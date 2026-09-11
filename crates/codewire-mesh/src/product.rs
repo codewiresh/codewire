@@ -188,6 +188,27 @@ impl MeshProductService {
         self.network_for_org(&context.org_id, &network_id).await
     }
 
+    pub(crate) async fn delete_network(
+        &self,
+        organization_id: &str,
+        network_id: &str,
+        credential: ForwardedMeshCredential,
+    ) -> AppResult<()> {
+        let network_id = validate_network_id(network_id)?;
+        let context = self
+            .authorize_network(
+                organization_id,
+                &network_id,
+                credential,
+                RequiredRole::Owner,
+            )
+            .await?;
+        self.store
+            .network_delete_by_owner(&network_id, &context.org_id, &context.principal_id)
+            .await
+            .map_err(store_error)
+    }
+
     pub(crate) async fn list_invites(
         &self,
         organization_id: &str,
@@ -827,6 +848,10 @@ pub(crate) fn store_error(error: StoreError) -> AppError {
     match error {
         StoreError::NotFound => AppError::NotFound("Mesh resource not found".into()),
         StoreError::AlreadyExists => AppError::Conflict("Mesh resource already exists".into()),
+        StoreError::Forbidden => AppError::Forbidden,
+        error @ (StoreError::NetworkNotEmpty | StoreError::NetworkRetired) => {
+            AppError::Precondition(error.to_string().into())
+        }
         StoreError::Invalid(message) => AppError::BadRequest(message.into()),
         StoreError::Sqlx(error) => AppError::Internal(anyhow::Error::new(error)),
     }

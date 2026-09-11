@@ -1995,7 +1995,7 @@ mod tests {
         // Even the canonical image uses an environment-scoped template: the
         // daemon credential must be present before the workspace process starts.
         let opts = environment_claim_opts(
-            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+            "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
             "tmpl-base",
             &env,
             7,
@@ -2014,7 +2014,7 @@ mod tests {
         confidential.isolation_tier = "confidential".into();
         confidential.cpu_millicores = 8000;
         let opts = environment_claim_opts(
-            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+            "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
             "tmpl-base",
             &confidential,
             7,
@@ -2023,7 +2023,7 @@ mod tests {
         assert_eq!(opts.warm_pool_ref, "shadow-pool-workspace-env-1");
         assert_eq!(
             environment_per_env_template_name(
-                "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+                "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
                 "tmpl-base",
                 "env-1",
             ),
@@ -2135,7 +2135,7 @@ mod tests {
         // First-party image: no image command; canonical name swap.
         let opts = environment_template_opts(
             &cfg,
-            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+            "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
             "preset-base",
             &env,
             7,
@@ -2323,7 +2323,7 @@ mod tests {
 
         let opts = environment_template_opts(
             &cfg,
-            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+            "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
             "workspace",
             &env,
             7,
@@ -2394,7 +2394,7 @@ mod tests {
 
         let opts = environment_template_opts(
             &cfg,
-            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+            "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
             "workspace",
             &env,
             7,

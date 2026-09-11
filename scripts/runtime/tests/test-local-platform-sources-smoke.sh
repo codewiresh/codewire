@@ -3,6 +3,24 @@
 # shellcheck disable=SC2034 # Fixture inputs are consumed by sourced functions.
 # shellcheck disable=SC2329 # Public-command doubles are invoked by sourced functions.
 set -euo pipefail
+if [[ "${1:-}" == --mesh-probe-fixture ]]; then
+  [[ -z "${OPENAI_API_KEY+x}" && -z "${ANTHROPIC_API_KEY+x}" && -z "${SSH_AUTH_SOCK+x}" &&
+    -z "${CODEWIRE_API_KEY+x}" && -z "${BASH_ENV+x}" && "$PATH" == /usr/bin:/bin &&
+    "$CW_CONFIG_DIR" == "$HOME/login" ]] || exit 1
+  [[ "${CW_MESH_FIXTURE_KIND:-}" != failure ]] || exit 1
+  if [[ "${CW_MESH_FIXTURE_KIND:-}" == malformed ]]; then printf '{}\n'; exit 0; fi
+  jq -n '
+    {version:"codewire-dev-mesh-probe:v1",server_url:"https://codewire-dev.sh",mesh_url:"https://mesh.codewire-dev.sh",
+     organization_id:env.CODEWIRE_DEV_MESH_PROBE_ORG,user_id:env.CODEWIRE_DEV_MESH_PROBE_USER,
+     network_id:env.CODEWIRE_DEV_MESH_PROBE_NETWORK,node_name:env.CODEWIRE_DEV_MESH_PROBE_NODE,
+     environment_id:env.CODEWIRE_DEV_MESH_PROBE_ENVIRONMENT,port:(env.CODEWIRE_DEV_MESH_PROBE_PORT|tonumber),
+     nonce:env.CODEWIRE_DEV_MESH_PROBE_NONCE,transport:"derp_relay"} |
+    if env.CW_MESH_FIXTURE_KIND == "wrong-network" then .network_id="wrong"
+    elif env.CW_MESH_FIXTURE_KIND == "wrong-vm" then .environment_id="wrong"
+    elif env.CW_MESH_FIXTURE_KIND == "wrong-nonce" then .nonce="wrong"
+    elif env.CW_MESH_FIXTURE_KIND == "wrong-transport" then .transport="websocket" else . end'
+  exit 0
+fi
 if [[ "${1:-}" == --server && "${2:-}" == synthetic && "${3:-}" == isolation-probe ]]; then
   [[ -z "${OPENAI_API_KEY+x}" && -z "${ANTHROPIC_API_KEY+x}" && -z "${SSH_AUTH_SOCK+x}" &&
     -z "${CODEWIRE_API_KEY+x}" && -z "${CODEWIRE_DEV_SMOKE_API_KEY+x}" && -z "${BASH_ENV+x}" &&
@@ -31,7 +49,7 @@ COUNT=0
 KEY_ID=11111111-1111-4111-8111-111111111111
 PROFILE_ID=22222222-2222-4222-8222-222222222222
 VM_ID=33333333-3333-4333-8333-333333333333
-USER_ID=44444444-4444-4444-8444-444444444444
+USER_ID=44444444444444448444444444444444
 ORG_ID=55555555555545558555555555555555
 PROJECT_ID=66666666-6666-4666-8666-666666666666
 HOST_KEY='[127.0.0.1]:22222 ssh-ed25519 AAAATestPublicHostMetadata'
@@ -55,11 +73,17 @@ fixture() {
   CODEWIRE_SERVER_URL=https://codewire-dev.sh; EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
   EXPECTED_CODEWIRE_ORGANIZATION_ID="$ORG_ID"; LP_USER_ID="$USER_ID"
   LOCAL_PLATFORM_IMAGE="ghcr.io/codewire/workspace@sha256:$(printf '%064d' 1)"
+  LOCAL_PLATFORM_NETWORK_ID=''
+  LOCAL_PLATFORM_DISPOSABLE_NETWORK=0
+  LOCAL_PLATFORM_MESH_PROBE_BIN=''
+  LP_NETWORK_CREATE_ATTEMPTED=0
+  FIXTURE_NETWORKS_JSON=''
+  FIXTURE_NETWORK_NODES_JSON=''
   SMOKE_EXISTING_ENV_ID=''; SMOKE_KEEP_ENV=0; SMOKE_SKIP_KUBE=0; SMOKE_ONLY_PHASES=()
   ALLOW_NON_DEV=0; ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=0
   PROVIDER_SSH_PROFILE_ID="$PROFILE_ID"; PROVIDER_SSH_PROFILE_NAME=owned-profile
   PROVIDER_SSH_CREDENTIAL_ID="$KEY_ID"; ENV_ID="$VM_ID"; SMOKE_NAME=owned-local
-  LP_GENERATION=0; LP_CREATE_ATTEMPTED=0; LP_RUNTIME=''; LP_HOME=''; LP_LOGIN_ATTEMPTED=0
+  LP_GENERATION=0; LP_CREATE_ATTEMPTED=0; LP_RUNTIME=''; LP_HOME=''; LP_LOGIN_ATTEMPTED=0; LP_NETWORK_NODE_OWNED=0
   FAILURE=''; unset CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY
   : >"$TMPDIR_SMOKE/calls"
 }
@@ -87,7 +111,35 @@ for invalid in saved-login wrong-auth missing-email api-key alternate-server org
   }
   expect_failure "$invalid" invalid_options
 done
+invalid_options() { fixture; LOCAL_PLATFORM_NETWORK_ID='bad network'; validate_local_platform_options; }
+expect_failure bad-network invalid_options
 expect_failure unsupported-option local_platform_parse --keep
+for invalid in disposable-value network-modes missing-probe orphan-probe; do
+  invalid_mesh_options() {
+    fixture
+    case "$invalid" in
+      disposable-value) LOCAL_PLATFORM_DISPOSABLE_NETWORK=2 ;;
+      network-modes) LOCAL_PLATFORM_DISPOSABLE_NETWORK=1; LOCAL_PLATFORM_NETWORK_ID=shared ;;
+      missing-probe) LOCAL_PLATFORM_DISPOSABLE_NETWORK=1 ;;
+      orphan-probe) LOCAL_PLATFORM_MESH_PROBE_BIN=/usr/bin/true ;;
+    esac
+    validate_local_platform_options
+  }
+  expect_failure "$invalid" invalid_mesh_options
+done
+fixture
+LOCAL_PLATFORM_DISPOSABLE_NETWORK=1; LOCAL_PLATFORM_MESH_PROBE_BIN=/usr/bin/true
+validate_local_platform_options
+pass
+
+fixture
+LP_NETWORK_ARGS=()
+local_platform_set_network_args
+[[ "${LP_NETWORK_ARGS[*]}" == --no-network ]] || fail 'baseline journey no longer opts out of Mesh'
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+local_platform_set_network_args
+[[ "${LP_NETWORK_ARGS[*]}" == '--network shared-dev-network' ]] || fail 'selected network did not reach public create arguments'
+pass
 
 # Organization creation emits UUID simple() strings; the acceptance must use
 # that exact current ID format while still rejecting ambiguous input.
@@ -107,6 +159,40 @@ cw_with_timeout() {
   shift
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
+    'network list --org '*" --output json")
+      if [[ "$FAILURE" == network-list ]]; then return 1; fi
+      if [[ -n "$FIXTURE_NETWORKS_JSON" ]]; then printf '%s\n' "$FIXTURE_NETWORKS_JSON"; return 0; fi
+      if [[ "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 1 ]]; then
+        if [[ ! -e "$TMPDIR_SMOKE/network-created" || -e "$TMPDIR_SMOKE/network-deleted" ]]; then printf '[]\n'; return 0; fi
+        jq -n --arg id "$LOCAL_PLATFORM_NETWORK_ID" --arg org "$ORG_ID" '[{id:$id,org_id:$org}]'
+        return 0
+      fi
+      jq -n --arg id "${FIXTURE_NETWORK_ID:-shared-dev-network}" --arg org "${FIXTURE_NETWORK_ORG:-$ORG_ID}" \
+        '[{id:$id,org_id:$org,created_at:"synthetic",node_count:1,invite_count:0}]' ;;
+    'network create '*)
+      [[ "$*" == "network create $SMOKE_NAME-mesh --org $ORG_ID --no-use" && "$LP_NETWORK_CREATE_ATTEMPTED" == 1 ]] || fail 'network create syntax/ownership drifted'
+      touch "$TMPDIR_SMOKE/network-created"
+      [[ "$FAILURE" != network-create-lost-reply ]] || return 1
+      printf 'Network created\n' >&2 ;;
+    'network delete '*)
+      [[ "$*" == "network delete $SMOKE_NAME-mesh --org $ORG_ID --yes" ]] || fail 'network delete syntax/ownership drifted'
+      [[ "$FAILURE" != network-delete ]] || return 1
+      touch "$TMPDIR_SMOKE/network-deleted"
+      printf 'Network deleted\n' >&2 ;;
+    'network nodes --network '*" --output json")
+      if [[ "$FAILURE" == network-nodes ]]; then return 1; fi
+      if [[ -n "$FIXTURE_NETWORK_NODES_JSON" ]]; then printf '%s\n' "$FIXTURE_NETWORK_NODES_JSON"; return 0; fi
+      if [[ -e "$TMPDIR_SMOKE/network-node-revoked" ]]; then printf '[]\n'; return 0; fi
+      if [[ "$FAILURE" == collision || -e "$TMPDIR_SMOKE/network-node-created" ]]; then
+        jq -n --arg network "${FIXTURE_NETWORK_ID:-shared-dev-network}" --arg name "${FIXTURE_NODE_NAME:-$SMOKE_NAME}" \
+          --argjson connected "${FIXTURE_NODE_CONNECTED:-true}" \
+          '[{network_id:$network,name:$name,peer_url:"synthetic.invalid",connected:$connected}]'
+        return 0
+      fi
+      printf '[]\n' ;;
+    'network revoke --network '*)
+      [[ "$4" == shared-dev-network && "$6" == "$ORG_ID" && "$7" == "$SMOKE_NAME" ]] || fail 'wrong owned network-node revocation'
+      touch "$TMPDIR_SMOKE/network-node-revoked" ;;
     'env info --local '*" --output json")
       jq -n --arg id "$ENV_ID" --arg project "platform:id:$PROJECT_ID" --arg profile "platform:id:$PROFILE_ID" \
         --arg server "$CODEWIRE_SERVER_URL" --arg user "$LP_USER_ID" --arg org "$ORG_ID" --arg failure "$FAILURE" '
@@ -164,6 +250,120 @@ cw_with_timeout() {
   esac
 }
 wait_until() { shift 2; "$@" || die 'fixture wait failed'; }
+fixture
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+local_platform_validate_network
+local_platform_bind_network_attempt
+[[ "$LP_NETWORK_NODE_OWNED" == 1 ]] || fail 'network create attempt did not bind partial-failure cleanup'
+touch "$TMPDIR_SMOKE/network-node-created"
+local_platform_network_member
+local_platform_network_prove
+local_platform_network_node_present
+cw_with_timeout 30 network revoke --network "$LOCAL_PLATFORM_NETWORK_ID" --org "$ORG_ID" "$SMOKE_NAME"
+local_platform_network_node_absent
+pass
+for invalid in network-list wrong-network wrong-network-org network-nodes collision wrong-node disconnected; do
+  invalid_network() {
+    fixture; LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+    case "$invalid" in
+      network-list|network-nodes|collision) FAILURE="$invalid" ;;
+      wrong-network) FIXTURE_NETWORK_ID=another-network ;;
+      wrong-network-org) FIXTURE_NETWORK_ORG=another-organization ;;
+      wrong-node) FIXTURE_NODE_NAME=another-node; touch "$TMPDIR_SMOKE/network-node-created" ;;
+      disconnected) FIXTURE_NODE_CONNECTED=false; touch "$TMPDIR_SMOKE/network-node-created" ;;
+    esac
+    case "$invalid" in
+      network-list|wrong-network|wrong-network-org|network-nodes|collision) local_platform_validate_network ;;
+      wrong-node|disconnected) local_platform_network_member ;;
+    esac
+  }
+  expect_failure "$invalid" invalid_network
+done
+for invalid_inventory in '{}' '[{}]' 'null' 'not-json' \
+  '[{"network_id":"shared-dev-network","name":42,"connected":true}]' \
+  '[{"network_id":"shared-dev-network","name":"owned-local"}]' \
+  '[{"network_id":"another-network","name":"owned-local","connected":true}]'; do
+  invalid_network_inventory() {
+    fixture; LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+    FIXTURE_NETWORK_NODES_JSON="$invalid_inventory"
+    "$@"
+  }
+  expect_failure malformed-network-admission invalid_network_inventory local_platform_validate_network
+  expect_failure malformed-network-membership invalid_network_inventory local_platform_network_member
+  expect_failure malformed-network-absence invalid_network_inventory local_platform_network_node_absent
+  fixture; LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+  FIXTURE_NETWORK_NODES_JSON="$invalid_inventory"
+  inventory_rc=0
+  local_platform_network_node_present >/dev/null 2>&1 || inventory_rc=$?
+  [[ "$inventory_rc" == 2 ]] || fail 'invalid network inventory was confused with node absence'
+  pass
+done
+fixture
+LOCAL_PLATFORM_DISPOSABLE_NETWORK=1
+local_platform_prepare_network
+local_platform_validate_network
+local_platform_cleanup_network
+[[ -e "$TMPDIR_SMOKE/network-deleted" ]] || fail 'owned disposable network survived cleanup'
+pass
+fixture
+LOCAL_PLATFORM_DISPOSABLE_NETWORK=1; FAILURE=network-create-lost-reply
+expect_failure lost-network-create-reply local_platform_prepare_network
+# expect_failure runs in a subshell; its durable committed-create marker is
+# retained while the real parent would also retain the pre-request ownership.
+LOCAL_PLATFORM_NETWORK_ID="$SMOKE_NAME-mesh"; LP_NETWORK_CREATE_ATTEMPTED=1
+local_platform_cleanup_network
+[[ -e "$TMPDIR_SMOKE/network-deleted" ]] || fail 'lost create reply did not reconcile the owned network'
+pass
+for invalid in malformed-list foreign-node unknown-nodes delete-failure rebound; do
+  unsafe_network_cleanup() {
+    fixture; LOCAL_PLATFORM_DISPOSABLE_NETWORK=1
+    local_platform_prepare_network
+    case "$invalid" in
+      malformed-list) FIXTURE_NETWORKS_JSON='{}' ;;
+      foreign-node) FIXTURE_NETWORK_NODES_JSON='[{"network_id":"owned-local-mesh","name":"foreign","connected":false}]' ;;
+      unknown-nodes) FIXTURE_NETWORK_NODES_JSON='[{}]' ;;
+      delete-failure) FAILURE=network-delete ;;
+      rebound) LOCAL_PLATFORM_NETWORK_ID=unowned ;;
+    esac
+    local_platform_cleanup_network
+  }
+  expect_failure "$invalid" unsafe_network_cleanup
+done
+fixture
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+local_platform_cleanup_network
+[[ ! -e "$TMPDIR_SMOKE/network-deleted" ]] || fail 'explicit shared network was deleted'
+pass
+fixture
+LP_WORKSPACE="$TMPDIR_SMOKE/workspace"; mkdir "$LP_WORKSPACE"
+printf '%s\n' '{"startup_script":"app-startup; ssh-startup"}' >"$LP_WORKSPACE/codewire.yaml"
+local_platform_prepare_mesh_listener
+[[ ! -e "$LP_WORKSPACE/.cw-mesh-smoke" ]] || fail 'baseline created a Mesh listener'
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+local_platform_prepare_mesh_listener
+cmp "$REPO_ROOT/scripts/runtime/dev/native-mesh-listener.py" "$LP_WORKSPACE/.cw-mesh-smoke/listener.py" || fail 'guest listener bytes drifted'
+jq -e '.ports == [{port:28083}] and (.startup_script | startswith("app-startup; ssh-startup; ") and contains("/workspace/.cw-mesh-smoke/listener.py --port 28083"))' \
+  "$LP_WORKSPACE/codewire.yaml" >/dev/null || fail 'named Mesh was not attached to a declared guest port'
+pass
+mesh_probe_fixture() {
+  fixture
+  LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+  LOCAL_PLATFORM_MESH_PROBE_BIN="$TMPDIR_SMOKE/dev-mesh-probe"
+  printf '#!/bin/bash\nexec %q --mesh-probe-fixture\n' "$REPO_ROOT/scripts/runtime/tests/test-local-platform-sources-smoke.sh" >"$LOCAL_PLATFORM_MESH_PROBE_BIN"
+  chmod 0700 "$LOCAL_PLATFORM_MESH_PROBE_BIN"
+  LP_ENV=(PATH=/usr/bin:/bin "HOME=$TMPDIR_SMOKE" "CW_CONFIG_DIR=$TMPDIR_SMOKE/login")
+}
+mesh_probe_fixture
+export OPENAI_API_KEY=never-import ANTHROPIC_API_KEY=never-import SSH_AUTH_SOCK=/never-import
+export CODEWIRE_API_KEY=never-import BASH_ENV=/never-import
+local_platform_mesh_probe
+unset OPENAI_API_KEY ANTHROPIC_API_KEY SSH_AUTH_SOCK CODEWIRE_API_KEY BASH_ENV
+[[ -s "$TMPDIR_SMOKE/local-mesh-probe-binary.sha256" ]] || fail 'accepted Mesh peer binary identity was not recorded'
+pass
+for invalid in failure malformed wrong-network wrong-vm wrong-nonce wrong-transport; do
+  invalid_mesh_probe() { mesh_probe_fixture; LP_ENV+=("CW_MESH_FIXTURE_KIND=$invalid"); local_platform_mesh_probe; }
+  expect_failure "$invalid" invalid_mesh_probe
+done
 fixture
 local_platform_binding "platform:id:$PROJECT_ID" 0
 pass
@@ -343,6 +543,36 @@ cw_with_timeout() {
       printf 'vm\n' >>"$TMPDIR_SMOKE/cleanup-calls"
       [[ "$FAILURE" != rm ]] || return 1
       touch "$TMPDIR_SMOKE/deleted" ;;
+    'network nodes --network '*" --output json")
+      [[ "$4" == "$LOCAL_PLATFORM_NETWORK_ID" && "$6" == "$ORG_ID" ]] || fail 'cleanup inspected a different network'
+      [[ "$FAILURE" != network-list ]] || return 1
+      if [[ -n "$FIXTURE_NETWORK_NODES_JSON" ]]; then printf '%s\n' "$FIXTURE_NETWORK_NODES_JSON"; return 0; fi
+      if [[ "${CLEANUP_NETWORK_ABSENT:-0}" == 1 || -e "$TMPDIR_SMOKE/network-node-revoked" ]]; then
+        printf '[]\n'
+      else
+        jq -n --arg network "$LOCAL_PLATFORM_NETWORK_ID" --arg name "$SMOKE_NAME" \
+          '[{network_id:$network,name:$name,peer_url:"synthetic.invalid",connected:false}]'
+      fi ;;
+    'network revoke --network '*)
+      [[ "$4" == "$LOCAL_PLATFORM_NETWORK_ID" && "$6" == "$ORG_ID" && "$7" == "$SMOKE_NAME" ]] ||
+        fail 'cleanup revoked a different network node'
+      printf 'network\n' >>"$TMPDIR_SMOKE/cleanup-calls"
+      [[ "$FAILURE" != network-revoke ]] || return 1
+      touch "$TMPDIR_SMOKE/network-node-revoked" ;;
+    'network list --org '*" --output json")
+      [[ "$4" == "$ORG_ID" ]] || fail 'cleanup inspected another organization'
+      if [[ "$FAILURE" == malformed-networks ]]; then printf '{}\n'; return 0; fi
+      if [[ -e "$TMPDIR_SMOKE/network-deleted" ]]; then printf '[]\n'; else
+        jq -n --arg id "$LOCAL_PLATFORM_NETWORK_ID" --arg org "$ORG_ID" '[{id:$id,org_id:$org}]'
+      fi ;;
+    'network delete '*)
+      [[ "$*" == "network delete $SMOKE_NAME-mesh --org $ORG_ID --yes" &&
+         -e "$TMPDIR_SMOKE/deleted" && -e "$TMPDIR_SMOKE/network-node-revoked" ]] ||
+        fail 'network deleted before owned VM/node cleanup'
+      printf 'network-delete\n' >>"$TMPDIR_SMOKE/cleanup-calls"
+      [[ "$FAILURE" != network-delete ]] || return 1
+      touch "$TMPDIR_SMOKE/network-deleted"
+      printf '{}\n' ;;
     logout) printf 'logout\n' >>"$TMPDIR_SMOKE/cleanup-calls"; [[ "$FAILURE" != logout ]] ;;
     *) fail "unexpected cleanup command: $*" ;;
   esac
@@ -356,22 +586,78 @@ cleanup_fixture() {
   LP_LOGIN_ATTEMPTED=1
   : >"$TMPDIR_SMOKE/cleanup-calls"
 }
+selected_network_cleanup_fixture() {
+  cleanup_fixture
+  LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+  LP_NETWORK_NODE_OWNED=1
+  CLEANUP_NETWORK_ABSENT=0
+}
+disposable_network_cleanup_fixture() {
+  selected_network_cleanup_fixture
+  LOCAL_PLATFORM_DISPOSABLE_NETWORK=1
+  LOCAL_PLATFORM_NETWORK_ID="$SMOKE_NAME-mesh"
+  LP_NETWORK_CREATE_ATTEMPTED=1
+}
 run_cleanup() { ( trap local_platform_cleanup EXIT; exit 0 ); }
 cleanup_fixture
 run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
 [[ ! -e "$LP_HOME" && ! -e "$LP_RUNTIME" ]] || fail 'successful cleanup retained local state'
 [[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nprofile\ncredential\nprojects\nowners\nlogout' ]] || fail 'incomplete cleanup ordering'
 pass
+selected_network_cleanup_fixture
+run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
+[[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nnetwork\nprofile\ncredential\nprojects\nowners\nlogout' ]] ||
+  fail 'selected-network cleanup did not revoke after environment deletion'
+pass
+disposable_network_cleanup_fixture
+run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
+[[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nnetwork\nnetwork-delete\nprofile\ncredential\nprojects\nowners\nlogout' ]] ||
+  fail 'disposable network cleanup did not follow VM/node cleanup'
+pass
+for invalid in malformed-networks network-delete; do
+  failed_disposable_cleanup() {
+    disposable_network_cleanup_fixture
+    FAILURE="$invalid"
+    run_cleanup
+  }
+  expect_failure "$invalid" failed_disposable_cleanup
+done
+selected_network_cleanup_fixture
+CLEANUP_NETWORK_ABSENT=1
+run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
+! grep -qx network "$TMPDIR_SMOKE/cleanup-calls" || fail 'absent network node was revoked'
+pass
+selected_network_cleanup_fixture
+FIXTURE_NETWORK_NODES_JSON='[{}]'
+expect_failure malformed-network-cleanup run_cleanup
+! grep -qx network "$TMPDIR_SMOKE/cleanup-calls" || fail 'malformed inventory authorized node revocation'
+grep -qx projects "$TMPDIR_SMOKE/cleanup-calls" || fail 'invalid network inventory prevented independent project cleanup'
+pass
+selected_network_cleanup_fixture
+ENV_ID=''
+run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
+grep -qx vm "$TMPDIR_SMOKE/cleanup-calls" || fail 'lost create acknowledgement did not resolve owned VM'
+grep -qx network "$TMPDIR_SMOKE/cleanup-calls" || fail 'lost create acknowledgement did not reconcile owned network node'
+pass
+cleanup_fixture
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+LP_NETWORK_NODE_OWNED=0
+LP_CREATE_ATTEMPTED=0
+FAILURE=collision
+run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
+! grep -qx network "$TMPDIR_SMOKE/cleanup-calls" || fail 'pre-create collision revoked an unowned network node'
+pass
 cleanup_fixture
 ENV_ID=''
 run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
 [[ ! -e "$LP_HOME" && ! -e "$LP_RUNTIME" ]] || fail 'lost-response cleanup retained state'
 pass
-for invalid in rebound ambiguous rm profile credential projects owners logout leakage; do
-  cleanup_fixture; FAILURE="$invalid"
+for invalid in rebound ambiguous rm profile credential projects owners logout leakage network-list network-revoke; do
+  if [[ "$invalid" == network-* ]]; then selected_network_cleanup_fixture; else cleanup_fixture; fi
+  FAILURE="$invalid"
   expect_failure "$invalid cleanup" run_cleanup
   for surface in profile credential projects owners logout; do
-    grep -qx "$surface" "$TMPDIR_SMOKE/cleanup-calls" || fail 'one cleanup failure skipped another surface'
+    grep -qx "$surface" "$TMPDIR_SMOKE/cleanup-calls" || fail "$invalid cleanup skipped $surface"
   done
   [[ ! -e "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR" && -d "$LP_HOME" ]] || fail 'cleanup retained login or erased failed evidence'
   if [[ "$invalid" == rebound || "$invalid" == ambiguous ]]; then

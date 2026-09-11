@@ -66,6 +66,17 @@ impl MeshClient {
         Ok(())
     }
 
+    pub async fn delete_network(&self, org_id: &str, network_id: &str) -> anyhow::Result<()> {
+        self.inner
+            .delete_mesh_network(rpc::DeleteMeshNetworkRequest {
+                org_id: org_id.to_string(),
+                network_id: network_id.to_string(),
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_nodes(
         &self,
         org_id: &str,
@@ -452,6 +463,49 @@ mod tests {
         let networks = client.list_networks("org-alpha").await.expect("list");
         assert_eq!(networks[0].id, "project-alpha");
         assert_eq!(networks[0].org_id, "org-alpha");
+    }
+
+    #[tokio::test]
+    async fn delete_network_uses_exact_scope_and_propagates_occupied_error() {
+        for occupied in [false, true] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/codewire.v1.MeshNetworkService/DeleteMeshNetwork"))
+                .and(header("authorization", "Bearer oauth-access"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let mut body = request.body.as_slice();
+                    let request = rpc::DeleteMeshNetworkRequest::decode(&mut body).unwrap();
+                    assert_eq!(request.org_id, "org-alpha");
+                    assert_eq!(request.network_id, "project-alpha");
+                    if occupied {
+                        ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                            "code": "failed_precondition",
+                            "message": "revoke registered nodes before deleting the network"
+                        }))
+                    } else {
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "application/proto")
+                            .set_body_bytes(
+                                rpc::DeleteMeshNetworkResponse::default().encode_to_vec(),
+                            )
+                    }
+                })
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = MeshClient::new(&resolved(&server.uri(), "oauth-access")).unwrap();
+            let result = client.delete_network("org-alpha", "project-alpha").await;
+            if occupied {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("revoke registered nodes")
+                );
+            } else {
+                result.unwrap();
+            }
+        }
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ pub const LABEL_TYPE: &str = "codewire.sh/type";
 const DELETION_PROTECTION_FINALIZER: &str = "codewire.sh/deletion-protection";
 
 /// Mirrors `sandbox.CanonicalWorkspaceRuntimeImage`.
-pub const CANONICAL_WORKSPACE_RUNTIME_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
+pub const CANONICAL_WORKSPACE_RUNTIME_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
 
 /// Mirrors `sandbox.IsCanonicalWorkspaceRuntimeImage`.
 pub fn is_canonical_workspace_runtime_image(image_ref: &str) -> bool {

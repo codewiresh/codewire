@@ -1499,6 +1499,8 @@ pub(crate) enum NetworkCommand {
     List(NetworkListArgs),
     #[command(about = "Create a Mesh network")]
     Create(NetworkCreateArgs),
+    #[command(about = "Delete an empty Mesh network and permanently retire its name")]
+    Delete(NetworkDeleteArgs),
     #[command(about = "Show the selected Mesh network")]
     Current,
     #[command(about = "Select the default Mesh network")]
@@ -1614,6 +1616,22 @@ pub(crate) struct NetworkCreateArgs {
     org: String,
     #[arg(long, help = "Create without selecting the network locally")]
     no_use: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct NetworkDeleteArgs {
+    #[arg(help = "Exact network name to delete (cannot be reused)")]
+    name: String,
+    #[arg(long = "mesh-url", help = "Mesh base URL override")]
+    mesh_url: Option<String>,
+    #[arg(
+        long,
+        value_name = "ORG_ID",
+        help = "Exact organization ID owning the network"
+    )]
+    org: String,
+    #[arg(long, help = "Confirm permanent deletion without prompting")]
+    yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1796,6 +1814,7 @@ pub(crate) use sessions::*;
 mod tests {
     use super::*;
     include!("tests/core.rs");
+    include!("tests/network_delete.rs");
     include!("tests/environment.rs");
     include!("tests/run.rs");
     include!("tests/platform.rs");

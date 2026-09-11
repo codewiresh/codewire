@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1e\x63odewire/v1/mesh_network.proto\x12\x0b\x63odewire.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xb1\x01\n\x0bMeshNetwork\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x39\n\ncreated_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x1d\n\nnode_count\x18\x04 \x01(\x03R\tnodeCount\x12!\n\x0cinvite_count\x18\x05 \x01(\x03R\x0binviteCount\"l\n\x17ListMeshNetworksRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n\tpage_size\x18\x02 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x03 \x01(\tR\tpageToken\"x\n\x18ListMeshNetworksResponse\x12\x34\n\x08networks\x18\x01 \x03(\x0b\x32\x18.codewire.v1.MeshNetworkR\x08networks\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"P\n\x18\x43reateMeshNetworkRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\"O\n\x19\x43reateMeshNetworkResponse\x12\x32\n\x07network\x18\x01 \x01(\x0b\x32\x18.codewire.v1.MeshNetworkR\x07network\">\n\x16JoinMeshNetworkRequest\x12$\n\x0binvite_code\x18\x01 \x01(\tB\x03\x80\x01\x01R\ninviteCode\"M\n\x17JoinMeshNetworkResponse\x12\x32\n\x07network\x18\x01 \x01(\x0b\x32\x18.codewire.v1.MeshNetworkR\x07network2\xbc\x02\n\x12MeshNetworkService\x12\x64\n\x10ListMeshNetworks\x12$.codewire.v1.ListMeshNetworksRequest\x1a%.codewire.v1.ListMeshNetworksResponse\"\x03\x90\x02\x01\x12\x62\n\x11\x43reateMeshNetwork\x12%.codewire.v1.CreateMeshNetworkRequest\x1a&.codewire.v1.CreateMeshNetworkResponse\x12\\\n\x0fJoinMeshNetwork\x12#.codewire.v1.JoinMeshNetworkRequest\x1a$.codewire.v1.JoinMeshNetworkResponseB\xb3\x01\n\x0f\x63om.codewire.v1B\x10MeshNetworkProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1e\x63odewire/v1/mesh_network.proto\x12\x0b\x63odewire.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xb1\x01\n\x0bMeshNetwork\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x39\n\ncreated_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x1d\n\nnode_count\x18\x04 \x01(\x03R\tnodeCount\x12!\n\x0cinvite_count\x18\x05 \x01(\x03R\x0binviteCount\"l\n\x17ListMeshNetworksRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n\tpage_size\x18\x02 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x03 \x01(\tR\tpageToken\"x\n\x18ListMeshNetworksResponse\x12\x34\n\x08networks\x18\x01 \x03(\x0b\x32\x18.codewire.v1.MeshNetworkR\x08networks\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"P\n\x18\x43reateMeshNetworkRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\"O\n\x19\x43reateMeshNetworkResponse\x12\x32\n\x07network\x18\x01 \x01(\x0b\x32\x18.codewire.v1.MeshNetworkR\x07network\"P\n\x18\x44\x65leteMeshNetworkRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\"\x1b\n\x19\x44\x65leteMeshNetworkResponse\">\n\x16JoinMeshNetworkRequest\x12$\n\x0binvite_code\x18\x01 \x01(\tB\x03\x80\x01\x01R\ninviteCode\"M\n\x17JoinMeshNetworkResponse\x12\x32\n\x07network\x18\x01 \x01(\x0b\x32\x18.codewire.v1.MeshNetworkR\x07network2\xa0\x03\n\x12MeshNetworkService\x12\x64\n\x10ListMeshNetworks\x12$.codewire.v1.ListMeshNetworksRequest\x1a%.codewire.v1.ListMeshNetworksResponse\"\x03\x90\x02\x01\x12\x62\n\x11\x43reateMeshNetwork\x12%.codewire.v1.CreateMeshNetworkRequest\x1a&.codewire.v1.CreateMeshNetworkResponse\x12\x62\n\x11\x44\x65leteMeshNetwork\x12%.codewire.v1.DeleteMeshNetworkRequest\x1a&.codewire.v1.DeleteMeshNetworkResponse\x12\\\n\x0fJoinMeshNetwork\x12#.codewire.v1.JoinMeshNetworkRequest\x1a$.codewire.v1.JoinMeshNetworkResponseB\xb3\x01\n\x0f\x63om.codewire.v1B\x10MeshNetworkProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -47,10 +47,14 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CREATEMESHNETWORKREQUEST']._serialized_end=572
   _globals['_CREATEMESHNETWORKRESPONSE']._serialized_start=574
   _globals['_CREATEMESHNETWORKRESPONSE']._serialized_end=653
-  _globals['_JOINMESHNETWORKREQUEST']._serialized_start=655
-  _globals['_JOINMESHNETWORKREQUEST']._serialized_end=717
-  _globals['_JOINMESHNETWORKRESPONSE']._serialized_start=719
-  _globals['_JOINMESHNETWORKRESPONSE']._serialized_end=796
-  _globals['_MESHNETWORKSERVICE']._serialized_start=799
-  _globals['_MESHNETWORKSERVICE']._serialized_end=1115
+  _globals['_DELETEMESHNETWORKREQUEST']._serialized_start=655
+  _globals['_DELETEMESHNETWORKREQUEST']._serialized_end=735
+  _globals['_DELETEMESHNETWORKRESPONSE']._serialized_start=737
+  _globals['_DELETEMESHNETWORKRESPONSE']._serialized_end=764
+  _globals['_JOINMESHNETWORKREQUEST']._serialized_start=766
+  _globals['_JOINMESHNETWORKREQUEST']._serialized_end=828
+  _globals['_JOINMESHNETWORKRESPONSE']._serialized_start=830
+  _globals['_JOINMESHNETWORKRESPONSE']._serialized_end=907
+  _globals['_MESHNETWORKSERVICE']._serialized_start=910
+  _globals['_MESHNETWORKSERVICE']._serialized_end=1326
 # @@protoc_insertion_point(module_scope)
