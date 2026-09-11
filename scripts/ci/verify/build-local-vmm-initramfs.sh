@@ -13,7 +13,8 @@ readonly PACKAGE='codewire-vmm-guest-probe'
 readonly BINARY='codewire-vmm-guest-probe'
 readonly REQUIRED_RUST='1.91.1'
 readonly REQUIRED_PROTOC='libprotoc 35.1'
-readonly TARGET='x86_64-unknown-linux-musl'
+readonly DEFAULT_TARGET='x86_64-unknown-linux-musl'
+readonly ARM64_TARGET='aarch64-unknown-linux-musl'
 readonly REQUIRED_RUNC_VERSION='1.5.1'
 readonly REQUIRED_RUNC_SHA256='177df879d50c913eb205e898d5c1c05a18f574053c0ce5524c471208eaf06f6f'
 
@@ -21,20 +22,24 @@ usage() {
   printf '%s\n' \
     'usage:' \
     '  build-local-vmm-initramfs.sh --probe ABSOLUTE_PATH --output ABSOLUTE_PATH' \
-    '  build-local-vmm-initramfs.sh --verify [--output ABSOLUTE_PATH]' \
+    '  build-local-vmm-initramfs.sh --verify [--target TARGET] [--output ABSOLUTE_PATH]' \
     '  build-local-vmm-initramfs.sh --verify-root --busybox ABSOLUTE_PATH' \
     '    --busybox-sha256 SHA256 --runc ABSOLUTE_PATH' \
-    '    --runc-sha256 SHA256 [--output ABSOLUTE_PATH]' \
+    '    --runc-sha256 SHA256 [--target x86_64-unknown-linux-musl]' \
+    '    [--output ABSOLUTE_PATH]' \
     '' \
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
     'It does not prove the probe is static or came from the sealed Rust toolchain.' \
-    '--verify requires exact Rust 1.91.1, libprotoc 35.1, the installed x86_64' \
-    'musl standard library, and readelf. It builds twice and fails closed on' \
-    'any drift. With --output, the verified archive is published atomically' \
+    '--verify accepts only x86_64-unknown-linux-musl (the default) or' \
+    'aarch64-unknown-linux-musl. It requires exact Rust 1.91.1, libprotoc' \
+    '35.1, the selected installed musl standard library, and readelf. It builds' \
+    'each required binary twice and fails closed on any drift. With --output,' \
+    'the verified archive' \
+    'is published atomically' \
     'after comparison. --verify-root applies the same proof and adds a static' \
     'x86_64 BusyBox plus the reviewed official static runc 1.5.1 binary. Exact' \
     'lowercase SHA-256 values must be supplied; runc must match the built-in' \
-    'reviewed release digest.' \
+    'reviewed release digest. Arm64 root inputs remain unadmitted.' \
     'Artifact provenance remains a separate gate.' >&2
 }
 
@@ -104,8 +109,15 @@ require_exact_toolchain() {
     die "Rust $REQUIRED_RUST toolchain has no rust-lld for host ${rust_host:-unknown}"
 }
 
+validate_target() {
+  case "$TARGET" in
+    "$DEFAULT_TARGET"|"$ARM64_TARGET") ;;
+    *) die "unsupported static guest target: $TARGET" ;;
+  esac
+}
+
 build_one() {
-  local target_dir="$1"
+  local target_dir="$1" build_target="$2"
   local cargo_home remap_flags
   cargo_home="${CARGO_HOME:-${HOME:?HOME is required}/.cargo}"
   [[ -d "$cargo_home" ]] || die "Cargo home does not exist: $cargo_home"
@@ -123,6 +135,8 @@ build_one() {
       -u CARGO_ENCODED_RUSTFLAGS \
       -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER \
       -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS \
+      -u CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER \
+      -u CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS \
       -u PROTOC \
       -u PROTOC_INCLUDE \
       -u RUSTC \
@@ -139,14 +153,20 @@ build_one() {
       RUSTFLAGS="$remap_flags" \
       SOURCE_DATE_EPOCH=0 \
       TZ=UTC \
-      cargo build --locked --release --target "$TARGET" -p "$PACKAGE" --bin "$BINARY"
+      cargo build --locked --release --target "$build_target" -p "$PACKAGE" --bin "$BINARY"
   )
 }
 
 verify_static_elf() {
-  local label="$1" binary="$2"
-  readelf -hW "$binary" | grep -Fq 'Advanced Micro Devices X86-64' ||
-    die "$label is not an x86_64 ELF"
+  local label="$1" binary="$2" expected_target="$3"
+  local machine
+  case "$expected_target" in
+    "$DEFAULT_TARGET") machine='Advanced Micro Devices X86-64' ;;
+    "$ARM64_TARGET") machine='AArch64' ;;
+    *) die "unsupported static guest target: $expected_target" ;;
+  esac
+  readelf -hW "$binary" | grep -Fq "$machine" ||
+    die "$label is not an ELF for $expected_target"
   if readelf -lW "$binary" | grep -Fq 'INTERP'; then
     die "$label contains a dynamic program interpreter"
   fi
@@ -158,9 +178,14 @@ verify_static_elf() {
 verify_reproducible() {
   local requested_output="$1" root_busybox="$2" root_busybox_sha256="$3"
   local root_runc="$4" root_runc_sha256="$5"
-  local target_a target_b binary_a binary_b archive_a archive_b runc_version
+  local target_a target_b binary_a binary_b packer_a packer_b
+  local archive_a archive_b runc_version
   if [[ -n "$requested_output" ]]; then
     requested_output="$(absolute_output "$requested_output")"
+  fi
+  validate_target
+  if [[ -n "$root_busybox" && "$TARGET" != "$DEFAULT_TARGET" ]]; then
+    die '--verify-root accepts only x86_64-unknown-linux-musl until arm64 BusyBox and runc inputs are reviewed'
   fi
   require_exact_toolchain
   if [[ -n "$root_busybox" ]]; then
@@ -169,7 +194,7 @@ verify_reproducible() {
       die "--busybox-sha256 must be exactly 64 lowercase hexadecimal characters"
     [[ "$(sha256sum "$root_busybox" | awk '{print $1}')" == "$root_busybox_sha256" ]] ||
       die "BusyBox digest differs from --busybox-sha256"
-    verify_static_elf BusyBox "$root_busybox"
+    verify_static_elf BusyBox "$root_busybox" "$DEFAULT_TARGET"
     root_runc="$(absolute_existing_file runc "$root_runc")"
     [[ "$root_runc_sha256" =~ ^[0-9a-f]{64}$ ]] ||
       die "--runc-sha256 must be exactly 64 lowercase hexadecimal characters"
@@ -177,7 +202,7 @@ verify_reproducible() {
       die "runc digest is not the reviewed static v$REQUIRED_RUNC_VERSION release digest"
     [[ "$(sha256sum "$root_runc" | awk '{print $1}')" == "$root_runc_sha256" ]] ||
       die "runc digest differs from --runc-sha256"
-    verify_static_elf runc "$root_runc"
+    verify_static_elf runc "$root_runc" "$DEFAULT_TARGET"
     runc_version="$(env -i PATH=/usr/bin:/bin "$root_runc" --version | sed -n '1s/^runc version //p')"
     [[ "$runc_version" == "$REQUIRED_RUNC_VERSION" ]] ||
       die "runc did not report exact version $REQUIRED_RUNC_VERSION"
@@ -191,21 +216,38 @@ verify_reproducible() {
   archive_a="$VERIFY_WORK/initramfs-a.cpio"
   archive_b="$VERIFY_WORK/initramfs-b.cpio"
 
-  build_one "$target_a"
-  build_one "$target_b"
+  build_one "$target_a" "$TARGET"
+  build_one "$target_b" "$TARGET"
   binary_a="$target_a/$TARGET/release/$BINARY"
   binary_b="$target_b/$TARGET/release/$BINARY"
   [[ -x "$binary_a" && -x "$binary_b" ]] || die "static guest build did not produce both binaries"
-  verify_static_elf 'guest probe' "$binary_a"
-  verify_static_elf 'guest probe' "$binary_b"
+  verify_static_elf 'guest probe' "$binary_a" "$TARGET"
+  verify_static_elf 'guest probe' "$binary_b" "$TARGET"
   cmp -s "$binary_a" "$binary_b" || die "independent static guest builds are not byte-identical"
 
+  packer_a="$binary_a"
+  packer_b="$binary_b"
+  if [[ "$TARGET" != "$DEFAULT_TARGET" ]]; then
+    # A cross-built guest cannot execute on this sealed x86_64 build host. Build
+    # the deterministic newc writer from the same source for the host target in
+    # each independent tree, compare those packers, and use each only to package
+    # the corresponding already-verified target payload.
+    build_one "$target_a" "$DEFAULT_TARGET"
+    build_one "$target_b" "$DEFAULT_TARGET"
+    packer_a="$target_a/$DEFAULT_TARGET/release/$BINARY"
+    packer_b="$target_b/$DEFAULT_TARGET/release/$BINARY"
+    [[ -x "$packer_a" && -x "$packer_b" ]] || die "static archive build did not produce both host packers"
+    verify_static_elf 'archive packer' "$packer_a" "$DEFAULT_TARGET"
+    verify_static_elf 'archive packer' "$packer_b" "$DEFAULT_TARGET"
+    cmp -s "$packer_a" "$packer_b" || die "independent static archive packers are not byte-identical"
+  fi
+
   if [[ -n "$root_busybox" ]]; then
-    "$binary_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$archive_a"
-    "$binary_b" newc-root "$binary_b" "$root_busybox" "$root_runc" "$archive_b"
+    "$packer_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$archive_a"
+    "$packer_b" newc-root "$binary_b" "$root_busybox" "$root_runc" "$archive_b"
   else
-    "$binary_a" newc "$binary_a" "$archive_a"
-    "$binary_b" newc "$binary_b" "$archive_b"
+    "$packer_a" newc "$binary_a" "$archive_a"
+    "$packer_b" newc "$binary_b" "$archive_b"
   fi
   cmp -s "$archive_a" "$archive_b" || die "independent canonical newc archives are not byte-identical"
 
@@ -215,9 +257,9 @@ verify_reproducible() {
     # rename, and parent-directory fsync; the comparison proves the published
     # bytes are archive A rather than a third unverified build.
     if [[ -n "$root_busybox" ]]; then
-      "$binary_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$requested_output"
+      "$packer_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$requested_output"
     else
-      "$binary_a" newc "$binary_a" "$requested_output"
+      "$packer_a" newc "$binary_a" "$requested_output"
     fi
     cmp -s "$archive_a" "$requested_output" ||
       die "atomically published archive differs from verified archive"
@@ -262,6 +304,8 @@ busybox_sha256=''
 runc=''
 runc_sha256=''
 output=''
+TARGET="$DEFAULT_TARGET"
+target_set=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --verify)
@@ -312,6 +356,12 @@ while [[ $# -gt 0 ]]; do
       output="$2"
       shift 2
       ;;
+    --target)
+      [[ $# -ge 2 && "$target_set" -eq 0 ]] || { usage; exit 2; }
+      TARGET="$2"
+      target_set=1
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -333,7 +383,7 @@ case "$mode" in
     verify_reproducible "$output" "$busybox" "$busybox_sha256" "$runc" "$runc_sha256"
     ;;
   archive)
-    [[ -n "$probe" && -n "$output" && -z "$busybox" && -z "$busybox_sha256" && -z "$runc" && -z "$runc_sha256" ]] || { usage; exit 2; }
+    [[ -n "$probe" && -n "$output" && -z "$busybox" && -z "$busybox_sha256" && -z "$runc" && -z "$runc_sha256" && "$target_set" -eq 0 ]] || { usage; exit 2; }
     build_archive_only "$probe" "$output"
     ;;
   *)
