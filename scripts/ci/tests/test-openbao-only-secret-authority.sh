@@ -254,6 +254,11 @@ yq ea -o=json -I=0 \
 yq ea -o=json -I=0 \
   'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
   "$render_root/production.yaml" >"$render_root/production-orchestration.json"
+for topology in dev local-kind local-kind-static production; do
+  yq ea -o=json -I=0 \
+    'select(.kind == "NetworkPolicy" and .metadata.name == "codewire-credential-service")' \
+    "$render_root/$topology.yaml" >"$render_root/$topology-credential-network-policy.json"
+done
 yq ea -o=json -I=0 \
   'select(.kind == "Deployment" and .metadata.name == "codewire-credential-service")' \
   deployments/k8s/credential-service/deployment.yaml \
@@ -335,6 +340,70 @@ jq -e '
     "namespace": "dev"
   }]
 ' "$render_root/dev-tokenrequest-binding.json" >/dev/null
+
+# The public mutation edge admits only the actual Dev ingress controller.
+# Keep the same-namespace dashboard and private managed-gateway legs exact;
+# tenant/DERP ingress namespaces and adjacent ports are not peers.
+jq -e '
+  .metadata.namespace == "dev" and
+  .spec.ingress == [
+    {
+      "from": [
+        {
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}},
+          "podSelector": {"matchLabels": {
+            "app.kubernetes.io/component": "controller",
+            "app.kubernetes.io/instance": "ingress-nginx",
+            "app.kubernetes.io/name": "ingress-nginx"
+          }}
+        },
+        {"podSelector": {"matchLabels": {
+          "app.kubernetes.io/component": "dashboard",
+          "app.kubernetes.io/name": "codewire"
+        }}}
+      ],
+      "ports": [{"port": 8086, "protocol": "TCP"}]
+    },
+    {
+      "from": [{
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev-sandboxes"}},
+        "podSelector": {"matchLabels": {
+          "app.kubernetes.io/managed-by": "codewire",
+          "app.kubernetes.io/name": "codewire-gateway",
+          "codewire.sh/type": "gateway"
+        }}
+      }],
+      "ports": [{"port": 9443, "protocol": "TCP"}]
+    }
+  ]
+' "$render_root/dev-credential-network-policy.json" >/dev/null
+
+# Dev's concrete edge must not broaden the reusable Production contract or
+# either checked-in Kind ingress topology.
+jq -e '
+  .spec.ingress[0] == {
+    "from": [
+      {
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+        "podSelector": {"matchLabels": {"app.kubernetes.io/name": "rke2-ingress-nginx"}}
+      },
+      {"podSelector": {"matchLabels": {
+        "app.kubernetes.io/component": "dashboard",
+        "app.kubernetes.io/name": "codewire"
+      }}}
+    ],
+    "ports": [{"port": 8086, "protocol": "TCP"}]
+  }
+' "$render_root/production-credential-network-policy.json" >/dev/null
+for topology in local-kind local-kind-static; do
+  jq -e '
+    .spec.ingress[0].from[0] == {
+      "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}},
+      "podSelector": {"matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}}
+    } and
+    .spec.ingress[0].ports == [{"port": 8086, "protocol": "TCP"}]
+  ' "$render_root/$topology-credential-network-policy.json" >/dev/null
+done
 
 jq -e '
   .BAO_ADDR == "" and
