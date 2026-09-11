@@ -39,6 +39,9 @@ const (
 	// MeshNetworkServiceCreateMeshNetworkProcedure is the fully-qualified name of the
 	// MeshNetworkService's CreateMeshNetwork RPC.
 	MeshNetworkServiceCreateMeshNetworkProcedure = "/codewire.v1.MeshNetworkService/CreateMeshNetwork"
+	// MeshNetworkServiceDeleteMeshNetworkProcedure is the fully-qualified name of the
+	// MeshNetworkService's DeleteMeshNetwork RPC.
+	MeshNetworkServiceDeleteMeshNetworkProcedure = "/codewire.v1.MeshNetworkService/DeleteMeshNetwork"
 	// MeshNetworkServiceJoinMeshNetworkProcedure is the fully-qualified name of the
 	// MeshNetworkService's JoinMeshNetwork RPC.
 	MeshNetworkServiceJoinMeshNetworkProcedure = "/codewire.v1.MeshNetworkService/JoinMeshNetwork"
@@ -48,6 +51,9 @@ const (
 type MeshNetworkServiceClient interface {
 	ListMeshNetworks(context.Context, *connect.Request[v1.ListMeshNetworksRequest]) (*connect.Response[v1.ListMeshNetworksResponse], error)
 	CreateMeshNetwork(context.Context, *connect.Request[v1.CreateMeshNetworkRequest]) (*connect.Response[v1.CreateMeshNetworkResponse], error)
+	// DeleteMeshNetwork requires network ownership and no registered nodes.
+	// It removes the network's metadata and permanently retires its name.
+	DeleteMeshNetwork(context.Context, *connect.Request[v1.DeleteMeshNetworkRequest]) (*connect.Response[v1.DeleteMeshNetworkResponse], error)
 	// JoinMeshNetwork consumes a one-use invitation capability and adds the
 	// authenticated caller to its organization-owned network.
 	JoinMeshNetwork(context.Context, *connect.Request[v1.JoinMeshNetworkRequest]) (*connect.Response[v1.JoinMeshNetworkResponse], error)
@@ -77,6 +83,12 @@ func NewMeshNetworkServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(meshNetworkServiceMethods.ByName("CreateMeshNetwork")),
 			connect.WithClientOptions(opts...),
 		),
+		deleteMeshNetwork: connect.NewClient[v1.DeleteMeshNetworkRequest, v1.DeleteMeshNetworkResponse](
+			httpClient,
+			baseURL+MeshNetworkServiceDeleteMeshNetworkProcedure,
+			connect.WithSchema(meshNetworkServiceMethods.ByName("DeleteMeshNetwork")),
+			connect.WithClientOptions(opts...),
+		),
 		joinMeshNetwork: connect.NewClient[v1.JoinMeshNetworkRequest, v1.JoinMeshNetworkResponse](
 			httpClient,
 			baseURL+MeshNetworkServiceJoinMeshNetworkProcedure,
@@ -90,6 +102,7 @@ func NewMeshNetworkServiceClient(httpClient connect.HTTPClient, baseURL string, 
 type meshNetworkServiceClient struct {
 	listMeshNetworks  *connect.Client[v1.ListMeshNetworksRequest, v1.ListMeshNetworksResponse]
 	createMeshNetwork *connect.Client[v1.CreateMeshNetworkRequest, v1.CreateMeshNetworkResponse]
+	deleteMeshNetwork *connect.Client[v1.DeleteMeshNetworkRequest, v1.DeleteMeshNetworkResponse]
 	joinMeshNetwork   *connect.Client[v1.JoinMeshNetworkRequest, v1.JoinMeshNetworkResponse]
 }
 
@@ -103,6 +116,11 @@ func (c *meshNetworkServiceClient) CreateMeshNetwork(ctx context.Context, req *c
 	return c.createMeshNetwork.CallUnary(ctx, req)
 }
 
+// DeleteMeshNetwork calls codewire.v1.MeshNetworkService.DeleteMeshNetwork.
+func (c *meshNetworkServiceClient) DeleteMeshNetwork(ctx context.Context, req *connect.Request[v1.DeleteMeshNetworkRequest]) (*connect.Response[v1.DeleteMeshNetworkResponse], error) {
+	return c.deleteMeshNetwork.CallUnary(ctx, req)
+}
+
 // JoinMeshNetwork calls codewire.v1.MeshNetworkService.JoinMeshNetwork.
 func (c *meshNetworkServiceClient) JoinMeshNetwork(ctx context.Context, req *connect.Request[v1.JoinMeshNetworkRequest]) (*connect.Response[v1.JoinMeshNetworkResponse], error) {
 	return c.joinMeshNetwork.CallUnary(ctx, req)
@@ -112,6 +130,9 @@ func (c *meshNetworkServiceClient) JoinMeshNetwork(ctx context.Context, req *con
 type MeshNetworkServiceHandler interface {
 	ListMeshNetworks(context.Context, *connect.Request[v1.ListMeshNetworksRequest]) (*connect.Response[v1.ListMeshNetworksResponse], error)
 	CreateMeshNetwork(context.Context, *connect.Request[v1.CreateMeshNetworkRequest]) (*connect.Response[v1.CreateMeshNetworkResponse], error)
+	// DeleteMeshNetwork requires network ownership and no registered nodes.
+	// It removes the network's metadata and permanently retires its name.
+	DeleteMeshNetwork(context.Context, *connect.Request[v1.DeleteMeshNetworkRequest]) (*connect.Response[v1.DeleteMeshNetworkResponse], error)
 	// JoinMeshNetwork consumes a one-use invitation capability and adds the
 	// authenticated caller to its organization-owned network.
 	JoinMeshNetwork(context.Context, *connect.Request[v1.JoinMeshNetworkRequest]) (*connect.Response[v1.JoinMeshNetworkResponse], error)
@@ -137,6 +158,12 @@ func NewMeshNetworkServiceHandler(svc MeshNetworkServiceHandler, opts ...connect
 		connect.WithSchema(meshNetworkServiceMethods.ByName("CreateMeshNetwork")),
 		connect.WithHandlerOptions(opts...),
 	)
+	meshNetworkServiceDeleteMeshNetworkHandler := connect.NewUnaryHandler(
+		MeshNetworkServiceDeleteMeshNetworkProcedure,
+		svc.DeleteMeshNetwork,
+		connect.WithSchema(meshNetworkServiceMethods.ByName("DeleteMeshNetwork")),
+		connect.WithHandlerOptions(opts...),
+	)
 	meshNetworkServiceJoinMeshNetworkHandler := connect.NewUnaryHandler(
 		MeshNetworkServiceJoinMeshNetworkProcedure,
 		svc.JoinMeshNetwork,
@@ -149,6 +176,8 @@ func NewMeshNetworkServiceHandler(svc MeshNetworkServiceHandler, opts ...connect
 			meshNetworkServiceListMeshNetworksHandler.ServeHTTP(w, r)
 		case MeshNetworkServiceCreateMeshNetworkProcedure:
 			meshNetworkServiceCreateMeshNetworkHandler.ServeHTTP(w, r)
+		case MeshNetworkServiceDeleteMeshNetworkProcedure:
+			meshNetworkServiceDeleteMeshNetworkHandler.ServeHTTP(w, r)
 		case MeshNetworkServiceJoinMeshNetworkProcedure:
 			meshNetworkServiceJoinMeshNetworkHandler.ServeHTTP(w, r)
 		default:
@@ -166,6 +195,10 @@ func (UnimplementedMeshNetworkServiceHandler) ListMeshNetworks(context.Context, 
 
 func (UnimplementedMeshNetworkServiceHandler) CreateMeshNetwork(context.Context, *connect.Request[v1.CreateMeshNetworkRequest]) (*connect.Response[v1.CreateMeshNetworkResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.MeshNetworkService.CreateMeshNetwork is not implemented"))
+}
+
+func (UnimplementedMeshNetworkServiceHandler) DeleteMeshNetwork(context.Context, *connect.Request[v1.DeleteMeshNetworkRequest]) (*connect.Response[v1.DeleteMeshNetworkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.MeshNetworkService.DeleteMeshNetwork is not implemented"))
 }
 
 func (UnimplementedMeshNetworkServiceHandler) JoinMeshNetwork(context.Context, *connect.Request[v1.JoinMeshNetworkRequest]) (*connect.Response[v1.JoinMeshNetworkResponse], error) {

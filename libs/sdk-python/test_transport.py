@@ -76,6 +76,7 @@ from codewire.v1.mesh_kv_pb2 import (
 from codewire.v1.mesh_network_connect import MeshNetworkServiceWSGIApplication
 from codewire.v1.mesh_network_pb2 import (
     CreateMeshNetworkResponse,
+    DeleteMeshNetworkResponse,
     ListMeshNetworksResponse,
     MeshNetwork,
 )
@@ -625,6 +626,10 @@ class MeshServiceFixture:
             raise ConnectError(Code.INVALID_ARGUMENT, "wrong network")
         return CreateMeshNetworkResponse(network=self._network())
 
+    def delete_mesh_network(self, request, ctx):
+        self._record("DeleteMeshNetwork", request, ctx, network=True)
+        return DeleteMeshNetworkResponse()
+
     def join_mesh_network(self, request, ctx):
         raise ConnectError(Code.UNIMPLEMENTED, "not exercised by WI-7C")
 
@@ -1075,6 +1080,7 @@ class MeshConnectTransportTestCase(unittest.TestCase):
         self.assertEqual(registration.node.name, "node-one")
         self.assertEqual(registration.enrollment.id, "enrollment-one")
         self.assertEqual(registration.enrollment.enrollment_code, "")
+        self.client.networks.delete(MESH_ORG_ID, MESH_NETWORK_ID)
 
         self.assertEqual(
             MeshServiceFixture.calls,
@@ -1095,6 +1101,7 @@ class MeshConnectTransportTestCase(unittest.TestCase):
                 "GetMeshKeyValue",
                 "ListMeshKeyValues",
                 "DeleteMeshKeyValue",
+                "DeleteMeshNetwork",
                 "RedeemMeshNodeEnrollment",
             },
         )

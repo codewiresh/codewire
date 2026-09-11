@@ -469,6 +469,12 @@ export class MeshNetworksService {
     return fromProtoNetwork(required("created network", response.network));
   }
 
+  async delete(orgId: string, networkId: string): Promise<void> {
+    await connectCall(() =>
+      this.client.deleteMeshNetwork({ orgId, networkId }),
+    );
+  }
+
   async list(orgId: string): Promise<MeshNetwork[]> {
     const networks: MeshNetwork[] = [];
     let pageToken = "";

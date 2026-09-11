@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .mesh_network_pb2 import CreateMeshNetworkRequest, CreateMeshNetworkResponse, JoinMeshNetworkRequest, JoinMeshNetworkResponse, ListMeshNetworksRequest, ListMeshNetworksResponse
+from .mesh_network_pb2 import CreateMeshNetworkRequest, CreateMeshNetworkResponse, DeleteMeshNetworkRequest, DeleteMeshNetworkResponse, JoinMeshNetworkRequest, JoinMeshNetworkResponse, ListMeshNetworksRequest, ListMeshNetworksResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -39,6 +39,9 @@ class MeshNetworkService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def create_mesh_network(self, request: CreateMeshNetworkRequest, ctx: RequestContext[CreateMeshNetworkRequest, CreateMeshNetworkResponse]) -> CreateMeshNetworkResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def delete_mesh_network(self, request: DeleteMeshNetworkRequest, ctx: RequestContext[DeleteMeshNetworkRequest, DeleteMeshNetworkResponse]) -> DeleteMeshNetworkResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def join_mesh_network(self, request: JoinMeshNetworkRequest, ctx: RequestContext[JoinMeshNetworkRequest, JoinMeshNetworkResponse]) -> JoinMeshNetworkResponse:
@@ -77,6 +80,16 @@ class MeshNetworkServiceASGIApplication(ConnectASGIApplication[MeshNetworkServic
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.create_mesh_network,
+                ),
+                "/codewire.v1.MeshNetworkService/DeleteMeshNetwork": Endpoint.unary(
+                    method=MethodInfo(
+                        name="DeleteMeshNetwork",
+                        service_name="codewire.v1.MeshNetworkService",
+                        input=DeleteMeshNetworkRequest,
+                        output=DeleteMeshNetworkResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.delete_mesh_network,
                 ),
                 "/codewire.v1.MeshNetworkService/JoinMeshNetwork": Endpoint.unary(
                     method=MethodInfo(
@@ -168,6 +181,26 @@ class MeshNetworkServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def delete_mesh_network(
+        self,
+        request: DeleteMeshNetworkRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> DeleteMeshNetworkResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="DeleteMeshNetwork",
+                service_name="codewire.v1.MeshNetworkService",
+                input=DeleteMeshNetworkRequest,
+                output=DeleteMeshNetworkResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def join_mesh_network(
         self,
         request: JoinMeshNetworkRequest,
@@ -193,6 +226,9 @@ class MeshNetworkServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def create_mesh_network(self, request: CreateMeshNetworkRequest, ctx: RequestContext[CreateMeshNetworkRequest, CreateMeshNetworkResponse]) -> CreateMeshNetworkResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def delete_mesh_network(self, request: DeleteMeshNetworkRequest, ctx: RequestContext[DeleteMeshNetworkRequest, DeleteMeshNetworkResponse]) -> DeleteMeshNetworkResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def join_mesh_network(self, request: JoinMeshNetworkRequest, ctx: RequestContext[JoinMeshNetworkRequest, JoinMeshNetworkResponse]) -> JoinMeshNetworkResponse:
@@ -229,6 +265,16 @@ class MeshNetworkServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.create_mesh_network,
+                ),
+                "/codewire.v1.MeshNetworkService/DeleteMeshNetwork": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="DeleteMeshNetwork",
+                        service_name="codewire.v1.MeshNetworkService",
+                        input=DeleteMeshNetworkRequest,
+                        output=DeleteMeshNetworkResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.delete_mesh_network,
                 ),
                 "/codewire.v1.MeshNetworkService/JoinMeshNetwork": EndpointSync.unary(
                     method=MethodInfo(
@@ -313,6 +359,25 @@ class MeshNetworkServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.MeshNetworkService",
                 input=CreateMeshNetworkRequest,
                 output=CreateMeshNetworkResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def delete_mesh_network(
+        self,
+        request: DeleteMeshNetworkRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> DeleteMeshNetworkResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="DeleteMeshNetwork",
+                service_name="codewire.v1.MeshNetworkService",
+                input=DeleteMeshNetworkRequest,
+                output=DeleteMeshNetworkResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

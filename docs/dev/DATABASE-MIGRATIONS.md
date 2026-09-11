@@ -573,6 +573,39 @@ and record the executed test count. Wire them into
 `scripts/ci/verify/run-integration-verification.sh database`, then run that mode
 locally. CI confirms the result; it is not the first integration environment.
 
+### Network deletion
+
+Mesh migration `007_network_deletion.sql` adds immediate foreign keys from
+every remaining network-owned table. Registered nodes restrict deletion;
+memberships, invitations, enrollments, groups, group policies/members, KV,
+access grants and task events cascade with their network. Existing orphan rows
+make the migration fail transactionally; it neither guesses ownership nor
+discards data to satisfy the constraints.
+
+Owner-authorized deletion locks the exact network, rechecks its organization
+and owner membership, and refuses any registered node, including an offline
+node. It then inserts a durable `retired_network_names` record and deletes the
+network in the same transaction. Deleted names cannot be reused: existing
+capabilities and coordinate streams identify a network by name, so admitting
+a replacement would grant old authority access to new state. Creation checks
+retirement after its insert has waited for any concurrent deletion. Enrollment
+redemption and invitation joining lock their parent before child rows; the
+foreign keys fence late writes across all server processes. Coordinate
+sessions on the deleting process are closed, including delayed registration.
+
+The upgrade fixture independently pins accepted versions 1–6 from canonical
+`9a22ecb46f1f22fbefc83c1bcf7b7dd3fe296df3`. It proves retained rows and the
+unchanged prior ledger, fresh apply, no-op restart, orphan rejection, metadata
+cascades, nonempty refusal, name retirement, failure/cancellation rollback,
+and concurrent enrollment/deletion/creation ordering using database locks.
+
+There is no in-place downgrade or old-writer compatibility. Stop new writers
+and replay the selected version-6 source into only an empty disposable Mesh
+`public` schema to roll back. The fixture proves the old ledger is restored,
+new records are discarded, and a separate schema survives. Cluster resources,
+other databases/schemas and external credentials are outside this boundary;
+this documentation authorizes no live reset.
+
 ### Hosted Rollout Preflight
 
 Before the first Mesh rollout into a new hosted database, use the environment

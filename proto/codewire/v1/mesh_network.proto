@@ -12,6 +12,10 @@ service MeshNetworkService {
 
   rpc CreateMeshNetwork(CreateMeshNetworkRequest) returns (CreateMeshNetworkResponse);
 
+  // DeleteMeshNetwork requires network ownership and no registered nodes.
+  // It removes the network's metadata and permanently retires its name.
+  rpc DeleteMeshNetwork(DeleteMeshNetworkRequest) returns (DeleteMeshNetworkResponse);
+
   // JoinMeshNetwork consumes a one-use invitation capability and adds the
   // authenticated caller to its organization-owned network.
   rpc JoinMeshNetwork(JoinMeshNetworkRequest) returns (JoinMeshNetworkResponse);
@@ -45,6 +49,13 @@ message CreateMeshNetworkRequest {
 message CreateMeshNetworkResponse {
   MeshNetwork network = 1;
 }
+
+message DeleteMeshNetworkRequest {
+  string org_id = 1;
+  string network_id = 2;
+}
+
+message DeleteMeshNetworkResponse {}
 
 message JoinMeshNetworkRequest {
   // One-use capability returned by CreateMeshInvite. It selects the

@@ -1488,7 +1488,7 @@ GET /api/v1/tailnet/coordinate
 EOF
 
   local node_registration legacy_relations legacy_columns migration_004
-  local migration_005 migration_006 network_auth_rows
+  local migration_005 migration_006 migration_007 network_auth_rows
   node_registration="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tA -F '|' -c \
       "SELECT network_id, name, owner_subject, authorized_by, enrollment_id, peer_url FROM nodes WHERE network_id = '${network_id}' AND name = 'mesh-kind-node'")"
@@ -1507,6 +1507,9 @@ EOF
   migration_006="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tA -F '|' -c \
       "SELECT description, success FROM _sqlx_migrations WHERE version = 6")"
+  migration_007="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire_mesh -tA -F '|' -c \
+      "SELECT description, success FROM _sqlx_migrations WHERE version = 7")"
   network_auth_rows="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tAc \
       "SELECT count(*) FROM kv WHERE namespace = 'mesh.networkauth'")"
@@ -1516,8 +1519,9 @@ EOF
     || [ "$migration_004" != "retire persistent node bearer|t" ] \
     || [ "$migration_005" != "retire network auth issuer|t" ] \
     || [ "$migration_006" != "retire raw auth session device state|t" ] \
+    || [ "$migration_007" != "network deletion|t" ] \
     || [ "$network_auth_rows" != "0" ]; then
-    echo "::error::Mesh raw-auth retirement persistence proof failed: node=${node_registration:-missing} legacy_relations=${legacy_relations:-missing} legacy_columns=${legacy_columns:-missing} migration_004=${migration_004:-missing} migration_005=${migration_005:-missing} migration_006=${migration_006:-missing} network_auth_rows=${network_auth_rows:-missing}"
+    echo "::error::Mesh persistence proof failed: node=${node_registration:-missing} legacy_relations=${legacy_relations:-missing} legacy_columns=${legacy_columns:-missing} migration_004=${migration_004:-missing} migration_005=${migration_005:-missing} migration_006=${migration_006:-missing} migration_007=${migration_007:-missing} network_auth_rows=${network_auth_rows:-missing}"
     exit 1
   fi
 

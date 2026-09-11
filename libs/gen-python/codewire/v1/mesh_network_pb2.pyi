@@ -55,6 +55,18 @@ class CreateMeshNetworkResponse(_message.Message):
     network: MeshNetwork
     def __init__(self, network: _Optional[_Union[MeshNetwork, _Mapping]] = ...) -> None: ...
 
+class DeleteMeshNetworkRequest(_message.Message):
+    __slots__ = ("org_id", "network_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    network_id: str
+    def __init__(self, org_id: _Optional[str] = ..., network_id: _Optional[str] = ...) -> None: ...
+
+class DeleteMeshNetworkResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
 class JoinMeshNetworkRequest(_message.Message):
     __slots__ = ("invite_code",)
     INVITE_CODE_FIELD_NUMBER: _ClassVar[int]

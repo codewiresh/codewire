@@ -178,6 +178,9 @@ func TestMeshGeneratedClientsCoverMountedOperations(t *testing.T) {
 	if err := client.KV.Delete(ctx, meshTestOrg, meshTestNetwork, "namespace-one", "key-one"); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Networks.Delete(ctx, meshTestOrg, meshTestNetwork); err != nil {
+		t.Fatal(err)
+	}
 
 	wantOperations := []string{
 		"AddMeshGroupMember",
@@ -186,6 +189,7 @@ func TestMeshGeneratedClientsCoverMountedOperations(t *testing.T) {
 		"CreateMeshNodeEnrollment",
 		"DeleteMeshGroup",
 		"DeleteMeshKeyValue",
+		"DeleteMeshNetwork",
 		"GetMeshGroup",
 		"GetMeshKeyValue",
 		"ListMeshGroups",
@@ -275,6 +279,11 @@ func (h *meshCapabilityHandler) CreateMeshNetwork(_ context.Context, request *co
 		h.t.Fatalf("network_id = %q, want %q", request.Msg.GetNetworkId(), meshTestNetwork)
 	}
 	return connect.NewResponse(&codewirev1.CreateMeshNetworkResponse{Network: h.network(meshTestNetwork)}), nil
+}
+
+func (h *meshCapabilityHandler) DeleteMeshNetwork(_ context.Context, request *connect.Request[codewirev1.DeleteMeshNetworkRequest]) (*connect.Response[codewirev1.DeleteMeshNetworkResponse], error) {
+	h.recordNetwork("DeleteMeshNetwork", request.Header(), request.Msg.GetOrgId(), request.Msg.GetNetworkId())
+	return connect.NewResponse(&codewirev1.DeleteMeshNetworkResponse{}), nil
 }
 
 func (h *meshCapabilityHandler) ListMeshNodes(_ context.Context, request *connect.Request[codewirev1.ListMeshNodesRequest]) (*connect.Response[codewirev1.ListMeshNodesResponse], error) {
@@ -513,6 +522,7 @@ func (h *meshCapabilityHandler) calledOperations() []string {
 		"CreateMeshNodeEnrollment",
 		"DeleteMeshGroup",
 		"DeleteMeshKeyValue",
+		"DeleteMeshNetwork",
 		"GetMeshGroup",
 		"GetMeshKeyValue",
 		"ListMeshGroups",
