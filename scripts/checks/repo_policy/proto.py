@@ -160,8 +160,8 @@ def proto_package_boundary_failures(
     public_method_count = sum(
         len(services.get(service, {})) for service in MESH_PUBLIC_SERVICE_METHODS
     )
-    if public_method_count != 21:
-        failures.append(f"public Mesh RPC count is {public_method_count}, expected 21")
+    if public_method_count != 22:
+        failures.append(f"public Mesh RPC count is {public_method_count}, expected 22")
 
     if services != MESH_RPC_IDEMPOTENCY:
         failures.append(
@@ -484,6 +484,6 @@ def check_proto_package_boundaries(args: argparse.Namespace) -> int:
         return report("proto package boundaries", failures, error_annotation=True)
     print(
         "proto package boundaries: OK "
-        "(21 public Mesh RPCs, 7 annotated reads, 8 services, 5 explicit TS exports)"
+        "(22 public Mesh RPCs, 7 annotated reads, 8 services, 5 explicit TS exports)"
     )
     return 0

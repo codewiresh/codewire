@@ -27,6 +27,14 @@ func (s *MeshNetworkService) Create(ctx context.Context, orgID, networkID string
 	return &network, nil
 }
 
+// Delete removes a network owned by orgID.
+func (s *MeshNetworkService) Delete(ctx context.Context, orgID, networkID string) error {
+	_, err := s.client.networkClient.DeleteMeshNetwork(ctx, connect.NewRequest(&codewirev1.DeleteMeshNetworkRequest{
+		OrgId: orgID, NetworkId: networkID,
+	}))
+	return connectSDKError(err)
+}
+
 // List returns networks owned by the exact orgID.
 func (s *MeshNetworkService) List(ctx context.Context, orgID string) ([]MeshNetwork, error) {
 	var networks []MeshNetwork

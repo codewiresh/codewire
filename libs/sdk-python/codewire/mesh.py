@@ -420,6 +420,15 @@ class MeshNetworks:
             _message(response, "network", "create network")
         )
 
+    def delete(self, org_id: str, network_id: str) -> None:
+        _unary(
+            self._transport,
+            self._client.delete_mesh_network,
+            mesh_network_pb2.DeleteMeshNetworkRequest(
+                org_id=org_id, network_id=network_id
+            ),
+        )
+
     def list(self, org_id: str) -> list[MeshNetwork]:
         networks: list[MeshNetwork] = []
         page_token = ""

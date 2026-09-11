@@ -213,6 +213,7 @@ MESH_PUBLIC_SERVICE_METHODS = {
     "MeshNetworkService": {
         "ListMeshNetworks",
         "CreateMeshNetwork",
+        "DeleteMeshNetwork",
         "JoinMeshNetwork",
     },
     "MeshNodeService": {
@@ -253,6 +254,7 @@ MESH_RPC_IDEMPOTENCY = {
     "MeshNetworkService": {
         "ListMeshNetworks": True,
         "CreateMeshNetwork": False,
+        "DeleteMeshNetwork": False,
         "JoinMeshNetwork": False,
     },
     "MeshNodeService": {
@@ -298,6 +300,7 @@ MESH_ORG_OWNED_RESOURCES = {
 MESH_ORG_SCOPED_REQUESTS = {
     "ListMeshNetworksRequest",
     "CreateMeshNetworkRequest",
+    "DeleteMeshNetworkRequest",
     "ListMeshNodesRequest",
     "RevokeMeshNodeRequest",
     "CreateMeshNodeEnrollmentRequest",
@@ -326,6 +329,7 @@ PROTO_TS_EXPORTS = {
 MESH_EXPECTED_CONNECT_METHODS = {
     "MESH_NETWORK_SERVICE_SERVICE_NAME": {
         "CreateMeshNetwork",
+        "DeleteMeshNetwork",
         "JoinMeshNetwork",
         "ListMeshNetworks",
     },

@@ -131,6 +131,17 @@ Verify how terminal events reach the coordinating session. Starting a watcher
 is not proof of notification delivery; record a bounded fallback when the host
 has no supported wake interface. Keep observer failure distinct from CI failure.
 
+The watcher owns the passive wait, not the model. Continue independent authorized
+work; when only passive gates remain, hand off once and resume only for a watcher
+transition, owner input, or the recorded fallback. Never turn a heartbeat,
+commentary cadence, or short tool timeout into repeated model turns, one-minute
+sleep calls, status narration, or unchanged-state reads. If automatic host
+goal continuations keep waking the model and no event-driven wake is available,
+report that scheduling mismatch once and ask the owner to pause those
+continuations; the watcher and canonical Program remain active. Do not cancel CI,
+mark a running gate blocked, or repeatedly end and restart turns to simulate a
+pause. Instructions do not themselves provide scheduler enforcement.
+
 Record actual commands, exit status and required test counts. Distinguish full
 runs, composed component proof, pending checks and unchanged inherited results.
 Reuse evidence only while its relevant source, dependencies/features, fixtures,

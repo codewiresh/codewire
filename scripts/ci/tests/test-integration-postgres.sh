@@ -218,7 +218,7 @@ suites = [
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::create::projection_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment projection capture matrix', 'count': 3},
     {'args': ['test', '-p', 'codewire-orchestration', '--lib', 'worker::tenant_secret_teardown::tests::db_', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization tenant secret teardown matrix', 'count': 2},
     {'args': ['test', '-p', 'codewire-orchestration', '--lib', 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'encrypted tenant secret store matrix', 'count': 1},
-    {'args': ['test', '-p', 'codewire-mesh', '--lib', 'store::migration_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Mesh migration ledger', 'count': 11},
+    {'args': ['test', '-p', 'codewire-mesh', '--lib', 'store::migration_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Mesh migration ledger', 'count': 15},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'environment_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment source admission matrix', 'count': 6},
 ]
 batches = [

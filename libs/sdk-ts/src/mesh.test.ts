@@ -137,6 +137,10 @@ router.service(MeshNetworkService, {
     );
     return { network: network(request.networkId) };
   },
+  deleteMeshNetwork: (request, context) => {
+    record("DeleteMeshNetwork", context, request.orgId, request.networkId);
+    return {};
+  },
   listMeshNetworks: (request, context) => {
     record("ListMeshNetworks", context, request.orgId);
     if (request.pageToken === "") {
@@ -616,6 +620,7 @@ try {
       registration.enrollment.enrollment_code === "",
     "generated redemption returns credential-free node and enrollment metadata",
   );
+  await client.networks.delete(orgId, networkId);
 
   const expectedOperations = [
     "AddMeshGroupMember",
@@ -624,6 +629,7 @@ try {
     "CreateMeshNodeEnrollment",
     "DeleteMeshGroup",
     "DeleteMeshKeyValue",
+    "DeleteMeshNetwork",
     "GetMeshGroup",
     "GetMeshKeyValue",
     "ListMeshGroups",
@@ -638,7 +644,7 @@ try {
   ];
   assert(
     JSON.stringify([...calls].sort()) === JSON.stringify(expectedOperations),
-    `generated clients cover exactly the seventeen mounted Mesh operations: got ${JSON.stringify([...calls].sort())}`,
+    `generated clients cover exactly the eighteen mounted Mesh operations: got ${JSON.stringify([...calls].sort())}`,
   );
 } finally {
   await new Promise<void>((resolve, reject) =>
