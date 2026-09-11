@@ -14,6 +14,7 @@ import Foundation
     case artifactDigestMismatch
     case dataDiskFormatInvalid
     case dataDiskIdentityMismatch
+    case bootControlCopyFailed
     case virtualMachineConfigurationInvalid
 
     var description: String {
@@ -25,6 +26,7 @@ import Foundation
       case .artifactDigestMismatch: "an admitted immutable artifact digest changed"
       case .dataDiskFormatInvalid: "the admitted data disk is not ext4"
       case .dataDiskIdentityMismatch: "the admitted data disk identity changed"
+      case .bootControlCopyFailed: "the path-backed boot control copy failed"
       case .virtualMachineConfigurationInvalid:
         "Virtualization.framework rejected the fixed topology"
       }
@@ -61,23 +63,29 @@ import Foundation
       -> VZVirtualMachineConfiguration
     {
       try buildConfiguration(
-        for: request, commandLine: RunnerProtocol.inodeProbeKernelCommandLine
+        for: request, commandLine: RunnerProtocol.inodeProbeKernelCommandLine,
+        bootArtifacts: nil
+      )
+    }
+
+    static func buildInodeProbeConfiguration(
+      for request: ReceivedRequest, bootArtifacts: InodeProbeBootArtifacts
+    ) throws -> VZVirtualMachineConfiguration {
+      try buildConfiguration(
+        for: request, commandLine: RunnerProtocol.inodeProbeKernelCommandLine,
+        bootArtifacts: bootArtifacts
       )
     }
 
     private static func buildConfiguration(
-      for request: ReceivedRequest, commandLine: String
+      for request: ReceivedRequest, commandLine: String,
+      bootArtifacts: InodeProbeBootArtifacts? = nil
     ) throws -> VZVirtualMachineConfiguration {
       try validateHost()
       let configuration = request.configuration
       let descriptors = request.descriptors
 
-      try validateImmutable(
-        descriptors.descriptor(for: .kernel), identity: configuration.kernel
-      )
-      try validateImmutable(
-        descriptors.descriptor(for: .initialRamdisk), identity: configuration.initialRamdisk
-      )
+      try validateInodeProbeBootArtifacts(for: request)
       try validateImmutable(
         descriptors.descriptor(for: .seedDisk), identity: configuration.seedDisk
       )
@@ -95,11 +103,12 @@ import Foundation
       else { throw ConfigurationError.invalidMemory }
 
       let bootLoader = VZLinuxBootLoader(
-        kernelURL: descriptorURL(descriptors.descriptor(for: .kernel))
+        kernelURL: bootArtifacts?.kernel
+          ?? descriptorURL(descriptors.descriptor(for: .kernel))
       )
-      bootLoader.initialRamdiskURL = descriptorURL(
-        descriptors.descriptor(for: .initialRamdisk)
-      )
+      bootLoader.initialRamdiskURL =
+        bootArtifacts?.initialRamdisk
+        ?? descriptorURL(descriptors.descriptor(for: .initialRamdisk))
       bootLoader.commandLine = commandLine
       result.bootLoader = bootLoader
       result.cpuCount = configuration.cpuCount
@@ -145,6 +154,16 @@ import Foundation
         throw RuntimeError.virtualMachineConfigurationInvalid
       }
       return result
+    }
+
+    static func validateInodeProbeBootArtifacts(for request: ReceivedRequest) throws {
+      try validateImmutable(
+        request.descriptors.descriptor(for: .kernel), identity: request.configuration.kernel
+      )
+      try validateImmutable(
+        request.descriptors.descriptor(for: .initialRamdisk),
+        identity: request.configuration.initialRamdisk
+      )
     }
 
     private static func descriptorURL(_ descriptor: Int32) -> URL {
@@ -286,5 +305,10 @@ import Foundation
       guard !overflow else { throw ConfigurationError.invalidMemory }
       return result
     }
+  }
+
+  struct InodeProbeBootArtifacts {
+    let kernel: URL
+    let initialRamdisk: URL
   }
 #endif

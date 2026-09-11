@@ -48,6 +48,18 @@ GUEST_FAILURE_RESULTS = frozenset(
 )
 
 
+def execution_contract(path_backed_boot_control: bool) -> tuple[str, str]:
+    if path_backed_boot_control:
+        return "inode-probe-path-control", "boot-path-control-ready"
+    return "inode-probe", "guest-ready"
+
+
+def execution_label(path_backed_boot_control: bool) -> str:
+    if path_backed_boot_control:
+        return "macOS VZ path-backed boot control (NOT exact-inode proof)"
+    return "macOS VZ exact-inode probe"
+
+
 def exact_input(path: str, label: str) -> Path:
     value = Path(path)
     if not value.is_absolute() or value.is_symlink():
@@ -154,7 +166,7 @@ def expect_response(stream: socket.socket, expected: str) -> None:
     ).encode()
     if payload == canonical:
         return
-    if expected == "guest-ready":
+    if expected in {"guest-ready", "boot-path-control-ready"}:
         for failure in GUEST_FAILURE_RESULTS:
             failure_payload = json.dumps(
                 {"result": failure, "schemaVersion": 1},
@@ -211,6 +223,7 @@ def run(arguments: argparse.Namespace) -> None:
     kernel_sha256 = exact_sha256(arguments.kernel_sha256, "kernel SHA-256")
     initramfs_sha256 = exact_sha256(arguments.initramfs_sha256, "initramfs SHA-256")
     data_uuid = exact_uuid(arguments.data_uuid, "data UUID")
+    helper_command, ready_result = execution_contract(arguments.path_backed_boot_control)
 
     with tempfile.TemporaryDirectory(prefix="codewire-vz-inode-probe-") as temporary:
         root = Path(temporary)
@@ -262,7 +275,7 @@ def run(arguments: argparse.Namespace) -> None:
         parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         parent.settimeout(arguments.timeout)
         process = subprocess.Popen(
-            [str(private_helper), "inode-probe", "--control-fd", str(child.fileno())],
+            [str(private_helper), helper_command, "--control-fd", str(child.fileno())],
             pass_fds=(child.fileno(),),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -293,7 +306,7 @@ def run(arguments: argparse.Namespace) -> None:
             for path in paths.values():
                 replace_with_decoy(path, path.stat().st_size)
             parent.sendall(framed(b"\x01"))
-            expect_response(parent, "guest-ready")
+            expect_response(parent, ready_result)
 
             os.kill(process.pid, signal.SIGKILL)
             return_code = process.wait(timeout=arguments.timeout)
@@ -307,11 +320,19 @@ def run(arguments: argparse.Namespace) -> None:
                 raise RuntimeError("a helper-owned process survived the fixture SIGKILL")
             if parent.recv(1) != b"":
                 raise RuntimeError("helper control ownership survived process death")
-            print(
-                "macOS VZ exact-inode probe: guest-ready then helper-kill ownership closed "
-                f"helper={helper_sha256} kernel={kernel_sha256} "
-                f"initramfs={initramfs_sha256} data_uuid={data_uuid}"
-            )
+            if arguments.path_backed_boot_control:
+                print(
+                    "macOS VZ path-backed boot control: boot-path-control-ready then "
+                    "helper-kill ownership closed; NOT exact-inode proof "
+                    f"helper={helper_sha256} kernel={kernel_sha256} "
+                    f"initramfs={initramfs_sha256} data_uuid={data_uuid}"
+                )
+            else:
+                print(
+                    "macOS VZ exact-inode probe: guest-ready then helper-kill ownership closed "
+                    f"helper={helper_sha256} kernel={kernel_sha256} "
+                    f"initramfs={initramfs_sha256} data_uuid={data_uuid}"
+                )
         finally:
             for descriptor in descriptors:
                 os.close(descriptor)
@@ -331,6 +352,7 @@ def main() -> int:
     parser.add_argument("--initramfs-sha256", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--data-uuid", required=True)
+    parser.add_argument("--path-backed-boot-control", action="store_true")
     parser.add_argument("--timeout", type=float, default=45.0)
     arguments = parser.parse_args()
     if not 5 <= arguments.timeout <= 120:
@@ -338,7 +360,10 @@ def main() -> int:
     try:
         run(arguments)
     except Exception as error:
-        print(f"macOS VZ exact-inode probe: ERROR: {error}", file=sys.stderr)
+        print(
+            f"{execution_label(arguments.path_backed_boot_control)}: ERROR: {error}",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

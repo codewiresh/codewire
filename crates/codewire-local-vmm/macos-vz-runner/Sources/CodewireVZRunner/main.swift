@@ -12,7 +12,10 @@ private struct Response: Encodable {
 
 private func usage() -> Never {
   FileHandle.standardError.write(
-    Data("usage: codewire-vz-runner (validate|inode-probe) --control-fd FD\n".utf8)
+    Data(
+      "usage: codewire-vz-runner (validate|inode-probe|inode-probe-path-control) --control-fd FD\n"
+        .utf8
+    )
   )
   exit(2)
 }
@@ -20,7 +23,7 @@ private func usage() -> Never {
 private func run() throws {
   let arguments = CommandLine.arguments
   guard arguments.count == 4,
-    ["validate", "inode-probe"].contains(arguments[1]),
+    ["validate", "inode-probe", "inode-probe-path-control"].contains(arguments[1]),
     arguments[2] == "--control-fd",
     let controlDescriptor = Int32(arguments[3]),
     controlDescriptor >= 3
@@ -32,7 +35,11 @@ private func run() throws {
       try RuntimeAdmission.validateConfiguration(for: request)
       try sendResponse("configuration-valid", to: controlDescriptor)
     } else {
-      try InodeProbeRuntime.run(request: request, controlDescriptor: controlDescriptor)
+      try InodeProbeRuntime.run(
+        request: request,
+        controlDescriptor: controlDescriptor,
+        mode: arguments[1] == "inode-probe" ? .exactInode : .pathBackedBootControl
+      )
     }
   #else
     throw ConfigurationError.unsupportedSchema

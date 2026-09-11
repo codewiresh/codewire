@@ -90,8 +90,14 @@ for required in (
     "forPort: RunnerProtocol.inodeProbeVsockPort",
     "InodeProbeConnectionReceiver", "OneShotAdmissionGate",
     "withExtendedLifetime(connection)", 'Data("CWVSTG1\\0".utf8)',
-    'sendResponse("descriptors-admitted"', 'sendResponse("guest-ready"',
+    'sendResponse("descriptors-admitted"', '"boot-path-control-ready" : "guest-ready"',
     "HMAC<SHA256>.isValidAuthenticationCode", "Darwin.read(controlDescriptor",
+    "PathBackedBootControl", 'appendingPathComponent("kernel"',
+    'appendingPathComponent("initramfs"', "O_CREAT | O_EXCL | O_NOFOLLOW",
+    "pread(sourceDescriptor", "Darwin.write(",
+    "validateInodeProbeBootArtifacts(for: request)", "mkdir(directory.path, 0o700)",
+    "fchmod(destinationDescriptor, 0o600)", "pathStatus.st_ino == status.st_ino",
+    "== .diagnostic(.started)", "withExtendedLifetime(pathBackedBootControl)",
 ):
     if required not in inode_probe:
         fail(f"inode probe lost lifecycle assertion: {required}")
@@ -129,9 +135,12 @@ for required in (
     "socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)",
     "socket.SCM_RIGHTS", 'expect_response(parent, "descriptors-admitted")',
     "for descriptor in descriptors:", "descriptors.clear()", "os.replace(decoy, path)",
-    'parent.sendall(framed(b"\\x01"))', 'expect_response(parent, "guest-ready")',
+    'parent.sendall(framed(b"\\x01"))', "expect_response(parent, ready_result)",
     "os.kill(process.pid, signal.SIGKILL)", 'parent.recv(1) != b""',
     "os.killpg(process.pid, 0)",
+    'return "inode-probe", "guest-ready"',
+    'return "inode-probe-path-control", "boot-path-control-ready"',
+    "NOT exact-inode proof", '"--path-backed-boot-control"',
     'entitlements.get("com.apple.security.virtualization") is not True',
     "helper_sha256 = exact_sha256",
     "kernel_sha256 = exact_sha256", "initramfs_sha256 = exact_sha256",
@@ -142,6 +151,14 @@ for required in (
 for forbidden in ('"codesign", "-s"', "ssh", "scp", "http://", "https://"):
     if forbidden in parent:
         fail(f"inode-probe parent gained prohibited operation: {forbidden}")
+
+main = source("Sources/CodewireVZRunner/main.swift")
+for required in (
+    '"inode-probe-path-control"',
+    ".exactInode : .pathBackedBootControl",
+):
+    if required not in main:
+        fail(f"runner entrypoint lost path-control separation: {required}")
 
 for relative in (
     "Tests/CodewireVZRunnerTests/ConfigurationTests.swift",

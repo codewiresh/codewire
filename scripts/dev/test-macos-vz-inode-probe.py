@@ -60,6 +60,36 @@ class InodeProbeHarnessTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unexpected"):
                 probe.expect_response(right, "guest-ready")
 
+    def test_path_backed_control_is_distinct_and_never_exact_inode_readiness(self):
+        self.assertEqual(probe.execution_contract(False), ("inode-probe", "guest-ready"))
+        self.assertEqual(
+            probe.execution_contract(True),
+            ("inode-probe-path-control", "boot-path-control-ready"),
+        )
+        self.assertEqual(probe.execution_label(False), "macOS VZ exact-inode probe")
+        self.assertIn("NOT exact-inode proof", probe.execution_label(True))
+
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        exact_readiness = probe.json.dumps(
+            {"result": "guest-ready", "schemaVersion": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        left.sendall(probe.framed(exact_readiness))
+        with self.assertRaisesRegex(RuntimeError, "unexpected"):
+            probe.expect_response(right, "boot-path-control-ready")
+
+        failure = probe.json.dumps(
+            {"result": "guest-readiness-failed-no-connection", "schemaVersion": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        left.sendall(probe.framed(failure))
+        with self.assertRaisesRegex(RuntimeError, "failed-no-connection"):
+            probe.expect_response(right, "boot-path-control-ready")
+
     def test_ext4_identity_is_read_from_exact_bytes(self):
         path = self.root / "data"
         path.write_bytes(b"\0" * 4096)

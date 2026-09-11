@@ -7,6 +7,11 @@ import Foundation
   import Security
   import Virtualization
 
+  public enum InodeProbeMode: Equatable {
+    case exactInode
+    case pathBackedBootControl
+  }
+
   @available(macOS 15.0, *)
   public enum InodeProbeRuntime {
     private static let challengeBytes = 32
@@ -17,8 +22,22 @@ import Foundation
     private static let stageFrameMagic = Data("CWVSTG1\0".utf8)
     private static let domain = Data("codewire-vz-exact-inode-probe-v1\0".utf8)
 
-    public static func run(request: ReceivedRequest, controlDescriptor: Int32) throws {
-      let configuration = try RuntimeAdmission.buildInodeProbeConfiguration(for: request)
+    public static func run(
+      request: ReceivedRequest, controlDescriptor: Int32, mode: InodeProbeMode = .exactInode
+    ) throws {
+      let pathBackedBootControl =
+        mode == .pathBackedBootControl
+        ? try PathBackedBootControl(request: request)
+        : nil
+      defer { withExtendedLifetime(pathBackedBootControl) {} }
+      let configuration: VZVirtualMachineConfiguration
+      if let pathBackedBootControl {
+        configuration = try RuntimeAdmission.buildInodeProbeConfiguration(
+          for: request, bootArtifacts: pathBackedBootControl.artifacts
+        )
+      } else {
+        configuration = try RuntimeAdmission.buildInodeProbeConfiguration(for: request)
+      }
       let seed = try RuntimeAdmission.inodeProbeSeed(for: request)
       let filesystemUUID = try RuntimeAdmission.inodeProbeFilesystemUUID(for: request)
       try sendResponse("descriptors-admitted", to: controlDescriptor)
@@ -51,12 +70,19 @@ import Foundation
 
       let connection: VZVirtioSocketConnection
       do {
-        connection = try receiveReadiness(
-          from: binding.receiver,
-          seed: seed,
-          filesystemUUID: filesystemUUID,
-          challenge: challenge
-        )
+        if mode == .pathBackedBootControl {
+          connection = try receiveBootControl(
+            from: binding.receiver,
+            challenge: challenge
+          )
+        } else {
+          connection = try receiveReadiness(
+            from: binding.receiver,
+            seed: seed,
+            filesystemUUID: filesystemUUID,
+            challenge: challenge
+          )
+        }
       } catch let error as ProbeError {
         binding.receiver.cancel()
         try? sendResponse(error.controlResult, to: controlDescriptor)
@@ -66,7 +92,10 @@ import Foundation
         try? sendResponse(ProbeError.invalidReadiness.controlResult, to: controlDescriptor)
         throw error
       }
-      try sendResponse("guest-ready", to: controlDescriptor)
+      try sendResponse(
+        mode == .pathBackedBootControl ? "boot-path-control-ready" : "guest-ready",
+        to: controlDescriptor
+      )
 
       // The fixture owner deliberately SIGKILLs this helper. Retain the
       // accepted listener, delegate and authenticated guest connection until
@@ -168,6 +197,40 @@ import Foundation
         throw ProbeError.readinessFailed(ReadinessPhase(lastStage))
       } catch ProbeError.socketUnavailable {
         throw ProbeError.readinessFailed(ReadinessPhase(lastStage))
+      }
+    }
+
+    private static func receiveBootControl(
+      from receiver: InodeProbeConnectionReceiver,
+      challenge: Data
+    ) throws -> VZVirtioSocketConnection {
+      let deadline = Date().addingTimeInterval(readyDeadlineSeconds)
+      let connection: VZVirtioSocketConnection
+      do {
+        connection = try receiver.wait(deadline: deadline)
+      } catch {
+        throw ProbeError.readinessFailed(.beforeConnection)
+      }
+      var retainConnection = false
+      defer {
+        if !retainConnection { connection.close() }
+      }
+
+      do {
+        try writeExact(challenge, to: connection.fileDescriptor, deadline: deadline)
+        guard
+          try readReadinessRecord(
+            from: connection.fileDescriptor,
+            after: nil,
+            deadline: deadline
+          ) == .diagnostic(.started)
+        else { throw ProbeError.invalidReadiness }
+        retainConnection = true
+        return connection
+      } catch ProbeError.timedOut {
+        throw ProbeError.readinessFailed(.connected)
+      } catch ProbeError.socketUnavailable {
+        throw ProbeError.readinessFailed(.connected)
       }
     }
 
@@ -349,6 +412,130 @@ import Foundation
       self.device = device
       self.listener = listener
       self.receiver = receiver
+    }
+  }
+
+  @available(macOS 15.0, *)
+  final class PathBackedBootControl {
+    let artifacts: InodeProbeBootArtifacts
+    let directory: URL
+
+    init(request: ReceivedRequest) throws {
+      try RuntimeAdmission.validateInodeProbeBootArtifacts(for: request)
+      let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "codewire-vz-path-control-\(UUID().uuidString)",
+        isDirectory: true
+      )
+      guard mkdir(directory.path, 0o700) == 0 else {
+        throw RuntimeError.bootControlCopyFailed
+      }
+      do {
+        let kernel = try Self.copyVerified(
+          sourceDescriptor: request.descriptors.descriptor(for: .kernel),
+          identity: request.configuration.kernel,
+          destination: directory.appendingPathComponent("kernel", isDirectory: false)
+        )
+        let initialRamdisk = try Self.copyVerified(
+          sourceDescriptor: request.descriptors.descriptor(for: .initialRamdisk),
+          identity: request.configuration.initialRamdisk,
+          destination: directory.appendingPathComponent("initramfs", isDirectory: false)
+        )
+        self.directory = directory
+        self.artifacts = InodeProbeBootArtifacts(
+          kernel: kernel,
+          initialRamdisk: initialRamdisk
+        )
+      } catch {
+        try? FileManager.default.removeItem(at: directory)
+        throw error
+      }
+    }
+
+    deinit {
+      try? FileManager.default.removeItem(at: directory)
+    }
+
+    static func copyVerified(
+      sourceDescriptor: Int32,
+      identity: ImmutableArtifact,
+      destination: URL
+    ) throws -> URL {
+      do {
+        let destinationDescriptor = open(
+          destination.path,
+          O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
+          0o600
+        )
+        guard destinationDescriptor >= 0 else {
+          throw RuntimeError.bootControlCopyFailed
+        }
+        defer { close(destinationDescriptor) }
+
+        var offset: UInt64 = 0
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while offset < identity.size {
+          let requested = min(UInt64(buffer.count), identity.size - offset)
+          let count = buffer.withUnsafeMutableBytes { raw in
+            pread(sourceDescriptor, raw.baseAddress, Int(requested), off_t(offset))
+          }
+          if count < 0 && errno == EINTR { continue }
+          guard count > 0 else { throw RuntimeError.bootControlCopyFailed }
+
+          var written = 0
+          while written < count {
+            let output = buffer.withUnsafeBytes { raw in
+              Darwin.write(
+                destinationDescriptor,
+                raw.baseAddress?.advanced(by: written),
+                count - written
+              )
+            }
+            if output < 0 && errno == EINTR { continue }
+            guard output > 0 else { throw RuntimeError.bootControlCopyFailed }
+            written += output
+          }
+          offset += UInt64(count)
+        }
+        guard fchmod(destinationDescriptor, 0o600) == 0 else {
+          throw RuntimeError.bootControlCopyFailed
+        }
+        var status = stat()
+        guard fstat(destinationDescriptor, &status) == 0,
+          (status.st_mode & S_IFMT) == S_IFREG,
+          status.st_uid == geteuid(),
+          status.st_nlink == 1,
+          (status.st_mode & 0o777) == 0o600,
+          status.st_size >= 0,
+          UInt64(status.st_size) == identity.size
+        else { throw RuntimeError.bootControlCopyFailed }
+
+        var digest = SHA256()
+        offset = 0
+        while offset < identity.size {
+          let requested = min(UInt64(buffer.count), identity.size - offset)
+          let count = buffer.withUnsafeMutableBytes { raw in
+            pread(destinationDescriptor, raw.baseAddress, Int(requested), off_t(offset))
+          }
+          if count < 0 && errno == EINTR { continue }
+          guard count > 0 else { throw RuntimeError.bootControlCopyFailed }
+          digest.update(data: Data(buffer.prefix(count)))
+          offset += UInt64(count)
+        }
+        let actual = digest.finalize().map { String(format: "%02x", $0) }.joined()
+        guard actual == identity.sha256 else {
+          throw RuntimeError.bootControlCopyFailed
+        }
+
+        var pathStatus = stat()
+        guard lstat(destination.path, &pathStatus) == 0,
+          pathStatus.st_dev == status.st_dev,
+          pathStatus.st_ino == status.st_ino
+        else { throw RuntimeError.bootControlCopyFailed }
+        return destination
+      } catch {
+        try? FileManager.default.removeItem(at: destination)
+        throw RuntimeError.bootControlCopyFailed
+      }
     }
   }
 
