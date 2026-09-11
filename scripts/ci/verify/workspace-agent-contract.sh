@@ -51,6 +51,12 @@ IFS= read -r actual_pids_max < "$cgroup_root/pids.max"
 
 test "$(id -un)" = codewire
 test "$(id -u)" = 1000
+test "$(id -g)" = 1000
+passwd_record="$(getent passwd codewire)"
+IFS=: read -r passwd_name _passwd passwd_uid passwd_gid _gecos _home _shell <<EOF
+$passwd_record
+EOF
+test "$passwd_name:$passwd_uid:$passwd_gid" = codewire:1000:1000
 
 if [ "$mode" = mounted-home-agents ]; then
   test "${HOME:-}" = /home/codewire

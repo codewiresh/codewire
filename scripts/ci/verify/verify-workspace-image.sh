@@ -230,11 +230,11 @@ workspace_id="$(<"$work/workspace-id")"
 [[ "$workspace_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'invalid workspace image ID' >&2; exit 1; }
 contract_container="$builder-full"
 workspace_cache_logged_command "$build_log_root/agents.log" "$docker_bin" run --rm --interactive --pids-limit=2048 \
-  --name "$contract_container" --user codewire --entrypoint bash \
+  --name "$contract_container" --user 1000:1000 --entrypoint bash \
   "$workspace_id" -eu -s <"$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
 contract_container="$builder-mounted-home"
 workspace_cache_logged_command "$build_log_root/mounted-home.log" "$docker_bin" run --rm --interactive --pids-limit=2048 \
-  --name "$contract_container" --user codewire \
+  --name "$contract_container" --user 1000:1000 \
   --tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256m --entrypoint bash \
   "$workspace_id" -eu -s -- --mounted-home-agents <"$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
 contract_container=''

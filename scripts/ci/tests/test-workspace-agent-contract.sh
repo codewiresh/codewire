@@ -28,8 +28,14 @@ cat >"$work/bin/id" <<'EOF'
 case "${1:-}" in
   -un) printf 'codewire\n' ;;
   -u) printf '1000\n' ;;
+  -g) printf '%s\n' "${FAKE_CODEWIRE_GID:-1000}" ;;
   *) printf 'codewire\n' ;;
 esac
+EOF
+cat >"$work/bin/getent" <<'EOF'
+#!/bin/sh
+[ "$*" = 'passwd codewire' ] || exit 99
+printf 'codewire:x:1000:%s:Codewire:/home/codewire:/bin/bash\n' "${FAKE_CODEWIRE_PASSWD_GID:-1000}"
 EOF
 cat >"$work/bin/agent" <<'EOF'
 #!/bin/sh
@@ -63,7 +69,7 @@ cat >"$work/bin/mkdir" <<'EOF'
 [ "$*" = '-p /home/codewire/.npm-global/lib' ] || exit 99
 printf 'lib-prepared\n' >"$FAKE_PREFIX_STATE"
 EOF
-chmod +x "$work/bin/id" "$work/bin/agent" "$work/bin/npm" "$work/bin/mkdir"
+chmod +x "$work/bin/id" "$work/bin/getent" "$work/bin/agent" "$work/bin/npm" "$work/bin/mkdir"
 cat >"$work/ssh/usr/sbin/sshd" <<'EOF'
 #!/bin/sh
 [ "$*" = -V ] || exit 99
@@ -103,6 +109,8 @@ run_contract() {
     CODEWIRE_SSH_FIXTURE_ROOT="$work/ssh" \
     CODEWIRE_SYSTEM_SBIN_ROOT="$work/system-sbin" \
     CODEWIRE_EXPECTED_PIDS_MAX=2048 \
+    FAKE_CODEWIRE_GID="${FAKE_CODEWIRE_GID:-1000}" \
+    FAKE_CODEWIRE_PASSWD_GID="${FAKE_CODEWIRE_PASSWD_GID:-1000}" \
     FAIL_AGENT="${FAIL_AGENT:-}" \
     FAKE_CODEX_VERSION="${FAKE_CODEX_VERSION:-0.149.0}" \
     FAKE_PREFIX_STATE="$work/prefix-state" \
@@ -123,6 +131,13 @@ grep -Fxq 'codex-cli 0.149.0' "$work/success.out" || fail 'agent checks did not 
 grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex install-plan check did not run'
 grep -Fxq 'workspace image verification: inert SSH fixture contract passed' "$work/success.out" ||
   fail 'prepared SSH fixture was not checked'
+
+if FAKE_CODEWIRE_GID=1001 run_contract >"$work/process-gid.out" 2>"$work/process-gid.err"; then
+  fail 'process GID drift was accepted'
+fi
+if FAKE_CODEWIRE_PASSWD_GID=1001 run_contract >"$work/passwd-gid.out" 2>"$work/passwd-gid.err"; then
+  fail 'passwd GID drift was accepted'
+fi
 
 for ssh_failure in missing-server writable-server wrong-owner host-key system-server missing-library loader find; do
   (
