@@ -25,6 +25,7 @@ use crate::store::{
 pub(crate) fn router(state: AppState) -> connectrpc::Router {
     let list_networks_state = state.clone();
     let create_network_state = state.clone();
+    let delete_network_state = state.clone();
     let join_network_state = state.clone();
     let list_nodes_state = state.clone();
     let revoke_node_state = state.clone();
@@ -61,6 +62,14 @@ pub(crate) fn router(state: AppState) -> connectrpc::Router {
             }),
         )
         .with_spec(MESH_NETWORK_SERVICE_CREATE_MESH_NETWORK_SPEC)
+        .route(
+            MESH_NETWORK_SERVICE_SERVICE_NAME,
+            "DeleteMeshNetwork",
+            handler_fn(move |ctx, request| {
+                delete_mesh_network(delete_network_state.clone(), ctx, request)
+            }),
+        )
+        .with_spec(MESH_NETWORK_SERVICE_DELETE_MESH_NETWORK_SPEC)
         .route(
             MESH_NETWORK_SERVICE_SERVICE_NAME,
             "JoinMeshNetwork",
@@ -256,6 +265,23 @@ async fn join_mesh_network(
         network: Some(proto_network(network)).into(),
         ..Default::default()
     })
+}
+
+async fn delete_mesh_network(
+    state: AppState,
+    ctx: RequestContext,
+    request: DeleteMeshNetworkRequest,
+) -> ServiceResult<DeleteMeshNetworkResponse> {
+    let credential = credential(&ctx).map_err(|e| rpc_app_error(&e, &ctx))?;
+    state
+        .product
+        .delete_network(&request.org_id, &request.network_id, credential)
+        .await
+        .map_err(|e| rpc_app_error(&e, &ctx))?;
+    state
+        .mesh_coordinate
+        .revoke_network(request.network_id.trim());
+    connectrpc::Response::ok(DeleteMeshNetworkResponse::default())
 }
 
 async fn list_mesh_nodes(
@@ -952,6 +978,126 @@ mod tests {
             network_id: NETWORK.to_string(),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn network_deletion_requires_owner_and_empty_nodes_and_retires_name() {
+        let store = MemoryStore::new();
+        store
+            .network_create_with_owner(NETWORK, ORG, "local-owner:org-mesh-contract", Utc::now())
+            .await
+            .unwrap();
+        let (addr, task) = start(store.clone()).await;
+        let request = DeleteMeshNetworkRequest {
+            org_id: ORG.to_owned(),
+            network_id: NETWORK.to_owned(),
+            ..Default::default()
+        };
+        for credential in [None, Some(UNKNOWN_BEARER), Some("cw_enr_synthetic-delete")] {
+            let denied = MeshNetworkServiceClient::new(
+                HttpClient::plaintext(),
+                client_config(addr, credential),
+            )
+            .delete_mesh_network(request.clone())
+            .await;
+            assert!(denied.is_err());
+            assert!(
+                store
+                    .network_organization_id(NETWORK)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let client = MeshNetworkServiceClient::new(
+            HttpClient::plaintext(),
+            client_config(addr, Some(API_KEY)),
+        );
+        assert_code(
+            client
+                .delete_mesh_network(DeleteMeshNetworkRequest {
+                    org_id: "wrong-org".to_owned(),
+                    ..request.clone()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        store
+            .network_member_upsert(crate::store::NetworkMember {
+                network_id: NETWORK.to_owned(),
+                subject: "local-owner:org-mesh-contract".to_owned(),
+                role: NETWORK_ROLE_MEMBER.to_owned(),
+                created_at: Utc::now(),
+                created_by: String::new(),
+            })
+            .await
+            .unwrap();
+        assert_code(
+            client
+                .delete_mesh_network(request.clone())
+                .await
+                .unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        store
+            .network_member_upsert(crate::store::NetworkMember {
+                network_id: NETWORK.to_owned(),
+                subject: "local-owner:org-mesh-contract".to_owned(),
+                role: crate::store::NETWORK_ROLE_OWNER.to_owned(),
+                created_at: Utc::now(),
+                created_by: String::new(),
+            })
+            .await
+            .unwrap();
+        store
+            .node_register(NodeRecord {
+                network_id: NETWORK.to_owned(),
+                name: "registered".to_owned(),
+                peer_url: String::new(),
+                github_id: None,
+                owner_subject: "local-owner:org-mesh-contract".to_owned(),
+                authorized_by: String::new(),
+                enrollment_id: String::new(),
+                authorized_at: Utc::now(),
+                last_seen_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        assert_code(
+            client
+                .delete_mesh_network(request.clone())
+                .await
+                .unwrap_err(),
+            ErrorCode::FailedPrecondition,
+        );
+        store.node_delete(NETWORK, "registered").await.unwrap();
+        client.delete_mesh_network(request.clone()).await.unwrap();
+        assert!(
+            client
+                .list_mesh_networks(network_request())
+                .await
+                .unwrap()
+                .into_owned()
+                .networks
+                .is_empty()
+        );
+        assert_code(
+            client.delete_mesh_network(request).await.unwrap_err(),
+            ErrorCode::NotFound,
+        );
+        assert_code(
+            client
+                .create_mesh_network(CreateMeshNetworkRequest {
+                    org_id: ORG.to_owned(),
+                    network_id: NETWORK.to_owned(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::FailedPrecondition,
+        );
+        task.abort();
     }
 
     #[tokio::test]

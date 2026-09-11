@@ -1,10 +1,10 @@
 use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
     CreateMeshNetworkResponse, CreateMeshNodeEnrollmentRequest, CreateMeshNodeEnrollmentResponse,
-    JoinMeshNetworkRequest, JoinMeshNetworkResponse, ListMeshNetworksRequest,
-    ListMeshNetworksResponse, ListMeshNodesRequest, ListMeshNodesResponse,
-    RedeemMeshNodeEnrollmentRequest, RedeemMeshNodeEnrollmentResponse, RevokeMeshNodeRequest,
-    RevokeMeshNodeResponse,
+    DeleteMeshNetworkRequest, DeleteMeshNetworkResponse, JoinMeshNetworkRequest,
+    JoinMeshNetworkResponse, ListMeshNetworksRequest, ListMeshNetworksResponse,
+    ListMeshNodesRequest, ListMeshNodesResponse, RedeemMeshNodeEnrollmentRequest,
+    RedeemMeshNodeEnrollmentResponse, RevokeMeshNodeRequest, RevokeMeshNodeResponse,
 };
 use connectrpc::client::CallOptions;
 
@@ -30,6 +30,17 @@ impl CodewireClient {
     ) -> Result<CreateMeshNetworkResponse, ClientError> {
         self.mesh_networks
             .create_mesh_network_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn delete_mesh_network(
+        &self,
+        request: DeleteMeshNetworkRequest,
+    ) -> Result<DeleteMeshNetworkResponse, ClientError> {
+        self.mesh_networks
+            .delete_mesh_network_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
@@ -145,6 +156,22 @@ mod tests {
             .mount(&mesh)
             .await;
 
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.MeshNetworkService/DeleteMeshNetwork"))
+            .and(header("authorization", "Bearer cw_exact_org_key"))
+            .respond_with(|request: &wiremock::Request| {
+                let mut body = request.body.as_slice();
+                let request = DeleteMeshNetworkRequest::decode(&mut body).unwrap();
+                assert_eq!(request.org_id, "org-alpha");
+                assert_eq!(request.network_id, "network-alpha");
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(DeleteMeshNetworkResponse::default().encode_to_vec())
+            })
+            .expect(1)
+            .mount(&mesh)
+            .await;
+
         let config = ClientConfig::new(primary.uri())
             .expect("primary origin")
             .with_mesh_url(mesh.uri())
@@ -163,6 +190,14 @@ mod tests {
             .expect("list Mesh networks");
 
         assert_eq!(listed.networks[0].id, "network-alpha");
+        client
+            .delete_mesh_network(DeleteMeshNetworkRequest {
+                org_id: "org-alpha".into(),
+                network_id: "network-alpha".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("delete Mesh network");
         assert!(
             primary
                 .received_requests()

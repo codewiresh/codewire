@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const CANONICAL_WORKSPACE_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
+pub(crate) const CANONICAL_WORKSPACE_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
 
 pub(crate) fn selected_network_or_error(mesh: &config::ResolvedMeshConfig) -> anyhow::Result<&str> {
     mesh.selected_network

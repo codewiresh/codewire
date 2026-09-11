@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/mesh_network.proto.
  */
 export const file_codewire_v1_mesh_network: GenFile = /*@__PURE__*/
-  fileDesc("Ch5jb2Rld2lyZS92MS9tZXNoX25ldHdvcmsucHJvdG8SC2NvZGV3aXJlLnYxIoMBCgtNZXNoTmV0d29yaxIKCgJpZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSLgoKY3JlYXRlZF9hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEgoKbm9kZV9jb3VudBgEIAEoAxIUCgxpbnZpdGVfY291bnQYBSABKAMiUAoXTGlzdE1lc2hOZXR3b3Jrc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhEKCXBhZ2Vfc2l6ZRgCIAEoBRISCgpwYWdlX3Rva2VuGAMgASgJIl8KGExpc3RNZXNoTmV0d29ya3NSZXNwb25zZRIqCghuZXR3b3JrcxgBIAMoCzIYLmNvZGV3aXJlLnYxLk1lc2hOZXR3b3JrEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSI+ChhDcmVhdGVNZXNoTmV0d29ya1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhIKCm5ldHdvcmtfaWQYAiABKAkiRgoZQ3JlYXRlTWVzaE5ldHdvcmtSZXNwb25zZRIpCgduZXR3b3JrGAEgASgLMhguY29kZXdpcmUudjEuTWVzaE5ldHdvcmsiMgoWSm9pbk1lc2hOZXR3b3JrUmVxdWVzdBIYCgtpbnZpdGVfY29kZRgBIAEoCUIDgAEBIkQKF0pvaW5NZXNoTmV0d29ya1Jlc3BvbnNlEikKB25ldHdvcmsYASABKAsyGC5jb2Rld2lyZS52MS5NZXNoTmV0d29yazK8AgoSTWVzaE5ldHdvcmtTZXJ2aWNlEmQKEExpc3RNZXNoTmV0d29ya3MSJC5jb2Rld2lyZS52MS5MaXN0TWVzaE5ldHdvcmtzUmVxdWVzdBolLmNvZGV3aXJlLnYxLkxpc3RNZXNoTmV0d29ya3NSZXNwb25zZSIDkAIBEmIKEUNyZWF0ZU1lc2hOZXR3b3JrEiUuY29kZXdpcmUudjEuQ3JlYXRlTWVzaE5ldHdvcmtSZXF1ZXN0GiYuY29kZXdpcmUudjEuQ3JlYXRlTWVzaE5ldHdvcmtSZXNwb25zZRJcCg9Kb2luTWVzaE5ldHdvcmsSIy5jb2Rld2lyZS52MS5Kb2luTWVzaE5ldHdvcmtSZXF1ZXN0GiQuY29kZXdpcmUudjEuSm9pbk1lc2hOZXR3b3JrUmVzcG9uc2VCswEKD2NvbS5jb2Rld2lyZS52MUIQTWVzaE5ldHdvcmtQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("Ch5jb2Rld2lyZS92MS9tZXNoX25ldHdvcmsucHJvdG8SC2NvZGV3aXJlLnYxIoMBCgtNZXNoTmV0d29yaxIKCgJpZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSLgoKY3JlYXRlZF9hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEgoKbm9kZV9jb3VudBgEIAEoAxIUCgxpbnZpdGVfY291bnQYBSABKAMiUAoXTGlzdE1lc2hOZXR3b3Jrc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhEKCXBhZ2Vfc2l6ZRgCIAEoBRISCgpwYWdlX3Rva2VuGAMgASgJIl8KGExpc3RNZXNoTmV0d29ya3NSZXNwb25zZRIqCghuZXR3b3JrcxgBIAMoCzIYLmNvZGV3aXJlLnYxLk1lc2hOZXR3b3JrEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSI+ChhDcmVhdGVNZXNoTmV0d29ya1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhIKCm5ldHdvcmtfaWQYAiABKAkiRgoZQ3JlYXRlTWVzaE5ldHdvcmtSZXNwb25zZRIpCgduZXR3b3JrGAEgASgLMhguY29kZXdpcmUudjEuTWVzaE5ldHdvcmsiPgoYRGVsZXRlTWVzaE5ldHdvcmtSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRISCgpuZXR3b3JrX2lkGAIgASgJIhsKGURlbGV0ZU1lc2hOZXR3b3JrUmVzcG9uc2UiMgoWSm9pbk1lc2hOZXR3b3JrUmVxdWVzdBIYCgtpbnZpdGVfY29kZRgBIAEoCUIDgAEBIkQKF0pvaW5NZXNoTmV0d29ya1Jlc3BvbnNlEikKB25ldHdvcmsYASABKAsyGC5jb2Rld2lyZS52MS5NZXNoTmV0d29yazKgAwoSTWVzaE5ldHdvcmtTZXJ2aWNlEmQKEExpc3RNZXNoTmV0d29ya3MSJC5jb2Rld2lyZS52MS5MaXN0TWVzaE5ldHdvcmtzUmVxdWVzdBolLmNvZGV3aXJlLnYxLkxpc3RNZXNoTmV0d29ya3NSZXNwb25zZSIDkAIBEmIKEUNyZWF0ZU1lc2hOZXR3b3JrEiUuY29kZXdpcmUudjEuQ3JlYXRlTWVzaE5ldHdvcmtSZXF1ZXN0GiYuY29kZXdpcmUudjEuQ3JlYXRlTWVzaE5ldHdvcmtSZXNwb25zZRJiChFEZWxldGVNZXNoTmV0d29yaxIlLmNvZGV3aXJlLnYxLkRlbGV0ZU1lc2hOZXR3b3JrUmVxdWVzdBomLmNvZGV3aXJlLnYxLkRlbGV0ZU1lc2hOZXR3b3JrUmVzcG9uc2USXAoPSm9pbk1lc2hOZXR3b3JrEiMuY29kZXdpcmUudjEuSm9pbk1lc2hOZXR3b3JrUmVxdWVzdBokLmNvZGV3aXJlLnYxLkpvaW5NZXNoTmV0d29ya1Jlc3BvbnNlQrMBCg9jb20uY29kZXdpcmUudjFCEE1lc2hOZXR3b3JrUHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
 
 /**
  * MeshNetwork is one private network owned by exactly one organization.
@@ -142,6 +142,41 @@ export const CreateMeshNetworkResponseSchema: GenMessage<CreateMeshNetworkRespon
   messageDesc(file_codewire_v1_mesh_network, 4);
 
 /**
+ * @generated from message codewire.v1.DeleteMeshNetworkRequest
+ */
+export type DeleteMeshNetworkRequest = Message<"codewire.v1.DeleteMeshNetworkRequest"> & {
+  /**
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string network_id = 2;
+   */
+  networkId: string;
+};
+
+/**
+ * Describes the message codewire.v1.DeleteMeshNetworkRequest.
+ * Use `create(DeleteMeshNetworkRequestSchema)` to create a new message.
+ */
+export const DeleteMeshNetworkRequestSchema: GenMessage<DeleteMeshNetworkRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_mesh_network, 5);
+
+/**
+ * @generated from message codewire.v1.DeleteMeshNetworkResponse
+ */
+export type DeleteMeshNetworkResponse = Message<"codewire.v1.DeleteMeshNetworkResponse"> & {
+};
+
+/**
+ * Describes the message codewire.v1.DeleteMeshNetworkResponse.
+ * Use `create(DeleteMeshNetworkResponseSchema)` to create a new message.
+ */
+export const DeleteMeshNetworkResponseSchema: GenMessage<DeleteMeshNetworkResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_mesh_network, 6);
+
+/**
  * @generated from message codewire.v1.JoinMeshNetworkRequest
  */
 export type JoinMeshNetworkRequest = Message<"codewire.v1.JoinMeshNetworkRequest"> & {
@@ -159,7 +194,7 @@ export type JoinMeshNetworkRequest = Message<"codewire.v1.JoinMeshNetworkRequest
  * Use `create(JoinMeshNetworkRequestSchema)` to create a new message.
  */
 export const JoinMeshNetworkRequestSchema: GenMessage<JoinMeshNetworkRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_mesh_network, 5);
+  messageDesc(file_codewire_v1_mesh_network, 7);
 
 /**
  * @generated from message codewire.v1.JoinMeshNetworkResponse
@@ -176,7 +211,7 @@ export type JoinMeshNetworkResponse = Message<"codewire.v1.JoinMeshNetworkRespon
  * Use `create(JoinMeshNetworkResponseSchema)` to create a new message.
  */
 export const JoinMeshNetworkResponseSchema: GenMessage<JoinMeshNetworkResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_mesh_network, 6);
+  messageDesc(file_codewire_v1_mesh_network, 8);
 
 /**
  * MeshNetworkService manages organization-owned Mesh networks.
@@ -199,6 +234,17 @@ export const MeshNetworkService: GenService<{
     methodKind: "unary";
     input: typeof CreateMeshNetworkRequestSchema;
     output: typeof CreateMeshNetworkResponseSchema;
+  },
+  /**
+   * DeleteMeshNetwork requires network ownership and no registered nodes.
+   * It removes the network's metadata and permanently retires its name.
+   *
+   * @generated from rpc codewire.v1.MeshNetworkService.DeleteMeshNetwork
+   */
+  deleteMeshNetwork: {
+    methodKind: "unary";
+    input: typeof DeleteMeshNetworkRequestSchema;
+    output: typeof DeleteMeshNetworkResponseSchema;
   },
   /**
    * JoinMeshNetwork consumes a one-use invitation capability and adds the

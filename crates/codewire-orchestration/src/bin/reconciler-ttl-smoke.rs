@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let org_id = required_env("SMOKE_ORG_ID")?;
     let cluster_name = required_env("KIND_CLUSTER_NAME")?;
     let image = std::env::var("SMOKE_WORKSPACE_IMAGE")
-        .unwrap_or_else(|_| "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into());
+        .unwrap_or_else(|_| "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into());
     // TTL and provenance need a real workspace, not an unrelated remote clone.
     // Repository execution and clone-failure cleanup have their own Kind proof.
     let project_spec = codewire_project::ProjectSpec {

@@ -459,6 +459,7 @@ run_runtime_dev_smoke() {
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
   scripts/runtime/tests/test-smoke-dev-commodity.sh
   scripts/runtime/tests/test-local-platform-sources-smoke.sh
+  python3 -B scripts/runtime/tests/test-native-mesh-listener.py
 }
 
 run_rust() {

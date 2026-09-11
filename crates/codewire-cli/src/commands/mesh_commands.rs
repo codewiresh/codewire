@@ -36,6 +36,36 @@ pub(crate) async fn handle_network_command(
                 eprintln!("Network {network_id:?} created and selected");
             }
         }
+        NetworkCommand::Delete(args) => {
+            let network_id = trimmed_required(&args.name, "network name")?;
+            let org_id = trimmed_required(&args.org, "organization ID")?;
+            let default_mesh_url = match config::resolve_mesh_base_url(
+                config::MeshResolveOptions {
+                    platform_server_url: globals.server.clone(),
+                    ..Default::default()
+                },
+                &paths,
+                &env,
+            ) {
+                Ok(url) => Some(url),
+                Err(config::ConfigError::NoMeshUrl) => None,
+                Err(error) => return Err(error.into()),
+            };
+            let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, None)?;
+            confirm_network_delete(network_id, org_id, args.yes)?;
+            MeshClient::new(&mesh)?
+                .delete_network(org_id, network_id)
+                .await?;
+            eprintln!("Network {network_id:?} deleted; its name cannot be reused.");
+            clear_deleted_network_selection(
+                &paths.mesh_data_dir,
+                default_mesh_url.as_deref(),
+                &mesh.mesh_url,
+                org_id,
+                network_id,
+            )
+            .context("network was deleted, but clearing its local selection failed")?;
+        }
         NetworkCommand::Current => match config::selected_mesh_network(&paths, &env) {
             Some(network_id) => println!("{network_id}"),
             None => println!("none"),
@@ -167,6 +197,48 @@ pub(crate) async fn handle_network_command(
         },
     }
 
+    Ok(())
+}
+
+fn confirm_network_delete(network_id: &str, org_id: &str, yes: bool) -> anyhow::Result<()> {
+    if !yes {
+        anyhow::ensure!(
+            std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+            "network deletion requires --yes when noninteractive"
+        );
+        eprintln!(
+            "Delete network {network_id:?} in organization {org_id:?}? All invitations, enrollments, groups, policies, stored values, grants and task history will be removed. The name cannot be reused. Registered nodes must be revoked first."
+        );
+        confirm_delete("network", network_id)?;
+    }
+    Ok(())
+}
+
+/// Clear only the deleted selection, never a same-named network on another
+/// Mesh origin or an unrelated owner projection.
+pub(crate) fn clear_deleted_network_selection(
+    data_dir: &Path,
+    default_mesh_url: Option<&str>,
+    deleted_mesh_url: &str,
+    org_id: &str,
+    network_id: &str,
+) -> anyhow::Result<()> {
+    let saved = config::load_mesh_config(data_dir)?;
+    let saved_mesh_url = saved.mesh_url.as_deref().or(default_mesh_url);
+    if saved_mesh_url.is_some_and(|url| config::same_mesh_url(url, deleted_mesh_url))
+        && saved.mesh_selected_network.as_deref() == Some(network_id)
+    {
+        config::clear_selected_mesh_network(data_dir)?;
+    }
+    if let Some(mut context) = load_local_mesh_owner_context(data_dir)?
+        && config::same_mesh_url(&context.mesh_url, deleted_mesh_url)
+        && context.organization_id == org_id
+        && context.selected_network.as_deref() == Some(network_id)
+    {
+        context.selected_network = None;
+        context.auto_connect = false;
+        save_local_mesh_owner_context(data_dir, &context)?;
+    }
     Ok(())
 }
 

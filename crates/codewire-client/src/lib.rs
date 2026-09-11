@@ -119,10 +119,11 @@ pub use codewire_proto::codewire::v1::{
 pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
     CreateMeshNetworkResponse, CreateMeshNodeEnrollmentRequest, CreateMeshNodeEnrollmentResponse,
-    JoinMeshNetworkRequest, JoinMeshNetworkResponse, ListMeshNetworksRequest,
-    ListMeshNetworksResponse, ListMeshNodesRequest, ListMeshNodesResponse, MeshInvite, MeshNetwork,
-    MeshNode, MeshNodeEnrollment, RedeemMeshNodeEnrollmentRequest,
-    RedeemMeshNodeEnrollmentResponse, RevokeMeshNodeRequest, RevokeMeshNodeResponse,
+    DeleteMeshNetworkRequest, DeleteMeshNetworkResponse, JoinMeshNetworkRequest,
+    JoinMeshNetworkResponse, ListMeshNetworksRequest, ListMeshNetworksResponse,
+    ListMeshNodesRequest, ListMeshNodesResponse, MeshInvite, MeshNetwork, MeshNode,
+    MeshNodeEnrollment, RedeemMeshNodeEnrollmentRequest, RedeemMeshNodeEnrollmentResponse,
+    RevokeMeshNodeRequest, RevokeMeshNodeResponse,
 };
 pub use codewire_proto::codewire::v1::{
     CreateSecretProjectRequest, CreateSecretProjectResponse, DeleteProjectSecretRequest,

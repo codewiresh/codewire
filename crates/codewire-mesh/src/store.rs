@@ -226,6 +226,12 @@ pub enum StoreError {
     NotFound,
     #[error("already exists")]
     AlreadyExists,
+    #[error("forbidden")]
+    Forbidden,
+    #[error("Mesh network has registered nodes; revoke them before deleting the network")]
+    NetworkNotEmpty,
+    #[error("Mesh network name was deleted and cannot be reused")]
+    NetworkRetired,
     #[error("{0}")]
     Invalid(String),
     #[error(transparent)]
@@ -318,6 +324,14 @@ pub trait MeshStore: Send + Sync + 'static {
         organization_id: &str,
         owner_subject: &str,
         created_at: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
+    /// Recheck the exact organization and owner, refuse registered nodes, and
+    /// atomically delete all network metadata while permanently retiring its name.
+    async fn network_delete_by_owner(
+        &self,
+        network_id: &str,
+        organization_id: &str,
+        owner_subject: &str,
     ) -> Result<(), StoreError>;
     async fn network_organization_id(&self, network_id: &str)
     -> Result<Option<String>, StoreError>;
@@ -426,6 +440,7 @@ pub struct MemoryStore {
 #[derive(Default)]
 struct MemoryState {
     networks: HashMap<String, MemoryNetwork>,
+    retired_network_names: HashSet<String>,
     kv: HashMap<(String, String, String), KVEntry>,
     groups: HashMap<(String, String), Group>,
     group_members: HashMap<(String, String, String, String), GroupMember>,
@@ -462,6 +477,9 @@ impl MeshStore for MemoryStore {
         ttl: Option<Duration>,
     ) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
+        if !state.networks.contains_key(network_id) {
+            return Err(StoreError::NotFound);
+        }
         let expires_at = ttl.map(|ttl| Utc::now() + ttl);
         state.kv.insert(
             (
@@ -775,6 +793,9 @@ impl MeshStore for MemoryStore {
         let organization_id = required_identifier(organization_id, "organization_id")?;
         let owner_subject = required_identifier(owner_subject, "owner_subject")?;
         let mut state = self.state.lock().await;
+        if state.retired_network_names.contains(&network_id) {
+            return Err(StoreError::NetworkRetired);
+        }
         if let Some(existing) = state.networks.get(&network_id) {
             return if existing.organization_id == organization_id
                 && state
@@ -804,6 +825,47 @@ impl MeshStore for MemoryStore {
                 created_by: owner_subject,
             },
         );
+        Ok(())
+    }
+
+    async fn network_delete_by_owner(
+        &self,
+        network_id: &str,
+        organization_id: &str,
+        owner_subject: &str,
+    ) -> Result<(), StoreError> {
+        let mut state = self.state.lock().await;
+        let network = state.networks.get(network_id).ok_or(StoreError::NotFound)?;
+        if network.organization_id != organization_id
+            || state
+                .members
+                .get(&(network_id.to_owned(), owner_subject.to_owned()))
+                .is_none_or(|member| member.role != NETWORK_ROLE_OWNER)
+        {
+            return Err(StoreError::Forbidden);
+        }
+        if state.nodes.keys().any(|(id, _)| id == network_id) {
+            return Err(StoreError::NetworkNotEmpty);
+        }
+        state.retired_network_names.insert(network_id.to_owned());
+        state.members.retain(|(id, _), _| id != network_id);
+        state
+            .invites
+            .retain(|_, invite| invite.network_id != network_id);
+        state
+            .node_enrollments
+            .retain(|_, enrollment| enrollment.network_id != network_id);
+        state.groups.retain(|(id, _), _| id != network_id);
+        state
+            .group_members
+            .retain(|(id, _, _, _), _| id != network_id);
+        state.group_policies.retain(|(id, _), _| id != network_id);
+        state.kv.retain(|(id, _, _), _| id != network_id);
+        state.access_grants.retain(|(id, _), _| id != network_id);
+        state
+            .task_events
+            .retain(|event| event.event.network_id != network_id);
+        state.networks.remove(network_id);
         Ok(())
     }
 
@@ -1081,6 +1143,9 @@ impl MeshStore for MemoryStore {
             return Ok(None);
         }
         validate_enrollment_node_binding(&enrollment, &node)?;
+        if !state.networks.contains_key(&node.network_id) {
+            return Err(StoreError::NotFound);
+        }
         let node_key = (node.network_id.clone(), node.name.clone());
         if state
             .nodes
@@ -1113,8 +1178,10 @@ impl MeshStore for MemoryStore {
     }
 
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
-        self.network_ensure(&grant.network_id).await?;
         let mut state = self.state.lock().await;
+        if !state.networks.contains_key(&grant.network_id) {
+            return Err(StoreError::NotFound);
+        }
         state
             .access_grants
             .insert((grant.network_id.clone(), grant.id.clone()), grant);
@@ -1182,8 +1249,10 @@ impl MeshStore for MemoryStore {
     }
 
     async fn task_event_create(&self, event: TaskEvent) -> Result<LatestTaskValue, StoreError> {
-        self.network_ensure(&event.network_id).await?;
         let mut state = self.state.lock().await;
+        if !state.networks.contains_key(&event.network_id) {
+            return Err(StoreError::NotFound);
+        }
         state.next_task_seq += 1;
         let seq = state.next_task_seq;
         state.task_events.push(TaskWatchEvent {
@@ -1336,6 +1405,22 @@ fn networks_from_state(state: &MemoryState, allowed: Option<&HashSet<&str>>) -> 
 
 pub struct PostgresMeshStore {
     pool: PgPool,
+}
+
+/// Always acquire the parent before child row locks. Network deletion takes
+/// FOR UPDATE and cascades into those children in the same transaction.
+async fn lock_network(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    network_id: &str,
+) -> Result<(), StoreError> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT network_id FROM networks WHERE network_id = $1 FOR KEY SHARE",
+    )
+    .bind(network_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StoreError::NotFound)?;
+    Ok(())
 }
 
 impl PostgresMeshStore {
@@ -1535,17 +1620,7 @@ impl MeshStore for PostgresMeshStore {
 
     async fn group_create(&self, group: Group) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            r#"
-            INSERT INTO networks (network_id, created_at)
-            VALUES ($1, $2)
-            ON CONFLICT DO NOTHING
-            "#,
-        )
-        .bind(&group.network_id)
-        .bind(Utc::now())
-        .execute(&mut *tx)
-        .await?;
+        lock_network(&mut tx, &group.network_id).await?;
 
         let result = sqlx::query(
             r#"
@@ -1900,6 +1975,17 @@ impl MeshStore for PostgresMeshStore {
         .bind(created_at)
         .fetch_optional(&mut *transaction)
         .await?;
+        // Check after INSERT has waited on a concurrent deletion. A check
+        // before INSERT alone could miss the retirement committed during that wait.
+        let retired: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM retired_network_names WHERE network_id = $1)",
+        )
+        .bind(&network_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if retired {
+            return Err(StoreError::NetworkRetired);
+        }
         if created.is_some() {
             sqlx::query(
                 r#"
@@ -1940,6 +2026,57 @@ impl MeshStore for PostgresMeshStore {
         if !same_owner {
             return Err(StoreError::AlreadyExists);
         }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn network_delete_by_owner(
+        &self,
+        network_id: &str,
+        organization_id: &str,
+        owner_subject: &str,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let actual_org: Option<String> = sqlx::query_scalar(
+            "SELECT organization_id FROM networks WHERE network_id = $1 FOR UPDATE",
+        )
+        .bind(network_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let actual_org = actual_org.ok_or(StoreError::NotFound)?;
+        if actual_org != organization_id {
+            return Err(StoreError::Forbidden);
+        }
+        let role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM network_members WHERE network_id = $1 AND subject = $2 FOR UPDATE",
+        )
+        .bind(network_id)
+        .bind(owner_subject)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if role.as_deref() != Some(NETWORK_ROLE_OWNER) {
+            return Err(StoreError::Forbidden);
+        }
+        // A separate statement observes child inserts which completed while
+        // the parent lock was pending. Immediate FKs block later inserts.
+        let has_nodes: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM nodes WHERE network_id = $1)")
+                .bind(network_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if has_nodes {
+            return Err(StoreError::NetworkNotEmpty);
+        }
+        sqlx::query(
+            "INSERT INTO retired_network_names (network_id, retired_at) VALUES ($1, now())",
+        )
+        .bind(network_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM networks WHERE network_id = $1")
+            .bind(network_id)
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -2099,6 +2236,18 @@ impl MeshStore for PostgresMeshStore {
         let organization_id = required_identifier(organization_id, "organization_id")?;
         let subject = required_identifier(subject, "subject")?;
         let mut transaction = self.pool.begin().await?;
+        let network_id: Option<String> = sqlx::query_scalar(
+            "SELECT network_id FROM invites WHERE code_hash = $1 AND organization_id = $2 AND expires_at > $3",
+        )
+        .bind(code_hash)
+        .bind(&organization_id)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(network_id) = network_id else {
+            return Ok(None);
+        };
+        lock_network(&mut transaction, &network_id).await?;
         let row = sqlx::query(
             r#"
             DELETE FROM invites
@@ -2362,6 +2511,7 @@ impl MeshStore for PostgresMeshStore {
         node: NodeRecord,
     ) -> Result<Option<NodeEnrollment>, StoreError> {
         let mut tx = self.pool.begin().await?;
+        lock_network(&mut tx, &node.network_id).await?;
         let existing_owner: Option<String> = sqlx::query_scalar(
             r#"
             SELECT owner_subject
@@ -2948,7 +3098,9 @@ mod migration_tests {
 
     use super::*;
 
-    const EXPECTED_MESH_MIGRATION_COUNT: usize = 6;
+    const EXPECTED_MESH_MIGRATION_COUNT: usize = 7;
+
+    include!("store/network_deletion_tests.rs");
 
     #[derive(Debug, PartialEq, Eq)]
     struct AppliedMigration {
@@ -3067,6 +3219,7 @@ mod migration_tests {
                 (4, "retire persistent node bearer".to_string()),
                 (5, "retire network auth issuer".to_string()),
                 (6, "retire raw auth session device state".to_string()),
+                (7, "network deletion".to_string()),
             ]
         );
         assert!(
@@ -3663,7 +3816,7 @@ mod migration_tests {
             anyhow::ensure!(!node_token_column_exists);
             anyhow::ensure!(retained_network == "org-alpha");
             anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(6));
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(7));
             anyhow::Ok(())
         }
         .await;
@@ -3797,6 +3950,11 @@ mod migration_tests {
                 .await?;
             }
             sqlx::query(
+                "INSERT INTO networks (network_id, organization_id, created_at) VALUES ('network-alpha', 'org-alpha', now())",
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query(
                 r#"
                 INSERT INTO kv (network_id, namespace, key, value)
                 VALUES
@@ -3823,7 +3981,7 @@ mod migration_tests {
             anyhow::ensure!(legacy_count == 0);
             anyhow::ensure!(retained_value == vec![0x03, 0x04]);
             anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(6));
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(7));
             anyhow::Ok(())
         }
         .await;

@@ -4,7 +4,7 @@
 //! The generated hello, node, subscription, and response messages are the only
 //! wire contract; no runtime-token exchange or WebSocket adapter is involved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,6 +95,22 @@ impl MeshCoordinateState {
         }
     }
 
+    /// Drop active sessions and reject sessions authorized before deletion but
+    /// not yet registered. The store permanently reserves this network name.
+    pub(crate) fn revoke_network(&self, network_id: &str) {
+        let mut registry = self.inner.lock().unwrap();
+        registry.retired_networks.insert(network_id.to_owned());
+        let removed = registry
+            .peers
+            .iter()
+            .filter_map(|(id, peer)| (peer.network_id == network_id).then_some(*id))
+            .collect::<HashSet<_>>();
+        registry.peers.retain(|id, _| !removed.contains(id));
+        registry
+            .tunnels
+            .retain(|dial, target| !removed.contains(dial) && !removed.contains(target));
+    }
+
     /// Disconnect the active peer addressed by this exact registered node.
     /// A later connection needs a fresh one-use enrollment and is therefore a
     /// separate authorization decision.
@@ -137,6 +153,7 @@ impl MeshCoordinateState {
 struct Registry {
     peers: HashMap<Uuid, Peer>,
     tunnels: HashMap<Uuid, Uuid>,
+    retired_networks: HashSet<String>,
 }
 
 struct Peer {
@@ -225,7 +242,14 @@ async fn run_session(
     derp_map: JsonValue,
 ) {
     let (events_tx, mut events_rx) = mpsc::channel(64);
-    let session_id = register(&state, &peer, events_tx);
+    let Some(session_id) = register(&state, &peer, events_tx) else {
+        let _ = responses
+            .send(Err(ConnectError::permission_denied(
+                "Mesh network was deleted",
+            )))
+            .await;
+        return;
+    };
     let initial = response(CoordinateDerpMap {
         derp_map_json: serde_json::to_vec(&derp_map).unwrap_or_default(),
         ..Default::default()
@@ -348,9 +372,12 @@ fn register(
     state: &MeshCoordinateState,
     peer: &AuthorizedPeer,
     tx: mpsc::Sender<CoordinateEvent>,
-) -> Uuid {
+) -> Option<Uuid> {
     let session_id = Uuid::new_v4();
     let mut registry = state.inner.lock().unwrap();
+    if registry.retired_networks.contains(&peer.network_id) {
+        return None;
+    }
     registry.peers.insert(
         peer.peer_id,
         Peer {
@@ -360,7 +387,7 @@ fn register(
             tx,
         },
     );
-    session_id
+    Some(session_id)
 }
 
 fn deregister(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid) {
@@ -735,6 +762,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn network_deletion_closes_existing_and_rejects_delayed_sessions() {
+        let state = MeshCoordinateState::new();
+        let peer = AuthorizedPeer {
+            peer_id: Uuid::new_v4(),
+            network_id: "deleted".to_owned(),
+            role: MeshCoordinateRole::Dial,
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+        assert!(register(&state, &peer, tx).is_some());
+        let retained = AuthorizedPeer {
+            peer_id: Uuid::new_v4(),
+            network_id: "retained".to_owned(),
+            role: MeshCoordinateRole::Dial,
+        };
+        let (retained_tx, mut retained_rx) = mpsc::channel(4);
+        assert!(register(&state, &retained, retained_tx).is_some());
+        state.revoke_network("deleted");
+        assert!(rx.recv().await.is_none());
+        assert!(matches!(
+            retained_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let (delayed_tx, _) = mpsc::channel(4);
+        assert!(register(&state, &peer, delayed_tx).is_none());
+    }
+
+    #[tokio::test]
     async fn target_publication_after_subscription_notifies_dial() {
         let state = MeshCoordinateState::new();
         let network_id = "network-test".to_owned();
@@ -759,7 +813,8 @@ mod tests {
                 role: MeshCoordinateRole::Peer,
             },
             target_tx,
-        );
+        )
+        .unwrap();
 
         add_tunnel(&state, dial_id, target_id);
         assert!(
