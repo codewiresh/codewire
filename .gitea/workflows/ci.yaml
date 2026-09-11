@@ -207,7 +207,7 @@ jobs:
           fi
           "$dispatch_selector"
 
-      - name: Select bounded workspace cache experiment
+      - name: Select opt-in workspace cache experiment
         id: cache-experiment
         env:
           CODEWIRE_EXPECTED_SOURCE_SHA: ${{ steps.select.outputs.ci_head_commit }}
@@ -1292,7 +1292,7 @@ jobs:
   workspace-cache-measurement:
     # This experiment uses the existing untrusted PR cache identity only.
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job obtains only the reviewed untrusted cache identity.
-    name: Workspace cache measurement (${{ matrix.case }})
+    name: Workspace cache experiment (${{ matrix.case }})
     runs-on: ci-heavy
     enable-openid-connect: true
     timeout-minutes: 55
@@ -1356,7 +1356,7 @@ jobs:
   workspace-cache-probes:
     # Cost-only opt-in, after all measured workers stop using the shared cache.
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job obtains only the reviewed untrusted cache identity.
-    name: Workspace cache fault and invalidation probes
+    name: Opt-in workspace cache experiment probes
     runs-on: ci-heavy
     enable-openid-connect: true
     timeout-minutes: 55

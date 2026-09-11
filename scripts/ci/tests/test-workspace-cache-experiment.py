@@ -57,14 +57,15 @@ class EventTests(unittest.TestCase):
         self.event["pull_request"]["labels"] = [{"name": "ci/r2-cache-canary"}]
         self.assertTrue(self.select()["selected"])
 
-    def test_ordinary_events_create_zero_tasks(self):
+    def test_ordinary_events_emit_one_inert_dependency_sentinel(self):
+        unselected = {"selected": False, "matrix": {"include": [selector.UNSELECTED]}}
         for event in ("push", "workflow_dispatch", "pull_request_target"):
             with self.subTest(event=event):
                 self.env["GITHUB_EVENT_NAME"] = event
-                self.assertEqual(self.select(), {"selected": False, "matrix": {"include": []}})
+                self.assertEqual(self.select(), unselected)
         self.env["GITHUB_EVENT_NAME"] = "pull_request"
         self.event["pull_request"]["head"]["ref"] = "ordinary"
-        self.assertFalse(self.select()["selected"])
+        self.assertEqual(self.select(), unselected)
 
     def test_branch_pattern_is_full_ascii_and_bounded(self):
         for branch in ("experiment/workspace-r2-cache/", "experiment/workspace-r2-cache/" + "x" * 65,
@@ -519,6 +520,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_measurement_allocation_and_failures_keep_ordinary_gates(self):
         body = workflow_job("workspace-cache-measurement")
+        self.assertIn("    name: Workspace cache experiment (${{ matrix.case }})\n", body)
         self.assertIn("    runs-on: ci-heavy\n", body)
         self.assertIn("    enable-openid-connect: true\n", body)
         self.assertNotIn("continue-on-error", body)
@@ -539,6 +541,13 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("needs.verification-selection.outputs.workspace_cache_experiment == 'true'", workflow_job(owner))
             self.assertIn("$GITHUB_WORKSPACE/.tmp/codewire-workspace-image-verification.json", workflow_job(owner))
         self.assertNotIn("prepare-workspace-cache-measurement.sh seed", workflow_job("edge-kind"))
+
+    def test_unselected_sentinel_cannot_allocate_a_measurement_task(self):
+        body = workflow_job("workspace-cache-measurement")
+        self.assertEqual(selector.UNSELECTED,
+                         {"case": "not-selected", "compiler": "disabled", "layers": "disabled"})
+        self.assertIn("needs.verification-selection.outputs.workspace_cache_experiment == 'true'", body)
+        self.assertIn("matrix: ${{ fromJSON(needs.verification-selection.outputs.workspace_cache_measurement_matrix) }}", body)
 
 
 if __name__ == "__main__":

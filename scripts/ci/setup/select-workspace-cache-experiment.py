@@ -13,6 +13,7 @@ CASES = (
     {"case": "warm-1", "compiler": "r2", "layers": "r2"},
     {"case": "warm-2", "compiler": "r2", "layers": "r2"},
 )
+UNSELECTED = {"case": "not-selected", "compiler": "disabled", "layers": "disabled"}
 SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 BRANCH = re.compile(r"experiment/workspace-r2-cache/[a-z0-9][a-z0-9-]{0,63}", re.ASCII)
 
@@ -37,7 +38,10 @@ def requested(event):
 
 
 def selection(root, env):
-    result = {"selected": False, "matrix": {"include": []}}
+    # Forgejo 16 leaves a downstream job blocked when one of its `needs` is an
+    # empty matrix. The sentinel instantiates a skipped measurement job without
+    # allocating a runner because the workflow's job-level opt-in remains false.
+    result = {"selected": False, "matrix": {"include": [UNSELECTED]}}
     if env.get("GITHUB_EVENT_NAME") != "pull_request":
         return result
     event_path = Path(env["GITHUB_EVENT_PATH"])

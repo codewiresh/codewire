@@ -506,6 +506,7 @@ class WorkflowContract(unittest.TestCase):
     def test_opt_in_dag_and_existing_authority_are_preserved(self):
         workflow = (ROOT / ".gitea/workflows/ci.yaml").read_text()
         body = workflow.split("\n  workspace-cache-probes:\n", 1)[1].split("\n  required-verification:", 1)[0]
+        self.assertIn("    name: Opt-in workspace cache experiment probes\n", body)
         request = (
             "always() && needs.verification-selection.result == 'success' && "
             "needs.verification-selection.outputs.workspace_cache_experiment == 'true' && "
