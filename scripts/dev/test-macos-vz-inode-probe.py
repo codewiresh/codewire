@@ -37,6 +37,29 @@ class InodeProbeHarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside"):
             probe.framed(b"x" * (probe.MAX_FRAME_BYTES + 1))
 
+    def test_guest_failure_is_finite_canonical_and_never_readiness(self):
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        failure = "guest-readiness-failed-seed-read"
+        payload = probe.json.dumps(
+            {"result": failure, "schemaVersion": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        left.sendall(probe.framed(payload))
+        with self.assertRaisesRegex(RuntimeError, f"helper reported {failure}"):
+            probe.expect_response(right, "guest-ready")
+
+        for rejected in (
+            {"result": "guest-ready", "schemaVersion": 2},
+            {"result": "guest-readiness-failed-unbounded", "schemaVersion": 1},
+            {"result": failure, "schemaVersion": 1, "detail": "/private/path"},
+        ):
+            left.sendall(probe.framed(probe.json.dumps(rejected, sort_keys=True).encode()))
+            with self.assertRaisesRegex(RuntimeError, "unexpected"):
+                probe.expect_response(right, "guest-ready")
+
     def test_ext4_identity_is_read_from_exact_bytes(self):
         path = self.root / "data"
         path.write_bytes(b"\0" * 4096)

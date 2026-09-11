@@ -32,6 +32,20 @@ MIB = 1024 * 1024
 EXT4_SUPERBLOCK = 1_024
 EXT4_MAGIC_OFFSET = 0x38
 EXT4_UUID_OFFSET = 0x68
+GUEST_FAILURE_RESULTS = frozenset(
+    {
+        "guest-readiness-challenge-failed",
+        "guest-readiness-failed-connected",
+        "guest-readiness-failed-data-identified",
+        "guest-readiness-failed-filesystems-mounted",
+        "guest-readiness-failed-no-connection",
+        "guest-readiness-failed-seed-read",
+        "guest-readiness-failed-started",
+        "guest-readiness-helper-socket-unavailable",
+        "guest-readiness-invalid",
+        "guest-start-failed",
+    }
+)
 
 
 def exact_input(path: str, label: str) -> Path:
@@ -138,8 +152,18 @@ def expect_response(stream: socket.socket, expected: str) -> None:
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    if payload != canonical:
-        raise RuntimeError("helper returned an unexpected control response")
+    if payload == canonical:
+        return
+    if expected == "guest-ready":
+        for failure in GUEST_FAILURE_RESULTS:
+            failure_payload = json.dumps(
+                {"result": failure, "schemaVersion": 1},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            if payload == failure_payload:
+                raise RuntimeError(f"helper reported {failure}")
+    raise RuntimeError("helper returned an unexpected control response")
 
 
 def require_entitled_helper(helper: Path) -> None:

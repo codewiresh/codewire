@@ -70,6 +70,107 @@
         }
       }
 
+      @Test
+      func testInodeProbeDiagnosticsAreOrderedAndNeverReadiness() throws {
+        var lastStage: InodeProbeRuntime.DiagnosticStage?
+        for stage in InodeProbeRuntime.DiagnosticStage.allCases {
+          let frame = InodeProbeRuntime.diagnosticFrame(stage)
+          #expect(frame.count == 88)
+          #expect(frame.prefix(8) == Data("CWVSTG1\0".utf8))
+          #expect(frame[8] == stage.rawValue)
+          #expect(frame.dropFirst(9).allSatisfy { $0 == 0 })
+          #expect(
+            try InodeProbeRuntime.parseReadinessRecord(frame, after: lastStage)
+              == .diagnostic(stage)
+          )
+          lastStage = stage
+        }
+
+        let readiness = try #require(
+          Data(
+            hex:
+              "435756494e4f44314fdd600892f7d61608383a6f94b6b68a8630b65c0976dea3f"
+              + "5e410d4c4ff0bbd42424242424242424242424242424242fe9873626ac6bde0aed0"
+              + "c4ffa3f5f35f6a48fb1fa669bde365e28a7fb0d29b6a"
+          )
+        )
+        #expect(
+          try InodeProbeRuntime.parseReadinessRecord(readiness, after: lastStage)
+            == .authenticated(readiness)
+        )
+        #expect(throws: (any Error).self) {
+          try InodeProbeRuntime.parseReadinessRecord(readiness, after: nil)
+        }
+
+        var malformed = InodeProbeRuntime.diagnosticFrame(.started)
+        malformed[8] = 9
+        #expect(throws: (any Error).self) {
+          try InodeProbeRuntime.parseReadinessRecord(malformed, after: nil)
+        }
+        malformed = InodeProbeRuntime.diagnosticFrame(.started)
+        malformed[20] = 1
+        #expect(throws: (any Error).self) {
+          try InodeProbeRuntime.parseReadinessRecord(malformed, after: nil)
+        }
+        #expect(throws: (any Error).self) {
+          try InodeProbeRuntime.parseReadinessRecord(
+            InodeProbeRuntime.diagnosticFrame(.seedRead),
+            after: .started
+          )
+        }
+        #expect(throws: (any Error).self) {
+          try InodeProbeRuntime.parseReadinessRecord(
+            InodeProbeRuntime.diagnosticFrame(.started),
+            after: .started
+          )
+        }
+        #expect(throws: (any Error).self) {
+          try InodeProbeRuntime.parseReadinessRecord(Data(repeating: 0, count: 87), after: nil)
+        }
+      }
+
+      @Test
+      func testInodeProbeStreamParserHandlesFragmentedAndCoalescedFrames() throws {
+        var descriptors = [Int32](repeating: -1, count: 2)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0)
+        defer {
+          close(descriptors[0])
+          close(descriptors[1])
+        }
+        let frames = InodeProbeRuntime.DiagnosticStage.allCases.map {
+          InodeProbeRuntime.diagnosticFrame($0)
+        }
+        let bytes = frames.reduce(into: Data(), { $0.append($1) })
+        try writeAllTest(Data(bytes.prefix(7)), to: descriptors[0])
+        let remainder = Data(bytes.dropFirst(7))
+        let writer = UncheckedSendableTestBox(remainder)
+        let writeDescriptor = descriptors[0]
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.01) {
+          try? writeAllTest(writer.value, to: writeDescriptor)
+        }
+
+        var lastStage: InodeProbeRuntime.DiagnosticStage?
+        for stage in InodeProbeRuntime.DiagnosticStage.allCases {
+          let record = try InodeProbeRuntime.readReadinessRecord(
+            from: descriptors[1],
+            after: lastStage,
+            deadline: Date().addingTimeInterval(1)
+          )
+          #expect(record == .diagnostic(stage))
+          lastStage = stage
+        }
+      }
+
+      @Test
+      func testInodeProbeConnectionAdmissionIsOneShot() {
+        let gate = OneShotAdmissionGate()
+        #expect(gate.admit())
+        #expect(!gate.admit())
+        let cancelled = OneShotAdmissionGate()
+        cancelled.cancel()
+        #expect(!cancelled.admit())
+      }
+
       private enum Mutation: Equatable {
         case directory
         case mode
@@ -154,6 +255,31 @@
       private func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
       }
+
+    }
+  }
+
+  private func writeAllTest(_ data: Data, to descriptor: Int32) throws {
+    try data.withUnsafeBytes { raw in
+      var written = 0
+      while written < data.count {
+        let count = Darwin.write(
+          descriptor,
+          raw.baseAddress?.advanced(by: written),
+          data.count - written
+        )
+        if count < 0 && errno == EINTR { continue }
+        guard count > 0 else { throw CocoaError(.fileWriteUnknown) }
+        written += count
+      }
+    }
+  }
+
+  private final class UncheckedSendableTestBox<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+      self.value = value
     }
   }
 

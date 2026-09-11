@@ -86,7 +86,10 @@ for forbidden in (
 inode_probe = source("Sources/CodewireVZRunnerRuntime/InodeProbe.swift")
 for required in (
     "VZVirtualMachine(configuration: configuration, queue: queue)",
-    "device.connect(toPort: RunnerProtocol.inodeProbeVsockPort)",
+    "VZVirtioSocketListener()", "device.setSocketListener(",
+    "forPort: RunnerProtocol.inodeProbeVsockPort",
+    "InodeProbeConnectionReceiver", "OneShotAdmissionGate",
+    "withExtendedLifetime(connection)", 'Data("CWVSTG1\\0".utf8)',
     'sendResponse("descriptors-admitted"', 'sendResponse("guest-ready"',
     "HMAC<SHA256>.isValidAuthenticationCode", "Darwin.read(controlDescriptor",
 ):
@@ -94,10 +97,23 @@ for required in (
         fail(f"inode probe lost lifecycle assertion: {required}")
 for forbidden in (
     "VZNATNetworkDeviceAttachment", "VZBridgedNetworkDeviceAttachment",
-    "VZVirtioFileSystemDeviceConfiguration", "Process(", "Docker", "Credential",
+    "VZVirtioFileSystemDeviceConfiguration", "device.connect(toPort:",
+    "Process(", "Docker", "Credential",
 ):
     if forbidden in inode_probe:
         fail(f"inode probe gained prohibited capability: {forbidden}")
+
+guest = (ROOT / "crates/codewire-vmm-guest-probe/src/guest.rs").read_text(encoding="utf-8")
+for required in (
+    "VsockStream::connect(VsockAddr::new(", "VMADDR_CID_HOST",
+    "encode_vz_inode_probe_stage_frame", "VZ inode probe helper connection closed",
+):
+    if required not in guest:
+        fail(f"guest inode probe lost reverse-vsock contract: {required}")
+if re.search(
+    r"VsockListener::bind\([^;]{0,200}VZ_INODE_PROBE_VSOCK_PORT", guest, re.DOTALL
+):
+    fail("guest inode probe restored the ambiguous host-connect listener")
 
 for relative in (
     "Cargo.toml",
