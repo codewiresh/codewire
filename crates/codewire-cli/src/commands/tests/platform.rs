@@ -505,7 +505,7 @@ fn test_preset(id: &str, name: &str, slug: &str, image: &str) -> Preset {
 
 #[test]
 fn format_preset_list_text_reads_canonical_project_resources() {
-    let workspace_image = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
+    let workspace_image = "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
     let mut private = test_preset("preset_2", "Private", "private", "unused");
     private.language = None;
     private.project_spec.image.clear();
@@ -550,7 +550,7 @@ fn format_preset_info_text_reads_canonical_project_resources() {
         "preset_1",
         "Workspace",
         "workspace",
-        "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
+        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
     );
 
     assert_eq!(
@@ -560,7 +560,7 @@ fn format_preset_info_text_reads_canonical_project_resources() {
             "Name:      Workspace\n",
             "Slug:      workspace\n",
             "Language:  rust\n",
-            "Image:     ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467\n",
+            "Image:     ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff\n",
             "Official:  false\n",
             "Build:     ready\n",
             "CPU:      2000m\n",
@@ -630,7 +630,7 @@ fn find_preset_rejects_same_precedence_slug_ambiguity() {
 fn expand_image_ref_matches_go_direct_preset_shorthand() {
     assert_eq!(
         expand_image_ref("workspace"),
-        "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"
+        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
     );
     assert_eq!(
         expand_image_ref("workspace:v2"),

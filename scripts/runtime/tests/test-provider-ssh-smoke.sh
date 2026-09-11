@@ -51,6 +51,8 @@ cw() {
       [[ "$8" == "$HOST_KEY" ]] || fail 'changed host trust'
       [[ "$FAILURE" != proof ]] || return 1
       [[ "$FAILURE" == empty-proof ]] || printf 'stock-ssh-workload-proved\n' ;;
+    'run --no-tty '*" /bin/cat /workspace/.cw-ssh-smoke/sshd.log")
+      printf 'synthetic public-only sshd evidence\n' ;;
     'run --no-tty --detach --output json '*" wait-revoked "*)
       [[ ! -e "$TMPDIR_SMOKE/revoked" ]] || fail 'probe admitted after revocation'
       [[ "${11}" == "$HOST_KEY" ]] || fail 'waiter lost host trust'
@@ -201,6 +203,12 @@ done
 # shellcheck disable=SC1090
 source <(sed -n '/^has_diagnostic_line() {$/,/^}$/p' \
   "$REPO_ROOT/scripts/ci/verify/stock-ssh-workload.sh")
+# shellcheck disable=SC1090
+source <(sed -n '/^strict_modes_component_state() {$/,/^}$/p' \
+  "$REPO_ROOT/scripts/ci/verify/stock-ssh-workload.sh")
+# shellcheck disable=SC1090
+source <(sed -n '/^authorized_keys_command_failure() {$/,/^}$/p' \
+  "$REPO_ROOT/scripts/ci/verify/stock-ssh-workload.sh")
 for expected in 'Host key verification failed.' 'codewire@127.0.0.1: Permission denied (publickey).'; do
   for ending in '\n' '\r\n'; do
     printf '%s%b' "$expected" "$ending" >"$TEST_ROOT/diagnostic"
@@ -208,6 +216,40 @@ for expected in 'Host key verification failed.' 'codewire@127.0.0.1: Permission 
     pass
   done
 done
+[[ "$(strict_modes_component_state 1000 700 1000)" == safe ]] ||
+  fail 'owned private authorization component was rejected'
+[[ "$(strict_modes_component_state 0 755 1000)" == safe ]] ||
+  fail 'root-owned immutable authorization component was rejected'
+[[ "$(strict_modes_component_state 1000 770 1000)" == unsafe ]] ||
+  fail 'group-writable authorization ancestor was admitted'
+[[ "$(strict_modes_component_state 2000 755 1000)" == unsafe ]] ||
+  fail 'foreign-owned authorization ancestor was admitted'
+printf 'AuthorizedKeysCommand command exited with status 13\n' >"$TEST_ROOT/helper.log"
+[[ "$(authorized_keys_command_failure "$TEST_ROOT/helper.log")" == 'helper-exit 13' ]] ||
+  fail 'numeric authorization helper exit was not classified'
+printf 'AuthorizedKeysCommand failed during setresuid\n' >"$TEST_ROOT/helper.log"
+[[ "$(authorized_keys_command_failure "$TEST_ROOT/helper.log")" == 'helper-identity unknown' ]] ||
+  fail 'authorization helper identity failure was not classified'
+printf 'Failed publickey for codewire\n' >"$TEST_ROOT/helper.log"
+[[ "$(authorized_keys_command_failure "$TEST_ROOT/helper.log")" == 'not-reported none' ]] ||
+  fail 'generic public-key denial was mistaken for a helper failure'
+stock_ssh_source="$(cat -- "$REPO_ROOT/scripts/ci/verify/stock-ssh-workload.sh")"
+# shellcheck disable=SC2016 # These contracts intentionally match literal shell variables.
+grep -qF 'readonly AUTHORIZED_KEYS="$STATE_ROOT/authorized_keys"' <<<"$stock_ssh_source" ||
+  fail 'public authorization is not retained in owned fixture state'
+[[ "$(grep -cF '  prepare_authorization' <<<"$stock_ssh_source")" == 2 ]] ||
+  fail 'install and restart do not both validate public authorization'
+# shellcheck disable=SC2016 # Match the literal variable reference.
+grep -qxF 'AuthorizedKeysCommand /usr/bin/cat $AUTHORIZED_KEYS' <<<"$stock_ssh_source" ||
+  fail 'sshd does not use the stock root-owned public authorization helper'
+# shellcheck disable=SC2016 # Match the literal variable reference.
+grep -qxF 'AuthorizedKeysCommandUser $TARGET_USER' <<<"$stock_ssh_source" ||
+  fail 'authorization helper does not run as the normal target account'
+grep -qxF 'AuthorizedKeysFile none' <<<"$stock_ssh_source" ||
+  fail 'group-writable PVC ancestry still participates in strict file authorization'
+grep -qF 'stock authorization command path is unsafe' <<<"$stock_ssh_source" ||
+  fail 'root-owned authorization command path is not checked before launch'
+pass
 for rejected in 'prefix Host key verification failed.' 'Host key verification failed. ' \
   'Connection refused.' $'Host key verification failed.\r\r'; do
   printf '%s\n' "$rejected" >"$TEST_ROOT/diagnostic"

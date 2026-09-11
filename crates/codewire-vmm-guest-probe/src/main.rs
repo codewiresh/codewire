@@ -1,19 +1,27 @@
 #[cfg(target_os = "linux")]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
 fn main() {
     #[cfg(target_os = "linux")]
-    let vm_init_entry = std::env::args_os().nth(1).is_none();
+    let fatal_vm_init_failure =
+        is_fatal_vm_init_failure(std::env::args_os().nth(1).as_deref(), unsafe {
+            libc::getpid()
+        });
     if let Err(error) = entrypoint() {
         eprintln!("codewire guest probe failed: {error:#}");
         #[cfg(target_os = "linux")]
-        if vm_init_entry && unsafe { libc::getpid() } == 1 {
+        if fatal_vm_init_failure {
             codewire_vmm_guest_probe::guest::halt_after_init_failure();
         }
         std::process::exit(1);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_fatal_vm_init_failure(command: Option<&OsStr>, pid: libc::pid_t) -> bool {
+    pid == 1 && (command.is_none() || command == Some(OsStr::new("vz-inode-probe")))
 }
 
 #[cfg(target_os = "linux")]
@@ -194,4 +202,26 @@ fn build_newc(mut arguments: impl Iterator<Item = OsString>) -> anyhow::Result<(
 #[cfg(not(target_os = "linux"))]
 fn entrypoint() -> Result<(), Box<dyn std::error::Error>> {
     Err("codewire-vmm-guest-probe is supported only on Linux".into())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_initial_vm_modes_halt_after_pid_one_failure() {
+        assert!(is_fatal_vm_init_failure(None, 1));
+        assert!(is_fatal_vm_init_failure(
+            Some(OsStr::new("vz-inode-probe")),
+            1
+        ));
+        for command in ["workspace-init", "daemon", "network-agent", "identity"] {
+            assert!(!is_fatal_vm_init_failure(Some(OsStr::new(command)), 1));
+        }
+        assert!(!is_fatal_vm_init_failure(None, 2));
+        assert!(!is_fatal_vm_init_failure(
+            Some(OsStr::new("vz-inode-probe")),
+            2
+        ));
+    }
 }

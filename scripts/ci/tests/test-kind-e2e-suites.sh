@@ -859,7 +859,7 @@ env \
   if grep -Fq 'docker.io/library/docker:29.7.1-dind' "$kind_rendered"; then
     fail 'sealed Kind overlay retained the public DinD image'
   fi
-  if grep -Fq 'ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467' "$kind_rendered"; then
+  if grep -Fq 'ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff' "$kind_rendered"; then
     fail 'sealed Kind overlay retained the public workspace image'
   fi
 BASH
@@ -969,7 +969,7 @@ env \
 
   pods_json="$(jq -cn \
     --arg dind "$KIND_DIND_LOCAL_IMAGE" \
-    '{items:[{spec:{containers:[{image:"ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"},{image:$dind}]}}]}')"
+    '{items:[{spec:{containers:[{image:"ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"},{image:$dind}]}}]}')"
   if assert_sandbox_supply_chain >/dev/null 2>&1; then
     fail 'sealed runtime accepted a public workspace reference'
   fi

@@ -71,6 +71,7 @@ pub use skill_snapshot::{
 };
 pub use vz_inode_probe::{
     VZ_INODE_PROBE_CHALLENGE_LEN, VZ_INODE_PROBE_FRAME_LEN, VZ_INODE_PROBE_SEED_LEN,
-    VZ_INODE_PROBE_VSOCK_PORT, VzInodeProbeError, encode_vz_inode_probe_frame,
-    verify_vz_inode_probe_frame,
+    VZ_INODE_PROBE_VSOCK_PORT, VzInodeProbeError, VzInodeProbeStage,
+    decode_vz_inode_probe_stage_frame, encode_vz_inode_probe_frame,
+    encode_vz_inode_probe_stage_frame, verify_vz_inode_probe_frame,
 };
