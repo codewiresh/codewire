@@ -17,6 +17,8 @@ LOCAL_PLATFORM_ARTIFACT_ROOT="${LOCAL_PLATFORM_ARTIFACT_ROOT:-}"
 LOCAL_PLATFORM_ARTIFACT_LOCK="${LOCAL_PLATFORM_ARTIFACT_LOCK:-}"
 LOCAL_PLATFORM_IMAGE="${LOCAL_PLATFORM_IMAGE:-}"
 LOCAL_PLATFORM_NETWORK_ID="${LOCAL_PLATFORM_NETWORK_ID:-}"
+LOCAL_PLATFORM_DISPOSABLE_NETWORK="${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-0}"
+LOCAL_PLATFORM_MESH_PROBE_BIN="${LOCAL_PLATFORM_MESH_PROBE_BIN:-}"
 EXPECTED_CODEWIRE_ORGANIZATION_ID="${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}"
 LP_RUNTIME=''
 LP_HOME=''
@@ -26,6 +28,8 @@ LP_USER_ID=''
 LP_GENERATION=0
 LP_LOGIN_ATTEMPTED=0
 LP_NETWORK_NODE_OWNED=0
+LP_NETWORK_CREATE_ATTEMPTED=0
+LP_MESH_PORT=28083
 LP_ENV=()
 
 local_platform_usage() {
@@ -47,6 +51,10 @@ Required environment:
   LOCAL_PLATFORM_NETWORK_ID        Optional existing Dev Mesh network ID. The
                                    smoke preserves the shared network and only
                                    revokes its exact owned environment node.
+  LOCAL_PLATFORM_DISPOSABLE_NETWORK=1 Instead create/delete a unique owned Dev
+                                   Mesh network; requires cw network delete.
+  LOCAL_PLATFORM_MESH_PROBE_BIN    Absolute prebuilt dev_mesh_probe example;
+                                   required for either named-network mode.
   XDG_RUNTIME_DIR                  Owner-only tmpfs runtime parent
 
 The smoke starts a fresh normal cw login in private tmpfs and waits for the owner
@@ -87,6 +95,18 @@ validate_local_platform_options() {
   [[ -z "$LOCAL_PLATFORM_NETWORK_ID" ||
     ( "$LOCAL_PLATFORM_NETWORK_ID" != *[[:space:]]* && ${#LOCAL_PLATFORM_NETWORK_ID} -le 128 ) ]] ||
     die 'LOCAL_PLATFORM_NETWORK_ID must be one exact non-whitespace network ID'
+  [[ "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 0 || "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 1 ]] ||
+    die 'LOCAL_PLATFORM_DISPOSABLE_NETWORK must be 0 or 1'
+  [[ "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 0 || -z "$LOCAL_PLATFORM_NETWORK_ID" ]] ||
+    die 'choose an existing network or a disposable network, not both'
+  if [[ -n "$LOCAL_PLATFORM_NETWORK_ID" || "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 1 ]]; then
+    [[ "$LOCAL_PLATFORM_MESH_PROBE_BIN" == /* &&
+       "$(realpath -e -- "$LOCAL_PLATFORM_MESH_PROBE_BIN")" == "$LOCAL_PLATFORM_MESH_PROBE_BIN" &&
+       -f "$LOCAL_PLATFORM_MESH_PROBE_BIN" && -x "$LOCAL_PLATFORM_MESH_PROBE_BIN" &&
+       ! -L "$LOCAL_PLATFORM_MESH_PROBE_BIN" ]] || die 'named-network acceptance requires a canonical executable dev_mesh_probe'
+  elif [[ -n "$LOCAL_PLATFORM_MESH_PROBE_BIN" ]]; then
+    die 'a Mesh probe requires an explicit named-network mode'
+  fi
   local path
   for path in "$CW_BIN" "$LOCAL_PLATFORM_ARTIFACT_ROOT" "$LOCAL_PLATFORM_ARTIFACT_LOCK"; do
     [[ "$path" == /* && "$(realpath -e -- "$path")" == "$path" && ! -L "$path" ]] ||
@@ -95,6 +115,33 @@ validate_local_platform_options() {
   [[ -f "$CW_BIN" && -x "$CW_BIN" && -d "$LOCAL_PLATFORM_ARTIFACT_ROOT" &&
      -f "$LOCAL_PLATFORM_ARTIFACT_LOCK" && -r "$LOCAL_PLATFORM_ARTIFACT_LOCK" ]] ||
     die 'normal CLI or matching native artifacts are unavailable'
+}
+
+local_platform_read_networks() {
+  local destination="$1"
+  cw_with_timeout 30 network list --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" --output json \
+    >"$destination" || return 2
+  jq -e --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" '
+    type == "array" and all(.[];
+      type == "object" and .org_id == $org and (.id | type == "string" and length > 0))
+  ' "$destination" >/dev/null || return 2
+}
+
+local_platform_prepare_network() {
+  [[ "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 1 ]] || return 0
+  LOCAL_PLATFORM_NETWORK_ID="$SMOKE_NAME-mesh"
+  local_platform_read_networks "$TMPDIR_SMOKE/local-networks-before.json" || die 'cannot validate Dev networks before creation'
+  jq -e --arg network "$LOCAL_PLATFORM_NETWORK_ID" 'all(.[]; .id != $network)' \
+    "$TMPDIR_SMOKE/local-networks-before.json" >/dev/null || die 'disposable network name collided before creation'
+  # The cryptographically random attempt name was absent. Bind ownership before
+  # the request so cleanup also reconciles a committed create with a lost reply.
+  LP_NETWORK_CREATE_ATTEMPTED=1
+  cw_with_timeout 30 network create "$LOCAL_PLATFORM_NETWORK_ID" --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" --no-use \
+    >"$TMPDIR_SMOKE/local-network-create.out" 2>"$TMPDIR_SMOKE/local-network-create.err" || die 'disposable Dev network creation failed'
+  local_platform_read_networks "$TMPDIR_SMOKE/local-networks-created.json" || die 'cannot validate the created Dev network'
+  jq -e --arg network "$LOCAL_PLATFORM_NETWORK_ID" --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" '
+    [.[] | select(.id == $network and .org_id == $org)] | length == 1
+  ' "$TMPDIR_SMOKE/local-networks-created.json" >/dev/null || die 'created Dev network identity drifted'
 }
 
 local_platform_read_network_nodes() {
@@ -113,8 +160,7 @@ local_platform_read_network_nodes() {
 
 local_platform_validate_network() {
   [[ -n "$LOCAL_PLATFORM_NETWORK_ID" ]] || return 0
-  cw_with_timeout 30 network list --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" --output json \
-    >"$TMPDIR_SMOKE/local-networks-before.json" || die 'cannot inspect the selected Dev Mesh network'
+  local_platform_read_networks "$TMPDIR_SMOKE/local-networks-before.json" || die 'cannot inspect the selected Dev Mesh network'
   jq -e --arg network "$LOCAL_PLATFORM_NETWORK_ID" --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" '
     [.[] | select(.id == $network and .org_id == $org)] | length == 1
   ' "$TMPDIR_SMOKE/local-networks-before.json" >/dev/null ||
@@ -159,7 +205,62 @@ local_platform_wait_network_node_absent() {
 local_platform_network_prove() {
   [[ -n "$LOCAL_PLATFORM_NETWORK_ID" ]] || return 0
   wait_until 'owned local Dev Mesh membership' "$(( $(seconds_now) + 60 ))" local_platform_network_member
-  log 'selected-network membership proved; no remote transport path is claimed'
+  log 'selected-network membership proved; application transport proof follows'
+}
+
+local_platform_prepare_mesh_listener() {
+  [[ -n "$LOCAL_PLATFORM_NETWORK_ID" ]] || return 0
+  mkdir -m 700 "$LP_WORKSPACE/.cw-mesh-smoke"
+  cp -- "$REPO_ROOT/scripts/runtime/dev/native-mesh-listener.py" "$LP_WORKSPACE/.cw-mesh-smoke/listener.py"
+  jq --argjson port "$LP_MESH_PORT" '
+    .ports = ((.ports // []) + [{port:$port}]) |
+    .startup_script += "; (/usr/bin/python3 /workspace/.cw-mesh-smoke/listener.py --port " +
+      ($port | tostring) + " </dev/null >/workspace/.cw-mesh-smoke/listener.log 2>&1) &"
+  ' "$LP_WORKSPACE/codewire.yaml" >"$TMPDIR_SMOKE/local-mesh-project.json"
+  cp -- "$TMPDIR_SMOKE/local-mesh-project.json" "$LP_WORKSPACE/codewire.yaml"
+}
+
+local_platform_mesh_probe() {
+  [[ -n "$LOCAL_PLATFORM_NETWORK_ID" ]] || return 0
+  local nonce
+  nonce="$(tr -d '-' </proc/sys/kernel/random/uuid)$(tr -d '-' </proc/sys/kernel/random/uuid)"
+  env -i "${LP_ENV[@]}" \
+    "CODEWIRE_DEV_MESH_PROBE_ORG=$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
+    "CODEWIRE_DEV_MESH_PROBE_USER=$LP_USER_ID" "CODEWIRE_DEV_MESH_PROBE_EMAIL=$EXPECTED_CODEWIRE_ADMIN_EMAIL" \
+    "CODEWIRE_DEV_MESH_PROBE_NETWORK=$LOCAL_PLATFORM_NETWORK_ID" "CODEWIRE_DEV_MESH_PROBE_NODE=$SMOKE_NAME" \
+    "CODEWIRE_DEV_MESH_PROBE_ENVIRONMENT=$ENV_ID" "CODEWIRE_DEV_MESH_PROBE_PORT=$LP_MESH_PORT" \
+    "CODEWIRE_DEV_MESH_PROBE_NONCE=$nonce" \
+    timeout --foreground --kill-after=5s 60 "$LOCAL_PLATFORM_MESH_PROBE_BIN" \
+    >"$TMPDIR_SMOKE/local-mesh-probe.json" 2>"$TMPDIR_SMOKE/local-mesh-probe.err" ||
+    die 'named Dev Mesh application transport proof failed'
+  jq -e --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" --arg user "$LP_USER_ID" \
+    --arg network "$LOCAL_PLATFORM_NETWORK_ID" --arg node "$SMOKE_NAME" --arg environment "$ENV_ID" \
+    --arg nonce "$nonce" --argjson port "$LP_MESH_PORT" '
+      type == "object" and .version == "codewire-dev-mesh-probe:v1" and
+      .server_url == "https://codewire-dev.sh" and .mesh_url == "https://mesh.codewire-dev.sh" and
+      .organization_id == $org and .user_id == $user and .network_id == $network and
+      .node_name == $node and .environment_id == $environment and .port == $port and .nonce == $nonce and
+      (.transport == "direct_udp" or .transport == "peer_relay" or .transport == "derp_relay")
+    ' "$TMPDIR_SMOKE/local-mesh-probe.json" >/dev/null || die 'named Dev Mesh probe receipt identity or transport drifted'
+  sha256sum "$LOCAL_PLATFORM_MESH_PROBE_BIN" >"$TMPDIR_SMOKE/local-mesh-probe-binary.sha256"
+  log 'named Dev Mesh application bytes proved; owner-side probe session closed'
+}
+
+local_platform_cleanup_network() {
+  [[ "$LP_NETWORK_CREATE_ATTEMPTED" == 1 ]] || return 0
+  [[ "$LOCAL_PLATFORM_NETWORK_ID" == "$SMOKE_NAME-mesh" ]] || return 1
+  local_platform_read_networks "$TMPDIR_SMOKE/local-networks-cleanup.json" || return 1
+  if jq -e --arg network "$LOCAL_PLATFORM_NETWORK_ID" 'all(.[]; .id != $network)' \
+      "$TMPDIR_SMOKE/local-networks-cleanup.json" >/dev/null; then return 0; fi
+  # Do not ask deletion to stand in for verified member cleanup. A foreign or
+  # unknown node leaves the owned network intact and fails this acceptance.
+  local_platform_read_network_nodes "$TMPDIR_SMOKE/local-network-cleanup-members.json" || return 1
+  jq -e 'length == 0' "$TMPDIR_SMOKE/local-network-cleanup-members.json" >/dev/null || return 1
+  cw_with_timeout 30 network delete "$LOCAL_PLATFORM_NETWORK_ID" --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" --yes \
+    >"$TMPDIR_SMOKE/local-network-delete.out" 2>"$TMPDIR_SMOKE/local-network-delete.err" || return 1
+  local_platform_read_networks "$TMPDIR_SMOKE/local-networks-cleanup.json" || return 1
+  jq -e --arg network "$LOCAL_PLATFORM_NETWORK_ID" 'all(.[]; .id != $network)' \
+    "$TMPDIR_SMOKE/local-networks-cleanup.json" >/dev/null
 }
 
 local_platform_set_network_args() {
@@ -401,6 +502,7 @@ local_platform_cleanup() {
       rc=1
     fi
   fi
+  local_platform_cleanup_network || rc=1
   cleanup_provider_ssh_profile || rc=1
   cleanup_provider_ssh_credential || rc=1
   # Only project cleanup is reused: this entrypoint never created a platform VM.
@@ -487,6 +589,7 @@ local_platform_journey() {
   cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
+  local_platform_prepare_network
   local_platform_validate_network
   prepare_provider_ssh
   prepare_application_secrets
@@ -495,6 +598,7 @@ local_platform_journey() {
     .install_command += "; " + $provider[0].install_command |
     .startup_script += "; " + $provider[0].startup_script
   ' "$APP_SECRET_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  local_platform_prepare_mesh_listener
   LP_CREATE_ATTEMPTED=1
   local -a LP_NETWORK_ARGS=()
   local_platform_set_network_args
@@ -506,6 +610,7 @@ local_platform_journey() {
     test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))' "$TMPDIR_SMOKE/local-create.json")"
   cw_with_timeout 30 use --local "$ENV_ID" >"$TMPDIR_SMOKE/local-use.out"
   local_platform_network_prove
+  local_platform_mesh_probe
   local_platform_application_phase a "platform:id:${APP_SECRET_IDS[0]}" "${APP_SECRET_HASHES[0]}"
   local_platform_ssh_prove
   cw_with_timeout 300 env update --local "$ENV_ID" --secrets "platform:id:${APP_SECRET_IDS[1]}" --yes --output json \
