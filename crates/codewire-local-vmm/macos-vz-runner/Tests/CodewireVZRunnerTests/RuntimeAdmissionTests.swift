@@ -48,6 +48,28 @@
         try assertRejected(.nilDataUUID, as: .dataDiskFormatInvalid)
       }
 
+      @Test
+      func testInodeProbeReadinessMatchesGuestCodec() throws {
+        let seed = Data(repeating: 0x31, count: 4096)
+        let filesystemUUID = [UInt8](repeating: 0x42, count: 16)
+        let challenge = Data(repeating: 0x53, count: 32)
+        let encoded =
+          "435756494e4f44314fdd600892f7d61608383a6f94b6b68a8630b65c0976dea3f"
+          + "5e410d4c4ff0bbd42424242424242424242424242424242fe9873626ac6bde0aed0"
+          + "c4ffa3f5f35f6a48fb1fa669bde365e28a7fb0d29b6a"
+        let frame = try #require(Data(hex: encoded))
+        try InodeProbeRuntime.verifyReadiness(
+          frame, seed: seed, filesystemUUID: filesystemUUID, challenge: challenge
+        )
+        var wrongChallenge = challenge
+        wrongChallenge[0] ^= 1
+        #expect(throws: (any Error).self) {
+          try InodeProbeRuntime.verifyReadiness(
+            frame, seed: seed, filesystemUUID: filesystemUUID, challenge: wrongChallenge
+          )
+        }
+      }
+
       private enum Mutation: Equatable {
         case directory
         case mode
@@ -132,6 +154,22 @@
       private func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
       }
+    }
+  }
+
+  extension Data {
+    fileprivate init?(hex: String) {
+      guard hex.count.isMultiple(of: 2) else { return nil }
+      var bytes: [UInt8] = []
+      bytes.reserveCapacity(hex.count / 2)
+      var offset = hex.startIndex
+      while offset < hex.endIndex {
+        let end = hex.index(offset, offsetBy: 2)
+        guard let byte = UInt8(hex[offset..<end], radix: 16) else { return nil }
+        bytes.append(byte)
+        offset = end
+      }
+      self.init(bytes)
     }
   }
 #endif

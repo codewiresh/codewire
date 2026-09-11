@@ -12,7 +12,7 @@ private struct Response: Encodable {
 
 private func usage() -> Never {
   FileHandle.standardError.write(
-    Data("usage: codewire-vz-runner validate --control-fd FD\n".utf8)
+    Data("usage: codewire-vz-runner (validate|inode-probe) --control-fd FD\n".utf8)
   )
   exit(2)
 }
@@ -20,7 +20,7 @@ private func usage() -> Never {
 private func run() throws {
   let arguments = CommandLine.arguments
   guard arguments.count == 4,
-    arguments[1] == "validate",
+    ["validate", "inode-probe"].contains(arguments[1]),
     arguments[2] == "--control-fd",
     let controlDescriptor = Int32(arguments[3]),
     controlDescriptor >= 3
@@ -28,12 +28,24 @@ private func run() throws {
 
   #if canImport(Virtualization) && os(macOS)
     let request = try PrivateIPC.receive(controlDescriptor: controlDescriptor)
-    try RuntimeAdmission.validateConfiguration(for: request)
-    let response = try JSONEncoder().encode(Response(result: "configuration-valid"))
-    try PrivateIPC.send(controlDescriptor: controlDescriptor, response: response)
+    if arguments[1] == "validate" {
+      try RuntimeAdmission.validateConfiguration(for: request)
+      try sendResponse("configuration-valid", to: controlDescriptor)
+    } else {
+      try InodeProbeRuntime.run(request: request, controlDescriptor: controlDescriptor)
+    }
   #else
     throw ConfigurationError.unsupportedSchema
   #endif
+}
+
+private func sendResponse(_ result: String, to descriptor: Int32) throws {
+  let encoder = JSONEncoder()
+  encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+  try PrivateIPC.send(
+    controlDescriptor: descriptor,
+    response: try encoder.encode(Response(result: result))
+  )
 }
 
 do {

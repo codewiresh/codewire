@@ -94,4 +94,10 @@ public enum PrivateIPC {
     }
     guard result == 0 else { throw IPCError.rejected(Int(result)) }
   }
+
+  public static func receiveStart(controlDescriptor: Int32) throws {
+    guard controlDescriptor >= 0 else { throw IPCError.invalidControlDescriptor }
+    let result = cw_vz_receive_start(controlDescriptor)
+    guard result == 0 else { throw IPCError.rejected(Int(result)) }
+  }
 }
