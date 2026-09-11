@@ -1814,8 +1814,8 @@ pub async fn handle_environment_setup(
     Ok(())
 }
 
-/// Reapply non-secret Git author metadata after a stop→start Pod replacement
-/// under the same durable process lease used by setup.
+/// Reapply Git author metadata and run the current startup script after a
+/// stop→start Pod replacement under the same durable process lease used by setup.
 pub async fn handle_post_start_configuration(
     ctx: &WorkerContext,
     payload: &JobPayload,
@@ -1828,7 +1828,7 @@ pub async fn handle_post_start_configuration(
     let input = to_setup_inputs(&env, &backend);
     let phase = input.setup_phase;
     let phase_authority = SetupPhaseAuthority::new(authority.clone(), setup_identity)?;
-    let ops = WorkerSetupOps {
+    let mut ops = WorkerSetupOps {
         ctx,
         env,
         authority,
@@ -1851,9 +1851,45 @@ pub async fn handle_post_start_configuration(
     }
 
     ops.configure_git_identity(&input.namespace).await?;
+    run_post_start_script(&mut ops, &input).await?;
     ops.ensure_can_commit().await?;
     phase_authority.complete_post_start_mutation(phase).await?;
     Ok(())
+}
+
+/// Startup runs on every start, independently of completed install/clone phases.
+/// The caller owns the post-start lease and releases it only after this succeeds.
+async fn run_post_start_script(ops: &mut impl SetupOps, input: &Inputs) -> anyhow::Result<()> {
+    if input.startup_script.is_empty() {
+        return Ok(());
+    }
+    ops.emit_log(
+        &input.environment_id,
+        input.setup_phase,
+        "startup_script",
+        "started",
+        "",
+        None,
+    )
+    .await?;
+    let (status, message) = match ops
+        .run_startup_script(input, &input.working_directory)
+        .await
+    {
+        Ok(()) => ("completed", String::new()),
+        Err(error) if is_setup_control_flow(&error) => return Err(error),
+        Err(error) => ("warning", format!("{error:#}")),
+    };
+    ops.ensure_can_commit().await?;
+    ops.emit_log(
+        &input.environment_id,
+        input.setup_phase,
+        "startup_script",
+        status,
+        &message,
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1871,9 +1907,11 @@ mod tests {
         complete: bool,
         error: Option<(i32, String)>,
         shutdown_ttl: Option<i32>,
+        startup_launches: Vec<(String, String)>,
         fail_step: Option<&'static str>,
         authority_loss_step: Option<&'static str>,
         recovery_failure_step: Option<&'static str>,
+        cancellation_step: Option<&'static str>,
         cancel_before_commit: bool,
     }
 
@@ -1909,6 +1947,9 @@ mod tests {
             s.calls.push(name.to_string());
             if s.authority_loss_step == Some(name) {
                 return Err(super::super::activity_authority::AuthorityLost.into());
+            }
+            if s.cancellation_step == Some(name) {
+                return Err(SetupActivityCancelled.into());
             }
             if s.recovery_failure_step == Some(name) {
                 return Err(SetupRecoveryFailed {
@@ -2000,7 +2041,13 @@ mod tests {
         async fn run_install(&mut self, _input: &Inputs, _wd: &str) -> anyhow::Result<()> {
             self.call("run_install")
         }
-        async fn run_startup_script(&mut self, _input: &Inputs, _wd: &str) -> anyhow::Result<()> {
+        async fn run_startup_script(&mut self, input: &Inputs, wd: &str) -> anyhow::Result<()> {
+            assert_eq!(wd, input.working_directory);
+            self.0
+                .lock()
+                .unwrap()
+                .startup_launches
+                .push((input.startup_script.clone(), wd.to_string()));
             self.call("run_startup_script")
         }
         async fn validate_agents(&mut self, _input: &Inputs) -> anyhow::Result<()> {
@@ -2031,6 +2078,84 @@ mod tests {
             app_ports: vec![(3000, "web".into(), "public".into())],
             ttl_seconds: Some(7200),
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn post_start_runs_script_after_completed_setup_without_replaying_install() {
+        let mut mock = Mock::new();
+        let mut input = full_inputs();
+        input.setup_complete = true;
+        input.setup_phase = 7;
+        input.startup_script = "./current-startup.sh".into();
+        input.working_directory = "/workspace/current".into();
+        run_post_start_script(&mut mock, &input).await.unwrap();
+        let state = mock.state();
+        assert_eq!(
+            state.calls,
+            [
+                "log:startup_script:started",
+                "run_startup_script",
+                "log:startup_script:completed",
+            ]
+        );
+        assert!(state.phases.is_empty());
+        assert_eq!(
+            state.startup_launches,
+            [("./current-startup.sh".into(), "/workspace/current".into())]
+        );
+        assert!(!state.complete);
+        assert_eq!(input.setup_phase, 7);
+        assert!(input.setup_complete);
+    }
+
+    #[tokio::test]
+    async fn post_start_skips_empty_script() {
+        let mut mock = Mock::new();
+        let mut input = full_inputs();
+        input.startup_script.clear();
+        run_post_start_script(&mut mock, &input).await.unwrap();
+        assert!(mock.state().calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_start_script_failure_is_warning_only() {
+        let mut mock = Mock::failing("run_startup_script");
+        run_post_start_script(&mut mock, &full_inputs())
+            .await
+            .unwrap();
+        assert_eq!(
+            mock.state().calls,
+            [
+                "log:startup_script:started",
+                "run_startup_script",
+                "log:startup_script:warning",
+            ]
+        );
+        assert!(mock.state().phases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_start_propagates_control_flow_without_success_or_warning() {
+        let cancelled = Mock::new();
+        cancelled.0.lock().unwrap().cancellation_step = Some("run_startup_script");
+        for mut mock in [
+            Mock::losing_authority("run_startup_script"),
+            Mock::failing_recovery("run_startup_script"),
+            cancelled,
+            Mock::cancelling_before_commit(),
+        ] {
+            let error = run_post_start_script(&mut mock, &full_inputs())
+                .await
+                .unwrap_err();
+            assert!(is_setup_control_flow(&error), "{error:#}");
+            let state = mock.state();
+            assert_eq!(
+                state.calls,
+                ["log:startup_script:started", "run_startup_script"]
+            );
+            assert!(state.phases.is_empty());
+            assert!(!state.complete);
         }
     }
 

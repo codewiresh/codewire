@@ -435,6 +435,9 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         if args.self_test:
             self_test()
             credential_service_self_test(credential_resources, credential_target)
+            dev_target = targets[1]
+            dev_resources = documents(run(["kustomize", "build", dev_target["path"]]).stdout)
+            credential_service_self_test(dev_resources, dev_target)
     except Exception as error:  # noqa: BLE001 - repo check script
         failures.append(str(error))
 
