@@ -1,5 +1,6 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -238,6 +239,8 @@ const DEV_PATH: &str = "/dev";
 const DISK_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRESS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const VZ_INODE_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const VZ_INODE_PROBE_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(20);
 const HOST_ONLY_REJECTION_BUDGET: usize = 32;
 const NONCE_MAX_LEN: usize = 256;
 const READ_LIMIT: usize = 4097;
@@ -474,12 +477,9 @@ pub fn run_vz_inode_probe() -> Result<()> {
         .build()
         .context("create VZ inode probe runtime")?;
     runtime.block_on(async move {
-        let mut stream = tokio::time::timeout(
-            PROGRESS_REQUEST_TIMEOUT,
-            VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, VZ_INODE_PROBE_VSOCK_PORT)),
-        )
-        .await
-        .context("connect VZ inode probe to host timed out")??;
+        let mut stream = connect_vz_inode_probe_to_host()
+            .await
+            .context("connect VZ inode probe to host before deadline")?;
         let mut challenge = [0_u8; VZ_INODE_PROBE_CHALLENGE_LEN];
         tokio::time::timeout(
             PROGRESS_REQUEST_TIMEOUT,
@@ -536,6 +536,48 @@ pub fn run_vz_inode_probe() -> Result<()> {
         ensure!(count != 0, "VZ inode probe helper connection closed");
         bail!("VZ inode probe received an unexpected post-readiness byte");
     })
+}
+
+async fn connect_vz_inode_probe_to_host() -> io::Result<VsockStream> {
+    let deadline = tokio::time::Instant::now() + VZ_INODE_PROBE_CONNECT_TIMEOUT;
+    // Retry only completed failures. An independent timeout per attempt could
+    // cancel a connection while the host is consuming its one-shot admission.
+    retry_async_connect_until(deadline, VZ_INODE_PROBE_CONNECT_RETRY_DELAY, || {
+        VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, VZ_INODE_PROBE_VSOCK_PORT))
+    })
+    .await
+}
+
+async fn retry_async_connect_until<T, Connect, ConnectFuture>(
+    deadline: tokio::time::Instant,
+    retry_delay: Duration,
+    mut connect: Connect,
+) -> io::Result<T>
+where
+    Connect: FnMut() -> ConnectFuture,
+    ConnectFuture: Future<Output = io::Result<T>>,
+{
+    let mut last_error = None;
+    loop {
+        match tokio::time::timeout_at(deadline, connect()).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => break,
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::time::sleep_until((now + retry_delay).min(deadline)).await;
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "VZ inode probe connection deadline elapsed",
+        )
+    }))
 }
 
 async fn write_vz_inode_probe_stage(
@@ -5714,6 +5756,52 @@ mod tests {
             startup_script: String::new(),
             skills_selected: false,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn vz_inode_probe_connect_retries_before_absolute_deadline() {
+        let attempts = Arc::new(AtomicU64::new(0));
+        let recorded = Arc::clone(&attempts);
+        let value = retry_async_connect_until(
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(1),
+            move || {
+                let attempt = recorded.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt < 2 {
+                        Err(io::Error::new(
+                            io::ErrorKind::ConnectionRefused,
+                            "listener is not ready",
+                        ))
+                    } else {
+                        Ok(7_u8)
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value, 7);
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn vz_inode_probe_connect_stops_at_one_absolute_deadline() {
+        let attempts = Arc::new(AtomicU64::new(0));
+        let recorded = Arc::clone(&attempts);
+        let result = retry_async_connect_until(
+            tokio::time::Instant::now(),
+            Duration::from_millis(1),
+            move || {
+                recorded.fetch_add(1, Ordering::Relaxed);
+                std::future::pending::<io::Result<()>>()
+            },
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
     }
 
     #[test]
