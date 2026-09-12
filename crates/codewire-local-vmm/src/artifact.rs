@@ -1088,6 +1088,70 @@ mod tests {
     }
 
     #[test]
+    fn canonical_product_guest_root_requires_exact_bootstrap_null_device() {
+        let architecture = ArtifactArchitecture::host().unwrap();
+        let mut executable = vec![0_u8; 64];
+        executable[..4].copy_from_slice(b"\x7fELF");
+        executable[4] = 2;
+        executable[5] = 1;
+        executable[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        executable[18..20].copy_from_slice(&architecture.elf_machine().to_le_bytes());
+        let archive = canonical_guest_root_newc(&executable, &executable, &executable).unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let path = staging.path().join("product.cpio");
+        std::fs::write(&path, &archive).unwrap();
+        validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture).unwrap();
+
+        let null_name = archive
+            .windows(9)
+            .position(|bytes| bytes == b"dev/null\0")
+            .unwrap();
+        let null_header = null_name - 110;
+        for (relative, replacement) in [
+            (14, b"000081b6"), // regular file instead of character device
+            (14, b"000021ff"), // excessive permissions
+            (22, b"00000001"), // non-root owner
+            (78, b"00000005"), // console major
+            (86, b"00000005"), // /dev/zero instead of /dev/null
+        ] {
+            let mut changed = archive.clone();
+            changed[null_header + relative..null_header + relative + 8]
+                .copy_from_slice(replacement);
+            std::fs::write(&path, changed).unwrap();
+            assert!(matches!(
+                validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture),
+                Err(ArtifactError::InvalidInitramfs(_))
+            ));
+        }
+
+        // Reconstruct the prior layout: no bootstrap dev entries and inode
+        // numbering starts at one. Old archives require a rebuild; admission
+        // must not silently continue accepting the broken startup contract.
+        let product_start = (null_name + 9).next_multiple_of(4);
+        let mut prior = archive[product_start..].to_vec();
+        let mut offset = 0;
+        loop {
+            let name_size = parse_hex_u32(&prior[offset + 94..offset + 102]).unwrap() as usize;
+            let size = parse_hex_u32(&prior[offset + 54..offset + 62]).unwrap() as usize;
+            let name_end = offset + 110 + name_size;
+            let next = (name_end.next_multiple_of(4) + size).next_multiple_of(4);
+            if &prior[offset + 110..name_end] == b"TRAILER!!!\0" {
+                prior.truncate(next);
+                prior.resize(next.next_multiple_of(512), 0);
+                break;
+            }
+            let inode = parse_hex_u32(&prior[offset + 6..offset + 14]).unwrap() - 2;
+            prior[offset + 6..offset + 14].copy_from_slice(format!("{inode:08x}").as_bytes());
+            offset = next;
+        }
+        std::fs::write(&path, prior).unwrap();
+        assert!(matches!(
+            validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture),
+            Err(ArtifactError::InvalidInitramfs(_))
+        ));
+    }
+
+    #[test]
     fn admitted_product_busybox_is_reopened_and_digest_bound() {
         let architecture = ArtifactArchitecture::host().unwrap();
         let mut executable = vec![0_u8; 64];

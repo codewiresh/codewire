@@ -13,6 +13,7 @@ const TRAILER_NAME: &[u8] = b"TRAILER!!!\0";
 const INIT_MODE: u32 = 0o100755;
 const DIRECTORY_MODE: u32 = 0o040755;
 const SYMLINK_MODE: u32 = 0o120777;
+const NULL_DEVICE_MODE: u32 = 0o020666;
 const ARCHIVE_BLOCK: usize = 512;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -79,8 +80,9 @@ pub fn canonical_newc(probe: &[u8]) -> Result<Vec<u8>, NewcError> {
     let mut archive = Vec::with_capacity(
         HEADER_LEN + INIT_NAME.len() + probe.len() + HEADER_LEN + TRAILER_NAME.len() + 512,
     );
-    append_entry(&mut archive, 1, INIT_MODE, INIT_NAME, probe, size);
-    append_entry(&mut archive, 0, 0, TRAILER_NAME, &[], 0);
+    append_boot_devices(&mut archive);
+    append_entry(&mut archive, 3, INIT_MODE, INIT_NAME, probe, size, (0, 0));
+    append_entry(&mut archive, 0, 0, TRAILER_NAME, &[], 0, (0, 0));
     pad_to(&mut archive, ARCHIVE_BLOCK);
     Ok(archive)
 }
@@ -116,7 +118,8 @@ pub fn canonical_guest_root_newc(
             .saturating_add(BASIC_BUSYBOX_APPLETS.len() * 160)
             .saturating_add(2048),
     );
-    let mut inode = 1_u32;
+    append_boot_devices(&mut archive);
+    let mut inode = 3_u32;
     append_named_entry(&mut archive, inode, DIRECTORY_MODE, "bin", &[], 0);
     inode += 1;
     append_named_entry(&mut archive, inode, DIRECTORY_MODE, "sbin", &[], 0);
@@ -147,7 +150,7 @@ pub fn canonical_guest_root_newc(
         );
         inode += 1;
     }
-    append_entry(&mut archive, 0, 0, TRAILER_NAME, &[], 0);
+    append_entry(&mut archive, 0, 0, TRAILER_NAME, &[], 0, (0, 0));
     pad_to(&mut archive, ARCHIVE_BLOCK);
     Ok(archive)
 }
@@ -253,7 +256,16 @@ fn append_named_entry(
         &nul_terminated,
         contents,
         contents_len,
+        (0, 0),
     );
+}
+
+fn append_boot_devices(archive: &mut Vec<u8>) {
+    // A console-free kernel can invoke /init with closed standard descriptors.
+    // Rust repairs them through /dev/null before main, so mounting devtmpfs in
+    // guest init is too late. This is a guest null device, not a host console.
+    append_named_entry(archive, 1, DIRECTORY_MODE, "dev", &[], 0);
+    append_entry(archive, 2, NULL_DEVICE_MODE, b"dev/null\0", &[], 0, (1, 3));
 }
 
 fn append_entry(
@@ -263,6 +275,7 @@ fn append_entry(
     name: &[u8],
     contents: &[u8],
     contents_len: u32,
+    rdev: (u32, u32),
 ) {
     let header_start = archive.len();
     archive.extend_from_slice(NEWC_MAGIC);
@@ -276,8 +289,8 @@ fn append_entry(
         contents_len,
         0, // dev major
         0, // dev minor
-        0, // rdev major
-        0, // rdev minor
+        rdev.0,
+        rdev.1,
         name.len() as u32,
         0, // checksum (newc, rather than crc)
     ] {
@@ -404,16 +417,15 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn canonical_archive_contains_only_executable_init_and_trailer() {
+    fn canonical_archive_contains_boot_devices_init_and_trailer() {
         let archive = canonical_newc(b"probe-bytes").unwrap();
-
-        assert_eq!(&archive[..6], NEWC_MAGIC);
-        assert_eq!(&archive[14..22], b"000081ed");
-        assert_eq!(&archive[94..102], b"00000005");
+        let entries = parse_entries(&archive);
         assert_eq!(
-            &archive[HEADER_LEN..HEADER_LEN + INIT_NAME.len()],
-            INIT_NAME
+            entries.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+            [b"dev".as_slice(), b"dev/null", b"init", b"TRAILER!!!"]
         );
+        assert_eq!(entries[2].1[1], 0o100755);
+        assert_eq!(entries[2].2, b"probe-bytes");
         assert_eq!(archive.len() % ARCHIVE_BLOCK, 0);
         assert!(
             archive
@@ -422,12 +434,98 @@ mod tests {
         );
         assert_eq!(
             format!("{:x}", Sha256::digest(&archive)),
-            "7d170ccd99684aa54b9deb05c5591e8418427b710d8c22a14af26bd3af0b9898"
+            "2dbb6be76671e71ba57f1e5031be82d26f5e7310ccf22339f5807e3a597d5e65"
         );
         assert_eq!(
             Sha256::digest(&archive),
             Sha256::digest(canonical_newc(b"probe-bytes").unwrap())
         );
+    }
+
+    fn parse_entries(archive: &[u8]) -> Vec<(&[u8], [u32; 13], &[u8])> {
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        loop {
+            assert_eq!(&archive[offset..offset + 6], b"070701");
+            let fields = std::array::from_fn(|index| {
+                let start = offset + 6 + index * 8;
+                u32::from_str_radix(std::str::from_utf8(&archive[start..start + 8]).unwrap(), 16)
+                    .unwrap()
+            });
+            let name_start = offset + 110;
+            let name_end = name_start + fields[11] as usize;
+            assert_eq!(archive[name_end - 1], 0);
+            let name = &archive[name_start..name_end - 1];
+            let data_start = name_end.next_multiple_of(4);
+            let data_end = data_start + fields[6] as usize;
+            entries.push((name, fields, &archive[data_start..data_end]));
+            offset = data_end.next_multiple_of(4);
+            if name == b"TRAILER!!!" {
+                assert!(archive[offset..].iter().all(|byte| *byte == 0));
+                return entries;
+            }
+        }
+    }
+
+    #[test]
+    fn every_archive_provides_only_the_exact_null_device_before_rust_init() {
+        for archive in [
+            canonical_newc(b"probe-bytes").unwrap(),
+            canonical_guest_root_newc(b"probe-bytes", b"busybox-bytes", b"runc-bytes").unwrap(),
+        ] {
+            let entries = parse_entries(&archive);
+            assert_eq!(entries[0].0, b"dev");
+            assert_eq!(entries[0].1[1], 0o040755);
+            assert_eq!(entries[0].1[2..4], [0, 0]);
+            assert!(entries[0].2.is_empty());
+            assert_eq!(entries[1].0, b"dev/null");
+            assert_eq!(entries[1].1, [2, 0o020666, 0, 0, 1, 0, 0, 0, 0, 1, 3, 9, 0]);
+            assert!(entries[1].2.is_empty());
+            assert!(entries.iter().position(|entry| entry.0 == b"init").unwrap() > 1);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.0 == b"dev/null")
+                    .count(),
+                1
+            );
+            let devices = entries
+                .iter()
+                .filter(|entry| matches!(entry.1[1] & 0o170000, 0o020000 | 0o060000))
+                .map(|entry| entry.0)
+                .collect::<Vec<_>>();
+            assert_eq!(devices, [b"dev/null".as_slice()]);
+        }
+    }
+
+    #[test]
+    fn previous_product_layout_is_bound_to_accepted_prior_bytes() {
+        let current =
+            canonical_guest_root_newc(b"probe-bytes\n", b"busybox-bytes\n", b"runc-bytes\n")
+                .unwrap();
+        let mut prior = Vec::new();
+        // Serialize the prior format independently, omitting the two new
+        // entries. The digest below was produced by the previous packer.
+        for (name, mut fields, payload) in parse_entries(&current).into_iter().skip(2) {
+            if fields[0] != 0 {
+                fields[0] -= 2;
+            }
+            prior.extend_from_slice(b"070701");
+            for field in fields {
+                prior.extend_from_slice(format!("{field:08x}").as_bytes());
+            }
+            prior.extend_from_slice(name);
+            prior.push(0);
+            prior.resize(prior.len().next_multiple_of(4), 0);
+            prior.extend_from_slice(payload);
+            prior.resize(prior.len().next_multiple_of(4), 0);
+        }
+        prior.resize(prior.len().next_multiple_of(512), 0);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&prior)),
+            "17d8f3e38f1bcfbfedf9f555a5a64dbdb6ab2aeed34785cdd5edf64d43aeaf34"
+        );
+        assert_ne!(current, prior);
     }
 
     #[test]

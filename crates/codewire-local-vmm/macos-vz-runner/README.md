@@ -25,6 +25,14 @@ this package therefore cannot start a VM. The synthetic PID-1 response is not
 production guest readiness; production still requires the distinct state,
 root, and seed storage contract to be implemented.
 
+Both canonical guest archive formats include `/dev/null` as character device
+1:3 before `/init`. With no console, the kernel can leave standard descriptors
+closed; Rust needs this node before entering guest code to reopen them. This
+does not add a VZ console or serial device. Earlier archives without the node
+must be rebuilt with the matching packer and their reviewed digest/size
+manifests refreshed. Canonical admission rejects mixing old and new layouts;
+saved state-disk contents do not change.
+
 The separate `inode-probe-path-control` subcommand is an explicit diagnostic
 control, never an exact-inode proof. It immediately copies only the already
 admitted kernel and initial-ramdisk descriptors into a helper-owned private
