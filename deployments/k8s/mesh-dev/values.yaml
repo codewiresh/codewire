@@ -24,6 +24,7 @@ meshAuthorization:
 
 mesh:
   baseURL: https://mesh.codewire-dev.sh
+  derpURL: https://derp.codewire-dev.sh
   listenAddr: "0.0.0.0:8080"
 
 ingress:

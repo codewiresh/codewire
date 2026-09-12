@@ -90,6 +90,32 @@ fixture() {
 fixture
 validate_local_platform_options
 pass
+local_platform_validate_socket_paths /short/.cwl.XXXXXX/h /run/user/1000/.cwlp-XXXXXX
+pass
+expect_failure long-scratch-parent local_platform_validate_socket_paths \
+  '/long-evidence-parent/codewire-runtime-smoke.XXXXXX/native-home' /run/user/1000/.cwlp-XXXXXX
+expect_failure long-runtime-parent local_platform_validate_socket_paths \
+  /short/.cwl.XXXXXX/h '/long-runtime-parent-that-would-overflow-the-private-ssh-agent-socket/.cwlp-XXXXXX'
+# At the longest home-derived socket boundary, 107 bytes fit and 108 do not.
+socket_suffix='/.codewire/credentials-v1/ssh-00000000-0000-4000-8000-000000000000/agent'
+printf -v boundary_home '/%*s' "$((106 - ${#socket_suffix}))" ''
+boundary_home="${boundary_home// /x}"
+local_platform_validate_socket_paths "$boundary_home" /run/user/1000/.cwlp-XXXXXX
+pass
+expect_failure socket-nul-boundary local_platform_validate_socket_paths "${boundary_home}x" /run/user/1000/.cwlp-XXXXXX
+# A multibyte character cannot hide an overlong pathname in a UTF-8 locale.
+expect_failure socket-byte-boundary local_platform_validate_socket_paths "${boundary_home%?}é" /run/user/1000/.cwlp-XXXXXX
+local_platform_validate_scratch_parent "$TEST_ROOT"
+pass
+expect_failure relative-scratch-parent local_platform_validate_scratch_parent relative
+expect_failure missing-scratch-parent local_platform_validate_scratch_parent "$TEST_ROOT/missing"
+ln -s "$TEST_ROOT" "$TEST_ROOT/scratch-link"
+expect_failure symlink-scratch-parent local_platform_validate_scratch_parent "$TEST_ROOT/scratch-link"
+invalid_scratch_mount() {
+  findmnt() { printf '%s\n' rw,noexec,nodev; }
+  local_platform_validate_scratch_parent "$TEST_ROOT"
+}
+expect_failure noexec-scratch-parent invalid_scratch_mount
 for invalid in saved-login wrong-auth missing-email api-key alternate-server organization mutable-image keep existing partial no-kube symlink; do
   invalid_options() {
     fixture
@@ -580,7 +606,7 @@ cw_with_timeout() {
 cleanup_fixture() {
   fixture
   LP_CREATE_ATTEMPTED=1
-  LP_HOME="$TMPDIR_SMOKE/native-home"; mkdir -m 700 "$LP_HOME"
+  LP_HOME="$TMPDIR_SMOKE/h"; mkdir -m 700 "$LP_HOME"
   LP_RUNTIME="$(mktemp -d "$TMPDIR_SMOKE/.cwlp-XXXXXX")"
   CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$LP_RUNTIME/login"; mkdir -m 700 "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR"
   LP_LOGIN_ATTEMPTED=1

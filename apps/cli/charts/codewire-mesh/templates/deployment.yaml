@@ -42,6 +42,9 @@ spec:
           args:
             - {{ printf "--base-url=%s" .Values.mesh.baseURL | quote }}
             - {{ printf "--listen=%s" .Values.mesh.listenAddr | quote }}
+            {{- if .Values.mesh.derpURL }}
+            - {{ printf "--derp-url=%s" .Values.mesh.derpURL | quote }}
+            {{- end }}
           env:
             {{- if .Values.database.enabled }}
             - name: DATABASE_URL

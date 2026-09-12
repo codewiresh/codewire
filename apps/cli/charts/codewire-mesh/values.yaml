@@ -1,5 +1,6 @@
 mesh:
   baseURL: ""  # Required: e.g. https://mesh.example.com
+  derpURL: ""  # Set when the packet relay is separate from the Mesh API.
   listenAddr: "0.0.0.0:8080"
 
 database:

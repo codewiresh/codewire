@@ -12,6 +12,7 @@ readonly DEV_KUSTOMIZATION="$ROOT/deployments/k8s/overlays/dev/kustomization.yam
 readonly DEV_CONFIG_IMAGES="$ROOT/deployments/k8s/overlays/dev/config-images.yaml"
 readonly DEV_MESH_RELEASE="$ROOT/deployments/k8s/flux/mesh-dev/helmrelease.yaml"
 readonly DEV_MESH_VALUES="$ROOT/deployments/k8s/mesh-dev/values.yaml"
+readonly MESH_CHART="$ROOT/apps/cli/charts/codewire-mesh"
 
 fail() {
   printf '[test-deploy-dev] ERROR: %s\n' "$*" >&2
@@ -279,5 +280,31 @@ mesh_release_authorization="$(sed -n '/^    meshAuthorization:$/,/^    mesh:$/p'
 mesh_values_authorization="$(sed -n '/^meshAuthorization:$/,/^mesh:$/p' "$DEV_MESH_VALUES")"
 assert_mesh_authorization_input "dev Mesh HelmRelease" "$mesh_release_authorization"
 assert_mesh_authorization_input "dev Mesh values" "$mesh_values_authorization"
+
+assert_mesh_transport_input() {
+  local label="$1" block="$2"
+  grep -Eq '^[[:space:]]+baseURL: "?https://mesh\.codewire-dev\.sh"?$' <<<"$block" ||
+    fail "$label does not select the Dev Mesh API"
+  grep -Eq '^[[:space:]]+derpURL: "?https://derp\.codewire-dev\.sh"?$' <<<"$block" ||
+    fail "$label must advertise the separate Dev DERP relay, not the Mesh API"
+}
+
+assert_mesh_transport_input "dev Mesh HelmRelease" \
+  "$(sed -n '/^    mesh:$/,/^    ingress:$/p' "$DEV_MESH_RELEASE")"
+assert_mesh_transport_input "dev Mesh values" \
+  "$(sed -n '/^mesh:$/,/^ingress:$/p' "$DEV_MESH_VALUES")"
+
+# Render the actual chart: source values alone do not prove the process receives
+# them. Helm is already a sealed prerequisite of the selected deploy verifier.
+dev_mesh_transport="$(helm template codewire-mesh-dev "$MESH_CHART" \
+  -f "$DEV_MESH_VALUES" --show-only templates/deployment.yaml)"
+[[ "$(grep -Fc -- '--derp-url=' <<<"$dev_mesh_transport")" == 1 &&
+   "$(grep -Fc -- '- "--derp-url=https://derp.codewire-dev.sh"' <<<"$dev_mesh_transport")" == 1 ]] ||
+  fail "Dev Mesh does not receive exactly one separate DERP relay argument"
+default_mesh_transport="$(helm template test "$MESH_CHART" \
+  --set mesh.baseURL=https://mesh.example.test --show-only templates/deployment.yaml)"
+if grep -Fq -- '--derp-url' <<<"$default_mesh_transport"; then
+  fail "an unselected chart relay must not render an empty DERP override"
+fi
 
 printf '[test-deploy-dev] SHA-only dispatch contract passed\n'
