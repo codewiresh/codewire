@@ -56,12 +56,41 @@ Required environment:
   LOCAL_PLATFORM_MESH_PROBE_BIN    Absolute prebuilt dev_mesh_probe example;
                                    required for either named-network mode.
   XDG_RUNTIME_DIR                  Owner-only tmpfs runtime parent
+  SMOKE_TMP_PARENT                 Existing short executable scratch parent,
+                                   for example /var/tmp. Socket paths must fit
+                                   Linux's 107-byte pathname limit.
 
 The smoke starts a fresh normal cw login in private tmpfs and waits for the owner
 to approve it. Existing login directories are rejected, never inspected. Cleanup
 logs out that login and removes its files. Local VM state uses a temporary HOME;
 cleanup failures retain only private diagnostic state and fail the acceptance.
 USAGE
+}
+
+local_platform_validate_socket_paths() {
+  # Match the short private layout used by smoke-native-local-environment.sh.
+  # Count bytes, not locale-dependent characters; reserve sockaddr_un's NUL.
+  local LC_ALL=C smoke_home_path="$1" smoke_runtime_path="$2" socket
+  for socket in \
+    "$smoke_home_path/n/engine/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock" \
+    "$smoke_home_path/.codewire/credentials-v1/authority.sock" \
+    "$smoke_home_path/.codewire/credentials-v1/ssh-00000000-0000-4000-8000-000000000000/agent" \
+    "$smoke_runtime_path/.codewire-provider-login-00000000-0000-4000-8000-000000000000/a"; do
+    (( ${#socket} < 108 )) ||
+      die 'local/platform scratch or XDG runtime parent is too long for Linux Unix sockets; choose a shorter parent before login'
+  done
+}
+
+local_platform_validate_scratch_parent() {
+  local scratch_parent="$1" mount_options
+  [[ "$scratch_parent" == /* && -d "$scratch_parent" &&
+     "$(realpath -e -- "$scratch_parent")" == "$scratch_parent" ]] ||
+    die 'local/platform scratch parent must be an existing absolute canonical directory'
+  mount_options="$(findmnt -nro OPTIONS -T "$scratch_parent")" ||
+    die 'cannot inspect the local/platform scratch filesystem'
+  case ",$mount_options," in
+    *,noexec,*) die 'local/platform scratch parent is mounted noexec; choose an executable filesystem before login' ;;
+  esac
 }
 
 local_platform_parse() {
@@ -420,7 +449,7 @@ import sys
 binary, home, runtime, artifacts, lock, config = sys.argv[1:]
 assert home and runtime
 expected = [
-    ['__native-supervisor', '--root', home + '/.codewire/native-v1',
+    ['__native-supervisor', '--root', home + '/n',
      '--artifact-root', artifacts, '--artifact-lock', lock, '--mesh-data-dir', home + '/.codewire',
      '--platform-config-dir', config, '--credential-authority-root', home + '/.codewire/credentials-v1'],
     ['__local-credential-authority', '--root', home + '/.codewire/credentials-v1'],
@@ -530,7 +559,7 @@ local_platform_cleanup() {
       "$TMPDIR_SMOKE"/local-pty-*.log || rc=1
   fi
   if [[ "$rc" == 0 ]]; then
-    [[ "$LP_HOME" == "$TMPDIR_SMOKE/native-home" && -d "$LP_HOME" && ! -L "$LP_HOME" &&
+    [[ "$LP_HOME" == "$TMPDIR_SMOKE/h" && -d "$LP_HOME" && ! -L "$LP_HOME" &&
       "$(stat -c %u "$LP_HOME")" == "$(id -u)" ]] || exit 1
     rm -rf -- "$LP_HOME"
     log 'PASS: local Linux VM with actual Dev application sources and platform SSH, transitions and cleanup'
@@ -551,16 +580,17 @@ main() {
   [[ "$(realpath -e -- "$runtime_parent")" == "$runtime_parent" &&
      "$(stat -c '%u:%a' "$runtime_parent")" == "$(id -u):700" &&
      "$(findmnt -nro FSTYPE -T "$runtime_parent")" == tmpfs ]] || die 'private tmpfs XDG runtime parent is required'
-  mkdir -p "$SMOKE_TMP_PARENT"
-  TMPDIR_SMOKE="$(mktemp -d "$SMOKE_TMP_PARENT/codewire-runtime-smoke.XXXXXX")"
-  LP_HOME="$TMPDIR_SMOKE/native-home"; LP_WORKSPACE="$LP_HOME/workspace"
+  local_platform_validate_scratch_parent "$SMOKE_TMP_PARENT"
+  local_platform_validate_socket_paths "$SMOKE_TMP_PARENT/.cwl.XXXXXX/h" "$runtime_parent/.cwlp-XXXXXX"
+  TMPDIR_SMOKE="$(mktemp -d "$SMOKE_TMP_PARENT/.cwl.XXXXXX")"
+  LP_HOME="$TMPDIR_SMOKE/h"; LP_WORKSPACE="$LP_HOME/workspace"
   mkdir -m 700 "$LP_HOME" "$LP_WORKSPACE"
   LP_RUNTIME="$(mktemp -d "$runtime_parent/.cwlp-XXXXXX")"
   CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$LP_RUNTIME/login"
   mkdir -m 700 "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR"
   LP_ENV=(PATH=/usr/bin:/bin "HOME=$LP_HOME" "USER=$(id -un)" "LOGNAME=$(id -un)"
     SHELL=/bin/bash TERM=xterm-256color LC_ALL=C "CW_CONFIG_DIR=$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR"
-    "CODEWIRE_NATIVE_STATE_ROOT=$LP_HOME/.codewire/native-v1"
+    "CODEWIRE_NATIVE_STATE_ROOT=$LP_HOME/n"
     "CODEWIRE_LOCAL_CREDENTIAL_ROOT=$LP_HOME/.codewire/credentials-v1"
     "CODEWIRE_NATIVE_ARTIFACT_ROOT=$LOCAL_PLATFORM_ARTIFACT_ROOT" "CODEWIRE_NATIVE_ARTIFACT_LOCK=$LOCAL_PLATFORM_ARTIFACT_LOCK"
     "XDG_RUNTIME_DIR=$LP_RUNTIME" "DBUS_SESSION_BUS_ADDRESS=unix:path=$LP_RUNTIME/no-owner-bus")
@@ -570,6 +600,11 @@ main() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   trap 'exit 129' HUP
+  # Prove the isolated normal CLI can start its confined authority before
+  # spending an owner approval. This fresh-root probe reads no saved login.
+  cw_with_timeout 30 __local-credential-authority-probe --root "$LP_HOME/.codewire/credentials-v1" --shutdown \
+    >"$TMPDIR_SMOKE/local-authority-preflight.out" 2>"$TMPDIR_SMOKE/local-authority-preflight.err" ||
+    die 'isolated local credential authority preflight failed before login'
   # Even identity checks use the isolated HOME and explicit config; never call
   # the ambient prepare_cli wrapper before isolation has been established.
   LP_LOGIN_ATTEMPTED=1
