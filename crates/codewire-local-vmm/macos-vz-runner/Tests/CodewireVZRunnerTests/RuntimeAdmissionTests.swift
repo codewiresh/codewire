@@ -171,6 +171,55 @@
         #expect(!cancelled.admit())
       }
 
+      @Test
+      func testPathBackedBootControlCopiesAndRehashesPrivateArtifact() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+          "cw-vz-path-control-test-\(UUID().uuidString)",
+          isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+          at: directory,
+          withIntermediateDirectories: false,
+          attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let bytes = Data("reviewed boot artifact".utf8)
+        let source = directory.appendingPathComponent("source")
+        try bytes.write(to: source)
+        #expect(chmod(source.path, 0o600) == 0)
+        let descriptor = open(source.path, O_RDONLY | O_NOFOLLOW)
+        #expect(descriptor >= 0)
+        defer { close(descriptor) }
+        let identity = ImmutableArtifact(size: UInt64(bytes.count), sha256: sha256(bytes))
+
+        let copied = try PathBackedBootControl.copyVerified(
+          sourceDescriptor: descriptor,
+          identity: identity,
+          destination: directory.appendingPathComponent("copied")
+        )
+        #expect(try Data(contentsOf: copied) == bytes)
+        var status = stat()
+        #expect(lstat(copied.path, &status) == 0)
+        #expect((status.st_mode & 0o777) == 0o600)
+
+        do {
+          _ = try PathBackedBootControl.copyVerified(
+            sourceDescriptor: descriptor,
+            identity: ImmutableArtifact(
+              size: identity.size,
+              sha256: String(repeating: "0", count: 64)
+            ),
+            destination: directory.appendingPathComponent("wrong-digest")
+          )
+          Issue.record("path-backed control accepted the wrong digest")
+        } catch {
+          #expect(error as? RuntimeError == .bootControlCopyFailed)
+        }
+        let wrongDigest = directory.appendingPathComponent("wrong-digest")
+        #expect(!FileManager.default.fileExists(atPath: wrongDigest.path))
+      }
+
       private enum Mutation: Equatable {
         case directory
         case mode

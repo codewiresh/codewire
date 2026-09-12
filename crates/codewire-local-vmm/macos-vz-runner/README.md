@@ -25,6 +25,19 @@ this package therefore cannot start a VM. The synthetic PID-1 response is not
 production guest readiness; production still requires the distinct state,
 root, and seed storage contract to be implemented.
 
+The separate `inode-probe-path-control` subcommand is an explicit diagnostic
+control, never an exact-inode proof. It immediately copies only the already
+admitted kernel and initial-ramdisk descriptors into a helper-owned private
+directory, verifies the copied sizes and SHA-256 values, and supplies those
+ordinary paths to the URL-only VZ boot APIs. The parent still replaces every
+original fixture pathname before start. The control succeeds only after the
+guest connects over native vsock and answers a fresh challenge with the first
+strictly ordered diagnostic frame. It then reports `boot-path-control-ready`,
+which is distinct from `guest-ready`, and its terminal output includes `NOT
+exact-inode proof`. This controlled comparison can distinguish a `/dev/fd`
+boot handoff failure from a later guest/vsock failure without weakening or
+substituting for the default exact-inode gate.
+
 The parent supplies one bounded, sorted-key canonical JSON frame over an
 inherited private connected `AF_UNIX` stream socket. A four-byte big-endian
 length prefix gives the stream an explicit frame boundary. The first send
@@ -49,6 +62,11 @@ hardware claim. VM validation or start remains blocked until an exact-inode
 swap test proves that behavior, the current guest boot contract is reconciled,
 and the repository owner separately authorizes the required
 `com.apple.security.virtualization` entitlement signing step.
+
+The path-backed boot control also remains blocked from execution until the
+repository owner separately authorizes its signing and one VZ start. Source
+builds and tests exercise only its copy, validation, result-separation, and
+cleanup contracts.
 
 Run the portable protocol tests and boundary guard with:
 
