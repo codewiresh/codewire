@@ -115,6 +115,8 @@ class Frames:
 
 def group_absent(process: subprocess.Popen) -> bool:
     # Reap the leader before checking: a zombie leader is still a group member.
+    # After reap this numeric group may be unrelated. Observation is safe, but
+    # a visible group must never authorize a later mutating signal.
     process.poll()
     try:
         os.killpg(process.pid, 0)
@@ -324,7 +326,11 @@ class Run:
         # disappeared. No subprocess output is read or published on this path.
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for process in reversed(self.children):
-                if not group_absent(process):
+                # Only this single-threaded parent reaps its retained children.
+                # With default SIGCHLD, exit after this poll leaves a zombie
+                # pinning the PID until our next poll. Never signal after reap,
+                # even if that numeric group remains visible: ownership is lost.
+                if process.poll() is None:
                     try:
                         os.killpg(process.pid, sig)
                     except ProcessLookupError:
@@ -595,6 +601,10 @@ def main(argv: list[str] | None = None) -> int:
     result = 1
     try:
         try:
+            # Actively clear inherited SIG_IGN/SA_NOCLDWAIT before any spawn.
+            # Merely getsignal()==SIG_DFL does not establish zombie retention.
+            # There are no competing child reapers or SIGCHLD handlers here.
+            signal.signal(signal.SIGCHLD, signal.SIG_DFL)
             for signum in OWNED_SIGNALS:
                 signal.signal(signum, run.signal)
             signal.setitimer(signal.ITIMER_REAL, run.remaining())

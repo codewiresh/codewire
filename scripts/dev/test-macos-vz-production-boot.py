@@ -49,7 +49,10 @@ def options():
     assert len(dict(pairs)) == len(pairs)
     return dict(pairs)
 assert "CODEWIRE_TEST_SECRET_CANARY" not in os.environ
-assert set(os.environ) <= {"HOME", "TMPDIR", "LC_ALL", "PATH", "LC_CTYPE"}
+# Apple's Python adds this CoreFoundation locale variable at interpreter
+# startup, even with the parent's fixed environment. Do not allow it elsewhere.
+native_names = {"__CF_USER_TEXT_ENCODING"} if sys.platform == "darwin" else set()
+assert set(os.environ) <= {"HOME", "TMPDIR", "LC_ALL", "PATH", "LC_CTYPE"} | native_names
 assert os.stat(os.getcwd()).st_mode & 0o7777 == 0o700
 print("synthetic-private-child-log-canary", flush=True)
 event("pid:" + str(os.getpid()))
@@ -276,6 +279,33 @@ class ParentFixtureTests(unittest.TestCase):
         events = self.events.read_text().splitlines()
         for event in ("nine-descriptors-admitted", "started", "rust-transport-ready", "kill-requested", "network-closed"):
             self.assertEqual(events.count(event), 1)
+
+    def test_sigchld_is_actively_normalized_before_spawn(self):
+        original = self.wrapper.read_text()
+        for disposition in ("SIG_IGN", "SIG_DFL"):
+            with self.subTest(disposition=disposition):
+                injection = (
+                    "import signal\n"
+                    f"signal.signal(signal.SIGCHLD, signal.{disposition})\n"
+                    "real_signal = signal.signal\n"
+                    "normalized = False\n"
+                    "def record_signal(signum, handler):\n"
+                    "    global normalized\n"
+                    "    result = real_signal(signum, handler)\n"
+                    "    if signum == signal.SIGCHLD and handler == signal.SIG_DFL:\n"
+                    "        normalized = True\n"
+                    "    return result\n"
+                    "signal.signal = record_signal\n"
+                    "real_popen = m.subprocess.Popen\n"
+                    "def checked_spawn(*args, **kwargs):\n"
+                    "    assert normalized\n"
+                    "    assert signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL\n"
+                    "    return real_popen(*args, **kwargs)\n"
+                    "m.subprocess.Popen = checked_spawn\n"
+                )
+                self.wrapper.write_text(original.replace("sys.exit(m.main())", injection + "sys.exit(m.main())"))
+                self.events.unlink(missing_ok=True)
+                self.finish(self.start())
 
     def test_protocol_failures(self):
         cases = (
@@ -639,6 +669,81 @@ class ParentFixtureTests(unittest.TestCase):
         # No actual child existed: test-owned fixture teardown is now safe.
         run.children = []
         self.assertTrue(run.cleanup())
+
+    def test_cleanup_never_signals_reaped_or_recycled_group(self):
+        for initial_status in (0, None):
+            with self.subTest(initial_status=initial_status):
+                run = harness.Run()
+                run.directory = self.runtime / f"retained-{initial_status}"
+                run.directory.mkdir(mode=0o700)
+                (run.directory / "private").write_text("synthetic")
+                child = mock.Mock(pid=987654321, returncode=initial_status, stdout=None)
+
+                def reap():
+                    child.returncode = 0
+                    return 0
+
+                child.poll.side_effect = reap
+                run.children = [child]
+                # A visible numeric group can now be unrelated. No real PID
+                # churn or signals are needed to exercise the unsafe decision.
+                with mock.patch.object(harness.os, "killpg") as killpg, mock.patch.object(harness, "STOP_SECONDS", 0):
+                    self.assertFalse(run.cleanup())
+                self.assertTrue(killpg.call_args_list)
+                self.assertTrue(all(call.args == (child.pid, 0) for call in killpg.call_args_list))
+                self.assertTrue((run.directory / "private").exists())
+                run.children = []  # Only a synthetic child existed.
+                self.assertTrue(run.cleanup())
+
+    def test_cleanup_rechecks_unreaped_ownership_before_escalation(self):
+        run = harness.Run()
+        child = mock.Mock(pid=987654321, returncode=None, stdout=None)
+        child.poll.return_value = None
+        run.children = [child]
+        signals = []
+
+        def killpg(pid, signum):
+            self.assertEqual(pid, child.pid)
+            if signum:
+                signals.append(signum)
+                # TERM was authorized while the leader was unreaped. The next
+                # poll reaps it, but the numeric group remains visible.
+                child.poll.return_value = 0
+                child.returncode = 0
+
+        with mock.patch.object(harness.os, "killpg", side_effect=killpg), mock.patch.object(harness, "STOP_SECONDS", 0):
+            self.assertFalse(run.cleanup())
+        self.assertEqual(signals, [signal.SIGTERM])
+        run.children = []
+        self.assertTrue(run.cleanup())
+
+    def test_reaped_visible_group_prevents_success_receipt(self):
+        original = self.wrapper.read_text()
+        injection = (
+            "import types\n"
+            "real_cleanup = m.Run.cleanup\n"
+            "real_killpg = m.os.killpg\n"
+            "def observe_group(pid, signum):\n"
+            "    if pid != 987654321: return real_killpg(pid, signum)\n"
+            "    if signum:\n"
+            f"        with open({str(self.events)!r}, 'a') as output: output.write('unsafe-signal\\n')\n"
+            "def cleanup_with_reaped_group(self):\n"
+            "    self.children.append(types.SimpleNamespace(pid=987654321, returncode=0, stdout=None, poll=lambda: 0))\n"
+            "    return real_cleanup(self)\n"
+            "m.os.killpg = observe_group\n"
+            "m.Run.cleanup = cleanup_with_reaped_group\n"
+            "m.STOP_SECONDS = 0\n"
+        )
+        self.wrapper.write_text(original.replace("sys.exit(m.main())", injection + "sys.exit(m.main())"))
+        process = self.start()
+        output, errors = process.communicate(timeout=12)
+        self.assertEqual(process.returncode, 1, (output, errors))
+        self.assertEqual(output, b"")
+        self.assertIn(b"private_retained=true", errors)
+        self.assertNotIn(CANARY.encode(), output + errors)
+        self.assertNotIn("unsafe-signal", self.events.read_text())
+        self.assertEqual(len(list(self.runtime.iterdir())), 1)
+        self.assert_no_children()
 
 
 if __name__ == "__main__":
