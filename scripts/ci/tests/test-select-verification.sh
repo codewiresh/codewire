@@ -981,6 +981,9 @@ run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head fal
 run_present_paths_case macos_vz_inode_probe pull_request refs/pull/2065/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-inode-probe.py scripts/dev/test-macos-vz-inode-probe.py
+run_present_paths_case macos_vz_production_boot pull_request refs/pull/2064/head false \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/dev/macos-vz-production-boot.py scripts/dev/test-macos-vz-production-boot.py
 run_present_paths_case dashboard_watch_unlisted pull_request refs/pull/2003/head false \
   "$all_product" scripts/dev/unlisted-dashboard-helper.py
 if grep -Fq 'scripts/ci/cache/*.sh' "$SELECTOR"; then

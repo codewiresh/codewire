@@ -895,7 +895,8 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_vmm_guest_probe
         recognized=true
         ;;
-      scripts/dev/macos-vz-inode-probe.py|scripts/dev/test-macos-vz-inode-probe.py)
+      scripts/dev/macos-vz-inode-probe.py|scripts/dev/test-macos-vz-inode-probe.py|\
+      scripts/dev/macos-vz-production-boot.py|scripts/dev/test-macos-vz-production-boot.py)
         # The entitlement-free parent tests share the macOS helper and guest
         # probe protocol, but never sign or start Virtualization.framework.
         select_token policy
