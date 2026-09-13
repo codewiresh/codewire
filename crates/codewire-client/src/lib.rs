@@ -149,8 +149,9 @@ pub use config::{
 };
 pub use connectrpc::ErrorCode;
 pub use coordinator::{
-    COORDINATOR_SETUP_TIMEOUT, CoordinatorPeerSession, Handlers as CoordinatorHandlers,
-    MeshCoordinateIdentity, MeshCoordinatorPeerSession, PrimaryCoordinateIdentity,
+    COORDINATOR_SETUP_TIMEOUT, CoordinatorPeerSession, Error as CoordinatorError,
+    Handlers as CoordinatorHandlers, MeshCoordinateIdentity, MeshCoordinatorPeerSession,
+    PrimaryCoordinateIdentity,
 };
 pub use credential_delegation::CredentialDelegationStream;
 pub use error::{ClientError, ErrorInfo, ValidationError};
