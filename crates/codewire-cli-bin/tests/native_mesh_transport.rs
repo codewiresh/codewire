@@ -1069,12 +1069,12 @@ async fn confined_mesh_process_relays_only_admitted_ports_and_requires_fresh_enr
     assert_eq!(
         decode_mesh_transport_startup_status(&read_status_frame(&replay_control)),
         Some(MeshTransportStartupStatus::Failed(
-            MeshTransportStartupFailure::CoordinatorSetup
+            MeshTransportStartupFailure::CoordinatorPermissionDenied
         ))
     );
     assert_eq!(
         replay_child.wait_bounded().code(),
-        Some(MeshTransportStartupFailure::CoordinatorSetup.exit_code())
+        Some(MeshTransportStartupFailure::CoordinatorPermissionDenied.exit_code())
     );
 
     let fresh_enrollment = create_enrollment(fixture.mesh_address).await;

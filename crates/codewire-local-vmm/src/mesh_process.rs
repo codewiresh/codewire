@@ -15,7 +15,10 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use codewire_client::{CoordinatorHandlers, MeshCoordinateIdentity, MeshCoordinatorPeerSession};
+use codewire_client::{
+    CoordinatorError, CoordinatorHandlers, ErrorCode, MeshCoordinateIdentity,
+    MeshCoordinatorPeerSession,
+};
 use codewire_egress_broker::adapters::SystemDnsResolver;
 use codewire_tailnet::conn::{Conn, Options as ConnOptions};
 use codewire_tailnet::derp_transport::{
@@ -150,6 +153,13 @@ pub enum MeshTransportStartupFailure {
     TransportSetup,
     StatusIo,
     Protocol,
+    CoordinatorUnauthenticated,
+    CoordinatorPermissionDenied,
+    CoordinatorUnavailable,
+    CoordinatorTimeout,
+    CoordinatorInvalid,
+    CoordinatorUnimplemented,
+    CoordinatorInternal,
 }
 
 impl MeshTransportStartupFailure {
@@ -174,6 +184,13 @@ impl MeshTransportStartupFailure {
             Self::TransportSetup => "transport-setup",
             Self::StatusIo => "status-io",
             Self::Protocol => "protocol",
+            Self::CoordinatorUnauthenticated => "coordinator-unauthenticated",
+            Self::CoordinatorPermissionDenied => "coordinator-permission-denied",
+            Self::CoordinatorUnavailable => "coordinator-unavailable",
+            Self::CoordinatorTimeout => "coordinator-timeout",
+            Self::CoordinatorInvalid => "coordinator-invalid",
+            Self::CoordinatorUnimplemented => "coordinator-unimplemented",
+            Self::CoordinatorInternal => "coordinator-internal",
         }
     }
 
@@ -198,6 +215,13 @@ impl MeshTransportStartupFailure {
             Self::TransportSetup => 96,
             Self::StatusIo => 97,
             Self::Protocol => 98,
+            Self::CoordinatorUnauthenticated => 99,
+            Self::CoordinatorPermissionDenied => 100,
+            Self::CoordinatorUnavailable => 101,
+            Self::CoordinatorTimeout => 102,
+            Self::CoordinatorInvalid => 103,
+            Self::CoordinatorUnimplemented => 104,
+            Self::CoordinatorInternal => 105,
         }
     }
 
@@ -222,6 +246,13 @@ impl MeshTransportStartupFailure {
             Self::TransportSetup => "mesh_transport_transport_setup",
             Self::StatusIo => "mesh_transport_status_io",
             Self::Protocol => "mesh_transport_protocol",
+            Self::CoordinatorUnauthenticated => "mesh_transport_coordinator_unauthenticated",
+            Self::CoordinatorPermissionDenied => "mesh_transport_coordinator_permission_denied",
+            Self::CoordinatorUnavailable => "mesh_transport_coordinator_unavailable",
+            Self::CoordinatorTimeout => "mesh_transport_coordinator_timeout",
+            Self::CoordinatorInvalid => "mesh_transport_coordinator_invalid",
+            Self::CoordinatorUnimplemented => "mesh_transport_coordinator_unimplemented",
+            Self::CoordinatorInternal => "mesh_transport_coordinator_internal",
         }
     }
 
@@ -246,6 +277,13 @@ impl MeshTransportStartupFailure {
             96 => Some(Self::TransportSetup),
             97 => Some(Self::StatusIo),
             98 => Some(Self::Protocol),
+            99 => Some(Self::CoordinatorUnauthenticated),
+            100 => Some(Self::CoordinatorPermissionDenied),
+            101 => Some(Self::CoordinatorUnavailable),
+            102 => Some(Self::CoordinatorTimeout),
+            103 => Some(Self::CoordinatorInvalid),
+            104 => Some(Self::CoordinatorUnimplemented),
+            105 => Some(Self::CoordinatorInternal),
             _ => None,
         }
     }
@@ -255,7 +293,7 @@ impl MeshTransportStartupFailure {
     }
 }
 
-const ALL_FAILURES: [MeshTransportStartupFailure; 19] = [
+const ALL_FAILURES: [MeshTransportStartupFailure; 26] = [
     MeshTransportStartupFailure::InvalidIdentity,
     MeshTransportStartupFailure::InheritedDescriptor,
     MeshTransportStartupFailure::AmbientEnvironment,
@@ -275,6 +313,13 @@ const ALL_FAILURES: [MeshTransportStartupFailure; 19] = [
     MeshTransportStartupFailure::TransportSetup,
     MeshTransportStartupFailure::StatusIo,
     MeshTransportStartupFailure::Protocol,
+    MeshTransportStartupFailure::CoordinatorUnauthenticated,
+    MeshTransportStartupFailure::CoordinatorPermissionDenied,
+    MeshTransportStartupFailure::CoordinatorUnavailable,
+    MeshTransportStartupFailure::CoordinatorTimeout,
+    MeshTransportStartupFailure::CoordinatorInvalid,
+    MeshTransportStartupFailure::CoordinatorUnimplemented,
+    MeshTransportStartupFailure::CoordinatorInternal,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +382,20 @@ pub enum MeshTransportProcessError {
     StatusIo,
     #[error("Mesh transport private protocol failed")]
     Protocol,
+    #[error("Mesh coordinator authentication failed")]
+    CoordinatorUnauthenticated,
+    #[error("Mesh coordinator permission was denied")]
+    CoordinatorPermissionDenied,
+    #[error("Mesh coordinator was unavailable")]
+    CoordinatorUnavailable,
+    #[error("Mesh coordinator setup timed out")]
+    CoordinatorTimeout,
+    #[error("Mesh coordinator setup request was invalid")]
+    CoordinatorInvalid,
+    #[error("Mesh coordinator setup is unimplemented")]
+    CoordinatorUnimplemented,
+    #[error("Mesh coordinator setup failed internally")]
+    CoordinatorInternal,
 }
 
 impl MeshTransportProcessError {
@@ -365,6 +424,17 @@ impl MeshTransportProcessError {
             Self::TransportSetup => MeshTransportStartupFailure::TransportSetup,
             Self::StatusIo => MeshTransportStartupFailure::StatusIo,
             Self::Protocol => MeshTransportStartupFailure::Protocol,
+            Self::CoordinatorUnauthenticated => {
+                MeshTransportStartupFailure::CoordinatorUnauthenticated
+            }
+            Self::CoordinatorPermissionDenied => {
+                MeshTransportStartupFailure::CoordinatorPermissionDenied
+            }
+            Self::CoordinatorUnavailable => MeshTransportStartupFailure::CoordinatorUnavailable,
+            Self::CoordinatorTimeout => MeshTransportStartupFailure::CoordinatorTimeout,
+            Self::CoordinatorInvalid => MeshTransportStartupFailure::CoordinatorInvalid,
+            Self::CoordinatorUnimplemented => MeshTransportStartupFailure::CoordinatorUnimplemented,
+            Self::CoordinatorInternal => MeshTransportStartupFailure::CoordinatorInternal,
         }
     }
 }
@@ -943,7 +1013,7 @@ async fn prepare_mesh(
         NETWORK_SETUP_TIMEOUT,
     )
     .await
-    .map_err(|_| MeshTransportProcessError::CoordinatorSetup)?;
+    .map_err(coordinator_setup_error)?;
     drop(enrollment);
     let map = coordinator
         .take_setup_derp_map()
@@ -966,6 +1036,28 @@ async fn prepare_mesh(
         wireguard_secret,
         disco_private,
     })
+}
+
+fn coordinator_setup_error(error: CoordinatorError) -> MeshTransportProcessError {
+    match error {
+        CoordinatorError::Connect(error) => match error.code {
+            ErrorCode::Unauthenticated => MeshTransportProcessError::CoordinatorUnauthenticated,
+            ErrorCode::PermissionDenied => MeshTransportProcessError::CoordinatorPermissionDenied,
+            ErrorCode::Unavailable => MeshTransportProcessError::CoordinatorUnavailable,
+            ErrorCode::DeadlineExceeded => MeshTransportProcessError::CoordinatorTimeout,
+            ErrorCode::InvalidArgument | ErrorCode::FailedPrecondition => {
+                MeshTransportProcessError::CoordinatorInvalid
+            }
+            ErrorCode::Unimplemented => MeshTransportProcessError::CoordinatorUnimplemented,
+            ErrorCode::Internal => MeshTransportProcessError::CoordinatorInternal,
+            _ => MeshTransportProcessError::CoordinatorSetup,
+        },
+        CoordinatorError::SetupTimeout(_) => MeshTransportProcessError::CoordinatorTimeout,
+        CoordinatorError::InvalidSetupResponse | CoordinatorError::Url(_) => {
+            MeshTransportProcessError::CoordinatorInvalid
+        }
+        _ => MeshTransportProcessError::CoordinatorSetup,
+    }
 }
 
 async fn resolve_transport_plan(
@@ -1651,6 +1743,100 @@ mod tests {
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
             );
+        }
+    }
+
+    #[test]
+    fn coordinator_setup_errors_map_only_closed_classes() {
+        const CANARY: &str = "coordinator-private-message-must-not-escape";
+        let classified = [
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::Unauthenticated,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorUnauthenticated,
+            ),
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::PermissionDenied,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorPermissionDenied,
+            ),
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::Unavailable,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorUnavailable,
+            ),
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::DeadlineExceeded,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorTimeout,
+            ),
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::InvalidArgument,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorInvalid,
+            ),
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::FailedPrecondition,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorInvalid,
+            ),
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::Unimplemented,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorUnimplemented,
+            ),
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::Internal,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorInternal,
+            ),
+            (
+                CoordinatorError::SetupTimeout(Duration::from_secs(15)),
+                MeshTransportStartupFailure::CoordinatorTimeout,
+            ),
+            (
+                CoordinatorError::InvalidSetupResponse,
+                MeshTransportStartupFailure::CoordinatorInvalid,
+            ),
+            (
+                CoordinatorError::Url(CANARY.to_owned()),
+                MeshTransportStartupFailure::CoordinatorInvalid,
+            ),
+            (
+                CoordinatorError::Connect(connectrpc::ConnectError::new(
+                    ErrorCode::ResourceExhausted,
+                    CANARY,
+                )),
+                MeshTransportStartupFailure::CoordinatorSetup,
+            ),
+        ];
+        for (error, expected) in classified {
+            let mapped = coordinator_setup_error(error);
+            assert_eq!(mapped.startup_failure(), expected);
+            assert!(!mapped.to_string().contains(CANARY));
+            assert!(
+                !expected
+                    .message()
+                    .windows(CANARY.len())
+                    .any(|value| value == CANARY.as_bytes())
+            );
+            assert!(!expected.runner_error_code().contains(CANARY));
         }
     }
 }
