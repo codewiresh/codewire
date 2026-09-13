@@ -5,10 +5,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck disable=SC1091 # The tested script is sourced without its main entrypoint.
 source "$REPO_ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
+REAL_CW="$(declare -f cw)"
+REAL_CW_WITH_TIMEOUT="$(declare -f cw_with_timeout)"
 mkdir -p "$REPO_ROOT/.tmp"
 APP_TEST_ROOT="$(mktemp -d "$REPO_ROOT/.tmp/cw-dev-app-fixtures.XXXXXXXX")"
+APP_TEST_RUNTIME="$(mktemp -d /dev/shm/cw-dev-app-runtime.XXXXXXXX)"
+chmod 0700 "$APP_TEST_RUNTIME"
 APP_TEST_OWNER="$BASHPID"
-trap 'if [[ "$BASHPID" == "$APP_TEST_OWNER" ]]; then rm -rf -- "$APP_TEST_ROOT"; fi' EXIT
+trap 'if [[ "$BASHPID" == "$APP_TEST_OWNER" ]]; then rm -rf -- "$APP_TEST_ROOT" "$APP_TEST_RUNTIME"; fi' EXIT
 APP_TEST_COUNT=0
 REAL_APPLICATION_PTY="$(declare -f run_application_secret_pty)"
 fail() { printf 'application smoke fixture: %s\n' "$*" >&2; exit 1; }
@@ -17,15 +21,25 @@ pass() { APP_TEST_COUNT=$((APP_TEST_COUNT + 1)); }
 fixture() {
   TMPDIR_SMOKE="$(mktemp -d "$APP_TEST_ROOT/case.XXXXXXXX")"
   APP_SECRET_PROJECTS=(); APP_SECRET_IDS=(); APP_SECRET_VALUES=(); APP_SECRET_HASHES=()
+  APP_SECRET_USER_ATTEMPTS=(); APP_SECRET_ORG_ATTEMPTS=(); APP_SECRET_ALL_KEYS=()
+  APP_SECRET_ALL_HASHES_A=(); APP_SECRET_ALL_HASHES_B=(); APP_SECRET_ALL_HASHES_CLEAR=()
+  APP_SECRET_ISOLATED_ENV=(); APP_SECRET_ALL_SCOPES=0; APP_SECRET_LOGIN_ATTEMPTED=0
+  APP_SECRET_LOGIN_DIR=''; APP_SECRET_RUNTIME_PARENT=''; APP_SECRET_RUNTIME_DIR=''
   APP_SECRET_DOCUMENT=''; APP_SECRET_CREATE_ATTEMPTED=0; ENV_ID=''; CLAIM_NAME=fixture-claim
   SMOKE_NAME=fixture-env; SMOKE_TIMEOUT_SECONDS=1; SMOKE_EXEC_TIMEOUT=5
   SMOKE_KEEP_ENV=0; SMOKE_SKIP_KUBE=0; SMOKE_EXISTING_ENV_ID=''
   SMOKE_AUTH_MODE=api-key; ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=0; ALLOW_NON_DEV=0
   CODEWIRE_SERVER_URL=https://synthetic.invalid; EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
   CODEWIRE_DEV_SMOKE_API_KEY=synthetic-test-only; EXPECTED_CODEWIRE_SMOKE_USER_EMAIL=synthetic@example.invalid
+  EXPECTED_CODEWIRE_ADMIN_EMAIL='owner@example.invalid'
+  EXPECTED_CODEWIRE_ADMIN_USER_ID=11111111111111111111111111111111
+  EXPECTED_CODEWIRE_ORGANIZATION_ID=22222222222222222222222222222222
+  CODEWIRE_ADMIN_OAUTH_CONFIG_DIR=''
   SANDBOX_NAMESPACE=synthetic; APP_FAILURE=''
   APP_KUBE_RESOURCE=''; APP_KUBE_MUTATION='.'; APP_ANNOTATED_POD=0
   printf '[]\n' >"$TMPDIR_SMOKE/projects.db"
+  printf '[]\n' >"$TMPDIR_SMOKE/user.db"
+  printf '[]\n' >"$TMPDIR_SMOKE/organization.db"
   printf '[]\n' >"$TMPDIR_SMOKE/environments.db"
   printf '1\n' >"$TMPDIR_SMOKE/pod-incarnation"
   : >"$TMPDIR_SMOKE/calls"
@@ -36,6 +50,25 @@ cw() {
   [[ "$*" != *cwdevapp* ]] || fail 'synthetic protected value entered CLI argv'
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
+    'secrets --platform --user list --output json')
+      cat "$TMPDIR_SMOKE/user.db" ;;
+    'secrets --platform --organization list --output json')
+      cat "$TMPDIR_SMOKE/organization.db" ;;
+    'secrets --platform --user set '*|'secrets --platform --organization set '*)
+      local input='' scope db key
+      IFS= read -r input || [[ -n "$input" ]]
+      [[ "$input" == cwdevall* ]] || fail 'all-scope protected stdin was not supplied'
+      scope="$3"; scope="${scope#--}"; db="$TMPDIR_SMOKE/$scope.db"; key="$5"
+      jq --arg key "$key" 'map(select(.key != $key)) + [{key:$key,created_at:"now",updated_at:"now"}]' \
+        "$db" >"$TMPDIR_SMOKE/db.next"
+      mv "$TMPDIR_SMOKE/db.next" "$db"
+      [[ "$APP_FAILURE" != "lost-$scope-write" ]] || return 1 ;;
+    'secrets --platform --user delete '*|'secrets --platform --organization delete '*)
+      local scope db key
+      scope="$3"; scope="${scope#--}"; db="$TMPDIR_SMOKE/$scope.db"; key="$5"
+      [[ "$APP_FAILURE" != "cleanup-$scope" ]] || return 1
+      jq --arg key "$key" 'map(select(.key != $key))' "$db" >"$TMPDIR_SMOKE/db.next"
+      mv "$TMPDIR_SMOKE/db.next" "$db" ;;
     'secrets --platform projects list --output json')
       cat "$TMPDIR_SMOKE/projects.db" ;;
     'secrets --platform projects create '*)
@@ -51,21 +84,33 @@ cw() {
     'secrets --platform --project '*" set "*)
       local input=''
       IFS= read -r input || [[ -n "$input" ]]
-      [[ "$input" == cwdevapp* && ${#input} == 41 ]] || fail 'protected stdin was not supplied'
+      if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+        [[ "$input" == cwdevall* ]]
+      else
+        [[ "$input" == cwdevapp* && ${#input} == 41 ]]
+      fi || fail 'protected stdin was not supplied'
       [[ "$APP_FAILURE" != scope ]] || return 1 ;;
     'secrets --platform --project '*" list --output json")
       if [[ "$APP_FAILURE" == leak ]]; then
         jq -n --arg value "${APP_SECRET_VALUES[0]}" '[{key:"DATABASE_URL",value:$value},{key:"CW_DEV_PRECEDENCE"}]'
+      elif [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+        printf '%s\n' "${APP_SECRET_ALL_KEYS[@]:1:1}" "${APP_SECRET_ALL_KEYS[@]:3:3}" |
+          jq -Rsc 'split("\n")[:-1] | map({key:.,created_at:"now",updated_at:"now"})'
       else printf '[{"key":"DATABASE_URL"},{"key":"CW_DEV_PRECEDENCE"}]\n'; fi ;;
     'env --platform list --output json') jq 'map(select(.state != "destroying" and .state != "destroyed"))' "$TMPDIR_SMOKE/environments.db" ;;
     'env --platform list --all --output json') cat "$TMPDIR_SMOKE/environments.db" ;;
     'env create --platform --file '*)
       local project
       project="$(jq -r .secrets.project "$APP_SECRET_DOCUMENT")"
-      jq -n --arg project "$project" --arg name "$SMOKE_NAME" \
+      local user organization
+      user="$(jq -r '.secrets.user // empty' "$APP_SECRET_DOCUMENT")"
+      organization="$(jq -r '.secrets.organization // false' "$APP_SECRET_DOCUMENT")"
+      jq -n --arg project "$project" --arg user "$user" --argjson organization "$organization" --arg name "$SMOKE_NAME" \
         '[{id:"00000000-0000-4000-8000-000000000099",name:$name,state:"running",operation_generation:1,
           setup_complete:true,setup_error:null,
-          source_selection:{secrets:{project:$project},credentials:null,profile_revision:null}}]' >"$TMPDIR_SMOKE/environments.db"
+          source_selection:{secrets:({project:$project} +
+            (if $user == "" then {} else {user:$user} end) +
+            (if $organization then {organization:true} else {} end)),credentials:null,profile_revision:null}}]' >"$TMPDIR_SMOKE/environments.db"
       printf 'ID: 00000000-0000-4000-8000-000000000099\n' ;;
     'env --platform info '*" --output json")
       jq -e '.[0].state != "destroying" and .[0].state != "destroyed"' "$TMPDIR_SMOKE/environments.db" >/dev/null || return 1
@@ -75,11 +120,16 @@ cw() {
         printf 'source selection requires --yes for noninteractive or JSON commands; no source change was submitted\n' >&2
         return 2
       fi
-      local project='' before
+      local project='' before user='' organization=false
       before="$(jq '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")"
       [[ " $* " != *' --secrets '* ]] || project="$6"
+      [[ " $* " != *' --user-secrets platform '* ]] || user=platform
+      [[ " $* " != *' --org-secrets '* ]] || organization=true
       # The real workflow retains its generation across source restarts.
-      jq --arg project "$project" '.[0].source_selection.secrets.project=$project' \
+      jq --arg project "$project" --arg user "$user" --argjson organization "$organization" '
+        .[0].source_selection.secrets=(if $project == "" then {} else
+          {project:$project} + (if $user == "" then {} else {user:$user} end) +
+          (if $organization then {organization:true} else {} end) end)' \
         "$TMPDIR_SMOKE/environments.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/environments.db"
       printf '%s\n' "$(( $(<"$TMPDIR_SMOKE/pod-incarnation") + 1 ))" >"$TMPDIR_SMOKE/pod-incarnation"
@@ -107,10 +157,10 @@ run_kube_assertions() {
     "$TMPDIR_SMOKE/app-environment.json" >/dev/null || fail 'Pod assertions preceded completed setup'
 }
 kubectl_dev() {
-  local generation project pod_uid pod_name=owned-sandbox resource object
+  local generation project pod_uid pod_name=owned-sandbox resource object pod_env
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   generation="$(jq -r '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")"
-  project="$(jq -r '.[0].source_selection.secrets.project' "$TMPDIR_SMOKE/environments.db")"
+  project="$(jq -r '.[0].source_selection.secrets.project // ""' "$TMPDIR_SMOKE/environments.db")"
   pod_uid="pod-$(<"$TMPDIR_SMOKE/pod-incarnation")"
   [[ "$APP_FAILURE" != stale-pod ]] || pod_uid='pod-1'
   [[ "$APP_ANNOTATED_POD" != 1 ]] || pod_name=annotated-pod
@@ -129,29 +179,98 @@ kubectl_dev() {
     "-n synthetic get pod $pod_name -o json")
       [[ "$APP_FAILURE" != missing-pod ]] || return 1
       resource=pod
-      object="$(jq -n --arg id "$ENV_ID" --arg generation "$generation" --arg project "$project" --arg uid "$pod_uid" --arg name "$pod_name" '
+      pod_env='[]'
+      if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+        pod_env="$(jq -n --arg key "${APP_SECRET_ALL_KEYS[5]}" '[{name:$key,value:"ordinary-config"}]')"
+      fi
+      object="$(jq -n --arg id "$ENV_ID" --arg generation "$generation" --arg project "$project" --arg uid "$pod_uid" --arg name "$pod_name" --argjson pod_env "$pod_env" '
         {metadata:{name:$name,namespace:"synthetic",uid:$uid,
           labels:{"codewire.sh/environment-id":$id,"codewire.sh/type":"workspace","codewire.sh/environment-operation-generation":$generation},
           ownerReferences:[{apiVersion:"agents.x-k8s.io/v1beta1",kind:"Sandbox",name:"owned-sandbox",uid:"owned-sandbox-uid",controller:true}]},
           status:{phase:"Running"},spec:{volumes:[{name:"workspace",persistentVolumeClaim:{claimName:"owned-pvc"}}],containers:[{name:"workspace",env:
-            (if $project == "" then [] else [
+            ($pod_env + (if $project == "" then [] else [
               {name:"CODEWIRE_ENVIRONMENT_ID",value:$id},
               {name:"CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",value:$generation},
-              {name:"CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",value:("a" * 64)}] end)}]}}')" ;;
+              {name:"CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",value:("a" * 64)}] end))}]}}')" ;;
     *) fail "unexpected Kubernetes fixture operation: $*" ;;
   esac
   if [[ "$APP_KUBE_RESOURCE" == "$resource" ]]; then jq "$APP_KUBE_MUTATION" <<<"$object";
   else printf '%s\n' "$object"; fi
 }
 run_application_secret_pty() {
-  [[ "$1" == *'DATABASE_URL'* ]] || fail 'PTY did not receive the application assertion'
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+    [[ "$1" == *"${APP_SECRET_ALL_KEYS[0]}"* && "$1" == *"${APP_SECRET_ALL_KEYS[5]}"* ]] ||
+      fail 'PTY did not receive every all-scope application assertion'
+  else
+    [[ "$1" == *'DATABASE_URL'* ]] || fail 'PTY did not receive the application assertion'
+  fi
   printf 'application-secret-check-ok\n' >"$TMPDIR_SMOKE/app-pty-$2.log"
 }
+TEST_CW="$(declare -f cw)"
+TEST_CW_WITH_TIMEOUT="$(declare -f cw_with_timeout)"
 
 expect_failure() {
   local label="$1"; shift
   if ( "$@" ) >"$APP_TEST_ROOT/failure.out" 2>"$APP_TEST_ROOT/failure.err"; then fail "$label accepted invalid input"; fi
   pass
+}
+
+write_fresh_login_cw() {
+  local target="$1"
+  cat >"$target" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+state="$(dirname "$0")/fresh-login-state"
+mkdir -p "$state"
+printf '%s\n' "$*" >>"$state/calls"
+case "$*" in
+  *' login --org '*)
+    env | sort >"$state/login-env"
+    mkdir -p "$CW_CONFIG_DIR"
+    printf '{}\n' >"$CW_CONFIG_DIR/config.json"
+    printf '{}\n' >"$CW_CONFIG_DIR/credentials.json"
+    chmod 0600 "$CW_CONFIG_DIR/config.json" "$CW_CONFIG_DIR/credentials.json" ;;
+  *' whoami --output json')
+    user=11111111111111111111111111111111
+    [[ "$(cat "$state/variant" 2>/dev/null || true)" != wrong-user ]] || user=33333333333333333333333333333333
+    printf '{"id":"%s","email":"owner@example.invalid"}\n' "$user" ;;
+  *' org current')
+    role=owner
+    [[ "$(cat "$state/variant" 2>/dev/null || true)" != current-role ]] || role=member
+    printf 'ID: 22222222222222222222222222222222\nRole: %s\n' "$role" ;;
+  *' env list --output json') printf '[]\n' ;;
+  *' org list --output json')
+    case "$(cat "$state/variant" 2>/dev/null || true)" in
+      duplicate) printf '[{"id":"22222222222222222222222222222222","role":"owner"},{"id":"22222222222222222222222222222222","role":"owner"}]\n' ;;
+      wrong-target) printf '[{"id":"33333333333333333333333333333333","role":"owner"}]\n' ;;
+      wrong-role) printf '[{"id":"22222222222222222222222222222222","role":"member"}]\n' ;;
+      *) printf '[{"id":"22222222222222222222222222222222","role":"owner"},{"id":"33333333333333333333333333333333","role":"member"}]\n' ;;
+    esac ;;
+  *' logout') printf 'logout\n' >>"$state/logout" ;;
+  *) exit 97 ;;
+esac
+EOF
+  chmod 0700 "$target"
+}
+
+fresh_login_fixture() {
+  fixture
+  eval "$REAL_CW"
+  eval "$REAL_CW_WITH_TIMEOUT"
+  SMOKE_ONLY_PHASES=(application-secrets-all-scopes)
+  SMOKE_AUTH_MODE=admin-oidc
+  APP_SECRET_ALL_SCOPES=1
+  ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=0
+  ALLOW_NON_DEV=0
+  CODEWIRE_SERVER_URL=https://codewire-dev.sh
+  EXPECTED_CODEWIRE_DEV_SERVER_URL=https://codewire-dev.sh
+  CODEWIRE_DEV_SMOKE_API_KEY=''
+  unset CODEWIRE_API_KEY CW_CONFIG_DIR
+  XDG_RUNTIME_DIR="$APP_TEST_RUNTIME"
+  SMOKE_TMP_PARENT="$APP_TEST_ROOT"
+  CW_BIN="$APP_TEST_ROOT/fresh-login-cw"
+  write_fresh_login_cw "$CW_BIN"
+  rm -rf -- "$APP_TEST_ROOT/fresh-login-state"
 }
 
 fixture
@@ -178,6 +297,106 @@ for invalid in existing keep no-kube oauth generic wrong-origin; do
 done
 
 fixture
+SMOKE_ONLY_PHASES=(application-secrets-all-scopes)
+application_all_scopes_requested
+application_all_scopes_selected
+pass
+bash -c '
+  smoke="$1"
+  set -- --admin-oidc --only application-secrets-all-scopes
+  source "$smoke"
+  [[ "$SMOKE_AUTH_MODE" == admin-oidc && "${SMOKE_ONLY_PHASES[*]}" == application-secrets-all-scopes ]]
+' _ "$REPO_ROOT/scripts/runtime/dev/smoke-dev-commodity.sh" ||
+  fail 'all-scope phase was not accepted by the public option parser'
+pass
+SMOKE_ONLY_PHASES=(application-secrets-all-scopes exec)
+application_all_scopes_requested
+expect_failure mixed-all-scope-phase validate_application_all_scopes_options
+SMOKE_ONLY_PHASES=(application-secrets-all-scopes application-secrets-all-scopes)
+expect_failure duplicate-all-scope-phase validate_application_all_scopes_options
+pass
+pass
+
+for invalid in saved-config inherited-config api-key generic-key endpoint existing keep skip-kube email user-id org-id relative-cw; do
+  reject_all_scope_options() {
+    fresh_login_fixture
+    case "$invalid" in
+      saved-config) CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$APP_TEST_ROOT/saved" ;;
+      inherited-config) CW_CONFIG_DIR="$APP_TEST_ROOT/saved" ;;
+      api-key) CODEWIRE_API_KEY=forbidden ;;
+      generic-key) ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=1 ;;
+      endpoint) CODEWIRE_SERVER_URL=https://other.invalid ;;
+      existing) SMOKE_EXISTING_ENV_ID=unowned ;;
+      keep) SMOKE_KEEP_ENV=1 ;;
+      skip-kube) SMOKE_SKIP_KUBE=1 ;;
+      email) EXPECTED_CODEWIRE_ADMIN_EMAIL='' ;;
+      user-id) EXPECTED_CODEWIRE_ADMIN_USER_ID=not-an-id ;;
+      org-id) EXPECTED_CODEWIRE_ORGANIZATION_ID=00000000000000000000000000000000 ;;
+      relative-cw) CW_BIN=relative-cw ;;
+    esac
+    validate_application_all_scopes_options
+  }
+  expect_failure "$invalid" reject_all_scope_options
+done
+
+fresh_login_fixture
+validate_application_all_scopes_options
+export AWS_SECRET_ACCESS_KEY=forbidden-owner-provider SSH_AUTH_SOCK=/forbidden/owner-agent
+prepare_application_all_scopes_cli
+fresh_runtime="$APP_SECRET_RUNTIME_DIR"
+fresh_login="$APP_SECRET_LOGIN_DIR"
+[[ "$(stat -c %a "$fresh_runtime")" == 700 && "$(stat -c %a "$fresh_login")" == 700 ]]
+login_env="$APP_TEST_ROOT/fresh-login-state/login-env"
+grep -Fx "HOME=$TMPDIR_SMOKE/auth-home" "$login_env" >/dev/null
+grep -Fx "CW_CONFIG_DIR=$fresh_login" "$login_env" >/dev/null
+grep -Fx "XDG_RUNTIME_DIR=$fresh_runtime" "$login_env" >/dev/null
+grep -Fx "DBUS_SESSION_BUS_ADDRESS=unix:path=$fresh_runtime/no-owner-bus" "$login_env" >/dev/null
+if grep -Eq '^(AWS_|SSH_AUTH_SOCK=|CODEWIRE_API_KEY=)' "$login_env"; then
+  fail 'fresh login inherited owner provider, SSH or API-key state'
+fi
+cleanup_application_all_scopes_login
+[[ ! -e "$fresh_runtime" ]]
+grep -Fx logout "$APP_TEST_ROOT/fresh-login-state/logout" >/dev/null
+unset AWS_SECRET_ACCESS_KEY SSH_AUTH_SOCK
+pass
+
+for variant in wrong-user duplicate wrong-target wrong-role current-role; do
+  fresh_login_fixture
+  mkdir -p "$APP_TEST_ROOT/fresh-login-state"
+  printf '%s\n' "$variant" >"$APP_TEST_ROOT/fresh-login-state/variant"
+  reject_fresh_identity() {
+    trap 'cleanup_application_all_scopes_login' EXIT
+    prepare_application_all_scopes_cli
+  }
+  expect_failure "$variant" reject_fresh_identity
+  if find "$APP_TEST_RUNTIME" -mindepth 1 -maxdepth 1 -name '.cwapp-*' | grep -q .; then
+    fail "$variant retained fresh auth material after failure"
+  fi
+  grep -Fx logout "$APP_TEST_ROOT/fresh-login-state/logout" >/dev/null ||
+    fail "$variant did not attempt logout during failure cleanup"
+done
+pass
+
+fresh_login_fixture
+prepare_application_all_scopes_cli
+forced_runtime="$APP_SECRET_RUNTIME_DIR"
+APP_SECRET_USER_ATTEMPTS=(FORCE_CLEANUP)
+SMOKE_COLLECT_FAILURE_DIAGNOSTICS=0
+if (
+  cleanup_application_secrets() { die 'forced explicit cleanup exit'; }
+  trap cleanup EXIT
+  false
+) >"$TMPDIR_SMOKE/forced-cleanup.out" 2>"$TMPDIR_SMOKE/forced-cleanup.err"; then
+  fail 'explicit application cleanup exit did not fail acceptance'
+fi
+[[ ! -e "$forced_runtime" ]] || fail 'explicit application cleanup exit retained fresh auth material'
+grep -Fx logout "$APP_TEST_ROOT/fresh-login-state/logout" >/dev/null ||
+  fail 'explicit application cleanup exit skipped logout'
+pass
+eval "$TEST_CW"
+eval "$TEST_CW_WITH_TIMEOUT"
+
+fixture
 prepare_application_secrets
 jq -e '.version == 1 and (has("schema_version") | not) and .secrets.project == "platform:id:00000000-0000-4000-8000-000000000001" and
   .environment.CW_DEV_PRECEDENCE == "ordinary-config" and (has("credentials") | not)' "$APP_SECRET_DOCUMENT" >/dev/null
@@ -195,6 +414,140 @@ pass
 expect_failure terminal-info-hidden cw env --platform info "$ENV_ID" --output json
 application_environment_destroyed
 grep -Fq 'env --platform list --all --output json' "$TMPDIR_SMOKE/calls"
+pass
+
+
+# Shared scopes must begin empty, and the final metadata read is an ownership
+# fence immediately before environment creation.
+fixture
+APP_SECRET_ALL_SCOPES=1
+printf '[{"key":"FOREIGN","created_at":"now","updated_at":"now"}]\n' >"$TMPDIR_SMOKE/user.db"
+expect_failure shared-user-nonempty prepare_application_secrets
+[[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]]
+[[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]]
+pass
+
+fixture
+APP_SECRET_ALL_SCOPES=1
+printf '[{"key":"FOREIGN","created_at":"now","updated_at":"now"}]\n[]\n' >"$TMPDIR_SMOKE/user.db"
+expect_failure multiple-shared-documents prepare_application_secrets
+[[ "$(jq -s length "$TMPDIR_SMOKE/user.db")" == 2 ]]
+[[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]]
+pass
+
+fixture
+APP_SECRET_ALL_SCOPES=1
+prepare_application_secrets
+jq '. + [{key:"FOREIGN",created_at:"now",updated_at:"now"}]' "$TMPDIR_SMOKE/user.db" >"$TMPDIR_SMOKE/db.next"
+mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/user.db"
+expect_failure extra-final-key create_environment
+if grep -Fq 'env create' "$TMPDIR_SMOKE/calls"; then fail 'environment create ran after the final scope fence failed'; fi
+expect_failure unknown-key-cleanup cleanup_application_secrets
+jq -e 'map(.key) == ["FOREIGN"]' "$TMPDIR_SMOKE/user.db" >/dev/null ||
+  fail 'cleanup removed an unknown shared-scope key or retained an owned key'
+[[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]]
+pass
+
+fixture
+APP_SECRET_ALL_SCOPES=1
+APP_FAILURE=lost-organization-write
+if (trap 'cleanup_application_secrets' EXIT; prepare_application_secrets) \
+    >"$TMPDIR_SMOKE/partial.out" 2>"$TMPDIR_SMOKE/partial.err"; then
+  fail 'lost shared-scope write response unexpectedly succeeded'
+fi
+[[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]] ||
+  fail 'partial write cleanup did not remove the exact attempted key'
+[[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]] ||
+  fail 'partial shared-scope write unexpectedly reached project creation'
+pass
+
+fixture
+APP_SECRET_ALL_SCOPES=1
+prepare_application_secrets
+jq '.[0].value="synthetic-leak"' "$TMPDIR_SMOKE/organization.db" >"$TMPDIR_SMOKE/db.next"
+mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/organization.db"
+expect_failure leaky-final-metadata create_environment
+pass
+
+fixture
+APP_SECRET_ALL_SCOPES=1
+prepare_application_secrets
+APP_FAILURE=cleanup-user
+expect_failure shared-cleanup cleanup_application_secrets
+pass
+
+fixture
+APP_SECRET_ALL_SCOPES=1
+prepare_application_secrets
+config_key="${APP_SECRET_ALL_KEYS[5]}"
+jq -e --arg project "platform:id:${APP_SECRET_IDS[0]}" --arg config "$config_key" '
+  .version == 1 and .secrets == {project:$project,organization:true,user:"platform"} and
+  (.environment | keys) == [$config] and .environment[$config] == "ordinary-config" and
+  (has("credentials") | not)
+' "$APP_SECRET_DOCUMENT" >/dev/null
+/bin/sh -n < <(jq -r .install_command "$APP_SECRET_DOCUMENT")
+/bin/sh -n < <(jq -r .startup_script "$APP_SECRET_DOCUMENT")
+create_environment
+run_application_secrets_smoke
+grep -Fq -- '--secrets platform:id:00000000-0000-4000-8000-000000000002 --user-secrets platform --org-secrets --yes --output json' \
+  "$TMPDIR_SMOKE/calls" || fail 'all-scope update did not resubmit every selector'
+jq -e '.[0].source_selection.secrets == {}' "$TMPDIR_SMOKE/environments.db" >/dev/null
+cleanup_application_secrets
+[[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]]
+[[ "$(jq length "$TMPDIR_SMOKE/user.db")" == 0 ]]
+[[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]]
+pass
+
+# Execute the generated setup scripts with real shell expansion. In particular,
+# clear must record absent for every scoped key while retaining ordinary config.
+guest_root="$TMPDIR_SMOKE/generated-guest"
+mkdir -p "$guest_root/workspace" "$guest_root/home/.codewire/daemon/sessions/one"
+install="$(jq -r .install_command "$APP_SECRET_DOCUMENT")"
+startup="$(jq -r .startup_script "$APP_SECRET_DOCUMENT")"
+install="${install//\/workspace/$guest_root/workspace}"
+startup="${startup//\/workspace/$guest_root/workspace}"
+all_env_a=(
+  "${APP_SECRET_ALL_KEYS[0]}=${APP_SECRET_VALUES[0]}"
+  "${APP_SECRET_ALL_KEYS[1]}=${APP_SECRET_VALUES[7]}"
+  "${APP_SECRET_ALL_KEYS[2]}=${APP_SECRET_VALUES[4]}"
+  "${APP_SECRET_ALL_KEYS[3]}=${APP_SECRET_VALUES[8]}"
+  "${APP_SECRET_ALL_KEYS[4]}=${APP_SECRET_VALUES[5]}"
+  "${APP_SECRET_ALL_KEYS[5]}=ordinary-config"
+)
+env "${all_env_a[@]}" /bin/sh -c "$install"
+env "${all_env_a[@]}" /bin/sh -c "$startup"
+jq -n --arg key "${APP_SECRET_ALL_KEYS[5]}" '{($key):"ordinary-config"}' \
+  >"$guest_root/home/.codewire/environment.json"
+jq -n --arg key "${APP_SECRET_ALL_KEYS[5]}" '{env:[($key + "=ordinary-config")]}' \
+  >"$guest_root/home/.codewire/daemon/sessions/one/session.json"
+check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_A)"
+check="${check//\/workspace/$guest_root/workspace}"
+check="${check//\/home\/codewire/$guest_root/home}"
+env "${all_env_a[@]}" /bin/sh -c "$check" >"$TMPDIR_SMOKE/all-check-a.out"
+grep -qx application-secret-check-ok "$TMPDIR_SMOKE/all-check-a.out"
+all_env_b=(
+  "${APP_SECRET_ALL_KEYS[0]}=${APP_SECRET_VALUES[0]}"
+  "${APP_SECRET_ALL_KEYS[1]}=${APP_SECRET_VALUES[11]}"
+  "${APP_SECRET_ALL_KEYS[2]}=${APP_SECRET_VALUES[4]}"
+  "${APP_SECRET_ALL_KEYS[3]}=${APP_SECRET_VALUES[12]}"
+  "${APP_SECRET_ALL_KEYS[4]}=${APP_SECRET_VALUES[5]}"
+  "${APP_SECRET_ALL_KEYS[5]}=ordinary-config"
+)
+env "${all_env_b[@]}" /bin/sh -c "$startup"
+check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_B)"
+check="${check//\/workspace/$guest_root/workspace}"
+check="${check//\/home\/codewire/$guest_root/home}"
+env "${all_env_b[@]}" /bin/sh -c "$check" >"$TMPDIR_SMOKE/all-check-b.out"
+grep -qx application-secret-check-ok "$TMPDIR_SMOKE/all-check-b.out"
+env "${APP_SECRET_ALL_KEYS[5]}=ordinary-config" /bin/sh -c "$startup"
+check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_CLEAR)"
+check="${check//\/workspace/$guest_root/workspace}"
+check="${check//\/home\/codewire/$guest_root/home}"
+env "${APP_SECRET_ALL_KEYS[5]}=ordinary-config" /bin/sh -c "$check" >"$TMPDIR_SMOKE/all-check-clear.out"
+grep -qx application-secret-check-ok "$TMPDIR_SMOKE/all-check-clear.out"
+for value in "${APP_SECRET_VALUES[@]}"; do
+  if grep -Fq "$value" <<<"$install$startup$check"; then fail 'generated guest assertion retained a synthetic canary'; fi
+done
 pass
 
 # A malformed acknowledgement cannot be excused by a later successful restart.

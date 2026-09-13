@@ -1216,6 +1216,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-native-mesh-listener.py|\
       scripts/runtime/tests/fixtures/local-platform/__local-credential-authority|\
       scripts/runtime/tests/test-smoke-dev-commodity.sh|\
+      scripts/runtime/tests/test-smoke-dev-application-secrets.sh|\
       scripts/runtime/tests/test-with-dev-smoke-auth.sh)
         select_token runtime_dev_smoke
         case "$path" in
