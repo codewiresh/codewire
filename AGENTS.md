@@ -20,6 +20,24 @@ secrets or credentials or bypassing a selected gate: use synthetic credentials
 for verification unless direct access is separately authorized, and preserve
 the checked-in topology and assertions.
 
+Routine developer verification on owner-designated local or remote machines has
+standing authority within an authorized task. This includes transferring build
+artifacts, starting and stopping disposable test VMs with existing signed
+helpers within their established privileges, creating or replacing synthetic
+fixtures, and terminating and cleaning up only the test's identified processes
+and disposable artifacts. These bounded lifecycle and cleanup operations need
+no per-run hardware or destructive-action approval. Bound runtime and resources,
+preserve unrelated state and checked-in topology, and diagnose failures before
+rerunning. Do not invent one-shot approval gates merely because a test uses
+real hardware, runs remotely, or needs a diagnosed retry.
+
+This standing permission does not authorize new signing or expanded privileges
+or entitlements, host reboots, ad-hoc host/network configuration, access to real
+credentials or user-data shares, or shared/production infrastructure mutation.
+Existing checked-in VM networking remains ordinary verification, not an ad-hoc
+host change. Explicit owner exclusions and checkpoints still apply; reuse valid
+evidence and preserve the selected gates.
+
 Preserve unrelated changes and worktrees. Never commit known-bad work, weaken a
 gate for momentum, or use destructive Git/filesystem operations without an
 explicit request. A Forgejo outage permits only collision-free local work until
