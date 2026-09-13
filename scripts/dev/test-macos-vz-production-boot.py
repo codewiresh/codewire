@@ -648,14 +648,54 @@ class ParentFixtureTests(unittest.TestCase):
 
     def test_real_short_deadline_expires_hung_child(self):
         self.mode("wait")
-        source = self.wrapper.read_text().replace("m.DEADLINE_SECONDS = 5; m.STOP_SECONDS = 0.25", "m.DEADLINE_SECONDS = 1.5; m.STOP_SECONDS = 0.1")
-        self.wrapper.write_text(source)
-        started = time.monotonic()
+        original = self.wrapper.read_text()
+        # Keep the ordinary bounded startup allowance. Starting the short timer
+        # before Python child startup races the very wait state we must prove.
+        # Leave the software deadline unchanged: only the real alarm handler
+        # can produce the short-deadline evidence recorded below.
+        injection = (
+            "import signal, time\n"
+            f"events = pathlib.Path({str(self.events)!r})\n"
+            "real_remaining = m.Run.remaining\n"
+            "real_signal = m.Run.signal\n"
+            "armed = False\n"
+            "def remaining(self):\n"
+            "    global armed\n"
+            "    budget = real_remaining(self)\n"
+            "    if not armed and events.exists() and 'ready-to-signal' in events.read_text().splitlines():\n"
+            "        armed = True\n"
+            "        with events.open('a') as output: output.write('software-deadline:' + str(self.deadline) + '\\n')\n"
+            "        with events.open('a') as output: output.write('deadline-armed:' + str(time.monotonic()) + '\\n')\n"
+            "        signal.setitimer(signal.ITIMER_REAL, 0.25)\n"
+            "    return budget\n"
+            "def observed_signal(self, signum, frame):\n"
+            "    if signum == signal.SIGALRM:\n"
+            "        with events.open('a') as output: output.write('deadline-fired:' + str(time.monotonic()) + '\\n')\n"
+            "        try:\n"
+            "            return real_signal(self, signum, frame)\n"
+            "        except m.FixtureFailure:\n"
+            "            with events.open('a') as output: output.write('deadline-raised\\n')\n"
+            "            raise\n"
+            "    return real_signal(self, signum, frame)\n"
+            "m.Run.remaining = remaining\n"
+            "m.Run.signal = observed_signal\n"
+        )
+        self.wrapper.write_text(original.replace("sys.exit(m.main())", injection + "sys.exit(m.main())"))
         self.finish(self.start(), 1)
-        elapsed = time.monotonic() - started
-        self.assertGreaterEqual(elapsed, 1.1)
-        self.assertLess(elapsed, 3)
-        self.assertIn("ready-to-signal", self.events.read_text())
+        events = self.events.read_text().splitlines()
+        armed = [line for line in events if line.startswith("deadline-armed:")]
+        fired = [line for line in events if line.startswith("deadline-fired:")]
+        software = [line for line in events if line.startswith("software-deadline:")]
+        self.assertEqual(len(armed), 1)
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(len(software), 1)
+        self.assertEqual(events.count("deadline-raised"), 1)
+        self.assertLess(events.index("ready-to-signal"), events.index(armed[0]))
+        self.assertLess(events.index(armed[0]), events.index(fired[0]))
+        self.assertLess(float(fired[0].split(":")[1]), float(software[0].split(":")[1]))
+        elapsed = float(fired[0].split(":")[1]) - float(armed[0].split(":")[1])
+        self.assertGreaterEqual(elapsed, 0.20)
+        self.assertLess(elapsed, 1.0)
 
     def test_real_deadline_interrupts_blocking_read(self):
         original = self.wrapper.read_text().replace("m.DEADLINE_SECONDS = 5; m.STOP_SECONDS = 0.25", "m.DEADLINE_SECONDS = 1.5; m.STOP_SECONDS = 0.1")
