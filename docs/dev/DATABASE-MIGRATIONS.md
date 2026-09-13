@@ -514,11 +514,28 @@ held SHARE lock serializes after that publication. Existing OAuth publication
 and OAuth-only delegation are unchanged.
 
 This staged 27→28 change adds no tables or credential formats and does not
-rewrite versions 1–27. Fresh/no-op, helper owner/search-path/ACL, restricted
-EXECUTE-only admission, fixed-expiry, sliding-session and logout/publication
-ordering proofs are required before acceptance. Rollback requires stopping new
-credential-mutation callers and resetting only a disposable application schema;
-it authorizes no live reset.
+rewrite versions 1–27. Its upgrade fixture independently pins migration 27's
+SHA-384 from accepted canonical
+`f0340e08f72d0bb9066e6f3c2ef1529beee4c911`; that is a staged predecessor-byte
+boundary, not a claim that version 27 alone was deployed. The fixture preserves
+the exact prior ledger, representative session and protected application-secret
+and credential rows, and every prior `codewire_` helper definition. It requires
+the second startup to be a no-op. Fresh-schema proof checks helper
+inventory/search-path/ACL, fixed-expiry, sliding-session and logout behavior; the
+restricted deployment proof separately grants only the two exact EXECUTE
+signatures. A disposable-database event trigger fails only after both new
+helpers have been created, proving that SQLx rolls back both helpers and the
+ledger before a successful retry.
+
+There is no in-place downgrade. After stopping new credential-mutation callers,
+rollback replays the selected version-27 source into only an empty, disposable
+application `public` schema. The fixture proves both session helpers are absent,
+the exact prior helper definitions and ledger are restored, credential records
+are discarded, and a separate schema survives. Other schemas, databases, cluster
+roles and external OpenBao key material remain outside this boundary. These tests
+and instructions authorize no live reset;
+authored fixtures are not acceptance evidence until executed against the
+checked-in disposable PostgreSQL topology.
 
 ## Mesh Database
 

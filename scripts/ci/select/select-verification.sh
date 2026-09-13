@@ -1036,6 +1036,11 @@ if [ "$event_selected" = false ]; then
         # database state transitions.
         select_token database
         ;;
+      crates/codewire-server-core/src/migrate/tests/*)
+        # Ignored PostgreSQL migration tests run in the database lane; this
+        # private test directory contains no deployable service/runtime input.
+        select_token database
+        ;;
       crates/codewire-server-core/*)
         select_services
         ;;
