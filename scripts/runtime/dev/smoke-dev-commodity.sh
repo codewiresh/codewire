@@ -76,6 +76,9 @@ EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}"
 EXPECTED_CODEWIRE_ADMIN_USER_ID="${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}"
 EXPECTED_CODEWIRE_ORGANIZATION_ID="${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}"
 CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR:-}"
+DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE="${DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE:-}"
+DEV_SMOKE_BROWSER_AUTH_BUN_BIN="${DEV_SMOKE_BROWSER_AUTH_BUN_BIN:-}"
+DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN="${DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN:-}"
 readonly CODEWIRE_DEV_SMOKE_ORG_SLUG="codewire-dev-smoke"
 readonly CODEWIRE_DEV_SMOKE_API_KEY_NAME="runtime-dev-commodity-smoke"
 ALLOW_NON_DEV="${ALLOW_NON_DEV:-0}"
@@ -105,14 +108,14 @@ declare -a SMOKE_ONLY_PHASES=()
 declare -a APP_SECRET_PROJECTS=() APP_SECRET_IDS=() APP_SECRET_VALUES=() APP_SECRET_HASHES=()
 declare -a APP_SECRET_USER_ATTEMPTS=() APP_SECRET_ORG_ATTEMPTS=() APP_SECRET_ALL_KEYS=()
 declare -a APP_SECRET_ALL_HASHES_A=() APP_SECRET_ALL_HASHES_B=() APP_SECRET_ALL_HASHES_CLEAR=()
-declare -a APP_SECRET_ISOLATED_ENV=()
+declare -a SMOKE_OAUTH_ENV=()
 APP_SECRET_DOCUMENT=""
 APP_SECRET_CREATE_ATTEMPTED=0
 APP_SECRET_ALL_SCOPES=0
-APP_SECRET_LOGIN_ATTEMPTED=0
-APP_SECRET_LOGIN_DIR=""
-APP_SECRET_RUNTIME_PARENT=""
-APP_SECRET_RUNTIME_DIR=""
+SMOKE_OAUTH_LOGIN_ATTEMPTED=0
+SMOKE_OAUTH_LOGIN_DIR=""
+SMOKE_OAUTH_RUNTIME_PARENT=""
+SMOKE_OAUTH_RUNTIME_DIR=""
 
 # shellcheck source=scripts/runtime/dev/provider-ssh-smoke.sh
 source "$ROOT/scripts/runtime/dev/provider-ssh-smoke.sh"
@@ -456,8 +459,8 @@ cleanup() {
   elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" == "1" ]]; then
     log "kept smoke environment $ENV_ID"
   fi
-  if [[ "$APP_SECRET_LOGIN_ATTEMPTED" == 1 ]]; then
-    cleanup_application_all_scopes_login || rc=1
+  if [[ "$SMOKE_OAUTH_LOGIN_ATTEMPTED" == 1 ]]; then
+    cleanup_fresh_oauth_login || rc=1
   fi
   if [[ "$rc" != "0" && -n "$TMPDIR_SMOKE" && -d "$TMPDIR_SMOKE" ]]; then
     log "kept failed-smoke evidence directory $TMPDIR_SMOKE"
@@ -703,8 +706,8 @@ stop_peer_relay_packet_diagnostics() {
 }
 
 cw() {
-  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
-    env -i "${APP_SECRET_ISOLATED_ENV[@]}" "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
+  if ((${#SMOKE_OAUTH_ENV[@]})); then
+    env -i "${SMOKE_OAUTH_ENV[@]}" "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
     return
   fi
   "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
@@ -713,8 +716,8 @@ cw() {
 cw_with_timeout() {
   local duration="$1"
   shift
-  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
-    env -i "${APP_SECRET_ISOLATED_ENV[@]}" timeout "$duration" \
+  if ((${#SMOKE_OAUTH_ENV[@]})); then
+    env -i "${SMOKE_OAUTH_ENV[@]}" timeout "$duration" \
       "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
     return
   fi
@@ -1098,9 +1101,69 @@ validate_application_all_scopes_options() {
      "$(stat -c '%u:%a' "$runtime_parent")" == "$(id -u):700" &&
      "$(findmnt -nro FSTYPE -T "$runtime_parent")" == tmpfs ]] ||
     die 'application-secrets-all-scopes requires a canonical owner-0700 tmpfs XDG_RUNTIME_DIR'
+  validate_dev_smoke_browser_auth
 }
 
-assert_application_all_scopes_principal() {
+# Optional automation uses the same fresh user OAuth grant as owner approval.
+# These are paths/identity metadata only; no credential values enter shell state.
+validate_dev_smoke_browser_auth() {
+  if [[ -z "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" &&
+        -z "$DEV_SMOKE_BROWSER_AUTH_BUN_BIN" &&
+        -z "$DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN" ]]; then
+    return 0
+  fi
+  [[ "$SMOKE_AUTH_MODE" == admin-oidc && "$ALLOW_NON_DEV" == 0 &&
+     "$CODEWIRE_SERVER_URL" == https://codewire-dev.sh &&
+     "$EXPECTED_CODEWIRE_DEV_SERVER_URL" == https://codewire-dev.sh &&
+     -z "${CODEWIRE_API_KEY:-}" && -z "${CODEWIRE_DEV_SMOKE_API_KEY:-}" &&
+     "$ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE" == 0 &&
+     -z "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR" && -z "${CW_CONFIG_DIR:-}" ]] ||
+    die 'browser automation requires fresh Dev account OAuth without saved login or API keys'
+  [[ "$EXPECTED_CODEWIRE_ADMIN_USER_ID" =~ ^[0-9a-f]{32}$ &&
+     "$EXPECTED_CODEWIRE_ADMIN_USER_ID" != 00000000000000000000000000000000 &&
+     "$EXPECTED_CODEWIRE_ORGANIZATION_ID" =~ ^[0-9a-f]{32}$ &&
+     "$EXPECTED_CODEWIRE_ORGANIZATION_ID" != 00000000000000000000000000000000 &&
+     -n "$EXPECTED_CODEWIRE_ADMIN_EMAIL" ]] ||
+    die 'browser automation requires exact expected account and organization identities'
+  local path runtime_parent="${XDG_RUNTIME_DIR:-}"
+  for path in "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" "$DEV_SMOKE_BROWSER_AUTH_BUN_BIN" \
+      "$DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN" "$CW_BIN"; do
+    [[ "$path" == /* && -f "$path" && ! -L "$path" &&
+       "$(realpath -e -- "$path")" == "$path" ]] ||
+      die 'browser automation requires canonical regular credential and executable paths'
+  done
+  [[ "$(stat -c '%u:%a' -- "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE")" == "$(id -u):600" &&
+     -x "$DEV_SMOKE_BROWSER_AUTH_BUN_BIN" && -x "$DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN" &&
+     -x "$CW_BIN" && "${CW_BIN##*/}" != cw-local-credential-broker-smoke ]] ||
+    die 'browser automation requires an owner-private credential file and executable runtimes'
+  [[ "$runtime_parent" == /* && -d "$runtime_parent" && ! -L "$runtime_parent" &&
+     "$(realpath -e -- "$runtime_parent")" == "$runtime_parent" &&
+     "$(stat -c '%u:%a' -- "$runtime_parent")" == "$(id -u):700" &&
+     "$(findmnt -nro FSTYPE -T "$runtime_parent")" == tmpfs ]] ||
+    die 'browser automation requires an owner-private canonical tmpfs runtime parent'
+}
+
+prepare_dev_smoke_browser_login() {
+  local config_dir="$1"
+  # The checked-in helper enforces empty owner-0700 tmpfs state before reading
+  # the separately supplied credential file. Its output contains fixed stages
+  # only. It never inherits shell, owner-provider, browser or OpenBao state.
+  (
+    ulimit -c 0
+    cd -- "$config_dir"
+    exec env -i PATH=/usr/bin:/bin HOME=/nonexistent LC_ALL=C TMPDIR="$config_dir" \
+      "$DEV_SMOKE_BROWSER_AUTH_BUN_BIN" --no-env-file --config=/dev/null \
+      "$ROOT/apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts" \
+      --cw-bin "$CW_BIN" --config-dir "$config_dir" \
+      --credential-file "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" \
+      --expected-user-id "$EXPECTED_CODEWIRE_ADMIN_USER_ID" \
+      --expected-email "$EXPECTED_CODEWIRE_ADMIN_EMAIL" \
+      --expected-org-id "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
+      --chromium-executable "$DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN"
+  ) || die 'fresh automated Dev browser login failed'
+}
+
+assert_fresh_oauth_principal() {
   assert_admin_oauth_principal
   jq -es --arg id "$EXPECTED_CODEWIRE_ADMIN_USER_ID" --arg email "$EXPECTED_CODEWIRE_ADMIN_EMAIL" '
     length == 1 and (.[0] | .id == $id and .email == $email)
@@ -1120,34 +1183,38 @@ assert_application_all_scopes_principal() {
     die 'fresh OAuth login did not select the exact owned organization'
 }
 
-prepare_application_all_scopes_cli() {
+prepare_fresh_oauth_cli() {
   mkdir -p "$SMOKE_TMP_PARENT"
   TMPDIR_SMOKE="$(mktemp -d "$SMOKE_TMP_PARENT/codewire-runtime-smoke.XXXXXX")"
   chmod 0700 "$TMPDIR_SMOKE"
   mkdir -m 0700 "$TMPDIR_SMOKE/auth-home"
-  APP_SECRET_RUNTIME_PARENT="$XDG_RUNTIME_DIR"
-  APP_SECRET_RUNTIME_DIR="$(mktemp -d "$APP_SECRET_RUNTIME_PARENT/.cwapp-XXXXXX")"
-  chmod 0700 "$APP_SECRET_RUNTIME_DIR"
-  APP_SECRET_LOGIN_ATTEMPTED=1
-  APP_SECRET_LOGIN_DIR="$APP_SECRET_RUNTIME_DIR/login"
-  mkdir -m 0700 "$APP_SECRET_LOGIN_DIR"
-  CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$APP_SECRET_LOGIN_DIR"
-  APP_SECRET_ISOLATED_ENV=(PATH=/usr/bin:/bin "HOME=$TMPDIR_SMOKE/auth-home"
+  SMOKE_OAUTH_RUNTIME_PARENT="$XDG_RUNTIME_DIR"
+  SMOKE_OAUTH_RUNTIME_DIR="$(mktemp -d "$SMOKE_OAUTH_RUNTIME_PARENT/.cwapp-XXXXXX")"
+  chmod 0700 "$SMOKE_OAUTH_RUNTIME_DIR"
+  SMOKE_OAUTH_LOGIN_ATTEMPTED=1
+  SMOKE_OAUTH_LOGIN_DIR="$SMOKE_OAUTH_RUNTIME_DIR/login"
+  mkdir -m 0700 "$SMOKE_OAUTH_LOGIN_DIR"
+  CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$SMOKE_OAUTH_LOGIN_DIR"
+  SMOKE_OAUTH_ENV=(PATH=/usr/bin:/bin "HOME=$TMPDIR_SMOKE/auth-home"
     "USER=$(id -un)" "LOGNAME=$(id -un)" SHELL=/bin/bash TERM=xterm-256color LC_ALL=C
-    "CW_CONFIG_DIR=$APP_SECRET_LOGIN_DIR" "XDG_RUNTIME_DIR=$APP_SECRET_RUNTIME_DIR"
-    "DBUS_SESSION_BUS_ADDRESS=unix:path=$APP_SECRET_RUNTIME_DIR/no-owner-bus")
-  cw_with_timeout 600 login --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" ||
-    die 'fresh owner-operated Dev login failed'
-  validate_admin_oauth_config "$APP_SECRET_LOGIN_DIR"
-  assert_application_all_scopes_principal
+    "CW_CONFIG_DIR=$SMOKE_OAUTH_LOGIN_DIR" "XDG_RUNTIME_DIR=$SMOKE_OAUTH_RUNTIME_DIR"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=$SMOKE_OAUTH_RUNTIME_DIR/no-owner-bus")
+  if [[ -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]]; then
+    prepare_dev_smoke_browser_login "$SMOKE_OAUTH_LOGIN_DIR"
+  else
+    cw_with_timeout 600 login --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" ||
+      die 'fresh owner-operated Dev login failed'
+  fi
+  validate_admin_oauth_config "$SMOKE_OAUTH_LOGIN_DIR"
+  assert_fresh_oauth_principal
 }
 
-cleanup_application_all_scopes_login() {
+cleanup_fresh_oauth_login() {
   local rc=0
   cw_with_timeout 30 logout >"$TMPDIR_SMOKE/app-logout.out" 2>"$TMPDIR_SMOKE/app-logout.err" || rc=1
-  if [[ "$APP_SECRET_RUNTIME_DIR" == "$APP_SECRET_RUNTIME_PARENT"/.cwapp-?????? ]]; then
-    rm -rf -- "$APP_SECRET_RUNTIME_DIR"
-    [[ ! -e "$APP_SECRET_RUNTIME_DIR" && ! -L "$APP_SECRET_RUNTIME_DIR" ]] || rc=1
+  if [[ "$SMOKE_OAUTH_RUNTIME_DIR" == "$SMOKE_OAUTH_RUNTIME_PARENT"/.cwapp-?????? ]]; then
+    rm -rf -- "$SMOKE_OAUTH_RUNTIME_DIR"
+    [[ ! -e "$SMOKE_OAUTH_RUNTIME_DIR" && ! -L "$SMOKE_OAUTH_RUNTIME_DIR" ]] || rc=1
   else
     rc=1
   fi
@@ -1557,7 +1624,7 @@ run_application_secret_pty() {
   # inside that host PTY so attach is noninteractive and propagates the guest
   # exit status, rather than waiting for the interactive detach chord.
   if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
-    printf -v command '%q ' env -i "${APP_SECRET_ISOLATED_ENV[@]}" \
+    printf -v command '%q ' env -i "${SMOKE_OAUTH_ENV[@]}" \
       "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty "$ENV_ID" -- \
       /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
   else
@@ -4675,6 +4742,14 @@ run_selected_phases() {
 }
 
 main() {
+  validate_dev_smoke_browser_auth
+  if [[ -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]]; then
+    [[ ${#SMOKE_ONLY_PHASES[@]} == 1 ]] ||
+      die 'browser automation supports only the all-scope or provider-SSH acceptance journey'
+    if ! application_all_scopes_selected && ! provider_ssh_selected; then
+      die 'browser automation supports only the all-scope or provider-SSH acceptance journey'
+    fi
+  fi
   if application_all_scopes_requested; then
     APP_SECRET_ALL_SCOPES=1
     validate_application_all_scopes_options
@@ -4682,8 +4757,8 @@ main() {
     validate_application_secrets_options
   fi
   if provider_ssh_selected; then validate_provider_ssh_options; fi
-  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
-    prepare_application_all_scopes_cli
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 || -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]]; then
+    prepare_fresh_oauth_cli
   else
     prepare_cli
   fi

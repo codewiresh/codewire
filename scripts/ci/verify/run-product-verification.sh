@@ -456,6 +456,8 @@ run_runtime_confidential() {
 }
 
 run_runtime_dev_smoke() {
+  install_bun_dependencies
+  bun test apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
   scripts/runtime/tests/test-smoke-dev-commodity.sh
   scripts/runtime/tests/test-local-platform-sources-smoke.sh

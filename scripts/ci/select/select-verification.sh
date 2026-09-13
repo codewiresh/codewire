@@ -804,6 +804,13 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
+      apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts|\
+      apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts)
+        # Dedicated Dev smoke tooling uses dashboard's pinned browser libraries,
+        # but does not change product templates or require rebuilding Kind.
+        select_token runtime_dev_smoke
+        recognized=true
+        ;;
       apps/dashboard/*|apps/docs/*|favicon.svg|logo/*|\
       scripts/dev/design-system-server.py|scripts/ci/tests/test-dashboard-browser-gate.sh)
         select_token web

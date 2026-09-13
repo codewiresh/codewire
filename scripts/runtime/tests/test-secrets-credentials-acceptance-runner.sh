@@ -67,8 +67,17 @@ case "$label" in
        -z "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR+x}" && -z "${CW_CONFIG_DIR+x}" ]] || exit 95
     ;;
   dev-provider-ssh)
-    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --only provider-ssh" &&
-       "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR:-}" == "${XDG_RUNTIME_DIR:-}/provider-login" ]] || exit 96
+    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --only provider-ssh" ]] || exit 96
+    if [[ -n "${DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE:-}" ]]; then
+      [[ -z "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR:-}" &&
+         "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" == "$fixtures/browser-input.json" &&
+         "$DEV_SMOKE_BROWSER_AUTH_BUN_BIN" == "$fixtures/synthetic-bun" &&
+         "$DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN" == "$fixtures/synthetic-chromium" &&
+         "$EXPECTED_CODEWIRE_ADMIN_USER_ID" == aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &&
+         "$EXPECTED_CODEWIRE_ORGANIZATION_ID" == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] || exit 101
+    else
+      [[ "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR:-}" == "${XDG_RUNTIME_DIR:-}/provider-login" ]] || exit 96
+    fi
     ;;
 esac
 for forbidden in CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY CW_CONFIG_DIR \
@@ -180,6 +189,7 @@ export OPENAI_API_KEY=must-not-reach-child
 export CODEX_HOME=/must/not/reach/child
 export SSH_AUTH_SOCK=/must/not/reach/child
 export BAO_TOKEN=must-not-reach-child
+unset DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE DEV_SMOKE_BROWSER_AUTH_BUN_BIN DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN
 export HTTPS_PROXY=http://must-not-reach-child
 export HTTP_PROXY=http://must-not-reach-child
 export ALL_PROXY=socks5://must-not-reach-child
@@ -254,6 +264,22 @@ export ACCEPTANCE_PROVIDER_SSH_FRESH_OAUTH_CONFIG_DIR="$saved_provider_dir"
 [[ ! -s "$CALLS" ]] || fail 'provider journey ran without an explicit fresh OAuth directory'
 grep -Fq 'dev-provider-ssh               NOT RUN (explicit canonical fresh provider-SSH OAuth directory unavailable)' \
   "$TEST_ROOT/provider-missing.out" || fail 'missing provider OAuth directory was not reported'
+pass
+
+: >"$CALLS"
+: >"$SIGNAL_MARKER"
+export ACCEPTANCE_PROVIDER_SSH_FRESH_OAUTH_CONFIG_DIR=''
+export DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE="$FAKE_ROOT/fixtures/browser-input.json"
+export DEV_SMOKE_BROWSER_AUTH_BUN_BIN="$FAKE_ROOT/fixtures/synthetic-bun"
+export DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN="$FAKE_ROOT/fixtures/synthetic-chromium"
+expect_status 0 "$TEST_ROOT/provider-browser.out" "$RUNNER" --only dev-provider-ssh
+[[ "$(cat "$CALLS")" == dev-provider-ssh ]] || fail 'browser provider selection invoked another journey'
+pass
+: >"$CALLS"
+export ACCEPTANCE_PROVIDER_SSH_FRESH_OAUTH_CONFIG_DIR="$saved_provider_dir"
+expect_status 1 "$TEST_ROOT/provider-browser-saved.out" "$RUNNER" --only dev-provider-ssh
+[[ ! -s "$CALLS" ]] || fail 'browser provider path reused a saved login'
+unset DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE DEV_SMOKE_BROWSER_AUTH_BUN_BIN DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN
 pass
 
 : >"$CALLS"

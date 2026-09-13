@@ -68,6 +68,9 @@ Required input names:
   ACCEPTANCE_NATIVE_ARTIFACT_LOCK
   ACCEPTANCE_NATIVE_SCRATCH_PARENT
   ACCEPTANCE_PROVIDER_SSH_FRESH_OAUTH_CONFIG_DIR
+  DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE  Optional dedicated test-user automation
+  DEV_SMOKE_BROWSER_AUTH_BUN_BIN         Required with browser automation
+  DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN    Required with browser automation
   LOCAL_PLATFORM_ARTIFACT_ROOT
   LOCAL_PLATFORM_ARTIFACT_LOCK
   LOCAL_PLATFORM_IMAGE
@@ -235,9 +238,15 @@ readiness_reason() {
       [[ -n "${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" ]] || {
         printf '%s' 'exact owner email unavailable'; return 1;
       }
-      provider_oauth_config_ready || {
+      if [[ -n "${DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE:-}" ]]; then
+        [[ -z "$ACCEPTANCE_PROVIDER_SSH_FRESH_OAUTH_CONFIG_DIR" &&
+           -n "${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}" &&
+           -n "${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}" ]] || {
+          printf '%s' 'browser automation requires exact identities without a saved OAuth directory'; return 1;
+        }
+      elif ! provider_oauth_config_ready; then
         printf '%s' 'explicit canonical fresh provider-SSH OAuth directory unavailable'; return 1;
-      }
+      fi
       ;;
     live-providers)
       printf '%s' 'no checked-in live Codex/GitHub/OpenAI/Anthropic journey'; return 1
@@ -267,6 +276,11 @@ start_isolated_child() {
 
 start_fixed_child() {
   local journey="$1"
+  local -a browser_auth_env=(
+    "DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE=${DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE:-}"
+    "DEV_SMOKE_BROWSER_AUTH_BUN_BIN=${DEV_SMOKE_BROWSER_AUTH_BUN_BIN:-}"
+    "DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN=${DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN:-}"
+  )
   case "$journey" in
     native-local)
       start_isolated_child \
@@ -285,10 +299,11 @@ start_fixed_child() {
         --scratch-parent "$ACCEPTANCE_NATIVE_SCRATCH_PARENT"
       ;;
     local-platform)
-      start_isolated_child \
+      start_isolated_child "${browser_auth_env[@]}" \
         CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" \
+        EXPECTED_CODEWIRE_ADMIN_USER_ID="${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}" \
         EXPECTED_CODEWIRE_ORGANIZATION_ID="${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}" \
         LOCAL_PLATFORM_ARTIFACT_ROOT="${LOCAL_PLATFORM_ARTIFACT_ROOT:-}" \
         LOCAL_PLATFORM_ARTIFACT_LOCK="${LOCAL_PLATFORM_ARTIFACT_LOCK:-}" \
@@ -300,7 +315,7 @@ start_fixed_child() {
           --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN"
       ;;
     dev-application-all-scopes)
-      start_isolated_child \
+      start_isolated_child "${browser_auth_env[@]}" \
         CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" \
@@ -325,10 +340,12 @@ start_fixed_child() {
           --only application-secrets-all-scopes
       ;;
     dev-provider-ssh)
-      start_isolated_child \
+      start_isolated_child "${browser_auth_env[@]}" \
         CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" \
+        EXPECTED_CODEWIRE_ADMIN_USER_ID="${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}" \
+        EXPECTED_CODEWIRE_ORGANIZATION_ID="${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}" \
         KUBECONFIG="${KUBECONFIG:-}" \
         KUBE_CONTEXT="${KUBE_CONTEXT:-}" \
         CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}" \
@@ -348,10 +365,11 @@ start_fixed_child() {
           --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN" --only provider-ssh
       ;;
     local-platform-mesh)
-      start_isolated_child \
+      start_isolated_child "${browser_auth_env[@]}" \
         CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" \
+        EXPECTED_CODEWIRE_ADMIN_USER_ID="${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}" \
         EXPECTED_CODEWIRE_ORGANIZATION_ID="${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}" \
         LOCAL_PLATFORM_ARTIFACT_ROOT="${LOCAL_PLATFORM_ARTIFACT_ROOT:-}" \
         LOCAL_PLATFORM_ARTIFACT_LOCK="${LOCAL_PLATFORM_ARTIFACT_LOCK:-}" \
