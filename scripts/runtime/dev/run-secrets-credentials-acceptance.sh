@@ -16,6 +16,7 @@ readonly -a JOURNEYS=(
   local-platform-mesh
   live-providers
   initial-private-checkout
+  dev-initial-private-checkout
 )
 
 ACCEPTANCE_NORMAL_CW_BIN="${ACCEPTANCE_NORMAL_CW_BIN:-}"
@@ -53,7 +54,8 @@ individual journey with --only. Available journeys:
   dev-provider-ssh
   local-platform-mesh
   live-providers             (NOT RUN: no checked-in live-provider journey)
-  initial-private-checkout   (NOT RUN: no checked-in journey)
+  initial-private-checkout   (Linux local VM with generated platform SSH)
+  dev-initial-private-checkout (NOT RUN: no checked-in hosted checkout journey)
 
 Required input names:
   ACCEPTANCE_NORMAL_CW_BIN
@@ -75,6 +77,7 @@ Required input names:
   LOCAL_PLATFORM_ARTIFACT_LOCK
   LOCAL_PLATFORM_IMAGE
   LOCAL_PLATFORM_MESH_PROBE_BIN
+  LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN
   CODEWIRE_SERVER_URL
   EXPECTED_CODEWIRE_DEV_SERVER_URL
   EXPECTED_CODEWIRE_ADMIN_EMAIL
@@ -252,7 +255,12 @@ readiness_reason() {
       printf '%s' 'no checked-in live Codex/GitHub/OpenAI/Anthropic journey'; return 1
       ;;
     initial-private-checkout)
-      printf '%s' 'no checked-in initial private-checkout journey'; return 1
+      local_platform_ready && canonical_executable "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}" || {
+        printf '%s' 'explicit normal CLI/local platform/checkout fixture inputs unavailable'; return 1;
+      }
+      ;;
+    dev-initial-private-checkout)
+      printf '%s' 'no checked-in hosted initial private-checkout journey'; return 1
       ;;
   esac
   return 0
@@ -298,8 +306,14 @@ start_fixed_child() {
         --workspace-image-import-bin "$ACCEPTANCE_NATIVE_WORKSPACE_IMAGE_IMPORT_BIN" \
         --scratch-parent "$ACCEPTANCE_NATIVE_SCRATCH_PARENT"
       ;;
-    local-platform)
+    local-platform|initial-private-checkout)
+      local -a checkout_env=() checkout_args=()
+      if [[ "$journey" == initial-private-checkout ]]; then
+        checkout_env=("LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}")
+        checkout_args=(--initial-private-checkout)
+      fi
       start_isolated_child "${browser_auth_env[@]}" \
+        "${checkout_env[@]}" \
         CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" \
         EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" \
@@ -312,7 +326,7 @@ start_fixed_child() {
         XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
         SMOKE_TMP_PARENT="${SMOKE_TMP_PARENT:-}" \
         "$ROOT/scripts/runtime/dev/smoke-local-platform-sources.sh" \
-          --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN"
+          --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN" "${checkout_args[@]}"
       ;;
     dev-application-all-scopes)
       start_isolated_child "${browser_auth_env[@]}" \

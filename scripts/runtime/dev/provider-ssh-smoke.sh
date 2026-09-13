@@ -49,8 +49,8 @@ provider_ssh_metadata_id() {
   ' "$file"
 }
 
-prepare_provider_ssh() {
-  local nonce credential_name profile_name public_key encoded_fixture encoded_key install startup
+prepare_provider_ssh_identity() {
+  local nonce credential_name profile_name public_key
   nonce="$(tr -d '-' </proc/sys/kernel/random/uuid)"
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'cannot generate disposable SSH fixture names'
   cw_with_timeout 30 env --platform list --all --output json >"$TMPDIR_SMOKE/provider-ssh-environments-before.json" ||
@@ -95,6 +95,12 @@ prepare_provider_ssh() {
   jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" 'length == 1 and .[0].revision == "1" and
     .[0].entries == [{capabilitySlot:"ssh",credentialId:$id}]' \
     "$TMPDIR_SMOKE/provider-ssh-profile.json" >/dev/null || die 'created SSH profile does not select exactly the generated identity'
+}
+
+prepare_provider_ssh() {
+  local public_key encoded_fixture encoded_key install startup
+  prepare_provider_ssh_identity
+  public_key="$(jq -er '.[0].sshPublicKey.openssh' "$TMPDIR_SMOKE/provider-ssh-credential.json")"
 
   # Both embedded inputs are public: the checked-in fixture and selected public
   # key. The fixture generates its synthetic server host key inside the guest.
