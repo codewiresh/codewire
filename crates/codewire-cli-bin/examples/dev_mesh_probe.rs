@@ -72,6 +72,24 @@ mod linux {
         std::io::Error::other("Codewire Dev Mesh probe failed").into()
     }
 
+    fn stage_error(stage: &'static str) -> Error {
+        eprintln!("Codewire Dev Mesh probe failed at {stage}");
+        error()
+    }
+
+    // Only the closed RPC status enum may cross this diagnostic boundary.
+    // Never render an underlying error: it can contain headers or response data.
+    fn rpc_error_code(failure: &(dyn StdError + 'static)) -> Option<connectrpc::ErrorCode> {
+        let mut source = Some(failure);
+        while let Some(failure) = source {
+            if let Some(rpc) = failure.downcast_ref::<connectrpc::ConnectError>() {
+                return Some(rpc.code);
+            }
+            source = failure.source();
+        }
+        None
+    }
+
     fn require(condition: bool) -> Result<()> {
         if condition { Ok(()) } else { Err(error()) }
     }
@@ -288,15 +306,25 @@ mod linux {
         oauth: OAuthClient,
         inputs: Inputs,
     ) -> Result<Receipt> {
-        verify_oauth_identity(&client, &oauth, &inputs).await?;
+        verify_oauth_identity(&client, &oauth, &inputs)
+            .await
+            .map_err(|_| stage_error("OAuth identity"))?;
 
         let identity =
             MeshCoordinateIdentity::dial(inputs.organization_id.clone(), inputs.network_id.clone());
         let mut coordinator = client
             .connect_mesh_coordinator_with_setup_timeout(identity, SETUP_DEADLINE)
             .await
-            .map_err(|_| error())?;
-        let map = coordinator.take_setup_derp_map().map_err(|_| error())?;
+            .map_err(|failure| {
+                eprintln!(
+                    "Codewire Dev Mesh coordinator setup RPC code: {:?}",
+                    rpc_error_code(&failure)
+                );
+                stage_error("coordinator setup")
+            })?;
+        let map = coordinator
+            .take_setup_derp_map()
+            .map_err(|_| stage_error("coordinator relay map"))?;
         let regions = map
             .get("Regions")
             .and_then(|value| value.as_object())
@@ -363,9 +391,13 @@ mod linux {
                 nodes: node_specs,
             });
         }
-        let plan = strict_derp_plan(&specs)?;
-        let stun_servers = resolve_stun_servers(&plan.stun_servers).await?;
-        let mut dial = connect_dial_peer(&inputs, coordinator, plan, stun_servers).await?;
+        let plan = strict_derp_plan(&specs).map_err(|_| stage_error("relay policy"))?;
+        let stun_servers = resolve_stun_servers(&plan.stun_servers)
+            .await
+            .map_err(|_| stage_error("STUN resolution"))?;
+        let mut dial = connect_dial_peer(&inputs, coordinator, plan, stun_servers)
+            .await
+            .map_err(|_| stage_error("peer setup"))?;
 
         let mut stream = dial
             .conn
@@ -374,8 +406,10 @@ mod linux {
                 inputs.port,
             ))
             .await
-            .map_err(|_| error())?;
-        exchange(&mut stream, &inputs.nonce).await?;
+            .map_err(|_| stage_error("application connection"))?;
+        exchange(&mut stream, &inputs.nonce)
+            .await
+            .map_err(|_| stage_error("application exchange"))?;
         drop(stream);
 
         let peer = dial.peer.as_ref().ok_or_else(error)?;
@@ -409,7 +443,7 @@ mod linux {
         let secret = StaticSecret::random_from_rng(OsRng);
         let fallback = connect_derp_transport(&plan.target, &secret)
             .await
-            .map_err(|_| error())?;
+            .map_err(|_| stage_error("verified TLS relay connection"))?;
         let disco_private = DiscoPrivate::generate(&mut OsRng);
         let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
         let (transport, direct_udp) = direct_udp::wrap_transport(
@@ -710,6 +744,19 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn rpc_diagnostic_extracts_only_the_closed_status_code() {
+            let failure = connectrpc::ConnectError::permission_denied("synthetic-private-body");
+            assert_eq!(
+                rpc_error_code(&failure),
+                Some(connectrpc::ErrorCode::PermissionDenied)
+            );
+            assert_eq!(
+                rpc_error_code(&std::io::Error::other("synthetic-private-body")),
+                None
+            );
+        }
 
         async fn identity_fixture(body: &str, status: axum::http::StatusCode) -> Result<()> {
             use std::sync::atomic::{AtomicUsize, Ordering};
