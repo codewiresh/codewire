@@ -72,6 +72,24 @@ mod linux {
         std::io::Error::other("Codewire Dev Mesh probe failed").into()
     }
 
+    fn stage_error(stage: &'static str) -> Error {
+        eprintln!("Codewire Dev Mesh probe failed at {stage}");
+        error()
+    }
+
+    // Only the closed RPC status enum may cross this diagnostic boundary.
+    // Never render an underlying error: it can contain headers or response data.
+    fn rpc_error_code(failure: &(dyn StdError + 'static)) -> Option<connectrpc::ErrorCode> {
+        let mut source = Some(failure);
+        while let Some(failure) = source {
+            if let Some(rpc) = failure.downcast_ref::<connectrpc::ConnectError>() {
+                return Some(rpc.code);
+            }
+            source = failure.source();
+        }
+        None
+    }
+
     fn require(condition: bool) -> Result<()> {
         if condition { Ok(()) } else { Err(error()) }
     }
@@ -239,27 +257,30 @@ mod linux {
     pub(super) async fn probe() -> Result<Receipt> {
         let inputs = Inputs::from_process()?;
         validate_login_layout(&inputs.config_dir)?;
-        let (client, platform) = authenticated_client(&inputs.config_dir)?;
+        let (client, platform, oauth) = authenticated_client(&inputs.config_dir)?;
         validate_login_config(&platform, &inputs)?;
 
-        tokio::time::timeout(NETWORK_DEADLINE, run_network_probe(client, inputs))
+        tokio::time::timeout(NETWORK_DEADLINE, run_network_probe(client, oauth, inputs))
             .await
             .map_err(|_| error())?
     }
 
-    fn authenticated_client(config_dir: &Path) -> Result<(CodewireClient, PlatformConfig)> {
+    fn authenticated_client(
+        config_dir: &Path,
+    ) -> Result<(CodewireClient, PlatformConfig, OAuthClient)> {
         let platform = config::load_platform_config(config_dir).map_err(|_| error())?;
         let store = FileCredentialStore::at(config_dir.join("credentials.json"));
         let credentials = store.load().map_err(|_| error())?.ok_or_else(error)?;
         require(exact_origin(credentials.issuer(), SERVER_URL))?;
         credentials.bearer_token().map_err(|_| error())?;
         let oauth = OAuthClient::for_server_url(SERVER_URL).map_err(|_| error())?;
-        let provider = RefreshingTokenProvider::from_store(oauth, store).map_err(|_| error())?;
+        let provider =
+            RefreshingTokenProvider::from_store(oauth.clone(), store).map_err(|_| error())?;
         let client_config = ClientConfig::new(SERVER_URL)?
             .with_mesh_url(MESH_URL)?
             .with_user_agent("codewire-dev-mesh-probe/v1")?;
         let client = CodewireClient::new(client_config, provider)?;
-        Ok((client, platform))
+        Ok((client, platform, oauth))
     }
 
     fn validate_login_config(platform: &PlatformConfig, inputs: &Inputs) -> Result<()> {
@@ -270,20 +291,40 @@ mod linux {
         Ok(())
     }
 
-    async fn run_network_probe(client: CodewireClient, inputs: Inputs) -> Result<Receipt> {
-        let session = client.auth().get_session().await.map_err(|_| error())?;
-        let user = session.user.ok_or_else(error)?;
-        require(
-            session.session.is_some() && user.id == inputs.user_id && user.email == inputs.email,
-        )?;
+    async fn verify_oauth_identity(
+        client: &CodewireClient,
+        oauth: &OAuthClient,
+        inputs: &Inputs,
+    ) -> Result<()> {
+        let token = client.bearer_token().await.map_err(|_| error())?;
+        let user = oauth.userinfo(&token).await.map_err(|_| error())?;
+        require(user.sub == inputs.user_id && user.email.as_deref() == Some(inputs.email.as_str()))
+    }
+
+    async fn run_network_probe(
+        client: CodewireClient,
+        oauth: OAuthClient,
+        inputs: Inputs,
+    ) -> Result<Receipt> {
+        verify_oauth_identity(&client, &oauth, &inputs)
+            .await
+            .map_err(|_| stage_error("OAuth identity"))?;
 
         let identity =
             MeshCoordinateIdentity::dial(inputs.organization_id.clone(), inputs.network_id.clone());
         let mut coordinator = client
             .connect_mesh_coordinator_with_setup_timeout(identity, SETUP_DEADLINE)
             .await
-            .map_err(|_| error())?;
-        let map = coordinator.take_setup_derp_map().map_err(|_| error())?;
+            .map_err(|failure| {
+                eprintln!(
+                    "Codewire Dev Mesh coordinator setup RPC code: {:?}",
+                    rpc_error_code(&failure)
+                );
+                stage_error("coordinator setup")
+            })?;
+        let map = coordinator
+            .take_setup_derp_map()
+            .map_err(|_| stage_error("coordinator relay map"))?;
         let regions = map
             .get("Regions")
             .and_then(|value| value.as_object())
@@ -350,9 +391,13 @@ mod linux {
                 nodes: node_specs,
             });
         }
-        let plan = strict_derp_plan(&specs)?;
-        let stun_servers = resolve_stun_servers(&plan.stun_servers).await?;
-        let mut dial = connect_dial_peer(&inputs, coordinator, plan, stun_servers).await?;
+        let plan = strict_derp_plan(&specs).map_err(|_| stage_error("relay policy"))?;
+        let stun_servers = resolve_stun_servers(&plan.stun_servers)
+            .await
+            .map_err(|_| stage_error("STUN resolution"))?;
+        let mut dial = connect_dial_peer(&inputs, coordinator, plan, stun_servers)
+            .await
+            .map_err(|_| stage_error("peer setup"))?;
 
         let mut stream = dial
             .conn
@@ -361,8 +406,10 @@ mod linux {
                 inputs.port,
             ))
             .await
-            .map_err(|_| error())?;
-        exchange(&mut stream, &inputs.nonce).await?;
+            .map_err(|_| stage_error("application connection"))?;
+        exchange(&mut stream, &inputs.nonce)
+            .await
+            .map_err(|_| stage_error("application exchange"))?;
         drop(stream);
 
         let peer = dial.peer.as_ref().ok_or_else(error)?;
@@ -396,7 +443,7 @@ mod linux {
         let secret = StaticSecret::random_from_rng(OsRng);
         let fallback = connect_derp_transport(&plan.target, &secret)
             .await
-            .map_err(|_| error())?;
+            .map_err(|_| stage_error("verified TLS relay connection"))?;
         let disco_private = DiscoPrivate::generate(&mut OsRng);
         let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
         let (transport, direct_udp) = direct_udp::wrap_transport(
@@ -697,6 +744,113 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn rpc_diagnostic_extracts_only_the_closed_status_code() {
+            let failure = connectrpc::ConnectError::permission_denied("synthetic-private-body");
+            assert_eq!(
+                rpc_error_code(&failure),
+                Some(connectrpc::ErrorCode::PermissionDenied)
+            );
+            assert_eq!(
+                rpc_error_code(&std::io::Error::other("synthetic-private-body")),
+                None
+            );
+        }
+
+        async fn identity_fixture(body: &str, status: axum::http::StatusCode) -> Result<()> {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            use axum::http::{HeaderMap, header};
+            use axum::{Router, routing::get};
+            use codewire_client::StaticTokenProvider;
+
+            let userinfo_calls = Arc::new(AtomicUsize::new(0));
+            let session_calls = Arc::new(AtomicUsize::new(0));
+            let userinfo_counter = Arc::clone(&userinfo_calls);
+            let session_counter = Arc::clone(&session_calls);
+            let body = body.to_owned();
+            let router = Router::new()
+                .route(
+                    "/api/oauth/userinfo",
+                    get(move |headers: HeaderMap| {
+                        userinfo_counter.fetch_add(1, Ordering::SeqCst);
+                        let body = body.clone();
+                        async move {
+                            assert_eq!(
+                                headers.get(header::AUTHORIZATION).unwrap(),
+                                "Bearer synthetic-device-oauth"
+                            );
+                            (status, [(header::CONTENT_TYPE, "application/json")], body)
+                        }
+                    }),
+                )
+                .route(
+                    "/api/auth/get-session",
+                    get(move || {
+                        session_counter.fetch_add(1, Ordering::SeqCst);
+                        async { ([(header::CONTENT_TYPE, "application/json")], "null") }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let server_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let client = CodewireClient::new(
+                ClientConfig::new(&server_url).unwrap(),
+                StaticTokenProvider::new("synthetic-device-oauth").unwrap(),
+            )
+            .unwrap();
+            let oauth = OAuthClient::for_server_url(&server_url).unwrap();
+            let inputs = Inputs::from_values(&values()).unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                verify_oauth_identity(&client, &oauth, &inputs),
+            )
+            .await;
+            server.abort();
+            let _ = server.await;
+            assert!(result.is_ok(), "synthetic identity request timed out");
+            assert_eq!(userinfo_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(session_calls.load(Ordering::SeqCst), 0);
+            result.expect("bounded synthetic identity request")
+        }
+
+        #[tokio::test]
+        async fn oauth_identity_uses_userinfo_without_a_browser_session() {
+            identity_fixture(
+                r#"{"sub":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","email":"owner@example.test"}"#,
+                axum::http::StatusCode::OK,
+            )
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn oauth_identity_rejects_wrong_missing_or_failed_claims_without_fallback() {
+            for body in [
+                r#"{"sub":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","email":"owner@example.test"}"#,
+                r#"{"sub":"","email":"owner@example.test"}"#,
+                r#"{"email":"owner@example.test"}"#,
+                r#"{"sub":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","email":"other@example.test"}"#,
+                r#"{"sub":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+                "null",
+                "malformed",
+            ] {
+                assert!(
+                    identity_fixture(body, axum::http::StatusCode::OK)
+                        .await
+                        .is_err()
+                );
+            }
+            assert!(
+                identity_fixture(
+                    r#"{"sub":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","email":"owner@example.test"}"#,
+                    axum::http::StatusCode::UNAUTHORIZED,
+                )
+                .await
+                .is_err()
+            );
+        }
 
         fn values() -> BTreeMap<String, String> {
             BTreeMap::from([
