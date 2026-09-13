@@ -3848,6 +3848,12 @@ impl SupervisorCore {
     async fn prepare_environment_for_delete(&mut self, name: &str) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
         let environment_id = environment.id;
+        let never_started = environment.generation == 0
+            && matches!(
+                environment.state,
+                StoredEnvironmentState::Starting | StoredEnvironmentState::Error
+            )
+            && environment.runner.is_none();
         if environment.generation == 0
             && matches!(
                 environment.state,
@@ -3858,6 +3864,14 @@ impl SupervisorCore {
         }
         self.reconcile(name).await?;
         if self.environment(name)?.runner.is_none() {
+            // Create durably reserves generation 1 before EnsureRunner. A
+            // generation-zero failure with no recorded runner cannot require
+            // a bootable image just to remove its owned provisioning tree.
+            // Capture eligibility before reconcile: clearing a dead runner
+            // must not turn previously exposed state into a preboot deletion.
+            if never_started {
+                return Ok(());
+            }
             let artifact_generation =
                 artifact_generation_for_boot(self.environment(name)?, false)?.to_owned();
             let _ = self
@@ -12937,6 +12951,152 @@ mod tests {
             core.environment("dev").unwrap().state,
             StoredEnvironmentState::Stopped
         );
+    }
+
+    #[tokio::test]
+    async fn preboot_delete_replays_after_failed_workspace_admission() {
+        for (staged, revoke_access) in [(false, false), (false, true), (true, false)] {
+            let mut environment = project_environment();
+            environment.generation = 0;
+            environment.state = StoredEnvironmentState::Starting;
+            if staged {
+                environment.staging_workspace_generation =
+                    Some(test_workspace_generation_with_artifact(
+                        environment.project_spec_json.as_deref().unwrap(),
+                        environment.project_spec_sha256.as_deref().unwrap(),
+                        environment.active_artifact_generation.as_deref().unwrap(),
+                        b"synthetic-preboot-image",
+                    ));
+            }
+            let environment_id = environment.id;
+            let (parent, mut core) = test_supervisor_core(environment);
+            // A spawn would fail: deleting this preboot state must need
+            // neither an executable runner nor an admitted workspace image.
+            core.config.executable = parent.path().join("must-not-spawn");
+            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+            let paths = VmPaths::create(&engine, environment_id).unwrap();
+            let create = begin_and_advance_test_operation(
+                &core.store,
+                environment_id,
+                OperationKind::Create,
+                &serde_json::json!({"name": "dev"}),
+                if staged { 4 } else { 3 },
+            );
+            assert_eq!(
+                supervisor_effect(create.kind, create.checkpoint).unwrap(),
+                Some(if staged {
+                    LifecycleEffect::RecordStarting
+                } else {
+                    LifecycleEffect::StageWorkspaceGeneration
+                }),
+            );
+            let failure_code = if staged {
+                "create_failed"
+            } else {
+                "create_registry_blob_stream"
+            };
+            core.fail_operation_with_environment_error(&create, "dev", failure_code)
+                .unwrap();
+            let delete = core
+                .store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment_id),
+                    OperationKind::Delete,
+                    &serde_json::json!({"name": "dev", "revoke_access": revoke_access}),
+                )
+                .unwrap();
+
+            core.replay_pending_operations().await.unwrap();
+
+            let reader = SupervisorOperationReader::open(&core.root).unwrap();
+            let deleted = reader
+                .operation_by_id(delete.operation_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(deleted.phase, OperationPhase::Completed);
+            assert_eq!(deleted.result.as_ref().unwrap()["removed"], true);
+            // Absent authority remains an honest pending revocation, not a
+            // reason to boot the failed environment or conceal cleanup work.
+            assert_eq!(
+                deleted.result.as_ref().unwrap()["cleanup_pending"],
+                revoke_access
+            );
+            let failed = reader
+                .operation_by_id(create.operation_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(failed.phase, OperationPhase::Failed);
+            assert_eq!(failed.error_code.as_deref(), Some(failure_code));
+            assert!(core.state.environments.is_empty());
+            assert!(core.state.current.is_none());
+            assert!(core.children.is_empty());
+            assert!(core.live_runners.is_empty());
+            assert!(!paths.vm_dir.exists());
+            assert!(matches!(
+                deletion_tree_location(
+                    &core.config.engine_root(),
+                    environment_id,
+                    delete.operation_id
+                )
+                .unwrap(),
+                DeletionTreeLocation::Missing,
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn preboot_delete_does_not_skip_missing_workspace_after_boot_or_stop() {
+        for (generation, state) in [
+            (1, StoredEnvironmentState::Error),
+            (1, StoredEnvironmentState::Stopped),
+            (0, StoredEnvironmentState::Stopped),
+        ] {
+            let mut environment = project_environment();
+            environment.generation = generation;
+            environment.state = state;
+            let environment_id = environment.id;
+            let (_parent, mut core) = test_supervisor_core(environment);
+            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+            let paths = VmPaths::create(&engine, environment_id).unwrap();
+
+            assert!(matches!(
+                core.prepare_environment_for_delete("dev").await,
+                Err(SupervisorError::InvalidState),
+            ));
+            assert!(paths.vm_dir.exists());
+            assert!(core.state.environments.contains_key("dev"));
+        }
+    }
+
+    #[tokio::test]
+    async fn preboot_delete_does_not_reclassify_a_recorded_dead_runner() {
+        let environment = project_environment();
+        let environment_id = environment.id;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let paths = VmPaths::create(&engine, environment_id).unwrap();
+        let (listener, identity) =
+            bind_owner_only_listener(&core.config.runner_socket(environment_id)).unwrap();
+        attach_test_runner_process(&mut core, identity);
+        let environment = core.environment_mut("dev").unwrap();
+        environment.generation = 0;
+        environment.state = StoredEnvironmentState::Error;
+        core.save().unwrap();
+        let child = core.children.get_mut(&environment_id).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert!(matches!(
+            core.prepare_environment_for_delete("dev").await,
+            Err(SupervisorError::InvalidState),
+        ));
+        assert!(
+            core.environment("dev").unwrap().runner.is_none(),
+            "reconciliation observed the dead runner"
+        );
+        assert!(paths.vm_dir.exists());
+        drop(listener);
     }
 
     #[tokio::test]
