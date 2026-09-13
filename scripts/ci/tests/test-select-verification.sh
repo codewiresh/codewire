@@ -437,6 +437,7 @@ run_paths_case shared_stock_ssh_smoke pull_request refs/pull/5016/head false \
   scripts/ci/verify/stock-ssh-workload.sh
 for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests/test-provider-ssh-smoke.sh \
     scripts/runtime/dev/smoke-local-platform-sources.sh scripts/runtime/tests/test-local-platform-sources-smoke.sh \
+    scripts/runtime/dev/run-secrets-credentials-acceptance.sh scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh \
     scripts/runtime/dev/native-mesh-listener.py scripts/runtime/tests/test-native-mesh-listener.py \
     scripts/runtime/tests/fixtures/local-platform/__local-credential-authority; do
   run_paths_case provider_ssh_dev_smoke pull_request refs/pull/5017/head false \
@@ -2821,6 +2822,8 @@ grep -qF 'scripts/runtime/tests/test-with-dev-smoke-auth.sh' \
 grep -qF 'scripts/runtime/tests/test-provision-dev-smoke-user.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'scripts/runtime/tests/test-smoke-dev-commodity.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'run_selected_family runtime_dev_smoke runtime-dev-smoke' \
   "$ROOT/scripts/dev/preflight.sh"
