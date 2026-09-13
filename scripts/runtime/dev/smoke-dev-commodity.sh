@@ -73,6 +73,8 @@ EXPECTED_KATA_COCO_TEST_RESOURCE_PATH="${EXPECTED_KATA_COCO_TEST_RESOURCE_PATH:-
 EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT="${EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT:-}"
 EXPECTED_CODEWIRE_SMOKE_USER_EMAIL="${EXPECTED_CODEWIRE_SMOKE_USER_EMAIL:-}"
 EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}"
+EXPECTED_CODEWIRE_ADMIN_USER_ID="${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}"
+EXPECTED_CODEWIRE_ORGANIZATION_ID="${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}"
 CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR:-}"
 readonly CODEWIRE_DEV_SMOKE_ORG_SLUG="codewire-dev-smoke"
 readonly CODEWIRE_DEV_SMOKE_API_KEY_NAME="runtime-dev-commodity-smoke"
@@ -101,8 +103,16 @@ COCO_REST_ISOLATION_EVIDENCE_SOURCE=""
 COCO_REST_ISOLATION_RECEIPT=""
 declare -a SMOKE_ONLY_PHASES=()
 declare -a APP_SECRET_PROJECTS=() APP_SECRET_IDS=() APP_SECRET_VALUES=() APP_SECRET_HASHES=()
+declare -a APP_SECRET_USER_ATTEMPTS=() APP_SECRET_ORG_ATTEMPTS=() APP_SECRET_ALL_KEYS=()
+declare -a APP_SECRET_ALL_HASHES_A=() APP_SECRET_ALL_HASHES_B=() APP_SECRET_ALL_HASHES_CLEAR=()
+declare -a APP_SECRET_ISOLATED_ENV=()
 APP_SECRET_DOCUMENT=""
 APP_SECRET_CREATE_ATTEMPTED=0
+APP_SECRET_ALL_SCOPES=0
+APP_SECRET_LOGIN_ATTEMPTED=0
+APP_SECRET_LOGIN_DIR=""
+APP_SECRET_RUNTIME_PARENT=""
+APP_SECRET_RUNTIME_DIR=""
 
 # shellcheck source=scripts/runtime/dev/provider-ssh-smoke.sh
 source "$ROOT/scripts/runtime/dev/provider-ssh-smoke.sh"
@@ -125,11 +135,15 @@ Options:
   --only PHASE             Run only one smoke phase; repeatable. Phases:
                            kube, exec, coco, docker, doctor, ssh,
                            tailnet-ssh, derp-ssh, websocket-ssh,
-                           host-key, app-preview, application-secrets, provider-ssh
+                           host-key, app-preview, application-secrets,
+                           application-secrets-all-scopes, provider-ssh
                            application-secrets requires the dedicated smoke
                            API key, a fresh disposable env and Kubernetes checks.
                            It tests project application secrets, not personal
                            secrets or outbound provider SSH.
+                           application-secrets-all-scopes is the sole phase in
+                           a fresh --admin-oidc login for an isolated owner
+                           account/org with initially empty shared scopes.
                            provider-ssh is owner-operated --admin-oidc with an
                            explicit login directory and expected email; it creates
                            only a disposable generated SSH identity/profile/env.
@@ -154,6 +168,10 @@ Environment:
                            Defaults to ~/.config/cw.
   EXPECTED_CODEWIRE_ADMIN_EMAIL
                            Optional exact email assertion for --admin-oidc.
+  EXPECTED_CODEWIRE_ADMIN_USER_ID
+                           Exact 32-hex account ID for all-scope acceptance.
+  EXPECTED_CODEWIRE_ORGANIZATION_ID
+                           Exact owned 32-hex org ID for all-scope acceptance.
   KUBECONFIG               Optional; defaults to ~/src/infra/kubeconfig-oidc.yaml when present
   KUBE_CONTEXT             Optional; if unset, prefers codewire-dev, then default, then current-context
   SANDBOX_NAMESPACE        Required sandbox namespace when Kubernetes checks run
@@ -370,7 +388,7 @@ while (($# > 0)); do
     --only)
       [[ $# -ge 2 ]] || die "--only requires a phase"
       case "$2" in
-        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|application-secrets|provider-ssh)
+        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|application-secrets|application-secrets-all-scopes|provider-ssh)
           SMOKE_ONLY_PHASES+=("$2")
           ;;
         *)
@@ -426,13 +444,20 @@ cleanup() {
   fi
   if [[ -n "$PROVIDER_SSH_CREDENTIAL_NAME" ]]; then
     cleanup_provider_ssh || rc=1
-  elif ((${#APP_SECRET_PROJECTS[@]} > 0)); then
-    cleanup_application_secrets || rc=1
+  elif ((${#APP_SECRET_PROJECTS[@]} > 0 || ${#APP_SECRET_USER_ATTEMPTS[@]} > 0 || ${#APP_SECRET_ORG_ATTEMPTS[@]} > 0 || APP_SECRET_CREATE_ATTEMPTED == 1)); then
+    if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+      (cleanup_application_secrets) || rc=1
+    else
+      cleanup_application_secrets || rc=1
+    fi
   elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" != "1" && -x "${CW_BIN:-}" ]]; then
     log "deleting smoke environment $ENV_ID"
     "$CW_BIN" --server "$CODEWIRE_SERVER_URL" env rm --yes "$ENV_ID" >/dev/null 2>&1 || true
   elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" == "1" ]]; then
     log "kept smoke environment $ENV_ID"
+  fi
+  if [[ "$APP_SECRET_LOGIN_ATTEMPTED" == 1 ]]; then
+    cleanup_application_all_scopes_login || rc=1
   fi
   if [[ "$rc" != "0" && -n "$TMPDIR_SMOKE" && -d "$TMPDIR_SMOKE" ]]; then
     log "kept failed-smoke evidence directory $TMPDIR_SMOKE"
@@ -678,12 +703,21 @@ stop_peer_relay_packet_diagnostics() {
 }
 
 cw() {
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+    env -i "${APP_SECRET_ISOLATED_ENV[@]}" "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
+    return
+  fi
   "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
 }
 
 cw_with_timeout() {
   local duration="$1"
   shift
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+    env -i "${APP_SECRET_ISOLATED_ENV[@]}" timeout "$duration" \
+      "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
+    return
+  fi
   timeout "$duration" "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
 }
 
@@ -955,6 +989,9 @@ create_environment() {
   local create_out="$TMPDIR_SMOKE/create.out"
   local -a source_args=()
   if [[ -n "$APP_SECRET_DOCUMENT" ]]; then
+    if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+      verify_application_all_scope_metadata
+    fi
     source_args=(--platform --file "$APP_SECRET_DOCUMENT")
     APP_SECRET_CREATE_ATTEMPTED=1
   elif [[ -n "$PROVIDER_SSH_DOCUMENT" ]]; then
@@ -995,7 +1032,19 @@ create_environment() {
 application_secrets_selected() {
   local phase
   for phase in "${SMOKE_ONLY_PHASES[@]}"; do
-    [[ "$phase" != application-secrets ]] || return 0
+    [[ "$phase" != application-secrets && "$phase" != application-secrets-all-scopes ]] || return 0
+  done
+  return 1
+}
+
+application_all_scopes_selected() {
+  [[ "${#SMOKE_ONLY_PHASES[@]}" == 1 && "${SMOKE_ONLY_PHASES[0]}" == application-secrets-all-scopes ]]
+}
+
+application_all_scopes_requested() {
+  local phase
+  for phase in "${SMOKE_ONLY_PHASES[@]}"; do
+    [[ "$phase" != application-secrets-all-scopes ]] || return 0
   done
   return 1
 }
@@ -1014,6 +1063,98 @@ validate_application_secrets_options() {
   for command in jq python3 sha256sum script; do require_cmd "$command"; done
 }
 
+validate_application_all_scopes_options() {
+  application_all_scopes_selected ||
+    die 'application-secrets-all-scopes must be the sole selected phase'
+  [[ "$SMOKE_AUTH_MODE" == admin-oidc && -z "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR" &&
+     -z "${CW_CONFIG_DIR:-}" ]] ||
+    die 'application-secrets-all-scopes requires --admin-oidc without any saved login directory'
+  [[ -z "${CODEWIRE_API_KEY:-}" && -z "${CODEWIRE_DEV_SMOKE_API_KEY:-}" &&
+     "$ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE" == 0 ]] ||
+    die 'application-secrets-all-scopes refuses API keys and generic-key fallback'
+  [[ "$ALLOW_NON_DEV" == 0 && "$CODEWIRE_SERVER_URL" == https://codewire-dev.sh &&
+     "$EXPECTED_CODEWIRE_DEV_SERVER_URL" == https://codewire-dev.sh ]] ||
+    die 'application-secrets-all-scopes requires the exact https://codewire-dev.sh endpoint'
+  [[ -z "$SMOKE_EXISTING_ENV_ID" && "$SMOKE_KEEP_ENV" == 0 && "$SMOKE_SKIP_KUBE" == 0 ]] ||
+    die 'application-secrets-all-scopes requires a fresh disposable environment and Kubernetes checks'
+  [[ -n "$SANDBOX_NAMESPACE" ]] ||
+    die 'application-secrets-all-scopes requires SANDBOX_NAMESPACE'
+  [[ -n "$EXPECTED_CODEWIRE_ADMIN_EMAIL" ]] ||
+    die 'application-secrets-all-scopes requires an exact account email'
+  [[ "$EXPECTED_CODEWIRE_ADMIN_USER_ID" =~ ^[0-9a-f]{32}$ &&
+     "$EXPECTED_CODEWIRE_ADMIN_USER_ID" != 00000000000000000000000000000000 ]] ||
+    die 'application-secrets-all-scopes requires an exact non-nil 32-hex account ID'
+  [[ "$EXPECTED_CODEWIRE_ORGANIZATION_ID" =~ ^[0-9a-f]{32}$ &&
+     "$EXPECTED_CODEWIRE_ORGANIZATION_ID" != 00000000000000000000000000000000 ]] ||
+    die 'application-secrets-all-scopes requires an exact non-nil 32-hex organization ID'
+  local command runtime_parent="${XDG_RUNTIME_DIR:-}"
+  for command in awk findmnt jq python3 realpath script sed sha256sum stat timeout; do
+    require_cmd "$command"
+  done
+  [[ "$CW_BIN" == /* && -f "$CW_BIN" && -x "$CW_BIN" && ! -L "$CW_BIN" &&
+     "$(realpath -e -- "$CW_BIN")" == "$CW_BIN" ]] ||
+    die 'application-secrets-all-scopes requires a canonical absolute prebuilt normal cw executable'
+  [[ -n "$runtime_parent" && "$(realpath -e -- "$runtime_parent")" == "$runtime_parent" &&
+     "$(stat -c '%u:%a' "$runtime_parent")" == "$(id -u):700" &&
+     "$(findmnt -nro FSTYPE -T "$runtime_parent")" == tmpfs ]] ||
+    die 'application-secrets-all-scopes requires a canonical owner-0700 tmpfs XDG_RUNTIME_DIR'
+}
+
+assert_application_all_scopes_principal() {
+  assert_admin_oauth_principal
+  jq -es --arg id "$EXPECTED_CODEWIRE_ADMIN_USER_ID" --arg email "$EXPECTED_CODEWIRE_ADMIN_EMAIL" '
+    length == 1 and (.[0] | .id == $id and .email == $email)
+  ' "$TMPDIR_SMOKE/admin-whoami.json" >/dev/null ||
+    die 'fresh OAuth login did not match the exact expected account identity'
+  cw_with_timeout 30 org list --output json >"$TMPDIR_SMOKE/admin-organizations.json" ||
+    die 'fresh OAuth login cannot list its organization ownership'
+  jq -es --arg id "$EXPECTED_CODEWIRE_ORGANIZATION_ID" '
+    length == 1 and (.[0] | type == "array" and
+      ([.[] | select(.id == $id and .role == "owner")] | length) == 1 and
+      ([.[] | select(.id == $id)] | length) == 1)
+  ' "$TMPDIR_SMOKE/admin-organizations.json" >/dev/null ||
+    die 'fresh OAuth account must exactly own the selected dedicated organization'
+  [[ "$(awk '$1 == "ID:" {print $2}' "$TMPDIR_SMOKE/admin-current-organization.out")" == \
+      "$EXPECTED_CODEWIRE_ORGANIZATION_ID" &&
+     "$(awk '$1 == "Role:" {print $2}' "$TMPDIR_SMOKE/admin-current-organization.out")" == owner ]] ||
+    die 'fresh OAuth login did not select the exact owned organization'
+}
+
+prepare_application_all_scopes_cli() {
+  mkdir -p "$SMOKE_TMP_PARENT"
+  TMPDIR_SMOKE="$(mktemp -d "$SMOKE_TMP_PARENT/codewire-runtime-smoke.XXXXXX")"
+  chmod 0700 "$TMPDIR_SMOKE"
+  mkdir -m 0700 "$TMPDIR_SMOKE/auth-home"
+  APP_SECRET_RUNTIME_PARENT="$XDG_RUNTIME_DIR"
+  APP_SECRET_RUNTIME_DIR="$(mktemp -d "$APP_SECRET_RUNTIME_PARENT/.cwapp-XXXXXX")"
+  chmod 0700 "$APP_SECRET_RUNTIME_DIR"
+  APP_SECRET_LOGIN_ATTEMPTED=1
+  APP_SECRET_LOGIN_DIR="$APP_SECRET_RUNTIME_DIR/login"
+  mkdir -m 0700 "$APP_SECRET_LOGIN_DIR"
+  CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$APP_SECRET_LOGIN_DIR"
+  APP_SECRET_ISOLATED_ENV=(PATH=/usr/bin:/bin "HOME=$TMPDIR_SMOKE/auth-home"
+    "USER=$(id -un)" "LOGNAME=$(id -un)" SHELL=/bin/bash TERM=xterm-256color LC_ALL=C
+    "CW_CONFIG_DIR=$APP_SECRET_LOGIN_DIR" "XDG_RUNTIME_DIR=$APP_SECRET_RUNTIME_DIR"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=$APP_SECRET_RUNTIME_DIR/no-owner-bus")
+  cw_with_timeout 600 login --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" ||
+    die 'fresh owner-operated Dev login failed'
+  validate_admin_oauth_config "$APP_SECRET_LOGIN_DIR"
+  assert_application_all_scopes_principal
+}
+
+cleanup_application_all_scopes_login() {
+  local rc=0
+  cw_with_timeout 30 logout >"$TMPDIR_SMOKE/app-logout.out" 2>"$TMPDIR_SMOKE/app-logout.err" || rc=1
+  if [[ "$APP_SECRET_RUNTIME_DIR" == "$APP_SECRET_RUNTIME_PARENT"/.cwapp-?????? ]]; then
+    rm -rf -- "$APP_SECRET_RUNTIME_DIR"
+    [[ ! -e "$APP_SECRET_RUNTIME_DIR" && ! -L "$APP_SECRET_RUNTIME_DIR" ]] || rc=1
+  else
+    rc=1
+  fi
+  [[ "$rc" == 0 ]] || log 'fresh all-scope login cleanup failed'
+  return "$rc"
+}
+
 assert_application_artifacts_redacted() {
   local status
   # Only synthetic patterns enter this anonymous pipe, never grep argv/files.
@@ -1025,8 +1166,190 @@ assert_application_artifacts_redacted() {
   fi
 }
 
+assert_application_scope_metadata() {
+  local file="$1"
+  shift
+  local expected
+  if (($# == 0)); then expected='[]'
+  else expected="$(printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1] | sort')"; fi
+  jq -es --argjson expected "$expected" '
+    length == 1 and (.[0] |
+      type == "array" and
+      (map(.key) | sort) == $expected and
+      all(.[]; type == "object" and
+        (keys | sort) == ["created_at", "key", "updated_at"] and
+        (.key | type) == "string" and
+        (.created_at | type) == "string" and
+        (.updated_at | type) == "string"))
+  ' "$file" >/dev/null
+}
+
+application_secret_hash() {
+  printf '%s' "$1" | sha256sum | cut -d ' ' -f 1
+}
+
+application_all_scopes_hash_checks() {
+  local -n hashes="$1"
+  local index key hash checks=''
+  for index in "${!APP_SECRET_ALL_KEYS[@]}"; do
+    key="${APP_SECRET_ALL_KEYS[$index]}"
+    hash="${hashes[$index]}"
+    if [[ "$hash" == absent ]]; then
+      checks+="test \"\${${key}+x}\" != x; "
+    else
+      checks+="test \"\${${key}+x}\" = x; test \"\$(printf %s \"\$${key}\" | sha256sum | cut -d ' ' -f 1)\" = '$hash'; "
+    fi
+  done
+  printf '%s' "$checks"
+}
+
+create_application_secret_project() {
+  local project="$1" index="$2" project_id
+  jq -e --arg name "$project" 'type == "array" and all(.[]; .name != $name)' \
+    "$TMPDIR_SMOKE/app-projects-before.json" >/dev/null || die 'synthetic project name already exists'
+  # Retain exact intent before the request so a committed create with a lost
+  # response is still reconciled by cleanup.
+  APP_SECRET_PROJECTS+=("$project")
+  cw_with_timeout 30 secrets --platform projects create "$project" \
+    >"$TMPDIR_SMOKE/app-create-project-$index.out" 2>"$TMPDIR_SMOKE/app-create-project-$index.err" ||
+    die 'dedicated smoke identity cannot create its disposable secret project'
+  cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-projects.json" ||
+    die 'cannot resolve the created platform secret project'
+  project_id="$(jq -er --arg name "$project" '
+    [.[] | select(.name == $name)] | if length == 1 then .[0].id else error("ambiguous project") end
+    | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
+  ' "$TMPDIR_SMOKE/app-projects.json")" || die 'created application project ID is missing or ambiguous'
+  APP_SECRET_IDS+=("$project_id")
+}
+
+prepare_application_all_scope_secrets() {
+  local nonce prefix project index key value install startup checks
+  local org_unique org_op org_pu org_cfg user_unique user_pu user_cfg config_hash
+  local -a project_unique=() project_op=() project_pu=() project_cfg=()
+  nonce="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+  [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'synthetic application identity generation failed'
+  prefix="CWAPP_${nonce^^}"
+  APP_SECRET_ALL_KEYS=("${prefix}_ORG" "${prefix}_PROJECT" "${prefix}_USER"
+    "${prefix}_ORG_PROJECT" "${prefix}_PROJECT_USER" "${prefix}_CONFIG")
+
+  cw_with_timeout 30 secrets --platform --user list --output json >"$TMPDIR_SMOKE/app-user-before.json" ||
+    die 'dedicated all-scope identity cannot list personal secret metadata'
+  cw_with_timeout 30 secrets --platform --organization list --output json >"$TMPDIR_SMOKE/app-org-before.json" ||
+    die 'dedicated all-scope identity cannot list organization secret metadata'
+  if ! jq -es 'length == 1 and (.[0] | type == "array" and length == 0)' \
+      "$TMPDIR_SMOKE/app-user-before.json" >/dev/null ||
+     ! jq -es 'length == 1 and (.[0] | type == "array" and length == 0)' \
+      "$TMPDIR_SMOKE/app-org-before.json" >/dev/null; then
+    die 'all-scope acceptance requires initially empty personal and organization scopes'
+  fi
+  cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
+    die 'dedicated all-scope identity cannot list platform secret projects'
+  cw_with_timeout 30 env --platform list --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
+    die 'dedicated all-scope identity cannot inspect its environment names'
+  jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
+    "$TMPDIR_SMOKE/app-environments-before.json" >/dev/null ||
+    die 'application smoke environment name already exists; choose a fresh --name'
+
+  org_unique="cwdevall${nonce}org"; org_op="cwdevall${nonce}orgop"
+  org_pu="cwdevall${nonce}orgpu"; org_cfg="cwdevall${nonce}orgcfg"
+  user_unique="cwdevall${nonce}user"; user_pu="cwdevall${nonce}userpu"
+  user_cfg="cwdevall${nonce}usercfg"
+  APP_SECRET_VALUES+=("$org_unique" "$org_op" "$org_pu" "$org_cfg"
+    "$user_unique" "$user_pu" "$user_cfg")
+  local -a org_keys=("${APP_SECRET_ALL_KEYS[0]}" "${APP_SECRET_ALL_KEYS[3]}"
+    "${APP_SECRET_ALL_KEYS[4]}" "${APP_SECRET_ALL_KEYS[5]}")
+  local -a org_values=("$org_unique" "$org_op" "$org_pu" "$org_cfg")
+  local -a user_keys=("${APP_SECRET_ALL_KEYS[2]}" "${APP_SECRET_ALL_KEYS[4]}"
+    "${APP_SECRET_ALL_KEYS[5]}")
+  local -a user_values=("$user_unique" "$user_pu" "$user_cfg")
+  for index in "${!org_keys[@]}"; do
+    key="${org_keys[$index]}"; value="${org_values[$index]}"
+    APP_SECRET_ORG_ATTEMPTS+=("$key")
+    printf '%s' "$value" | cw_with_timeout 30 secrets --platform --organization set "$key" \
+      >"$TMPDIR_SMOKE/app-set-org-$index.out" 2>"$TMPDIR_SMOKE/app-set-org-$index.err" ||
+      die 'cannot write an owned organization secret via protected stdin'
+  done
+  for index in "${!user_keys[@]}"; do
+    key="${user_keys[$index]}"; value="${user_values[$index]}"
+    APP_SECRET_USER_ATTEMPTS+=("$key")
+    printf '%s' "$value" | cw_with_timeout 30 secrets --platform --user set "$key" \
+      >"$TMPDIR_SMOKE/app-set-user-$index.out" 2>"$TMPDIR_SMOKE/app-set-user-$index.err" ||
+      die 'cannot write an owned personal secret via protected stdin'
+  done
+
+  for index in 0 1; do
+    project="dev-app-${nonce}-${index}"
+    create_application_secret_project "$project" "$index"
+    project_unique+=("cwdevall${nonce}project${index}")
+    project_op+=("cwdevall${nonce}projectop${index}")
+    project_pu+=("cwdevall${nonce}projectpu${index}")
+    project_cfg+=("cwdevall${nonce}projectcfg${index}")
+    APP_SECRET_VALUES+=("${project_unique[$index]}" "${project_op[$index]}"
+      "${project_pu[$index]}" "${project_cfg[$index]}")
+    local -a project_keys=("${APP_SECRET_ALL_KEYS[1]}" "${APP_SECRET_ALL_KEYS[3]}"
+      "${APP_SECRET_ALL_KEYS[4]}" "${APP_SECRET_ALL_KEYS[5]}")
+    local -a project_values=("${project_unique[$index]}" "${project_op[$index]}"
+      "${project_pu[$index]}" "${project_cfg[$index]}")
+    local key_index
+    for key_index in "${!project_keys[@]}"; do
+      printf '%s' "${project_values[$key_index]}" | cw_with_timeout 30 secrets --platform \
+        --project "id:${APP_SECRET_IDS[$index]}" set "${project_keys[$key_index]}" \
+        >"$TMPDIR_SMOKE/app-set-$index-$key_index.out" 2>"$TMPDIR_SMOKE/app-set-$index-$key_index.err" ||
+        die 'cannot write an owned project secret via protected stdin'
+    done
+    cw_with_timeout 30 secrets --platform --project "id:${APP_SECRET_IDS[$index]}" list --output json \
+      >"$TMPDIR_SMOKE/app-keys-$index.json" || die 'cannot inspect write-only application key metadata'
+    assert_application_scope_metadata "$TMPDIR_SMOKE/app-keys-$index.json" "${project_keys[@]}" ||
+      die 'application project key metadata is malformed or contains unknown fields'
+  done
+
+  config_hash="$(application_secret_hash ordinary-config)"
+  APP_SECRET_ALL_HASHES_A=("$(application_secret_hash "$org_unique")"
+    "$(application_secret_hash "${project_unique[0]}")" "$(application_secret_hash "$user_unique")"
+    "$(application_secret_hash "${project_op[0]}")" "$(application_secret_hash "$user_pu")" "$config_hash")
+  APP_SECRET_ALL_HASHES_B=("$(application_secret_hash "$org_unique")"
+    "$(application_secret_hash "${project_unique[1]}")" "$(application_secret_hash "$user_unique")"
+    "$(application_secret_hash "${project_op[1]}")" "$(application_secret_hash "$user_pu")" "$config_hash")
+  APP_SECRET_ALL_HASHES_CLEAR=(absent absent absent absent absent "$config_hash")
+  ((${#APP_SECRET_ALL_HASHES_A[@]} == ${#APP_SECRET_ALL_KEYS[@]} &&
+     ${#APP_SECRET_ALL_HASHES_B[@]} == ${#APP_SECRET_ALL_KEYS[@]} &&
+     ${#APP_SECRET_ALL_HASHES_CLEAR[@]} == ${#APP_SECRET_ALL_KEYS[@]})) ||
+    die 'all-scope application hash matrix is incomplete'
+  checks="$(application_all_scopes_hash_checks APP_SECRET_ALL_HASHES_A)"
+  install="set -eu; $checks test ! -e /workspace/.cw-app-smoke; mkdir /workspace/.cw-app-smoke; printf '1\\n' > /workspace/.cw-app-smoke/install-count; printf 'workspace-preserved\\n' > /workspace/.cw-app-smoke/preserved"
+  startup="set -eu; { "
+  for index in "${!APP_SECRET_ALL_KEYS[@]}"; do
+    key="${APP_SECRET_ALL_KEYS[$index]}"
+    startup+="if test \"\${${key}+x}\" = x; then digest=\"\$(printf %s \"\$${key}\" | sha256sum | cut -d ' ' -f 1)\"; else digest=absent; fi; printf '%s=%s\\n' '$key' \"\$digest\"; "
+  done
+  startup+="} > /workspace/.cw-app-smoke/startup-sha"
+  APP_SECRET_DOCUMENT="$TMPDIR_SMOKE/app-codewire.json"
+  jq -n --arg project "platform:id:${APP_SECRET_IDS[0]}" --arg install "$install" --arg startup "$startup" \
+    --arg config_key "${APP_SECRET_ALL_KEYS[5]}" '
+    {version:1, working_directory:"/workspace",
+      secrets:{project:$project,organization:true,user:"platform"},
+      environment:{($config_key):"ordinary-config"}, install_command:$install, startup_script:$startup}
+  ' >"$APP_SECRET_DOCUMENT"
+  assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-*.json "$TMPDIR_SMOKE"/app-*.out "$TMPDIR_SMOKE"/app-*.err
+}
+
+verify_application_all_scope_metadata() {
+  cw_with_timeout 30 secrets --platform --user list --output json >"$TMPDIR_SMOKE/app-user-final.json" ||
+    die 'cannot re-list owned personal secret metadata before environment creation'
+  cw_with_timeout 30 secrets --platform --organization list --output json >"$TMPDIR_SMOKE/app-org-final.json" ||
+    die 'cannot re-list owned organization secret metadata before environment creation'
+  if ! assert_application_scope_metadata "$TMPDIR_SMOKE/app-user-final.json" "${APP_SECRET_USER_ATTEMPTS[@]}" ||
+     ! assert_application_scope_metadata "$TMPDIR_SMOKE/app-org-final.json" "${APP_SECRET_ORG_ATTEMPTS[@]}"; then
+    die 'shared-scope metadata contains malformed, leaky or non-attempt-owned keys; environment creation refused'
+  fi
+}
+
 prepare_application_secrets() {
-  local nonce project project_id value index key install startup
+  local nonce project value index key install startup
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+    prepare_application_all_scope_secrets
+    return
+  fi
   nonce="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'synthetic application identity generation failed'
   # Use only the already checked dedicated smoke org, never a personal scope.
@@ -1040,20 +1363,7 @@ prepare_application_secrets() {
   APP_SECRET_VALUES=("cwdevapp${nonce}a" "cwdevapp${nonce}b")
   for index in 0 1; do
     project="dev-app-${nonce}-${index}"
-    jq -e --arg name "$project" 'all(.[]; .name != $name)' \
-      "$TMPDIR_SMOKE/app-projects-before.json" >/dev/null || die 'synthetic project name already exists'
-    # Retain exact intent even if the create response is lost after commit.
-    APP_SECRET_PROJECTS+=("$project")
-    cw_with_timeout 30 secrets --platform projects create "$project" >"$TMPDIR_SMOKE/app-create-project-$index.out" \
-      2>"$TMPDIR_SMOKE/app-create-project-$index.err" ||
-      die 'dedicated smoke identity cannot create its disposable secret project'
-    cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-projects.json" ||
-      die 'cannot resolve the created platform secret project'
-    project_id="$(jq -er --arg name "$project" '
-      [.[] | select(.name == $name)] | if length == 1 then .[0].id else error("ambiguous project") end
-      | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
-    ' "$TMPDIR_SMOKE/app-projects.json")" || die 'created application project ID is missing or ambiguous'
-    APP_SECRET_IDS+=("$project_id")
+    create_application_secret_project "$project" "$index"
     value="${APP_SECRET_VALUES[$index]}"
     APP_SECRET_HASHES+=("$(printf '%s' "$value" | sha256sum | cut -d ' ' -f 1)")
     for key in DATABASE_URL CW_DEV_PRECEDENCE; do
@@ -1085,7 +1395,8 @@ application_environment_ready() {
       "$TMPDIR_SMOKE/app-environment.json" >/dev/null; then
     die 'application environment setup failed; output suppressed'
   fi
-  jq -e --arg id "$ENV_ID" --arg project "$project" --argjson previous "$previous_generation" '
+  jq -e --arg id "$ENV_ID" --arg project "$project" --argjson previous "$previous_generation" \
+    --argjson all_scopes "$APP_SECRET_ALL_SCOPES" '
     .id == $id and .state == "running" and
     (.operation_generation | type == "number" and . > 0) and
     ($previous == 0 or .operation_generation == $previous) and
@@ -1093,8 +1404,13 @@ application_environment_ready() {
     (.source_selection | type == "object") and (.source_selection.secrets | type == "object") and
     .source_selection.credentials == null and .source_selection.profile_revision == null and
     (.source_selection.secrets.project // "") == $project and
-    (.source_selection.secrets.user // null) == null and
-    (.source_selection.secrets.organization // false) == false
+    (if $all_scopes == 1 then
+      .source_selection.secrets == (if $project == "" then {} else
+        {project:$project,user:"platform",organization:true} end)
+    else
+      (.source_selection.secrets.user // null) == null and
+      (.source_selection.secrets.organization // false) == false
+    end)
   ' "$TMPDIR_SMOKE/app-environment.json" >/dev/null
 }
 
@@ -1120,9 +1436,15 @@ capture_application_pod() {
       select(all(.[]; type == "string" and test("^[a-z0-9][a-z0-9.-]*$"))) | @tsv')" ||
     die 'application smoke Sandbox is not controlled by the exact Claim'
   IFS=$'\t' read -r sandbox_uid pod_name <<<"$sandbox_identity"
+  local secret_keys_json='["DATABASE_URL"]' config_key=''
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+    secret_keys_json="$(printf '%s\n' "${APP_SECRET_ALL_KEYS[@]:0:5}" | jq -Rsc 'split("\n")[:-1]')"
+    config_key="${APP_SECRET_ALL_KEYS[5]}"
+  fi
   kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$pod_name" -o json |
     jq -e --arg claim "$claim_uid" --arg sandbox "$sandbox_name" --arg sandbox_uid "$sandbox_uid" \
-      --arg pod "$pod_name" --arg ns "$SANDBOX_NAMESPACE" --arg id "$ENV_ID" --arg generation "$generation" --arg phase "$phase" '
+      --arg pod "$pod_name" --arg ns "$SANDBOX_NAMESPACE" --arg id "$ENV_ID" --arg generation "$generation" --arg phase "$phase" \
+      --argjson secret_keys "$secret_keys_json" --arg config_key "$config_key" '
       select(.metadata.deletionTimestamp == null and .status.phase == "Running" and
         .metadata.name == $pod and .metadata.namespace == $ns and
         .metadata.labels["codewire.sh/environment-id"] == $id and
@@ -1133,7 +1455,9 @@ capture_application_pod() {
           .kind == "Sandbox" and .name == $sandbox and .uid == $sandbox_uid)) |
       select([.spec.containers[] | select(.name == "workspace")] | length == 1) |
       [.spec.containers[] | select(.name == "workspace") | .env[]?] as $env |
-      select(all($env[]; .name != "DATABASE_URL")) |
+      select(all($env[]; (.name as $name | $secret_keys | index($name) | not))) |
+      select($config_key == "" or
+        ([$env[] | select(.name == $config_key) | .value] | length <= 1 and all(.[]; . == "ordinary-config"))) |
       select(if $phase == "clear" then
         all($env[]; .name != "CODEWIRE_ENVIRONMENT_ID" and
           .name != "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION" and
@@ -1184,13 +1508,62 @@ printf 'application-secret-check-ok\\n'
 SCRIPT
 }
 
+application_all_scopes_guest_check() {
+  local hashes_name="$1"
+  local -n hashes="$hashes_name"
+  local checks index key hash startup_checks='' keys_json config_key
+  checks="$(application_all_scopes_hash_checks "$hashes_name")"
+  for index in "${!APP_SECRET_ALL_KEYS[@]}"; do
+    key="${APP_SECRET_ALL_KEYS[$index]}"; hash="${hashes[$index]}"
+    startup_checks+="grep -Fx '$key=$hash' /workspace/.cw-app-smoke/startup-sha >/dev/null && "
+  done
+  startup_checks="${startup_checks% && }"
+  keys_json="$(printf '%s\n' "${APP_SECRET_ALL_KEYS[@]}" | jq -Rsc 'split("\n")[:-1]')"
+  config_key="${APP_SECRET_ALL_KEYS[5]}"
+  cat <<SCRIPT
+set -eu
+application_fail() { printf 'application check failed: %s\\n' "\$1" >&2; exit 1; }
+$checks
+test "\$(cat /workspace/.cw-app-smoke/install-count)" = 1 || application_fail install-count
+test "\$(cat /workspace/.cw-app-smoke/preserved)" = workspace-preserved || application_fail workspace-preservation
+attempt=0
+until $startup_checks; do
+  attempt=\$((attempt + 1)); test "\$attempt" -lt 100 || application_fail startup-projection; sleep 0.1
+done
+python3 - <<'PY'
+import json
+from pathlib import Path
+root = Path('/home/codewire/.codewire')
+keys = $keys_json
+config_key = '$config_key'
+ordinary = json.loads((root / 'environment.json').read_text())
+assert ordinary[config_key] == 'ordinary-config'
+assert all(key not in ordinary for key in keys if key != config_key)
+sessions = list((root / 'daemon' / 'sessions').glob('*/session.json'))
+assert sessions, 'managed session metadata is missing'
+for path in sessions:
+    session = json.loads(path.read_text())
+    for value in session['env']:
+        name, _, persisted = value.partition('=')
+        assert name not in keys or (name == config_key and persisted == 'ordinary-config')
+PY
+printf 'application-secret-check-ok\\n'
+SCRIPT
+}
+
 run_application_secret_pty() {
   local guest_script="$1" phase="$2" command receipt
   # cw needs terminal stdin to read its initial size. Redirect cw's stdout
   # inside that host PTY so attach is noninteractive and propagates the guest
   # exit status, rather than waiting for the interactive detach chord.
-  printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty "$ENV_ID" -- \
-    /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+    printf -v command '%q ' env -i "${APP_SECRET_ISOLATED_ENV[@]}" \
+      "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty "$ENV_ID" -- \
+      /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
+  else
+    printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty "$ENV_ID" -- \
+      /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
+  fi
   printf -v receipt '%q' "$TMPDIR_SMOKE/app-pty-$phase.log"
   command+=" >$receipt"
   if ! timeout --foreground --kill-after=5s "$SMOKE_EXEC_TIMEOUT" \
@@ -1204,27 +1577,41 @@ run_application_secret_pty() {
 
 assert_application_source_update() {
   local file="$1" project="$2" generation="$3"
-  jq -es --arg id "$ENV_ID" --arg project "$project" --argjson generation "$generation" '
+  jq -es --arg id "$ENV_ID" --arg project "$project" --argjson generation "$generation" \
+    --argjson all_scopes "$APP_SECRET_ALL_SCOPES" '
     length == 1 and (.[0] |
       type == "object" and .environment_id == $id and
       .operation_generation == $generation and .outcome == "restart_required" and
       (.selection | type == "object" and has("secrets") and has("credentials") and has("profile_revision")) and
       (.selection.secrets | type == "object") and
       (.selection.secrets | if has("project") then .project == $project else $project == "" end) and
-      (.selection.secrets | (has("user") | not) or .user == null) and
-      (.selection.secrets | (has("organization") | not) or .organization == false) and
+      (if $all_scopes == 1 then
+        .selection.secrets == (if $project == "" then {} else
+          {project:$project,user:"platform",organization:true} end)
+      else
+        (.selection.secrets | (has("user") | not) or .user == null) and
+        (.selection.secrets | (has("organization") | not) or .organization == false)
+      end) and
       .selection.credentials == null and .selection.profile_revision == null)
   ' "$file" >/dev/null || die 'application source update acknowledgement did not match the exact submitted operation and selection'
 }
 
 run_application_secrets_smoke() {
-  local phase expected project generation=0 previous_uid='' guest_script
+  local phase expected project generation=0 previous_uid='' guest_script hashes_name=''
   for phase in a b clear; do
     case "$phase" in
-      a) project="platform:id:${APP_SECRET_IDS[0]}"; expected="${APP_SECRET_HASHES[0]}" ;;
+      a)
+        project="platform:id:${APP_SECRET_IDS[0]}"; expected="${APP_SECRET_HASHES[0]:-}"
+        hashes_name=APP_SECRET_ALL_HASHES_A
+        ;;
       b)
-        project="platform:id:${APP_SECRET_IDS[1]}"; expected="${APP_SECRET_HASHES[1]}"
-        if cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" --output json </dev/null \
+        project="platform:id:${APP_SECRET_IDS[1]}"; expected="${APP_SECRET_HASHES[1]:-}"
+        hashes_name=APP_SECRET_ALL_HASHES_B
+        local -a scope_args=()
+        if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+          scope_args=(--user-secrets platform --org-secrets)
+        fi
+        if cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --output json </dev/null \
             >"$TMPDIR_SMOKE/app-unconfirmed.out" 2>"$TMPDIR_SMOKE/app-unconfirmed.err"; then
           die 'unconfirmed application source replacement unexpectedly succeeded'
         fi
@@ -1233,12 +1620,13 @@ run_application_secrets_smoke() {
         application_environment_ready "platform:id:${APP_SECRET_IDS[0]}" 0 || die 'unconfirmed source edit changed selection'
         [[ "$(jq -r .operation_generation "$TMPDIR_SMOKE/app-environment.json")" == "$generation" ]] ||
           die 'unconfirmed source edit changed generation'
-        cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" --yes --output json \
+        cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --yes --output json \
           >"$TMPDIR_SMOKE/app-update-b.json" 2>"$TMPDIR_SMOKE/app-update-b.err" || die 'application source replacement failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-b.json" "$project" "$generation"
         ;;
       clear)
         project=''; expected=absent
+        hashes_name=APP_SECRET_ALL_HASHES_CLEAR
         cw_with_timeout 30 env --platform update "$ENV_ID" --clear-secrets --yes --output json \
           >"$TMPDIR_SMOKE/app-update-clear.json" 2>"$TMPDIR_SMOKE/app-update-clear.err" || die 'application source clear failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
@@ -1261,7 +1649,11 @@ run_application_secrets_smoke() {
         die 'source replacement changed the exact owned SandboxClaim'
     fi
     previous_uid="$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")"
-    guest_script="$(application_guest_check "$expected")"
+    if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+      guest_script="$(application_all_scopes_guest_check "$hashes_name")"
+    else
+      guest_script="$(application_guest_check "$expected")"
+    fi
     cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- /bin/sh -c "$guest_script" \
       >"$TMPDIR_SMOKE/app-exec-$phase.out" 2>"$TMPDIR_SMOKE/app-exec-$phase.err" || die 'managed application-secret exec failed; output suppressed'
     grep -qx application-secret-check-ok "$TMPDIR_SMOKE/app-exec-$phase.out" || die 'managed exec omitted application receipt'
@@ -1269,7 +1661,11 @@ run_application_secrets_smoke() {
     cw_with_timeout 30 list "$ENV_ID" --output json >"$TMPDIR_SMOKE/app-sessions-$phase.json" || die 'session metadata inspection failed'
     assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-*.json "$TMPDIR_SMOKE"/app-*.out "$TMPDIR_SMOKE"/app-*.err "$TMPDIR_SMOKE"/app-pty-*.log "$TMPDIR_SMOKE/create.out"
   done
-  log 'application project secrets passed install/startup, exec/PTY, replacement/clear and preservation; no personal/provider claim'
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+    log 'application organization/project/personal precedence passed install/startup, exec/PTY, replacement/clear and preservation'
+  else
+    log 'application project secrets passed install/startup, exec/PTY, replacement/clear and preservation; no personal/provider claim'
+  fi
 }
 
 application_environment_destroyed() {
@@ -1285,6 +1681,44 @@ application_environment_destroyed() {
     else error("expected exact unique owned environment") end
   ' "$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null)" || return 2
   [[ "$state" == destroyed ]]
+}
+
+cleanup_application_shared_scope() {
+  local scope="$1" attempts_name="$2"
+  local -n attempts="$attempts_name"
+  local key index rc=0 metadata="$TMPDIR_SMOKE/app-cleanup-$scope.json"
+  local -a scope_args=("--$scope")
+  for index in "${!attempts[@]}"; do
+    key="${attempts[$index]}"
+    if ! cw_with_timeout 30 secrets --platform "${scope_args[@]}" list --output json >"$metadata" 2>/dev/null; then
+      rc=1
+      continue
+    fi
+    if ! jq -es --arg key "$key" '
+        length == 1 and (.[0] | type == "array" and
+          all(.[]; type == "object" and (.key | type) == "string") and
+          ([.[] | select(.key == $key)] | length) <= 1)
+      ' "$metadata" >/dev/null; then
+      rc=1
+      continue
+    fi
+    if jq -es --arg key "$key" '.[0] | any(.[]; .key == $key)' "$metadata" >/dev/null; then
+      cw_with_timeout 30 secrets --platform "${scope_args[@]}" delete "$key" \
+        >"$TMPDIR_SMOKE/app-cleanup-$scope-$index.out" \
+        2>"$TMPDIR_SMOKE/app-cleanup-$scope-$index.err" || rc=1
+    fi
+  done
+  if ! cw_with_timeout 30 secrets --platform "${scope_args[@]}" list --output json >"$metadata" 2>/dev/null; then
+    return 1
+  fi
+  local attempted_json
+  attempted_json="$(printf '%s\n' "${attempts[@]}" | jq -Rsc 'split("\n")[:-1]')"
+  jq -es --argjson attempted "$attempted_json" '
+    length == 1 and (.[0] | type == "array" and
+      all(.[]; type == "object" and (.key | type) == "string") and
+      all(.[]; (.key as $key | $attempted | index($key) | not)) and length == 0)
+  ' "$metadata" >/dev/null || rc=1
+  return "$rc"
 }
 
 cleanup_application_secrets() {
@@ -1323,6 +1757,16 @@ cleanup_application_secrets() {
     cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null &&
       jq -e --arg name "$project" --arg id "$project_id" 'type == "array" and all(.[]; .name != $name and .id != $id)' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null || rc=1
   done
+  if ((${#APP_SECRET_USER_ATTEMPTS[@]} > 0)); then
+    cleanup_application_shared_scope user APP_SECRET_USER_ATTEMPTS || rc=1
+  fi
+  if ((${#APP_SECRET_ORG_ATTEMPTS[@]} > 0)); then
+    cleanup_application_shared_scope organization APP_SECRET_ORG_ATTEMPTS || rc=1
+  fi
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 && "$rc" == 0 ]]; then
+    assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-cleanup-*.json \
+      "$TMPDIR_SMOKE"/app-cleanup-*.out "$TMPDIR_SMOKE"/app-cleanup-*.err || rc=1
+  fi
   [[ "$rc" == 0 ]] || log 'application smoke cleanup incomplete; exact owned IDs remain in private smoke evidence'
   return "$rc"
 }
@@ -4170,6 +4614,9 @@ run_selected_phase() {
     application-secrets)
       run_application_secrets_smoke
       ;;
+    application-secrets-all-scopes)
+      run_application_secrets_smoke
+      ;;
     provider-ssh)
       run_provider_ssh_smoke
       ;;
@@ -4228,9 +4675,18 @@ run_selected_phases() {
 }
 
 main() {
-  if application_secrets_selected; then validate_application_secrets_options; fi
+  if application_all_scopes_requested; then
+    APP_SECRET_ALL_SCOPES=1
+    validate_application_all_scopes_options
+  elif application_secrets_selected; then
+    validate_application_secrets_options
+  fi
   if provider_ssh_selected; then validate_provider_ssh_options; fi
-  prepare_cli
+  if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+    prepare_application_all_scopes_cli
+  else
+    prepare_cli
+  fi
   if application_secrets_selected; then prepare_application_secrets; fi
   if provider_ssh_selected; then prepare_provider_ssh; fi
   if [[ -n "$SMOKE_EXISTING_ENV_ID" ]]; then

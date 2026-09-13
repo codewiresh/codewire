@@ -85,12 +85,18 @@ SSH_PUBLIC_KEY_FINGERPRINT=''
 WORKLOAD_SECRET_CANARY=''
 APP_SECRET_PROJECT_A='native-app-a'
 APP_SECRET_PROJECT_B='native-app-b'
+APP_SECRET_UNSELECTED_PROJECT='native-app-unselected-canary'
 APP_SECRET_PROJECT_A_ID=''
 APP_SECRET_PROJECT_B_ID=''
 APP_SECRET_CANARY_A=''
 APP_SECRET_CANARY_B=''
 APP_SECRET_SHA_A=''
 APP_SECRET_SHA_B=''
+APP_SECRET_USER_ONLY_CANARY=''
+APP_SECRET_USER_COLLISION_CANARY=''
+APP_SECRET_USER_PRECEDENCE_CANARY=''
+APP_SECRET_USER_ONLY_SHA=''
+APP_SECRET_USER_COLLISION_SHA=''
 KEYRING_ROOT=''
 KEYRING_RUNTIME=''
 KEYRING_RUNTIME_PARENT=''
@@ -152,9 +158,10 @@ OAuth identities, OpenAI and Anthropic API keys, and one generated SSH identity
 through the public commands;
 it never contacts any provider or reads the desktop session keyring or an
 ambient provider home.
-It also selects synthetic local application projects for install, startup,
-managed exec, and PTY sessions; replaces and clears them through confirmed
-source updates; and proves installed-root, workspace, and skill preservation.
+It also selects synthetic local personal and project application scopes for
+install, startup, managed exec, and PTY sessions; replaces and clears them
+through confirmed source updates; and proves installed-root, workspace, and
+skill preservation.
 Application values are intentionally child-visible, unlike provider credentials.
 USAGE
 }
@@ -853,17 +860,29 @@ run_codex_credential_bridge_smoke() {
 }
 
 prepare_application_secret_fixture() {
-  local project phase
-  APP_SECRET_CANARY_A="cwappfirst$(tr -d '-' </proc/sys/kernel/random/boot_id)"
-  APP_SECRET_CANARY_B="cwappsecond$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  local project phase boot_id
+  boot_id="$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  APP_SECRET_CANARY_A="cwappfirst$boot_id"
+  APP_SECRET_CANARY_B="cwappsecond$boot_id"
+  APP_SECRET_USER_ONLY_CANARY="cwpersonalonly$boot_id"
+  APP_SECRET_USER_COLLISION_CANARY="cwpersonalwins$boot_id"
+  APP_SECRET_USER_PRECEDENCE_CANARY="cwpersonalconfigloses$boot_id"
   APP_SECRET_SHA_A="$(printf '%s' "$APP_SECRET_CANARY_A" | sha256sum | cut -d ' ' -f 1)"
   APP_SECRET_SHA_B="$(printf '%s' "$APP_SECRET_CANARY_B" | sha256sum | cut -d ' ' -f 1)"
+  APP_SECRET_USER_ONLY_SHA="$(printf '%s' "$APP_SECRET_USER_ONLY_CANARY" | sha256sum | cut -d ' ' -f 1)"
+  APP_SECRET_USER_COLLISION_SHA="$(printf '%s' "$APP_SECRET_USER_COLLISION_CANARY" | sha256sum | cut -d ' ' -f 1)"
   [[ "$APP_SECRET_SHA_A" =~ ^[0-9a-f]{64}$ && "$APP_SECRET_SHA_B" =~ ^[0-9a-f]{64}$ &&
-     "$APP_SECRET_SHA_A" != "$APP_SECRET_SHA_B" ]] || die 'application fixture digests are invalid'
+     "$APP_SECRET_USER_ONLY_SHA" =~ ^[0-9a-f]{64}$ &&
+     "$APP_SECRET_USER_COLLISION_SHA" =~ ^[0-9a-f]{64}$ &&
+     "$APP_SECRET_SHA_A" != "$APP_SECRET_SHA_B" &&
+     "$APP_SECRET_USER_ONLY_SHA" != "$APP_SECRET_USER_COLLISION_SHA" ]] ||
+    die 'application fixture digests are invalid'
   for project in "$APP_SECRET_PROJECT_A" "$APP_SECRET_PROJECT_B"; do
     run_cw secrets --local projects create "$project"
     run_cw_with_secret_stdin stored-project-precedence-must-lose \
       secrets --local --project "$project" set CW_NATIVE_PRECEDENCE
+    run_cw_with_secret_stdin "stored-$project-collision-must-lose" \
+      secrets --local --project "$project" set CW_NATIVE_SCOPE_COLLISION
   done
   run_cw_with_secret_stdin "$APP_SECRET_CANARY_A" \
     secrets --local --project "$APP_SECRET_PROJECT_A" set DATABASE_URL
@@ -873,6 +892,12 @@ prepare_application_secret_fixture() {
     secrets --local --project "$APP_SECRET_PROJECT_B" set DATABASE_URL
   run_cw_with_secret_stdin selected-b-only \
     secrets --local --project "$APP_SECRET_PROJECT_B" set CW_NATIVE_APP_B_ONLY
+  run_cw_with_secret_stdin "$APP_SECRET_USER_ONLY_CANARY" \
+    secrets --local --user set CW_NATIVE_PERSONAL_ONLY
+  run_cw_with_secret_stdin "$APP_SECRET_USER_COLLISION_CANARY" \
+    secrets --local --user set CW_NATIVE_SCOPE_COLLISION
+  run_cw_with_secret_stdin "$APP_SECRET_USER_PRECEDENCE_CANARY" \
+    secrets --local --user set CW_NATIVE_PRECEDENCE
   run_cw secrets --local projects list --output json
   APP_SECRET_PROJECT_A_ID="$(jq -er --arg name "$APP_SECRET_PROJECT_A" \
     '.[] | select(.name == $name) | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")"
@@ -880,16 +905,28 @@ prepare_application_secret_fixture() {
     '.[] | select(.name == $name) | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")"
   for project in "$APP_SECRET_PROJECT_A" "$APP_SECRET_PROJECT_B"; do
     run_cw secrets --local --project "$project" list --output json
-    jq -e 'length == 3 and any(.[]; .key == "DATABASE_URL") and
+    jq -e 'length == 4 and any(.[]; .key == "DATABASE_URL") and
+      any(.[]; .key == "CW_NATIVE_SCOPE_COLLISION") and
       all(.[]; (keys | sort) == ["created_at", "key", "updated_at"]) and
       (tostring | contains("cwapp") | not)' "$LAST_STDOUT" >/dev/null ||
       die 'selected application project metadata is not key-only'
   done
+  run_cw secrets --local --user list --output json
+  jq -e '
+    length == 3 and
+    any(.[]; .key == "CW_NATIVE_PERSONAL_ONLY") and
+    any(.[]; .key == "CW_NATIVE_SCOPE_COLLISION") and
+    any(.[]; .key == "CW_NATIVE_PRECEDENCE") and
+    all(.[]; (keys | sort) == ["created_at", "key", "updated_at"]) and
+    (tostring | contains("cwpersonal") | not)
+  ' "$LAST_STDOUT" >/dev/null || die 'selected personal application metadata is not key-only'
   cat >"$MOUNT_SOURCE/app-secrets-install.sh" <<'APP_INSTALL'
 #!/bin/sh
 set -eu
 test -n "${DATABASE_URL:-}"
 test "$(printf '%s' "$DATABASE_URL" | sha256sum | cut -d ' ' -f 1)" = "$1"
+test "$(printf '%s' "$CW_NATIVE_PERSONAL_ONLY" | sha256sum | cut -d ' ' -f 1)" = "$2"
+test "$(printf '%s' "$CW_NATIVE_SCOPE_COLLISION" | sha256sum | cut -d ' ' -f 1)" = "$3"
 test "$CW_NATIVE_PRECEDENCE" = explicit-project-environment
 test -z "${CW_NATIVE_SMOKE_SECRET+x}"
 count=0
@@ -911,9 +948,17 @@ APP_INSTALL
 set -eu
 test "$CW_NATIVE_PRECEDENCE" = explicit-project-environment
 test -z "${CW_NATIVE_SMOKE_SECRET+x}"
-if test -n "${DATABASE_URL+x}"; then
-  printf '%s' "$DATABASE_URL" | sha256sum | cut -d ' ' -f 1 > /workspace/native-app-startup-proof
+if test -n "${DATABASE_URL+x}" && test -n "${CW_NATIVE_PERSONAL_ONLY+x}" &&
+   test -n "${CW_NATIVE_SCOPE_COLLISION+x}"; then
+  printf '%s:%s:%s\n' \
+    "$(printf '%s' "$DATABASE_URL" | sha256sum | cut -d ' ' -f 1)" \
+    "$(printf '%s' "$CW_NATIVE_PERSONAL_ONLY" | sha256sum | cut -d ' ' -f 1)" \
+    "$(printf '%s' "$CW_NATIVE_SCOPE_COLLISION" | sha256sum | cut -d ' ' -f 1)" \
+    > /workspace/native-app-startup-proof
 else
+  test -z "${DATABASE_URL+x}"
+  test -z "${CW_NATIVE_PERSONAL_ONLY+x}"
+  test -z "${CW_NATIVE_SCOPE_COLLISION+x}"
   printf '%s\n' absent > /workspace/native-app-startup-proof
 fi
 /bin/bash /workspace/fixtures/stock-ssh-workload.sh startup
@@ -922,7 +967,9 @@ APP_STARTUP
 #!/bin/sh
 set -eu
 expected=$1
-phase=$2
+personal_expected=$2
+collision_expected=$3
+phase=$4
 assert_app() {
   label=$1
   shift
@@ -950,14 +997,22 @@ case "$phase" in
     assert_app cleared-database-absent test -z "${DATABASE_URL+x}"
     assert_app cleared-a-absent test -z "${CW_NATIVE_APP_A_ONLY+x}"
     assert_app cleared-b-absent test -z "${CW_NATIVE_APP_B_ONLY+x}"
+    assert_app cleared-personal-only-absent test -z "${CW_NATIVE_PERSONAL_ONLY+x}"
+    assert_app cleared-scope-collision-absent test -z "${CW_NATIVE_SCOPE_COLLISION+x}"
     ;;
   *) exit 76 ;;
 esac
 if test "$phase" != clear; then
   assert_app selected-database-matches test "$(printf '%s' "${DATABASE_URL-}" | sha256sum | cut -d ' ' -f 1)" = "$expected"
+  assert_app personal-only-matches test "$(printf '%s' "${CW_NATIVE_PERSONAL_ONLY-}" | sha256sum | cut -d ' ' -f 1)" = "$personal_expected"
+  assert_app personal-beats-project test "$(printf '%s' "${CW_NATIVE_SCOPE_COLLISION-}" | sha256sum | cut -d ' ' -f 1)" = "$collision_expected"
+fi
+startup_expected=absent
+if test "$phase" != clear; then
+  startup_expected="$expected:$personal_expected:$collision_expected"
 fi
 attempt=0
-while test "$(cat /workspace/native-app-startup-proof 2>/dev/null || true)" != "$expected"; do
+while test "$(cat /workspace/native-app-startup-proof 2>/dev/null || true)" != "$startup_expected"; do
   attempt=$((attempt + 1))
   assert_app startup-current-generation test "$attempt" -lt 100
   sleep 0.05
@@ -971,12 +1026,14 @@ APP_CHECK
   cat >>"$WORKSPACE/codewire.yaml" <<EOF
 environment:
   CW_NATIVE_PRECEDENCE: explicit-project-environment
-install_command: /bin/sh /workspace/fixtures/app-secrets-install.sh $APP_SECRET_SHA_A
+install_command: /bin/sh /workspace/fixtures/app-secrets-install.sh $APP_SECRET_SHA_A $APP_SECRET_USER_ONLY_SHA $APP_SECRET_USER_COLLISION_SHA
 startup_script: /bin/sh /workspace/fixtures/app-secrets-startup.sh
 EOF
   # Only hashes and fixed receipts enter scripts/YAML/output. The selected app
   # values are intentionally child-visible; this is not a provider-hiding proof.
-  for phase in "$APP_SECRET_CANARY_A" "$APP_SECRET_CANARY_B"; do
+  for phase in "$APP_SECRET_CANARY_A" "$APP_SECRET_CANARY_B" \
+    "$APP_SECRET_USER_ONLY_CANARY" "$APP_SECRET_USER_COLLISION_CANARY" \
+    "$APP_SECRET_USER_PRECEDENCE_CANARY"; do
     if rg -qF "$phase" "$WORKSPACE/codewire.yaml" "$MOUNT_SOURCE"/app-secrets-*.sh; then
       die 'application value entered a checked launch fixture instead of protected storage'
     fi
@@ -984,13 +1041,13 @@ EOF
 }
 
 run_application_secret_pty() {
-  local expected="$1" phase="$2" pty_log attempt
+  local expected="$1" personal_expected="$2" collision_expected="$3" phase="$4" pty_log attempt
   pty_log="$SMOKE_ROOT/app-pty-$phase.log"
   if ! (
     cd "$WORKSPACE"
     {
-      printf 'test -t 0 && test -t 1 && /bin/sh /workspace/fixtures/app-secrets-check.sh %s %s && printf "app-secret-pty-ok\\n" || exit 77\nexit\n' \
-        "$expected" "$phase"
+      printf 'test -t 0 && test -t 1 && /bin/sh /workspace/fixtures/app-secrets-check.sh %s %s %s %s && printf "app-secret-pty-ok\\n" || exit 77\nexit\n' \
+        "$expected" "$personal_expected" "$collision_expected" "$phase"
       # Keep the checked-in PTY/detach path, but wait for the exact guest
       # receipt instead of guessing when the console hop has completed.
       for ((attempt = 0; attempt < 400; attempt++)); do
@@ -1038,11 +1095,13 @@ run_application_secret_smoke() {
       b)
         expected="$APP_SECRET_SHA_B"; project_id="$APP_SECRET_PROJECT_B_ID"
         journal="$(native_database_value journal_summary)"
-        run_cw_expect_failure env update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" --output json
+        run_cw_expect_failure env update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" \
+          --user-secrets local --output json
         [[ "$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")" == "$generation" &&
            "$(native_database_value journal_summary)" == "$journal" ]] ||
           die 'unconfirmed source update changed the running generation or admitted an operation'
-        run_cw env update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" --yes --output json
+        run_cw env update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" \
+          --user-secrets local --yes --output json
         assert_previous_direct_share_processes_gone
         assert_direct_share_processes
         generation=$((generation + 1))
@@ -1063,7 +1122,8 @@ run_application_secret_smoke() {
       .source_selection.credentials.reference == "user/native-broker" and
       .source_selection.credentials.revision == 5 and
       (.source_selection.secrets.project // "") == (if $project == "" then "" else "local:id:" + $project end) and
-      (.source_selection.secrets.user // null) == null and
+      (if $project == "" then .source_selection.secrets.user == null
+       else .source_selection.secrets.user == "local" end) and
       (.source_selection.secrets.organization // false) == false and
       .skill_snapshot == $skills and .skill_snapshot_generation == 1
     ' "$LAST_STDOUT" >/dev/null || die 'source update changed an unrelated pin or did not replace the exact source'
@@ -1071,12 +1131,14 @@ run_application_secret_smoke() {
        "$(jq -er '.root_generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")" == "$root_generation" &&
        "$(stat -c '%d:%i:%s' "$root_file")" == "$root_identity" ]] ||
       die 'source-only update rebuilt the installed root or changed immutable setup/skill intent'
-    run_cw run --no-tty -- /bin/sh /workspace/fixtures/app-secrets-check.sh "$expected" "$phase"
+    run_cw run --no-tty -- /bin/sh /workspace/fixtures/app-secrets-check.sh \
+      "$expected" "$APP_SECRET_USER_ONLY_SHA" "$APP_SECRET_USER_COLLISION_SHA" "$phase"
     rg -qxF app-managed-exec-ok "$LAST_STDOUT" || die 'managed exec did not receive the exact current application keys'
     # shellcheck disable=SC2016 # These variables belong to the guest command.
     run_cw run --no-tty --env DATABASE_URL=explicit-command-database -- /bin/sh -lc \
       'test "$DATABASE_URL" = explicit-command-database'
-    run_application_secret_pty "$expected" "$phase"
+    run_application_secret_pty \
+      "$expected" "$APP_SECRET_USER_ONLY_SHA" "$APP_SECRET_USER_COLLISION_SHA" "$phase"
     if [[ "$phase" != a ]]; then
       [[ "$(native_database_value source_operation)" == 'update_environment_sources:completed:10' ]] ||
         die 'source update did not complete its exact durable operation'
@@ -1092,6 +1154,12 @@ run_application_secret_smoke() {
   if rg -qF "$APP_SECRET_CANARY_A" "$TRANSCRIPT" || rg -qF "$APP_SECRET_CANARY_B" "$TRANSCRIPT"; then
     die 'application smoke accidentally printed a selected value'
   fi
+  for expected in "$APP_SECRET_USER_ONLY_CANARY" "$APP_SECRET_USER_COLLISION_CANARY" \
+    "$APP_SECRET_USER_PRECEDENCE_CANARY"; do
+    if rg -qF "$expected" "$TRANSCRIPT"; then
+      die 'personal application smoke accidentally printed a selected value'
+    fi
+  done
 }
 
 run_managed_credential_broker_smoke() {
@@ -1975,15 +2043,19 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw_with_secret_stdin "$ANTHROPIC_CREDENTIAL_CANARY" \
     credentials --local add anthropic --name native-broker-anthropic
   run_cw credentials --local generate ssh --name native-broker-ssh
+  run_cw secrets --local projects create "$APP_SECRET_UNSELECTED_PROJECT"
   run_cw_with_secret_stdin "$WORKLOAD_SECRET_CANARY" \
-    secrets --local --user set CW_NATIVE_SMOKE_SECRET
-  run_cw secrets --local --user list --output json
+    secrets --local --project "$APP_SECRET_UNSELECTED_PROJECT" set CW_NATIVE_SMOKE_SECRET
+  run_cw secrets --local --project "$APP_SECRET_UNSELECTED_PROJECT" list --output json
   jq -e '
     length == 1 and
     (.[0] | keys | sort) == ["created_at", "key", "updated_at"] and
     .[0].key == "CW_NATIVE_SMOKE_SECRET" and
     (tostring | contains("cwworkload") | not)
-  ' "$LAST_STDOUT" >/dev/null || die 'local workload-secret inventory was not key-only'
+  ' "$LAST_STDOUT" >/dev/null || die 'unselected workload-secret inventory was not key-only'
+  run_cw secrets --local --user list --output json
+  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
+    die 'local personal-secret store was not empty before its selected fixture'
   [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
     -name '.codewire-codex-login-*' -print -quit)" ]] ||
     die 'transient Codex login directory remained after enrollment'
@@ -2119,7 +2191,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     .[0].entries.ssh == $ssh
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic access profile metadata drifted'
   prepare_application_secret_fixture
-  CREATE_ACCESS_ARGS=(--profile "local:user/$CREDENTIAL_PROFILE_NAME" --secrets "local:$APP_SECRET_PROJECT_A" --yes)
+  CREATE_ACCESS_ARGS=(--profile "local:user/$CREDENTIAL_PROFILE_NAME" \
+    --secrets "local:$APP_SECRET_PROJECT_A" --user-secrets local --yes)
 fi
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
@@ -2343,9 +2416,12 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw credentials --local delete "id:$OPENAI_CREDENTIAL_ID" --yes
   run_cw credentials --local delete "id:$ANTHROPIC_CREDENTIAL_ID" --yes
   run_cw credentials --local delete "id:$SSH_CREDENTIAL_ID" --yes
-  run_cw secrets --local --user delete CW_NATIVE_SMOKE_SECRET
+  run_cw secrets --local --user delete CW_NATIVE_PERSONAL_ONLY
+  run_cw secrets --local --user delete CW_NATIVE_SCOPE_COLLISION
+  run_cw secrets --local --user delete CW_NATIVE_PRECEDENCE
   run_cw secrets --local projects delete "$APP_SECRET_PROJECT_A" --yes
   run_cw secrets --local projects delete "$APP_SECRET_PROJECT_B" --yes
+  run_cw secrets --local projects delete "$APP_SECRET_UNSELECTED_PROJECT" --yes
   run_cw secrets --local projects list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'synthetic application projects remained after deletion'
@@ -2408,6 +2484,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   unset WORKLOAD_SECRET_CANARY
   unset SSH_PUBLIC_KEY SSH_PUBLIC_KEY_FINGERPRINT
   unset APP_SECRET_CANARY_A APP_SECRET_CANARY_B
+  unset APP_SECRET_USER_ONLY_CANARY APP_SECRET_USER_COLLISION_CANARY
+  unset APP_SECRET_USER_PRECEDENCE_CANARY
 
   [[ ! -e "$TRIPWIRE" ]] ||
     die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"

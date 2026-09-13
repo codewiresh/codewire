@@ -442,6 +442,8 @@ for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests
   run_paths_case provider_ssh_dev_smoke pull_request refs/pull/5017/head false \
     'policy runtime_dev_smoke' "$ssh_input"
 done
+run_paths_case application_secret_smoke_fixture pull_request refs/pull/5018/head false \
+  'policy runtime_dev_smoke' scripts/runtime/tests/test-smoke-dev-application-secrets.sh
 run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head false \
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml
