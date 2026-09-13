@@ -20,9 +20,11 @@ provider_ssh_selected() {
 }
 
 validate_provider_ssh_options() {
-  [[ "$SMOKE_AUTH_MODE" == admin-oidc && -n "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR" &&
+  [[ "$SMOKE_AUTH_MODE" == admin-oidc &&
+     ( -n "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR" || -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ) &&
      -n "$EXPECTED_CODEWIRE_ADMIN_EMAIL" ]] ||
     die 'provider-ssh requires explicit owner-operated --admin-oidc, an exact login directory and expected identity'
+  validate_dev_smoke_browser_auth
   [[ -z "${CODEWIRE_API_KEY:-}" && -z "${CODEWIRE_DEV_SMOKE_API_KEY:-}" &&
      "$ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE" == 0 ]] ||
     die 'provider-ssh never substitutes an organization API key for personal credential authority'

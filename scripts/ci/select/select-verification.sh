@@ -804,6 +804,13 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
+      apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts|\
+      apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts)
+        # Dedicated Dev smoke tooling uses dashboard's pinned browser libraries,
+        # but does not change product templates or require rebuilding Kind.
+        select_token runtime_dev_smoke
+        recognized=true
+        ;;
       apps/dashboard/*|apps/docs/*|favicon.svg|logo/*|\
       scripts/dev/design-system-server.py|scripts/ci/tests/test-dashboard-browser-gate.sh)
         select_token web
@@ -1209,11 +1216,13 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/smoke-dev-commodity.sh|\
       scripts/runtime/dev/provider-ssh-smoke.sh|\
       scripts/runtime/dev/smoke-local-platform-sources.sh|\
+      scripts/runtime/dev/run-secrets-credentials-acceptance.sh|\
       scripts/runtime/dev/native-mesh-listener.py|\
       scripts/runtime/dev/with-dev-smoke-auth.sh|\
       scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
       scripts/runtime/tests/test-provider-ssh-smoke.sh|\
       scripts/runtime/tests/test-local-platform-sources-smoke.sh|\
+      scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh|\
       scripts/runtime/tests/test-native-mesh-listener.py|\
       scripts/runtime/tests/fixtures/local-platform/__local-credential-authority|\
       scripts/runtime/tests/test-smoke-dev-commodity.sh|\

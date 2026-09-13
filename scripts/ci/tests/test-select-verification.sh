@@ -436,7 +436,9 @@ run_paths_case shared_stock_ssh_smoke pull_request refs/pull/5016/head false \
   'policy runtime_dev_smoke transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/stock-ssh-workload.sh
 for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests/test-provider-ssh-smoke.sh \
+    apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts \
     scripts/runtime/dev/smoke-local-platform-sources.sh scripts/runtime/tests/test-local-platform-sources-smoke.sh \
+    scripts/runtime/dev/run-secrets-credentials-acceptance.sh scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh \
     scripts/runtime/dev/native-mesh-listener.py scripts/runtime/tests/test-native-mesh-listener.py \
     scripts/runtime/tests/fixtures/local-platform/__local-credential-authority; do
   run_paths_case provider_ssh_dev_smoke pull_request refs/pull/5017/head false \
@@ -2032,6 +2034,21 @@ for contract in \
 done
 
 tooling_block="$TMP/tooling.yaml"
+tooling_bun_setup="$(grep -A3 -F \
+  'uses: https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
+  "$tooling_block" || true)"
+if ! grep -qF "tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|runtime_dev_smoke|')" \
+    <<<"$tooling_bun_setup" ||
+   ! grep -qF "bun-version: '1.3.9'" <<<"$tooling_bun_setup"; then
+  echo 'tooling: Dev smoke must provision pinned Bun in its own selected job' >&2
+  exit 1
+fi
+tooling_bun_line="$(grep -n -m1 'uses: https://git.example.invalid/noel/setup-bun@' "$tooling_block" | cut -d: -f1)"
+tooling_dev_smoke_line="$(grep -n -m1 'name: Run Dev smoke tooling' "$tooling_block" | cut -d: -f1)"
+if [ "$tooling_bun_line" -ge "$tooling_dev_smoke_line" ]; then
+  echo 'tooling: pinned Bun setup must precede Dev smoke execution' >&2
+  exit 1
+fi
 for contract in \
     'Run API key smoke tooling|service_apikey_smoke' \
     'Run Confidential runtime tooling|runtime_confidential' \
@@ -2824,6 +2841,8 @@ grep -qF 'scripts/runtime/tests/test-with-dev-smoke-auth.sh' \
 grep -qF 'scripts/runtime/tests/test-provision-dev-smoke-user.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'scripts/runtime/tests/test-smoke-dev-commodity.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'run_selected_family runtime_dev_smoke runtime-dev-smoke' \
   "$ROOT/scripts/dev/preflight.sh"
