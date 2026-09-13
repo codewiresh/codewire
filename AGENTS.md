@@ -20,6 +20,24 @@ secrets or credentials or bypassing a selected gate: use synthetic credentials
 for verification unless direct access is separately authorized, and preserve
 the checked-in topology and assertions.
 
+Routine developer work on owner-designated local or remote machines, including
+Macs, has standing authority within an authorized task. Run developer commands
+without per-operation approval: source/artifact transfer, dependency and tool
+setup, builds/tests, ad-hoc development signing, disposable VM lifecycle,
+checked-in test networking and synthetic workspace shares, and cleanup of the
+test's identified processes and disposable artifacts. These are ordinary
+build-loop operations, not separate hardware or destructive-action gates.
+Bound runtime and resources, preserve unrelated user state and checked-in
+topology, and diagnose failures before rerunning. Do not invent one-shot gates
+merely because a command runs remotely, uses real hardware, signs a development
+helper, or needs a diagnosed retry.
+
+This standing permission does not authorize access to real credentials or
+unrelated user data, release signing/publication, shared/production
+infrastructure mutation, or ad-hoc topology changes to make a gate pass.
+Explicit owner exclusions and checkpoints still apply; reuse valid evidence
+and preserve selected gates. Routine VM networking is not an ad-hoc host change.
+
 Preserve unrelated changes and worktrees. Never commit known-bad work, weaken a
 gate for momentum, or use destructive Git/filesystem operations without an
 explicit request. A Forgejo outage permits only collision-free local work until
