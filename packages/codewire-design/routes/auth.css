@@ -100,7 +100,30 @@
 .cw-auth-secondary a, .cw-field-heading a { color: var(--accent); }
 .cw-auth-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
 .cw-field-heading { display: flex; justify-content: space-between; gap: var(--space-3); }
-.cw-auth-code, .cw-device-code { text-align: center; font-size: 1.4rem; letter-spacing: .22em; }
+.cw-auth-code { text-align: center; font-size: 1.4rem; letter-spacing: .22em; }
+.cw-device-code-field { margin: 0; padding: 0; border: 0; }
+.cw-device-code {
+  display: grid;
+  width: 100%;
+  max-width: 23rem;
+  margin: var(--space-2) auto 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto repeat(4, minmax(0, 1fr));
+  align-items: center;
+  gap: clamp(.2rem, 1.2vw, var(--space-2));
+}
+.cw-device-code-slot {
+  min-height: 3rem;
+  padding: var(--space-2) 0;
+  text-align: center;
+  text-transform: uppercase;
+  font-size: 1.25rem;
+}
+.cw-device-code-separator {
+  color: var(--fg-secondary);
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+}
+.cw-device-code-field .cw-field-help { text-align: center; }
 .cw-setup-grid { display: grid; gap: var(--space-6); }
 .cw-qr { display: grid; margin-top: var(--space-3); place-items: center; padding: var(--space-4); border-radius: var(--radius-md); background: #fff; }
 .cw-qr svg { display: block; width: min(16rem, 100%); height: auto; }

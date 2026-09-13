@@ -132,6 +132,57 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await context.close();
   });
 
+  test("device code entry groups and distributes all eight characters", async ({ page }) => {
+    await page.goto("/device");
+
+    const group = page.getByRole("group", { name: "Device code" });
+    const slots = group.getByRole("textbox");
+    const slotValues = () => slots.evaluateAll((inputs) => inputs.map((input) => (
+      input instanceof HTMLInputElement ? input.value : ""
+    )));
+    await expect(slots).toHaveCount(8);
+    await expect(group.locator(".cw-device-code-separator")).toHaveText("-");
+    await expect(group.locator(".cw-device-code-separator")).toHaveAttribute("aria-hidden", "true");
+    await expect(slots.first()).toHaveAttribute("autocomplete", "one-time-code");
+    await expect(slots.first()).toHaveAttribute("inputmode", "text");
+    for (let index = 0; index < 8; index += 1) {
+      await expect(page.getByLabel(`Character ${index + 1} of 8`)).toHaveCount(1);
+    }
+
+    await slots.first().focus();
+    await page.keyboard.type("bcdf-ghjk");
+    expect(await slotValues()).toEqual("BCDFGHJK".split(""));
+
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    await expect(slots.nth(6)).toBeFocused();
+    expect(await slotValues()).toEqual(["B", "C", "D", "F", "G", "H", "", ""]);
+
+    const paste = async (value: string) => slots.first().evaluate((input, pasted) => {
+      const clipboard = new DataTransfer();
+      clipboard.setData("text", pasted);
+      input.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard,
+      }));
+    }, value);
+    await paste("bcdf-ghjk");
+    expect(await slotValues()).toEqual("BCDFGHJK".split(""));
+    await paste("bcdfghjk");
+    expect(await slotValues()).toEqual("BCDFGHJK".split(""));
+
+    await slots.first().fill("ghjkbcdf");
+    expect(await slotValues()).toEqual("GHJKBCDF".split(""));
+    await paste("bcdf!ghjk");
+    expect(await slotValues()).toEqual("GHJKBCDF".split(""));
+    await paste("bcdf-ghjkx");
+    expect(await slotValues()).toEqual("GHJKBCDF".split(""));
+    await slots.first().fill("bcdf-ghjkx");
+    expect(await slotValues()).toEqual("GHJKBCDF".split(""));
+    expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+
   test("settings render the current account surfaces and no-JS forms", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop settings contract");
     const response = await page.goto("/settings/");

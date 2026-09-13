@@ -29,6 +29,34 @@ const POLL_INTERVAL_SECS: u64 = 5;
 /// ambiguous 0/O/1/I), per RFC 8628 §6.1 guidance.
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 
+/// Normalize a human-entered device user code to the canonical `XXXX-XXXX`
+/// representation minted by the provider.
+///
+/// The visual separator is optional at input time, but when supplied it must
+/// appear between the two four-character groups. Only characters from the
+/// provider's unambiguous user-code alphabet are accepted.
+pub fn normalize_user_code(input: &str) -> Option<String> {
+    let input = input.trim().as_bytes();
+    let compact = match input {
+        [a, b, c, d, e, f, g, h] => [*a, *b, *c, *d, *e, *f, *g, *h],
+        [a, b, c, d, b'-', e, f, g, h] => [*a, *b, *c, *d, *e, *f, *g, *h],
+        _ => return None,
+    };
+    let compact = compact.map(|byte| byte.to_ascii_uppercase());
+    if !compact.iter().all(|byte| USER_CODE_ALPHABET.contains(byte)) {
+        return None;
+    }
+
+    let mut normalized = String::with_capacity(9);
+    for (index, byte) in compact.into_iter().enumerate() {
+        if index == 4 {
+            normalized.push('-');
+        }
+        normalized.push(char::from(byte));
+    }
+    Some(normalized)
+}
+
 /// The device-authorization response (RFC 8628 §3.2).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceAuthorizationResponse {
@@ -294,5 +322,29 @@ mod tests {
         assert!(!diagnostic.contains("user-response-marker"));
         assert!(diagnostic.contains("https://issuer.example/device"));
         assert!(diagnostic.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn user_codes_normalize_to_the_provider_format() {
+        for input in ["BCDF-GHJK", "bcdf-ghjk", "BCDFGHJK", "  bcdfghjk  "] {
+            assert_eq!(normalize_user_code(input).as_deref(), Some("BCDF-GHJK"));
+        }
+    }
+
+    #[test]
+    fn user_code_normalization_rejects_noncanonical_input() {
+        for input in [
+            "",
+            "BCDF-GHJ",
+            "BCDF-GHJKL",
+            "BCD-FGHJK",
+            "BCDFG-HJK",
+            "BCDF--GHJK",
+            "ABCD-EFGH",
+            "BCDF-1HJK",
+            "BCDF GHJK",
+        ] {
+            assert_eq!(normalize_user_code(input), None, "accepted {input:?}");
+        }
     }
 }

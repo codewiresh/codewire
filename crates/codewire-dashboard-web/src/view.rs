@@ -162,7 +162,7 @@ impl fmt::Debug for TwoFactorRecoveryView {
 }
 
 pub(crate) struct DevicePageView {
-    pub(crate) user_code: String,
+    pub(crate) user_code_slots: [String; 8],
     pub(crate) csrf_token: String,
     pub(crate) error: String,
     pub(crate) approved: bool,
@@ -172,7 +172,7 @@ impl fmt::Debug for DevicePageView {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DevicePageView")
-            .field("user_code", &redacted(&self.user_code))
+            .field("user_code_slots", &"[REDACTED]")
             .field("csrf_token", &redacted(&self.csrf_token))
             .field("error", &self.error)
             .field("approved", &self.approved)
@@ -234,7 +234,30 @@ impl fmt::Debug for CsrfSubmission {
 pub(crate) struct DeviceSubmission {
     #[serde(rename = "_csrf")]
     pub(crate) csrf: String,
-    pub(crate) user_code: String,
+    pub(crate) user_code_1: String,
+    pub(crate) user_code_2: String,
+    pub(crate) user_code_3: String,
+    pub(crate) user_code_4: String,
+    pub(crate) user_code_5: String,
+    pub(crate) user_code_6: String,
+    pub(crate) user_code_7: String,
+    pub(crate) user_code_8: String,
+}
+
+impl DeviceSubmission {
+    pub(crate) fn user_code(&self) -> String {
+        [
+            self.user_code_1.as_str(),
+            self.user_code_2.as_str(),
+            self.user_code_3.as_str(),
+            self.user_code_4.as_str(),
+            self.user_code_5.as_str(),
+            self.user_code_6.as_str(),
+            self.user_code_7.as_str(),
+            self.user_code_8.as_str(),
+        ]
+        .concat()
+    }
 }
 
 impl fmt::Debug for DeviceSubmission {
@@ -242,7 +265,7 @@ impl fmt::Debug for DeviceSubmission {
         formatter
             .debug_struct("DeviceSubmission")
             .field("csrf", &redacted(&self.csrf))
-            .field("user_code", &redacted(&self.user_code))
+            .field("user_code", &"[REDACTED]")
             .finish()
     }
 }
@@ -1534,14 +1557,21 @@ mod secret_debug_tests {
             backup_codes: vec![MARKER.into()],
         };
         let device = DevicePageView {
-            user_code: MARKER.into(),
+            user_code_slots: std::array::from_fn(|_| MARKER.into()),
             csrf_token: MARKER.into(),
             error: String::new(),
             approved: false,
         };
         let submission = DeviceSubmission {
             csrf: MARKER.into(),
-            user_code: MARKER.into(),
+            user_code_1: MARKER.into(),
+            user_code_2: MARKER.into(),
+            user_code_3: MARKER.into(),
+            user_code_4: MARKER.into(),
+            user_code_5: MARKER.into(),
+            user_code_6: MARKER.into(),
+            user_code_7: MARKER.into(),
+            user_code_8: MARKER.into(),
         };
 
         for diagnostic in [

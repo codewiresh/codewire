@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Authorize device · Codewire</title>
+    <link rel="stylesheet" href="../../styles.css">
+    <link rel="stylesheet" href="../../components.css">
+    <link rel="stylesheet" href="../../routes/auth.css">
+    <script src="../../device.js" defer></script>
+  </head>
+  <body class="cw-body cw-auth-body" data-route="device">
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="home.html"><img src="../../assets/logo.svg" alt=""><span>Codewire</span></a>
+      <section class="cw-card cw-auth-card">
+        <header class="cw-card-header cw-auth-header">
+          <div class="cw-auth-mark" aria-hidden="true"><svg class="cw-icon"><use href="../../assets/icons.svg#icon-device"/></svg></div>
+          <h1 class="cw-page-title">Authorize a device</h1>
+          <p class="cw-card-description">Enter the code shown by the Codewire CLI. Only approve a device you started yourself.</p>
+        </header>
+        <div class="cw-card-content">
+          <form class="cw-form" method="post" action="#">
+            <fieldset class="cw-field cw-device-code-field" data-device-code aria-describedby="device-code-help">
+              <legend class="cw-label">Device code</legend>
+              <div class="cw-device-code" data-device-code-slots>
+                <label class="cw-sr-only" for="user-code-1">Character 1 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-1" name="user_code_1" value="B" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required autofocus data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-2">Character 2 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-2" name="user_code_2" value="C" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-3">Character 3 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-3" name="user_code_3" value="D" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-4">Character 4 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-4" name="user_code_4" value="F" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <span class="cw-device-code-separator" aria-hidden="true">-</span>
+                <label class="cw-sr-only" for="user-code-5">Character 5 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-5" name="user_code_5" value="G" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-6">Character 6 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-6" name="user_code_6" value="H" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-7">Character 7 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-7" name="user_code_7" value="J" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-8">Character 8 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-8" name="user_code_8" value="K" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" enterkeyhint="done" required data-device-code-slot>
+              </div>
+              <p class="cw-field-help" id="device-code-help">Enter the 8-character code. The separator is added automatically.</p>
+            </fieldset>
+            <button class="cw-button cw-auth-submit" type="submit">Approve device</button>
+          </form>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

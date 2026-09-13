@@ -43,7 +43,7 @@ pub mod transport;
 pub mod types;
 pub mod userinfo;
 
-pub use device::DeviceAuthorizationResponse;
+pub use device::{DeviceAuthorizationResponse, normalize_user_code};
 pub use discovery::{DiscoveryDocument, EndpointPaths};
 pub use endsession::{EndSessionOutcome, RawEndSessionParams};
 pub use error::{ErrorCode, OAuthError, StoreError, StoreResult};

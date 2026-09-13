@@ -20,6 +20,7 @@ pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v1.css";
 pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v1.css";
 pub(crate) const COSMOS_STYLE_PATH: &str = "/assets/codewire/cosmos-v1.css";
 pub(crate) const COSMOS_SCRIPT_PATH: &str = "/assets/codewire/cosmos-v1.js";
+pub(crate) const DEVICE_SCRIPT_PATH: &str = "/assets/codewire/device-v1.js";
 pub(crate) const SETTINGS_STYLE_PATH: &str = "/assets/codewire/routes/settings-v1.css";
 pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organizations-v1.css";
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
@@ -61,6 +62,7 @@ const AUTH_STYLES: &str = include_str!("../../../packages/codewire-design/routes
 const PUBLIC_STYLES: &str = include_str!("../../../packages/codewire-design/routes/public.css");
 const COSMOS_STYLES: &str = include_str!("../../../packages/codewire-design/cosmos.css");
 const COSMOS_SCRIPT: &str = include_str!("../../../packages/codewire-design/cosmos.js");
+const DEVICE_SCRIPT: &str = include_str!("../../../packages/codewire-design/device.js");
 const SETTINGS_STYLES: &str = include_str!("../../../packages/codewire-design/routes/settings.css");
 const ORGANIZATIONS_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/organizations.css");
@@ -115,6 +117,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             COSMOS_SCRIPT_PATH,
             static_asset("application/javascript; charset=utf-8", COSMOS_SCRIPT),
+        )
+        .route(
+            DEVICE_SCRIPT_PATH,
+            static_asset("application/javascript; charset=utf-8", DEVICE_SCRIPT),
         )
         .route(
             DASHBOARD_STYLE_PATH,
@@ -329,6 +335,22 @@ mod tests {
     }
 
     #[test]
+    fn device_template_and_fixture_share_the_slot_contract() {
+        let production = include_str!("../templates/device.html");
+        let fixture =
+            include_str!("../../../packages/codewire-design/reference/fixtures/device.html");
+        for html in [production, fixture] {
+            assert_eq!(html.matches("name=\"user_code_").count(), 8);
+            assert_eq!(html.matches("Character ").count(), 8);
+            assert!(html.contains("data-device-code-slots"));
+            assert!(html.contains("cw-device-code-separator\" aria-hidden=\"true\">-"));
+            assert!(!html.contains("name=\"user_code\""));
+        }
+        assert!(production.contains(DEVICE_SCRIPT_PATH));
+        assert!(fixture.contains("../../device.js"));
+    }
+
+    #[test]
     fn static_assets_revalidate_by_content_etag_and_are_nosniff() {
         assert_eq!(
             ENVIRONMENTS_SCRIPT_PATH,
@@ -338,6 +360,7 @@ mod tests {
             ENVIRONMENTS_STYLE_PATH,
             "/assets/codewire/routes/environments-v2.css"
         );
+        assert_eq!(DEVICE_SCRIPT_PATH, "/assets/codewire/device-v1.js");
         assert_eq!(ICONS_PATH, "/assets/codewire/icons-v2.svg");
         let response = static_response(&HeaderMap::new(), "text/css; charset=utf-8", "body{}");
         assert_eq!(
