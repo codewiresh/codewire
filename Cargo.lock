@@ -1731,6 +1731,7 @@ dependencies = [
  "buffa",
  "chrono",
  "codewire-admin-proto",
+ "codewire-oidc",
  "codewire-project",
  "codewire-project-proto",
  "codewire-proto",

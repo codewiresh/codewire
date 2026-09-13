@@ -7,7 +7,7 @@
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router, middleware};
-use codewire_oidc::{ErrorCode as OAuthErrorCode, Provider, Subject};
+use codewire_oidc::{ErrorCode as OAuthErrorCode, Provider, Subject, normalize_user_code};
 use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::{AppError, ValidatedJson};
 use schemars::JsonSchema;
@@ -28,7 +28,8 @@ async fn approve_device(
     user: AuthUser,
     ValidatedJson(input): ValidatedJson<DeviceVerificationInput>,
 ) -> Result<Json<DeviceVerificationBody>, AppError> {
-    let user_code = input.user_code.trim().to_uppercase();
+    let user_code = normalize_user_code(&input.user_code)
+        .ok_or_else(|| AppError::NotFound("Invalid or expired device code".into()))?;
     let request = provider
         .lookup_user_code(&user_code)
         .await

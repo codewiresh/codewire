@@ -398,7 +398,18 @@ test.describe.serial("server-rendered identity flows", () => {
       page,
       new RegExp(`/device\\?user_code=${device.user_code}`),
     );
-    await expect(page.getByLabel("Device code")).toHaveValue(device.user_code);
+    const deviceCode = page.getByRole("group", { name: "Device code" });
+    const deviceCodeSlots = deviceCode.getByRole("textbox");
+    const deviceCodeValues = () => deviceCodeSlots.evaluateAll((inputs) => inputs.map((input) => (
+      input instanceof HTMLInputElement ? input.value : ""
+    )));
+    await expect(deviceCodeSlots).toHaveCount(8);
+    expect(await deviceCodeValues()).toEqual(device.user_code.replace("-", "").split(""));
+
+    // Exercise the compact form accepted by both one-time-code autofill and
+    // the server boundary instead of resubmitting the prefilled representation.
+    await deviceCodeSlots.first().fill(device.user_code.replace("-", "").toLowerCase());
+    expect(await deviceCodeValues()).toEqual(device.user_code.replace("-", "").split(""));
 
     const approval = await submitAndCapture(
       page,

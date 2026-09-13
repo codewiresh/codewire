@@ -1955,7 +1955,10 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
         provider.clone(),
         AuthState { pool: pool.clone() },
     );
-    let approve_body = format!(r#"{{"user_code":"{}"}}"#, device.user_code);
+    let approve_body = format!(
+        r#"{{"user_code":"{}"}}"#,
+        device.user_code.replace('-', "").to_lowercase()
+    );
 
     let (status, _) =
         device_post(&app, "/api/oauth/device_verification", None, &approve_body).await;

@@ -6,6 +6,7 @@
     <title>Authorize device · Codewire</title>
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/auth-v1.css">
+    <script src="/assets/codewire/device-v1.js" defer></script>
   </head>
   <body class="cw-body cw-auth-body" data-route="device">
     <main class="cw-auth-shell">
@@ -21,10 +22,32 @@
           <div class="cw-alert cw-alert--success" role="status">Device approved. You can return to the CLI.</div>
           <a class="cw-button cw-auth-submit" href="/dashboard/">Go to dashboard</a>
           {% else %}
-          {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
+          {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" id="device-code-error" role="alert">{{ view.error }}</div>{% endif %}
           <form class="cw-form" method="post" action="/device/_actions/approve">
             <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
-            <div class="cw-field"><label class="cw-label" for="user-code">Device code</label><input class="cw-input cw-input--mono cw-device-code" id="user-code" name="user_code" value="{{ view.user_code }}" autocomplete="one-time-code" required autofocus></div>
+            <fieldset class="cw-field cw-device-code-field" data-device-code{% if !view.error.is_empty() %} aria-describedby="device-code-help device-code-error"{% else %} aria-describedby="device-code-help"{% endif %}>
+              <legend class="cw-label">Device code</legend>
+              <div class="cw-device-code" data-device-code-slots>
+                <label class="cw-sr-only" for="user-code-1">Character 1 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-1" name="user_code_1" value="{{ view.user_code_slots[0] }}" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required autofocus data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-2">Character 2 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-2" name="user_code_2" value="{{ view.user_code_slots[1] }}" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-3">Character 3 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-3" name="user_code_3" value="{{ view.user_code_slots[2] }}" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-4">Character 4 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-4" name="user_code_4" value="{{ view.user_code_slots[3] }}" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <span class="cw-device-code-separator" aria-hidden="true">-</span>
+                <label class="cw-sr-only" for="user-code-5">Character 5 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-5" name="user_code_5" value="{{ view.user_code_slots[4] }}" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-6">Character 6 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-6" name="user_code_6" value="{{ view.user_code_slots[5] }}" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-7">Character 7 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-7" name="user_code_7" value="{{ view.user_code_slots[6] }}" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" required data-device-code-slot>
+                <label class="cw-sr-only" for="user-code-8">Character 8 of 8</label>
+                <input class="cw-input cw-input--mono cw-device-code-slot" id="user-code-8" name="user_code_8" value="{{ view.user_code_slots[7] }}" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" pattern="[BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz]" maxlength="1" enterkeyhint="done" required data-device-code-slot>
+              </div>
+              <p class="cw-field-help" id="device-code-help">Enter the 8-character code. The separator is added automatically.</p>
+            </fieldset>
             <button class="cw-button cw-auth-submit" type="submit">Approve device</button>
           </form>
           {% endif %}
