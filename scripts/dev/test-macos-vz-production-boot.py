@@ -26,7 +26,7 @@ SPEC.loader.exec_module(harness)
 CANARY = "synthetic-private-child-log-canary"
 
 COMMON = r'''
-import array, fcntl, json, os, signal, socket, stat, struct, sys, time
+import array, fcntl, json, os, select, signal, socket, stat, struct, sys, time
 MODE = __MODE__
 EVENTS = __EVENTS__
 def event(value):
@@ -139,6 +139,7 @@ streams = {name: socket.socket(fileno=int(opts["--" + name + "-fd"])) for name i
 control = streams["control"]
 control.settimeout(10)
 if MODE == "early-ready": control.sendall(b"R")
+if MODE == "early-workload": control.sendall(b"W")
 if MODE == "early-armed": control.sendall(b"A")
 if MODE == "early-closed": control.sendall(b"C")
 if MODE == "rust-eof": sys.exit(0)
@@ -150,8 +151,29 @@ while len(seen) < 3:
 assert exact(streams["progress"], 0) == b""
 assert streams["progress"].recv(1) == b""
 event("rust-transport-ready")
-control.sendall(b"R")
-if MODE == "duplicate-ready": control.sendall(b"R")
+coalesced = {"coalesced-ready-workload": b"RW", "coalesced-duplicate-workload": b"RWW", "coalesced-early-armed": b"RWA"}
+if MODE in coalesced:
+    control.sendall(coalesced[MODE])
+else:
+    control.sendall(b"R")
+    if MODE == "duplicate-ready": control.sendall(b"R")
+    # Readiness is not permission for the parent to kill the guest: the separate
+    # fixed-workload proof must finish first. This is a synthetic protocol test,
+    # not evidence that any real command ran inside a guest.
+    assert not select.select([control], [], [], 0.08)[0]
+    event("workload-gate-waited")
+    if MODE == "workload-eof": sys.exit(0)
+    if MODE == "workload-failed": sys.exit(2)
+    if MODE == "armed-before-workload": control.sendall(b"A")
+    if MODE == "missing-workload":
+        event("workload-waiting")
+        while True:
+            if select.select([control], [], [], 1)[0]:
+                if not control.recv(1): sys.exit(0)
+                event("premature-workload-control")
+                raise AssertionError("control received before workload completion")
+    control.sendall(b"WW" if MODE == "duplicate-workload" else b"W")
+event("workload-complete")
 assert exact(control, 1) == b"K"
 event("kill-requested")
 control.sendall(b"A")
@@ -277,8 +299,11 @@ class ParentFixtureTests(unittest.TestCase):
     def test_full_synthetic_lifecycle(self):
         self.finish(self.start())
         events = self.events.read_text().splitlines()
-        for event in ("nine-descriptors-admitted", "started", "rust-transport-ready", "kill-requested", "network-closed"):
+        for event in ("nine-descriptors-admitted", "started", "rust-transport-ready", "workload-gate-waited", "workload-complete", "kill-requested", "network-closed"):
             self.assertEqual(events.count(event), 1)
+        self.assertLess(events.index("rust-transport-ready"), events.index("workload-gate-waited"))
+        self.assertLess(events.index("workload-gate-waited"), events.index("workload-complete"))
+        self.assertLess(events.index("workload-complete"), events.index("kill-requested"))
 
     def test_sigchld_is_actively_normalized_before_spawn(self):
         original = self.wrapper.read_text()
@@ -313,11 +338,47 @@ class ParentFixtureTests(unittest.TestCase):
             "duplicate-network", "duplicate-progress-closed", "missing-progress-closed",
             "helper-exit", "short-seed", "early-ready", "early-armed", "early-closed",
             "rust-eof", "duplicate-ready", "duplicate-closed", "rust-exit",
+            "early-workload", "duplicate-workload", "armed-before-workload",
+            "coalesced-duplicate-workload", "coalesced-early-armed",
         )
         for mode in cases:
             with self.subTest(mode=mode):
                 self.mode(mode)
                 self.finish(self.start(), 1)
+
+    def test_coalesced_readiness_and_workload_completion(self):
+        self.mode("coalesced-ready-workload")
+        self.finish(self.start())
+        events = self.events.read_text().splitlines()
+        self.assertLess(events.index("workload-complete"), events.index("kill-requested"))
+
+    def test_workload_failure_or_missing_proof_never_arms_kill(self):
+        for mode in ("workload-eof", "workload-failed", "missing-workload"):
+            with self.subTest(mode=mode):
+                self.mode(mode)
+                self.events.unlink(missing_ok=True)
+                _output, errors = self.finish(self.start(), 1)
+                self.assertIn(b"phase=guest-workload", errors)
+                events = self.events.read_text().splitlines()
+                self.assertIn("workload-gate-waited", events)
+                self.assertNotIn("kill-requested", events)
+                self.assertNotIn("workload-complete", events)
+                self.assertNotIn("premature-workload-control", events)
+
+    def test_workload_cancellation_reaps_owned_children(self):
+        self.mode("missing-workload")
+        process = self.start()
+        stop = time.monotonic() + 4
+        while not self.events.exists() or "workload-waiting" not in self.events.read_text():
+            if process.poll() is not None or time.monotonic() >= stop:
+                self.finish(process, 143)
+                self.fail("synthetic verifier did not reach workload phase")
+            time.sleep(0.01)
+        process.send_signal(signal.SIGTERM)
+        _output, errors = self.finish(process, 143)
+        self.assertIn(b"phase=guest-workload", errors)
+        self.assertNotIn("kill-requested", self.events.read_text())
+        self.assertNotIn("premature-workload-control", self.events.read_text())
 
     def test_signing_rejections(self):
         for mode in ("invalid-signature", "not-adhoc", "no-entitlement", "integer-entitlement", "extra-entitlement"):

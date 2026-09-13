@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs::File;
+use std::future::Future;
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -28,10 +29,12 @@ use zeroize::Zeroizing;
 mod prepare;
 #[cfg(test)]
 mod tests;
+mod workload;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 const DEADLINE: Duration = Duration::from_secs(210);
 const MAX_PROGRESS_FRAMES: usize = 64;
+const WORKLOAD_DEADLINE: Duration = Duration::from_secs(30);
 
 fn invalid() -> io::Error {
     io::Error::from(io::ErrorKind::InvalidData)
@@ -248,6 +251,7 @@ enum Finished {
     Network,
     Progress(UnixStream),
     Daemon(SessionClient),
+    Workload,
 }
 
 async fn verify(options: BTreeMap<String, String>) -> Result<()> {
@@ -285,8 +289,31 @@ async fn verify_session(
     network: UnixStream,
     progress: UnixStream,
     daemon: UnixStream,
-    mut control: UnixStream,
+    control: UnixStream,
 ) -> Result<()> {
+    verify_session_with_workload(
+        seed,
+        network,
+        progress,
+        daemon,
+        control,
+        |client| async move { workload::prove(&client).await },
+    )
+    .await
+}
+
+async fn verify_session_with_workload<W, F>(
+    seed: Arc<Seed>,
+    network: UnixStream,
+    progress: UnixStream,
+    daemon: UnixStream,
+    mut control: UnixStream,
+    workload: W,
+) -> Result<()>
+where
+    W: FnOnce(SessionClient) -> F + Send + 'static,
+    F: Future<Output = Result<()>> + Send + 'static,
+{
     let mut network = Some(network);
     let mut progress = Some(progress);
     let mut daemon = Some(daemon);
@@ -296,7 +323,9 @@ async fn verify_session(
     let mut tasks: JoinSet<Result<Finished>> = JoinSet::new();
     let mut retained_progress = None;
     let mut retained_daemon = None;
+    let mut workload = Some(workload);
     let mut ready = false;
+    let mut workload_complete = false;
     let mut armed = false;
     loop {
         // Completed task failures win over a simultaneous control command.
@@ -317,6 +346,13 @@ async fn verify_session(
                 }
                 Finished::Progress(stream) => retained_progress = Some(stream),
                 Finished::Daemon(client) => retained_daemon = Some(client),
+                Finished::Workload => {
+                    if !ready || workload_complete {
+                        return Err(invalid().into());
+                    }
+                    workload_complete = true;
+                    control.write_all(b"W").await?;
+                }
             },
             result = &mut network_ready_rx, if network.is_none() && !network_ready => {
                 result?;
@@ -350,7 +386,7 @@ async fn verify_session(
                     let seed = seed.clone();
                     tasks.spawn(async move { prove_daemon(stream, &seed).await.map(Finished::Daemon) });
                 }
-                b'K' if ready && !armed => {
+                b'K' if ready && workload_complete && !armed => {
                     armed = true;
                     control.write_all(b"A").await?;
                 }
@@ -366,6 +402,14 @@ async fn verify_session(
         {
             ready = true;
             control.write_all(b"R").await?;
+            let client = retained_daemon.as_ref().ok_or_else(invalid)?.clone();
+            let workload = workload.take().ok_or_else(invalid)?;
+            tasks.spawn(async move {
+                tokio::time::timeout(WORKLOAD_DEADLINE, workload(client))
+                    .await
+                    .map_err(|_| invalid())??;
+                Ok(Finished::Workload)
+            });
         }
     }
 }
