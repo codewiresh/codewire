@@ -61,7 +61,10 @@ Required environment:
                                    Linux's 107-byte pathname limit.
 
 The smoke starts a fresh normal cw login in private tmpfs and waits for the owner
-to approve it. Existing login directories are rejected, never inspected. Cleanup
+to approve it, or uses the explicitly configured dedicated-user browser helper
+(`DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE`, `DEV_SMOKE_BROWSER_AUTH_BUN_BIN`,
+`DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN`, and `EXPECTED_CODEWIRE_ADMIN_USER_ID`).
+Existing login directories are rejected, never inspected. Cleanup
 logs out that login and removes its files. Local VM state uses a temporary HOME;
 cleanup failures retain only private diagnostic state and fail the acceptance.
 USAGE
@@ -105,6 +108,7 @@ local_platform_parse() {
 }
 
 validate_local_platform_options() {
+  validate_dev_smoke_browser_auth
   [[ "$SMOKE_AUTH_MODE" == admin-oidc && -z "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR" &&
      -n "$EXPECTED_CODEWIRE_ADMIN_EMAIL" && -n "$CW_BIN" ]] ||
     die 'local/platform smoke requires --admin-oidc, expected email and normal --cw-bin, without any saved login directory'
@@ -608,9 +612,17 @@ main() {
   # Even identity checks use the isolated HOME and explicit config; never call
   # the ambient prepare_cli wrapper before isolation has been established.
   LP_LOGIN_ATTEMPTED=1
-  cw_with_timeout 600 login --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" || die 'fresh owner-operated Dev login failed'
+  if [[ -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]]; then
+    prepare_dev_smoke_browser_login "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR"
+  else
+    cw_with_timeout 600 login --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" || die 'fresh owner-operated Dev login failed'
+  fi
   validate_admin_oauth_config "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR"
-  assert_admin_oauth_principal
+  if [[ -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]]; then
+    assert_fresh_oauth_principal
+  else
+    assert_admin_oauth_principal
+  fi
   LP_USER_ID="$(jq -er .id "$TMPDIR_SMOKE/admin-whoami.json")"
   [[ "$(awk '$1 == "ID:" {print $2}' "$TMPDIR_SMOKE/admin-current-organization.out")" == "$EXPECTED_CODEWIRE_ORGANIZATION_ID" ]] ||
     die 'fresh OAuth login selected a different organization'

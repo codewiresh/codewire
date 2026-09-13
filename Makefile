@@ -1,5 +1,5 @@
 .PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind design-system e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
-.PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets
+.PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
 
 # Default target
 help:
@@ -27,6 +27,7 @@ help:
 	@echo "  make test-ui-kind-billing - Run Playwright billing tests against local kind"
 	@echo "  make test-billing-smoke-kind - Run Rust billing runtime smoke + Playwright billing against local kind"
 	@echo "  make e2e-kind     - Run the isolated Rust-owned Kind product gate"
+	@echo "  make accept-secrets-credentials - Run the checked-in #1922 acceptance matrix"
 	@echo "  make scan-supply-chain - Run local policy plus the strict external-scanner equivalent"
 	@echo "  make verify-dashboard-image - Build and inspect the production Rust/Zola image"
 	@echo "  make seed-e2e-users - Seed local E2E login users"
@@ -118,6 +119,9 @@ scan-supply-chain:
 		--gitleaks-config=.gitleaks.toml \
 		--baseline=.supplychain/bun-baseline.json \
 		.
+
+accept-secrets-credentials:
+	scripts/runtime/dev/run-secrets-credentials-acceptance.sh
 
 DASHBOARD_VERIFY_IMAGE ?= codewire-dashboard:verification
 verify-dashboard-image:

@@ -23,8 +23,8 @@ fixture() {
   APP_SECRET_PROJECTS=(); APP_SECRET_IDS=(); APP_SECRET_VALUES=(); APP_SECRET_HASHES=()
   APP_SECRET_USER_ATTEMPTS=(); APP_SECRET_ORG_ATTEMPTS=(); APP_SECRET_ALL_KEYS=()
   APP_SECRET_ALL_HASHES_A=(); APP_SECRET_ALL_HASHES_B=(); APP_SECRET_ALL_HASHES_CLEAR=()
-  APP_SECRET_ISOLATED_ENV=(); APP_SECRET_ALL_SCOPES=0; APP_SECRET_LOGIN_ATTEMPTED=0
-  APP_SECRET_LOGIN_DIR=''; APP_SECRET_RUNTIME_PARENT=''; APP_SECRET_RUNTIME_DIR=''
+  SMOKE_OAUTH_ENV=(); APP_SECRET_ALL_SCOPES=0; SMOKE_OAUTH_LOGIN_ATTEMPTED=0
+  SMOKE_OAUTH_LOGIN_DIR=''; SMOKE_OAUTH_RUNTIME_PARENT=''; SMOKE_OAUTH_RUNTIME_DIR=''
   APP_SECRET_DOCUMENT=''; APP_SECRET_CREATE_ATTEMPTED=0; ENV_ID=''; CLAIM_NAME=fixture-claim
   SMOKE_NAME=fixture-env; SMOKE_TIMEOUT_SECONDS=1; SMOKE_EXEC_TIMEOUT=5
   SMOKE_KEEP_ENV=0; SMOKE_SKIP_KUBE=0; SMOKE_EXISTING_ENV_ID=''
@@ -35,6 +35,9 @@ fixture() {
   EXPECTED_CODEWIRE_ADMIN_USER_ID=11111111111111111111111111111111
   EXPECTED_CODEWIRE_ORGANIZATION_ID=22222222222222222222222222222222
   CODEWIRE_ADMIN_OAUTH_CONFIG_DIR=''
+  DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE=''
+  DEV_SMOKE_BROWSER_AUTH_BUN_BIN=''
+  DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN=''
   SANDBOX_NAMESPACE=synthetic; APP_FAILURE=''
   APP_KUBE_RESOURCE=''; APP_KUBE_MUTATION='.'; APP_ANNOTATED_POD=0
   printf '[]\n' >"$TMPDIR_SMOKE/projects.db"
@@ -342,9 +345,9 @@ done
 fresh_login_fixture
 validate_application_all_scopes_options
 export AWS_SECRET_ACCESS_KEY=forbidden-owner-provider SSH_AUTH_SOCK=/forbidden/owner-agent
-prepare_application_all_scopes_cli
-fresh_runtime="$APP_SECRET_RUNTIME_DIR"
-fresh_login="$APP_SECRET_LOGIN_DIR"
+prepare_fresh_oauth_cli
+fresh_runtime="$SMOKE_OAUTH_RUNTIME_DIR"
+fresh_login="$SMOKE_OAUTH_LOGIN_DIR"
 [[ "$(stat -c %a "$fresh_runtime")" == 700 && "$(stat -c %a "$fresh_login")" == 700 ]]
 login_env="$APP_TEST_ROOT/fresh-login-state/login-env"
 grep -Fx "HOME=$TMPDIR_SMOKE/auth-home" "$login_env" >/dev/null
@@ -354,7 +357,7 @@ grep -Fx "DBUS_SESSION_BUS_ADDRESS=unix:path=$fresh_runtime/no-owner-bus" "$logi
 if grep -Eq '^(AWS_|SSH_AUTH_SOCK=|CODEWIRE_API_KEY=)' "$login_env"; then
   fail 'fresh login inherited owner provider, SSH or API-key state'
 fi
-cleanup_application_all_scopes_login
+cleanup_fresh_oauth_login
 [[ ! -e "$fresh_runtime" ]]
 grep -Fx logout "$APP_TEST_ROOT/fresh-login-state/logout" >/dev/null
 unset AWS_SECRET_ACCESS_KEY SSH_AUTH_SOCK
@@ -365,8 +368,8 @@ for variant in wrong-user duplicate wrong-target wrong-role current-role; do
   mkdir -p "$APP_TEST_ROOT/fresh-login-state"
   printf '%s\n' "$variant" >"$APP_TEST_ROOT/fresh-login-state/variant"
   reject_fresh_identity() {
-    trap 'cleanup_application_all_scopes_login' EXIT
-    prepare_application_all_scopes_cli
+    trap 'cleanup_fresh_oauth_login' EXIT
+    prepare_fresh_oauth_cli
   }
   expect_failure "$variant" reject_fresh_identity
   if find "$APP_TEST_RUNTIME" -mindepth 1 -maxdepth 1 -name '.cwapp-*' | grep -q .; then
@@ -377,12 +380,93 @@ for variant in wrong-user duplicate wrong-target wrong-role current-role; do
 done
 pass
 
+# Exercise the shell integration with a synthetic runtime, not a real browser,
+# login, provider or credential reader. The TypeScript helper has its own tests.
+browser_login_fixture() {
+  fresh_login_fixture
+  DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE="$APP_TEST_ROOT/browser-input.json"
+  DEV_SMOKE_BROWSER_AUTH_BUN_BIN="$APP_TEST_ROOT/synthetic-bun"
+  DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN="$CW_BIN"
+  printf 'synthetic-browser-input-not-read-by-shell\n' >"$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE"
+  chmod 0600 "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE"
+  cat >"$DEV_SMOKE_BROWSER_AUTH_BUN_BIN" <<'BROWSER_STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$HOME" == /nonexistent && "$PATH" == /usr/bin:/bin &&
+   -z "${AWS_SECRET_ACCESS_KEY+x}" && -z "${SSH_AUTH_SOCK+x}" &&
+   -z "${CW_CONFIG_DIR+x}" && -z "${BAO_TOKEN+x}" ]] || exit 91
+[[ "$1" == --no-env-file && "$2" == --config=/dev/null &&
+   "$3" == */apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts ]] || exit 92
+shift 3
+[[ $# == 14 && "$1" == --cw-bin && "$3" == --config-dir &&
+   "$5" == --credential-file && "$7" == --expected-user-id &&
+   "$8" == 11111111111111111111111111111111 && "$9" == --expected-email &&
+   "${10}" == owner@example.invalid && "${11}" == --expected-org-id &&
+   "${12}" == 22222222222222222222222222222222 && "${13}" == --chromium-executable ]] || exit 93
+config_dir="$4"
+[[ "$PWD" == "$config_dir" && "$TMPDIR" == "$config_dir" && "$(stat -c %a "$config_dir")" == 700 &&
+   -z "$(ls -A "$config_dir")" ]] || exit 94
+state="$(dirname "$2")/fresh-login-state"
+mkdir -p "$state"
+printf 'browser-helper\n' >"$state/browser-called"
+CW_CONFIG_DIR="$config_dir" "$2" --server https://codewire-dev.sh login --org "${12}"
+[[ "$(cat "$state/variant" 2>/dev/null || true)" != helper-failed ]] || exit 95
+BROWSER_STUB
+  chmod 0700 "$DEV_SMOKE_BROWSER_AUTH_BUN_BIN"
+}
+
+for phase in application-secrets-all-scopes provider-ssh; do
+  browser_login_fixture
+  SMOKE_ONLY_PHASES=("$phase")
+  [[ "$phase" == application-secrets-all-scopes ]] || APP_SECRET_ALL_SCOPES=0
+  validate_dev_smoke_browser_auth
+  if [[ "$phase" == provider-ssh ]]; then validate_provider_ssh_options; fi
+  export AWS_SECRET_ACCESS_KEY=forbidden-owner-provider SSH_AUTH_SOCK=/forbidden/owner-agent BAO_TOKEN=forbidden
+  prepare_fresh_oauth_cli
+  grep -qx browser-helper "$APP_TEST_ROOT/fresh-login-state/browser-called" || fail 'browser helper was not selected'
+  cleanup_fresh_oauth_login
+  [[ ! -e "$SMOKE_OAUTH_RUNTIME_DIR" && -f "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]] ||
+    fail 'fresh browser cleanup retained login or removed its input credential file'
+  unset AWS_SECRET_ACCESS_KEY SSH_AUTH_SOCK BAO_TOKEN
+  pass
+done
+
+for variant in helper-failed wrong-user; do
+  browser_login_fixture
+  mkdir -p "$APP_TEST_ROOT/fresh-login-state"
+  printf '%s\n' "$variant" >"$APP_TEST_ROOT/fresh-login-state/variant"
+  reject_browser_login() {
+    trap cleanup_fresh_oauth_login EXIT
+    prepare_fresh_oauth_cli
+  }
+  expect_failure "$variant" reject_browser_login
+  [[ -z "$(find "$APP_TEST_RUNTIME" -mindepth 1 -maxdepth 1 -name '.cwapp-*')" ]] ||
+    fail 'failed browser helper retained fresh auth state'
+  grep -qx logout "$APP_TEST_ROOT/fresh-login-state/logout" || fail 'failed browser helper skipped logout'
+  pass
+done
+
+for invalid in partial-runtime public-input missing-id saved-login; do
+  reject_browser_inputs() {
+    browser_login_fixture
+    case "$invalid" in
+      partial-runtime) DEV_SMOKE_BROWSER_AUTH_BUN_BIN='' ;;
+      public-input) chmod 0644 "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ;;
+      missing-id) EXPECTED_CODEWIRE_ADMIN_USER_ID='' ;;
+      saved-login) CODEWIRE_ADMIN_OAUTH_CONFIG_DIR=/unowned/login ;;
+    esac
+    validate_dev_smoke_browser_auth
+  }
+  expect_failure "$invalid" reject_browser_inputs
+done
+
 fresh_login_fixture
-prepare_application_all_scopes_cli
-forced_runtime="$APP_SECRET_RUNTIME_DIR"
+prepare_fresh_oauth_cli
+forced_runtime="$SMOKE_OAUTH_RUNTIME_DIR"
 APP_SECRET_USER_ATTEMPTS=(FORCE_CLEANUP)
 SMOKE_COLLECT_FAILURE_DIAGNOSTICS=0
 if (
+  # shellcheck disable=SC2329 # Called by the EXIT cleanup through the override.
   cleanup_application_secrets() { die 'forced explicit cleanup exit'; }
   trap cleanup EXIT
   false
