@@ -512,6 +512,9 @@ run_paths_case application_schema_fingerprint pull_request refs/pull/60/head fal
 run_paths_case server_core_lifecycle_test pull_request refs/pull/6010/head false \
   'database policy rust rust_pkg_codewire_server_core' \
   crates/codewire-server-core/tests/org_deletion_lifecycle.rs
+run_paths_case server_core_migration_database_test pull_request refs/pull/6010/head false \
+  'database policy rust rust_pkg_codewire_server_core' \
+  crates/codewire-server-core/src/migrate/tests/session_mutation.rs
 for oauth_input in tests/oauth_bearer_auth.rs tests/oauth_bearer_auth/authority.rs; do
   run_paths_case server_core_oauth_publication_test pull_request refs/pull/6010/head false \
     'database policy rust rust_pkg_codewire_server_core' \
@@ -1261,7 +1264,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 46' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 49' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 21' "$integration_runner"
 grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 12' "$integration_runner"
