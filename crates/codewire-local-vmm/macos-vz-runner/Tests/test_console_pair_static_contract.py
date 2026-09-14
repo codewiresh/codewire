@@ -45,6 +45,10 @@ class ConsolePairBoundaryTests(unittest.TestCase):
             (protocol, "schemaVersion = 3", "schemaVersion = 1"),
             (ROOT / "crates/codewire-local-vmm/Cargo.toml",
              'required-features = ["macos-console-pair-fixture"]', 'required-features = []'),
+            (ROOT / "crates/codewire-local-vmm/Cargo.toml",
+             'required-features = ["macos-product-network-fixture"]', 'required-features = []'),
+            (ROOT / "crates/codewire-local-vmm/src/bin/codewire-macos-product-network-fixture.rs",
+             'feature = "macos-product-network-fixture"', 'feature = "default"'),
         ):
             with self.subTest(contract=old):
                 with self.assertRaises(SystemExit) as failure:

@@ -133,6 +133,8 @@ if record['tool'] == 'cargo' and sys.argv[1] == os.environ.get('COMPOSITION_FAIL
     sys.exit(43)
 if record['tool'] == os.environ.get('COMPOSITION_FAIL_TOOL'):
     sys.exit(44)
+if record['tool'] == 'cargo' and sys.argv[1] == 'test' and os.environ.get('COMPOSITION_FAIL_FEATURE') in sys.argv:
+    sys.exit(45)
 ''')
 tool.chmod(0o755)
 for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
@@ -153,7 +155,7 @@ environment = dict(PATH=f'{binary}:{os.environ["PATH"]}',
                    RUST_COMPOSE_FORMAT='true', RUST_COMPOSE_FORMAT_DONE='true')
 cases = 0
 
-def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None):
+def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None, fail_feature=None):
     global cases
     cases += 1
     trace.write_text('')
@@ -162,6 +164,8 @@ def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None)
         env['COMPOSITION_FAIL'] = fail
     if fail_tool:
         env['COMPOSITION_FAIL_TOOL'] = fail_tool
+    if fail_feature:
+        env['COMPOSITION_FAIL_FEATURE'] = fail_feature
     result = subprocess.run(['bash', str(runner), family], env=env,
                             text=True, capture_output=True)
     records = [json.loads(line) for line in trace.read_text().splitlines()]
@@ -206,10 +210,20 @@ assert sum(r['tool'] == 'build-local-vmm-initramfs.sh' for r in records) == 1
 assert sum(r['tool'] == 'test_ipc_system.sh' for r in records) == 1
 assert sum(r['tool'] == 'test_static_contract.py' for r in records) == 1
 assert sum(r['tool'] == 'test_console_pair_static_contract.py' for r in records) == 1
+product_feature = 'macos-product-network-fixture'
+product_test = ['test', '--locked', '-p', 'codewire-local-vmm', '--features',
+                product_feature, '--lib', 'macos_console_pair_fixture']
+assert sum(r['tool'] == 'cargo' and r['args'] == product_test for r in records) == 1
+assert sum(r['tool'] == 'cargo' and r['args'][0] == 'clippy' and
+           product_feature in r['args'] and 'codewire-macos-product-network-fixture' in r['args']
+           for r in records) == 1
 assert sum('--target' in r['args'] and 'aarch64-apple-darwin' in r['args'] for r in records) == 1
 
 records, _ = run(special, fail_tool='test_console_pair_static_contract.py', status=44)
 assert records[-1]['tool'] == 'test_console_pair_static_contract.py'
+
+records, _ = run(special, fail_feature=product_feature, status=45)
+assert records[-1]['args'] == product_test
 
 for command in ('fmt', 'build', 'clippy', 'test'):
     records, _ = run(both, fail=command)

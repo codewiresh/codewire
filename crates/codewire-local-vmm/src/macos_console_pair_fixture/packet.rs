@@ -220,6 +220,25 @@ async fn write_packet<S: AsyncWrite + Unpin>(
     stream.write_all(&frame).await
 }
 
+pub(super) async fn traffic_for<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    session: NetworkSession,
+    profile: super::binding::Profile,
+) -> Result<()> {
+    match profile {
+        super::binding::Profile::ConsolePair => traffic(stream, session).await,
+        #[cfg(feature = "macos-product-network-fixture")]
+        super::binding::Profile::ProductNetwork => {
+            tcp_traffic(
+                stream,
+                &Mutex::new(session),
+                super::product_network::destination(),
+            )
+            .await
+        }
+    }
+}
+
 pub(super) async fn traffic<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     session: NetworkSession,
@@ -255,6 +274,14 @@ pub(super) async fn traffic<S: AsyncRead + AsyncWrite + Unpin>(
         return Err(invalid());
     }
 
+    tcp_traffic(stream, &session, destination()).await
+}
+
+async fn tcp_traffic<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    session: &Mutex<NetworkSession>,
+    peer: SocketAddr,
+) -> Result<()> {
     let (to_stack, inbound) = mpsc::channel(32);
     let (outbound, mut from_stack) = mpsc::channel(32);
     let stack = Netstack::with_config(
@@ -273,7 +300,7 @@ pub(super) async fn traffic<S: AsyncRead + AsyncWrite + Unpin>(
     let receive = async {
         for _ in 0..512 {
             to_stack
-                .send(read_packet(&mut reader, &session).await?)
+                .send(read_packet(&mut reader, session).await?)
                 .await
                 .map_err(|_| invalid())?;
         }
@@ -282,12 +309,12 @@ pub(super) async fn traffic<S: AsyncRead + AsyncWrite + Unpin>(
     let send = async {
         for _ in 0..512 {
             let packet = from_stack.recv().await.ok_or_else(invalid)?;
-            write_packet(&mut writer, &session, &packet).await?;
+            write_packet(&mut writer, session, &packet).await?;
         }
         Err::<(), _>(invalid())
     };
     let application = async {
-        let mut stream = stack.connect(destination()).await?;
+        let mut stream = stack.connect(peer).await?;
         stream.write_all(&payload(false)).await?;
         stream.shutdown().await?;
         let mut response = [0; PAYLOAD_LEN];

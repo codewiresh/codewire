@@ -214,6 +214,18 @@ if 'required-features = ["macos-console-pair-fixture"]' not in (
 ).read_text():
     fail("console pair binary must require its developer feature")
 
+product_binary = re.search(
+    r'^\[\[bin\]\]\s*\nname = "codewire-macos-product-network-fixture"\n(.*?)(?=^\[|\Z)',
+    (local_vmm / "Cargo.toml").read_text(), re.M | re.S,
+)
+if (product_binary is None or
+        'required-features = ["macos-product-network-fixture"]' not in product_binary.group(1)):
+    fail("product-network binary must require its distinct developer feature")
+if '#[cfg(all(target_os = "linux", feature = "macos-product-network-fixture"))]' not in (
+    local_vmm / "src/bin/codewire-macos-product-network-fixture.rs"
+).read_text():
+    fail("product-network entrypoint lost Linux opt-in feature isolation")
+
 for relative in (
     "Tests/CodewireVZRunnerTests/ConfigurationTests.swift",
     "Tests/CodewireVZRunnerTests/IPCTests.swift",

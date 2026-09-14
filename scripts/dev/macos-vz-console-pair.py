@@ -597,8 +597,46 @@ def inherited_descriptor_limit() -> int:
     return maximum + 1
 
 
+class ConsolePairSpec:
+    """Fixed fixture semantics; native/process ownership stays shared."""
+
+    __slots__ = ()
+    fixture = FIXTURE
+    schema_version = SCHEMA_VERSION
+
+    def base_result(self) -> dict[str, object]:
+        return base_result()
+
+    def validate_result(self, result: dict[str, object]) -> None:
+        validate_result(result)
+
+    def result_is_pass(self, result: dict[str, object]) -> bool:
+        return result_is_pass(result)
+
+    def binding_image(
+        self,
+        role: str,
+        vm_id: str,
+        generation: int,
+        run_nonce: bytes,
+        network_key: bytes,
+        status_key: bytes,
+    ) -> bytes:
+        return binding_image(role, vm_id, generation, run_nonce, network_key, status_key)
+
+    def coordinator(
+        self, run: Run, vm_id: uuid.UUID, generation: int, nonce: bytes,
+        status_keys: dict[int, bytes],
+    ) -> Coordinator:
+        return Coordinator(run, vm_id, generation, nonce, status_keys)
+
+
+CONSOLE_SPEC = ConsolePairSpec()
+
+
 class Run:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, spec: ConsolePairSpec = CONSOLE_SPEC):
+        self.spec = spec
         self.root = root
         self.deadline = time.monotonic() + ACTIVE_SECONDS
         self.phase = "admission"
@@ -610,11 +648,11 @@ class Run:
         self.control_eof = False
         self.force_stop_requested = False
         self.committed = False
-        self.result = base_result()
+        self.result = spec.base_result()
         self.receipt_path = root / "receipt.json"
         self.receipt: dict[str, object] = {
-            "schemaVersion": SCHEMA_VERSION,
-            "fixture": FIXTURE,
+            "schemaVersion": spec.schema_version,
+            "fixture": spec.fixture,
             "status": "assembling",
             "artifacts": "retained",
             "result": self.result,
@@ -640,7 +678,7 @@ class Run:
         return remaining
 
     def persist(self, status: str) -> None:
-        validate_result(self.result)
+        self.spec.validate_result(self.result)
         self.receipt["status"] = status
         self.receipt["phase"] = self.phase
         self.receipt["result"] = dict(self.result)
@@ -828,6 +866,12 @@ class Run:
 
 
 class Coordinator:
+    status_magic = STATUS_MAGIC
+    control_magic = CONTROL_MAGIC
+    status_domain = STATUS_DOMAIN
+    control_domain = CONTROL_DOMAIN
+    wait_keys = ("workerWaitStatus", "adapterWaitStatus")
+
     def __init__(
         self,
         run: Run,
@@ -881,7 +925,7 @@ class Coordinator:
         sequence = self.control_sequence[role]
         self.control_sequence[role] += 1
         frame = bytearray(ROLE_FRAME_BYTES)
-        frame[:8] = CONTROL_MAGIC
+        frame[:8] = self.control_magic
         frame[8] = role
         frame[9] = code
         frame[16:32] = self.vm_id.bytes
@@ -889,18 +933,18 @@ class Coordinator:
         frame[40:72] = self.nonce
         frame[72:80] = sequence.to_bytes(8, "little")
         frame[96:] = hmac.new(
-            self.keys[role], CONTROL_DOMAIN + frame[:96], hashlib.sha256
+            self.keys[role], self.control_domain + frame[:96], hashlib.sha256
         ).digest()
         return b"C" + bytes([role]) + frame
 
     def send_control(self, role: int, code: int) -> None:
         self.run.send(framed(self.control_frame(role, code)))
 
-    def decode_status(self, wrapper_role: int, frame: bytes) -> tuple[int, int, int | None, int | None]:
+    def decode_status(self, wrapper_role: int, frame: bytes) -> tuple[int | None, ...]:
         if wrapper_role not in ROLES or len(frame) != ROLE_FRAME_BYTES:
             raise FixtureFailure()
         if (
-            frame[:8] != STATUS_MAGIC
+            frame[:8] != self.status_magic
             or frame[8] != wrapper_role
             or frame[10:16] != bytes(6)
             or frame[16:32] != self.vm_id.bytes
@@ -913,32 +957,27 @@ class Coordinator:
             raise FixtureFailure()
         code = frame[9]
         if code == STATUS_CHILDREN_REAPED:
-            if wrapper_role != ROLE_SERVICE or frame[88:96] != bytes(8):
+            end = 80 + 4 * len(self.wait_keys)
+            if wrapper_role != ROLE_SERVICE or frame[end:96] != bytes(96 - end):
                 raise FixtureFailure()
-            worker = int.from_bytes(frame[80:84], "little", signed=True)
-            adapter = int.from_bytes(frame[84:88], "little", signed=True)
+            waits = tuple(
+                int.from_bytes(frame[offset:offset + 4], "little", signed=True)
+                for offset in range(80, end, 4)
+            )
         else:
             if frame[80:96] != bytes(16):
                 raise FixtureFailure()
-            worker = adapter = None
+            waits = (None,) * len(self.wait_keys)
         expected = hmac.new(
-            self.keys[wrapper_role], STATUS_DOMAIN + frame[:96], hashlib.sha256
+            self.keys[wrapper_role], self.status_domain + frame[:96], hashlib.sha256
         ).digest()
         if not hmac.compare_digest(frame[96:], expected):
             raise FixtureFailure()
         self.status_sequence[wrapper_role] += 1
-        return wrapper_role, code, worker, adapter
+        return wrapper_role, code, *waits
 
-    def handle_status(
-        self,
-        role: int,
-        code: int,
-        worker: int | None,
-        adapter: int | None,
-        *,
-        persist_packet: bool = True,
-    ) -> None:
-        expected = {
+    def expected_statuses(self, role: int) -> list[int | tuple[int, ...]]:
+        return {
             ROLE_GUEST: [
                 STATUS_PORTS_READY,
                 STATUS_GUEST_ARMED,
@@ -956,6 +995,33 @@ class Coordinator:
                 STATUS_CANCELLED,
             ],
         }[role]
+
+    def packet_ready(self) -> bool:
+        return (
+            STATUS_PACKET_COMPLETED in self.seen[ROLE_GUEST]
+            and STATUS_HOST_READY in self.seen[ROLE_GUEST]
+            and STATUS_WORKER_READY in self.seen[ROLE_SERVICE]
+        )
+
+    def initial_ready(self) -> bool:
+        return (
+            self.seen[ROLE_GUEST] == [STATUS_PORTS_READY]
+            and self.seen[ROLE_SERVICE] == [STATUS_PREPARED]
+        )
+
+    def accepted_status(self, role: int, code: int) -> None:
+        """A fixed protocol variant may record additional authenticated facts."""
+
+    def handle_status(
+        self,
+        role: int,
+        code: int,
+        *waits: int | None,
+        persist_packet: bool = True,
+    ) -> None:
+        if len(waits) != len(self.wait_keys):
+            raise FixtureFailure()
+        expected = self.expected_statuses(role)
         index = len(self.seen[role])
         if code == STATUS_FAILED or index >= len(expected):
             raise FixtureFailure()
@@ -965,13 +1031,12 @@ class Coordinator:
                 raise FixtureFailure()
         elif code != admitted:
             raise FixtureFailure()
+        self.accepted_status(role, code)
         self.seen[role].append(code)
 
         if (
             not self.run.result["packetCompleted"]
-            and STATUS_PACKET_COMPLETED in self.seen[ROLE_GUEST]
-            and STATUS_HOST_READY in self.seen[ROLE_GUEST]
-            and STATUS_WORKER_READY in self.seen[ROLE_SERVICE]
+            and self.packet_ready()
         ):
             # Independent VM status pipes have no cross-role delivery order.
             # Preserve both authenticated facts before advancing to EOF.
@@ -988,8 +1053,8 @@ class Coordinator:
             self.run.result[f"{ROLE_NAMES[role]}Cancelled"] = True
         elif code == STATUS_CHILDREN_REAPED:
             self.run.result["serviceChildrenReaped"] = True
-            self.run.result["workerWaitStatus"] = worker
-            self.run.result["adapterWaitStatus"] = adapter
+            for key, value in zip(self.wait_keys, waits):
+                self.run.result[key] = value
 
     def handle_vm(self, role: int, state: int) -> None:
         if role not in ROLES or state not in {VM_STOPPED, VM_FAILED, VM_FORCE_STOPPED}:
@@ -1017,13 +1082,15 @@ class Coordinator:
         if state != VM_STOPPED:
             raise FixtureFailure()
 
+    def poweroff_ready(self) -> bool:
+        return True
+
     def advance(self) -> None:
         guest = self.seen[ROLE_GUEST]
         service = self.seen[ROLE_SERVICE]
         if (
             self.started
-            and guest == [STATUS_PORTS_READY]
-            and service == [STATUS_PREPARED]
+            and self.initial_ready()
             and not self.sent_guest_start
         ):
             self.send_control(ROLE_GUEST, CONTROL_START)
@@ -1034,8 +1101,7 @@ class Coordinator:
             self.sent_service_start = True
             self.set_stage("authenticated-packet", 35)
         if (
-            STATUS_PACKET_COMPLETED in guest
-            and STATUS_WORKER_READY in service
+            self.packet_ready()
             and not self.sent_eof_observe
         ):
             self.send_control(ROLE_SERVICE, CONTROL_OBSERVE_EOF)
@@ -1057,6 +1123,7 @@ class Coordinator:
             self.set_stage("normal-cancellation", 10)
         if (
             self.sent_cancel
+            and self.poweroff_ready()
             and STATUS_CANCELLED in guest
             and ROLE_GUEST not in self.sent_poweroff
         ):
@@ -1064,6 +1131,7 @@ class Coordinator:
             self.sent_poweroff.add(ROLE_GUEST)
         if (
             self.sent_cancel
+            and self.poweroff_ready()
             and STATUS_CANCELLED in service
             and STATUS_CHILDREN_REAPED in service
             and ROLE_SERVICE not in self.sent_poweroff
@@ -1153,7 +1221,9 @@ def attach_and_start_coordinator(
     nonce: bytes,
     status_keys: dict[int, bytes],
 ) -> Coordinator:
-    coordinator = Coordinator(run, vm_id, generation, nonce, status_keys)
+    coordinator = run.spec.coordinator(
+        run, vm_id, generation, nonce, status_keys
+    )
     # Retain the decoder before START can have any effect. An exception after
     # a successful or partial transport write must not erase cleanup evidence.
     run.coordinator = coordinator
@@ -1233,7 +1303,7 @@ def run_coordinator(run: Run, coordinator: Coordinator) -> None:
     run.result["helperReaped"] = True
     if coordinator.buffer or run.helper.returncode != 0:
         raise FixtureFailure()
-    if not result_is_pass(run.result):
+    if not run.spec.result_is_pass(run.result):
         raise FixtureFailure()
     # Signal delivery is not an alternative to checking the absolute active
     # deadline after the final poll/drain has completed.
@@ -1279,7 +1349,7 @@ def prepare_and_run(arguments: argparse.Namespace, run: Run) -> Coordinator | No
             ROLE_SERVICE: run.root / "service-binding",
         }
         for role in ROLES:
-            image = binding_image(
+            image = run.spec.binding_image(
                 ROLE_NAMES[role],
                 str(vm_id),
                 generation,
@@ -1380,11 +1450,13 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None, *, spec: ConsolePairSpec = CONSOLE_SPEC,
+) -> int:
     arguments = argv if argv is not None else sys.argv[1:]
     run: Run | None = None
     coordinator: Coordinator | None = None
-    result = base_result()
+    result = spec.base_result()
     status = 1
     prior_umask = os.umask(0o077)
     prior_handlers: dict[int, object] = {}
@@ -1399,7 +1471,7 @@ def main(argv: list[str] | None = None) -> int:
         require_host()
         root = private_artifact_root(parsed.artifact_root)
         root.mkdir(mode=0o700)
-        run = Run(root)
+        run = Run(root, spec=spec)
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         for signum in WATCHED_SIGNALS:
             prior_handlers[signum] = signal.getsignal(signum)
@@ -1474,7 +1546,7 @@ def main(argv: list[str] | None = None) -> int:
                 status = status or 1
                 result["outcome"] = "unknown"
             run.committed = True
-        validate_result(result)
+        spec.validate_result(result)
         sys.stdout.buffer.write(canonical(result) + b"\n")
         sys.stdout.buffer.flush()
         os.umask(prior_umask)

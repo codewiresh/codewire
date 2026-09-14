@@ -11,7 +11,7 @@ use codewire_vmm_guest_probe::NetworkKey;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use super::binding::{Binding, Control, FRAME_LEN, Role, Status};
+use super::binding::{Binding, Control, FRAME_LEN, Profile, Role, Status};
 use super::descriptor as fd;
 use super::packet::{self, CharacterStream, FixtureBroker};
 use super::process::{self, OwnedChild};
@@ -22,6 +22,10 @@ const RUNTIME: Duration = Duration::from_secs(120);
 const PREPARE: Duration = Duration::from_secs(20);
 
 pub(super) fn entry(arguments: Vec<String>) -> Result<()> {
+    entry_for(arguments, Profile::ConsolePair)
+}
+
+pub(super) fn entry_for(arguments: Vec<String>, profile: Profile) -> Result<()> {
     if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) } == libc::SIG_ERR
         || unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR
     {
@@ -41,8 +45,17 @@ pub(super) fn entry(arguments: Vec<String>) -> Result<()> {
             }
             mount_minimal()?;
             let deadline = Instant::now() + RUNTIME;
-            let binding =
-                Binding::read(Role::parse(role)?, deadline.min(Instant::now() + PREPARE))?;
+            let binding = match profile {
+                Profile::ConsolePair => {
+                    Binding::read(Role::parse(role)?, deadline.min(Instant::now() + PREPARE))?
+                }
+                #[cfg(feature = "macos-product-network-fixture")]
+                Profile::ProductNetwork => Binding::read_for(
+                    Role::parse(role)?,
+                    deadline.min(Instant::now() + PREPARE),
+                    profile,
+                )?,
+            };
             let packet =
                 fd::discover_port(fd::PACKET_PORT, deadline.min(Instant::now() + PREPARE))?;
             let status =
@@ -63,7 +76,13 @@ pub(super) fn entry(arguments: Vec<String>) -> Result<()> {
             let result = if context.binding.role == Role::Guest {
                 guest(&mut context, packet)
             } else {
-                service(&mut context, packet)
+                match profile {
+                    Profile::ConsolePair => service(&mut context, packet),
+                    #[cfg(feature = "macos-product-network-fixture")]
+                    Profile::ProductNetwork => {
+                        super::product_runtime::service(&mut context, packet)
+                    }
+                }
             };
             if result.is_err() {
                 let _ = context.status(Status::Failed);
@@ -78,14 +97,22 @@ pub(super) fn entry(arguments: Vec<String>) -> Result<()> {
                 .enable_all()
                 .build()?;
             let result = runtime.block_on(async {
-                tokio::time::timeout(
-                    RUNTIME,
-                    network_worker::run_inherited_worker_with_broker(
-                        identity,
-                        generation,
-                        Arc::new(FixtureBroker::new(true)),
-                    ),
-                )
+                tokio::time::timeout(RUNTIME, async {
+                    match profile {
+                        Profile::ConsolePair => {
+                            network_worker::run_inherited_worker_with_broker(
+                                identity,
+                                generation,
+                                Arc::new(FixtureBroker::new(true)),
+                            )
+                            .await
+                        }
+                        #[cfg(feature = "macos-product-network-fixture")]
+                        Profile::ProductNetwork => {
+                            network_worker::run_inherited_worker(identity, generation).await
+                        }
+                    }
+                })
                 .await
             });
             let code = match result {
@@ -97,6 +124,33 @@ pub(super) fn entry(arguments: Vec<String>) -> Result<()> {
             std::process::exit(code);
         }
         [mode] if mode == "adapter" => process::adapter(),
+        #[cfg(feature = "macos-product-network-fixture")]
+        [mode] if mode == "endpoint" && profile == Profile::ProductNetwork => {
+            super::product_network::run_inherited_endpoint()
+        }
+        #[cfg(feature = "macos-product-network-fixture")]
+        [mode, identity, generation] if mode == "broker" && profile == Profile::ProductNetwork => {
+            process::child_invariants(&[4])?;
+            let identity = Uuid::parse_str(identity).map_err(|_| invalid())?;
+            let generation = generation.parse::<u64>().map_err(|_| invalid())?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let result = runtime.block_on(async {
+                tokio::time::timeout(
+                    RUNTIME,
+                    crate::egress_broker::run_inherited_egress_broker(identity, generation),
+                )
+                .await
+            });
+            let code = match result {
+                Ok(Ok(())) => 0,
+                Ok(Err(error)) => error.exit_code(),
+                Err(_) => 70,
+            };
+            drop(runtime);
+            std::process::exit(code);
+        }
         _ => Err(invalid()),
     }
 }
@@ -158,11 +212,11 @@ pub(super) fn poweroff() -> ! {
     }
 }
 
-struct Context {
-    binding: Binding,
+pub(super) struct Context {
+    pub(super) binding: Binding,
     status: OwnedFd,
-    control: OwnedFd,
-    deadline: Instant,
+    pub(super) control: OwnedFd,
+    pub(super) deadline: Instant,
     output_sequence: u64,
     input_sequence: u64,
     input: [u8; FRAME_LEN],
@@ -170,7 +224,7 @@ struct Context {
 }
 
 impl Context {
-    fn status(&mut self, code: Status) -> Result<()> {
+    pub(super) fn status(&mut self, code: Status) -> Result<()> {
         let bytes = self.binding.status(code, self.output_sequence);
         fd::write_all(
             self.status.as_raw_fd(),
@@ -190,7 +244,18 @@ impl Context {
         self.output_sequence = self.output_sequence.checked_add(1).ok_or_else(invalid)?;
         Ok(())
     }
-    fn read_control(&mut self) -> Result<Option<Control>> {
+    #[cfg(feature = "macos-product-network-fixture")]
+    pub(super) fn product_reaped(&mut self, waits: [i32; 4]) -> Result<()> {
+        let bytes = self.binding.product_reaped(self.output_sequence, waits)?;
+        fd::write_all(
+            self.status.as_raw_fd(),
+            &bytes,
+            self.deadline.min(Instant::now() + Duration::from_secs(1)),
+        )?;
+        self.output_sequence = self.output_sequence.checked_add(1).ok_or_else(invalid)?;
+        Ok(())
+    }
+    pub(super) fn read_control(&mut self) -> Result<Option<Control>> {
         if Instant::now() >= self.deadline {
             return Err(io::Error::from(io::ErrorKind::TimedOut));
         }
@@ -234,14 +299,23 @@ impl Context {
             )?;
         }
     }
-    fn cancelled(&mut self) -> Result<()> {
+    pub(super) fn cancelled(&mut self) -> Result<()> {
         self.status(Status::Cancelled)?;
         // The parent's authenticated acknowledgement proves it received the
         // final status before PID1 can power off and discard queued port bytes.
         self.await_poweroff()
     }
     fn await_poweroff(&mut self) -> Result<()> {
-        self.deadline = self.deadline.min(Instant::now() + Duration::from_secs(5));
+        let seconds = match self.binding.profile {
+            Profile::ConsolePair => 5,
+            // The product parent waits both normal cancellation facts before
+            // either poweroff. Its 10s cancellation phase must fit this wait.
+            #[cfg(feature = "macos-product-network-fixture")]
+            Profile::ProductNetwork => 15,
+        };
+        self.deadline = self
+            .deadline
+            .min(Instant::now() + Duration::from_secs(seconds));
         if self.wait_control()? != Control::PowerOff {
             return Err(invalid());
         }
@@ -264,6 +338,7 @@ fn guest(context: &mut Context, packet: OwnedFd) -> Result<()> {
     context.binding.network_key.zeroize();
     let vm_id = context.binding.vm_id;
     let generation = context.binding.generation;
+    let profile = context.binding.profile;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -285,7 +360,7 @@ fn guest(context: &mut Context, packet: OwnedFd) -> Result<()> {
                 context.status(Status::Cancelled)?;
                 return Ok(None);
             }
-            result = tokio::time::timeout(Duration::from_secs(15), packet::traffic(&mut stream, session)) => result.map_err(|_| invalid())??,
+            result = tokio::time::timeout(Duration::from_secs(15), packet::traffic_for(&mut stream, session, profile)) => result.map_err(|_| invalid())??,
         }
         context.status(Status::PacketCompleted)?;
         Ok::<_, io::Error>(Some(stream.into_inner()))
@@ -310,20 +385,20 @@ fn guest(context: &mut Context, packet: OwnedFd) -> Result<()> {
     }
 }
 
-struct LineReader {
+pub(super) struct LineReader {
     bytes: [u8; 64],
     length: usize,
-    closed: bool,
+    pub(super) closed: bool,
 }
 impl LineReader {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             bytes: [0; 64],
             length: 0,
             closed: false,
         }
     }
-    fn read(&mut self, source: i32) -> Result<Option<Vec<u8>>> {
+    pub(super) fn read(&mut self, source: i32) -> Result<Option<Vec<u8>>> {
         if self.closed {
             return Ok(None);
         }

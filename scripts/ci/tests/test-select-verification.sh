@@ -994,6 +994,11 @@ run_present_paths_case macos_console_pair pull_request refs/pull/20641/head fals
   scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
 run_present_paths_case macos_console_pair_unknown pull_request refs/pull/20642/head false \
   "$all_product" scripts/dev/macos-vz-console-pair-future.py
+run_present_paths_case macos_product_network pull_request refs/pull/20644/head false \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/macos-vz-product-network.py scripts/dev/test-macos-vz-product-network.py
+run_present_paths_case macos_product_network_unknown pull_request refs/pull/20645/head false \
+  "$all_product" scripts/dev/macos-vz-product-network-future.py
 run_paths_case macos_console_pair_rust pull_request refs/pull/20643/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/src/macos_console_pair_fixture/runtime.rs

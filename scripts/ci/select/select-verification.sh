@@ -902,7 +902,8 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_vmm_guest_probe
         recognized=true
         ;;
-      scripts/dev/macos-vz-console-pair.py|scripts/dev/test-macos-vz-console-pair.py)
+      scripts/dev/macos-vz-console-pair.py|scripts/dev/test-macos-vz-console-pair.py|\
+      scripts/dev/macos-vz-product-network.py|scripts/dev/test-macos-vz-product-network.py)
         # Exact developer-only two-VM harness; exercise its feature-gated
         # Linux packet engine and portable parent tests, never VMs in CI.
         select_token policy

@@ -33,6 +33,7 @@ SPEC.loader.exec_module(fixture)
 
 class FakeRun:
     def __init__(self) -> None:
+        self.spec = fixture.CONSOLE_SPEC
         self.result = fixture.base_result()
         self.deadline = float("inf")
         self.phase = "test"

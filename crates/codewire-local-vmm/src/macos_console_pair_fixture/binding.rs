@@ -22,6 +22,55 @@ const STATUS_DOMAIN: &[u8] = b"codewire-console-pair-status-v1\0";
 const CONTROL_DOMAIN: &[u8] = b"codewire-console-pair-control-v1\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Profile {
+    ConsolePair,
+    #[cfg(feature = "macos-product-network-fixture")]
+    ProductNetwork,
+}
+
+impl Profile {
+    fn magic(self, control: bool) -> &'static [u8; 8] {
+        match self {
+            Self::ConsolePair => {
+                if control {
+                    CONTROL_MAGIC
+                } else {
+                    STATUS_MAGIC
+                }
+            }
+            #[cfg(feature = "macos-product-network-fixture")]
+            Self::ProductNetwork => {
+                if control {
+                    b"CWPNCT1\0"
+                } else {
+                    b"CWPNST1\0"
+                }
+            }
+        }
+    }
+
+    fn domain(self, control: bool) -> &'static [u8] {
+        match self {
+            Self::ConsolePair => {
+                if control {
+                    CONTROL_DOMAIN
+                } else {
+                    STATUS_DOMAIN
+                }
+            }
+            #[cfg(feature = "macos-product-network-fixture")]
+            Self::ProductNetwork => {
+                if control {
+                    b"codewire-product-network-control-v1\0"
+                } else {
+                    b"codewire-product-network-status-v1\0"
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum Role {
     Guest = 1,
@@ -54,6 +103,18 @@ pub(super) enum Status {
     Failed = 11,
     PacketClosed = 12,
     EofArmed = 13,
+    #[cfg(feature = "macos-product-network-fixture")]
+    TopologyReady = 14,
+    #[cfg(feature = "macos-product-network-fixture")]
+    EndpointReady = 15,
+    #[cfg(feature = "macos-product-network-fixture")]
+    BrokerPrepared = 16,
+    #[cfg(feature = "macos-product-network-fixture")]
+    BrokerReady = 17,
+    #[cfg(feature = "macos-product-network-fixture")]
+    WorkerBrokerReady = 18,
+    #[cfg(feature = "macos-product-network-fixture")]
+    EndpointCompleted = 19,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +128,7 @@ pub(super) enum Control {
 }
 
 pub(super) struct Binding {
+    pub profile: Profile,
     pub role: Role,
     pub vm_id: Uuid,
     pub generation: u64,
@@ -86,6 +148,31 @@ struct Document {
     run_nonce: String,
     network_key: String,
     status_key: String,
+}
+
+// Separate strict structs preserve rejection of even a null/unknown kind in
+// the old mode. Neither binary auto-detects a profile from untrusted input.
+#[cfg(feature = "macos-product-network-fixture")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProductDocument {
+    schema_version: u32,
+    kind: String,
+    role: String,
+    #[serde(rename = "vmID")]
+    vm_id: String,
+    generation: u64,
+    run_nonce: String,
+    network_key: String,
+    status_key: String,
+}
+
+#[cfg(feature = "macos-product-network-fixture")]
+impl Drop for ProductDocument {
+    fn drop(&mut self) {
+        self.network_key.zeroize();
+        self.status_key.zeroize();
+    }
 }
 
 impl Drop for Document {
@@ -116,6 +203,10 @@ fn hex32(value: &str) -> Result<[u8; 32]> {
 
 impl Binding {
     pub(super) fn decode(bytes: &[u8], role: Role) -> Result<Self> {
+        Self::decode_for(bytes, role, Profile::ConsolePair)
+    }
+
+    pub(super) fn decode_for(bytes: &[u8], role: Role, profile: Profile) -> Result<Self> {
         if bytes.len() != BINDING_LEN {
             return Err(invalid());
         }
@@ -123,11 +214,36 @@ impl Binding {
         if end == 0 || end > 2048 || bytes[end..].iter().any(|b| *b != 0) {
             return Err(invalid());
         }
-        let document: Document = serde_json::from_slice(&bytes[..end]).map_err(|_| invalid())?;
+        let document: Document = match profile {
+            Profile::ConsolePair => {
+                let value: Document =
+                    serde_json::from_slice(&bytes[..end]).map_err(|_| invalid())?;
+                if value.schema_version != 1 {
+                    return Err(invalid());
+                }
+                value
+            }
+            #[cfg(feature = "macos-product-network-fixture")]
+            Profile::ProductNetwork => {
+                let mut value: ProductDocument =
+                    serde_json::from_slice(&bytes[..end]).map_err(|_| invalid())?;
+                if value.schema_version != 2 || value.kind != "product-network" {
+                    return Err(invalid());
+                }
+                Document {
+                    schema_version: value.schema_version,
+                    role: std::mem::take(&mut value.role),
+                    vm_id: std::mem::take(&mut value.vm_id),
+                    generation: value.generation,
+                    run_nonce: std::mem::take(&mut value.run_nonce),
+                    network_key: std::mem::take(&mut value.network_key),
+                    status_key: std::mem::take(&mut value.status_key),
+                }
+            }
+        };
         let parsed_role = Role::parse(&document.role)?;
         let vm_id = Uuid::parse_str(&document.vm_id).map_err(|_| invalid())?;
-        if document.schema_version != 1
-            || parsed_role != role
+        if parsed_role != role
             || vm_id.is_nil()
             || vm_id.to_string() != document.vm_id
             || document.generation == 0
@@ -140,6 +256,7 @@ impl Binding {
             return Err(invalid());
         }
         Ok(Self {
+            profile,
             role,
             vm_id,
             generation: document.generation,
@@ -150,6 +267,10 @@ impl Binding {
     }
 
     pub(super) fn read(role: Role, deadline: Instant) -> Result<Self> {
+        Self::read_for(role, deadline, Profile::ConsolePair)
+    }
+
+    pub(super) fn read_for(role: Role, deadline: Instant, profile: Profile) -> Result<Self> {
         loop {
             let path = codewire_vmm_guest_probe::guest::find_disk_by_serial(
                 Path::new("/sys/class/block"),
@@ -190,7 +311,11 @@ impl Binding {
                     }
                     let mut bytes = Zeroizing::new([0_u8; BINDING_LEN]);
                     file.read_exact(bytes.as_mut())?;
-                    return Self::decode(bytes.as_ref(), role);
+                    return match profile {
+                        Profile::ConsolePair => Self::decode(bytes.as_ref(), role),
+                        #[cfg(feature = "macos-product-network-fixture")]
+                        Profile::ProductNetwork => Self::decode_for(bytes.as_ref(), role, profile),
+                    };
                 }
                 Err(error) => {
                     if error.to_string().starts_with("multiple ") || Instant::now() >= deadline {
@@ -204,7 +329,7 @@ impl Binding {
 
     fn frame(&self, code: u8, sequence: u64, control: bool) -> [u8; FRAME_LEN] {
         let mut bytes = [0; FRAME_LEN];
-        bytes[..8].copy_from_slice(if control { CONTROL_MAGIC } else { STATUS_MAGIC });
+        bytes[..8].copy_from_slice(self.profile.magic(control));
         bytes[8] = self.role as u8;
         bytes[9] = code;
         bytes[16..32].copy_from_slice(self.vm_id.as_bytes());
@@ -212,11 +337,7 @@ impl Binding {
         bytes[40..72].copy_from_slice(&self.nonce);
         bytes[72..80].copy_from_slice(&sequence.to_le_bytes());
         let mut mac = Hmac::<Sha256>::new_from_slice(self.status_key.as_ref()).expect("fixed key");
-        mac.update(if control {
-            CONTROL_DOMAIN
-        } else {
-            STATUS_DOMAIN
-        });
+        mac.update(self.profile.domain(control));
         mac.update(&bytes[..96]);
         bytes[96..].copy_from_slice(&mac.finalize().into_bytes());
         bytes
@@ -232,7 +353,7 @@ impl Binding {
         worker: i32,
         adapter: i32,
     ) -> Result<[u8; FRAME_LEN]> {
-        if self.role != Role::Service {
+        if self.role != Role::Service || self.profile != Profile::ConsolePair {
             return Err(invalid());
         }
         let mut bytes = self.frame(Status::ChildrenReaped as u8, sequence, false);
@@ -241,6 +362,23 @@ impl Binding {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(self.status_key.as_ref()).map_err(|_| invalid())?;
         mac.update(STATUS_DOMAIN);
+        mac.update(&bytes[..96]);
+        bytes[96..].copy_from_slice(&mac.finalize().into_bytes());
+        Ok(bytes)
+    }
+
+    #[cfg(feature = "macos-product-network-fixture")]
+    pub(super) fn product_reaped(&self, sequence: u64, waits: [i32; 4]) -> Result<[u8; FRAME_LEN]> {
+        if self.role != Role::Service || self.profile != Profile::ProductNetwork {
+            return Err(invalid());
+        }
+        let mut bytes = self.frame(Status::ChildrenReaped as u8, sequence, false);
+        for (index, wait) in waits.into_iter().enumerate() {
+            bytes[80 + index * 4..84 + index * 4].copy_from_slice(&wait.to_le_bytes());
+        }
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(self.status_key.as_ref()).map_err(|_| invalid())?;
+        mac.update(self.profile.domain(false));
         mac.update(&bytes[..96]);
         bytes[96..].copy_from_slice(&mac.finalize().into_bytes());
         Ok(bytes)
@@ -256,7 +394,7 @@ impl Binding {
         }
         let mut mac =
             Hmac::<Sha256>::new_from_slice(self.status_key.as_ref()).map_err(|_| invalid())?;
-        mac.update(CONTROL_DOMAIN);
+        mac.update(self.profile.domain(true));
         mac.update(&bytes[..96]);
         mac.verify_slice(&bytes[96..]).map_err(|_| invalid())?;
         match bytes[9] {
