@@ -101,9 +101,19 @@ private_checkout_count() {
 
 private_checkout_create() {
   local document="$1" phase="$2" duration="$3"
+  local filename="${document##*/}"
+  [[ "$LP_WORKSPACE" == /* && "$document" == "$LP_WORKSPACE/$filename" &&
+     -f "$document" && ! -L "$document" &&
+     "$(realpath -e -- "$document")" == "$document" ]] ||
+    die 'initial-checkout document must be a regular file directly inside the owned workspace'
+  # Native --file resolves beneath the default --path (the current directory).
+  # Keep attempted-create state in the owner, even if the CLI reply is lost.
   LP_CREATE_ATTEMPTED=1
-  cw_with_timeout "$duration" env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB \
-    --no-docker --no-network --file "$document" --yes --output json \
+  (
+    cd -- "$LP_WORKSPACE" || exit 1
+    cw_with_timeout "$duration" env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB \
+      --no-docker --no-network --file "$filename" --yes --output json
+  ) \
     >"$TMPDIR_SMOKE/checkout-$phase.json" 2>"$TMPDIR_SMOKE/checkout-$phase.err"
 }
 

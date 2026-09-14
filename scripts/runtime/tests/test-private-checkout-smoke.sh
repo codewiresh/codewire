@@ -107,6 +107,8 @@ cw() {
       [[ $# == 16 && "$*" == "env create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --file "*" --yes --output json" ]] ||
         fail 'normal repository create gained path-copy or different resource arguments'
       local document="${13}" reason
+      [[ "$PWD" == "$LP_WORKSPACE" && -n "$document" && "$document" == "${document##*/}" ]] ||
+        fail 'normal repository create requires owned workspace cwd and a relative document basename'
       if ! jq -e '.credentials.profile != null' "$document" >/dev/null; then
         reason='SSH repository checkout requires a selected credential profile'
       elif ! jq -e '.repositories[0].known_hosts | length == 1' "$document" >/dev/null; then
@@ -172,7 +174,24 @@ ready_document >"$TMPDIR_SMOKE/ready.json"; chmod 0644 "$TMPDIR_SMOKE/ready.json
 expect_failure public-metadata-mode private_checkout_json ready
 chmod 0600 "$TMPDIR_SMOKE/ready.json"; printf '{"version":2}\n' >"$TMPDIR_SMOKE/ready.json"
 expect_failure metadata-version private_checkout_json ready
-fixture; private_checkout_journey; local_platform_cleanup_environment; private_checkout_stop; pass
+for invalid in outside sibling traversal relative symlink missing directory; do
+  fixture; printf '{}\n' >"$LP_WORKSPACE/codewire.yaml"
+  case "$invalid" in
+    outside) document="$TMPDIR_SMOKE/outside.json"; cp "$LP_WORKSPACE/codewire.yaml" "$document" ;;
+    sibling) mkdir "$LP_WORKSPACE-other"; document="$LP_WORKSPACE-other/codewire.yaml"; cp "$LP_WORKSPACE/codewire.yaml" "$document" ;;
+    traversal) document="$LP_WORKSPACE/../workspace/codewire.yaml" ;;
+    relative) document=codewire.yaml ;;
+    symlink) document="$LP_WORKSPACE/link.json"; ln -s codewire.yaml "$document" ;;
+    missing) document="$LP_WORKSPACE/missing.json" ;;
+    directory) document="$LP_WORKSPACE/nested"; mkdir "$document" ;;
+  esac
+  expect_failure "document $invalid" private_checkout_create "$document" invalid 1
+  [[ ! -s "$TMPDIR_SMOKE/calls" ]] || fail "$invalid document reached the CLI"
+  grep -qF 'directly inside the owned workspace' "$TEST_ROOT/failure.err" || fail 'document rejected for unrelated reason'
+done
+fixture; owner_pwd="$PWD"; private_checkout_journey
+[[ "$PWD" == "$owner_pwd" && "$LP_CREATE_ATTEMPTED" == 1 ]] || fail 'create lost parent cwd or cleanup state'
+local_platform_cleanup_environment; private_checkout_stop; pass
 [[ ! -e "$TMPDIR_SMOKE/created" && -f "$TMPDIR_SMOKE/checkout/.install-proved" ]] || fail 'normal journey missed install or cleanup'
 # The preinstall proof must be single-use even when repository content matches.
 expect_failure repeated-install run_guest "$(jq -er .install_command "$LP_WORKSPACE/codewire.yaml")"
