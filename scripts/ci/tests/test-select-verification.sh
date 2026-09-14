@@ -436,6 +436,7 @@ run_paths_case shared_stock_ssh_smoke pull_request refs/pull/5016/head false \
   'policy runtime_dev_smoke transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/stock-ssh-workload.sh
 for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests/test-provider-ssh-smoke.sh \
+    scripts/runtime/dev/private-checkout-smoke.sh scripts/runtime/tests/test-private-checkout-smoke.sh \
     apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts \
     scripts/runtime/dev/smoke-local-platform-sources.sh scripts/runtime/tests/test-local-platform-sources-smoke.sh \
     scripts/runtime/dev/run-secrets-credentials-acceptance.sh scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh \

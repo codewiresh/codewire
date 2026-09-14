@@ -31,10 +31,17 @@ LP_NETWORK_NODE_OWNED=0
 LP_NETWORK_CREATE_ATTEMPTED=0
 LP_MESH_PORT=28083
 LP_ENV=()
+LP_INITIAL_PRIVATE_CHECKOUT=0
+# shellcheck source=scripts/runtime/dev/private-checkout-smoke.sh
+source "$REPO_ROOT/scripts/runtime/dev/private-checkout-smoke.sh"
 
 local_platform_usage() {
   cat <<'USAGE'
 Usage: scripts/runtime/dev/smoke-local-platform-sources.sh --admin-oidc --cw-bin /absolute/normal/cw
+
+Add --initial-private-checkout to test repository checkout before install using
+a generated platform SSH key and the checked-in host-loopback repository peer.
+That mode requires LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN and no Mesh network.
 
 Owner-operated Linux KVM acceptance against https://codewire-dev.sh. Uses one
 disposable 2-vCPU/16-GiB local VM, synthetic application values and a newly
@@ -100,6 +107,7 @@ local_platform_parse() {
   while (($#)); do
     case "$1" in
       --admin-oidc) SMOKE_AUTH_MODE=admin-oidc; shift ;;
+      --initial-private-checkout) LP_INITIAL_PRIVATE_CHECKOUT=1; shift ;;
       --cw-bin) [[ $# -ge 2 ]] || die '--cw-bin requires a path'; CW_BIN="$2"; shift 2 ;;
       -h|--help) local_platform_usage; return 2 ;;
       *) die 'unsupported local/platform smoke option' ;;
@@ -109,6 +117,7 @@ local_platform_parse() {
 
 validate_local_platform_options() {
   validate_dev_smoke_browser_auth
+  validate_private_checkout_options
   [[ "$SMOKE_AUTH_MODE" == admin-oidc && -z "$CODEWIRE_ADMIN_OAUTH_CONFIG_DIR" &&
      -n "$EXPECTED_CODEWIRE_ADMIN_EMAIL" && -n "$CW_BIN" ]] ||
     die 'local/platform smoke requires --admin-oidc, expected email and normal --cw-bin, without any saved login directory'
@@ -503,9 +512,8 @@ sys.exit(1 if failed else 0)
 PY
 }
 
-local_platform_cleanup() {
-  local rc=$? cleanup_rc=0 resolved=''
-  trap - EXIT INT TERM HUP
+local_platform_cleanup_environment() {
+  local rc=0 resolved=''
   if [[ "$LP_CREATE_ATTEMPTED" == 1 ]]; then
     if cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-cleanup-environments.json" 2>/dev/null &&
         jq -e 'type == "array"' "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null; then
@@ -520,6 +528,14 @@ local_platform_cleanup() {
           "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null || rc=1
     else rc=1; fi
   fi
+  return "$rc"
+}
+
+local_platform_cleanup() {
+  local rc=$? cleanup_rc=0
+  trap - EXIT INT TERM HUP
+  local_platform_cleanup_environment || rc=1
+  private_checkout_stop || { rc=1; cleanup_rc=1; }
   if [[ "$LP_NETWORK_NODE_OWNED" == 1 ]]; then
     local network_node_rc=0
     local_platform_network_node_present || network_node_rc=$?
@@ -566,7 +582,11 @@ local_platform_cleanup() {
     [[ "$LP_HOME" == "$TMPDIR_SMOKE/h" && -d "$LP_HOME" && ! -L "$LP_HOME" &&
       "$(stat -c %u "$LP_HOME")" == "$(id -u)" ]] || exit 1
     rm -rf -- "$LP_HOME"
-    log 'PASS: local Linux VM with actual Dev application sources and platform SSH, transitions and cleanup'
+    if [[ "$LP_INITIAL_PRIVATE_CHECKOUT" == 1 ]]; then
+      log 'PASS: local Linux initial private checkout through platform SSH before install, with cleanup; hosted checkout is not implied'
+    else
+      log 'PASS: local Linux VM with actual Dev application sources and platform SSH, transitions and cleanup'
+    fi
   else
     log "local/platform smoke incomplete; private evidence retained at $TMPDIR_SMOKE"
   fi
@@ -628,7 +648,11 @@ main() {
     die 'fresh OAuth login selected a different organization'
   [[ "$(awk '$1 == "Role:" {print $2}' "$TMPDIR_SMOKE/admin-current-organization.out")" == owner ]] ||
     die 'fresh OAuth login must own the selected disposable-test organization'
-  local_platform_journey
+  if [[ "$LP_INITIAL_PRIVATE_CHECKOUT" == 1 ]]; then
+    private_checkout_journey
+  else
+    local_platform_journey
+  fi
 }
 
 local_platform_journey() {
