@@ -84,9 +84,14 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         let bridge = ssh::configure(bridge, &config.runtime_directory)?;
         let mutation = Arc::new(CredentialMutationOwner::new(
             pool.clone(),
-            store,
+            store.clone(),
             CodexEnrollmentOwner::new(enrollment),
             GitHubEnrollmentOwner::new(github),
+        ));
+        let repositories = Arc::new(GithubRepositoryOwner::new(
+            pool.clone(),
+            store,
+            Arc::new(provider.clone()),
         ));
         tracing::info!(target: TARGET, event = "fixture_starting", "fixture_starting");
         let result = serve_owned(
@@ -95,6 +100,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             pool.clone(),
             Arc::new(TestKekProvider),
             mutation,
+            repositories,
             bridge,
             async {
                 let signal = tokio::select! {

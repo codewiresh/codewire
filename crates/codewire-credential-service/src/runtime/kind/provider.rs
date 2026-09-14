@@ -124,6 +124,50 @@ impl SyntheticProvider {
         Self(Arc::new(Mutex::new(Counters::default())))
     }
 
+    fn github_repositories(
+        &self,
+        target: &url::Url,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let values = target.query_pairs().collect::<Vec<_>>();
+        let size = values
+            .first()
+            .filter(|(key, _)| key == "per_page")
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+            .filter(|size| (1..=100).contains(size))
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        let page = values
+            .get(1)
+            .filter(|(key, _)| key == "page")
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+            .filter(|page| (1..=10_000).contains(page))
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        if !body.is_empty()
+            || target.as_str()
+                != format!(
+                    "https://api.github.com/user/repos?per_page={size}&page={page}&sort=full_name&direction=asc"
+                )
+            || headers.get_all("authorization").iter().count() != 1
+            || headers.get("authorization")
+                != Some(&HeaderValue::from_static(
+                    "Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                ))
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let repositories = github_repository_values(page, size);
+        let bytes = serde_json::to_vec(&repositories).map_err(|_| BrokerUpstreamError::Protocol)?;
+        Ok(BrokerUpstreamResponse::new(
+            StatusCode::OK,
+            HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )]),
+            Box::pin(futures::stream::once(async move { Ok(bytes.into()) })),
+        ))
+    }
+
     pub(super) fn log_totals(&self) {
         if let Ok(counters) = self.0.lock() {
             tracing::info!(target: TARGET, event = "provider_totals", response_calls = counters.responses,
@@ -251,10 +295,16 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (method, target, headers, body) = request.into_parts();
-        if method != Method::POST
-            || headers.contains_key("proxy-authorization")
-            || headers.contains_key("cookie")
+        if headers.contains_key("proxy-authorization") || headers.contains_key("cookie") {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        if method == Method::GET
+            && target.origin().ascii_serialization() == "https://api.github.com"
+            && target.path() == "/user/repos"
         {
+            return self.github_repositories(&target, &headers, &body);
+        }
+        if method != Method::POST {
             return Err(BrokerUpstreamError::Protocol);
         }
         match target.as_str() {
@@ -263,6 +313,13 @@ impl BrokerUpstreamTransport for SyntheticProvider {
             _ => Err(BrokerUpstreamError::Protocol),
         }
     }
+}
+
+fn github_repository_values(page: usize, size: usize) -> Vec<Value> {
+    (1..=51).skip((page-1)*size).take(size).map(|index| json!({
+        "id":index,"full_name":format!("synthetic-user/repository-{index:02}"),"default_branch":"main",
+        "private":true,"archived":false,"disabled":index==50,
+    })).collect()
 }
 
 fn increment(value: u64) -> Result<u64, BrokerUpstreamError> {
@@ -334,6 +391,34 @@ fn validate_access(token: &str) -> Result<u64, BrokerUpstreamError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_fixture_is_bounded_paginated_and_requires_its_synthetic_identity() {
+        let provider = SyntheticProvider::new();
+        let headers = HeaderMap::from_iter([(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+        )]);
+        for (page, count) in [(1, 50), (2, 1), (3, 0)] {
+            let url = format!("https://api.github.com/user/repos?per_page=50&page={page}&sort=full_name&direction=asc").parse().unwrap();
+            assert!(provider.github_repositories(&url, &headers, &[]).is_ok());
+            let values = github_repository_values(page, 50);
+            assert_eq!(values.len(), count);
+            if page == 1 {
+                assert_eq!(values[0]["full_name"], "synthetic-user/repository-01");
+                assert_eq!(values[49]["disabled"], true);
+            }
+        }
+        let url =
+            "https://api.github.com/user/repos?per_page=50&page=1&sort=full_name&direction=asc"
+                .parse()
+                .unwrap();
+        assert!(
+            provider
+                .github_repositories(&url, &HeaderMap::new(), &[])
+                .is_err()
+        );
+    }
 
     fn body(marker: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({"input":marker})).unwrap()

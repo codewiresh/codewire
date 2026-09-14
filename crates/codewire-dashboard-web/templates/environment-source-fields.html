@@ -16,10 +16,17 @@
       </select>
       <p id="{{ source_fields_id }}-project-help" class="cw-field-help">A named collection on the platform, not a deployment stage.</p>
       {% if !sources.project_error.is_empty() %}<p class="cw-field-error" role="alert">{{ sources.project_error }}</p>{% endif %}
+      {% if sources.application_selection_enabled && sources.project_error.is_empty() && sources.projects.is_empty() %}<p class="cw-field-help">No secret projects are available in this organization. An organization administrator can create one.</p>{% endif %}
     </div>
-    <label class="cw-source-choice"><input type="checkbox" name="confirm_personal_secrets" value="true"{% if sources.personal_secrets_confirmed %} checked{% endif %}><span>I confirm that the selected personal application secrets may be read by Sandbox processes.</span></label>
   </fieldset>
   <p class="cw-field-help">When names overlap: organization, then project, then personal. Ordinary environment configuration wins over all three.</p>
+  <nav aria-label="Manage application secrets">
+    <ul class="cw-source-choices">
+      <li><a href="/{{ organization.slug }}/secrets/user/">Add or manage personal secrets</a></li>
+      <li><a href="/{{ organization.slug }}/secrets/organization/">Manage organization secrets</a></li>
+      <li><a href="{{ organization.secrets_url }}">Manage secret projects</a></li>
+    </ul>
+  </nav>
 </section>
 
 <section class="cw-create-panel cw-credential-panel" aria-labelledby="{{ source_fields_id }}-credentials-title">
@@ -36,7 +43,14 @@
       </select>
       {% if !sources.profile_error.is_empty() %}<p class="cw-field-error" role="alert">{{ sources.profile_error }}</p>{% endif %}
     </div>
-    <label class="cw-source-choice"><input type="checkbox" name="confirm_personal_credentials" value="true"{% if sources.personal_credentials_confirmed %} checked{% endif %}><span>I confirm use of my personal credentials from the selected profile revision.</span></label>
   </fieldset>
   <p class="cw-field-help">Editing a profile does not change an existing Sandbox's bound revision. Selecting no profile removes provider access on the next managed launch.</p>
+  {% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}
+  <p class="cw-field-help">You have no credential profiles yet. Create a profile in Settings, then select it here.</p>
+  {% endif %}
+  <nav aria-label="Manage provider credentials">
+    <ul class="cw-source-choices">
+      <li><a href="/settings/credentials/?org={{ organization.slug }}">{% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}Add credentials and create a profile{% else %}Manage personal credentials and profiles{% endif %}</a></li>
+    </ul>
+  </nav>
 </section>

@@ -420,7 +420,7 @@ pub(super) async fn enroll_oauth_action(
         }
         _ => return page_redirect("credential-invalid", true, &query.org, &headers),
     };
-    if !valid_credential_name(name) {
+    if !valid_oauth_name(&provider, name, reconnect.0.is_some()) {
         return page_redirect("credential-invalid", true, &query.org, &headers);
     }
 
@@ -498,17 +498,59 @@ fn render_enrollment_event(
         credentials_connect::OAuthEnrollmentEvent::Committed => format!(
             "<div class=\"cw-alert cw-alert--success\" role=\"status\">Credential connected.</div><p><a class=\"cw-button\" href=\"{return_path}\">Return to credentials</a></p></div></section></div></main></body></html>"
         ),
-        credentials_connect::OAuthEnrollmentEvent::Failed { uncertain } => {
-            let message = if uncertain {
-                "The final acknowledgement was not received. Return to credentials and inspect the named credential before retrying."
+        credentials_connect::OAuthEnrollmentEvent::Failed { reason, uncertain } => {
+            use credentials_connect::OAuthEnrollmentFailure as Failure;
+            let message = match reason {
+                Failure::SignInRequired => {
+                    "Your account session no longer permits this connection. Sign in again, then return to credentials."
+                }
+                Failure::Unavailable => {
+                    "The credential service is unavailable or busy. Return to credentials and try again later."
+                }
+                Failure::AlreadyExists => {
+                    "A credential with this account name already exists. No credential was overwritten. Return to credentials to inspect the existing connection and its connection reference before choosing Reconnect."
+                }
+                Failure::Changed => {
+                    "The credential changed or was removed while connecting. Return to credentials and use its current Reconnect action."
+                }
+                Failure::Unsupported => {
+                    "Codewire could not verify the provider login version or response. If another attempt fails, ask an administrator to check the credential service."
+                }
+                Failure::Invalid => {
+                    "The connection request was not valid. Return to credentials and start a new connection."
+                }
+                Failure::NotCompleted => {
+                    "Provider authorization did not complete. Return to credentials to start a new connection and finish the provider's authorization steps."
+                }
+                Failure::Expired => {
+                    "This connection attempt expired. Return to credentials to start a new authorization code."
+                }
+                Failure::Cancelled => {
+                    "This connection attempt was cancelled. Return to credentials to start again."
+                }
+                Failure::UnexpectedResponse => {
+                    "Codewire did not receive a valid final connection response. Return to credentials to check the account status."
+                }
+            };
+            let reconciliation = if uncertain {
+                "<p>The credential may already have been saved. Inspect the account in credentials before retrying; do not create another connection until its status is clear.</p>"
             } else {
-                "The credential could not be connected. Return to credentials and try again."
+                ""
             };
             format!(
-                "<div class=\"cw-alert cw-alert--error\" role=\"alert\">{message}</div><p><a class=\"cw-button\" href=\"{return_path}\">Return to credentials</a></p></div></section></div></main></body></html>"
+                "<div class=\"cw-alert cw-alert--error\" role=\"alert\">{message}</div>{reconciliation}<p><a class=\"cw-button\" href=\"{return_path}\">Return to credentials</a></p></div></section></div></main></body></html>"
             )
         }
     }
+}
+
+fn valid_oauth_name(
+    provider: &credentials_connect::OAuthProvider,
+    name: &str,
+    reconnect: bool,
+) -> bool {
+    matches!(provider, credentials_connect::OAuthProvider::Github) && !reconnect && name.is_empty()
+        || valid_credential_name(name)
 }
 
 fn escape_html(value: &str) -> String {
@@ -775,6 +817,54 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn github_create_can_omit_name_but_reconnect_and_codex_cannot() {
+        use credentials_connect::OAuthProvider::{Codex, Github};
+        let submission: CredentialOAuthSubmission = serde_json::from_value(serde_json::json!({
+            "_csrf": "synthetic-csrf", "provider": "github"
+        }))
+        .unwrap();
+        assert!(submission.name.is_empty());
+        assert!(valid_oauth_name(&Github, "", false));
+        assert!(!valid_oauth_name(&Github, "", true));
+        assert!(!valid_oauth_name(&Codex, "", false));
+        assert!(valid_oauth_name(&Github, "legacy-name", true));
+        assert!(valid_oauth_name(&Github, "legacy-name", false));
+    }
+
+    #[test]
+    fn enrollment_errors_explain_recovery_and_uncertain_publication_separately() {
+        use credentials_connect::{
+            OAuthEnrollmentEvent as Event, OAuthEnrollmentFailure as Failure,
+        };
+        let duplicate = render_enrollment_event(
+            Event::Failed {
+                reason: Failure::AlreadyExists,
+                uncertain: false,
+            },
+            "/settings/credentials/",
+        );
+        assert!(duplicate.contains("No credential was overwritten"));
+        assert!(!duplicate.contains("may already have been saved"));
+        let uncertain = render_enrollment_event(
+            Event::Failed {
+                reason: Failure::Unavailable,
+                uncertain: true,
+            },
+            "/settings/credentials/",
+        );
+        assert!(uncertain.contains("unavailable or busy"));
+        assert!(uncertain.contains("may already have been saved"));
+        let unsupported = render_enrollment_event(
+            Event::Failed {
+                reason: Failure::Unsupported,
+                uncertain: false,
+            },
+            "/settings/credentials/",
+        );
+        assert!(unsupported.contains("administrator to check the credential service"));
     }
 
     #[test]

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <!-- Public, static nonce ONLY for this non-authenticated design fixture.
+       Production generates a fresh random nonce for each terminal response. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'nonce-codewire-terminal-design-preview'; style-src-attr 'none'">
+  <title>Codewire terminal fixture</title>
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css">
+  <link rel="stylesheet" href="../../routes/terminal.css">
+  <link rel="stylesheet" href="terminal.css">
+  <link rel="stylesheet" href="/assets/codewire/xterm-6.0.0.css" integrity="sha384-n2n7twoohnW+d3myBKaUgl7DSiwidw6MkQy9oesGzkPpMjejKRR3XlnD+5yCdtBD">
+  <script src="/assets/codewire/xterm-6.0.0.js" integrity="sha384-f/1U6Z9wM4D71a5eRXEZnyOTMOvjqxr2XLwh+Go1OvIl3L3tOcvUrzudnhbECwl4" defer></script>
+  <script src="/assets/codewire/addon-fit-0.11.0.js" integrity="sha384-txoiwu4RR2GD3qySbaj+BbzibkLbSJRcfqGYMu6z1EqHil4A2dyBiBW5dlacG6OR" defer></script>
+  <script src="/assets/codewire/addon-web-links-0.12.0.js" integrity="sha384-0IIwkXq0LAkIxEVKxlOxWbje2g/VT+5CzVTZiEukyiZ02pOl/O+M0fkpEKAYqto9" defer></script>
+  <script src="../../terminal-renderer.js" defer></script>
+  <script src="../../terminal-presentation.js" defer></script>
+  <script src="terminal.js" nonce="codewire-terminal-design-preview" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+  <main class="terminal-fixture">
+    <header><a href="index.html">Design fixtures</a><h1>Sandbox terminal</h1><p>Read-only sample output. Select text to copy; this preview does not connect to a sandbox.</p></header>
+    <section class="cw-sandbox-terminal" aria-label="Sandbox terminal">
+      <header class="cw-terminal-toolbar"><p class="cw-terminal-copy-status" data-terminal-copy-status role="status"></p><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-copy disabled>Copy selection</button></header>
+      <div class="cw-terminal-panel" data-terminal-root aria-label="Terminal preview"><p class="cw-terminal-status" data-terminal-status>Loading preview…</p></div>
+    </section>
+  </main>
+</body>
+</html>

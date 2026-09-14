@@ -43,6 +43,7 @@ type Client struct {
 	accessProfiles        codewirev1connect.AccessProfileServiceClient
 	credentials           codewirev1connect.CredentialServiceClient
 	credentialMutations   codewirev1connect.CredentialMutationServiceClient
+	githubRepositories    codewirev1connect.GithubRepositoryServiceClient
 	credentialEnrollments codewirev1connect.CredentialMutationServiceClient
 }
 
@@ -96,6 +97,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c.accessProfiles = codewirev1connect.NewAccessProfileServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.credentials = codewirev1connect.NewCredentialServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.credentialMutations = codewirev1connect.NewCredentialMutationServiceClient(c.httpClient, c.baseURL, connectOptions)
+	c.githubRepositories = codewirev1connect.NewGithubRepositoryServiceClient(c.httpClient, c.baseURL, connectOptions)
 	// Enrollment owns its explicit per-call context deadline. Preserve the caller's
 	// transport, redirect policy and cookie jar without mutating their HTTP client
 	// or letting an ordinary short client timeout truncate device authorization.

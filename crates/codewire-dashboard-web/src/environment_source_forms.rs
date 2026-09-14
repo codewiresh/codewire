@@ -20,14 +20,13 @@ pub(crate) struct SourceSubmission {
 impl SourceSubmission {
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, ()> {
         let values = source_fields(bytes)?;
+        let selection = selection(&values, "")?;
+        let (confirm_personal_secrets, confirm_personal_credentials) =
+            personal_access_intent(&selection);
         Ok(Self {
-            selection: selection(&values, "")?,
-            confirm_personal_secrets: checkbox(&values, "confirm_personal_secrets", "true")?,
-            confirm_personal_credentials: checkbox(
-                &values,
-                "confirm_personal_credentials",
-                "true",
-            )?,
+            selection,
+            confirm_personal_secrets,
+            confirm_personal_credentials,
         })
     }
 
@@ -95,17 +94,34 @@ pub(crate) fn update_request(
 ) -> Result<UpdateEnvironmentSourcesRequest, ()> {
     let values = source_fields(bytes)?;
     let generation = positive(values.get("expected_operation_generation").ok_or(())?)?;
+    let replacement = selection(&values, "")?;
+    let (confirm_personal_secrets, confirm_personal_credentials) =
+        personal_access_intent(&replacement);
     Ok(UpdateEnvironmentSourcesRequest {
         org_id: organization.into(),
         environment_id: environment.into(),
         expected_operation_generation: generation,
         expected: Some(selection(&values, "expected_")?).into(),
-        replacement: Some(selection(&values, "")?).into(),
+        replacement: Some(replacement).into(),
         allow_restart: checkbox(&values, "allow_restart", "true")?,
-        confirm_personal_secrets: checkbox(&values, "confirm_personal_secrets", "true")?,
-        confirm_personal_credentials: checkbox(&values, "confirm_personal_credentials", "true")?,
+        confirm_personal_secrets,
+        confirm_personal_credentials,
         ..Default::default()
     })
+}
+
+/// An explicit, validated selection authorizes only its selected personal
+/// sources. Keep the API's guards and exact revision binding; merely loading
+/// catalog metadata or carrying an expected prior selection grants nothing.
+fn personal_access_intent(selection: &EnvironmentSourceSelection) -> (bool, bool) {
+    (
+        selection.secrets.as_option().is_some_and(|secrets| {
+            secrets.user.is_some_and(|placement| {
+                placement.as_known() == Some(ProjectStoragePlacement::Platform)
+            })
+        }),
+        selection.credentials.is_set(),
+    )
 }
 
 fn source_fields(bytes: &[u8]) -> Result<BTreeMap<String, String>, ()> {
@@ -142,6 +158,10 @@ fn source_fields(bytes: &[u8]) -> Result<BTreeMap<String, String>, ()> {
             return Err(());
         }
     }
+    // Previously rendered forms may still submit these fields. Validate their
+    // closed shape for compatibility, but never use them to authorize sources.
+    checkbox(&fields, "confirm_personal_secrets", "true")?;
+    checkbox(&fields, "confirm_personal_credentials", "true")?;
     Ok(fields)
 }
 
@@ -221,9 +241,9 @@ mod tests {
     const ID: &str = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
 
     #[test]
-    fn create_form_keeps_confirmations_independent_and_pins_exact_revision() {
+    fn create_form_derives_intent_from_selection_and_pins_exact_revision() {
         let bytes = format!(
-            "secret_project={ID}&credential_profile={ID}%407&include_user_secrets=platform&confirm_personal_secrets=true"
+            "secret_project={ID}&credential_profile={ID}%407&include_user_secrets=platform"
         );
         let source = SourceSubmission::parse(bytes.as_bytes()).unwrap();
         let mut request = CreateEnvironmentRequest {
@@ -232,7 +252,7 @@ mod tests {
         };
         source.apply_create(&mut request).unwrap();
         assert_eq!(request.expected_profile_revision, Some(7));
-        assert!(request.confirm_personal_secrets && !request.confirm_personal_credentials);
+        assert!(request.confirm_personal_secrets && request.confirm_personal_credentials);
         assert_eq!(
             request
                 .project_spec
@@ -248,9 +268,40 @@ mod tests {
     }
 
     #[test]
+    fn each_selected_source_authorizes_only_its_own_personal_access() {
+        for (bytes, personal_secrets, personal_credentials) in [
+            (String::new(), false, false),
+            ("include_org_secrets=platform".into(), false, false),
+            (format!("secret_project={ID}"), false, false),
+            ("include_user_secrets=platform".into(), true, false),
+            (format!("credential_profile={ID}%407"), false, true),
+            (
+                "confirm_personal_secrets=true&confirm_personal_credentials=true".into(),
+                false,
+                false,
+            ),
+        ] {
+            let source = SourceSubmission::parse(bytes.as_bytes()).unwrap();
+            let mut request = CreateEnvironmentRequest {
+                project_spec: Some(codewire_project_proto::to_proto(Default::default())).into(),
+                confirm_personal_secrets: true,
+                confirm_personal_credentials: true,
+                ..Default::default()
+            };
+            source.apply_create(&mut request).unwrap();
+            assert_eq!(request.confirm_personal_secrets, personal_secrets);
+            assert_eq!(request.confirm_personal_credentials, personal_credentials);
+            assert_eq!(
+                request.expected_profile_revision,
+                personal_credentials.then_some(7)
+            );
+        }
+    }
+
+    #[test]
     fn update_preserves_expected_revision_and_generation_when_clearing() {
         let bytes = format!(
-            "expected_operation_generation=9&expected_credential_profile={ID}%407&expected_include_user_secrets=platform"
+            "expected_operation_generation=9&expected_credential_profile={ID}%407&expected_include_user_secrets=platform&confirm_personal_secrets=true&confirm_personal_credentials=true"
         );
         let request = update_request(bytes.as_bytes(), "org", "environment").unwrap();
         assert_eq!(request.expected_operation_generation, 9);
@@ -274,14 +325,52 @@ mod tests {
     }
 
     #[test]
+    fn update_intent_comes_from_replacement_not_expected_sources_or_restart() {
+        let replacement_id = "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76";
+        let bytes = format!(
+            "expected_operation_generation=9&expected_credential_profile={ID}%407&expected_include_user_secrets=platform&credential_profile={replacement_id}%4011&allow_restart=true"
+        );
+        let request = update_request(bytes.as_bytes(), "org", "environment").unwrap();
+        let expected = request.expected.as_option().unwrap();
+        let replacement = request.replacement.as_option().unwrap();
+        assert_eq!(request.expected_operation_generation, 9);
+        assert_eq!(expected.profile_revision, Some(7));
+        assert_eq!(
+            expected.credentials.as_option().unwrap().profile,
+            format!("platform:id:{ID}")
+        );
+        assert_eq!(replacement.profile_revision, Some(11));
+        assert_eq!(
+            replacement.credentials.as_option().unwrap().profile,
+            format!("platform:id:{replacement_id}")
+        );
+        assert!(!request.confirm_personal_secrets);
+        assert!(request.confirm_personal_credentials && request.allow_restart);
+
+        let request = update_request(
+            b"expected_operation_generation=9&include_user_secrets=platform",
+            "org",
+            "environment",
+        )
+        .unwrap();
+        assert!(request.confirm_personal_secrets);
+        assert!(!request.confirm_personal_credentials && !request.allow_restart);
+    }
+
+    #[test]
     fn untrusted_names_duplicates_unknown_origins_and_zero_revision_are_rejected() {
         for bytes in [
             "secret_project=secret-value-canary",
             "secret_project=&secret_project=",
             "include_user_secrets=local",
             "confirm_personal_credentials=yes",
+            "confirm_personal_secrets=true&confirm_personal_secrets=true",
             "credential_profile=invalid%401",
+            "credential_profile=6bf8d155-e84c-4fc5-b479-b17022fe41dd%400",
+            "credential_profile=6bf8d155-e84c-4fc5-b479-b17022fe41dd%407&credential_profile=",
             "expected_operation_generation=0",
+            "expected_operation_generation=9&expected_credential_profile=invalid%407",
+            "expected_operation_generation=9&confirm_personal_credentials=yes",
         ] {
             if bytes.starts_with("expected_") {
                 assert!(update_request(bytes.as_bytes(), "org", "env").is_err());

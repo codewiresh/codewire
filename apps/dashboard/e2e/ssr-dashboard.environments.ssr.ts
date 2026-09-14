@@ -198,8 +198,11 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Branch", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Mount path", { exact: true })).toBeVisible();
-    await expect(page.locator("[data-github-repository-picker]")).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "Connect GitHub" })).toHaveCount(0);
+    await expect(page.locator("[data-github-repository-picker]")).toHaveCount(1);
+    await expect(page.locator("[data-github-repository-picker]")).not.toBeVisible();
+    await expect(page.getByRole("button", { name: "Choose from GitHub" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Custom Git URL" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?org=${slug}`);
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 
@@ -432,7 +435,11 @@ test.describe.serial("server-rendered environments", () => {
     expect((await response).status()).toBe(422);
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
-    await expect(page.locator('[name="confirm_personal_credentials"]')).not.toBeChecked();
+    await expect(page.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/${slug}/secrets/user/`);
+    await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
+    await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/`);
+    await expect(page.locator(`a[href="/settings/credentials/?org=${slug}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
   });
 
   test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile }) => {
@@ -442,6 +449,11 @@ test.describe.serial("server-rendered environments", () => {
     await page.addInitScript(() => {
       const frames: number[][] = [];
       (window as Window & { __terminalFrames?: number[][] }).__terminalFrames = frames;
+      const styleViolations: string[] = [];
+      (window as Window & { __terminalStyleViolations?: string[] }).__terminalStyleViolations = styleViolations;
+      document.addEventListener("securitypolicyviolation", (event) => {
+        if (event.violatedDirective.startsWith("style-src")) styleViolations.push(event.violatedDirective);
+      });
       const nativeSend = WebSocket.prototype.send;
       WebSocket.prototype.send = function(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
         if (data instanceof ArrayBuffer) frames.push([...new Uint8Array(data)]);
@@ -566,6 +578,34 @@ test.describe.serial("server-rendered environments", () => {
         .some((frame) => frame[0] === 0x00 && frame.length > 1)
     ));
     expect(sentInput).toBe(true);
+    // Assert actual output under the production response CSP. The chrome-only
+    // screenshots below deliberately mask output and cannot protect this.
+    await page.keyboard.type("printf '\\033[31m__SSR_ANSI16__\\033[0m \\033[38;5;196m__SSR_ANSI256__\\033[0m \\033[38;2;12;160;240m__SSR_RGB__\\033[0m\\n__SSR_COPY_234__\\n'");
+    await page.keyboard.press("Enter");
+    const terminalRows = terminalRoot.locator(".xterm-rows");
+    await expect(terminalRows.getByText("__SSR_ANSI16__", { exact: true })).toHaveCSS("color", "rgb(204, 0, 0)");
+    await expect(terminalRows.getByText("__SSR_ANSI256__", { exact: true })).toHaveCSS("color", "rgb(255, 0, 0)");
+    await expect(terminalRows.getByText("__SSR_RGB__", { exact: true })).toHaveCSS("color", "rgb(12, 160, 240)");
+    await expect(terminalRows).toHaveCSS("font-family", /IBM Plex Mono/);
+    expect(await page.evaluate(() => (window as Window & { __terminalStyleViolations?: string[] }).__terminalStyleViolations)).toEqual([]);
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: ssrUrl });
+    const copyBounds = (await terminalRows.getByText("__SSR_COPY_234__", { exact: true }).boundingBox())!;
+    await page.mouse.move(copyBounds.x, copyBounds.y + copyBounds.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(copyBounds.x + copyBounds.width, copyBounds.y + copyBounds.height / 2, { steps: 12 });
+    await page.mouse.up();
+    await expect(terminalRoot.locator(".xterm-selection div").first()).toBeVisible();
+    await page.getByRole("button", { name: "Copy selection", exact: true }).click();
+    await expect(page.locator("[data-terminal-copy-status]")).toHaveText("Selection copied.");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("__SSR_COPY_234__");
+    const inputBeforeCopy = await page.evaluate(() => ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || []).filter((frame) => frame[0] === 0).length);
+    await terminalRoot.locator("textarea").focus();
+    await page.keyboard.press("Control+Shift+C");
+    expect(await page.evaluate(() => ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || []).filter((frame) => frame[0] === 0).length)).toBe(inputBeforeCopy);
+    // Clicking clears selection. Plain Ctrl+C must retain its PTY interrupt.
+    await terminalRoot.locator(".xterm").click();
+    await page.keyboard.press("Control+C");
+    await expect.poll(() => page.evaluate(() => ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || []).filter((frame) => frame[0] === 0).at(-1))).toEqual([0, 3]);
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(page.locator(".cw-sandbox-terminal")).toHaveScreenshot("terminal-drawer-desktop.png", {
       mask: [terminalRoot.locator(".xterm-rows")],
@@ -640,8 +680,11 @@ test.describe.serial("server-rendered environments", () => {
     await expect(sourceEditor).toBeVisible();
     await expect(sourceEditor.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
     await expect(sourceEditor.locator('[name="expected_secret_project"]')).toHaveValue(secretProjectId);
-    await expect(sourceEditor.locator('[name="confirm_personal_secrets"]')).not.toBeChecked();
-    await expect(sourceEditor.locator('[name="confirm_personal_credentials"]')).not.toBeChecked();
+    await expect(sourceEditor.locator('[name="confirm_personal_secrets"]')).toHaveCount(0);
+    await expect(sourceEditor.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
+    await expect(sourceEditor.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/${slug}/secrets/user/`);
+    await expect(sourceEditor.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
+    await expect(sourceEditor.locator(`a[href="/settings/credentials/?org=${slug}"]`)).toBeVisible();
     await sourceEditor.getByLabel("Secret project", { exact: true }).selectOption("");
     await sourceEditor.getByRole("button", { name: "Save sources", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("Sandbox sources saved. The Sandbox remains stopped.");

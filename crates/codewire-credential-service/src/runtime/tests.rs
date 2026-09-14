@@ -228,6 +228,11 @@ impl Running {
         let stopped = stop.clone();
         let pool = h.pool.clone();
         let owner = h.owner.clone();
+        let repositories = Arc::new(GithubRepositoryOwner::new(
+            h.pool.clone(),
+            h.store.clone(),
+            Arc::new(NeverUpstream::default()),
+        ));
         let provider = h.provider.clone();
         let task = tokio::spawn(serve_owned(
             listeners,
@@ -235,6 +240,7 @@ impl Running {
             pool,
             provider,
             owner,
+            repositories,
             bridge,
             async move {
                 stopped.cancelled().await;
@@ -333,6 +339,11 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
             h.pool.clone(),
             h.provider.clone(),
             h.owner.clone(),
+            Arc::new(GithubRepositoryOwner::new(
+                h.pool.clone(),
+                h.store.clone(),
+                Arc::new(upstream.clone()),
+            )),
             bridge.clone(),
             std::future::pending(),
         )

@@ -8,7 +8,7 @@ use url::Url;
 use crate::{
     environment_connect,
     error::WebError,
-    response::{error_page, render_page_with_connect_origin},
+    response::{TerminalStyleNonce, error_page, render_terminal_page},
     routes::organization_governance::{connect_page_error, get_context},
     security::{csrf_cookie, new_csrf_token, with_csrf_cookie},
     state::AppState,
@@ -52,15 +52,18 @@ pub(super) async fn page(
         websocket_origin,
     };
     let token = new_csrf_token();
+    let style_nonce = TerminalStyleNonce::new();
     with_csrf_cookie(
-        render_page_with_connect_origin(
+        render_terminal_page(
             TerminalTemplate {
                 view: &dashboard,
                 organization: &organization,
                 page: &view,
                 csrf_token: &token,
+                style_nonce: style_nonce.as_str(),
             },
             &view.websocket_origin,
+            &style_nonce,
         ),
         csrf_cookie(&state.public_origin, &token),
     )

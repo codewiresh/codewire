@@ -15,6 +15,9 @@
 //! the complete injected Bearer/Basic value. It does not inspect compressed Git
 //! pack objects or guarantee arbitrary-transformation redaction. The ordinary
 //! Git wire payload is binary; changing a matching pattern can invalidate it.
+//! Stock Git gzip fetch requests are forwarded unchanged to the fixed GitHub
+//! upload-pack endpoint. The 4 MiB request cap counts compressed wire bytes;
+//! the broker neither decompresses nor claims an expanded-body size bound.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,6 +34,8 @@ use url::Url;
 use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiStreamingResponse, PreparedOpenAiResponse,
 };
+
+pub mod repositories;
 
 const TOKEN: &str = "GITHUB_OAUTH_TOKEN";
 const API_VERSION: &str = "2022-11-28";
@@ -138,7 +143,7 @@ impl GitHubOAuthAdapter {
         if body.len() > MAX_REQUEST_BYTES
             || !bounded_headers(&headers)
             || is_websocket_attempt(&headers)
-            || crate::openai::validate_response_encoding(&headers).is_err()
+            || !valid_request_encoding(operation, method, &headers)
             || REQUEST_HEADERS
                 .iter()
                 .any(|name| headers.get_all(*name).iter().count() > 1)
@@ -217,48 +222,53 @@ impl GitHubOAuthAdapter {
         request: ValidatedGitHubRequest,
     ) -> Result<PreparedGitHubRequest, CredentialBrokerError> {
         validate_lease(&lease, request.operation)?;
+        lease.with_material(|material| self.prepare_material(request, material))
+    }
+
+    fn prepare_material(
+        &self,
+        request: ValidatedGitHubRequest,
+        material: &[u8],
+    ) -> Result<PreparedGitHubRequest, CredentialBrokerError> {
         let target = build_target_url(&request.policy, &request.request)
             .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
-        lease.with_material(|material| {
-            if material.is_empty()
-                || material.len() > 4096
-                || !material.iter().all(|byte| byte.is_ascii_graphic())
-            {
-                return Err(CredentialBrokerError::InvalidCredentialMaterial);
-            }
-            let token = std::str::from_utf8(material)
-                .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
-            let prepared = prepare_credentials(&request.policy, &Token(token), &request.body)
-                .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
-            let mut headers =
-                prepare_outbound_headers(&request.policy, &request.headers, &prepared)
-                    .map_err(|_| CredentialBrokerError::RequestDenied)?;
+        if material.is_empty()
+            || material.len() > 4096
+            || !material.iter().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(CredentialBrokerError::InvalidCredentialMaterial);
+        }
+        let token = std::str::from_utf8(material)
+            .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
+        let prepared = prepare_credentials(&request.policy, &Token(token), &request.body)
+            .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
+        let mut headers = prepare_outbound_headers(&request.policy, &request.headers, &prepared)
+            .map_err(|_| CredentialBrokerError::RequestDenied)?;
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("Codewire-Credential-Broker"),
+        );
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        if !request.operation.is_git() {
             headers.insert(
-                header::USER_AGENT,
-                HeaderValue::from_static("Codewire-Credential-Broker"),
+                "x-github-api-version",
+                HeaderValue::from_static(API_VERSION),
             );
-            headers.insert(
-                header::ACCEPT_ENCODING,
-                HeaderValue::from_static("identity"),
-            );
-            if !request.operation.is_git() {
-                headers.insert(
-                    "x-github-api-version",
-                    HeaderValue::from_static(API_VERSION),
-                );
-            }
-            let (body, redaction) = prepared.into_body_and_redaction();
-            let response = PreparedGitHubResponse {
-                operation: request.operation,
-                inner: PreparedOpenAiResponse::from_route_redaction(&request.policy, redaction)?,
-            };
-            Ok(PreparedGitHubRequest {
-                method: request.method,
-                target,
-                headers,
-                body,
-                response,
-            })
+        }
+        let (body, redaction) = prepared.into_body_and_redaction();
+        let response = PreparedGitHubResponse {
+            operation: request.operation,
+            inner: PreparedOpenAiResponse::from_route_redaction(&request.policy, redaction)?,
+        };
+        Ok(PreparedGitHubRequest {
+            method: request.method,
+            target,
+            headers,
+            body,
+            response,
         })
     }
 }
@@ -545,6 +555,25 @@ fn media_type(headers: &HeaderMap) -> Option<String> {
     Some(media)
 }
 
+fn valid_request_encoding(
+    operation: GitHubOperation,
+    method: &Method,
+    headers: &HeaderMap,
+) -> bool {
+    let mut values = headers.get_all(header::CONTENT_ENCODING).iter();
+    if let Some(value) = values.next()
+        && value.as_bytes() == b"gzip"
+    {
+        // Stock remote-curl compresses buffered fetch requests over 1024
+        // bytes. Preserve the opaque Git body: no decompressor, body rewrite,
+        // API/GraphQL acceptance, alternate route or response-policy change.
+        return values.next().is_none()
+            && operation == GitHubOperation::GitFetch
+            && method == Method::POST;
+    }
+    crate::openai::validate_response_encoding(headers).is_ok()
+}
+
 fn policy(operation: GitHubOperation, path: &str) -> ProxyRouteConfig {
     ProxyRouteConfig {
         profile: "codewire-github-oauth".into(),
@@ -574,7 +603,15 @@ fn policy(operation: GitHubOperation, path: &str) -> ProxyRouteConfig {
             .collect(),
         allowed_exact_paths: vec![path.into()],
         allowed_path_prefixes: Vec::new(),
-        allowed_request_headers: REQUEST_HEADERS.iter().map(|name| (*name).into()).collect(),
+        allowed_request_headers: REQUEST_HEADERS
+            .iter()
+            .copied()
+            .chain(
+                (operation == GitHubOperation::GitFetch && path.ends_with("/git-upload-pack"))
+                    .then_some("content-encoding"),
+            )
+            .map(str::to_owned)
+            .collect(),
         allowed_response_headers: RESPONSE_HEADERS.iter().map(|name| (*name).into()).collect(),
         allowed_query_parameters: if operation.is_git() {
             vec!["service".into()]

@@ -289,6 +289,7 @@ pub(crate) struct TerminalTemplate<'a> {
     pub(crate) organization: &'a OrganizationContext,
     pub(crate) page: &'a TerminalPageView,
     pub(crate) csrf_token: &'a str,
+    pub(crate) style_nonce: &'a str,
 }
 
 #[derive(Template)]

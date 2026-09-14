@@ -8,7 +8,7 @@ from typing import Literal, TypedDict
 from codewire._context import ConnectContext
 from codewire.v1 import credential_pb2 as pb
 from codewire.v1.credential_connect import (
-    CredentialServiceClientSync, CredentialMutationServiceClientSync,
+    CredentialServiceClientSync, CredentialMutationServiceClientSync, GithubRepositoryServiceClientSync,
 )
 
 
@@ -31,6 +31,23 @@ class Credential(TypedDict):
     expires_at_unix: int | None
     revocation_generation: int
     ssh_public_key: SshPublicKey | None
+
+
+class GithubRepository(TypedDict):
+    """Allowlisted metadata, never provider JSON or a checkout grant."""
+
+    repository_id: str
+    full_name: str
+    default_branch: str
+    clone_url: str
+    is_private: bool
+    archived: bool
+    disabled: bool
+
+
+class GithubRepositoryPage(TypedDict):
+    repositories: list[GithubRepository]
+    next_page_token: str
 
 
 class CodexDeviceChallenge(TypedDict):
@@ -123,6 +140,23 @@ class Credentials:
         self._context = context
         self._client = context.transport.client(CredentialServiceClientSync)
         self._mutations = context.transport.client(CredentialMutationServiceClientSync)
+        self._repositories = context.transport.client(GithubRepositoryServiceClientSync)
+
+    def list_github_repositories(
+        self, profile_id: str, profile_revision: int, *, page_size: int = 50, page_token: str = "",
+    ) -> GithubRepositoryPage:
+        """One page for the exact selected profile, without attaching or advancing it."""
+        _generation(profile_revision)
+        if not profile_id or type(page_size) is not int or not 0 <= page_size <= 100 or len(page_token) > 128:
+            raise ValueError("invalid GitHub repository selection or page")
+        response = self._context.unary(self._repositories.list_github_repositories,
+            pb.ListGithubRepositoriesRequest(profile_id=profile_id, profile_revision=profile_revision,
+                page_size=page_size, page_token=page_token))
+        return {"repositories": [{
+            "repository_id": value.repository_id, "full_name": value.full_name,
+            "default_branch": value.default_branch, "clone_url": value.clone_url,
+            "is_private": value.is_private, "archived": value.archived, "disabled": value.disabled,
+        } for value in response.repositories], "next_page_token": response.next_page_token}
 
     def list(self) -> list[Credential]:
         result: list[Credential] = []

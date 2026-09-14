@@ -2129,10 +2129,10 @@ mod tests {
     }
 
     #[test]
-    fn selected_create_preserves_choices_and_independent_confirmations_on_rerender() {
+    fn selected_create_preserves_explicit_source_intent_on_rerender() {
         let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
         let submission = EnvironmentSubmission::parse(format!(
-            "image=example.test%2Fworkspace&secret_project={id}&credential_profile={id}%407&include_user_secrets=platform&confirm_personal_secrets=true&confirm_personal_credentials=true"
+            "image=example.test%2Fworkspace&secret_project={id}&credential_profile={id}%407&include_user_secrets=platform"
         ).as_bytes()).unwrap();
         let mut form = submission.form_view("token".into());
         let options = || EnvironmentCreateOptions {
@@ -2231,8 +2231,8 @@ mod tests {
         assert!(html.contains("name=\"expected_operation_generation\" value=\"9\""));
         assert!(html.contains(&format!("name=\"expected_secret_project\" value=\"{id}\"")));
         assert!(html.contains("name=\"expected_include_user_secrets\" value=\"platform\""));
-        assert!(html.contains("name=\"confirm_personal_secrets\" value=\"true\">"));
-        assert!(html.contains("name=\"confirm_personal_credentials\" value=\"true\">"));
+        assert!(!html.contains("name=\"confirm_personal_secrets\""));
+        assert!(!html.contains("name=\"confirm_personal_credentials\""));
         assert!(html.contains("type=\"submit\">Save sources</button>"));
         assert!(!html.contains("<unsafe>"));
         let request = crate::environment_source_forms::update_request(format!(

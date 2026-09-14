@@ -10,11 +10,7 @@ use std::net::Ipv6Addr;
 
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header::HOST, uri::Authority};
 
-/// Public Git URL-rewrite prefix on the existing managed HTTP endpoint.
-/// Only smart-HTTP discovery, upload-pack and receive-pack are accepted below.
-pub const MANAGED_GITHUB_GIT_PREFIX: &str = "/_codewire/github/";
-
-pub use codewire_access::MANAGED_OPENAI_API_PREFIX;
+pub use codewire_access::{MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX};
 
 const GITHUB_API_HOST: &str = "api.github.com";
 const MAX_PATH_BYTES: usize = 2048;

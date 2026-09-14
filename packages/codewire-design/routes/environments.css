@@ -223,3 +223,15 @@
 .cw-source-summary { margin: 0; }
 .cw-source-summary dt { color: var(--fg-tertiary); font-size: 12px; }
 .cw-source-summary dd { margin: 0 0 8px; overflow-wrap: anywhere; }
+
+.cw-repository-actions ul { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); list-style: none; margin: 0 0 var(--space-3); padding: 0; }
+.cw-github-picker { width: min(40rem, calc(100vw - 2 * var(--space-4))); padding: 0; color: var(--fg-primary); }
+.cw-github-picker::backdrop { background: rgba(0, 0, 0, 0.72); }
+.cw-github-picker .cw-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+.cw-github-picker .cw-dialog-header h2 { margin: 0; font-size: 1.125rem; }
+.cw-github-picker .cw-dialog-body { display: grid; gap: var(--space-3); }
+.cw-github-repository-list { list-style: none; padding: 0; margin: 0 0 var(--space-3); }
+.cw-github-repository-list button { display: grid; gap: var(--space-1); width: 100%; border: 0; border-bottom: 1px solid var(--border-subtle); padding: var(--space-3) var(--space-4); text-align: left; background: none; color: var(--fg-primary); cursor: pointer; overflow-wrap: anywhere; }
+.cw-github-repository-list button:hover { background: var(--bg-surface-hover); }
+.cw-github-repository-list button:disabled { opacity: 0.5; cursor: not-allowed; }
+.cw-github-repository-list small { color: var(--fg-secondary); }

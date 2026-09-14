@@ -34,6 +34,9 @@ pub(crate) const PUBLIC_SCRIPT_PATH: &str = "/assets/codewire/public-v1.js";
 pub(crate) const ORGANIZATIONS_SCRIPT_PATH: &str = "/assets/codewire/organizations-v1.js";
 pub(crate) const ENVIRONMENTS_SCRIPT_PATH: &str = "/assets/codewire/environments-v2.js";
 pub(crate) const TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/terminal-v1.js";
+pub(crate) const TERMINAL_RENDERER_SCRIPT_PATH: &str = "/assets/codewire/terminal-renderer-v1.js";
+pub(crate) const TERMINAL_PRESENTATION_SCRIPT_PATH: &str =
+    "/assets/codewire/terminal-presentation-v1.js";
 pub(crate) const XTERM_SCRIPT_PATH: &str = "/assets/codewire/xterm-6.0.0.js";
 pub(crate) const XTERM_FIT_SCRIPT_PATH: &str = "/assets/codewire/addon-fit-0.11.0.js";
 pub(crate) const XTERM_WEB_LINKS_SCRIPT_PATH: &str = "/assets/codewire/addon-web-links-0.12.0.js";
@@ -80,6 +83,10 @@ const ORGANIZATIONS_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/organizations.js");
 const ENVIRONMENTS_SCRIPT: &str = include_str!("../../../packages/codewire-design/environments.js");
 const TERMINAL_SCRIPT: &str = include_str!("../../../packages/codewire-design/terminal.js");
+const TERMINAL_RENDERER_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/terminal-renderer.js");
+const TERMINAL_PRESENTATION_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/terminal-presentation.js");
 const XTERM_SCRIPT: &str = include_str!("../assets/xterm/xterm-6.0.0.js");
 const XTERM_FIT_SCRIPT: &str = include_str!("../assets/xterm/addon-fit-0.11.0.js");
 const XTERM_WEB_LINKS_SCRIPT: &str = include_str!("../assets/xterm/addon-web-links-0.12.0.js");
@@ -184,6 +191,20 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             TERMINAL_SCRIPT_PATH,
             static_asset("application/javascript; charset=utf-8", TERMINAL_SCRIPT),
+        )
+        .route(
+            TERMINAL_RENDERER_SCRIPT_PATH,
+            static_asset(
+                "application/javascript; charset=utf-8",
+                TERMINAL_RENDERER_SCRIPT,
+            ),
+        )
+        .route(
+            TERMINAL_PRESENTATION_SCRIPT_PATH,
+            static_asset(
+                "application/javascript; charset=utf-8",
+                TERMINAL_PRESENTATION_SCRIPT,
+            ),
         )
         .route(
             XTERM_SCRIPT_PATH,

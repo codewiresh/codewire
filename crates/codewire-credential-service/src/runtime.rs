@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 use crate::KubernetesPlatformBridgeAuthenticator;
 use crate::mutation::CredentialMutationOwner;
+use crate::repositories::GithubRepositoryOwner;
 pub use config::CredentialServiceConfig;
 
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -152,6 +153,11 @@ async fn run_connected(
     let enrollment = enrollment_config(config.codex_executable, config.runtime_directory.clone())?;
     let github = github_enrollment_config(config.github_executable, &config.runtime_directory)?;
     let store = authorities.credential_store(pool.clone());
+    let repositories = Arc::new(GithubRepositoryOwner::new(
+        pool.clone(),
+        store.clone(),
+        Arc::new(upstream.clone()),
+    ));
     let bridge = PlatformCredentialBridgeService::new(
         Arc::new(authorities.kubernetes_authenticator(client, pool.clone())),
         store.clone(),
@@ -175,6 +181,7 @@ async fn run_connected(
         pool,
         authorities.delegation_provider(),
         mutation,
+        repositories,
         bridge,
         shutdown,
     )
@@ -243,6 +250,7 @@ async fn serve_owned<A, U>(
     pool: PgPool,
     provider: Arc<dyn KekProvider>,
     mutation: Arc<CredentialMutationOwner>,
+    repositories: Arc<GithubRepositoryOwner>,
     bridge: PlatformCredentialBridgeService<A, U>,
     shutdown: impl Future<Output = Result<(), RuntimeError>> + Send,
 ) -> Result<(), RuntimeError>
@@ -288,7 +296,14 @@ where
             })
             .with_connect_routes_auth(
                 mutation.router(),
-                ConnectAuthLayer::credential_mutation(AuthState { pool }, public_origin),
+                ConnectAuthLayer::credential_mutation(
+                    AuthState { pool: pool.clone() },
+                    public_origin.clone(),
+                ),
+            )
+            .with_connect_routes_auth(
+                repositories.router(),
+                ConnectAuthLayer::github_repository(AuthState { pool }, public_origin),
             )
             .into_router();
         let grpc = bridge.clone().into_server();
@@ -320,9 +335,10 @@ where
     }
     .await;
     ready.store(false, Ordering::Release);
-    // Close BOTH admission owners synchronously before allowing transport
+    // Close all admission owners synchronously before allowing transport
     // grace. Then join every owner, including active blocking refresh tasks.
     mutation.start_shutdown();
+    repositories.start_shutdown();
     bridge.start_shutdown();
     stop.cancel();
     let (mutation_result, bridge_result, ()) =

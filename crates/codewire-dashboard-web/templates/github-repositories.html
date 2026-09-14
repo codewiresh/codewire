@@ -1,0 +1,13 @@
+<section aria-label="GitHub repository results" data-github-results-page data-github-profile="{{ profile }}">
+  {% if !error.is_empty() %}
+  <p class="cw-field-error" role="alert">{{ error }}</p>
+  {% else %}
+  {% if repositories.is_empty() %}<p role="status">No repositories are available on this page for the selected GitHub account.</p>{% endif %}
+  <ul class="cw-github-repository-list">
+    {% for repository in repositories %}
+    <li><button type="button" data-select-github-repository data-repository-url="{{ repository.clone_url }}" data-repository-branch="{{ repository.default_branch }}" data-repository-name="{{ repository.full_name }}"{% if repository.disabled %} disabled{% endif %}><strong>{{ repository.full_name }}</strong><small>{% if repository.is_private %}Private{% else %}Public{% endif %}{% if repository.archived %} · Archived{% endif %}{% if repository.disabled %} · Unavailable{% endif %}</small></button></li>
+    {% endfor %}
+  </ul>
+  {% if !next_page_token.is_empty() %}<button class="cw-button cw-button--outline" type="button" data-github-next data-page-token="{{ next_page_token }}">Next page</button>{% endif %}
+  {% endif %}
+</section>

@@ -138,6 +138,9 @@ if (app) {
   });
 
   document.addEventListener("keydown", (event) => {
+    // Native modal dialogs own Escape, focus and keyboard interaction above a
+    // drawer. Do not close the underlying Create Sandbox draft as well.
+    if (document.querySelector("dialog:modal")) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     const isEditing = target?.matches("input, textarea, select, [contenteditable='true']");
     if (event.key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey && !isEditing) {
@@ -179,6 +182,7 @@ if (app) {
   document.addEventListener("codewire:drawer-replaced", () => setDrawerOpen(true));
   document.addEventListener("htmx:afterSwap", () => setDrawerOpen(drawerPathMatches(currentDrawer()), false));
   document.addEventListener("keydown", (event) => {
+    if (document.querySelector("dialog:modal")) return;
     if (event.key !== "Tab") return;
     const drawer = currentDrawer();
     if (!drawer || drawer.hidden) return;

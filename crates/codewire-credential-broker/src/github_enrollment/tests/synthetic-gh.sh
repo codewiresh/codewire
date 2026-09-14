@@ -46,7 +46,8 @@ native)
   printf '%s\n' "$$" > "$fixture_root/native.pid"
   if [ -f "$fixture_root/unexpected-stdout" ]; then printf 'synthetic unexpected output\n'; fi
   printf '\n! First copy your one-time code: ABCD-EFGH\n' >&2
-  printf 'To continue, open this URL in your web browser: https://github.com/login/device\n' >&2
+  # cli/cli v2.97.0 internal/authflow/flow.go:64-66, noninteractive BrowseURL.
+  printf 'Open this URL to continue in your web browser: https://github.com/login/device\n' >&2
   while [ ! -f "$fixture_root/release" ]; do sleep 0.02; done
   umask 077
   cp "$fixture_root/hosts.fixture.yml" "$GH_CONFIG_DIR/hosts.yml"
