@@ -160,6 +160,55 @@ for required in (
     if required not in main:
         fail(f"runner entrypoint lost path-control separation: {required}")
 
+console = source("Sources/CodewireVZRunnerProtocol/ConsolePair.swift")
+for required in (
+    "schemaVersion = 3", "cpuCount = 1", "memoryMiB: UInt64 = 512",
+    "bindingBytes: UInt64 = 4096", "roleFrameBytes = 128",
+    '"org.codewire.console-pair.packet"', '"org.codewire.console-pair.status"',
+    '"org.codewire.console-pair.control"', '"CWCONSOLEPAIR1"',
+    "cw_vz_descriptors_are_distinct_files", "cw_vz_receive_request",
+    "encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]",
+    "configuration.guestBinding.sha256 != configuration.serviceBinding.sha256",
+):
+    if required not in console:
+        fail(f"console pair lost fixed admission contract: {required}")
+
+console_runtime = source("Sources/CodewireVZRunnerRuntime/ConsolePairRuntime.swift")
+for required in (
+    "socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors)",
+    "fileHandleForReading: packet, fileHandleForWriting: packet",
+    "PathBackedBootControl.copyVerified", "VZVirtioConsoleDeviceConfiguration",
+    "packetPort.isConsole = false", "statusPort.isConsole = false",
+    "controlPort.isConsole = false", "configuration.socketDevices = []",
+    "configuration.networkDevices = []", "configuration.directorySharingDevices = []",
+    "configuration.serialPorts = []", "configuration.graphicsDevices = []",
+    "VZVirtualMachine(configuration: configuration, queue: queue)",
+    "let drained = machines.map { $0.drain() }", "guard input.isEmpty",
+    "machines[index].snapshot().terminal", "virtualMachine === machine",
+    "flags & O_ACCMODE == O_RDONLY", "ConsolePairLifecycle()",
+):
+    if required not in console_runtime:
+        fail(f"console pair lost topology/ownership assertion: {required}")
+for forbidden in (
+    "VZNATNetworkDeviceAttachment", "VZBridgedNetworkDeviceAttachment",
+    "VZFileHandleNetworkDeviceAttachment", "VZVirtioFileSystemDeviceConfiguration",
+    "Process(", "device.connect(toPort:", "Darwin.read(packet", "Darwin.write(packet",
+):
+    if forbidden in console_runtime:
+        fail(f"console pair gained prohibited host capability: {forbidden}")
+if 'arguments[1] == "console-pair-fixture"' not in main:
+    fail("console pair must remain a distinct developer-only command")
+
+local_vmm = ROOT / "crates/codewire-local-vmm"
+if '#[cfg(all(target_os = "linux", feature = "macos-console-pair-fixture"))]' not in (
+    local_vmm / "src/lib.rs"
+).read_text():
+    fail("Linux console pair lost opt-in feature isolation")
+if 'required-features = ["macos-console-pair-fixture"]' not in (
+    local_vmm / "Cargo.toml"
+).read_text():
+    fail("console pair binary must require its developer feature")
+
 for relative in (
     "Tests/CodewireVZRunnerTests/ConfigurationTests.swift",
     "Tests/CodewireVZRunnerTests/IPCTests.swift",

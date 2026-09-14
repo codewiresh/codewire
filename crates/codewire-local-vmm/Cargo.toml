@@ -10,6 +10,12 @@ build = "build.rs"
 
 [features]
 synthetic-oci-input-smoke = []
+macos-console-pair-fixture = []
+
+[[bin]]
+name = "codewire-macos-console-pair-fixture"
+path = "src/bin/codewire-macos-console-pair-fixture.rs"
+required-features = ["macos-console-pair-fixture"]
 
 [[bin]]
 name = "codewire-local-oci-import-smoke"

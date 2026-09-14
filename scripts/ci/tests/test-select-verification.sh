@@ -989,6 +989,14 @@ run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
   "$policy" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
+run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
+run_present_paths_case macos_console_pair_unknown pull_request refs/pull/20642/head false \
+  "$all_product" scripts/dev/macos-vz-console-pair-future.py
+run_paths_case macos_console_pair_rust pull_request refs/pull/20643/head false \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/src/macos_console_pair_fixture/runtime.rs
 run_present_paths_case macos_vz_inode_probe pull_request refs/pull/2065/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-inode-probe.py scripts/dev/test-macos-vz-inode-probe.py

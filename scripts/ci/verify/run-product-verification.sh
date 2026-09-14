@@ -197,6 +197,7 @@ run_policy_core() {
   python3 scripts/ci/tests/test-repo-checks-modules.py
   python3 scripts/dev/test-macos-cli.py
   python3 scripts/dev/test-macos-vz-inode-probe.py
+  python3 scripts/dev/test-macos-vz-console-pair.py
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
@@ -576,6 +577,11 @@ run_transport() {
   if selected transport_pkg_codewire_local_vmm; then
     crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
     python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
+    python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_console_pair_static_contract.py
+    cargo test --locked -p codewire-local-vmm --features macos-console-pair-fixture \
+      --lib macos_console_pair_fixture
+    cargo clippy --locked -p codewire-local-vmm --features macos-console-pair-fixture \
+      --lib --bin codewire-macos-console-pair-fixture -- -D warnings
     cargo check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
       --target aarch64-apple-darwin
   fi

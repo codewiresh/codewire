@@ -13,7 +13,7 @@ private struct Response: Encodable {
 private func usage() -> Never {
   FileHandle.standardError.write(
     Data(
-      "usage: codewire-vz-runner (validate|inode-probe|inode-probe-path-control) --control-fd FD\n"
+      "usage: codewire-vz-runner (validate|inode-probe|inode-probe-path-control|console-pair-fixture) --control-fd FD\n"
         .utf8
     )
   )
@@ -23,13 +23,23 @@ private func usage() -> Never {
 private func run() throws {
   let arguments = CommandLine.arguments
   guard arguments.count == 4,
-    ["validate", "inode-probe", "inode-probe-path-control"].contains(arguments[1]),
+    ["validate", "inode-probe", "inode-probe-path-control", "console-pair-fixture"].contains(
+      arguments[1]),
     arguments[2] == "--control-fd",
     let controlDescriptor = Int32(arguments[3]),
     controlDescriptor >= 3
   else { usage() }
 
   #if canImport(Virtualization) && os(macOS)
+    if arguments[1] == "console-pair-fixture" {
+      signal(SIGPIPE, SIG_IGN)
+      signal(SIGALRM, SIG_DFL)
+      alarm(120)
+      let request = try PrivateIPC.receiveConsolePair(controlDescriptor: controlDescriptor)
+      try ConsolePairRuntime.run(request: request, controlDescriptor: controlDescriptor)
+      alarm(0)
+      return
+    }
     let request = try PrivateIPC.receive(controlDescriptor: controlDescriptor)
     if arguments[1] == "validate" {
       try RuntimeAdmission.validateConfiguration(for: request)

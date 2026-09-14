@@ -902,6 +902,14 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_vmm_guest_probe
         recognized=true
         ;;
+      scripts/dev/macos-vz-console-pair.py|scripts/dev/test-macos-vz-console-pair.py)
+        # Exact developer-only two-VM harness; exercise its feature-gated
+        # Linux packet engine and portable parent tests, never VMs in CI.
+        select_token policy
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        recognized=true
+        ;;
       scripts/dev/macos-vz-inode-probe.py|scripts/dev/test-macos-vz-inode-probe.py)
         # The entitlement-free parent tests share the macOS helper and guest
         # probe protocol, but never sign or start Virtualization.framework.
