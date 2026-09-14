@@ -286,8 +286,10 @@ print(f'Rust/transport composition trace: {cases} cases passed')
 # Only terminal checks are synthetic; selection, preflight and receipt logic
 # are copied byte-for-byte. This isolated repository has no external remote or secrets.
 policy_body = production.split('run_policy_core() {', 1)[1].split('\n}\n', 1)[0]
-policy_helpers = re.findall(r'^  (?:python3 (?:-B )?)?(scripts/[\w/.-]+)', policy_body, re.M)
+policy_helpers = re.findall(r'^  (?:python3 (?:-B )?)?((?:scripts|crates)/[\w/.-]+)', policy_body, re.M)
 assert 'scripts/dev/test-macos-vz-workload-network.py' in policy_helpers
+canary_guard = 'crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py'
+assert canary_guard in policy_helpers, 'composition fixture omitted the actual crate-local policy guard'
 for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh']:
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -322,7 +324,8 @@ git('add', '.')
 git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'synthetic selected workload parent')
 receipt_owner = fixture / 'scripts/ci/receipts/local-prepush-receipt.py'
 preflight = fixture / 'scripts/dev/preflight.sh'
-receipt_cases = [dict(COMPOSITION_FAIL_TOOL='test-macos-vz-workload-network.py')]
+receipt_cases = [dict(COMPOSITION_FAIL_TOOL=name) for name in
+                 (Path(canary_guard).name, 'test-macos-vz-workload-network.py')]
 receipt_cases += [dict(COMPOSITION_FAIL_ARGS=json.dumps(command)) for command in
                  (workload_test, workload_clippy, client_test, client_clippy, transcript_test)]
 for injected in receipt_cases:
@@ -343,7 +346,7 @@ for injected in receipt_cases:
                              env=git_env, capture_output=True, text=True)
     assert missing.returncode != 0 and 'missing' in missing.stdout, missing.stdout
     assert not list((fixture / '.git/codewire-receipts').rglob('*.json'))
-print(f'Actual selected workload failures without a receipt: {len(receipt_cases)} cases passed')
+print(f'Actual selected policy/workload failures without a receipt: {len(receipt_cases)} cases passed')
 
 # The opt-in root packager flag cannot select archive-only/default verification.
 # Exercise real argument dispatch with a Cargo sentinel, then the actual shared
