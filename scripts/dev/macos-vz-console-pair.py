@@ -865,13 +865,67 @@ class Run:
             self.control = None
 
 
-class Coordinator:
+class RoleFrameCodec:
     status_magic = STATUS_MAGIC
     control_magic = CONTROL_MAGIC
     status_domain = STATUS_DOMAIN
     control_domain = CONTROL_DOMAIN
     wait_keys = ("workerWaitStatus", "adapterWaitStatus")
 
+    def control_frame(self, role: int, code: int) -> bytes:
+        sequence = self.control_sequence[role]
+        self.control_sequence[role] += 1
+        frame = bytearray(ROLE_FRAME_BYTES)
+        frame[:8] = self.control_magic
+        frame[8] = role
+        frame[9] = code
+        frame[16:32] = self.vm_id.bytes
+        frame[32:40] = self.generation.to_bytes(8, "little")
+        frame[40:72] = self.nonce
+        frame[72:80] = sequence.to_bytes(8, "little")
+        frame[96:] = hmac.new(
+            self.keys[role], self.control_domain + frame[:96], hashlib.sha256
+        ).digest()
+        return b"C" + bytes([role]) + frame
+
+    def decode_status(self, wrapper_role: int, frame: bytes) -> tuple[int | None, ...]:
+        if wrapper_role not in ROLES or len(frame) != ROLE_FRAME_BYTES:
+            raise FixtureFailure()
+        if (
+            frame[:8] != self.status_magic
+            or frame[8] != wrapper_role
+            or frame[10:16] != bytes(6)
+            or frame[16:32] != self.vm_id.bytes
+            or frame[32:40] != self.generation.to_bytes(8, "little")
+            or frame[40:72] != self.nonce
+        ):
+            raise FixtureFailure()
+        sequence = int.from_bytes(frame[72:80], "little")
+        if sequence != self.status_sequence[wrapper_role]:
+            raise FixtureFailure()
+        code = frame[9]
+        if code == STATUS_CHILDREN_REAPED:
+            end = 80 + 4 * len(self.wait_keys)
+            if wrapper_role != ROLE_SERVICE or frame[end:96] != bytes(96 - end):
+                raise FixtureFailure()
+            waits = tuple(
+                int.from_bytes(frame[offset:offset + 4], "little", signed=True)
+                for offset in range(80, end, 4)
+            )
+        else:
+            if frame[80:96] != bytes(16):
+                raise FixtureFailure()
+            waits = (None,) * len(self.wait_keys)
+        expected = hmac.new(
+            self.keys[wrapper_role], self.status_domain + frame[:96], hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(frame[96:], expected):
+            raise FixtureFailure()
+        self.status_sequence[wrapper_role] += 1
+        return wrapper_role, code, *waits
+
+
+class Coordinator(RoleFrameCodec):
     def __init__(
         self,
         run: Run,
@@ -921,60 +975,8 @@ class Coordinator:
         self.run.phase = phase
         self.stage_deadline = min(self.run.deadline, time.monotonic() + seconds)
 
-    def control_frame(self, role: int, code: int) -> bytes:
-        sequence = self.control_sequence[role]
-        self.control_sequence[role] += 1
-        frame = bytearray(ROLE_FRAME_BYTES)
-        frame[:8] = self.control_magic
-        frame[8] = role
-        frame[9] = code
-        frame[16:32] = self.vm_id.bytes
-        frame[32:40] = self.generation.to_bytes(8, "little")
-        frame[40:72] = self.nonce
-        frame[72:80] = sequence.to_bytes(8, "little")
-        frame[96:] = hmac.new(
-            self.keys[role], self.control_domain + frame[:96], hashlib.sha256
-        ).digest()
-        return b"C" + bytes([role]) + frame
-
     def send_control(self, role: int, code: int) -> None:
         self.run.send(framed(self.control_frame(role, code)))
-
-    def decode_status(self, wrapper_role: int, frame: bytes) -> tuple[int | None, ...]:
-        if wrapper_role not in ROLES or len(frame) != ROLE_FRAME_BYTES:
-            raise FixtureFailure()
-        if (
-            frame[:8] != self.status_magic
-            or frame[8] != wrapper_role
-            or frame[10:16] != bytes(6)
-            or frame[16:32] != self.vm_id.bytes
-            or frame[32:40] != self.generation.to_bytes(8, "little")
-            or frame[40:72] != self.nonce
-        ):
-            raise FixtureFailure()
-        sequence = int.from_bytes(frame[72:80], "little")
-        if sequence != self.status_sequence[wrapper_role]:
-            raise FixtureFailure()
-        code = frame[9]
-        if code == STATUS_CHILDREN_REAPED:
-            end = 80 + 4 * len(self.wait_keys)
-            if wrapper_role != ROLE_SERVICE or frame[end:96] != bytes(96 - end):
-                raise FixtureFailure()
-            waits = tuple(
-                int.from_bytes(frame[offset:offset + 4], "little", signed=True)
-                for offset in range(80, end, 4)
-            )
-        else:
-            if frame[80:96] != bytes(16):
-                raise FixtureFailure()
-            waits = (None,) * len(self.wait_keys)
-        expected = hmac.new(
-            self.keys[wrapper_role], self.status_domain + frame[:96], hashlib.sha256
-        ).digest()
-        if not hmac.compare_digest(frame[96:], expected):
-            raise FixtureFailure()
-        self.status_sequence[wrapper_role] += 1
-        return wrapper_role, code, *waits
 
     def expected_statuses(self, role: int) -> list[int | tuple[int, ...]]:
         return {

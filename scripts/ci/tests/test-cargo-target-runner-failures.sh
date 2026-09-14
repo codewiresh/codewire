@@ -99,6 +99,8 @@ python3 - "$ROOT" "$TMP" <<'PY'
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -109,9 +111,10 @@ runner = fixture / 'scripts/ci/verify/run-product-verification.sh'
 runner.parent.mkdir(parents=True)
 production = (source_root / 'scripts/ci/verify/run-product-verification.sh').read_text()
 runner.write_text(production)
+runner.chmod(0o755)
 binary = fixture / 'bin'
 binary.mkdir()
-trace = fixture / 'trace.jsonl'
+trace = temporary / 'rust-composition-trace.jsonl'
 packages = ['codewire-alpha', 'codewire-beta', 'codewire-desktop',
             'codewire-local-vmm', 'codewire-vmm-guest-probe',
             'codewire-protected-store']
@@ -124,7 +127,7 @@ tool = binary / 'cargo'
 tool.write_text('''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
-record = dict(tool=Path(sys.argv[0]).name, args=sys.argv[1:],
+record = dict(tool=os.environ.get('COMPOSITION_TOOL_NAME', Path(sys.argv[0]).name), args=sys.argv[1:],
               target=os.environ.get('CARGO_TARGET_DIR'),
               flags=os.environ.get('RUSTFLAGS'))
 with open(os.environ['COMPOSITION_TRACE'], 'a') as output:
@@ -135,6 +138,8 @@ if record['tool'] == os.environ.get('COMPOSITION_FAIL_TOOL'):
     sys.exit(44)
 if record['tool'] == 'cargo' and sys.argv[1] == 'test' and os.environ.get('COMPOSITION_FAIL_FEATURE') in sys.argv:
     sys.exit(45)
+if record['tool'] == 'cargo' and sys.argv[1:] == json.loads(os.environ.get('COMPOSITION_FAIL_ARGS', 'null')):
+    sys.exit(46)
 ''')
 tool.chmod(0o755)
 for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
@@ -155,7 +160,7 @@ environment = dict(PATH=f'{binary}:{os.environ["PATH"]}',
                    RUST_COMPOSE_FORMAT='true', RUST_COMPOSE_FORMAT_DONE='true')
 cases = 0
 
-def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None, fail_feature=None):
+def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None, fail_feature=None, fail_args=None):
     global cases
     cases += 1
     trace.write_text('')
@@ -166,6 +171,8 @@ def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None,
         env['COMPOSITION_FAIL_TOOL'] = fail_tool
     if fail_feature:
         env['COMPOSITION_FAIL_FEATURE'] = fail_feature
+    if fail_args:
+        env['COMPOSITION_FAIL_ARGS'] = json.dumps(fail_args)
     result = subprocess.run(['bash', str(runner), family], env=env,
                             text=True, capture_output=True)
     records = [json.loads(line) for line in trace.read_text().splitlines()]
@@ -219,6 +226,43 @@ assert sum(r['tool'] == 'cargo' and r['args'][0] == 'clippy' and
            for r in records) == 1
 assert sum('--target' in r['args'] and 'aarch64-apple-darwin' in r['args'] for r in records) == 1
 
+workload_feature = 'macos-workload-network-fixture'
+workload_test = ['test', '--locked', '-p', 'codewire-local-vmm', '--features',
+                 workload_feature, '--bin', 'codewire-macos-workload-network-fixture']
+workload_clippy = ['clippy', '--locked', '-p', 'codewire-local-vmm', '--features',
+                   workload_feature, '--bin', 'codewire-macos-workload-network-fixture',
+                   '--', '-D', 'warnings']
+client_test = ['test', '--locked', '-p', 'codewire-vmm-guest-probe', '--features',
+               workload_feature, '--lib', 'macos_workload_network_fixture::']
+client_clippy = ['clippy', '--locked', '-p', 'codewire-vmm-guest-probe', '--features',
+                 workload_feature, '--lib', '--bin', 'codewire-vmm-guest-probe',
+                 '--', '-D', 'warnings']
+transcript_test = ['test', '--locked', '-p', 'codewire-local-vmm', '--features',
+                   product_feature + ',' + workload_feature, '--lib',
+                   'macos_console_pair_fixture::product_network::tests::'
+                   'actual_workload_client_and_service_endpoint_share_exact_transcript',
+                   '--', '--exact']
+old_production_test = ['test', '--locked', '-p', 'codewire-local-vmm', '--features',
+                       'macos-production-init-fixture', '--bin', 'codewire-macos-vz-fixture']
+old_console_test = ['test', '--locked', '-p', 'codewire-local-vmm', '--features',
+                    'macos-console-pair-fixture', '--lib', 'macos_console_pair_fixture']
+old_production_clippy = ['clippy', '--locked', '-p', 'codewire-local-vmm', '--features',
+                         'macos-production-init-fixture', '--bin', 'codewire-macos-vz-fixture',
+                         '--', '-D', 'warnings']
+old_console_clippy = ['clippy', '--locked', '-p', 'codewire-local-vmm', '--features',
+                      'macos-console-pair-fixture', '--lib', '--bin',
+                      'codewire-macos-console-pair-fixture', '--', '-D', 'warnings']
+for command in (workload_test, workload_clippy, client_test, client_clippy,
+                transcript_test, old_production_test, old_console_test,
+                old_production_clippy, old_console_clippy):
+    assert sum(r['tool'] == 'cargo' and r['args'] == command for r in records) == 1, command
+
+# Every new command must fail the actual shared entrypoint, not merely a
+# duplicated list in the fixture. A later command may not hide its failure.
+for command in (workload_test, workload_clippy, client_test, client_clippy, transcript_test):
+    records, _ = run(special, fail_args=command, status=46)
+    assert records[-1]['args'] == command
+
 records, _ = run(special, fail_tool='test_console_pair_static_contract.py', status=44)
 assert records[-1]['tool'] == 'test_console_pair_static_contract.py'
 
@@ -237,4 +281,127 @@ for family, token in [('rust', 'rust_pkg_codewire_alpha'),
     assert records[0]['args'] == ['fmt', '--all', '--check']
 
 print(f'Rust/transport composition trace: {cases} cases passed')
+
+# Exercise the actual local receipt owner through the actual shared core too.
+# Only terminal checks are synthetic; selection, preflight and receipt logic
+# are copied byte-for-byte. This isolated repository has no external remote or secrets.
+policy_body = production.split('run_policy_core() {', 1)[1].split('\n}\n', 1)[0]
+policy_helpers = re.findall(r'^  (?:python3 (?:-B )?)?(scripts/[\w/.-]+)', policy_body, re.M)
+assert 'scripts/dev/test-macos-vz-workload-network.py' in policy_helpers
+for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh']:
+    destination = fixture / helper
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.suffix == '.sh':
+        destination.write_text('#!/usr/bin/env bash\nCOMPOSITION_TOOL_NAME=' +
+                               shlex.quote(destination.name) + ' exec python3 ' +
+                               shlex.quote(str(tool)) + ' "$@"\n')
+        destination.chmod(0o755)
+    else:
+        shutil.copy(tool, destination)
+for helper in ('scripts/dev/preflight.sh', 'scripts/ci/select/select-verification.sh',
+               'scripts/ci/receipts/local-prepush-receipt.py'):
+    destination = fixture / helper
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(source_root / helper, destination)
+git_env = dict(environment, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+
+def git(*args):
+    return subprocess.run(['git', '-C', str(fixture), *args], env=git_env,
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+git('init', '-q', '-b', 'main')
+git('config', 'user.name', 'Composition Fixture')
+git('config', 'user.email', 'composition@codewire.invalid')
+git('remote', 'add', 'origin', str(fixture))
+git('add', '.')
+git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'synthetic base')
+git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+parent = fixture / 'scripts/dev/macos-vz-workload-network.py'
+parent.write_text('# exact new developer path; never executed by this fixture\n')
+git('add', '.')
+git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'synthetic selected workload parent')
+receipt_owner = fixture / 'scripts/ci/receipts/local-prepush-receipt.py'
+preflight = fixture / 'scripts/dev/preflight.sh'
+receipt_cases = [dict(COMPOSITION_FAIL_TOOL='test-macos-vz-workload-network.py')]
+receipt_cases += [dict(COMPOSITION_FAIL_ARGS=json.dumps(command)) for command in
+                 (workload_test, workload_clippy, client_test, client_clippy, transcript_test)]
+for injected in receipt_cases:
+    trace.write_text('')
+    result = subprocess.run([str(preflight), '--for-push', '--emit-receipt'], cwd=fixture,
+                            env=dict(git_env, **injected), capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout
+    assert 'preflight push mode: default' in result.stdout, result.stdout
+    assert 'receipt=emitted' not in result.stdout and 'receipt_path=' not in result.stdout
+    assert 'preflight: OK' not in result.stdout
+    records = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert records, (result.stdout, result.stderr)
+    if 'COMPOSITION_FAIL_TOOL' in injected:
+        assert records[-1]['tool'] == injected['COMPOSITION_FAIL_TOOL'], records
+    else:
+        assert records[-1]['args'] == json.loads(injected['COMPOSITION_FAIL_ARGS']), records
+    missing = subprocess.run([str(receipt_owner), 'verify'], cwd=fixture,
+                             env=git_env, capture_output=True, text=True)
+    assert missing.returncode != 0 and 'missing' in missing.stdout, missing.stdout
+    assert not list((fixture / '.git/codewire-receipts').rglob('*.json'))
+print(f'Actual selected workload failures without a receipt: {len(receipt_cases)} cases passed')
+
+# The opt-in root packager flag cannot select archive-only/default verification.
+# Exercise real argument dispatch with a Cargo sentinel, then the actual shared
+# build_one function with both flags and all four target/independent-tree pairs.
+# This proves flag propagation and build failure, not binary reproducibility.
+builder = source_root / 'scripts/ci/verify/build-local-vmm-initramfs.sh'
+builder_source = builder.read_text()
+builder_fixture = temporary / 'initramfs-flag'
+builder_bin = builder_fixture / 'bin'
+builder_bin.mkdir(parents=True)
+builder_trace = builder_fixture / 'cargo.jsonl'
+sentinel = builder_bin / 'cargo'
+sentinel.write_text('''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['BUILDER_TRACE'], 'a') as output:
+    output.write(json.dumps(dict(args=sys.argv[1:], target=os.environ.get('CARGO_TARGET_DIR'))) + '\\n')
+sys.exit(47)
+''')
+sentinel.chmod(0o755)
+builder_env = dict(PATH=f'{builder_bin}:{os.environ["PATH"]}', HOME=str(builder_fixture),
+                   CARGO_HOME=str(builder_fixture), BUILDER_TRACE=str(builder_trace))
+for arguments in (
+    ['--workload-network-fixture'],
+    ['--verify', '--workload-network-fixture'],
+    ['--probe', '/synthetic/probe', '--output', '/synthetic/output', '--workload-network-fixture'],
+    ['--verify-root', '--workload-network-fixture'],
+    ['--verify-root', '--workload-network-fixture', '--workload-network-fixture'],
+):
+    result = subprocess.run(['bash', str(builder), *arguments], env=builder_env,
+                            text=True, capture_output=True)
+    assert result.returncode == 2, (arguments, result.stderr)
+    assert not builder_trace.exists()
+    assert 'reproducibility OK' not in result.stdout
+
+function_runner = builder_fixture / 'scripts/ci/verify/build-function-fixture.sh'
+function_runner.parent.mkdir(parents=True)
+function_runner.write_text(builder_source.split("VERIFY_WORK=''", 1)[0] + '''
+workload_network_fixture="$1"
+RUST_TOOLS_DIR="$2"
+build_one "$3" "$4"
+''')
+build_cases = 0
+for enabled in (0, 1):
+    for tree in ('target-a', 'target-b'):
+        for target in ('aarch64-unknown-linux-musl', 'x86_64-unknown-linux-musl'):
+            builder_trace.write_text('')
+            destination = builder_fixture / tree
+            result = subprocess.run(['bash', str(function_runner), str(enabled), str(builder_bin),
+                                     str(destination), target], env=builder_env,
+                                    text=True, capture_output=True)
+            assert result.returncode == 47, result.stderr
+            records = [json.loads(line) for line in builder_trace.read_text().splitlines()]
+            expected_build = ['build', '--locked', '--release', '--target', target,
+                              '-p', 'codewire-vmm-guest-probe', '--bin', 'codewire-vmm-guest-probe']
+            if enabled:
+                expected_build += ['--features', workload_feature]
+            assert records == [dict(args=expected_build, target=str(destination))], records
+            assert 'reproducibility OK' not in result.stdout
+            build_cases += 1
+print(f'Initramfs flag boundary: 5 rejected modes; {build_cases} feature/failure traces passed')
 PY

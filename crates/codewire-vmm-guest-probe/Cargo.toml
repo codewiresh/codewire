@@ -7,6 +7,10 @@ authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Minimal Codewire microVM guest init and authenticated daemon probe."
 
+[features]
+default = []
+macos-workload-network-fixture = []
+
 [lib]
 name = "codewire_vmm_guest_probe"
 path = "src/lib.rs"

@@ -14,7 +14,7 @@ private struct Response: Encodable {
 private func usage() -> Never {
   FileHandle.standardError.write(
     Data(
-      "usage: codewire-vz-runner (validate|inode-probe|inode-probe-path-control|production-init-fixture|console-pair-fixture) --control-fd FD\n"
+      "usage: codewire-vz-runner (validate|inode-probe|inode-probe-path-control|production-init-fixture|console-pair-fixture|workload-network-fixture) --control-fd FD\n"
         .utf8
     )
   )
@@ -26,7 +26,7 @@ private func run() throws {
   guard arguments.count == 4,
     [
       "validate", "inode-probe", "inode-probe-path-control", "production-init-fixture",
-      "console-pair-fixture",
+      "console-pair-fixture", "workload-network-fixture",
     ].contains(
       arguments[1]),
     arguments[2] == "--control-fd",
@@ -35,6 +35,16 @@ private func run() throws {
   else { usage() }
 
   #if canImport(Virtualization) && os(macOS)
+    if arguments[1] == "workload-network-fixture" {
+      signal(SIGPIPE, SIG_IGN)
+      signal(SIGALRM, SIG_DFL)
+      alarm(190)
+      guard cw_vz_prepare_control(controlDescriptor) == 0 else { throw IPCError.rejected(-4) }
+      let request = try PrivateIPC.receiveWorkloadNetwork(controlDescriptor: controlDescriptor)
+      try WorkloadNetworkRuntime.run(request: request, controlDescriptor: controlDescriptor)
+      alarm(0)
+      return
+    }
     if arguments[1] == "console-pair-fixture" {
       signal(SIGPIPE, SIG_IGN)
       signal(SIGALRM, SIG_DFL)

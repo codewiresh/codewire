@@ -999,6 +999,32 @@ run_present_paths_case macos_product_network pull_request refs/pull/20644/head f
   scripts/dev/macos-vz-product-network.py scripts/dev/test-macos-vz-product-network.py
 run_present_paths_case macos_product_network_unknown pull_request refs/pull/20645/head false \
   "$all_product" scripts/dev/macos-vz-product-network-future.py
+run_present_paths_case macos_workload_network pull_request refs/pull/20646/head true \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/dev/macos-vz-workload-network.py scripts/dev/test-macos-vz-workload-network.py
+run_present_paths_case macos_workload_network_unknown pull_request refs/pull/20647/head false \
+  "$all_product" scripts/dev/macos-vz-workload-network-future.py
+run_paths_case macos_workload_network_rust pull_request refs/pull/20648/head true \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/src/bin/codewire-macos-workload-network-fixture.rs \
+  crates/codewire-local-vmm/src/bin/vz_workload_network_fixture/mod.rs \
+  crates/codewire-local-vmm/src/bin/vz_workload_network_fixture/workload.rs \
+  crates/codewire-local-vmm/src/bin/vz_workload_network_fixture/tests.rs \
+  crates/codewire-local-vmm/src/bin/vz_production_fixture/common.rs \
+  crates/codewire-local-vmm/src/bin/vz_production_fixture/session.rs
+run_paths_case macos_workload_network_client pull_request refs/pull/20649/head true \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-vmm-guest-probe/src/macos_workload_network_fixture.rs
+run_paths_case macos_workload_network_native pull_request refs/pull/20650/head true \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerProtocol/WorkloadNetwork.swift \
+  crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerRuntime/WorkloadNetworkRuntime.swift \
+  crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerRuntime/WorkloadNetworkMachine.swift \
+  crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerRuntime/WorkloadNetworkLifecycle.swift \
+  crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerRuntime/WorkloadNetworkWire.swift \
+  crates/codewire-local-vmm/macos-vz-runner/Tests/CodewireVZRunnerTests/WorkloadNetworkTests.swift
+run_paths_case macos_workload_network_documentation pull_request refs/pull/20651/head true \
+  "$policy" docs/dev/MACOS-WORKLOAD-NETWORK.md
 run_paths_case macos_console_pair_rust pull_request refs/pull/20643/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/src/macos_console_pair_fixture/runtime.rs

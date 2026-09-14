@@ -375,7 +375,7 @@ import Foundation
     return (first, second)
   }
 
-  private func nonblocking(_ descriptor: Int32) throws {
+  func nonblocking(_ descriptor: Int32) throws {
     let flags = fcntl(descriptor, F_GETFL)
     guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
       throw ConsolePairError.io
@@ -387,7 +387,7 @@ import Foundation
       descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
   }
 
-  private func readAvailable(_ descriptor: Int32, maximum: Int) throws -> Data? {
+  func readAvailable(_ descriptor: Int32, maximum: Int) throws -> Data? {
     var bytes = [UInt8](repeating: 0, count: maximum)
     let count = Darwin.read(descriptor, &bytes, bytes.count)
     if count < 0 && (errno == EAGAIN || errno == EINTR) { return Data() }
@@ -395,7 +395,7 @@ import Foundation
     return count == 0 ? nil : Data(bytes.prefix(count))
   }
 
-  private func writeAvailable(_ descriptor: Int32, buffer: inout Data) throws {
+  func writeAvailable(_ descriptor: Int32, buffer: inout Data) throws {
     guard !buffer.isEmpty else { return }
     let count = buffer.withUnsafeBytes { raw in Darwin.write(descriptor, raw.baseAddress, raw.count)
     }

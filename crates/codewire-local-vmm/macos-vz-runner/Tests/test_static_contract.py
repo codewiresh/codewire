@@ -273,4 +273,91 @@ bridge = source("Sources/CVZRunnerIPC/ProductionBridge.c")
 if "CW_VZ_BRIDGE_BUFFER_BYTES" not in bridge or "CLOCK_MONOTONIC" not in bridge:
     fail("production bridge lost resource bounds")
 
+workload_protocol = source("Sources/CodewireVZRunnerProtocol/WorkloadNetwork.swift")
+for required in (
+    "schemaVersion = 4", "descriptorCount = 10",
+    "case kernel, initialRamdisk, seedDisk, stateDisk, rootDisk, setupDisk",
+    "case serviceInitialRamdisk, serviceBinding, progress, daemon",
+    "Set(root.keys) == [", "try production.validate()", "serviceBinding.size == 4096",
+    "cw_vz_validate_workload_network_descriptors", "cw_vz_receive_workload_network_request",
+):
+    if required not in workload_protocol:
+        fail(f"workload-network lost exact ten-FD admission: {required}")
+if "validate_artifacts_and_channels(control_fd, descriptors, 8, 2)" not in ipc:
+    fail("workload-network requires eight artifacts and only two private channels")
+
+workload_machine = source("Sources/CodewireVZRunnerRuntime/WorkloadNetworkMachine.swift")
+for required in (
+    "configuration.networkDevices = []", "configuration.directorySharingDevices = []",
+    "configuration.socketDevices = []", "port.isConsole = false",
+    "(0, ConsolePairProtocol.packetPort, nil as VZSerialPortAttachment?)",
+    "virtualMachine === machine", "error == nil ? .stopSucceeded : .stopFailed",
+):
+    if required not in workload_machine:
+        fail(f"workload-network lost service topology/stop boundary: {required}")
+
+workload_runtime = source("Sources/CodewireVZRunnerRuntime/WorkloadNetworkRuntime.swift")
+workload_lifecycle = source("Sources/CodewireVZRunnerRuntime/WorkloadNetworkLifecycle.swift")
+for required in (
+    "FileHandle(fileDescriptor: connection.fileDescriptor, closeOnDealloc: false)",
+    "fileHandleForReading: handle, fileHandleForWriting: handle",
+    "let connection = try self.connect(port: 7775)", "var bytes = held",
+    "port.attachment == nil", "port.attachment = owned.attachment",
+    "port.attachment = nil", "self.life.didDetach(consumerTerminal: self.service.snapshot().terminal)",
+    "self.life.claimClose() { packet.connection.close() }",
+    "for role in [WorkloadNetworkDescriptorRole.progress, .daemon]",
+    "let states = [production.drain(), service.drain()]", "if event == 0 { actualStops.insert(role) }",
+):
+    if required not in workload_runtime:
+        fail(f"workload-network lost borrowed-connection/lifecycle boundary: {required}")
+if "actualStops == [1, 2] && daemonDrained" not in workload_lifecycle:
+    fail("workload-network must drain poweroff response before helper completion")
+workload_bridge = workload_runtime.split("private func bridge(", 1)[-1].split(
+    "private func relay()", 1)[0]
+if ("WorkloadNetworkProtocol.stopSeconds" in workload_bridge or
+        "daemonStopDeadline" in workload_bridge):
+    fail("normal daemon drain must not borrow the forced-cleanup stop budget")
+for required in (
+    "let deadline = workloadNow() + WorkloadNetworkProtocol.runtimeSeconds",
+    "guard workloadNow() < deadline", "WorkloadNetworkLifecycle.mayComplete(",
+    "actualStops: actualStops, daemonDrained: daemonDrainedNow",
+    "let stopDeadline = workloadNow() + WorkloadNetworkProtocol.stopSeconds",
+):
+    if required not in workload_runtime:
+        fail(f"workload-network lost central completion/cleanup bound: {required}")
+for forbidden in (
+    "VZNATNetworkDeviceAttachment", "VZBridgedNetworkDeviceAttachment",
+    "VZFileHandleNetworkDeviceAttachment", "VZVirtioFileSystemDeviceConfiguration",
+    "Process(", "Darwin.read(connection", "Darwin.write(connection",
+    "Darwin.read(packet", "Darwin.write(packet", "handle.close(",
+):
+    if forbidden in workload_machine + workload_runtime:
+        fail(f"workload-network acquired prohibited host authority: {forbidden}")
+if 'arguments[1] == "workload-network-fixture"' not in main:
+    fail("workload-network must remain a distinct developer-only command")
+
+workload_binary = re.search(
+    r'^\[\[bin\]\]\s*\nname = "codewire-macos-workload-network-fixture"\n(.*?)(?=^\[|\Z)',
+    (local_vmm / "Cargo.toml").read_text(), re.M | re.S,
+)
+if (workload_binary is None or
+        'required-features = ["macos-workload-network-fixture"]' not in workload_binary.group(1)):
+    fail("workload-network binary must require its distinct developer feature")
+guest_root = ROOT / "crates/codewire-vmm-guest-probe/src"
+for path, pattern in (
+    (guest_root / "lib.rs", r'#\[cfg\(feature = "macos-workload-network-fixture"\)\]\s*'
+     r'pub mod macos_workload_network_fixture;'),
+    (guest_root / "main.rs", r'#\[cfg\(feature = "macos-workload-network-fixture"\)\]\s*'
+     r'Some\("macos-workload-network-client"\)'),
+):
+    if not re.search(pattern, path.read_text()):
+        fail("workload client must remain excluded from the default guest")
+workload_host = "\n".join(
+    path.read_text() for path in sorted((local_vmm / "src/bin/vz_workload_network_fixture").glob("*.rs"))
+    if path.name != "tests.rs"
+)
+for forbidden in ("run_network_session", "DenyBroker", '"--network-fd"'):
+    if forbidden in workload_host:
+        fail(f"workload verifier acquired a host packet engine: {forbidden}")
+
 print("macOS VZ runner static boundary: OK")

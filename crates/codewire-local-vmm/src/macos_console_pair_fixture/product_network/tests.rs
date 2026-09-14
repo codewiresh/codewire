@@ -16,6 +16,19 @@ use super::{
 };
 use crate::macos_console_pair_fixture::{descriptor as fd, process};
 
+#[cfg(feature = "macos-workload-network-fixture")]
+#[test]
+fn actual_workload_client_and_service_endpoint_share_exact_transcript() {
+    use codewire_vmm_guest_probe::macos_workload_network_fixture as client;
+    use sha2::{Digest as _, Sha256};
+
+    assert_eq!(super::destination(), SocketAddr::V4(client::DESTINATION));
+    assert_eq!(payload(false), client::request_payload());
+    assert_eq!(payload(true), client::response_payload());
+    assert_eq!(<[u8; 32]>::from(Sha256::digest(payload(false))), client::REQUEST_SHA256);
+    assert_eq!(<[u8; 32]>::from(Sha256::digest(payload(true))), client::RESPONSE_SHA256);
+}
+
 #[test]
 fn topology_requests_and_inventory_are_strict() {
     let initial = fixtures::initial_inventory();

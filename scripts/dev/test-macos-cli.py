@@ -257,7 +257,7 @@ class HelperTests(unittest.TestCase):
         request = {"run_id": "fixture", "source_sha256": "source", "lock_sha256": "lock",
                    "component": component,
                    "helper_sha256": "helper", "timeout": 10, "action": action, "intel": True}
-        if component in ("vz-runner", "vz-fixture"):
+        if component == "vz-runner" or component in helper.VZ_FIXTURES:
             request["intel"] = False
         (run / "request.json").write_text(json.dumps(request))
         with tarfile.open(run / "source.tar.gz", "w:gz") as archive:
@@ -310,14 +310,20 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(Path(result["isolated_state"]).exists())
 
     def test_vz_production_fixture_is_opt_in_and_collects_only_its_binary(self):
-        run = self.worker_fixture("vz-fixture")
+        self.check_vz_fixture_plan("vz-fixture", "macos-production-init-fixture", "codewire-macos-vz-fixture")
+
+    def test_vz_workload_network_is_opt_in_and_collects_only_its_binary(self):
+        self.check_vz_fixture_plan("vz-workload-network", "macos-workload-network-fixture", "codewire-macos-workload-network-fixture")
+
+    def check_vz_fixture_plan(self, component, feature, executable):
+        run = self.worker_fixture(component)
         reader, writer = os.pipe()
         stdin = os.fdopen(reader, "r")
 
         def fixture_command(argv, cwd, env, log, cancel, deadline):
             log.write_text("synthetic build plan, not Mac execution")
             if argv[:2] == ["cargo", "build"]:
-                binary = Path(env["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug/codewire-macos-vz-fixture"
+                binary = Path(env["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug" / executable
                 binary.parent.mkdir(parents=True, exist_ok=True)
                 binary.write_bytes(b"synthetic developer fixture binary")
             return 0
@@ -335,14 +341,15 @@ class HelperTests(unittest.TestCase):
         result = json.loads((run / "result.json").read_text())
         cargo = [item["argv"] for item in result["commands"]
                  if item["argv"][0] == "cargo" and item["argv"][1] != "-V"]
-        self.assertEqual([command[1] for command in cargo], ["build", "test", "test", "clippy"])
+        expected = ["build", "test", "test", "clippy"] if component == "vz-fixture" else ["build", "test", "clippy"]
+        self.assertEqual([command[1] for command in cargo], expected)
         for command in cargo:
             self.assertIn("--offline", command)
             self.assertIn("--locked", command)
-            self.assertIn("macos-production-init-fixture", command)
+            self.assertIn(feature, command)
             self.assertIn("aarch64-apple-darwin", command)
             self.assertNotIn("cw", command)
-        self.assertEqual(set(result["artifacts"]), {"codewire-macos-vz-fixture-arm64"})
+        self.assertEqual(set(result["artifacts"]), {executable + "-arm64"})
         self.assertEqual(helper.evidence_status(run, "fixture"), "passed")
 
     def test_vz_runner_worker_plan_and_artifact_collection(self):

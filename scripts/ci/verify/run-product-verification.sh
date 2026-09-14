@@ -200,6 +200,7 @@ run_policy_core() {
   python3 scripts/dev/test-macos-vz-console-pair.py
   python3 scripts/dev/test-macos-vz-product-network.py
   python3 scripts/dev/test-macos-vz-production-boot.py
+  python3 scripts/dev/test-macos-vz-workload-network.py
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
@@ -597,9 +598,23 @@ run_transport() {
       --bin codewire-macos-vz-fixture
     cargo clippy --locked -p codewire-local-vmm --features macos-production-init-fixture \
       --bin codewire-macos-vz-fixture -- -D warnings
+    cargo test --locked -p codewire-local-vmm --features macos-workload-network-fixture \
+      --bin codewire-macos-workload-network-fixture
+    cargo clippy --locked -p codewire-local-vmm --features macos-workload-network-fixture \
+      --bin codewire-macos-workload-network-fixture -- -D warnings
+    # The workload client and isolated service endpoint must retain one exact
+    # transcript even though they are built by different feature entrypoints.
+    cargo test --locked -p codewire-local-vmm \
+      --features macos-product-network-fixture,macos-workload-network-fixture \
+      --lib macos_console_pair_fixture::product_network::tests::actual_workload_client_and_service_endpoint_share_exact_transcript \
+      -- --exact
   fi
   if selected transport_pkg_codewire_vmm_guest_probe; then
     scripts/ci/verify/build-local-vmm-initramfs.sh --verify
+    cargo test --locked -p codewire-vmm-guest-probe --features macos-workload-network-fixture \
+      --lib macos_workload_network_fixture::
+    cargo clippy --locked -p codewire-vmm-guest-probe --features macos-workload-network-fixture \
+      --lib --bin codewire-vmm-guest-probe -- -D warnings
   fi
   if selected transport_derp_contract; then
     run_derp_contract

@@ -16,7 +16,7 @@ READ_TEXT = Path.read_text
 
 
 class ConsolePairBoundaryTests(unittest.TestCase):
-    def check(self, path=None, old=None, new=None):
+    def check(self, path=None, old=None, new=None, output=None):
         def read(candidate, *args, **kwargs):
             value = READ_TEXT(candidate, *args, **kwargs)
             if candidate == path:
@@ -24,7 +24,8 @@ class ConsolePairBoundaryTests(unittest.TestCase):
                 return value.replace(old, new, 1)
             return value
 
-        output = io.StringIO()
+        if output is None:
+            output = io.StringIO()
         with mock.patch.object(Path, "read_text", read), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             exec(compile(GUARD_SOURCE, str(GUARD), "exec"), {"__file__": str(GUARD)})
@@ -54,6 +55,47 @@ class ConsolePairBoundaryTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as failure:
                     self.check(path, old, new)
                 self.assertEqual(failure.exception.code, 1)
+
+    def test_workload_network_mutations_fail_without_success(self):
+        protocol = PACKAGE / "Sources/CodewireVZRunnerProtocol/WorkloadNetwork.swift"
+        runtime = PACKAGE / "Sources/CodewireVZRunnerRuntime/WorkloadNetworkRuntime.swift"
+        lifecycle = PACKAGE / "Sources/CodewireVZRunnerRuntime/WorkloadNetworkLifecycle.swift"
+        machine = PACKAGE / "Sources/CodewireVZRunnerRuntime/WorkloadNetworkMachine.swift"
+        for path, old, new in (
+            (protocol, "descriptorCount = 10", "descriptorCount = 11"),
+            (protocol, "schemaVersion = 4", "schemaVersion = 3"),
+            (protocol, "serviceBinding, progress, daemon", "serviceBinding, network, progress, daemon"),
+            (machine, "configuration.networkDevices = []", "configuration.networkDevices = addedNICs"),
+            (runtime, "closeOnDealloc: false", "closeOnDealloc: true"),
+            (runtime, "port.attachment = nil", "port.attachment = packet.attachment"),
+            (runtime, "let connection = try self.connect(port: 7775)",
+             "let connection = try self.connect(port: 7775); Darwin.read(connection.fileDescriptor, nil, 0)"),
+            (lifecycle, "actualStops == [1, 2] && daemonDrained", "actualStops == [1, 2]"),
+            (runtime, "daemonDrained = true",
+             "daemonDrained = true; let stopDeadline = workloadNow() + WorkloadNetworkProtocol.stopSeconds"),
+            (runtime, "daemonDrained = true",
+             "daemonDrained = true; site = .daemonStopDeadline"),
+            (runtime, "actualStops: actualStops, daemonDrained: daemonDrainedNow",
+             "actualStops: actualStops, daemonDrained: true"),
+            (runtime, "let stopDeadline = workloadNow() + WorkloadNetworkProtocol.stopSeconds",
+             "let stopDeadline = Double.infinity"),
+            (ROOT / "crates/codewire-local-vmm/Cargo.toml",
+             'required-features = ["macos-workload-network-fixture"]', 'required-features = []'),
+            (ROOT / "crates/codewire-vmm-guest-probe/src/lib.rs",
+             '#[cfg(feature = "macos-workload-network-fixture")]\npub mod macos_workload_network_fixture;',
+             'pub mod macos_workload_network_fixture;'),
+            (ROOT / "crates/codewire-vmm-guest-probe/src/main.rs",
+             '#[cfg(feature = "macos-workload-network-fixture")]\n        Some("macos-workload-network-client")',
+             'Some("macos-workload-network-client")'),
+            (ROOT / "crates/codewire-local-vmm/src/bin/vz_workload_network_fixture/mod.rs",
+             "use std::", "use codewire_netstack::run_network_session;\nuse std::"),
+        ):
+            with self.subTest(contract=old):
+                output = io.StringIO()
+                with self.assertRaises(SystemExit) as failure:
+                    self.check(path, old, new, output)
+                self.assertEqual(failure.exception.code, 1)
+                self.assertNotIn("macOS VZ runner static boundary: OK", output.getvalue())
 
 
 if __name__ == "__main__":

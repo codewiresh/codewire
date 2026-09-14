@@ -912,7 +912,8 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/dev/macos-vz-inode-probe.py|scripts/dev/test-macos-vz-inode-probe.py|\
-      scripts/dev/macos-vz-production-boot.py|scripts/dev/test-macos-vz-production-boot.py)
+      scripts/dev/macos-vz-production-boot.py|scripts/dev/test-macos-vz-production-boot.py|\
+      scripts/dev/macos-vz-workload-network.py|scripts/dev/test-macos-vz-workload-network.py)
         # The entitlement-free parent tests share the macOS helper and guest
         # probe protocol, but never sign or start Virtualization.framework.
         select_token policy
