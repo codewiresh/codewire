@@ -25,8 +25,14 @@ fn actual_workload_client_and_service_endpoint_share_exact_transcript() {
     assert_eq!(super::destination(), SocketAddr::V4(client::DESTINATION));
     assert_eq!(payload(false), client::request_payload());
     assert_eq!(payload(true), client::response_payload());
-    assert_eq!(<[u8; 32]>::from(Sha256::digest(payload(false))), client::REQUEST_SHA256);
-    assert_eq!(<[u8; 32]>::from(Sha256::digest(payload(true))), client::RESPONSE_SHA256);
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(payload(false))),
+        client::REQUEST_SHA256
+    );
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(payload(true))),
+        client::RESPONSE_SHA256
+    );
 }
 
 #[test]
