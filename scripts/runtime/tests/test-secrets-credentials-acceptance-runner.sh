@@ -29,7 +29,9 @@ label=""
 case "$0" in
   */smoke-native-local-environment.sh) label=native-local ;;
   */smoke-local-platform-sources.sh)
-    if [[ "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 1 ]]; then
+    if [[ " $* " == *' --initial-private-checkout '* ]]; then
+      label=initial-private-checkout
+    elif [[ "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 1 ]]; then
       label=local-platform-mesh
     else
       label=local-platform
@@ -55,6 +57,13 @@ case "$label" in
        "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 0 &&
        -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
        -z "${LOCAL_PLATFORM_MESH_PROBE_BIN+x}" ]] || exit 94
+    ;;
+  initial-private-checkout)
+    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --initial-private-checkout" &&
+       "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 0 &&
+       "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}" == "$fixtures/checkout-fixture" &&
+       -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
+       -z "${LOCAL_PLATFORM_MESH_PROBE_BIN+x}" ]] || exit 102
     ;;
   local-platform-mesh)
     [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw" &&
@@ -135,7 +144,7 @@ EARLY_SETSID
 chmod 0755 "$FAKE_ROOT/fake-bin/setsid"
 
 for executable in normal-cw cw-local-credential-broker-smoke mesh derp data-plane \
-    credential-bridge state-probe image-import; do
+    credential-bridge state-probe image-import checkout-fixture; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_ROOT/fixtures/$executable"
   chmod 0755 "$FAKE_ROOT/fixtures/$executable"
 done
@@ -163,6 +172,7 @@ export LOCAL_PLATFORM_IMAGE=registry.example/workspace@sha256:aaaaaaaaaaaaaaaaaa
 export LOCAL_PLATFORM_NETWORK_ID=must-not-reach-baseline-or-mesh
 export LOCAL_PLATFORM_DISPOSABLE_NETWORK=1
 export LOCAL_PLATFORM_MESH_PROBE_BIN="$FAKE_ROOT/fixtures/dev-mesh-probe"
+export LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN="$FAKE_ROOT/fixtures/checkout-fixture"
 export EXPECTED_CODEWIRE_ADMIN_EMAIL=owner@example.test
 export EXPECTED_CODEWIRE_ADMIN_USER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export EXPECTED_CODEWIRE_ORGANIZATION_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -235,14 +245,27 @@ pass
 
 : >"$CALLS"
 expect_status 1 "$TEST_ROOT/default.out" "$RUNNER"
-printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh \
+printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh initial-private-checkout \
   | cmp -s - "$CALLS" || fail 'default matrix did not invoke each available fixed child once'
 grep -Fq 'live-providers                 NOT RUN (no checked-in live Codex/GitHub/OpenAI/Anthropic journey)' \
   "$TEST_ROOT/default.out" || fail 'missing live providers were not reported honestly'
-grep -Fq 'initial-private-checkout       NOT RUN (no checked-in initial private-checkout journey)' \
-  "$TEST_ROOT/default.out" || fail 'missing private checkout was not reported honestly'
+grep -Eq 'initial-private-checkout +PASS' "$TEST_ROOT/default.out" || fail 'local private checkout did not run'
+grep -Fq 'dev-initial-private-checkout   NOT RUN (no checked-in hosted initial private-checkout journey)' \
+  "$TEST_ROOT/default.out" || fail 'missing hosted private checkout was not reported honestly'
 grep -Fq 'aggregate result: INCOMPLETE; full acceptance: NOT CLAIMED' "$TEST_ROOT/default.out" ||
   fail 'default matrix claimed completion'
+pass
+
+: >"$CALLS"
+expect_status 0 "$TEST_ROOT/checkout.out" "$RUNNER" --only initial-private-checkout
+[[ "$(cat "$CALLS")" == initial-private-checkout ]] || fail 'selected checkout ran another journey'
+pass
+saved_checkout_fixture="$LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN"
+export LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN="$TEST_ROOT/missing"
+: >"$CALLS"
+expect_status 1 "$TEST_ROOT/checkout-missing.out" "$RUNNER" --only initial-private-checkout
+[[ ! -s "$CALLS" ]] || fail 'missing checkout fixture started a journey'
+export LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN="$saved_checkout_fixture"
 pass
 
 : >"$CALLS"

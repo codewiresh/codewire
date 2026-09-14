@@ -131,7 +131,7 @@ for failure in info wrong-environment wrong-profile wrong-revision missing-revis
 done
 # Profile enumeration must use the existing collection command. A selected
 # profile followed by list is an alias for Get, so it fails for a fresh name.
-profile_calls="$(declare -f prepare_provider_ssh cleanup_provider_ssh_profile)"
+profile_calls="$(declare -f prepare_provider_ssh_identity cleanup_provider_ssh_profile)"
 [[ "$(grep -cF 'credentials --platform profiles list --output json' <<<"$profile_calls")" == 3 ]]
 if grep -E 'credentials --platform --profile .* list --output json' <<<"$profile_calls"; then
   fail 'selected-profile Get used as collection enumeration'
