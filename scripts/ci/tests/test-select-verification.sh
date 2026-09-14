@@ -417,6 +417,25 @@ run_paths_case local_vmm_host_source pull_request refs/pull/5011/head false \
 run_paths_case macos_vz_runner_source pull_request refs/pull/50111/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerRuntime/Runtime.swift
+run_paths_case macos_sandbox_canary_source pull_request refs/pull/50112/head false \
+  'policy' \
+  crates/codewire-local-vmm/macos-sandbox-canary-experiment/Package.swift \
+  crates/codewire-local-vmm/macos-sandbox-canary-experiment/Sources/SandboxCandidate/main.swift \
+  crates/codewire-local-vmm/macos-sandbox-canary-experiment/Sources/CCanarySupport/CCanarySupport.c \
+  crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py
+run_paths_case macos_sandbox_canary_run_loop pull_request refs/pull/50115/head false \
+  'policy' \
+  crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_run_loop.swift
+run_paths_case macos_sandbox_canary_application_lifecycle pull_request refs/pull/50116/head false \
+  'policy' \
+  crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_application_lifecycle.swift
+run_paths_case macos_sandbox_canary_with_product_change pull_request refs/pull/50113/head false \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/macos-sandbox-canary-experiment/Package.swift \
+  crates/codewire-local-vmm/src/lib.rs
+run_paths_case macos_sandbox_canary_future_rust_input pull_request refs/pull/50114/head false \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/macos-sandbox-canary-experiment/src/lib.rs
 run_paths_case local_vmm_guest_source pull_request refs/pull/5012/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-vmm-guest-probe/src/lib.rs
@@ -1028,6 +1047,8 @@ run_paths_case macos_workload_network_documentation pull_request refs/pull/20651
 run_paths_case macos_console_pair_rust pull_request refs/pull/20643/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/src/macos_console_pair_fixture/runtime.rs
+run_present_paths_case macos_sandbox_canary_harness pull_request refs/pull/2066/head false \
+  "$policy" scripts/dev/macos-app-sandbox-canary.py scripts/dev/test-macos-app-sandbox-canary.py
 run_present_paths_case macos_vz_inode_probe pull_request refs/pull/2065/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-inode-probe.py scripts/dev/test-macos-vz-inode-probe.py
@@ -2474,6 +2495,8 @@ for policy_owner in \
     'scripts/ci/tests/test-rust-owned-fixtures.sh' \
     'scripts/ci/tests/test-dashboard-image-network-probe.sh' \
     'scripts/ci/tests/test-admin-proto-boundary.sh' \
+    'scripts/dev/test-macos-app-sandbox-canary.py' \
+    'crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py' \
     'scripts/checks/repo_checks.py license-map' \
     'scripts/checks/repo_checks.py permanent-raw-surface --self-test' \
     'scripts/checks/repo_checks.py rust-validation-source' \

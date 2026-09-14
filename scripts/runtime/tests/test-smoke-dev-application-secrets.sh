@@ -18,8 +18,23 @@ REAL_APPLICATION_PTY="$(declare -f run_application_secret_pty)"
 fail() { printf 'application smoke fixture: %s\n' "$*" >&2; exit 1; }
 pass() { APP_TEST_COUNT=$((APP_TEST_COUNT + 1)); }
 
+# Keep the real polling loop and readiness predicates, but advance its clock
+# only on retry sleeps. A one-second synthetic budget must not expire between
+# two date invocations before the first predicate runs on a busy CI worker.
+seconds_now() { cat "$TMPDIR_SMOKE/clock"; }
+sleep() {
+  if [[ "$#" == 1 && "$1" == 5 ]]; then
+    local current
+    read -r current <"$TMPDIR_SMOKE/clock"
+    printf '%s\n' "$((current + 5))" >"$TMPDIR_SMOKE/clock"
+  else
+    command sleep "$@"
+  fi
+}
+
 fixture() {
   TMPDIR_SMOKE="$(mktemp -d "$APP_TEST_ROOT/case.XXXXXXXX")"
+  printf '100\n' >"$TMPDIR_SMOKE/clock"
   APP_SECRET_PROJECTS=(); APP_SECRET_IDS=(); APP_SECRET_VALUES=(); APP_SECRET_HASHES=()
   APP_SECRET_USER_ATTEMPTS=(); APP_SECRET_ORG_ATTEMPTS=(); APP_SECRET_ALL_KEYS=()
   APP_SECRET_ALL_HASHES_A=(); APP_SECRET_ALL_HASHES_B=(); APP_SECRET_ALL_HASHES_CLEAR=()
@@ -217,6 +232,43 @@ expect_failure() {
   if ( "$@" ) >"$APP_TEST_ROOT/failure.out" 2>"$APP_TEST_ROOT/failure.err"; then fail "$label accepted invalid input"; fi
   pass
 }
+
+# These exercise the unchanged production wait_until with deterministic time,
+# independently of application metadata assertions below. Failed predicates
+# still take the real retry branch, and an expired deadline never polls.
+fixture
+wait_probe() {
+  printf 'attempt\n' >>"$TMPDIR_SMOKE/wait-attempts"
+  [[ "$APP_TEST_READY_AFTER" -gt 0 &&
+     "$(wc -l <"$TMPDIR_SMOKE/wait-attempts")" -ge "$APP_TEST_READY_AFTER" ]]
+}
+APP_TEST_READY_AFTER=1
+: >"$TMPDIR_SMOKE/wait-attempts"
+wait_until immediate-ready "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" wait_probe
+[[ "$(wc -l <"$TMPDIR_SMOKE/wait-attempts")" == 1 && "$(seconds_now)" == 100 ]] ||
+  fail 'immediate readiness did not poll exactly once before expiry'
+pass
+
+APP_TEST_READY_AFTER=2
+: >"$TMPDIR_SMOKE/wait-attempts"
+wait_until retry-ready "$(( $(seconds_now) + 6 ))" wait_probe
+[[ "$(wc -l <"$TMPDIR_SMOKE/wait-attempts")" == 2 && "$(seconds_now)" == 105 ]] ||
+  fail 'readiness retry did not preserve the five-second polling interval'
+pass
+
+APP_TEST_READY_AFTER=0
+: >"$TMPDIR_SMOKE/wait-attempts"
+expect_failure readiness-expired wait_until never-ready "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" wait_probe
+[[ "$(wc -l <"$TMPDIR_SMOKE/wait-attempts")" == 1 && "$(seconds_now)" == 110 ]] ||
+  fail 'failed readiness did not expire after its bounded retry'
+grep -Fx '[runtime-smoke] ERROR: timed out waiting for never-ready' "$APP_TEST_ROOT/failure.err" >/dev/null ||
+  fail 'expired readiness did not preserve its production diagnostic'
+
+APP_TEST_READY_AFTER=1
+: >"$TMPDIR_SMOKE/wait-attempts"
+expect_failure deadline-boundary wait_until already-expired "$(seconds_now)" wait_probe
+[[ ! -s "$TMPDIR_SMOKE/wait-attempts" && "$(seconds_now)" == 110 ]] ||
+  fail 'an already-expired deadline polled or slept'
 
 write_fresh_login_cw() {
   local target="$1"
