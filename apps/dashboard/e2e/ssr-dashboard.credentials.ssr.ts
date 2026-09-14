@@ -26,6 +26,7 @@ test.describe("managed provider credential browser journey", () => {
     const email = `e2e-github-${randomUUID()}@codewire.sh`;
     const slug = `github-journey-${randomUUID().replaceAll("-", "")}`;
     let orgId = "";
+    let primaryFailure: unknown;
     await seedSyntheticUser(email, "GitHub enrollment fixture");
     try {
       await bypassTwoFactor(email);
@@ -90,7 +91,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(row).toHaveCount(1);
       await expect(row).toContainText("Generation 1");
 
-      const profileName = "GitHub repository browser";
+      const profileName = "github-repository-browser";
       const createProfile = page.locator('form[action^="/settings/credentials/_actions/profiles/create"]');
       await createProfile.getByRole("textbox", { name: "Profile name", exact: true }).fill(profileName);
       const githubChoice = createProfile.getByRole("combobox", { name: "GitHub", exact: true });
@@ -98,7 +99,11 @@ test.describe("managed provider credential browser journey", () => {
       if (!credentialId) throw new Error("Verified GitHub connection was not selectable");
       await githubChoice.selectOption(credentialId);
       await createProfile.getByRole("button", { name: "Create profile", exact: true }).click();
+      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=profile-created`);
+      await expect(page.getByRole("status")).toHaveText("Credential profile created.");
       let profileRow = page.locator(".cw-profile-row", { hasText: profileName });
+      await expect(profileRow).toHaveCount(1);
+      await expect(profileRow).toBeVisible();
       const profileId = await profileRow.locator('[name="profile_id"]').first().inputValue();
 
       await page.goto(`/${slug}/new/`);
@@ -167,14 +172,31 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-deleted`);
       await expect(page.getByRole("status")).toHaveText("Credential deleted.");
       await expect(page.locator(".cw-credential-row", { hasText: name })).toHaveCount(0);
+    } catch (error) {
+      primaryFailure = error;
+      throw error;
     } finally {
       // Allow bounded normal teardown even when creation/verification timed out.
       test.setTimeout(test.info().timeout + 150_000);
-      if (orgId) await destroyGithubCheckout(page, orgId);
-      if (!page.isClosed()) await page.close();
-      await page.context().clearCookies();
-      await cleanupTestOrg(slug);
-      await cleanupUser(email);
+      try {
+        // Never remove ownership records unless normal destruction or absence
+        // is proved. Playwright owns this test's isolated browser context and
+        // closes it itself, including after a timeout.
+        if (orgId) await destroyGithubCheckout(page, orgId);
+        const cleanupFailures: unknown[] = [];
+        for (const cleanup of [() => cleanupTestOrg(slug), () => cleanupUser(email)]) {
+          try { await cleanup(); } catch (error) { cleanupFailures.push(error); }
+        }
+        if (cleanupFailures.length) {
+          throw new AggregateError(cleanupFailures, "GitHub fixture cleanup failed", { cause: cleanupFailures[0] });
+        }
+      } catch (error) {
+        if (primaryFailure !== undefined) {
+          // Playwright serializes Error.cause, but not AggregateError.errors.
+          throw new AggregateError([primaryFailure, error], "GitHub journey and cleanup failed", { cause: primaryFailure });
+        }
+        throw error;
+      }
     }
   });
 });

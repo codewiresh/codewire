@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve the editable design system with production font asset paths."""
+"""Serve the editable design system with production browser asset paths."""
 
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -21,12 +21,15 @@ TERMINAL_ASSET_ROUTES = {
         "xterm-6.0.0.js", "xterm-6.0.0.css", "addon-fit-0.11.0.js", "addon-web-links-0.12.0.js"
     )
 }
+HTMX_ASSET = REPOSITORY_ROOT / "crates" / "codewire-dashboard-web" / "assets" / "htmx-2.0.10.min.js"
 
 
 class DesignSystemHandler(SimpleHTTPRequestHandler):
     """Keep the production font URLs valid in the static authoring preview."""
 
     def translate_path(self, path: str) -> str:
+        if urlsplit(path).path == "/assets/codewire/htmx-2.0.10.min.js":
+            return str(HTMX_ASSET)
         font_name = FONT_ROUTES.get(urlsplit(path).path)
         if font_name is not None:
             return str(FONT_ROOT / font_name)

@@ -1732,6 +1732,7 @@ dependencies = [
  "base64",
  "buffa",
  "chrono",
+ "codewire-access",
  "codewire-admin-proto",
  "codewire-oidc",
  "codewire-project",

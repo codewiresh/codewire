@@ -972,9 +972,7 @@ fn build_settings_data(
     for profile in profiles {
         if exact_id(&profile.id).is_err()
             || !seen_profiles.insert(profile.id.clone())
-            || profile.name.is_empty()
-            || profile.name.len() > 128
-            || profile.name.bytes().any(|byte| byte.is_ascii_control())
+            || codewire_access::AccessProfileName::parse(&profile.name).is_err()
             || profile.revision == 0
             || profile.revision > i64::MAX as u64
             || profile.entries.len() > 5
@@ -1135,9 +1133,7 @@ fn validate_profile_ack(
     if exact_id(&profile.id).is_err()
         || expected_id.is_some_and(|id| profile.id != id)
         || expected_name.is_some_and(|name| profile.name != name)
-        || profile.name.is_empty()
-        || profile.name.len() > 128
-        || profile.name.bytes().any(|byte| byte.is_ascii_control())
+        || codewire_access::AccessProfileName::parse(&profile.name).is_err()
         || profile.revision != expected_revision
         || canonical_entries(&profile.entries)? != *expected_entries
     {
@@ -1390,6 +1386,12 @@ mod tests {
         };
         validate_profile_ack(&create_ack, None, Some("work"), 1, &expected).unwrap();
         assert!(validate_profile_ack(&create_ack, None, Some("other"), 1, &expected).is_err());
+
+        let mut invalid_name = create_ack.clone();
+        invalid_name.name = "GitHub repository browser".into();
+        assert!(validate_profile_ack(&invalid_name, None, None, 1, &expected).is_err());
+        invalid_name.entries.clear();
+        assert!(build_settings_data(Vec::new(), vec![invalid_name]).is_err());
 
         let mut malformed = create_ack;
         malformed.id = "not-an-id".into();

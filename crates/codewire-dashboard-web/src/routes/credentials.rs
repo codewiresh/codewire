@@ -8,6 +8,7 @@ use axum::{
     response::Response,
 };
 use chrono::{NaiveDateTime, Utc};
+use codewire_access::AccessProfileName;
 use codewire_proto::codewire::v1::AccessProfileEntry;
 use connectrpc::ErrorCode;
 use serde::Deserialize;
@@ -654,7 +655,7 @@ fn entries(
 }
 
 fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 128 && !name.bytes().any(|byte| byte.is_ascii_control())
+    AccessProfileName::parse(name).is_ok()
 }
 
 fn valid_credential_name(name: &str) -> bool {
@@ -726,7 +727,9 @@ fn credential_mutation_error(
 }
 
 fn mutation_error_code(code: ErrorCode, delete: bool) -> &'static str {
-    if code == ErrorCode::Aborted || code == ErrorCode::AlreadyExists {
+    if code == ErrorCode::InvalidArgument {
+        "profile-invalid"
+    } else if code == ErrorCode::Aborted || code == ErrorCode::AlreadyExists {
         "profile-conflict"
     } else if delete && code == ErrorCode::FailedPrecondition {
         "profile-in-use"
@@ -781,7 +784,9 @@ fn approved_error(code: &str) -> &'static str {
             "The credential operation may have completed. Reload and inspect it before retrying."
         }
         "credential-request-failed" => "The credential change could not be completed. Try again.",
-        "profile-invalid" => "The credential profile is invalid.",
+        "profile-invalid" => {
+            "Check the profile name and selected credentials. Use 1–128 lowercase letters, numbers, hyphens, underscores or dots; start and end with a letter or number."
+        }
         "profile-conflict" => "The credential profile changed. Reload and try again.",
         "profile-in-use" => "The credential profile is still in use and cannot be deleted.",
         "request-failed" => "The credential profile change could not be completed. Try again.",
@@ -792,6 +797,32 @@ fn approved_error(code: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_names_match_the_shared_identifier_contract() {
+        for name in [
+            "a",
+            "1",
+            "github-repository-browser",
+            "work_1.v2",
+            &"a".repeat(128),
+        ] {
+            assert!(valid_name(name), "valid profile name: {name}");
+        }
+        for name in [
+            "",
+            "GitHub repository browser",
+            "Work",
+            "work profile",
+            "-work",
+            "work.",
+            "wörk",
+            &"a".repeat(129),
+        ] {
+            assert!(!valid_name(name), "invalid profile name: {name}");
+        }
+        assert!(valid_credential_name("Work API"));
+    }
 
     #[test]
     fn entries_are_closed_and_use_exact_credential_ids() {
@@ -875,6 +906,11 @@ mod tests {
         );
         assert!(approved_message("attacker text").is_empty());
         assert!(approved_error("attacker text").is_empty());
+        assert_eq!(
+            mutation_error_code(ErrorCode::InvalidArgument, false),
+            "profile-invalid"
+        );
+        assert!(approved_error("profile-invalid").contains("selected credentials"));
         assert_eq!(
             mutation_error_code(ErrorCode::FailedPrecondition, false),
             "request-failed"

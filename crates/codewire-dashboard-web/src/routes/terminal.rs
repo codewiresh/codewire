@@ -101,6 +101,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_htmx_uses_external_indicator_styles_under_strict_csp() {
+        let template = include_str!("../../templates/terminal.html");
+        let config = template
+            .split("name=\"htmx-config\" content='")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(config).unwrap();
+        assert_eq!(config["includeIndicatorStyles"], false);
+        assert_eq!(config["allowEval"], false);
+        assert_eq!(config["allowScriptTags"], false);
+    }
+
+    #[test]
     fn browser_websocket_origin_is_same_host_and_protocol_bounded() {
         assert_eq!(
             browser_websocket_origin("http://127.0.0.1:5173", "http://127.0.0.1:8080").as_deref(),
