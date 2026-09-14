@@ -103,6 +103,25 @@ invalidates a trust boundary, remove or defer that slice before spending the
 expensive gate. Keep the main checkout clean, investigate unexpected dirt before
 changing it, and reconcile `origin/main` immediately before landing.
 
+## Worktree and artifact lifecycle
+
+On the owner workstation, keep the canonical checkout at
+`/home/user/src/codewire/codewire` and put every new linked worktree under
+`/home/user/src/worktrees/codewire/codewire/<task-slug>`. Do not create new
+worktrees in `/home/user/t`, `/tmp`, cache directories, or beside the canonical
+checkout. On another machine, use its dedicated worktree root with the same
+`<owner>/<repository>/<task-slug>` organization. Begin each task from current
+`origin/main` and use one stable, readable task slug for its branch and path.
+
+The agent that creates a worktree owns its automatic cleanup. After the task is
+merged, closed, or explicitly abandoned, stop its processes; remove its
+disposable runtime, cache, and build artifacts; prove the worktree is clean and
+its commits are merged, pushed, or intentionally preserved; then remove it from
+the canonical checkout and prune stale worktree metadata. Delete the local task
+branch only after proving it contains no unique work. Never force-remove a dirty
+worktree or delete shared caches, toolchains, or paths used by another live
+task. If safe cleanup cannot finish, retain the exact path and report the reason.
+
 ## Delivery and verification
 
 Forgejo `origin` is canonical; GitHub is a mirror. Branch from current
