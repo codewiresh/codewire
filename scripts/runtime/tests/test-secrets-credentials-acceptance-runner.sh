@@ -33,6 +33,8 @@ case "$0" in
       label=initial-private-checkout
     elif [[ " $* " == *' --live-codex '* ]]; then
       label=live-codex
+    elif [[ " $* " == *' --live-anthropic '* ]]; then
+      label=live-anthropic
     elif [[ "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 1 ]]; then
       label=local-platform-mesh
     else
@@ -67,8 +69,8 @@ case "$label" in
        -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
        -z "${LOCAL_PLATFORM_MESH_PROBE_BIN+x}" ]] || exit 102
     ;;
-  live-codex)
-    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --live-codex" &&
+  live-codex|live-anthropic)
+    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --$label" &&
        "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 0 &&
        -z "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN+x}" &&
        -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
@@ -255,10 +257,11 @@ pass
 
 : >"$CALLS"
 expect_status 1 "$TEST_ROOT/default.out" "$RUNNER"
-printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh live-codex initial-private-checkout \
+printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh live-codex live-anthropic initial-private-checkout \
   | cmp -s - "$CALLS" || fail 'default matrix did not invoke each available fixed child once'
 grep -Eq 'live-codex +PASS' "$TEST_ROOT/default.out" || fail 'live Codex did not run'
-for provider in live-github live-openai live-anthropic; do
+grep -Eq 'live-anthropic +PASS' "$TEST_ROOT/default.out" || fail 'live Anthropic did not run'
+for provider in live-github live-openai; do
   grep -Eq "$provider +NOT RUN \(no checked-in $provider journey\)" \
     "$TEST_ROOT/default.out" || fail 'Codex success concealed a missing provider journey'
 done
@@ -289,6 +292,28 @@ expect_status 1 "$TEST_ROOT/codex-failure.out" "$RUNNER"
 rm "$FAKE_ROOT/fixtures/fail-live-codex"
 grep -Eq 'live-codex +FAIL' "$TEST_ROOT/codex-failure.out" || fail 'Codex failure was lost'
 if grep -qx initial-private-checkout "$CALLS"; then fail 'matrix continued after Codex cleanup failure'; fi
+pass
+
+: >"$CALLS"
+expect_status 0 "$TEST_ROOT/anthropic.out" "$RUNNER" --only live-anthropic
+[[ "$(cat "$CALLS")" == live-anthropic ]] || fail 'selected Anthropic ran another journey'
+grep -Fq 'selected result: PASS; full acceptance: NOT CLAIMED' "$TEST_ROOT/anthropic.out" ||
+  fail 'selected Anthropic claimed full acceptance'
+pass
+
+: >"$CALLS"
+export ACCEPTANCE_NORMAL_CW_BIN="$ACCEPTANCE_SYNTHETIC_CW_BIN"
+expect_status 1 "$TEST_ROOT/anthropic-wrong-cli.out" "$RUNNER" --only live-anthropic
+export ACCEPTANCE_NORMAL_CW_BIN="$saved_normal_cw"
+[[ ! -s "$CALLS" ]] || fail 'live Anthropic accepted synthetic cw'
+pass
+
+: >"$CALLS"
+touch "$FAKE_ROOT/fixtures/fail-live-anthropic"
+expect_status 1 "$TEST_ROOT/anthropic-failure.out" "$RUNNER"
+rm "$FAKE_ROOT/fixtures/fail-live-anthropic"
+grep -Eq 'live-anthropic +FAIL' "$TEST_ROOT/anthropic-failure.out" || fail 'Anthropic failure was lost'
+if grep -qx initial-private-checkout "$CALLS"; then fail 'matrix continued after Anthropic cleanup failure'; fi
 pass
 
 : >"$CALLS"
