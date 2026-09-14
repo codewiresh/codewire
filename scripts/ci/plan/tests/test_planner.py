@@ -26,6 +26,26 @@ PRODUCTION_GRAPH = json.loads(
     (PLANNER_PATH.parent / "artifact-graph.json").read_text()
 )
 WORKSPACE_VERIFICATION_SPEC = PRODUCTION_GRAPH["artifacts"]["workspace_image_verification"]
+CREDENTIAL_ACCEPTANCE_PATHS = (
+    "scripts/runtime/dev/provider-anthropic-output.py",
+    "scripts/runtime/dev/provider-anthropic-smoke.sh",
+    "scripts/runtime/dev/provider-anthropic-workload.sh",
+    "scripts/runtime/dev/provider-codex-output.py",
+    "scripts/runtime/dev/provider-codex-smoke.sh",
+    "scripts/runtime/dev/provider-codex-workload.sh",
+    "scripts/runtime/dev/provider-openai-smoke.sh",
+    "scripts/runtime/dev/provider-openai-workload.py",
+    "scripts/runtime/dev/run-secrets-credentials-acceptance.sh",
+    "scripts/runtime/dev/smoke-local-platform-sources.sh",
+    "scripts/runtime/tests/test-local-platform-sources-smoke.sh",
+    "scripts/runtime/tests/test-provider-anthropic-smoke.sh",
+    "scripts/runtime/tests/test-provider-anthropic-workload.py",
+    "scripts/runtime/tests/test-provider-codex-smoke.sh",
+    "scripts/runtime/tests/test-provider-codex-workload.py",
+    "scripts/runtime/tests/test-provider-openai-smoke.sh",
+    "scripts/runtime/tests/test-provider-openai-workload.py",
+    "scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh",
+)
 
 
 def fixture_cargo_metadata(tree: Path, manifest: Path, _cargo_env: dict[str, str]) -> dict:
@@ -172,17 +192,7 @@ class FixtureRepository:
                 "scripts/ci/plan/artifact-graph.json",
                 "scripts/ci/plan/planner.py",
             ],
-            "non_artifact_inputs": [
-                ".agents/**",
-                ".gitea/workflows/mirror-github.yaml",
-                "AGENTS.md",
-                "CLAUDE.md",
-                "docs/**",
-                "scripts/ci/images/cosign-private-signing-config.json",
-                "scripts/ci/images/sign-runtime-image-set.sh",
-                "scripts/ci/tests/test-sign-runtime-image-set.sh",
-                "scripts/ci/trust/codewire-runtime-signing.pub",
-            ],
+            "non_artifact_inputs": list(PRODUCTION_GRAPH["non_artifact_inputs"]),
             "artifacts": {
                 "dev_release_tree": {
                     "kind": "file-set",
@@ -1417,6 +1427,74 @@ class PlannerFixtureTests(unittest.TestCase):
                 for artifact in document["artifacts"].values()
             )
         )
+
+    def test_credential_acceptance_paths_keep_capability_checks_without_artifact_changes(self) -> None:
+        for path in CREDENTIAL_ACCEPTANCE_PATHS:
+            self.assertIn(path, PRODUCTION_GRAPH["non_artifact_inputs"])
+            self.repo.write(path, "# Synthetic acceptance-only edit\n")
+        self.repo.commit("credential acceptance helpers")
+        document = self.repo.plan()
+        self.assertTrue(all(
+            artifact["state"] == "unaffected"
+            for artifact in document["artifacts"].values()
+        ))
+        capabilities = select_capabilities(list(CREDENTIAL_ACCEPTANCE_PATHS))
+        self.assertIn("|runtime_dev_smoke|", capabilities["selection"])
+        self.assertIn("|policy|", capabilities["selection"])
+
+    def test_exact_main_credential_acceptance_and_policy_edits_skip_publication(self) -> None:
+        for path in CREDENTIAL_ACCEPTANCE_PATHS:
+            self.repo.write(path, "# Synthetic acceptance-only edit\n")
+        for path in (
+            "scripts/ci/select/select-verification.sh",
+            "scripts/ci/tests/test-select-verification.sh",
+            "scripts/ci/verify/run-product-verification.sh",
+        ):
+            self.repo.write(path, "# Synthetic verifier-policy edit\n")
+        head = self.repo.commit("acceptance helpers plus verifier policy")
+        # Proposed policy must not exempt its own PR qualification.
+        self.assertTrue(all(
+            artifact["state"] == "unclassified"
+            for artifact in self.repo.plan()["artifacts"].values()
+        ))
+        deployed = self.repo.deployed_source_candidate(self.repo.base, head)
+        support = self.repo.support_candidate(self.repo.base)
+        for document in (
+            self.repo.deployed_source_plan(deployed, head),
+            self.repo.support_plan(support, head),
+        ):
+            self.assertTrue(document["baseline"]["validation"]["valid"])
+            self.assertFalse(document["degraded_reasons"])
+            self.assertTrue(all(
+                artifact["state"] == "unaffected"
+                for artifact in document["artifacts"].values()
+            ))
+
+    def test_unknown_credential_acceptance_neighbor_remains_unclassified(self) -> None:
+        # An unknown neighbor must not join the canonical policy-only exemption.
+        self.repo.write("scripts/ci/select/credential-fixture.sh", "# Policy edit\n")
+        head = self.repo.change(
+            "scripts/runtime/dev/provider-openai-unreviewed.sh", "# Unknown input\n"
+        )
+        candidate = self.repo.deployed_source_candidate(self.repo.base, head)
+        support = self.repo.support_candidate(self.repo.base)
+        for document in (
+            self.repo.deployed_source_plan(candidate, head),
+            self.repo.support_plan(support, head),
+        ):
+            self.assertEqual(self.runtime_states(document), ("unclassified",) * 5)
+            self.assertEqual(self.states(document), ("unclassified",) * 2)
+
+    def test_credential_acceptance_does_not_hide_real_runtime_image_changes(self) -> None:
+        self.repo.write(CREDENTIAL_ACCEPTANCE_PATHS[0], "# Acceptance-only edit\n")
+        head = self.repo.change("apps/dashboard/runtime-inventory.json", '{"new":true}\n')
+        candidate = self.repo.deployed_source_candidate(self.repo.base, head)
+        document = self.repo.deployed_source_plan(candidate, head)
+        self.assertEqual(
+            self.runtime_states(document),
+            ("affected", "unaffected", "unaffected", "unaffected", "unaffected"),
+        )
+        self.assertEqual(document["artifacts"]["workspace_image"]["state"], "affected")
 
     def test_unknown_root_path_still_fails_closed(self) -> None:
         self.repo.change("unknown-root-input.txt", "unknown\n")
