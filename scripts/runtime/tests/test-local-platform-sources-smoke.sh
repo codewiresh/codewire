@@ -77,7 +77,9 @@ fixture() {
   LOCAL_PLATFORM_DISPOSABLE_NETWORK=0
   LOCAL_PLATFORM_MESH_PROBE_BIN=''
   LP_NETWORK_CREATE_ATTEMPTED=0
-  LP_LIVE_CODEX=0; LP_LIVE_ANTHROPIC=0; LP_INITIAL_PRIVATE_CHECKOUT=0; LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=''
+  LP_LIVE_CODEX=0; LP_LIVE_ANTHROPIC=0; LP_LIVE_OPENAI=0
+  LOCAL_PLATFORM_OPENAI_MODEL=fixture-model-v1
+  LP_INITIAL_PRIVATE_CHECKOUT=0; LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=''
   FIXTURE_NETWORKS_JSON=''
   FIXTURE_NETWORK_NODES_JSON=''
   SMOKE_EXISTING_ENV_ID=''; SMOKE_KEEP_ENV=0; SMOKE_SKIP_KUBE=0; SMOKE_ONLY_PHASES=()
@@ -95,12 +97,13 @@ local_platform_parse --live-codex
 [[ "$LP_LIVE_CODEX" == 1 ]] || fail 'Codex option was not parsed'
 validate_local_platform_options
 pass
-for invalid in anthropic checkout fixture network disposable probe; do
+for invalid in anthropic openai checkout fixture network disposable probe; do
   invalid_codex_options() {
     fixture
     LP_LIVE_CODEX=1
     case "$invalid" in
       anthropic) LP_LIVE_ANTHROPIC=1 ;;
+      openai) LP_LIVE_OPENAI=1 ;;
       checkout) LP_INITIAL_PRIVATE_CHECKOUT=1 ;;
       fixture) LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=/usr/bin/true ;;
       network) LOCAL_PLATFORM_NETWORK_ID=shared ;;
@@ -116,12 +119,13 @@ local_platform_parse --live-anthropic
 [[ "$LP_LIVE_ANTHROPIC" == 1 ]] || fail 'Anthropic option was not parsed'
 validate_local_platform_options
 pass
-for invalid in codex checkout fixture network disposable probe; do
+for invalid in codex openai checkout fixture network disposable probe; do
   invalid_anthropic_options() {
     fixture
     LP_LIVE_ANTHROPIC=1
     case "$invalid" in
       codex) LP_LIVE_CODEX=1 ;;
+      openai) LP_LIVE_OPENAI=1 ;;
       checkout) LP_INITIAL_PRIVATE_CHECKOUT=1 ;;
       fixture) LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=/usr/bin/true ;;
       network) LOCAL_PLATFORM_NETWORK_ID=shared ;;
@@ -131,6 +135,29 @@ for invalid in codex checkout fixture network disposable probe; do
     validate_local_platform_options
   }
   expect_failure "anthropic-$invalid" invalid_anthropic_options
+done
+fixture
+local_platform_parse --live-openai
+[[ "$LP_LIVE_OPENAI" == 1 ]] || fail 'OpenAI option was not parsed'
+validate_local_platform_options
+pass
+for invalid in codex anthropic checkout fixture network disposable probe model; do
+  invalid_openai_options() {
+    fixture
+    LP_LIVE_OPENAI=1
+    case "$invalid" in
+      codex) LP_LIVE_CODEX=1 ;;
+      anthropic) LP_LIVE_ANTHROPIC=1 ;;
+      checkout) LP_INITIAL_PRIVATE_CHECKOUT=1 ;;
+      fixture) LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=/usr/bin/true ;;
+      network) LOCAL_PLATFORM_NETWORK_ID=shared ;;
+      disposable) LOCAL_PLATFORM_DISPOSABLE_NETWORK=1 ;;
+      probe) LOCAL_PLATFORM_MESH_PROBE_BIN=/usr/bin/true ;;
+      model) LOCAL_PLATFORM_OPENAI_MODEL='' ;;
+    esac
+    validate_local_platform_options
+  }
+  expect_failure "openai-$invalid" invalid_openai_options
 done
 fixture
 local_platform_validate_socket_paths /short/.cwl.XXXXXX/h /run/user/1000/.cwlp-XXXXXX
@@ -590,7 +617,7 @@ done
 
 # Each live provider owns a public create/use/run flow, not the application/SSH
 # journey. Keep typed dispatch and parent ownership when a reply is lost.
-for live_provider in codex anthropic; do
+for live_provider in codex anthropic openai; do
 (
   fixture
   LP_WORKSPACE="$TMPDIR_SMOKE"
@@ -608,6 +635,11 @@ for live_provider in codex anthropic; do
     prepare_live_provider_fixture
     PROVIDER_ANTHROPIC_DOCUMENT="$PROVIDER_CODEX_DOCUMENT"
   }
+  prepare_provider_openai() {
+    [[ "$live_provider" == openai ]] || fail 'another provider prepared OpenAI'
+    prepare_live_provider_fixture
+    PROVIDER_OPENAI_DOCUMENT="$PROVIDER_CODEX_DOCUMENT"
+  }
   prepare_provider_ssh() { fail 'Codex prepared SSH'; }
   prepare_application_secrets() { fail 'Codex prepared application secrets'; }
   run_live_provider_fixture() {
@@ -621,6 +653,10 @@ for live_provider in codex anthropic; do
   }
   run_provider_anthropic_smoke() {
     [[ "$live_provider" == anthropic ]] || fail 'Codex ran Anthropic'
+    run_live_provider_fixture
+  }
+  run_provider_openai_smoke() {
+    [[ "$live_provider" == openai ]] || fail 'another provider ran OpenAI'
     run_live_provider_fixture
   }
   cw_with_timeout() {
@@ -645,6 +681,7 @@ for live_provider in codex anthropic; do
   }
   journey_function=local_platform_codex_journey
   if [[ "$live_provider" == anthropic ]]; then journey_function=local_platform_anthropic_journey; fi
+  if [[ "$live_provider" == openai ]]; then journey_function=local_platform_openai_journey; fi
   "$journey_function"
   [[ "$LP_CREATE_ATTEMPTED" == 1 && "$(cat "$TMPDIR_SMOKE/codex-order")" == $'prepare\ncreate\nuse\nrun' ]] ||
     fail 'Codex journey did not preserve ownership or complete its proof'
@@ -675,6 +712,14 @@ cleanup_provider_anthropic_profile() {
 cleanup_provider_anthropic_credential() {
   [[ "$LP_LIVE_ANTHROPIC" == 1 ]] || return 0
   printf 'anthropic-credential\n' >>"$TMPDIR_SMOKE/cleanup-calls"; [[ "$FAILURE" != anthropic-credential ]]
+}
+cleanup_provider_openai_profile() {
+  [[ "$LP_LIVE_OPENAI" == 1 ]] || return 0
+  printf 'openai-profile\n' >>"$TMPDIR_SMOKE/cleanup-calls"; [[ "$FAILURE" != openai-profile ]]
+}
+cleanup_provider_openai_credential() {
+  [[ "$LP_LIVE_OPENAI" == 1 ]] || return 0
+  printf 'openai-credential\n' >>"$TMPDIR_SMOKE/cleanup-calls"; [[ "$FAILURE" != openai-credential ]]
 }
 cleanup_application_secrets() {
   [[ -z "$ENV_ID" ]] || fail 'local ID sent to platform environment cleanup'
@@ -848,5 +893,21 @@ for invalid in anthropic-profile anthropic-credential rm logout; do
     grep -qx "$surface" "$TMPDIR_SMOKE/cleanup-calls" || fail 'failed Anthropic cleanup skipped another surface'
   done
   if grep -Fq 'PASS:' "$TEST_ROOT/failure.out"; then fail 'Anthropic passed before successful cleanup'; fi
+done
+cleanup_fixture
+LP_LIVE_OPENAI=1
+run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
+grep -Fq 'PASS: OpenAI Responses HTTP request' "$TMPDIR_SMOKE/cleanup-result.out" || fail 'OpenAI cleanup omitted its named PASS'
+[[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nprofile\ncredential\nopenai-profile\nopenai-credential\nprojects\nowners\nlogout' ]] ||
+  fail 'OpenAI cleanup skipped an independent owned surface'
+pass
+for invalid in openai-profile openai-credential rm logout; do
+  cleanup_fixture
+  LP_LIVE_OPENAI=1; FAILURE="$invalid"
+  expect_failure "$invalid OpenAI cleanup" run_cleanup
+  for surface in openai-profile openai-credential logout; do
+    grep -qx "$surface" "$TMPDIR_SMOKE/cleanup-calls" || fail 'failed OpenAI cleanup skipped another surface'
+  done
+  if grep -Fq 'PASS:' "$TEST_ROOT/failure.out"; then fail 'OpenAI passed before successful cleanup'; fi
 done
 printf 'Local/platform smoke fixtures passed (%s cases)\n' "$COUNT"

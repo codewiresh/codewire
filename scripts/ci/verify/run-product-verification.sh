@@ -466,6 +466,8 @@ run_runtime_dev_smoke() {
   python3 -B scripts/runtime/tests/test-provider-codex-workload.py
   scripts/runtime/tests/test-provider-anthropic-smoke.sh
   python3 -B scripts/runtime/tests/test-provider-anthropic-workload.py
+  scripts/runtime/tests/test-provider-openai-smoke.sh
+  python3 -B scripts/runtime/tests/test-provider-openai-workload.py
   scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh
   python3 -B scripts/runtime/tests/test-native-mesh-listener.py
 }
