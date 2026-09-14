@@ -2,7 +2,9 @@
 """Explicit production-init VZ developer fixture; not product or confinement proof.
 
 Only the pinned Rust verifier interprets the real seed, progress, daemon and
-network protocols. This parent owns artifact admission, private descriptor
+network protocols and proves the fixed synthetic guest workloads. This parent
+requires separate readiness and workload success before owned shutdown. It
+owns artifact admission, private descriptor
 transport, bounded child lifetimes and cleanup. It never prints child output.
 
 The nominal 240-second budget reserves 230 seconds for active work and two
@@ -53,6 +55,7 @@ OWNED_SIGNALS = (*SIGNALS, signal.SIGALRM)
 MAX_LOG_BYTES = 64 * 1024
 SUCCESS = (
     "macOS VZ production-init fixture: PASS production_init=true "
+    "transient_exec=true session_lifecycle=true "
     "owned_kill=true private_cleanup=true confinement=false "
     "egress_mediation=false parity=false"
 )
@@ -481,7 +484,7 @@ def boot(run: Run, config: dict, paths: dict[str, Path]) -> None:
     rust_control.setblocking(False)
     frames = Frames()
     seen: set[str] = set()
-    ready = requested_kill = killed = closed = False
+    ready = workload_complete = requested_kill = killed = closed = False
     helper_eof = rust_eof = False
     while True:
         run.drain_logs()
@@ -522,6 +525,9 @@ def boot(run: Run, config: dict, paths: dict[str, Path]) -> None:
                 for marker in data:
                     if marker == ord("R") and not ready and set(CONNECTED).issubset(seen):
                         ready = True
+                        run.phase = "guest-workload"
+                    elif marker == ord("W") and ready and not workload_complete and not requested_kill:
+                        workload_complete = True
                     elif marker == ord("A") and requested_kill and not killed:
                         if helper.poll() is not None:
                             raise FixtureFailure()
@@ -532,7 +538,7 @@ def boot(run: Run, config: dict, paths: dict[str, Path]) -> None:
                         closed = True
                     else:
                         raise FixtureFailure()
-        if ready and "progress-closed" in seen and not requested_kill:
+        if ready and workload_complete and "progress-closed" in seen and not requested_kill:
             rust_control.sendall(b"K")
             requested_kill = True
         helper_status, rust_status = helper.poll(), verifier.poll()
