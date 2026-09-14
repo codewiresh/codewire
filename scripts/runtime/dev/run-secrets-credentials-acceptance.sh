@@ -14,7 +14,10 @@ readonly -a JOURNEYS=(
   dev-application-all-scopes
   dev-provider-ssh
   local-platform-mesh
-  live-providers
+  live-codex
+  live-github
+  live-openai
+  live-anthropic
   initial-private-checkout
   dev-initial-private-checkout
 )
@@ -53,7 +56,10 @@ individual journey with --only. Available journeys:
   dev-application-all-scopes
   dev-provider-ssh
   local-platform-mesh
-  live-providers             (NOT RUN: no checked-in live-provider journey)
+  live-codex                (Linux local VM; fresh Codex device approval required)
+  live-github               (NOT RUN: no checked-in live GitHub journey)
+  live-openai               (Linux local VM; fresh API key and explicit model required)
+  live-anthropic            (Linux local VM; fresh Anthropic API key input required)
   initial-private-checkout   (Linux local VM with generated platform SSH)
   dev-initial-private-checkout (NOT RUN: no checked-in hosted checkout journey)
 
@@ -97,8 +103,11 @@ Required input names:
   EXPECTED_RUNTIME_TRANSPORT_REGION
   XDG_RUNTIME_DIR
   SMOKE_TMP_PARENT
+  LOCAL_PLATFORM_OPENAI_MODEL (live-openai only: exact accessible model snapshot)
 
-The default matrix remains INCOMPLETE while either checked-in journey is absent.
+The default matrix requires fresh Codewire/Codex approvals, fresh OpenAI/Anthropic
+API-key input through cw's protected prompt, and an explicit OpenAI model. It remains
+INCOMPLETE while any required journey is absent.
 This runner never reads credential material, captures child output, or accepts an
 arbitrary command. See docs/dev/SECRETS-AND-CREDENTIALS.md for required inputs.
 USAGE
@@ -251,8 +260,17 @@ readiness_reason() {
         printf '%s' 'explicit canonical fresh provider-SSH OAuth directory unavailable'; return 1;
       fi
       ;;
-    live-providers)
-      printf '%s' 'no checked-in live Codex/GitHub/OpenAI/Anthropic journey'; return 1
+    live-codex|live-anthropic)
+      local_platform_ready || { printf '%s' 'explicit normal CLI/local platform inputs unavailable'; return 1; }
+      ;;
+    live-openai)
+      local_platform_ready || { printf '%s' 'explicit normal CLI/local platform inputs unavailable'; return 1; }
+      [[ "${LOCAL_PLATFORM_OPENAI_MODEL:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || {
+        printf '%s' 'explicit bounded LOCAL_PLATFORM_OPENAI_MODEL unavailable'; return 1;
+      }
+      ;;
+    live-github)
+      printf '%s' "no checked-in $journey journey"; return 1
       ;;
     initial-private-checkout)
       local_platform_ready && canonical_executable "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}" || {
@@ -306,11 +324,18 @@ start_fixed_child() {
         --workspace-image-import-bin "$ACCEPTANCE_NATIVE_WORKSPACE_IMAGE_IMPORT_BIN" \
         --scratch-parent "$ACCEPTANCE_NATIVE_SCRATCH_PARENT"
       ;;
-    local-platform|initial-private-checkout)
+    local-platform|initial-private-checkout|live-codex|live-anthropic|live-openai)
       local -a checkout_env=() checkout_args=()
       if [[ "$journey" == initial-private-checkout ]]; then
         checkout_env=("LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}")
         checkout_args=(--initial-private-checkout)
+      elif [[ "$journey" == live-codex ]]; then
+        checkout_args=(--live-codex)
+      elif [[ "$journey" == live-anthropic ]]; then
+        checkout_args=(--live-anthropic)
+      elif [[ "$journey" == live-openai ]]; then
+        checkout_env=("LOCAL_PLATFORM_OPENAI_MODEL=$LOCAL_PLATFORM_OPENAI_MODEL")
+        checkout_args=(--live-openai)
       fi
       start_isolated_child "${browser_auth_env[@]}" \
         "${checkout_env[@]}" \
