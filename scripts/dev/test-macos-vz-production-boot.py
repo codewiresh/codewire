@@ -26,7 +26,7 @@ SPEC.loader.exec_module(harness)
 CANARY = "synthetic-private-child-log-canary"
 
 COMMON = r'''
-import array, fcntl, json, os, signal, socket, stat, struct, sys, time
+import array, fcntl, json, os, select, signal, socket, stat, struct, sys, time
 MODE = __MODE__
 EVENTS = __EVENTS__
 def event(value):
@@ -139,6 +139,7 @@ streams = {name: socket.socket(fileno=int(opts["--" + name + "-fd"])) for name i
 control = streams["control"]
 control.settimeout(10)
 if MODE == "early-ready": control.sendall(b"R")
+if MODE == "early-workload": control.sendall(b"W")
 if MODE == "early-armed": control.sendall(b"A")
 if MODE == "early-closed": control.sendall(b"C")
 if MODE == "rust-eof": sys.exit(0)
@@ -150,8 +151,29 @@ while len(seen) < 3:
 assert exact(streams["progress"], 0) == b""
 assert streams["progress"].recv(1) == b""
 event("rust-transport-ready")
-control.sendall(b"R")
-if MODE == "duplicate-ready": control.sendall(b"R")
+coalesced = {"coalesced-ready-workload": b"RW", "coalesced-duplicate-workload": b"RWW", "coalesced-early-armed": b"RWA"}
+if MODE in coalesced:
+    control.sendall(coalesced[MODE])
+else:
+    control.sendall(b"R")
+    if MODE == "duplicate-ready": control.sendall(b"R")
+    # Readiness is not permission for the parent to kill the guest: the separate
+    # fixed-workload proof must finish first. This is a synthetic protocol test,
+    # not evidence that any real command ran inside a guest.
+    assert not select.select([control], [], [], 0.08)[0]
+    event("workload-gate-waited")
+    if MODE == "workload-eof": sys.exit(0)
+    if MODE == "workload-failed": sys.exit(2)
+    if MODE == "armed-before-workload": control.sendall(b"A")
+    if MODE == "missing-workload":
+        event("workload-waiting")
+        while True:
+            if select.select([control], [], [], 1)[0]:
+                if not control.recv(1): sys.exit(0)
+                event("premature-workload-control")
+                raise AssertionError("control received before workload completion")
+    control.sendall(b"WW" if MODE == "duplicate-workload" else b"W")
+event("workload-complete")
 assert exact(control, 1) == b"K"
 event("kill-requested")
 control.sendall(b"A")
@@ -277,8 +299,11 @@ class ParentFixtureTests(unittest.TestCase):
     def test_full_synthetic_lifecycle(self):
         self.finish(self.start())
         events = self.events.read_text().splitlines()
-        for event in ("nine-descriptors-admitted", "started", "rust-transport-ready", "kill-requested", "network-closed"):
+        for event in ("nine-descriptors-admitted", "started", "rust-transport-ready", "workload-gate-waited", "workload-complete", "kill-requested", "network-closed"):
             self.assertEqual(events.count(event), 1)
+        self.assertLess(events.index("rust-transport-ready"), events.index("workload-gate-waited"))
+        self.assertLess(events.index("workload-gate-waited"), events.index("workload-complete"))
+        self.assertLess(events.index("workload-complete"), events.index("kill-requested"))
 
     def test_sigchld_is_actively_normalized_before_spawn(self):
         original = self.wrapper.read_text()
@@ -313,11 +338,47 @@ class ParentFixtureTests(unittest.TestCase):
             "duplicate-network", "duplicate-progress-closed", "missing-progress-closed",
             "helper-exit", "short-seed", "early-ready", "early-armed", "early-closed",
             "rust-eof", "duplicate-ready", "duplicate-closed", "rust-exit",
+            "early-workload", "duplicate-workload", "armed-before-workload",
+            "coalesced-duplicate-workload", "coalesced-early-armed",
         )
         for mode in cases:
             with self.subTest(mode=mode):
                 self.mode(mode)
                 self.finish(self.start(), 1)
+
+    def test_coalesced_readiness_and_workload_completion(self):
+        self.mode("coalesced-ready-workload")
+        self.finish(self.start())
+        events = self.events.read_text().splitlines()
+        self.assertLess(events.index("workload-complete"), events.index("kill-requested"))
+
+    def test_workload_failure_or_missing_proof_never_arms_kill(self):
+        for mode in ("workload-eof", "workload-failed", "missing-workload"):
+            with self.subTest(mode=mode):
+                self.mode(mode)
+                self.events.unlink(missing_ok=True)
+                _output, errors = self.finish(self.start(), 1)
+                self.assertIn(b"phase=guest-workload", errors)
+                events = self.events.read_text().splitlines()
+                self.assertIn("workload-gate-waited", events)
+                self.assertNotIn("kill-requested", events)
+                self.assertNotIn("workload-complete", events)
+                self.assertNotIn("premature-workload-control", events)
+
+    def test_workload_cancellation_reaps_owned_children(self):
+        self.mode("missing-workload")
+        process = self.start()
+        stop = time.monotonic() + 4
+        while not self.events.exists() or "workload-waiting" not in self.events.read_text():
+            if process.poll() is not None or time.monotonic() >= stop:
+                self.finish(process, 143)
+                self.fail("synthetic verifier did not reach workload phase")
+            time.sleep(0.01)
+        process.send_signal(signal.SIGTERM)
+        _output, errors = self.finish(process, 143)
+        self.assertIn(b"phase=guest-workload", errors)
+        self.assertNotIn("kill-requested", self.events.read_text())
+        self.assertNotIn("premature-workload-control", self.events.read_text())
 
     def test_signing_rejections(self):
         for mode in ("invalid-signature", "not-adhoc", "no-entitlement", "integer-entitlement", "extra-entitlement"):
@@ -587,14 +648,54 @@ class ParentFixtureTests(unittest.TestCase):
 
     def test_real_short_deadline_expires_hung_child(self):
         self.mode("wait")
-        source = self.wrapper.read_text().replace("m.DEADLINE_SECONDS = 5; m.STOP_SECONDS = 0.25", "m.DEADLINE_SECONDS = 1.5; m.STOP_SECONDS = 0.1")
-        self.wrapper.write_text(source)
-        started = time.monotonic()
+        original = self.wrapper.read_text()
+        # Keep the ordinary bounded startup allowance. Starting the short timer
+        # before Python child startup races the very wait state we must prove.
+        # Leave the software deadline unchanged: only the real alarm handler
+        # can produce the short-deadline evidence recorded below.
+        injection = (
+            "import signal, time\n"
+            f"events = pathlib.Path({str(self.events)!r})\n"
+            "real_remaining = m.Run.remaining\n"
+            "real_signal = m.Run.signal\n"
+            "armed = False\n"
+            "def remaining(self):\n"
+            "    global armed\n"
+            "    budget = real_remaining(self)\n"
+            "    if not armed and events.exists() and 'ready-to-signal' in events.read_text().splitlines():\n"
+            "        armed = True\n"
+            "        with events.open('a') as output: output.write('software-deadline:' + str(self.deadline) + '\\n')\n"
+            "        with events.open('a') as output: output.write('deadline-armed:' + str(time.monotonic()) + '\\n')\n"
+            "        signal.setitimer(signal.ITIMER_REAL, 0.25)\n"
+            "    return budget\n"
+            "def observed_signal(self, signum, frame):\n"
+            "    if signum == signal.SIGALRM:\n"
+            "        with events.open('a') as output: output.write('deadline-fired:' + str(time.monotonic()) + '\\n')\n"
+            "        try:\n"
+            "            return real_signal(self, signum, frame)\n"
+            "        except m.FixtureFailure:\n"
+            "            with events.open('a') as output: output.write('deadline-raised\\n')\n"
+            "            raise\n"
+            "    return real_signal(self, signum, frame)\n"
+            "m.Run.remaining = remaining\n"
+            "m.Run.signal = observed_signal\n"
+        )
+        self.wrapper.write_text(original.replace("sys.exit(m.main())", injection + "sys.exit(m.main())"))
         self.finish(self.start(), 1)
-        elapsed = time.monotonic() - started
-        self.assertGreaterEqual(elapsed, 1.1)
-        self.assertLess(elapsed, 3)
-        self.assertIn("ready-to-signal", self.events.read_text())
+        events = self.events.read_text().splitlines()
+        armed = [line for line in events if line.startswith("deadline-armed:")]
+        fired = [line for line in events if line.startswith("deadline-fired:")]
+        software = [line for line in events if line.startswith("software-deadline:")]
+        self.assertEqual(len(armed), 1)
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(len(software), 1)
+        self.assertEqual(events.count("deadline-raised"), 1)
+        self.assertLess(events.index("ready-to-signal"), events.index(armed[0]))
+        self.assertLess(events.index(armed[0]), events.index(fired[0]))
+        self.assertLess(float(fired[0].split(":")[1]), float(software[0].split(":")[1]))
+        elapsed = float(fired[0].split(":")[1]) - float(armed[0].split(":")[1])
+        self.assertGreaterEqual(elapsed, 0.20)
+        self.assertLess(elapsed, 1.0)
 
     def test_real_deadline_interrupts_blocking_read(self):
         original = self.wrapper.read_text().replace("m.DEADLINE_SECONDS = 5; m.STOP_SECONDS = 0.25", "m.DEADLINE_SECONDS = 1.5; m.STOP_SECONDS = 0.1")
