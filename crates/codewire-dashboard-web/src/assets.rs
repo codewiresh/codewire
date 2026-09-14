@@ -16,7 +16,7 @@ use crate::state::AppState;
 pub(crate) const HTMX_PATH: &str = "/assets/codewire/htmx-2.0.10.min.js";
 pub(crate) const STYLE_PATH: &str = "/assets/codewire/design-v1.css";
 pub(crate) const DASHBOARD_STYLE_PATH: &str = "/assets/codewire/routes/dashboard-v1.css";
-pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v1.css";
+pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v2.css";
 pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v1.css";
 pub(crate) const COSMOS_STYLE_PATH: &str = "/assets/codewire/cosmos-v1.css";
 pub(crate) const COSMOS_SCRIPT_PATH: &str = "/assets/codewire/cosmos-v1.js";
@@ -347,6 +347,21 @@ mod tests {
             assert!(!html.contains("name=\"user_code\""));
         }
         assert!(production.contains(DEVICE_SCRIPT_PATH));
+        // Old auth-v1.css has no slot grid. A fresh URL keeps warm browser/CDN
+        // caches from pairing those pre-eight-input bytes with new markup.
+        assert_eq!(AUTH_STYLE_PATH, "/assets/codewire/routes/auth-v2.css");
+        assert!(production.contains(AUTH_STYLE_PATH));
+        for template in [
+            production,
+            include_str!("../templates/auth-form.html"),
+            include_str!("../templates/auth-status.html"),
+            include_str!("../templates/invitation.html"),
+            include_str!("../templates/setup-two-factor.html"),
+            include_str!("../templates/two-factor-recovery.html"),
+        ] {
+            assert!(template.contains(AUTH_STYLE_PATH));
+            assert!(!template.contains("/assets/codewire/routes/auth-v1.css"));
+        }
         assert!(fixture.contains("../../device.js"));
     }
 
