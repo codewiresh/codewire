@@ -34,6 +34,16 @@ PUBLIC_GIT = {
 SMOKE = [[], ["env"], ["run"], ["list"], ["mesh"], ["network"]]
 SSH_OPTIONS = ["-oBatchMode=yes", "-oForwardAgent=no", "-oConnectTimeout=10",
                "-oServerAliveInterval=10", "-oServerAliveCountMax=2"]
+SWIFT_COMPONENTS = {
+    "vz-runner": ("macos-vz-runner", "swift-vz-runner", ("codewire-vz-runner",)),
+    "sandbox-canary": ("macos-sandbox-canary-experiment", "swift-sandbox-canary",
+                       ("sandbox-experiment-owner", "sandbox-candidate", "canary-deputy")),
+}
+STOP_SECONDS = 3
+
+
+class CleanupUnknown(RuntimeError):
+    """A command's process group is not proven quiescent; retain its state."""
 
 
 def output(argv, **kwargs):
@@ -247,52 +257,102 @@ def cache_lock(root):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("another developer build owns this worktree cache") from None
+        if (root / "inflight.json").exists() or (root / "inflight.json").is_symlink():
+            raise RuntimeError("prior developer command cleanup is unconfirmed; cache retained")
         yield
 
 
+@contextlib.contextmanager
+def isolated_runtime(root, run):
+    runtime = Path(tempfile.mkdtemp(prefix="cw-", dir="/tmp"))
+    marker = root / "inflight.json"
+    # This fail-closed marker exists before any child can start. An abrupt
+    # worker death or failed cleanup cannot silently unlock cache reuse.
+    descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as stream:
+        json.dump({"run_id": run.name, "isolated_state": str(runtime)}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    retain = False
+    try:
+        yield runtime
+    except CleanupUnknown:
+        retain = True
+        raise
+    finally:
+        if not retain:
+            shutil.rmtree(runtime)
+            marker.unlink()
+
+
+def group_absent(process):
+    try:
+        reaped = process.poll() is not None
+    except OSError as error:
+        raise CleanupUnknown("command child ownership is unknown") from error
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return reaped
+    except OSError as error:
+        raise CleanupUnknown("command group absence is unknown") from error
+    return False
+
+
 def stop_group(process):
-    # Signal the process group even if its leader exited, to reap grandchildren.
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        process.wait()
-        return
-    except PermissionError:
-        # Darwin can report EPERM for a group containing only an unreaped
-        # exited leader. It is safe only after poll confirms that leader gone.
-        if process.poll() is None:
-            raise
-        return
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        # The TERM reached the entire owned group. Darwin may retain only
-        # zombie group members until their parents reap them and return EPERM.
-        if process.poll() is None:
-            raise
-    process.wait()
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            # Only this command owner reaps its child. With default SIGCHLD,
+            # exit after this poll leaves a zombie pinning the PID until our
+            # next poll. A reaped or unknown leader never authorizes a signal.
+            live = process.poll() is None
+        except OSError as error:
+            raise CleanupUnknown("command child ownership is unknown") from error
+        try:
+            if live:
+                os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            raise CleanupUnknown("command group signal ownership is unknown") from error
+        stop = time.monotonic() + STOP_SECONDS
+        while True:
+            if group_absent(process):
+                return
+            if time.monotonic() >= stop:
+                break
+            time.sleep(0.02)
+    raise CleanupUnknown("command group remains; runtime and cache retained")
 
 
 def run_command(argv, cwd, env, log, cancel, deadline):
     if cancel.is_set() or time.monotonic() >= deadline:
         return 130 if cancel.is_set() else 124
+    # Heartbeat/watchdog threads only set cancellation; this standalone worker
+    # is the sole child reaper. Reset SIG_IGN/SA_NOCLDWAIT before every spawn.
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     with log.open("wb") as stream:
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=stream,
                                    stderr=subprocess.STDOUT, start_new_session=True)
+        ownership_known = True
         try:
-            while process.poll() is None:
+            while True:
+                try:
+                    status = process.poll()
+                except OSError as error:
+                    ownership_known = False
+                    raise CleanupUnknown("command child ownership is unknown") from error
+                if status is not None:
+                    return status
                 if cancel.is_set() or time.monotonic() >= deadline:
                     return 130 if cancel.is_set() else 124
                 time.sleep(0.1)
-            return process.returncode
         finally:
-            stop_group(process)
+            if ownership_known:
+                try:
+                    stop_group(process)
+                except BaseException as error:
+                    raise CleanupUnknown("command cleanup is unknown; state retained") from error
 
 
 def import_git_seeds(seeded, cargo, command):
@@ -347,7 +407,7 @@ def worker(root, run):
     try:
         # Darwin Unix socket addresses are only 104 bytes. Isolated HOME/config
         # and TMPDIR must not inherit the long retained run-directory prefix.
-        with cache_lock(root), tempfile.TemporaryDirectory(prefix="cw-", dir="/tmp") as runtime:
+        with cache_lock(root), isolated_runtime(root, run) as runtime:
             if platform.system() != "Darwin" or platform.machine() != "arm64":
                 raise RuntimeError("native developer host must be Apple Silicon macOS")
             result["host"] = {"macos": output(["sw_vers", "-productVersion"]),
@@ -413,21 +473,27 @@ def worker(root, run):
                              "-p", "codewire-cli-bin", "--bin", "cw"])
                     shutil.copy2(root / "target/x86_64-apple-darwin/debug/cw",
                                  run / "artifacts/cw-x86_64-apple-darwin")
-            elif component == "vz-runner":
+            elif component in SWIFT_COMPONENTS:
                 if action == "clippy" or request["intel"]:
-                    raise RuntimeError("VZ runner accepts build, test, or verify on native arm64 only")
-                package = source / "crates/codewire-local-vmm/macos-vz-runner"
-                scratch = root / "target/swift-vz-runner"
+                    raise RuntimeError("Swift components accept build, test, or verify on native arm64 only")
+                package_name, scratch_name, products = SWIFT_COMPONENTS[component]
+                package = source / "crates/codewire-local-vmm" / package_name
+                scratch = root / "target" / scratch_name
                 command(["xcrun", "swift", "--version"])
                 command(["xcrun", "--show-sdk-version"])
-                command([str(package / "Tests/test_ipc_system.sh")])
+                if component == "vz-runner":
+                    command([str(package / "Tests/test_ipc_system.sh")])
+                else:
+                    command(["python3", str(package / "Tests/test_static_contract.py")])
+                    command(["python3", str(source / "scripts/dev/test-macos-app-sandbox-canary.py"), "-v"])
                 command(["xcrun", "swift-format", "lint", "--strict", "--recursive", str(package)])
                 swift = ["--package-path", str(package), "--scratch-path", str(scratch),
                          "-Xswiftc", "-warnings-as-errors", "-Xcc", "-Werror"]
                 if action in ("build", "verify"):
                     command(["xcrun", "swift", "build", *swift])
-                    binary = scratch / "debug/codewire-vz-runner"
-                    shutil.copy2(binary, run / "artifacts/codewire-vz-runner-arm64")
+                    for product in products:
+                        shutil.copy2(scratch / "debug" / product,
+                                     run / "artifacts" / f"{product}-arm64")
                 if action in ("test", "verify"):
                     swiftc = Path(output(["xcrun", "--find", "swiftc"])).resolve()
                     testing_plugin = (swiftc.parent.parent /
@@ -437,6 +503,18 @@ def worker(root, run):
                             "Swift Testing macro plugin is missing from the selected toolchain")
                     command(["xcrun", "swift", "test", *swift, "-Xswiftc",
                              "-load-plugin-library", "-Xswiftc", str(testing_plugin)])
+                    if component == "sandbox-canary":
+                        # This assertion needs synchronous main-thread execution,
+                        # outside Swift Testing's dispatch-main actor context.
+                        command(["xcrun", "swift", "-warnings-as-errors",
+                                 str(package / "Tests/test_run_loop.swift")])
+                        lifecycle = isolated / "test-application-lifecycle"
+                        command(["xcrun", "swiftc", "-warnings-as-errors", "-parse-as-library",
+                                 "-swift-version", "6",
+                                 str(package / "Sources/CanaryDeputy/ApplicationLifecycle.swift"),
+                                 str(package / "Tests/test_application_lifecycle.swift"),
+                                 "-o", str(lifecycle)])
+                        command([str(lifecycle)])
             else:
                 raise RuntimeError("unknown developer build component")
             for artifact in (run / "artifacts").iterdir():
@@ -485,7 +563,9 @@ def recover(host, remote, destination):
 import pathlib, sys, tarfile
 run = pathlib.Path(sys.argv[1])
 paths = [run / 'request.json', run / 'result.json', *run.glob('command-*.log')]
-paths += [run / 'artifacts' / name for name in ('cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin', 'codewire-vz-runner-arm64')]
+paths += [run / 'artifacts' / name for name in (
+    'cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin', 'codewire-vz-runner-arm64',
+    'sandbox-experiment-owner-arm64', 'sandbox-candidate-arm64', 'canary-deputy-arm64')]
 if not (run / 'request.json').is_file(): raise SystemExit('run not found')
 with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
     for path in paths:
@@ -517,14 +597,17 @@ def evidence_status(evidence, run_id):
     if not commands or any(item.get("exit_code") != 0 for item in commands):
         raise RuntimeError("passed result lacks successful command evidence")
     expected = set()
-    if request.get("component", "cli") == "vz-runner":
+    component = request.get("component", "cli")
+    if component in SWIFT_COMPONENTS:
         if request["action"] in ("build", "verify"):
-            expected.add("codewire-vz-runner-arm64")
-    else:
+            expected.update(f"{product}-arm64" for product in SWIFT_COMPONENTS[component][2])
+    elif component == "cli":
         if request["action"] in ("build", "verify"):
             expected.add("cw-aarch64-apple-darwin")
         if request["intel"]:
             expected.add("cw-x86_64-apple-darwin")
+    else:
+        raise RuntimeError("unknown developer build component in recovered evidence")
     if set(result.get("artifacts", {})) != expected:
         raise RuntimeError("passed result lacks expected artifacts")
     for name, checksum in result["artifacts"].items():
@@ -539,7 +622,7 @@ def main():
         return worker(Path(sys.argv[2]), Path(sys.argv[3]))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="user@mac.example.invalid")
-    parser.add_argument("--component", choices=["cli", "vz-runner"], default="cli")
+    parser.add_argument("--component", choices=["cli", *SWIFT_COMPONENTS], default="cli")
     parser.add_argument("--action", choices=["build", "test", "clippy", "verify"], default="build")
     parser.add_argument("--intel", action="store_true", help="also compile/link x86_64; never execute it")
     parser.add_argument("--seed-cargo", action="store_true", help="seed locked public source dependencies")
@@ -550,8 +633,8 @@ def main():
         parser.error("invalid SSH destination")
     if not 1 <= args.timeout <= 14400:
         parser.error("timeout must be between 1 and 14400 seconds")
-    if args.component == "vz-runner" and (args.action == "clippy" or args.intel or args.seed_cargo):
-        parser.error("VZ runner accepts build, test, or verify without --intel/--seed-cargo")
+    if args.component in SWIFT_COMPONENTS and (args.action == "clippy" or args.intel or args.seed_cargo):
+        parser.error("Swift components accept build, test, or verify without --intel/--seed-cargo")
     repo = Path(output(["git", "rev-parse", "--show-toplevel"])).resolve()
     key = hashlib.sha256(str(repo).encode()).hexdigest()[:16]
     run_id = args.recover or uuid.uuid4().hex

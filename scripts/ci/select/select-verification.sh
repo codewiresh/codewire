@@ -377,6 +377,7 @@ if [ "$event_selected" = false ]; then
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
+      scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
       scripts/ci/select/require-verification-results.sh|\
@@ -834,6 +835,26 @@ if [ "$event_selected" = false ]; then
       packages/*)
         select_token web
         recognized=true
+        ;;
+    esac
+
+    case "$path" in
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Package.swift|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Sources/*/*.swift|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Sources/CCanarySupport/CCanarySupport.c|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Sources/CCanarySupport/include/CCanarySupport.h|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Fixtures/*.plist|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Fixtures/*.entitlements|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/*/*.swift|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_run_loop.swift|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_application_lifecycle.swift|\
+      crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py)
+        # Standalone, non-product SwiftPM comparison. The common policy core
+        # checks its source boundary and harness; native checks use the Mac
+        # developer loop. Product/Rust inputs still select their own gates.
+        select_token policy
+        recognized=true
+        continue
         ;;
     esac
 
