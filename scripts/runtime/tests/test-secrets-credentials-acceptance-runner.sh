@@ -33,6 +33,10 @@ case "$0" in
       label=initial-private-checkout
     elif [[ " $* " == *' --live-codex '* ]]; then
       label=live-codex
+    elif [[ " $* " == *' --live-anthropic '* ]]; then
+      label=live-anthropic
+    elif [[ " $* " == *' --live-openai '* ]]; then
+      label=live-openai
     elif [[ "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 1 ]]; then
       label=local-platform-mesh
     else
@@ -67,13 +71,18 @@ case "$label" in
        -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
        -z "${LOCAL_PLATFORM_MESH_PROBE_BIN+x}" ]] || exit 102
     ;;
-  live-codex)
-    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --live-codex" &&
+  live-codex|live-anthropic|live-openai)
+    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --$label" &&
        "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 0 &&
        -z "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN+x}" &&
        -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
        -z "${LOCAL_PLATFORM_MESH_PROBE_BIN+x}" &&
        -z "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR+x}" ]] || exit 103
+    if [[ "$label" == live-openai ]]; then
+      [[ "${LOCAL_PLATFORM_OPENAI_MODEL:-}" == fixture-model-v1 ]] || exit 104
+    else
+      [[ -z "${LOCAL_PLATFORM_OPENAI_MODEL+x}" ]] || exit 104
+    fi
     ;;
   local-platform-mesh)
     [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw" &&
@@ -201,6 +210,7 @@ export EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE=dev
 export EXPECTED_RUNTIME_TRANSPORT_REGION=test
 export XDG_RUNTIME_DIR="$RUNTIME_ROOT"
 export SMOKE_TMP_PARENT="$TEST_ROOT"
+export LOCAL_PLATFORM_OPENAI_MODEL=fixture-model-v1
 export CODEWIRE_API_KEY=must-not-reach-child
 export CODEWIRE_DEV_SMOKE_API_KEY=must-not-reach-child
 export CODEWIRE_ADMIN_OAUTH_CONFIG_DIR=/must/not/reach/child
@@ -255,13 +265,12 @@ pass
 
 : >"$CALLS"
 expect_status 1 "$TEST_ROOT/default.out" "$RUNNER"
-printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh live-codex initial-private-checkout \
+printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh live-codex live-openai live-anthropic initial-private-checkout \
   | cmp -s - "$CALLS" || fail 'default matrix did not invoke each available fixed child once'
 grep -Eq 'live-codex +PASS' "$TEST_ROOT/default.out" || fail 'live Codex did not run'
-for provider in live-github live-openai live-anthropic; do
-  grep -Eq "$provider +NOT RUN \(no checked-in $provider journey\)" \
-    "$TEST_ROOT/default.out" || fail 'Codex success concealed a missing provider journey'
-done
+grep -Eq 'live-anthropic +PASS' "$TEST_ROOT/default.out" || fail 'live Anthropic did not run'
+grep -Eq 'live-github +NOT RUN \(no checked-in live-github journey\)' \
+  "$TEST_ROOT/default.out" || fail 'provider success concealed the missing GitHub journey'
 grep -Eq 'initial-private-checkout +PASS' "$TEST_ROOT/default.out" || fail 'local private checkout did not run'
 grep -Fq 'dev-initial-private-checkout   NOT RUN (no checked-in hosted initial private-checkout journey)' \
   "$TEST_ROOT/default.out" || fail 'missing hosted private checkout was not reported honestly'
@@ -289,6 +298,61 @@ expect_status 1 "$TEST_ROOT/codex-failure.out" "$RUNNER"
 rm "$FAKE_ROOT/fixtures/fail-live-codex"
 grep -Eq 'live-codex +FAIL' "$TEST_ROOT/codex-failure.out" || fail 'Codex failure was lost'
 if grep -qx initial-private-checkout "$CALLS"; then fail 'matrix continued after Codex cleanup failure'; fi
+pass
+
+: >"$CALLS"
+expect_status 0 "$TEST_ROOT/anthropic.out" "$RUNNER" --only live-anthropic
+[[ "$(cat "$CALLS")" == live-anthropic ]] || fail 'selected Anthropic ran another journey'
+grep -Fq 'selected result: PASS; full acceptance: NOT CLAIMED' "$TEST_ROOT/anthropic.out" ||
+  fail 'selected Anthropic claimed full acceptance'
+pass
+
+: >"$CALLS"
+export ACCEPTANCE_NORMAL_CW_BIN="$ACCEPTANCE_SYNTHETIC_CW_BIN"
+expect_status 1 "$TEST_ROOT/anthropic-wrong-cli.out" "$RUNNER" --only live-anthropic
+export ACCEPTANCE_NORMAL_CW_BIN="$saved_normal_cw"
+[[ ! -s "$CALLS" ]] || fail 'live Anthropic accepted synthetic cw'
+pass
+
+: >"$CALLS"
+touch "$FAKE_ROOT/fixtures/fail-live-anthropic"
+expect_status 1 "$TEST_ROOT/anthropic-failure.out" "$RUNNER"
+rm "$FAKE_ROOT/fixtures/fail-live-anthropic"
+grep -Eq 'live-anthropic +FAIL' "$TEST_ROOT/anthropic-failure.out" || fail 'Anthropic failure was lost'
+if grep -qx initial-private-checkout "$CALLS"; then fail 'matrix continued after Anthropic cleanup failure'; fi
+pass
+
+: >"$CALLS"
+expect_status 0 "$TEST_ROOT/openai.out" "$RUNNER" --only live-openai
+[[ "$(cat "$CALLS")" == live-openai ]] || fail 'selected OpenAI ran another journey'
+grep -Fq 'selected result: PASS; full acceptance: NOT CLAIMED' "$TEST_ROOT/openai.out" ||
+  fail 'selected OpenAI claimed full acceptance'
+pass
+
+for bad_model in '' '-leading' 'with space' 'a/b' $'line\nbreak' "$(printf 'x%.0s' {1..129})"; do
+  : >"$CALLS"
+  export LOCAL_PLATFORM_OPENAI_MODEL="$bad_model"
+  expect_status 1 "$TEST_ROOT/openai-model.out" "$RUNNER" --only live-openai
+  [[ ! -s "$CALLS" ]] || fail 'invalid OpenAI model reached a child'
+  grep -Fq 'NOT RUN (explicit bounded LOCAL_PLATFORM_OPENAI_MODEL unavailable)' "$TEST_ROOT/openai-model.out" ||
+    fail 'missing model was not reported as NOT RUN'
+  pass
+done
+export LOCAL_PLATFORM_OPENAI_MODEL=fixture-model-v1
+
+: >"$CALLS"
+export ACCEPTANCE_NORMAL_CW_BIN="$ACCEPTANCE_SYNTHETIC_CW_BIN"
+expect_status 1 "$TEST_ROOT/openai-wrong-cli.out" "$RUNNER" --only live-openai
+export ACCEPTANCE_NORMAL_CW_BIN="$saved_normal_cw"
+[[ ! -s "$CALLS" ]] || fail 'live OpenAI accepted synthetic cw'
+pass
+
+: >"$CALLS"
+touch "$FAKE_ROOT/fixtures/fail-live-openai"
+expect_status 1 "$TEST_ROOT/openai-failure.out" "$RUNNER"
+rm "$FAKE_ROOT/fixtures/fail-live-openai"
+grep -Eq 'live-openai +FAIL' "$TEST_ROOT/openai-failure.out" || fail 'OpenAI failure was lost'
+if grep -qx live-anthropic "$CALLS"; then fail 'matrix continued after OpenAI cleanup failure'; fi
 pass
 
 : >"$CALLS"

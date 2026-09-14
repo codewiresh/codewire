@@ -439,6 +439,11 @@ for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests
     scripts/runtime/dev/provider-codex-smoke.sh scripts/runtime/dev/provider-codex-workload.sh \
     scripts/runtime/dev/provider-codex-output.py scripts/runtime/tests/test-provider-codex-smoke.sh \
     scripts/runtime/tests/test-provider-codex-workload.py \
+    scripts/runtime/dev/provider-anthropic-smoke.sh scripts/runtime/dev/provider-anthropic-workload.sh \
+    scripts/runtime/dev/provider-anthropic-output.py scripts/runtime/tests/test-provider-anthropic-smoke.sh \
+    scripts/runtime/tests/test-provider-anthropic-workload.py \
+    scripts/runtime/dev/provider-openai-smoke.sh scripts/runtime/dev/provider-openai-workload.py \
+    scripts/runtime/tests/test-provider-openai-smoke.sh scripts/runtime/tests/test-provider-openai-workload.py \
     scripts/runtime/dev/private-checkout-smoke.sh scripts/runtime/tests/test-private-checkout-smoke.sh \
     apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts \
     scripts/runtime/dev/smoke-local-platform-sources.sh scripts/runtime/tests/test-local-platform-sources-smoke.sh \
