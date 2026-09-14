@@ -241,7 +241,9 @@ class WorkloadContractTests(unittest.TestCase):
         self.assertEqual((failure.returncode, failure.stdout, failure.stderr), (0, "", ""))
 
     def test_real_entrypoint_with_synthetic_stock_command(self) -> None:
-        executable_parent = os.environ.get("TMPDIR", "/home/user/t")
+        # The fixture executes a synthetic command; /tmp may be mounted noexec.
+        # Default to this checkout, never a workstation-specific directory.
+        executable_parent = os.environ.get("TMPDIR") or str(ROOT)
         with tempfile.TemporaryDirectory(prefix="cw-codex-entrypoint-", dir=executable_parent) as root_text, \
                 tempfile.TemporaryDirectory(prefix="cw-codex-scratch-", dir="/dev/shm") as scratch_text:
             root = Path(root_text)
