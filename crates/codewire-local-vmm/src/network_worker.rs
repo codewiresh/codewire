@@ -6,7 +6,6 @@
 //! process receives already-open streams and generation keys on inherited
 //! AF_UNIX descriptors, never the guest daemon token or provider credentials.
 
-use std::collections::HashMap;
 use std::io::{self, Read as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -23,20 +22,11 @@ use codewire_egress_broker::ipc::{
     BrokerIpcKey,
 };
 use codewire_egress_policy::CompiledPolicy;
-use codewire_netstack::{
-    DnsAnswer, DnsQuestion, DnsRecordType, Netstack, NetstackConfig, NetstackLimits, TcpListener,
-    build_ipv4_dns_response, parse_canonical_ipv4_tcp_packet, parse_ipv4_dns_question,
-};
-use codewire_vmm_guest_probe::{
-    NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN, NETWORK_KEY_LEN, NETWORK_MAX_PACKET_BYTES,
-    NetworkGuestAck, NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
-    encoded_network_frame_len,
-};
-use rand::{RngCore as _, rngs::OsRng};
+use codewire_netstack::{DnsAnswer, DnsQuestion, DnsRecordType};
+use codewire_vmm_guest_probe::{NETWORK_KEY_LEN, NetworkKey};
 use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, ReadBuf};
-use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio::task::JoinSet;
+use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -52,6 +42,27 @@ use crate::mesh_ingress::{
     MAX_MESH_INGRESS_PORTS, MESH_INGRESS_CONTROL_KEY_LEN, MeshIngressControlReceiver,
     is_mesh_ingress_control_frame, validate_canonical_mesh_ingress_ports,
 };
+pub use crate::network_session::{
+    AsyncReadWrite, BoxedBrokerStream, BrokerDnsAnswer, DenyBroker, EgressBroker, TcpFlow,
+};
+use crate::network_session::{
+    InboundGuestStream, MAX_INBOUND_STREAM_FLOWS, NetworkSessionError, run_network_session,
+    run_network_session_with_ingress as run_portable_network_session_with_ingress,
+};
+#[cfg(test)]
+use crate::network_session::{NETWORK_MTU, PACKET_QUEUE};
+
+#[cfg(test)]
+use codewire_netstack::{Netstack, NetstackConfig};
+#[cfg(test)]
+use codewire_vmm_guest_probe::{
+    NETWORK_FRAME_HEADER_LEN, NetworkGuestAck, NetworkHostHello, NetworkHostReady, NetworkRole,
+    NetworkSession, encoded_network_frame_len,
+};
+#[cfg(test)]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(test)]
+use tokio::sync::Mutex;
 
 pub const NETWORK_BOOTSTRAP_FD: RawFd = 4;
 pub const WORKER_PREPARED_MESSAGE: &[u8] = b"CWNETW1 prepared\n";
@@ -99,17 +110,9 @@ const PRODUCT_HOST_PORT_KEY_OFFSET: usize = 128;
 const PRODUCT_MESH_INGRESS_KEY_OFFSET: usize = 160;
 const PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET: usize = 192;
 const PRODUCT_MESH_INGRESS_PORTS_OFFSET: usize = 194;
-const PACKET_QUEUE: usize = 256;
-const MAX_INBOUND_STREAM_FLOWS: usize = 64;
-const NETWORK_MTU: usize = 1_500;
-const DNS_MESSAGE_LIMIT: usize = 1_232;
-const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
-
-pub type BoxedBrokerStream = Pin<Box<dyn AsyncReadWrite + Send + Sync + Unpin + 'static>>;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkWorkerStartupFailure {
     InvalidIdentity,
@@ -479,55 +482,6 @@ fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::Resul
     descriptors
         .pop()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "descriptor is absent"))
-}
-
-pub trait AsyncReadWrite: AsyncRead + AsyncWrite {}
-
-impl<T: AsyncRead + AsyncWrite + ?Sized> AsyncReadWrite for T {}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TcpFlow {
-    pub source: SocketAddr,
-    pub destination: SocketAddr,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BrokerDnsAnswer {
-    pub answer: DnsAnswer,
-    pub ttl_seconds: u32,
-}
-
-/// Implementations bound queue admission separately from each transaction.
-/// An outer deadline must not cancel IPC mid-frame after spending its
-/// transaction budget waiting behind an unrelated DNS/TCP operation.
-#[async_trait]
-pub trait EgressBroker: Send + Sync + 'static {
-    /// Cheap policy admission before the worker binds an AnyIP listener.
-    async fn authorize_tcp(&self, flow: TcpFlow) -> io::Result<()>;
-
-    /// Return an already-connected stream for one accepted guest flow.
-    async fn connect_tcp(&self, flow: TcpFlow) -> io::Result<BoxedBrokerStream>;
-
-    /// Resolve one already-parsed canonical DNS question.
-    async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer>;
-}
-
-#[derive(Debug, Default)]
-pub struct DenyBroker;
-
-#[async_trait]
-impl EgressBroker for DenyBroker {
-    async fn authorize_tcp(&self, _flow: TcpFlow) -> io::Result<()> {
-        Err(denied())
-    }
-
-    async fn connect_tcp(&self, _flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
-        Err(denied())
-    }
-
-    async fn resolve_dns(&self, _question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
-        Err(denied())
-    }
 }
 
 pub struct IpcEgressBroker {
@@ -939,11 +893,6 @@ fn publish_product_worker_status(
         .map_err(|_| io::Error::other("network worker status channel closed"))
 }
 
-struct InboundGuestStream {
-    guest_port: u16,
-    stream: TransferredStream,
-}
-
 struct IngressControlKeys {
     host_port: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
     mesh: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
@@ -990,7 +939,10 @@ async fn run_ingress_control(
         let stream =
             transferred_stream(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
         inbound
-            .send(InboundGuestStream { guest_port, stream })
+            .send(InboundGuestStream {
+                guest_port,
+                stream: Box::pin(stream),
+            })
             .await
             .map_err(|_| NetworkWorkerError::Engine)?;
     }
@@ -1520,9 +1472,9 @@ fn validate_identity(vm_id: Uuid, generation: u64) -> Result<(), NetworkWorkerEr
     Ok(())
 }
 
-/// Run one authenticated generation-bound worker over an injected stream.
-/// `ready` is called only after the bounded engine exists and the guest has
-/// accepted the authenticated host-ready proof.
+/// Preserve the Linux worker entrypoint while delegating the complete packet
+/// session to the portable engine. Linux descriptor validation and confinement
+/// remain in the inherited-worker wrappers above.
 pub async fn run_host_session<S, B, R>(
     stream: S,
     key: NetworkKey,
@@ -1536,11 +1488,13 @@ where
     B: EgressBroker,
     R: FnOnce() -> io::Result<()> + Send,
 {
-    run_host_session_with_ingress(stream, key, vm_id, generation, broker, None, ready).await
+    run_network_session(stream, key, vm_id, generation, broker, ready)
+        .await
+        .map_err(NetworkWorkerError::from)
 }
 
 async fn run_host_session_with_ingress<S, B, R>(
-    mut stream: S,
+    stream: S,
     key: NetworkKey,
     vm_id: Uuid,
     generation: u64,
@@ -1553,291 +1507,11 @@ where
     B: EgressBroker,
     R: FnOnce() -> io::Result<()> + Send,
 {
-    validate_identity(vm_id, generation)?;
-    // Build the fixed-size engine before beginning the guest handshake. Once
-    // the guest acknowledges the hello, the worker has no setup work left
-    // that can consume the guest's bounded authentication window.
-    let limits = NetstackLimits::default();
-    let (to_stack, stack_packets) = mpsc::channel(PACKET_QUEUE);
-    let (from_stack, outbound_packets) = mpsc::channel(PACKET_QUEUE);
-    let stack = Netstack::with_config_and_limits(
-        NetstackConfig {
-            local_ip: IpAddr::V4(WORKER_IP),
-            prefix_len: 30,
-            mtu: NETWORK_MTU,
-            verify_rx_checksums: true,
-            accept_any_ip: true,
-            default_gateway: None,
-        },
-        limits,
-        stack_packets,
-        from_stack.clone(),
+    run_portable_network_session_with_ingress(
+        stream, key, vm_id, generation, broker, inbound, ready,
     )
-    .map_err(|_| NetworkWorkerError::Engine)?;
-
-    let nonce = network_nonce();
-    let hello = NetworkHostHello::new(vm_id, generation, nonce)
-        .map_err(|_| NetworkWorkerError::Protocol)?;
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.write_all(&hello.encode(&key)))
-        .await
-        .map_err(|_| NetworkWorkerError::HelloWriteTimeout)?
-        .map_err(|_| NetworkWorkerError::HelloWriteIo)?;
-    let mut ack = [0_u8; NETWORK_GUEST_ACK_LEN];
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut ack))
-        .await
-        .map_err(|_| NetworkWorkerError::AcknowledgementReadTimeout)?
-        .map_err(|_| NetworkWorkerError::AcknowledgementReadIo)?;
-    NetworkGuestAck::decode(&ack, &key, &nonce)
-        .map_err(|_| NetworkWorkerError::AcknowledgementInvalid)?;
-
-    stream
-        .write_all(
-            &NetworkHostReady::new(nonce)
-                .map_err(|_| NetworkWorkerError::Protocol)?
-                .encode(&key),
-        )
-        .await
-        .map_err(|_| NetworkWorkerError::HostReadyIo)?;
-    stream
-        .flush()
-        .await
-        .map_err(|_| NetworkWorkerError::HostReadyIo)?;
-    ready().map_err(|_| NetworkWorkerError::StatusIo)?;
-
-    let session = Arc::new(Mutex::new(
-        NetworkSession::new(&key, &nonce, NetworkRole::Host)
-            .map_err(|_| NetworkWorkerError::Protocol)?,
-    ));
-    let (stream_read, stream_write) = tokio::io::split(stream);
-    let (guest_packet_tx, guest_packets) = mpsc::channel(PACKET_QUEUE);
-    let reader = read_authenticated_frames(stream_read, Arc::clone(&session), guest_packet_tx);
-    let writer = write_authenticated_frames(stream_write, session, outbound_packets);
-    let dispatcher = dispatch_packets(guest_packets, stack, to_stack, from_stack, broker, inbound);
-    tokio::pin!(reader, writer, dispatcher);
-    tokio::select! {
-        result = &mut reader => result,
-        result = &mut writer => result,
-        result = &mut dispatcher => result,
-    }
-}
-
-fn network_nonce() -> [u8; 32] {
-    loop {
-        let mut nonce = [0_u8; 32];
-        OsRng.fill_bytes(&mut nonce);
-        if nonce.iter().any(|byte| *byte != 0) {
-            return nonce;
-        }
-    }
-}
-
-async fn read_authenticated_frames<R>(
-    mut stream: R,
-    session: Arc<Mutex<NetworkSession>>,
-    packets: mpsc::Sender<Vec<u8>>,
-) -> Result<(), NetworkWorkerError>
-where
-    R: AsyncRead + Unpin,
-{
-    loop {
-        let mut header = [0_u8; NETWORK_FRAME_HEADER_LEN];
-        stream
-            .read_exact(&mut header)
-            .await
-            .map_err(|_| NetworkWorkerError::FrameIo)?;
-        let frame_len =
-            encoded_network_frame_len(&header).map_err(|_| NetworkWorkerError::Protocol)?;
-        let mut frame = vec![0_u8; frame_len];
-        frame[..NETWORK_FRAME_HEADER_LEN].copy_from_slice(&header);
-        stream
-            .read_exact(&mut frame[NETWORK_FRAME_HEADER_LEN..])
-            .await
-            .map_err(|_| NetworkWorkerError::FrameIo)?;
-        let packet = session
-            .lock()
-            .await
-            .decode_packet(&frame)
-            .map_err(|_| NetworkWorkerError::Protocol)?;
-        packets
-            .send(packet)
-            .await
-            .map_err(|_| NetworkWorkerError::Engine)?;
-    }
-}
-
-async fn write_authenticated_frames<W>(
-    mut stream: W,
-    session: Arc<Mutex<NetworkSession>>,
-    mut packets: mpsc::Receiver<Vec<u8>>,
-) -> Result<(), NetworkWorkerError>
-where
-    W: AsyncWrite + Unpin,
-{
-    while let Some(packet) = packets.recv().await {
-        if packet.is_empty() || packet.len() > NETWORK_MAX_PACKET_BYTES {
-            return Err(NetworkWorkerError::Engine);
-        }
-        let frame = session
-            .lock()
-            .await
-            .encode_packet(&packet)
-            .map_err(|_| NetworkWorkerError::Protocol)?;
-        stream
-            .write_all(&frame)
-            .await
-            .map_err(|_| NetworkWorkerError::FrameIo)?;
-    }
-    Err(NetworkWorkerError::Engine)
-}
-
-async fn dispatch_packets<B: EgressBroker>(
-    mut packets: mpsc::Receiver<Vec<u8>>,
-    stack: Netstack,
-    to_stack: mpsc::Sender<Vec<u8>>,
-    outbound: mpsc::Sender<Vec<u8>>,
-    broker: Arc<B>,
-    mut inbound: Option<mpsc::Receiver<InboundGuestStream>>,
-) -> Result<(), NetworkWorkerError> {
-    let mut listeners = HashMap::<SocketAddr, tokio::task::JoinHandle<()>>::new();
-    let mut inbound_bridges = JoinSet::new();
-    loop {
-        let packet = tokio::select! {
-            packet = packets.recv() => {
-                packet.ok_or(NetworkWorkerError::FrameIo)?
-            }
-            incoming = next_inbound_guest_stream(&mut inbound) => {
-                let Some(mut incoming) = incoming else {
-                    inbound = None;
-                    continue;
-                };
-                if inbound_bridges.len() >= MAX_INBOUND_STREAM_FLOWS {
-                    continue;
-                }
-                let destination = SocketAddr::new(
-                    IpAddr::V4(GUEST_IP),
-                    incoming.guest_port,
-                );
-                let guest = tokio::time::timeout(GUEST_CONNECT_TIMEOUT, stack.connect(destination)).await;
-                let Ok(Ok(mut guest)) = guest else {
-                    continue;
-                };
-                inbound_bridges.spawn(async move {
-                    let _ = tokio::io::copy_bidirectional(&mut incoming.stream, &mut guest).await;
-                    let _ = incoming.stream.shutdown().await;
-                    let _ = guest.shutdown().await;
-                });
-                continue;
-            }
-            completed = inbound_bridges.join_next(), if !inbound_bridges.is_empty() => {
-                let _ = completed;
-                continue;
-            }
-        };
-        if let Ok(question) = parse_ipv4_dns_question(&packet, WORKER_IP, DNS_MESSAGE_LIMIT) {
-            if question.source.ip() != IpAddr::V4(GUEST_IP) {
-                continue;
-            }
-            let answer = match broker.resolve_dns(&question).await {
-                Ok(answer) => answer,
-                Err(_) => continue,
-            };
-            let response =
-                build_ipv4_dns_response(&question, answer.answer, answer.ttl_seconds, NETWORK_MTU)
-                    .map_err(|_| NetworkWorkerError::Engine)?;
-            outbound
-                .send(response)
-                .await
-                .map_err(|_| NetworkWorkerError::Engine)?;
-            continue;
-        }
-
-        let Ok(tcp) = parse_canonical_ipv4_tcp_packet(&packet) else {
-            // UDP other than canonical virtual-resolver DNS, ICMP, IPv6, and
-            // malformed/fragmented packets are intentionally not admitted.
-            continue;
-        };
-        if tcp.source.ip() != IpAddr::V4(GUEST_IP) {
-            continue;
-        }
-        if tcp.destination.ip() == IpAddr::V4(WORKER_IP) {
-            // Host-port publication creates an outbound userspace-netstack
-            // connection from WORKER_IP to one exact guest port. Feed return
-            // packets to that stack; it has no listener on WORKER_IP and
-            // rejects anything that does not match an existing connection.
-            to_stack
-                .send(packet)
-                .await
-                .map_err(|_| NetworkWorkerError::Engine)?;
-            continue;
-        }
-        if listeners.contains_key(&tcp.destination) {
-            to_stack
-                .send(packet)
-                .await
-                .map_err(|_| NetworkWorkerError::Engine)?;
-            continue;
-        }
-        if !tcp.initial_syn {
-            continue;
-        }
-        let flow = TcpFlow {
-            source: tcp.source,
-            destination: tcp.destination,
-        };
-        match broker.authorize_tcp(flow).await {
-            Ok(()) => {}
-            Err(_) => continue,
-        }
-        let listener = match stack.bind_endpoint(tcp.destination).await {
-            Ok(listener) => listener,
-            Err(_) => continue,
-        };
-        let listener_broker = Arc::clone(&broker);
-        listeners.insert(
-            tcp.destination,
-            tokio::spawn(async move {
-                serve_listener(listener, listener_broker).await;
-            }),
-        );
-        to_stack
-            .send(packet)
-            .await
-            .map_err(|_| NetworkWorkerError::Engine)?;
-    }
-}
-
-async fn next_inbound_guest_stream(
-    inbound: &mut Option<mpsc::Receiver<InboundGuestStream>>,
-) -> Option<InboundGuestStream> {
-    match inbound {
-        Some(inbound) => inbound.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
-async fn serve_listener<B: EgressBroker>(mut listener: TcpListener, broker: Arc<B>) {
-    let mut bridges = JoinSet::new();
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let Some(mut guest) = accepted else { return; };
-                let flow = TcpFlow {
-                    source: guest.peer_addr(),
-                    destination: guest.local_addr(),
-                };
-                let connected = broker.connect_tcp(flow).await;
-                let Ok(mut connected) = connected else { continue; };
-                bridges.spawn(async move {
-                    let _ = tokio::io::copy_bidirectional(&mut guest, &mut connected).await;
-                    let _ = guest.shutdown().await;
-                    let _ = connected.shutdown().await;
-                });
-            }
-            completed = bridges.join_next(), if !bridges.is_empty() => {
-                let _ = completed;
-            }
-        }
-    }
+    .await
+    .map_err(NetworkWorkerError::from)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1880,6 +1554,24 @@ pub enum NetworkWorkerError {
     FrameIo,
     #[error("network worker engine failed")]
     Engine,
+}
+
+impl From<NetworkSessionError> for NetworkWorkerError {
+    fn from(error: NetworkSessionError) -> Self {
+        match error {
+            NetworkSessionError::InvalidIdentity => Self::InvalidIdentity,
+            NetworkSessionError::HelloWriteTimeout => Self::HelloWriteTimeout,
+            NetworkSessionError::HelloWriteIo => Self::HelloWriteIo,
+            NetworkSessionError::AcknowledgementReadTimeout => Self::AcknowledgementReadTimeout,
+            NetworkSessionError::AcknowledgementReadIo => Self::AcknowledgementReadIo,
+            NetworkSessionError::AcknowledgementInvalid => Self::AcknowledgementInvalid,
+            NetworkSessionError::HostReadyIo => Self::HostReadyIo,
+            NetworkSessionError::ReadyIo => Self::StatusIo,
+            NetworkSessionError::Protocol => Self::Protocol,
+            NetworkSessionError::FrameIo => Self::FrameIo,
+            NetworkSessionError::Engine => Self::Engine,
+        }
+    }
 }
 
 impl NetworkWorkerError {
@@ -2586,7 +2278,7 @@ mod tests {
         inbound_tx
             .send(InboundGuestStream {
                 guest_port: binding.guest_port,
-                stream: transferred_stream(OwnedFd::from(accepted)).unwrap(),
+                stream: Box::pin(transferred_stream(OwnedFd::from(accepted)).unwrap()),
             })
             .await
             .unwrap();

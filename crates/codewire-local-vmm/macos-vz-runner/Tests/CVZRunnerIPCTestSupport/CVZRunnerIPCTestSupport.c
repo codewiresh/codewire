@@ -21,7 +21,7 @@ int cw_vz_fixture_send_request(
     size_t descriptor_count
 ) {
     if (socket_fd < 0 || buffer == NULL || size == 0 || size > CW_VZ_MAX_FRAME_BYTES + 1 ||
-        descriptors == NULL || descriptor_count == 0 || descriptor_count > 8) {
+        descriptors == NULL || descriptor_count == 0 || descriptor_count > 12) {
         return -1;
     }
     int send_flags = 0;
@@ -52,7 +52,7 @@ int cw_vz_fixture_send_request(
     struct iovec vector = {.iov_base = frame, .iov_len = frame_size};
     union {
         struct cmsghdr alignment;
-        uint8_t bytes[CMSG_SPACE(sizeof(int) * 8)];
+        uint8_t bytes[CMSG_SPACE(sizeof(int) * 12)];
     } control = {0};
     struct msghdr message = {0};
     message.msg_iov = &vector;

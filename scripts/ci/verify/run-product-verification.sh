@@ -199,6 +199,7 @@ run_policy_core() {
   python3 scripts/dev/test-macos-app-sandbox-canary.py
   python3 crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py
   python3 scripts/dev/test-macos-vz-inode-probe.py
+  python3 scripts/dev/test-macos-vz-production-boot.py
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
@@ -580,6 +581,12 @@ run_transport() {
     python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
     cargo check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
       --target aarch64-apple-darwin
+    # The opt-in developer verifier is not exercised by default package tests.
+    # Keep its production-codec preparation and control-loop proof selected.
+    cargo test --locked -p codewire-local-vmm --features macos-production-init-fixture \
+      --bin codewire-macos-vz-fixture
+    cargo clippy --locked -p codewire-local-vmm --features macos-production-init-fixture \
+      --bin codewire-macos-vz-fixture -- -D warnings
   fi
   if selected transport_pkg_codewire_vmm_guest_probe; then
     scripts/ci/verify/build-local-vmm-initramfs.sh --verify

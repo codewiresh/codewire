@@ -166,14 +166,14 @@ import Foundation
       )
     }
 
-    private static func descriptorURL(_ descriptor: Int32) -> URL {
+    static func descriptorURL(_ descriptor: Int32) -> URL {
       // This feasibility slice deliberately has no pathname fallback. Apple
       // documents URL-only APIs for Linux boot and regular disk images; an
       // exact-inode hardware kill test must prove /dev/fd before VM start is admitted.
       URL(fileURLWithPath: "/dev/fd/\(descriptor)", isDirectory: false)
     }
 
-    private static func validateImmutable(
+    static func validateImmutable(
       _ descriptor: Int32,
       identity: ImmutableArtifact
     ) throws {
@@ -183,7 +183,7 @@ import Foundation
       }
     }
 
-    private static func validateMutable(
+    static func validateMutable(
       _ descriptor: Int32,
       identity: MutableDataDisk
     ) throws {
@@ -300,7 +300,7 @@ import Foundation
       return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func multiplied(_ value: UInt64, by multiplier: UInt64) throws -> UInt64 {
+    static func multiplied(_ value: UInt64, by multiplier: UInt64) throws -> UInt64 {
       let (result, overflow) = value.multipliedReportingOverflow(by: multiplier)
       guard !overflow else { throw ConfigurationError.invalidMemory }
       return result

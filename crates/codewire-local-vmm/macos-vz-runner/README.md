@@ -3,7 +3,8 @@
 `codewire-vz-runner` is an additive, currently unreachable Swift helper for
 validating a fixed Virtualization.framework configuration on macOS 26 or later
 on Apple Silicon. It is not linked from Cargo, `codewire-local-vmm`, or `cw`, and
-it does not start or manage a VM.
+its default validation does not start a VM. The separately invoked developer
+fixtures below own disposable VMs; none exposes a product environment path.
 
 The separately invoked `inode-probe` subcommand is source for one synthetic
 hardware fixture, not product lifecycle wiring. Its parent is
@@ -19,11 +20,12 @@ process result and control-channel EOF to classify ownership termination.
 
 The harness never signs. It requires exact reviewed SHA-256 values for its
 private helper copy, kernel and initramfs plus the exact synthetic ext4 UUID,
-and refuses a helper without the separately authorized
+and refuses a helper without the development
 `com.apple.security.virtualization` entitlement. Merely building or testing
 this package therefore cannot start a VM. The synthetic PID-1 response is not
-production guest readiness; production still requires the distinct state,
-root, and seed storage contract to be implemented.
+production guest readiness. The schema-2 fixture below implements the distinct
+state, root, seed and setup descriptor contract; product lifecycle wiring and
+production boot acceptance remain separate from the inode probe.
 
 Both canonical guest archive formats include `/dev/null` as character device
 1:3 before `/init`. With no console, the kernel can leave standard descriptors
@@ -64,17 +66,84 @@ The VZ topology has no network, shared directory, graphics, audio, input,
 serial, console, USB, or balloon devices; its only host transport is native
 virtio-vsock.
 
-This source slice uses `/dev/fd/<n>` only because Apple's public Linux boot and
-regular disk-image VZ APIs accept URLs. That URL-to-open-file behavior is not a
-hardware claim. VM validation or start remains blocked until an exact-inode
-swap test proves that behavior, the current guest boot contract is reconciled,
-and the repository owner separately authorizes the required
-`com.apple.security.virtualization` entitlement signing step.
+## Production-init developer fixture (schema 2)
 
-The path-backed boot control also remains blocked from execution until the
-repository owner separately authorizes its signing and one VZ start. Source
-builds and tests exercise only its copy, validation, result-separation, and
-cleanup contracts.
+See [preparation and execution](../../../docs/dev/MACOS-VZ-PRODUCTION-FIXTURE.md)
+for the Rust verifier, private synthetic inputs and parent harness. The standalone
+`developer-entitlements.plist` is the sole-entitlement ad-hoc signing input;
+building the package does not sign it or start a VM.
+
+`production-init-fixture --control-fd FD` is a separate, unreachable developer
+entrypoint. The existing four-descriptor schema-1 inode probes are unchanged.
+Its fixed nine `SCM_RIGHTS` descriptors are, in order:
+
+1. read-only kernel
+2. read-only initial ramdisk
+3. read-only 4 KiB seed
+4. read-write state ext4 disk (`CWSTATE1`)
+5. read-write root ext4 disk (`CWROOT1`)
+6. read-only setup pack (`CWSETUP1`)
+7. private connected Unix network channel
+8. private connected Unix progress channel
+9. private connected Unix daemon channel
+
+The canonical configuration fields are exactly `schemaVersion` (2), `vmID`,
+`generation`, `cpuCount`, `memoryMiB`, `daemonVsockPort` (7777), `kernel`,
+`initialRamdisk`, `seedDisk`, `stateDisk`, `rootDisk`, and `setupDisk`. Immutable
+identities contain `size` and `sha256`; mutable identities contain `size` and
+`filesystemUUID`. The setup pack is at least 64 KiB, aligned to 4096 bytes and
+at most 65 GiB, matching the guest contract. File roles must refer to distinct
+private regular inodes. Channels must be connected same-EUID Unix streams,
+distinct from each other and the control socket; admission uses Darwin's
+self-only opaque socket handles or Linux socket cookies, not Darwin inode
+assumptions. All received descriptors are close-on-exec and helper-owned.
+
+The parent constructs the real current guest seed with synthetic boot
+authentication and a matching verified setup pack. The helper admits descriptor
+identities, not seed credentials or workload semantics; unchanged production
+PID 1 validates the complete seed/setup/root contract. No paths, tokens,
+network destinations, shares, Docker, timeout knobs or provider authority can
+be added to this configuration. This is a fresh-boot fixture, not recovery.
+
+After schema-2 `descriptors-admitted`, the parent sends the existing framed
+one-byte start command. The helper boots the unchanged production command line
+and independently dials guest ports 7775/7776/7777, forwarding opaque bytes
+through their respective channels. It serializes exactly one
+`network-connected`, `progress-connected`, and `daemon-connected` response,
+in any order. The parent starts each protocol only after its corresponding
+marker, preserving the guest handshake deadline. There is no all-channel
+barrier and the helper never generates `HostReady` or accepts guest readiness.
+
+The guest progress service closes after a terminal frame. Only that channel
+drains its buffered bytes, half-closes the Unix output and emits
+`progress-closed`, while retaining the VM. The parent must validate the genuine
+terminal progress frame and independently authenticate daemon readiness. Parent
+channel/control EOF, unexpected control input, ordinary guest-channel EOF,
+guest stop, errors or the fixed deadline end the fixture. The parent retains
+its channels until cleanup. No helper response is named `guest-ready`.
+
+Connections have a shared 120-second deadline and the runtime lasts at most
+180 seconds, followed by at most five seconds for owned VZ stop and transport
+joining. Every forwarding buffer is at most 32 KiB. Control admission/start
+reads are bounded to 15 seconds and marker writes to one second. No network
+device, real host dial, shared directory or product confinement claim is added.
+Source/portable tests do not prove production boot on hardware; native compile
+and the separate parent-owned guest/network/progress/daemon fixture qualify
+that claim. Routine developer execution follows the repository's standing
+authority; this command does not confer permission to use real credentials.
+
+This source slice uses `/dev/fd/<n>` because Apple's public Linux boot and
+regular disk-image VZ APIs accept URLs. The earlier schema-1 exact-inode swap
+probe established this handoff on the designated Mac; that accepted evidence
+does not qualify a changed helper or prove schema-2 production boot. The
+path-backed control remains diagnostic evidence, never an exact-inode proof.
+
+Bounded developer builds, ad-hoc development signing with the required
+`com.apple.security.virtualization` entitlement, and disposable fixture runs
+follow the repository's standing authority on owner-designated machines.
+They do not require separate per-run approval. Source builds and tests do not
+start a VM; hardware acceptance must record the exact helper and guest inputs
+actually exercised, preserving the checked-in topology and assertions.
 
 Run the portable protocol tests and boundary guard with:
 
