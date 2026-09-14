@@ -2,6 +2,7 @@
 """Focused developer helper tests; synthetic files/processes, no SSH or Cargo."""
 
 import importlib.util
+import contextlib
 import io
 import json
 import os
@@ -38,7 +39,8 @@ class HelperTests(unittest.TestCase):
         (repo / "tracked").write_text("old")
         (repo / ".gitignore").write_text(".env\n")
         subprocess.run(["git", "add", "."], cwd=repo, check=True)
-        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture"], cwd=repo, check=True)
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                        "commit", "-qm", "fixture"], cwd=repo, check=True)
         return repo
 
     def test_working_bytes_staged_added_deleted_and_private_exclusions(self):
@@ -62,6 +64,19 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(first, helper.source_archive(repo, archive))
         (repo / "tracked").write_text("changed again")
         self.assertNotEqual(first["source_sha256"], helper.source_archive(repo, archive)["source_sha256"])
+
+    def test_synthetic_git_commits_do_not_invoke_inherited_signer(self):
+        # /bin/false is a non-secret synthetic signer. Even an inherited
+        # command-scope signing request must not reach it in either fixture
+        # commit. This does not alter signing policy in the real checkout.
+        with mock.patch.dict(os.environ, {
+            "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "commit.gpgsign",
+            "GIT_CONFIG_VALUE_0": "true", "GIT_CONFIG_KEY_1": "gpg.program",
+            "GIT_CONFIG_VALUE_1": "/bin/false",
+        }):
+            self.test_git_seed_exports_objects_not_hooks_or_config()
+        signature = helper.output(["git", "log", "-1", "--format=%G?"], cwd=self.root / "repo")
+        self.assertEqual(signature, "N")
 
     def test_escaping_source_symlink_rejected(self):
         repo = self.repo()
@@ -153,7 +168,8 @@ class HelperTests(unittest.TestCase):
         (database / "hooks/secret").write_text("synthetic-secret")
         (repo / "tracked").write_text("synthetic private replacement")
         subprocess.run(["git", "add", "tracked"], cwd=repo, check=True)
-        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "replacement"], cwd=repo, check=True)
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                        "commit", "-qm", "replacement"], cwd=repo, check=True)
         replacement = helper.output(["git", "rev-parse", "HEAD"], cwd=repo)
         subprocess.run(["git", f"--git-dir={database}", "fetch", "-q", str(repo), replacement], check=True)
         subprocess.run(["git", f"--git-dir={database}", "replace", commit, replacement], check=True)
@@ -216,27 +232,191 @@ class HelperTests(unittest.TestCase):
             self.root, os.environ.copy(), self.root / "timeout.log", cancel, time.monotonic() + .2), 124)
 
     def test_natural_failure_does_not_require_signalling_an_exited_group(self):
-        with mock.patch.object(helper.os, "killpg", side_effect=PermissionError):
+        def absent_only(pid, signum):
+            self.assertEqual(signum, 0, "must not signal an already reaped leader")
+            raise ProcessLookupError
+
+        with mock.patch.object(helper.os, "killpg", side_effect=absent_only):
             self.assertEqual(helper.run_command([sys.executable, "-c", "raise SystemExit(7)"],
                 self.root, os.environ.copy(), self.root / "natural-failure.log", threading.Event(),
                 time.monotonic() + 5), 7)
 
+    def test_cleanup_does_not_escalate_after_term_reaps_leader(self):
+        process = mock.Mock(pid=4242, returncode=None)
+
+        def poll():
+            if process.poll.call_count == 1:
+                return None
+            process.returncode = -signal.SIGTERM
+            return process.returncode
+
+        process.poll.side_effect = poll
+
+        def signal_group(pid, signum):
+            self.assertEqual(pid, 4242)
+            self.assertNotEqual(signum, signal.SIGKILL)
+            if signum == 0:
+                raise ProcessLookupError
+
+        with mock.patch.object(helper.os, "killpg", side_effect=signal_group):
+            helper.stop_group(process)
+
+    def test_cleanup_refuses_reaped_visible_or_unobservable_groups(self):
+        for observation in (None, PermissionError(), OSError("synthetic observation failure")):
+            with self.subTest(observation=type(observation).__name__):
+                process = mock.Mock(pid=4242, returncode=0)
+                process.poll.return_value = 0
+
+                def observe(pid, signum):
+                    self.assertEqual(signum, 0)
+                    if observation is not None:
+                        raise observation
+
+                with mock.patch.object(helper, "STOP_SECONDS", 0), \
+                     mock.patch.object(helper.os, "killpg", side_effect=observe):
+                    with self.assertRaises(helper.CleanupUnknown):
+                        helper.stop_group(process)
+
+    def test_cleanup_escalates_only_while_leader_remains_owned(self):
+        process = mock.Mock(pid=4242, returncode=None)
+        process.poll.side_effect = lambda: process.returncode
+        signals = []
+
+        def observe(pid, signum):
+            if signum:
+                signals.append(signum)
+                if signum == signal.SIGKILL:
+                    process.returncode = -signal.SIGKILL
+            elif process.returncode is not None:
+                raise ProcessLookupError
+
+        with mock.patch.object(helper, "STOP_SECONDS", 0), \
+             mock.patch.object(helper.os, "killpg", side_effect=observe):
+            helper.stop_group(process)
+        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
+
+    def test_unknown_wait_never_authorizes_a_signal(self):
+        process = mock.Mock(pid=4242, returncode=None)
+        process.poll.side_effect = ChildProcessError("synthetic ECHILD")
+        with mock.patch.object(helper.subprocess, "Popen", return_value=process), \
+             mock.patch.object(helper.os, "killpg") as signal_group:
+            with self.assertRaises(helper.CleanupUnknown):
+                helper.run_command(["synthetic"], self.root, {}, self.root / "unknown.log",
+                                   threading.Event(), time.monotonic() + 5)
+            signal_group.assert_not_called()
+
+    def test_command_resets_inherited_sigchld_autoreap(self):
+        previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        try:
+            result = helper.run_command([sys.executable, "-c", "raise SystemExit(7)"],
+                self.root, os.environ.copy(), self.root / "autoreap.log", threading.Event(),
+                time.monotonic() + 5)
+            self.assertEqual(result, 7)
+            self.assertEqual(signal.getsignal(signal.SIGCHLD), signal.SIG_DFL)
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+
+    def test_unknown_cleanup_retains_runtime_and_blocks_cache_reuse(self):
+        with helper.cache_lock(self.root):
+            with self.assertRaises(helper.CleanupUnknown):
+                with helper.isolated_runtime(self.root, self.root / "fixture-run") as runtime:
+                    self.addCleanup(helper.shutil.rmtree, runtime)
+                    (runtime / "keep").write_bytes(b"synthetic retained state")
+                    marker = json.loads((self.root / "inflight.json").read_text())
+                    self.assertEqual(marker["isolated_state"], str(runtime))
+                    self.assertEqual(marker["run_id"], "fixture-run")
+                    self.assertEqual((self.root / "inflight.json").stat().st_mode & 0o777, 0o600)
+                    raise helper.CleanupUnknown("synthetic uncertainty; no process launched")
+        self.assertEqual((runtime / "keep").read_bytes(), b"synthetic retained state")
+        with self.assertRaisesRegex(RuntimeError, "cleanup is unconfirmed"):
+            with helper.cache_lock(self.root):
+                self.fail("unconfirmed state was reused")
+
+    def test_confirmed_command_failure_removes_runtime_and_marker(self):
+        with helper.cache_lock(self.root):
+            with self.assertRaisesRegex(RuntimeError, "ordinary failure"):
+                with helper.isolated_runtime(self.root, self.root / "fixture-run") as runtime:
+                    raise RuntimeError("ordinary failure; no command remains")
+        self.assertFalse(runtime.exists())
+        self.assertFalse((self.root / "inflight.json").exists())
+        with helper.cache_lock(self.root):
+            pass
+
     def test_cancel_kills_fixture_grandchild(self):
         cancel = threading.Event()
         marker = self.root / "escaped"
-        child = f"import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).touch()"
-        parent = (f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}]); "
-                  "print('started', flush=True); time.sleep(20)")
-        timer = threading.Timer(.3, cancel.set)
-        timer.start()
+        ready = self.root / "grandchild-ready"
+        child = (f"import time; from pathlib import Path; Path({str(ready)!r}).touch(); "
+                 f"time.sleep(1); Path({str(marker)!r}).touch()")
+        # TERM reaches both processes. The fixture parent must reap its own
+        # child before exiting, not rely on the runner's PID 1 orphan reaper.
+        parent = f'''import signal, subprocess, sys, time
+cancelled = False
+def stop(signum, frame):
+    global cancelled
+    cancelled = True
+signal.signal(signal.SIGTERM, stop)
+child = subprocess.Popen([sys.executable, '-c', {child!r}])
+deadline = time.monotonic() + 20
+while not cancelled and time.monotonic() < deadline:
+    time.sleep(.01)
+child.wait(timeout=2)
+'''
+        finished = threading.Event()
+
+        def cancel_after_ready():
+            deadline = time.monotonic() + 3
+            while not ready.exists() and time.monotonic() < deadline:
+                if finished.wait(.01):
+                    return
+            cancel.set()
+
+        observer = threading.Thread(target=cancel_after_ready)
+        observer.start()
         try:
             status = helper.run_command([sys.executable, "-c", parent], self.root, os.environ.copy(),
                                         self.root / "cancel.log", cancel, time.monotonic() + 5)
         finally:
-            timer.cancel()
+            finished.set()
+            observer.join()
         self.assertEqual(status, 130)
+        self.assertTrue(ready.exists(), "cancellation must exercise a running grandchild")
         time.sleep(1)
         self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux orphan-reaper regression")
+    def test_cancel_fixture_reaps_before_its_parent_exits(self):
+        # A container's PID 1 need not promptly reap an orphan. Keep adoption
+        # inside this disposable subprocess so the fixture cannot rely on it;
+        # even an assertion failure reaps every adopted fixture child.
+        probe = r'''
+import ctypes, importlib.util, os, signal, sys, unittest
+libc = ctypes.CDLL(None, use_errno=True)
+assert libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER, this process only
+signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+spec = importlib.util.spec_from_file_location("cancel_fixture", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+result = unittest.TestResult()
+adopted = []
+try:
+    module.HelperTests("test_cancel_kills_fixture_grandchild").run(result)
+finally:
+    while True:
+        try:
+            child, status = os.waitpid(-1, 0)
+        except ChildProcessError:
+            break
+        adopted.append(status)
+assert result.wasSuccessful(), result.errors + result.failures
+assert not adopted, "cancellation fixture orphaned a child"
+print("cooperative cancellation: no adopted children")
+'''
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", probe, __file__],
+                                env={"PATH": os.defpath}, capture_output=True, text=True,
+                                timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "cooperative cancellation: no adopted children")
 
     def test_worker_failure_saves_evidence_not_success(self):
         run = self.root / "run"
@@ -251,13 +431,40 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(result["commands"], [])
         self.assertEqual(result["artifacts"], {})
 
+    def test_worker_unknown_cleanup_retains_state_and_refuses_next_sync(self):
+        run = self.worker_fixture()
+        with mock.patch.object(sys, "stdin", io.StringIO("")), \
+             mock.patch.object(signal, "signal"), \
+             mock.patch.object(helper.platform, "system", return_value="Darwin"), \
+             mock.patch.object(helper.platform, "machine", return_value="arm64"), \
+             mock.patch.object(helper, "output", return_value="fixture macOS"), \
+             mock.patch.object(helper, "run_command", side_effect=helper.CleanupUnknown("fixture")):
+            self.assertEqual(helper.worker(self.root, run), 1)
+        result = json.loads((run / "result.json").read_text())
+        runtime = Path(result["isolated_state"])
+        self.addCleanup(helper.shutil.rmtree, runtime)
+        self.assertTrue(runtime.is_dir())
+        self.assertEqual(result["status"], "failed")
+        self.assertNotIn("exit_code", result["commands"][0])
+        self.assertEqual(helper.evidence_status(run, "fixture"), "failed")
+        following = self.root / "next-run"
+        following.mkdir()
+        (following / "request.json").write_bytes((run / "request.json").read_bytes())
+        with mock.patch.object(sys, "stdin", io.StringIO("")), \
+             mock.patch.object(signal, "signal"), \
+             mock.patch.object(helper, "sync_source") as sync:
+            self.assertEqual(helper.worker(self.root, following), 1)
+            sync.assert_not_called()
+        self.assertTrue((self.root / "inflight.json").is_file())
+        self.assertEqual(json.loads((following / "result.json").read_text())["commands"], [])
+
     def worker_fixture(self, component="cli", action="verify"):
         run = self.root / "run"
         run.mkdir()
         request = {"run_id": "fixture", "source_sha256": "source", "lock_sha256": "lock",
                    "component": component,
                    "helper_sha256": "helper", "timeout": 10, "action": action, "intel": True}
-        if component in ("vz-runner", "vz-fixture"):
+        if component in ("vz-runner", "vz-fixture", "sandbox-canary"):
             request["intel"] = False
         (run / "request.json").write_text(json.dumps(request))
         with tarfile.open(run / "source.tar.gz", "w:gz") as archive:
@@ -429,6 +636,146 @@ class HelperTests(unittest.TestCase):
         self.assertIn(["xcrun", "swift", "build"], [argv[:3] for argv in commands])
         self.assertNotIn(["xcrun", "swift", "test"], [argv[:3] for argv in commands])
 
+    def test_sandbox_canary_only_builds_and_tests_never_signs_or_runs_experiment(self):
+        run = self.worker_fixture("sandbox-canary")
+        reader, writer = os.pipe()
+        stdin = os.fdopen(reader, "r")
+        swiftc = self.root / "toolchain/usr/bin/swiftc"
+        testing_plugin = self.root / "toolchain/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
+        swiftc.parent.mkdir(parents=True)
+        testing_plugin.parent.mkdir(parents=True)
+        swiftc.touch()
+        testing_plugin.touch()
+        products = ("sandbox-experiment-owner", "sandbox-candidate", "canary-deputy")
+
+        def fixture_command(argv, cwd, env, log, cancel, deadline):
+            log.write_text("synthetic command plan, not native sandbox evidence")
+            if argv[:3] == ["xcrun", "swift", "build"]:
+                scratch = Path(argv[argv.index("--scratch-path") + 1])
+                self.assertEqual(scratch, self.root / "target/swift-sandbox-canary")
+                self.assertTrue(argv[argv.index("--package-path") + 1].endswith(
+                    "/macos-sandbox-canary-experiment"))
+                (scratch / "debug").mkdir(parents=True)
+                for product in products:
+                    (scratch / "debug" / product).write_bytes(product.encode())
+            return 0
+
+        try:
+            with mock.patch.object(sys, "stdin", stdin), mock.patch.object(signal, "signal"), \
+                 mock.patch.object(helper.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(helper.platform, "machine", return_value="arm64"), \
+                 mock.patch.object(helper, "output", side_effect=lambda argv:
+                     str(swiftc) if argv == ["xcrun", "--find", "swiftc"] else "fixture macOS"), \
+                 mock.patch.object(helper, "run_command", side_effect=fixture_command):
+                self.assertEqual(helper.worker(self.root, run), 0)
+        finally:
+            os.close(writer)
+            stdin.close()
+        result = json.loads((run / "result.json").read_text())
+        commands = [item["argv"] for item in result["commands"]]
+        self.assertEqual(commands[2][0], "python3")
+        self.assertTrue(commands[2][1].endswith(
+            "/macos-sandbox-canary-experiment/Tests/test_static_contract.py"))
+        self.assertEqual(commands[3], [
+            "python3", str(self.root / "source/scripts/dev/test-macos-app-sandbox-canary.py"), "-v",
+        ])
+        self.assertEqual([argv[:3] for argv in commands[5:7]], [
+            ["xcrun", "swift", "build"], ["xcrun", "swift", "test"],
+        ])
+        self.assertEqual(commands[7], [
+            "xcrun", "swift", "-warnings-as-errors",
+            str(self.root / "source/crates/codewire-local-vmm" /
+                "macos-sandbox-canary-experiment/Tests/test_run_loop.swift"),
+        ])
+        lifecycle = str(Path(result["isolated_state"]) / "test-application-lifecycle")
+        package = self.root / "source/crates/codewire-local-vmm/macos-sandbox-canary-experiment"
+        self.assertEqual(commands[8], [
+            "xcrun", "swiftc", "-warnings-as-errors", "-parse-as-library",
+            "-swift-version", "6",
+            str(package / "Sources/CanaryDeputy/ApplicationLifecycle.swift"),
+            str(package / "Tests/test_application_lifecycle.swift"), "-o", lifecycle,
+        ])
+        self.assertEqual(commands[9], [lifecycle])
+        self.assertTrue(all(argv[0] in ("xcrun", "python3", "file", "lipo", lifecycle)
+                            for argv in commands))
+        self.assertFalse(any(Path(argument).name == "macos-app-sandbox-canary.py"
+                             for argv in commands for argument in argv))
+        self.assertNotIn("codesign", str(commands))
+        self.assertEqual(set(result["artifacts"]), {f"{name}-arm64" for name in products})
+        self.assertEqual(helper.evidence_status(run, "fixture"), "passed")
+        # Each of the three binaries is required, not just the launcher.
+        result["artifacts"].pop("canary-deputy-arm64")
+        (run / "result.json").write_text(json.dumps(result))
+        with self.assertRaisesRegex(RuntimeError, "expected artifacts"):
+            helper.evidence_status(run, "fixture")
+
+    def test_sandbox_canary_run_loop_failure_prevents_success(self):
+        self.assert_sandbox_canary_native_failure_prevents_success("run-loop")
+
+    def test_sandbox_canary_lifecycle_compile_failure_prevents_success(self):
+        self.assert_sandbox_canary_native_failure_prevents_success("lifecycle-compile")
+
+    def test_sandbox_canary_lifecycle_execution_failure_prevents_success(self):
+        self.assert_sandbox_canary_native_failure_prevents_success("lifecycle-run")
+
+    def assert_sandbox_canary_native_failure_prevents_success(self, failure_stage):
+        run = self.worker_fixture("sandbox-canary", "test")
+        reader, writer = os.pipe()
+        stdin = os.fdopen(reader, "r")
+        swiftc = self.root / "toolchain/usr/bin/swiftc"
+        plugin = self.root / "toolchain/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
+        swiftc.parent.mkdir(parents=True)
+        plugin.parent.mkdir(parents=True)
+        swiftc.touch()
+        plugin.touch()
+
+        def fixture_command(argv, cwd, env, log, cancel, deadline):
+            log.write_text("synthetic native-fixture failure, not native evidence")
+            failed = (
+                (failure_stage == "run-loop" and argv[-1].endswith("/Tests/test_run_loop.swift"))
+                or (failure_stage == "lifecycle-compile" and argv[:2] == ["xcrun", "swiftc"])
+                or (failure_stage == "lifecycle-run" and
+                    Path(argv[0]).name == "test-application-lifecycle"))
+            return 1 if failed else 0
+
+        try:
+            with mock.patch.object(sys, "stdin", stdin), mock.patch.object(signal, "signal"), \
+                 mock.patch.object(helper.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(helper.platform, "machine", return_value="arm64"), \
+                 mock.patch.object(helper, "output", side_effect=lambda argv:
+                     str(swiftc) if argv == ["xcrun", "--find", "swiftc"] else "fixture macOS"), \
+                 mock.patch.object(helper, "run_command", side_effect=fixture_command):
+                self.assertEqual(helper.worker(self.root, run), 1)
+        finally:
+            os.close(writer)
+            stdin.close()
+        result = json.loads((run / "result.json").read_text())
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["commands"][-1]["exit_code"], 1)
+        last = result["commands"][-1]["argv"]
+        if failure_stage == "run-loop":
+            self.assertTrue(last[-1].endswith("/Tests/test_run_loop.swift"))
+        elif failure_stage == "lifecycle-compile":
+            self.assertEqual(last[:2], ["xcrun", "swiftc"])
+        else:
+            self.assertEqual(Path(last[0]).name, "test-application-lifecycle")
+        self.assertFalse(any(item["argv"][:3] == ["xcrun", "swift", "build"]
+                             for item in result["commands"]))
+
+    def test_swift_components_reject_cargo_only_options_before_ssh(self):
+        for component in ("vz-runner", "sandbox-canary"):
+            for option in (["--intel"], ["--seed-cargo"], ["--action", "clippy"]):
+                with self.subTest(component=component, option=option), \
+                     mock.patch.object(sys, "argv", ["macos-cli.py", "--component", component, *option]), \
+                     mock.patch.object(helper, "ssh") as ssh, \
+                     mock.patch.object(helper, "output") as output, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as failure:
+                        helper.main()
+                    self.assertEqual(failure.exception.code, 2)
+                    ssh.assert_not_called()
+                    output.assert_not_called()
+
     def test_worker_stdin_eof_cancels_owned_command(self):
         run = self.worker_fixture()
         original = helper.run_command
@@ -469,6 +816,30 @@ class HelperTests(unittest.TestCase):
         self.assertFalse((destination / "private.txt").exists())
         self.assertFalse((destination / "command-link.log").exists())
         self.assertEqual((destination / "artifacts/cw-aarch64-apple-darwin").read_bytes(), b"fixture binary")
+
+    def test_sandbox_canary_recovery_transfers_every_product_but_no_unlisted_artifact(self):
+        run = self.root / "remote-run"
+        artifacts = run / "artifacts"
+        artifacts.mkdir(parents=True)
+        products = ("sandbox-experiment-owner-arm64", "sandbox-candidate-arm64", "canary-deputy-arm64")
+        for name in products:
+            (artifacts / name).write_bytes(name.encode())
+        (artifacts / "unlisted-private-file").write_bytes(b"synthetic excluded bytes")
+        request = {"run_id": "fixture", "source_sha256": "source", "lock_sha256": "lock",
+                   "helper_sha256": "helper", "component": "sandbox-canary",
+                   "action": "build", "intel": False}
+        result = {**request, "status": "passed", "commands": [{"argv": ["fixture"], "exit_code": 0}],
+                  "artifacts": {name: helper.digest(artifacts / name) for name in products}}
+        (run / "request.json").write_text(json.dumps(request))
+        (run / "result.json").write_text(json.dumps(result))
+        destination = self.root / "recovered"
+        with mock.patch.object(helper, "ssh", side_effect=lambda _host, command, **kwargs:
+                               subprocess.run(command, **kwargs)):
+            helper.recover("unused", str(run), destination)
+        self.assertEqual(helper.evidence_status(destination, "fixture"), "passed")
+        self.assertEqual({path.name for path in (destination / "artifacts").iterdir()}, set(products))
+        for name in products:
+            self.assertEqual((destination / "artifacts" / name).read_bytes(), name.encode())
 
     def test_evidence_missing_running_failed_mismatch_and_tampered_artifacts(self):
         request = {"run_id": "fixture", "source_sha256": "source", "lock_sha256": "lock",

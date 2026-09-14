@@ -196,6 +196,8 @@ run_policy_core() {
   scripts/ci/tests/test-integration-postgres.sh
   python3 scripts/ci/tests/test-repo-checks-modules.py
   python3 scripts/dev/test-macos-cli.py
+  python3 scripts/dev/test-macos-app-sandbox-canary.py
+  python3 crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py
   python3 scripts/dev/test-macos-vz-inode-probe.py
   python3 scripts/dev/test-macos-vz-production-boot.py
   python3 scripts/checks/repo_checks.py license-map
