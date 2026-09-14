@@ -1,4 +1,5 @@
 use super::*;
+use codewire_daemon::client::v1;
 use codewire_vmm_guest_probe::{PROGRESS_REQUEST_LEN, Sha256Value};
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -341,7 +342,172 @@ async fn verifier_rejects_early_kill_and_network_closure_before_composite_readin
 }
 
 #[tokio::test]
-async fn verifier_composite_readiness_precedes_arming_and_only_armed_eof_completes() {
+async fn verifier_rejects_k_or_network_eof_after_readiness_but_before_workload() {
+    use codewire_daemon::service::DaemonRuntimeState;
+
+    for early_kill in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let (network, mut guest_network) = UnixStream::pair().unwrap();
+        let (progress, guest_progress) = UnixStream::pair().unwrap();
+        let (daemon, guest_daemon) = UnixStream::pair().unwrap();
+        let (control, mut parent) = UnixStream::pair().unwrap();
+        let (incoming, receiver) = tokio::sync::mpsc::channel(1);
+        incoming
+            .send(Ok::<_, io::Error>(guest_daemon))
+            .await
+            .unwrap();
+        let (shutdown, stop) = oneshot::channel();
+        let config = codewire_daemon::Config {
+            listen_addr: "unused-injected-transport".to_owned(),
+            workspace_root: temporary.path().to_path_buf(),
+            home_root: temporary.path().to_path_buf(),
+            auth_token: codewire_daemon::DaemonAuthToken::new(seed().auth_token().to_owned())
+                .unwrap(),
+            process_execution: codewire_daemon::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
+        };
+        let server = tokio::spawn(
+            codewire_daemon::server::serve_grpc_with_incoming_and_runtime_state(
+                config,
+                DaemonRuntimeState::ready(),
+                tokio_stream::wrappers::ReceiverStream::new(receiver),
+                async {
+                    let _ = stop.await;
+                },
+            ),
+        );
+        let verifier = tokio::spawn(verify_session_with_workload(
+            Arc::new(seed()),
+            network,
+            progress,
+            daemon,
+            control,
+            |_| async { std::future::pending::<Result<()>>().await },
+        ));
+        parent.write_all(b"N").await.unwrap();
+        authenticate_network(&mut guest_network).await;
+        parent.write_all(b"P").await.unwrap();
+        serve_progress(
+            guest_progress,
+            seed(),
+            vec![(16, GuestBootStage::DaemonStarted)],
+            false,
+        )
+        .await;
+        parent.write_all(b"D").await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), parent.read_u8())
+                .await
+                .unwrap()
+                .unwrap(),
+            b'R'
+        );
+        if early_kill {
+            parent.write_all(b"K").await.unwrap();
+        } else {
+            drop(guest_network);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), verifier)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(
+            parent.read_u8().await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        let _ = shutdown.send(());
+        drop(incoming);
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn failed_workload_emits_no_workload_marker() {
+    use codewire_daemon::service::DaemonRuntimeState;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let (network, mut guest_network) = UnixStream::pair().unwrap();
+    let (progress, guest_progress) = UnixStream::pair().unwrap();
+    let (daemon, guest_daemon) = UnixStream::pair().unwrap();
+    let (control, mut parent) = UnixStream::pair().unwrap();
+    let (incoming, receiver) = tokio::sync::mpsc::channel(1);
+    incoming
+        .send(Ok::<_, io::Error>(guest_daemon))
+        .await
+        .unwrap();
+    let (shutdown, stop) = oneshot::channel();
+    let config = codewire_daemon::Config {
+        listen_addr: "unused-injected-transport".to_owned(),
+        workspace_root: temporary.path().to_path_buf(),
+        home_root: temporary.path().to_path_buf(),
+        auth_token: codewire_daemon::DaemonAuthToken::new(seed().auth_token().to_owned()).unwrap(),
+        process_execution: codewire_daemon::execution::ProcessExecution::Native,
+        credential_bridge: None,
+        managed_credential_clients: Default::default(),
+        launch_projection: None,
+    };
+    let server = tokio::spawn(
+        codewire_daemon::server::serve_grpc_with_incoming_and_runtime_state(
+            config,
+            DaemonRuntimeState::ready(),
+            tokio_stream::wrappers::ReceiverStream::new(receiver),
+            async {
+                let _ = stop.await;
+            },
+        ),
+    );
+    let verifier = tokio::spawn(verify_session_with_workload(
+        Arc::new(seed()),
+        network,
+        progress,
+        daemon,
+        control,
+        |_| async { Err(invalid().into()) },
+    ));
+    parent.write_all(b"N").await.unwrap();
+    authenticate_network(&mut guest_network).await;
+    parent.write_all(b"P").await.unwrap();
+    serve_progress(
+        guest_progress,
+        seed(),
+        vec![(16, GuestBootStage::DaemonStarted)],
+        false,
+    )
+    .await;
+    parent.write_all(b"D").await.unwrap();
+    assert_eq!(parent.read_u8().await.unwrap(), b'R');
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), verifier)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        parent.read_u8().await.unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+    drop(guest_network);
+    let _ = shutdown.send(());
+    drop(incoming);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn verifier_readiness_and_workload_precede_arming_and_only_armed_eof_completes() {
     use codewire_daemon::service::DaemonRuntimeState;
     // Mode0: EOF before K rejects, mode1: armed EOF succeeds, mode2: armed
     // malformed network protocol rejects (it is not an ownership-close event).
@@ -378,12 +544,14 @@ async fn verifier_composite_readiness_precedes_arming_and_only_armed_eof_complet
                 },
             ),
         );
-        let verifier = tokio::spawn(verify_session(
+        let working_dir = temporary.path().to_string_lossy().into_owned();
+        let verifier = tokio::spawn(verify_session_with_workload(
             Arc::new(seed()),
             network,
             progress,
             daemon,
             control,
+            move |client| async move { workload::prove_in_test(&client, &working_dir).await },
         ));
         parent.write_all(b"N").await.unwrap();
         authenticate_network(&mut guest_network).await;
@@ -408,6 +576,13 @@ async fn verifier_composite_readiness_precedes_arming_and_only_armed_eof_complet
                 .unwrap()
                 .unwrap(),
             b'R'
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(8), parent.read_u8())
+                .await
+                .unwrap()
+                .unwrap(),
+            b'W'
         );
         if mode != 0 {
             parent.write_all(b"K").await.unwrap();
@@ -437,5 +612,183 @@ async fn verifier_composite_readiness_precedes_arming_and_only_armed_eof_complet
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+}
+
+fn exec_message(payload: v1::exec_message::Payload) -> v1::ExecMessage {
+    v1::ExecMessage {
+        payload: Some(payload),
+    }
+}
+
+#[test]
+fn transient_workload_rejects_malformed_duplicate_oversize_and_trailing_frames() {
+    use v1::exec_message::Payload;
+
+    let valid = vec![
+        exec_message(Payload::Stdout(b"out".to_vec())),
+        exec_message(Payload::Stderr(b"err".to_vec())),
+        exec_message(Payload::Stdout(vec![0xff])),
+        exec_message(Payload::Stderr(vec![0xfe])),
+        exec_message(Payload::Exit(v1::ExitStatus { code: 23 })),
+    ];
+    assert!(workload::transient_messages(valid.clone()).is_ok());
+
+    for invalid_messages in [
+        vec![v1::ExecMessage::default()],
+        vec![
+            exec_message(Payload::Stdout(b"out\xff".to_vec())),
+            exec_message(Payload::Stderr(b"err\xfe".to_vec())),
+            exec_message(Payload::Exit(v1::ExitStatus { code: 23 })),
+            exec_message(Payload::Exit(v1::ExitStatus { code: 23 })),
+        ],
+        vec![exec_message(Payload::Stdout(vec![b'x'; 257]))],
+        vec![
+            exec_message(Payload::Stdout(b"out\xff".to_vec())),
+            exec_message(Payload::Stderr(b"err\xfe".to_vec())),
+            exec_message(Payload::Exit(v1::ExitStatus { code: 23 })),
+            exec_message(Payload::Stdout(b"trailing".to_vec())),
+        ],
+    ] {
+        assert!(workload::transient_messages(invalid_messages).is_err());
+    }
+}
+
+fn output_chunk(
+    offset: u64,
+    stream: v1::SessionOutputStream,
+    data: &[u8],
+) -> v1::SessionOutputChunk {
+    v1::SessionOutputChunk {
+        offset,
+        next_offset: offset + data.len() as u64,
+        stream: stream as i32,
+        data: data.to_vec(),
+    }
+}
+
+#[test]
+fn durable_output_rejects_malformed_oversize_and_trailing_frames() {
+    let valid = v1::ReadSessionOutputResponse {
+        chunks: vec![
+            output_chunk(0, v1::SessionOutputStream::Stdout, b"session-"),
+            output_chunk(8, v1::SessionOutputStream::Stdout, b"ready\n"),
+        ],
+        next_offset: 14,
+        eof: true,
+    };
+    assert_eq!(
+        workload::output_response(valid).unwrap(),
+        (b"session-ready\n".to_vec(), true)
+    );
+
+    for invalid in [
+        v1::ReadSessionOutputResponse {
+            chunks: vec![output_chunk(
+                1,
+                v1::SessionOutputStream::Stdout,
+                b"session-ready\n",
+            )],
+            next_offset: 15,
+            eof: true,
+        },
+        v1::ReadSessionOutputResponse {
+            chunks: vec![output_chunk(
+                0,
+                v1::SessionOutputStream::Stderr,
+                b"session-ready\n",
+            )],
+            next_offset: 14,
+            eof: true,
+        },
+        v1::ReadSessionOutputResponse {
+            chunks: vec![output_chunk(
+                0,
+                v1::SessionOutputStream::Stdout,
+                &vec![b'x'; 257],
+            )],
+            next_offset: 257,
+            eof: true,
+        },
+        v1::ReadSessionOutputResponse {
+            chunks: vec![output_chunk(
+                0,
+                v1::SessionOutputStream::Stdout,
+                b"session-ready\ntrailing",
+            )],
+            next_offset: 22,
+            eof: true,
+        },
+    ] {
+        assert!(workload::output_response(invalid).is_err());
+    }
+}
+
+fn running_record(output_end_offset: u64) -> v1::SessionRecord {
+    v1::SessionRecord {
+        session_id: "session-00000000-0000-4000-8000-000000000001".to_owned(),
+        state: v1::SessionLifecycleState::Running as i32,
+        command: vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf 'session-ready\\n'; exec /bin/sleep 300".to_owned(),
+        ],
+        working_dir: "/synthetic-workspace".to_owned(),
+        pty: false,
+        created_at: Some(Default::default()),
+        started_at: Some(Default::default()),
+        finished_at: None,
+        exit_code: None,
+        output_end_offset,
+        status_message: "session running".to_owned(),
+    }
+}
+
+#[test]
+fn complete_output_with_stale_metadata_repolls_before_acceptance() {
+    let stale = running_record(0);
+    assert!(
+        !workload::running_output_for_test(
+            &stale,
+            "/synthetic-workspace",
+            b"session-ready\n",
+            true,
+        )
+        .unwrap()
+    );
+    let current = running_record(14);
+    assert!(
+        workload::running_output_for_test(
+            &current,
+            "/synthetic-workspace",
+            b"session-ready\n",
+            true,
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn only_canonical_matching_launch_response_establishes_session_ownership() {
+    let valid = running_record(0);
+    assert!(workload::owned_launch_for_test(&valid, "/synthetic-workspace").unwrap());
+    for invalid in [
+        {
+            let mut record = valid.clone();
+            record.session_id = "foreign-session".to_owned();
+            record
+        },
+        {
+            let mut record = valid.clone();
+            record.command.push("substituted".to_owned());
+            record
+        },
+        {
+            let mut record = valid;
+            record.working_dir = "/substituted".to_owned();
+            record
+        },
+    ] {
+        assert!(!workload::owned_launch_for_test(&invalid, "/synthetic-workspace").unwrap());
     }
 }
