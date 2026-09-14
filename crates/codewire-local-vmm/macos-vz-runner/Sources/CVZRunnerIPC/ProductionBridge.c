@@ -55,7 +55,10 @@ static int receive_buffer(int fd, struct bounded_buffer *buffer) {
     return 0;
 }
 
-int cw_vz_bridge_streams(int local_fd, int guest_fd, int cancellation_fd, int seconds, int preserve_guest_eof) {
+static int bridge_streams(
+    int local_fd, int guest_fd, int cancellation_fd, int seconds,
+    int preserve_guest_eof, int directional_local_eof
+) {
     if (local_fd < 0 || guest_fd < 0 || cancellation_fd < 0 || local_fd == guest_fd ||
         seconds <= 0 || seconds > 180 || (preserve_guest_eof != 0 && preserve_guest_eof != 1) ||
         prepare_stream(local_fd) != 0 || prepare_stream(guest_fd) != 0) { return -1; }
@@ -63,13 +66,17 @@ int cw_vz_bridge_streams(int local_fd, int guest_fd, int cancellation_fd, int se
     if (started < 0) { return -1; }
     double deadline = started + seconds;
     struct bounded_buffer to_guest = {0}, to_local = {0};
-    int guest_eof = 0;
+    int guest_eof = 0, local_eof = 0, guest_write_closed = 0;
     while (1) {
         double now = monotonic_seconds();
         if (now < 0 || now >= deadline) { return -1; }
         struct pollfd fds[3] = {
-            {.fd = local_fd, .events = (to_guest.size == 0 ? POLLIN : 0) | (to_local.size != 0 ? POLLOUT : 0)},
-            {.fd = guest_fd, .events = (!guest_eof && to_local.size == 0 ? POLLIN : 0) | (to_guest.size != 0 ? POLLOUT : 0)},
+            // An idle EOF descriptor is omitted, not merely assigned events=0:
+            // poll may otherwise repeatedly return its persistent POLLHUP.
+            {.fd = directional_local_eof && local_eof && to_local.size == 0 ? -1 : local_fd,
+             .events = (!local_eof && to_guest.size == 0 ? POLLIN : 0) | (to_local.size != 0 ? POLLOUT : 0)},
+            {.fd = directional_local_eof && guest_eof && to_guest.size == 0 ? -1 : guest_fd,
+             .events = (!guest_eof && to_local.size == 0 ? POLLIN : 0) | (to_guest.size != 0 ? POLLOUT : 0)},
             {.fd = cancellation_fd, .events = POLLIN}
         };
         int result = poll(fds, 3, 100);
@@ -78,12 +85,26 @@ int cw_vz_bridge_streams(int local_fd, int guest_fd, int cancellation_fd, int se
         // Never consume cancellation: every bridge observes the same event.
         if (fds[2].revents != 0) { return 0; }
         if ((fds[0].revents | fds[1].revents) & (POLLERR | POLLNVAL)) { return -1; }
-        if ((fds[0].revents & POLLOUT) && to_local.size && forward_buffer(local_fd, &to_local) != 0) { return -1; }
-        if ((fds[1].revents & POLLOUT) && to_guest.size && forward_buffer(guest_fd, &to_guest) != 0) { return -1; }
-        if ((fds[0].revents & (POLLIN | POLLHUP)) && to_guest.size == 0) {
+        // Darwin may report only HUP after actual peer close. A pending
+        // nonblocking write must observe its EPIPE instead of waiting forever
+        // for POLLOUT. HUP itself is not successful forwarding or guest EOF.
+        int write_events = POLLOUT | (directional_local_eof ? POLLHUP : 0);
+        if ((fds[0].revents & write_events) && to_local.size && forward_buffer(local_fd, &to_local) != 0) { return -1; }
+        if ((fds[1].revents & write_events) && to_guest.size && forward_buffer(guest_fd, &to_guest) != 0) { return -1; }
+        if (!local_eof && (fds[0].revents & (POLLIN | POLLHUP)) && to_guest.size == 0) {
             int read_result = receive_buffer(local_fd, &to_guest);
-            if (read_result != 0) { return read_result; }
-            if (guest_eof && to_guest.size != 0) { return -1; }
+            if (read_result < 0) { return -1; }
+            if (read_result == 1) {
+                if (!directional_local_eof) { return 1; }
+                local_eof = 1;
+            }
+            if (!directional_local_eof && guest_eof && to_guest.size != 0) { return -1; }
+        }
+        if (directional_local_eof && local_eof && !guest_write_closed && to_guest.size == 0) {
+            // EOF is directional, not a drained-guest observation. Every
+            // request byte has reached the guest before its write half closes.
+            if (shutdown(guest_fd, SHUT_WR) != 0) { return -1; }
+            guest_write_closed = 1;
         }
         if (!guest_eof && (fds[1].revents & (POLLIN | POLLHUP)) && to_local.size == 0) {
             int read_result = receive_buffer(guest_fd, &to_local);
@@ -94,10 +115,22 @@ int cw_vz_bridge_streams(int local_fd, int guest_fd, int cancellation_fd, int se
             }
         }
         if (guest_eof && to_local.size == 0) {
-            if (to_guest.size != 0 || shutdown(local_fd, SHUT_WR) != 0) { return -1; }
+            if (to_guest.size != 0) {
+                if (!directional_local_eof) { return -1; }
+                continue;
+            }
+            if (shutdown(local_fd, SHUT_WR) != 0) { return -1; }
             return 2;
         }
     }
+}
+
+int cw_vz_bridge_streams(int local_fd, int guest_fd, int cancellation_fd, int seconds, int preserve_guest_eof) {
+    return bridge_streams(local_fd, guest_fd, cancellation_fd, seconds, preserve_guest_eof, 0);
+}
+
+int cw_vz_bridge_daemon_streams(int local_fd, int guest_fd, int cancellation_fd, int seconds) {
+    return bridge_streams(local_fd, guest_fd, cancellation_fd, seconds, 1, 1);
 }
 
 int cw_vz_prepare_control(int socket_fd) {

@@ -215,6 +215,123 @@ extension CodewireVZRunnerTests {
       }
     }
 
+    @Test func daemonLocalEOFAloneDoesNotProveGuestDrain() throws {
+      let fixture = try BridgeFixture()
+      let result = fixture.startDaemon(seconds: 1)
+      try #require(shutdown(fixture.local[0], Int32(SHUT_WR)) == 0)
+      #expect(try result.wait() == -1)
+    }
+
+    @Test func daemonLocalFirstEOFStillForwardsDelayedReply() throws {
+      let fixture = try BridgeFixture()
+      let result = fixture.startDaemon()
+      let request = Data([0, 255, 0x31, 0x80])
+      try send(request, fd: fixture.local[0])
+      try #require(shutdown(fixture.local[0], Int32(SHUT_WR)) == 0)
+      #expect(try receive(request.count, fd: fixture.guest[0]) == request)
+      try requireEOF(fixture.guest[0])
+      // Guest EOF has deliberately not occurred. The reply starts only after
+      // observing the real propagated request half-close; no sleep/timing guess.
+      #expect(result.isPending())
+      let reply = Data([0xff, 0, 0x80, 0x27, 0])
+      try send(reply, fd: fixture.guest[0])
+      try #require(shutdown(fixture.guest[0], Int32(SHUT_WR)) == 0)
+      #expect(try receive(reply.count, fd: fixture.local[0]) == reply)
+      try requireEOF(fixture.local[0])
+      #expect(try result.wait() == 2)
+    }
+
+    @Test func daemonGuestFirstAndSimultaneousEOFRequireRealGuestDrain() throws {
+      for simultaneous in [false, true] {
+        let fixture = try BridgeFixture()
+        let reply = Data([0, 1, 0xff, 0x80])
+        try send(reply, fd: fixture.guest[0])
+        try #require(shutdown(fixture.guest[0], Int32(SHUT_WR)) == 0)
+        if simultaneous { try #require(shutdown(fixture.local[0], Int32(SHUT_WR)) == 0) }
+        let result = fixture.startDaemon()
+        #expect(try receive(reply.count, fd: fixture.local[0]) == reply)
+        try requireEOF(fixture.local[0])
+        #expect(try result.wait() == 2)
+        if !simultaneous { try #require(shutdown(fixture.local[0], Int32(SHUT_WR)) == 0) }
+      }
+    }
+
+    @Test func daemonBufferedRequestsAndRepliesDrainBeforeEOF() throws {
+      let fixture = try BridgeFixture()
+      var capacity: Int32 = 4096
+      for fd in [fixture.local[1], fixture.guest[1]] {
+        try #require(
+          setsockopt(
+            fd, SOL_SOCKET, SO_SNDBUF, &capacity,
+            socklen_t(MemoryLayout<Int32>.size)) == 0)
+      }
+      let result = fixture.startDaemon()
+      let request = Data((0..<(3 * 32768)).map { UInt8($0 % 251) })
+      let sent = try fixture.writeThenShutdown(request, descriptor: fixture.local[0])
+      #expect(try receive(request.count, fd: fixture.guest[0]) == request)
+      try requireEOF(fixture.guest[0])
+      #expect(try sent.wait() == 0)
+      #expect(result.isPending())
+      let reply = Data(request.map { $0 ^ 0xa5 })
+      let replied = try fixture.writeThenShutdown(reply, descriptor: fixture.guest[0])
+      #expect(try receive(reply.count, fd: fixture.local[0]) == reply)
+      try requireEOF(fixture.local[0])
+      #expect(try replied.wait() == 0)
+      #expect(try result.wait() == 2)
+    }
+
+    @Test func daemonFullLocalCloseWithReplyIsNotDrainSuccess() throws {
+      let fixture = try BridgeFixture()
+      try fixture.closeLocalPeer()
+      try send(Data([0, 255, 1]), fd: fixture.guest[0])
+      try #require(shutdown(fixture.guest[0], Int32(SHUT_WR)) == 0)
+      #expect(try fixture.startDaemon().wait() == -1)
+    }
+
+    @Test func daemonReadShutdownWithoutWritableReadinessRemainsBoundedFailure() throws {
+      let fixture = try BridgeFixture()
+      // Unlike actual close, Darwin SHUT_RDWR can withhold POLLOUT while a
+      // blind send would claim success and discard bytes. Do not bypass poll.
+      try #require(shutdown(fixture.local[0], Int32(SHUT_RDWR)) == 0)
+      try send(Data([0, 255, 1]), fd: fixture.guest[0])
+      try #require(shutdown(fixture.guest[0], Int32(SHUT_WR)) == 0)
+      #expect(try fixture.startDaemon(seconds: 1).wait() == -1)
+    }
+
+    @Test func daemonReplyBackpressureStillCancels() throws {
+      let fixture = try BridgeFixture()
+      var capacity: Int32 = 4096
+      try #require(
+        setsockopt(
+          fixture.local[1], SOL_SOCKET, SO_SNDBUF, &capacity,
+          socklen_t(MemoryLayout<Int32>.size)) == 0)
+      let flags = fcntl(fixture.guest[0], F_GETFL)
+      try #require(flags >= 0 && fcntl(fixture.guest[0], F_SETFL, flags | O_NONBLOCK) == 0)
+      let result = fixture.startDaemon()
+      try #require(shutdown(fixture.local[0], Int32(SHUT_WR)) == 0)
+      try requireEOF(fixture.guest[0])
+      let payload = [UInt8](repeating: 0xa5, count: 32768)
+      var blocked = false
+      for _ in 0..<64 {
+        let count = payload.withUnsafeBytes { write(fixture.guest[0], $0.baseAddress, $0.count) }
+        if count < 0 {
+          try #require(errno == EAGAIN || errno == EWOULDBLOCK)
+          blocked = true
+          break
+        }
+      }
+      #expect(blocked)
+      try send(Data([1]), fd: fixture.cancel[0])
+      #expect(try result.wait() == 0)
+    }
+
+    private func requireEOF(_ descriptor: Int32) throws {
+      var polled = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+      try #require(poll(&polled, 1, 2000) == 1)
+      var byte: UInt8 = 0
+      try #require(read(descriptor, &byte, 1) == 0)
+    }
+
     private func object() -> [String: Any] {
       [
         "schemaVersion": 2, "vmID": "00000000-0000-4000-8000-000000000001",
@@ -280,18 +397,70 @@ private final class BridgeFixture: @unchecked Sendable {
   let local: [Int32]
   let guest: [Int32]
   let cancel: [Int32]
+  private var localPeerClosed = false
   init() throws {
     local = try pair()
     guest = try pair()
     cancel = try pair()
   }
-  deinit { for fd in local + guest + cancel { _ = close(fd) } }
+  deinit {
+    let retainedLocal = localPeerClosed ? [local[1]] : local
+    for fd in retainedLocal + guest + cancel { _ = close(fd) }
+  }
+  func closeLocalPeer() throws {
+    // Called before starting the bridge; never close a reused descriptor in
+    // deinit after this exact endpoint was intentionally released.
+    try #require(!localPeerClosed)
+    try #require(close(local[0]) == 0)
+    localPeerClosed = true
+  }
   func start(preserve: Bool, seconds: Int32 = 5) -> BridgeResult {
     let result = BridgeResult()
     DispatchQueue.global().async {
       result.complete(
         cw_vz_bridge_streams(
           self.local[1], self.guest[1], self.cancel[1], seconds, preserve ? 1 : 0))
+    }
+    return result
+  }
+  func startDaemon(seconds: Int32 = 5) -> BridgeResult {
+    let result = BridgeResult()
+    DispatchQueue.global().async {
+      result.complete(
+        cw_vz_bridge_daemon_streams(
+          self.local[1], self.guest[1], self.cancel[1], seconds))
+    }
+    return result
+  }
+  func writeThenShutdown(_ bytes: Data, descriptor: Int32) throws -> BridgeResult {
+    let flags = fcntl(descriptor, F_GETFL)
+    try #require(flags >= 0 && fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0)
+    let result = BridgeResult()
+    DispatchQueue.global().async {
+      // Capture this fixture so every borrowed socket remains owned until the
+      // bounded writer has stopped, including after a test assertion fails.
+      withExtendedLifetime(self) {
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        var offset = 0
+        while offset < bytes.count, ProcessInfo.processInfo.systemUptime < deadline {
+          var polled = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
+          if poll(&polled, 1, 20) < 0 && errno != EINTR {
+            result.complete(-1)
+            return
+          }
+          if polled.revents & Int16(POLLOUT) == 0 { continue }
+          let count = bytes.withUnsafeBytes {
+            write(descriptor, $0.baseAddress?.advanced(by: offset), bytes.count - offset)
+          }
+          if count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) { continue }
+          if count <= 0 {
+            result.complete(-1)
+            return
+          }
+          offset += count
+        }
+        result.complete(offset == bytes.count && shutdown(descriptor, Int32(SHUT_WR)) == 0 ? 0 : -1)
+      }
     }
     return result
   }
@@ -307,6 +476,11 @@ private final class BridgeResult: @unchecked Sendable {
   func wait() throws -> Int32 {
     try #require(signal.wait(timeout: .now() + 3) == .success)
     return result
+  }
+  func isPending() -> Bool {
+    if signal.wait(timeout: .now()) == .timedOut { return true }
+    signal.signal()
+    return false
   }
 }
 

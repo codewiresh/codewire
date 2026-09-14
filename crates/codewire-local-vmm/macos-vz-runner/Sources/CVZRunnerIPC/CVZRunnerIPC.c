@@ -231,6 +231,13 @@ ssize_t cw_vz_receive_production_request(
     return receive_exact_request(socket_fd, buffer, capacity, descriptors, CW_VZ_PRODUCTION_DESCRIPTOR_COUNT);
 }
 
+ssize_t cw_vz_receive_workload_network_request(
+    int socket_fd, uint8_t *buffer, size_t capacity,
+    int descriptors[CW_VZ_WORKLOAD_NETWORK_DESCRIPTOR_COUNT]
+) {
+    return receive_exact_request(socket_fd, buffer, capacity, descriptors, CW_VZ_WORKLOAD_NETWORK_DESCRIPTOR_COUNT);
+}
+
 static int socket_identity(int fd, uint64_t *identity) {
     if (validate_private_socket(fd) != 0) { return 0; }
 #if defined(__APPLE__)
@@ -251,12 +258,12 @@ static int socket_identity(int fd, uint64_t *identity) {
     return *identity != 0;
 }
 
-int cw_vz_validate_production_descriptors(
-    int control_fd, const int descriptors[CW_VZ_PRODUCTION_DESCRIPTOR_COUNT]
+static int validate_artifacts_and_channels(
+    int control_fd, const int *descriptors, size_t file_count, size_t channel_count
 ) {
-    if (descriptors == NULL) { return 0; }
-    struct stat files[CW_VZ_PRODUCTION_ARTIFACT_COUNT];
-    for (size_t i = 0; i < CW_VZ_PRODUCTION_ARTIFACT_COUNT; i++) {
+    if (descriptors == NULL || file_count > 8 || channel_count > 3) { return 0; }
+    struct stat files[8];
+    for (size_t i = 0; i < file_count; i++) {
         if (fstat(descriptors[i], &files[i]) != 0 || !S_ISREG(files[i].st_mode)) { return 0; }
         for (size_t j = 0; j < i; j++) {
             if (files[i].st_dev == files[j].st_dev && files[i].st_ino == files[j].st_ino) { return 0; }
@@ -264,8 +271,8 @@ int cw_vz_validate_production_descriptors(
     }
     uint64_t identities[4] = {0};
     if (!socket_identity(control_fd, &identities[0])) { return 0; }
-    for (size_t i = 0; i < 3; i++) {
-        int fd = descriptors[CW_VZ_PRODUCTION_ARTIFACT_COUNT + i];
+    for (size_t i = 0; i < channel_count; i++) {
+        int fd = descriptors[file_count + i];
         int flags = fcntl(fd, F_GETFL);
         if (flags < 0 || (flags & O_ACCMODE) != O_RDWR ||
             !socket_identity(fd, &identities[i + 1])) { return 0; }
@@ -274,6 +281,18 @@ int cw_vz_validate_production_descriptors(
         }
     }
     return 1;
+}
+
+int cw_vz_validate_production_descriptors(
+    int control_fd, const int descriptors[CW_VZ_PRODUCTION_DESCRIPTOR_COUNT]
+) {
+    return validate_artifacts_and_channels(control_fd, descriptors, CW_VZ_PRODUCTION_ARTIFACT_COUNT, 3);
+}
+
+int cw_vz_validate_workload_network_descriptors(
+    int control_fd, const int descriptors[CW_VZ_WORKLOAD_NETWORK_DESCRIPTOR_COUNT]
+) {
+    return validate_artifacts_and_channels(control_fd, descriptors, 8, 2);
 }
 
 int cw_vz_descriptors_are_distinct_files(

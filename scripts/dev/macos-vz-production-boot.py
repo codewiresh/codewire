@@ -324,9 +324,22 @@ class Run:
         ):
             raise FixtureFailure()
 
-    def cleanup(self) -> bool:
-        # Do not erase evidence/artifacts until every owned process group has
-        # disappeared. No subprocess output is read or published on this path.
+    def seed(self, paths: dict[str, Path], vm_id: str) -> Path:
+        assert self.directory is not None
+        seed = self.directory / "seed"
+        setup_fd = self.open(paths["setup"], os.O_RDONLY)
+        seed_fd = self.open(seed, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        self.wait(self.spawn([
+            str(paths["fixture"]), "seed", "--setup-fd", str(setup_fd),
+            "--output-fd", str(seed_fd), "--vm-id", vm_id, "--generation", "1",
+        ], (setup_fd, seed_fd)))
+        self.close_fd(seed_fd)
+        self.close_fd(setup_fd)
+        return seed
+
+    def stop_and_close(self) -> bool:
+        # No subprocess output is published on this path. Returning true proves
+        # only the retained children's observed process groups are absent.
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for process in reversed(self.children):
                 # Only this single-threaded parent reaps its retained children.
@@ -354,6 +367,13 @@ class Run:
         for descriptor in self.fds:
             os.close(descriptor)
         self.fds.clear()
+        return stopped
+
+    def cleanup(self) -> bool:
+        # Existing production fixture still removes its private artifacts only
+        # after all owned groups disappear. Retaining fixtures reuse ownership,
+        # not this deletion or its private_cleanup claim.
+        stopped = self.stop_and_close()
         if stopped and self.directory is not None:
             shutil.rmtree(self.directory)
             self.directory = None
@@ -368,11 +388,14 @@ class Run:
                 pass
 
 
-def prepare(run: Run, args: argparse.Namespace) -> tuple[dict, dict[str, Path]]:
+def prepare(
+    run: Run, args: argparse.Namespace, *,
+    extra_initramfs: tuple[str, ...] = (), artifact_root: Path | None = None,
+) -> tuple[dict, dict[str, Path]]:
     paths = {}
     sources = {}
     identities = set()
-    for name in ("helper", "fixture", "kernel", "initramfs", "setup", "state", "root"):
+    for name in ("helper", "fixture", "kernel", "initramfs", "setup", "state", "root", *extra_initramfs):
         run.remaining()
         source = Path(getattr(args, name))
         if not source.is_absolute():
@@ -396,17 +419,23 @@ def prepare(run: Run, args: argparse.Namespace) -> tuple[dict, dict[str, Path]]:
         elif name == "setup":
             if not 64 * 1024 <= status.st_size <= 65 * 1024**3 or status.st_size % 4096:
                 raise FixtureFailure()
-        elif status.st_size > (4 if name == "initramfs" else 1) * 1024**3:
+        elif status.st_size > (4 if name == "initramfs" or name in extra_initramfs else 1) * 1024**3:
             raise FixtureFailure()
         sources[name] = (descriptor, status.st_size)
     expected = {
         name: artifact.exact_sha256(getattr(args, f"{name}_sha256"), name)
-        for name in ("helper", "fixture", "kernel", "initramfs", "setup")
+        for name in ("helper", "fixture", "kernel", "initramfs", "setup", *extra_initramfs)
     }
     disk_ids = {name: artifact.exact_uuid(getattr(args, f"{name}_uuid"), name) for name in ("state", "root")}
     if disk_ids["state"] == disk_ids["root"]:
         raise FixtureFailure()
-    run.directory = Path(tempfile.mkdtemp(prefix="codewire-vz-production-"))
+    if artifact_root is None:
+        run.directory = Path(tempfile.mkdtemp(prefix="codewire-vz-production-"))
+    else:
+        # Caller admits a fresh private parent. Never reuse or overwrite an
+        # existing trial directory; assign ownership only after mkdir succeeds.
+        artifact_root.mkdir(mode=0o700)
+        run.directory = artifact_root
     run.directory.chmod(0o700)
     for name, (descriptor, size) in sources.items():
         target = run.directory / name
@@ -427,15 +456,7 @@ def prepare(run: Run, args: argparse.Namespace) -> tuple[dict, dict[str, Path]]:
     run.signing(paths["helper"])
     run.phase = "seed"
     vm_id = str(uuid.uuid4())
-    seed = run.directory / "seed"
-    setup_fd = run.open(paths["setup"], os.O_RDONLY)
-    seed_fd = run.open(seed, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-    run.wait(run.spawn([
-        str(paths["fixture"]), "seed", "--setup-fd", str(setup_fd),
-        "--output-fd", str(seed_fd), "--vm-id", vm_id, "--generation", "1",
-    ], (setup_fd, seed_fd)))
-    run.close_fd(seed_fd)
-    run.close_fd(setup_fd)
+    seed = run.seed(paths, vm_id)
     if seed.stat().st_size != artifact.SEED_BYTES:
         raise FixtureFailure()
     paths["seed"] = seed

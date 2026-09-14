@@ -9,6 +9,7 @@
 #define CW_VZ_DESCRIPTOR_COUNT ((size_t)4)
 #define CW_VZ_PRODUCTION_DESCRIPTOR_COUNT ((size_t)9)
 #define CW_VZ_PRODUCTION_ARTIFACT_COUNT ((size_t)6)
+#define CW_VZ_WORKLOAD_NETWORK_DESCRIPTOR_COUNT ((size_t)10)
 #define CW_VZ_BRIDGE_BUFFER_BYTES ((size_t)32768)
 #define CW_VZ_FRAME_HEADER_BYTES ((size_t)4)
 
@@ -57,6 +58,15 @@ int cw_vz_validate_production_descriptors(
     int control_fd, const int descriptors[CW_VZ_PRODUCTION_DESCRIPTOR_COUNT]
 );
 
+// Eight boot artifacts and two private channels; no host packet channel.
+ssize_t cw_vz_receive_workload_network_request(
+    int socket_fd, uint8_t *buffer, size_t buffer_capacity,
+    int descriptors[CW_VZ_WORKLOAD_NETWORK_DESCRIPTOR_COUNT]
+);
+int cw_vz_validate_workload_network_descriptors(
+    int control_fd, const int descriptors[CW_VZ_WORKLOAD_NETWORK_DESCRIPTOR_COUNT]
+);
+
 // Bounded, opaque forwarding. No protocol parsing, address selection or dial.
 // Returns 0 on cancellation, 1 on EOF, 2 after preserved guest EOF has drained
 // and half-closed local output, and -1 on error/deadline. Does not close
@@ -64,6 +74,11 @@ int cw_vz_validate_production_descriptors(
 int cw_vz_bridge_streams(
     int local_fd, int guest_fd, int cancellation_fd, int seconds, int preserve_guest_eof
 );
+// Daemon-only directional shutdown. Local EOF is forwarded as guest SHUT_WR
+// after pending requests drain; it is never proof of guest EOF. Returns 2 only
+// after actual guest EOF, drained forwarding buffers and local SHUT_WR, 0 on
+// cancellation, and -1 on error/deadline. The caller retains both endpoints.
+int cw_vz_bridge_daemon_streams(int local_fd, int guest_fd, int cancellation_fd, int seconds);
 int cw_vz_prepare_control(int socket_fd);
 int cw_vz_control_event(int socket_fd, int milliseconds);
 
