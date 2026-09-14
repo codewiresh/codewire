@@ -2,6 +2,7 @@
 """Linux-inspectable guard for the unreachable macOS VZ helper boundary."""
 
 from pathlib import Path
+import plistlib
 import re
 import sys
 
@@ -24,6 +25,10 @@ if ".executable(name: \"codewire-vz-runner\"" not in manifest:
     fail("SwiftPM executable product is missing")
 if ".package(" in manifest:
     fail("helper acquired an external package dependency")
+entitlements = plistlib.loads(source("developer-entitlements.plist").encode())
+if (set(entitlements) != {"com.apple.security.virtualization"}
+        or entitlements["com.apple.security.virtualization"] is not True):
+    fail("developer signing acquired another entitlement")
 
 configuration = source("Sources/CodewireVZRunnerProtocol/Configuration.swift")
 required_configuration = [
@@ -217,5 +222,43 @@ for relative in (
     test_source = source(relative)
     if "import Testing" not in test_source or "import XCTest" in test_source:
         fail(f"{relative} must use CLT-supported Swift Testing")
+
+production_protocol = source("Sources/CodewireVZRunnerProtocol/ProductionFixture.swift")
+for required in (
+    "schemaVersion = 2", "descriptorCount = 9", "maximumSetupBytes: UInt64 = 65 * 1024 * 1024 * 1024",
+    "runtimeSeconds: Double = 180", "connectSeconds: Double = 120", "stopSeconds: Double = 5",
+    '"network-connected"', '"progress-connected"', '"daemon-connected"',
+    "cw_vz_validate_production_descriptors", "cw_vz_receive_production_request",
+):
+    if required not in production_protocol:
+        fail(f"production fixture lost fixed protocol boundary: {required}")
+production_configuration = source("Sources/CodewireVZRunnerRuntime/ProductionConfiguration.swift")
+for required in (
+    '"CWSTATE1", false', '"CWROOT1", false', '"CWSEED1", true', '"CWSETUP1", true',
+    "RunnerProtocol.guestKernelCommandLine", "validateImmutable", "validateMutable",
+    "result.networkDevices = []", "result.directorySharingDevices = []",
+):
+    if required not in production_configuration:
+        fail(f"production fixture lost storage/topology boundary: {required}")
+production_runtime = source("Sources/CodewireVZRunnerRuntime/ProductionFixtureRuntime.swift")
+for required in (
+    "device.connect(toPort: port)", "lifecycle.didConnect(role)", "cw_vz_bridge_streams",
+    "lifecycle.progressClosed()", "cw_vz_control_event", "self.machine.stop",
+    "workers.wait(timeout:", "role == .progress, result == 2",
+):
+    if required not in production_runtime:
+        fail(f"production fixture lost lifecycle boundary: {required}")
+for forbidden in (
+    "VZNATNetworkDeviceAttachment", "VZBridgedNetworkDeviceAttachment",
+    "VZFileHandleNetworkDeviceAttachment", "VZVirtioFileSystemDeviceConfiguration",
+    "NetworkHostReady", "auth_token", '"guest-ready"', "Process(",
+):
+    if forbidden in production_configuration + production_runtime:
+        fail(f"production fixture acquired unsupported authority: {forbidden}")
+if "proc_pidfdinfo(getpid()" not in ipc or "SO_COOKIE" not in ipc:
+    fail("production socket alias admission lost platform socket identities")
+bridge = source("Sources/CVZRunnerIPC/ProductionBridge.c")
+if "CW_VZ_BRIDGE_BUFFER_BYTES" not in bridge or "CLOCK_MONOTONIC" not in bridge:
+    fail("production bridge lost resource bounds")
 
 print("macOS VZ runner static boundary: OK")

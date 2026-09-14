@@ -32,7 +32,8 @@ class HelperTests(unittest.TestCase):
         repo = self.root / "repo"
         repo.mkdir()
         for argv in (["init", "-q"], ["config", "user.name", "Fixture"],
-                     ["config", "user.email", "fixture@example.invalid"]):
+                     ["config", "user.email", "fixture@example.invalid"],
+                     ["config", "commit.gpgsign", "false"]):
             subprocess.run(["git", *argv], cwd=repo, check=True)
         (repo / "tracked").write_text("old")
         (repo / ".gitignore").write_text(".env\n")
@@ -256,7 +257,7 @@ class HelperTests(unittest.TestCase):
         request = {"run_id": "fixture", "source_sha256": "source", "lock_sha256": "lock",
                    "component": component,
                    "helper_sha256": "helper", "timeout": 10, "action": action, "intel": True}
-        if component == "vz-runner":
+        if component in ("vz-runner", "vz-fixture"):
             request["intel"] = False
         (run / "request.json").write_text(json.dumps(request))
         with tarfile.open(run / "source.tar.gz", "w:gz") as archive:
@@ -307,6 +308,42 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(all("x86_64" not in argv[0] for argv in commands))
         self.assertEqual(helper.evidence_status(run, "fixture"), "passed")
         self.assertFalse(Path(result["isolated_state"]).exists())
+
+    def test_vz_production_fixture_is_opt_in_and_collects_only_its_binary(self):
+        run = self.worker_fixture("vz-fixture")
+        reader, writer = os.pipe()
+        stdin = os.fdopen(reader, "r")
+
+        def fixture_command(argv, cwd, env, log, cancel, deadline):
+            log.write_text("synthetic build plan, not Mac execution")
+            if argv[:2] == ["cargo", "build"]:
+                binary = Path(env["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug/codewire-macos-vz-fixture"
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_bytes(b"synthetic developer fixture binary")
+            return 0
+
+        try:
+            with mock.patch.object(sys, "stdin", stdin), mock.patch.object(signal, "signal"), \
+                 mock.patch.object(helper.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(helper.platform, "machine", return_value="arm64"), \
+                 mock.patch.object(helper, "output", return_value="fixture macOS"), \
+                 mock.patch.object(helper, "run_command", side_effect=fixture_command):
+                self.assertEqual(helper.worker(self.root, run), 0)
+        finally:
+            os.close(writer)
+            stdin.close()
+        result = json.loads((run / "result.json").read_text())
+        cargo = [item["argv"] for item in result["commands"]
+                 if item["argv"][0] == "cargo" and item["argv"][1] != "-V"]
+        self.assertEqual([command[1] for command in cargo], ["build", "test", "test", "clippy"])
+        for command in cargo:
+            self.assertIn("--offline", command)
+            self.assertIn("--locked", command)
+            self.assertIn("macos-production-init-fixture", command)
+            self.assertIn("aarch64-apple-darwin", command)
+            self.assertNotIn("cw", command)
+        self.assertEqual(set(result["artifacts"]), {"codewire-macos-vz-fixture-arm64"})
+        self.assertEqual(helper.evidence_status(run, "fixture"), "passed")
 
     def test_vz_runner_worker_plan_and_artifact_collection(self):
         run = self.worker_fixture("vz-runner")

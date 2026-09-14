@@ -1,3 +1,4 @@
+import CVZRunnerIPC
 import CodewireVZRunnerProtocol
 import Foundation
 
@@ -13,7 +14,7 @@ private struct Response: Encodable {
 private func usage() -> Never {
   FileHandle.standardError.write(
     Data(
-      "usage: codewire-vz-runner (validate|inode-probe|inode-probe-path-control|console-pair-fixture) --control-fd FD\n"
+      "usage: codewire-vz-runner (validate|inode-probe|inode-probe-path-control|production-init-fixture|console-pair-fixture) --control-fd FD\n"
         .utf8
     )
   )
@@ -23,7 +24,10 @@ private func usage() -> Never {
 private func run() throws {
   let arguments = CommandLine.arguments
   guard arguments.count == 4,
-    ["validate", "inode-probe", "inode-probe-path-control", "console-pair-fixture"].contains(
+    [
+      "validate", "inode-probe", "inode-probe-path-control", "production-init-fixture",
+      "console-pair-fixture",
+    ].contains(
       arguments[1]),
     arguments[2] == "--control-fd",
     let controlDescriptor = Int32(arguments[3]),
@@ -38,6 +42,12 @@ private func run() throws {
       let request = try PrivateIPC.receiveConsolePair(controlDescriptor: controlDescriptor)
       try ConsolePairRuntime.run(request: request, controlDescriptor: controlDescriptor)
       alarm(0)
+      return
+    }
+    if arguments[1] == "production-init-fixture" {
+      guard cw_vz_prepare_control(controlDescriptor) == 0 else { throw IPCError.rejected(-4) }
+      let request = try PrivateIPC.receiveProductionFixture(controlDescriptor: controlDescriptor)
+      try ProductionFixtureRuntime.run(request: request, controlDescriptor: controlDescriptor)
       return
     }
     let request = try PrivateIPC.receive(controlDescriptor: controlDescriptor)

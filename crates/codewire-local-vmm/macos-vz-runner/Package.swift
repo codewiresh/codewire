@@ -11,7 +11,8 @@ let package = Package(
     .target(
       name: "CVZRunnerIPC",
       path: "Sources/CVZRunnerIPC",
-      publicHeadersPath: "include"
+      publicHeadersPath: "include",
+      linkerSettings: [.linkedLibrary("proc", .when(platforms: [.macOS]))]
     ),
     .target(
       name: "CodewireVZRunnerProtocol",
@@ -28,7 +29,7 @@ let package = Package(
     ),
     .executableTarget(
       name: "CodewireVZRunner",
-      dependencies: ["CodewireVZRunnerProtocol", "CodewireVZRunnerRuntime"],
+      dependencies: ["CVZRunnerIPC", "CodewireVZRunnerProtocol", "CodewireVZRunnerRuntime"],
       path: "Sources/CodewireVZRunner"
     ),
     .target(
