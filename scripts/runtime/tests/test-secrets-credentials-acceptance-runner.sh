@@ -31,6 +31,8 @@ case "$0" in
   */smoke-local-platform-sources.sh)
     if [[ " $* " == *' --initial-private-checkout '* ]]; then
       label=initial-private-checkout
+    elif [[ " $* " == *' --live-codex '* ]]; then
+      label=live-codex
     elif [[ "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 1 ]]; then
       label=local-platform-mesh
     else
@@ -64,6 +66,14 @@ case "$label" in
        "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}" == "$fixtures/checkout-fixture" &&
        -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
        -z "${LOCAL_PLATFORM_MESH_PROBE_BIN+x}" ]] || exit 102
+    ;;
+  live-codex)
+    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --live-codex" &&
+       "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 0 &&
+       -z "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN+x}" &&
+       -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
+       -z "${LOCAL_PLATFORM_MESH_PROBE_BIN+x}" &&
+       -z "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR+x}" ]] || exit 103
     ;;
   local-platform-mesh)
     [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw" &&
@@ -245,15 +255,40 @@ pass
 
 : >"$CALLS"
 expect_status 1 "$TEST_ROOT/default.out" "$RUNNER"
-printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh initial-private-checkout \
+printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh live-codex initial-private-checkout \
   | cmp -s - "$CALLS" || fail 'default matrix did not invoke each available fixed child once'
-grep -Fq 'live-providers                 NOT RUN (no checked-in live Codex/GitHub/OpenAI/Anthropic journey)' \
-  "$TEST_ROOT/default.out" || fail 'missing live providers were not reported honestly'
+grep -Eq 'live-codex +PASS' "$TEST_ROOT/default.out" || fail 'live Codex did not run'
+for provider in live-github live-openai live-anthropic; do
+  grep -Eq "$provider +NOT RUN \(no checked-in $provider journey\)" \
+    "$TEST_ROOT/default.out" || fail 'Codex success concealed a missing provider journey'
+done
 grep -Eq 'initial-private-checkout +PASS' "$TEST_ROOT/default.out" || fail 'local private checkout did not run'
 grep -Fq 'dev-initial-private-checkout   NOT RUN (no checked-in hosted initial private-checkout journey)' \
   "$TEST_ROOT/default.out" || fail 'missing hosted private checkout was not reported honestly'
 grep -Fq 'aggregate result: INCOMPLETE; full acceptance: NOT CLAIMED' "$TEST_ROOT/default.out" ||
   fail 'default matrix claimed completion'
+pass
+
+: >"$CALLS"
+expect_status 0 "$TEST_ROOT/codex.out" "$RUNNER" --only live-codex
+[[ "$(cat "$CALLS")" == live-codex ]] || fail 'selected Codex ran another journey'
+grep -Fq 'selected result: PASS; full acceptance: NOT CLAIMED' "$TEST_ROOT/codex.out" ||
+  fail 'selected Codex claimed full acceptance'
+pass
+
+: >"$CALLS"
+export ACCEPTANCE_NORMAL_CW_BIN="$ACCEPTANCE_SYNTHETIC_CW_BIN"
+expect_status 1 "$TEST_ROOT/codex-wrong-cli.out" "$RUNNER" --only live-codex
+export ACCEPTANCE_NORMAL_CW_BIN="$saved_normal_cw"
+[[ ! -s "$CALLS" ]] || fail 'live Codex accepted synthetic cw'
+pass
+
+: >"$CALLS"
+touch "$FAKE_ROOT/fixtures/fail-live-codex"
+expect_status 1 "$TEST_ROOT/codex-failure.out" "$RUNNER"
+rm "$FAKE_ROOT/fixtures/fail-live-codex"
+grep -Eq 'live-codex +FAIL' "$TEST_ROOT/codex-failure.out" || fail 'Codex failure was lost'
+if grep -qx initial-private-checkout "$CALLS"; then fail 'matrix continued after Codex cleanup failure'; fi
 pass
 
 : >"$CALLS"

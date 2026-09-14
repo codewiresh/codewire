@@ -1214,6 +1214,9 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
       scripts/runtime/dev/smoke-dev-commodity.sh|\
       scripts/runtime/dev/provider-ssh-smoke.sh|\
+      scripts/runtime/dev/provider-codex-smoke.sh|\
+      scripts/runtime/dev/provider-codex-workload.sh|\
+      scripts/runtime/dev/provider-codex-output.py|\
       scripts/runtime/dev/private-checkout-smoke.sh|\
       scripts/runtime/dev/smoke-local-platform-sources.sh|\
       scripts/runtime/dev/run-secrets-credentials-acceptance.sh|\
@@ -1221,6 +1224,8 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/with-dev-smoke-auth.sh|\
       scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
       scripts/runtime/tests/test-provider-ssh-smoke.sh|\
+      scripts/runtime/tests/test-provider-codex-smoke.sh|\
+      scripts/runtime/tests/test-provider-codex-workload.py|\
       scripts/runtime/tests/test-private-checkout-smoke.sh|\
       scripts/runtime/tests/test-local-platform-sources-smoke.sh|\
       scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh|\
