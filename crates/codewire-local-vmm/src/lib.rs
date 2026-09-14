@@ -34,6 +34,8 @@ pub mod mesh_ingress;
 pub mod mesh_process;
 #[cfg(target_os = "linux")]
 pub mod mesh_transport;
+#[cfg(any(target_os = "linux", feature = "macos-production-init-fixture"))]
+pub mod network_session;
 #[cfg(target_os = "linux")]
 pub mod network_worker;
 #[cfg(target_os = "linux")]

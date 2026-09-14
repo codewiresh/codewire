@@ -10,6 +10,16 @@ build = "build.rs"
 
 [features]
 synthetic-oci-input-smoke = []
+macos-production-init-fixture = [
+    "dep:async-trait", "dep:codewire-daemon", "dep:codewire-netstack",
+    "dep:codewire-vmm-guest-probe", "dep:hyper-util", "dep:libc", "dep:rand",
+    "dep:tokio", "dep:tower", "dep:uuid", "dep:zeroize",
+]
+
+[[bin]]
+name = "codewire-macos-vz-fixture"
+path = "src/bin/codewire-macos-vz-fixture.rs"
+required-features = ["macos-production-init-fixture"]
 
 [[bin]]
 name = "codewire-local-oci-import-smoke"
@@ -64,10 +74,27 @@ url = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
+# Developer-only transport proof. None of these optional dependencies is enabled
+# by the default Darwin CLI or its release graph.
+[target.'cfg(target_os = "macos")'.dependencies]
+async-trait = { workspace = true, optional = true }
+codewire-daemon = { workspace = true, optional = true }
+codewire-netstack = { workspace = true, optional = true }
+codewire-vmm-guest-probe = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+libc = { version = "0.2", optional = true }
+rand = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+
 [build-dependencies]
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
+codewire-access = { workspace = true }
+tokio-stream = { workspace = true }
 codewire-protected-store = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }

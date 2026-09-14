@@ -8,6 +8,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <sys/proc_info.h>
+#endif
 
 #define CW_VZ_MAX_RECEIVED_DESCRIPTORS ((size_t)256)
 
@@ -64,6 +68,13 @@ static void close_message_descriptors(struct msghdr *message) {
 }
 
 static int validate_private_socket(int socket_fd) {
+    struct sockaddr_storage local = {0}, peer_address = {0};
+    socklen_t local_size = sizeof(local), peer_address_size = sizeof(peer_address);
+    if (getsockname(socket_fd, (struct sockaddr *)&local, &local_size) != 0 ||
+        getpeername(socket_fd, (struct sockaddr *)&peer_address, &peer_address_size) != 0 ||
+        local.ss_family != AF_UNIX || peer_address.ss_family != AF_UNIX) {
+        return CW_VZ_IPC_NOT_PRIVATE_STREAM;
+    }
     int socket_type = 0;
     socklen_t socket_type_size = sizeof(socket_type);
     if (getsockopt(socket_fd, SOL_SOCKET, SO_TYPE, &socket_type, &socket_type_size) != 0 ||
@@ -90,17 +101,18 @@ static int validate_private_socket(int socket_fd) {
     return 0;
 }
 
-ssize_t cw_vz_receive_request(
+static ssize_t receive_exact_request(
     int socket_fd,
     uint8_t *buffer,
     size_t buffer_capacity,
-    int descriptors[CW_VZ_DESCRIPTOR_COUNT]
+    int *descriptors,
+    size_t descriptor_count
 ) {
     if (socket_fd < 0 || buffer == NULL || descriptors == NULL ||
         buffer_capacity == 0 || buffer_capacity > CW_VZ_MAX_FRAME_BYTES) {
         return CW_VZ_IPC_INVALID_ARGUMENT;
     }
-    for (size_t index = 0; index < CW_VZ_DESCRIPTOR_COUNT; index++) {
+    for (size_t index = 0; index < descriptor_count; index++) {
         descriptors[index] = -1;
     }
 
@@ -145,7 +157,7 @@ ssize_t cw_vz_receive_request(
         control_count++;
         if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS ||
             control_payload_size(&message, header, &payload_size) != 0 ||
-            payload_size != sizeof(int) * CW_VZ_DESCRIPTOR_COUNT) {
+            payload_size != sizeof(int) * descriptor_count) {
             close_message_descriptors(&message);
             return CW_VZ_IPC_DESCRIPTOR_SET_INVALID;
         }
@@ -155,8 +167,7 @@ ssize_t cw_vz_receive_request(
         close_message_descriptors(&message);
         return CW_VZ_IPC_DESCRIPTOR_SET_INVALID;
     }
-    memcpy(descriptors, CMSG_DATA(rights), sizeof(int) * CW_VZ_DESCRIPTOR_COUNT);
-    size_t descriptor_count = CW_VZ_DESCRIPTOR_COUNT;
+    memcpy(descriptors, CMSG_DATA(rights), sizeof(int) * descriptor_count);
     for (size_t index = 0; index < descriptor_count; index++) {
         int flags = fcntl(descriptors[index], F_GETFD);
         if (flags < 0 || fcntl(descriptors[index], F_SETFD, flags | FD_CLOEXEC) != 0) {
@@ -205,6 +216,64 @@ ssize_t cw_vz_receive_request(
     }
     memcpy(buffer, frame + CW_VZ_FRAME_HEADER_BYTES, payload_size);
     return (ssize_t)payload_size;
+}
+
+ssize_t cw_vz_receive_request(
+    int socket_fd, uint8_t *buffer, size_t capacity, int descriptors[CW_VZ_DESCRIPTOR_COUNT]
+) {
+    return receive_exact_request(socket_fd, buffer, capacity, descriptors, CW_VZ_DESCRIPTOR_COUNT);
+}
+
+ssize_t cw_vz_receive_production_request(
+    int socket_fd, uint8_t *buffer, size_t capacity,
+    int descriptors[CW_VZ_PRODUCTION_DESCRIPTOR_COUNT]
+) {
+    return receive_exact_request(socket_fd, buffer, capacity, descriptors, CW_VZ_PRODUCTION_DESCRIPTOR_COUNT);
+}
+
+static int socket_identity(int fd, uint64_t *identity) {
+    if (validate_private_socket(fd) != 0) { return 0; }
+#if defined(__APPLE__)
+    // Self-only metadata. Apple documents soi_so as an opaque socket handle;
+    // unlike stat.st_ino it identifies duplicated Darwin socket descriptors.
+    struct socket_fdinfo info = {0};
+    if (proc_pidfdinfo(getpid(), fd, PROC_PIDFDSOCKETINFO, &info, (int)sizeof(info)) != (int)sizeof(info) ||
+        info.psi.soi_family != AF_UNIX || info.psi.soi_type != SOCK_STREAM) { return 0; }
+    *identity = info.psi.soi_so;
+#elif defined(__linux__) && defined(SO_COOKIE)
+    socklen_t size = sizeof(*identity);
+    if (getsockopt(fd, SOL_SOCKET, SO_COOKIE, identity, &size) != 0 || size != sizeof(*identity)) {
+        return 0;
+    }
+#else
+    return 0;
+#endif
+    return *identity != 0;
+}
+
+int cw_vz_validate_production_descriptors(
+    int control_fd, const int descriptors[CW_VZ_PRODUCTION_DESCRIPTOR_COUNT]
+) {
+    if (descriptors == NULL) { return 0; }
+    struct stat files[CW_VZ_PRODUCTION_ARTIFACT_COUNT];
+    for (size_t i = 0; i < CW_VZ_PRODUCTION_ARTIFACT_COUNT; i++) {
+        if (fstat(descriptors[i], &files[i]) != 0 || !S_ISREG(files[i].st_mode)) { return 0; }
+        for (size_t j = 0; j < i; j++) {
+            if (files[i].st_dev == files[j].st_dev && files[i].st_ino == files[j].st_ino) { return 0; }
+        }
+    }
+    uint64_t identities[4] = {0};
+    if (!socket_identity(control_fd, &identities[0])) { return 0; }
+    for (size_t i = 0; i < 3; i++) {
+        int fd = descriptors[CW_VZ_PRODUCTION_ARTIFACT_COUNT + i];
+        int flags = fcntl(fd, F_GETFL);
+        if (flags < 0 || (flags & O_ACCMODE) != O_RDWR ||
+            !socket_identity(fd, &identities[i + 1])) { return 0; }
+        for (size_t j = 0; j <= i; j++) {
+            if (identities[i + 1] == identities[j]) { return 0; }
+        }
+    }
+    return 1;
 }
 
 int cw_vz_descriptors_are_distinct_files(

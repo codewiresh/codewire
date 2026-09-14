@@ -413,6 +413,24 @@ def worker(root, run):
                              "-p", "codewire-cli-bin", "--bin", "cw"])
                     shutil.copy2(root / "target/x86_64-apple-darwin/debug/cw",
                                  run / "artifacts/cw-x86_64-apple-darwin")
+            elif component == "vz-fixture":
+                if request["intel"]:
+                    raise RuntimeError("VZ production fixture accepts native arm64 only")
+                for argv in (["rustc", "-Vv"], ["cargo", "-V"], ["protoc", "--version"],
+                             ["xcrun", "--show-sdk-version"]):
+                    command(argv)
+                native = ["--locked", "--offline", "--target", "aarch64-apple-darwin",
+                          "-p", "codewire-local-vmm", "--features", "macos-production-init-fixture"]
+                if action in ("build", "verify"):
+                    command(["cargo", "build", *native, "--bin", "codewire-macos-vz-fixture"])
+                    binary = root / "target/aarch64-apple-darwin/debug/codewire-macos-vz-fixture"
+                    shutil.copy2(binary, run / "artifacts/codewire-macos-vz-fixture-arm64")
+                if action in ("test", "verify"):
+                    command(["cargo", "test", *native, "--lib", "network_session::tests"])
+                    command(["cargo", "test", *native, "--bin", "codewire-macos-vz-fixture"])
+                if action in ("clippy", "verify"):
+                    command(["cargo", "clippy", *native, "--lib", "--bin", "codewire-macos-vz-fixture",
+                             "--", "-D", "warnings"])
             elif component == "vz-runner":
                 if action == "clippy" or request["intel"]:
                     raise RuntimeError("VZ runner accepts build, test, or verify on native arm64 only")
@@ -485,7 +503,7 @@ def recover(host, remote, destination):
 import pathlib, sys, tarfile
 run = pathlib.Path(sys.argv[1])
 paths = [run / 'request.json', run / 'result.json', *run.glob('command-*.log')]
-paths += [run / 'artifacts' / name for name in ('cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin', 'codewire-vz-runner-arm64')]
+paths += [run / 'artifacts' / name for name in ('cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin', 'codewire-vz-runner-arm64', 'codewire-macos-vz-fixture-arm64')]
 if not (run / 'request.json').is_file(): raise SystemExit('run not found')
 with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
     for path in paths:
@@ -520,6 +538,9 @@ def evidence_status(evidence, run_id):
     if request.get("component", "cli") == "vz-runner":
         if request["action"] in ("build", "verify"):
             expected.add("codewire-vz-runner-arm64")
+    elif request.get("component") == "vz-fixture":
+        if request["action"] in ("build", "verify"):
+            expected.add("codewire-macos-vz-fixture-arm64")
     else:
         if request["action"] in ("build", "verify"):
             expected.add("cw-aarch64-apple-darwin")
@@ -539,7 +560,7 @@ def main():
         return worker(Path(sys.argv[2]), Path(sys.argv[3]))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="user@mac.example.invalid")
-    parser.add_argument("--component", choices=["cli", "vz-runner"], default="cli")
+    parser.add_argument("--component", choices=["cli", "vz-runner", "vz-fixture"], default="cli")
     parser.add_argument("--action", choices=["build", "test", "clippy", "verify"], default="build")
     parser.add_argument("--intel", action="store_true", help="also compile/link x86_64; never execute it")
     parser.add_argument("--seed-cargo", action="store_true", help="seed locked public source dependencies")
@@ -552,6 +573,8 @@ def main():
         parser.error("timeout must be between 1 and 14400 seconds")
     if args.component == "vz-runner" and (args.action == "clippy" or args.intel or args.seed_cargo):
         parser.error("VZ runner accepts build, test, or verify without --intel/--seed-cargo")
+    if args.component == "vz-fixture" and args.intel:
+        parser.error("VZ production fixture accepts native arm64 only")
     repo = Path(output(["git", "rev-parse", "--show-toplevel"])).resolve()
     key = hashlib.sha256(str(repo).encode()).hexdigest()[:16]
     run_id = args.recover or uuid.uuid4().hex
