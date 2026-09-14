@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import { bypassTwoFactor, cleanupUser, createAuthenticatedSession, getUserId, seedSyntheticUser } from "./helpers/db";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
+import {
+  destroyGithubCheckout, githubCheckoutImage, githubCheckoutInstall, githubCheckoutName,
+  githubGitCounters, verifyGithubCheckout,
+} from "./helpers/github-checkout";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 
@@ -12,20 +16,22 @@ test.describe("managed provider credential browser journey", () => {
   );
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("connects GitHub through the session BFF, then revokes and deletes it", async ({ page, isMobile }) => {
+  test("connects GitHub, checks out a selected repository, then revokes and deletes it", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop credential lifecycle contract");
+    test.setTimeout(600_000);
     const name = "synthetic-user";
     // The provider's verified fixture username is deliberately stable. A fresh
     // synthetic owner per attempt keeps retries independent without finding or
     // deleting another user's credential by its display name.
     const email = `e2e-github-${randomUUID()}@codewire.sh`;
     const slug = `github-journey-${randomUUID().replaceAll("-", "")}`;
+    let orgId = "";
     await seedSyntheticUser(email, "GitHub enrollment fixture");
     try {
       await bypassTwoFactor(email);
       const owner = await getUserId(email);
       if (!owner) throw new Error("Synthetic GitHub owner was not created");
-      await ensureTestOrg("GitHub repository journey", slug, owner);
+      orgId = await ensureTestOrg("GitHub repository journey", slug, owner);
       const session = await createAuthenticatedSession(email);
       await page.context().addCookies([{
         name: "codewire.session_token", value: session.token, url: ssrUrl,
@@ -96,7 +102,7 @@ test.describe("managed provider credential browser journey", () => {
       const profileId = await profileRow.locator('[name="profile_id"]').first().inputValue();
 
       await page.goto(`/${slug}/new/`);
-      await page.getByRole("textbox", { name: "Name", exact: true }).fill("github-repository-draft");
+      await page.getByRole("textbox", { name: "Name", exact: true }).fill(githubCheckoutName);
       const openPicker = page.getByRole("button", { name: "Choose from GitHub", exact: true });
       await openPicker.click();
       const picker = page.getByRole("dialog", { name: "Choose a GitHub repository", exact: true });
@@ -130,8 +136,17 @@ test.describe("managed provider credential browser journey", () => {
       expect(rendered?.includes("gho_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
-      // No Sandbox was submitted. Remove the test-owned profile before the
-      // existing revoke/delete proof so a bound credential is never force-deleted.
+      await source.getByRole("textbox", { name: "Branch", exact: true }).fill("main");
+      await page.getByLabel("Workspace image").fill(githubCheckoutImage);
+      await page.getByLabel("Install Command").fill(githubCheckoutInstall);
+      await page.getByLabel("TTL").fill("3600s");
+      const before = await githubGitCounters();
+      await page.getByRole("button", { name: "Create Sandbox", exact: true }).click();
+      await expect(page).toHaveURL(`${ssrUrl}/${slug}/?message=environment-created`);
+      await verifyGithubCheckout(page, orgId, profileId, before);
+      await destroyGithubCheckout(page, orgId);
+
+      // The normal destroy finished before removing its selected profile.
       await page.goto("/settings/credentials/");
       profileRow = page.locator(".cw-profile-row", { hasText: profileName });
       await profileRow.getByText("Delete profile", { exact: true }).click();
@@ -153,6 +168,9 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page.getByRole("status")).toHaveText("Credential deleted.");
       await expect(page.locator(".cw-credential-row", { hasText: name })).toHaveCount(0);
     } finally {
+      // Allow bounded normal teardown even when creation/verification timed out.
+      test.setTimeout(test.info().timeout + 150_000);
+      if (orgId) await destroyGithubCheckout(page, orgId);
       if (!page.isClosed()) await page.close();
       await page.context().clearCookies();
       await cleanupTestOrg(slug);

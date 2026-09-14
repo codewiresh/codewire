@@ -114,14 +114,55 @@ struct Counters {
     attempts: [u64; 3],
     required_generation: [Option<u64>; 3],
     last_refresh: Option<(u64, u64)>,
+    github_advertisements: u64,
+    github_upload_packs: u64,
 }
 
 #[derive(Clone)]
-pub(super) struct SyntheticProvider(Arc<Mutex<Counters>>);
+pub(super) struct SyntheticProvider(Arc<Mutex<Counters>>, Option<Arc<super::git::Fixture>>);
 
 impl SyntheticProvider {
     pub(super) fn new() -> Self {
-        Self(Arc::new(Mutex::new(Counters::default())))
+        Self(Arc::new(Mutex::new(Counters::default())), None)
+    }
+
+    pub(super) fn with_git(git: Arc<super::git::Fixture>) -> Self {
+        Self(Arc::new(Mutex::new(Counters::default())), Some(git))
+    }
+
+    async fn github_git(
+        &self,
+        method: &Method,
+        target: &url::Url,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let fixture = self.1.as_ref().ok_or(BrokerUpstreamError::Protocol)?;
+        let (operation, body) = fixture.execute(method, target, headers, body).await?;
+        {
+            let mut counters = self.0.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
+            match operation {
+                super::git::Operation::Advertisement => {
+                    counters.github_advertisements = increment(counters.github_advertisements)?
+                }
+                super::git::Operation::UploadPack => {
+                    counters.github_upload_packs = increment(counters.github_upload_packs)?
+                }
+            }
+            // Only successful authenticated backend responses advance these
+            // closed counters. No request/header/body or private path is logged.
+            tracing::info!(target: TARGET, event = "github_git_response", operation = operation.name(),
+                github_advertisement_calls = counters.github_advertisements,
+                github_upload_pack_calls = counters.github_upload_packs, "github_git_response");
+        }
+        Ok(BrokerUpstreamResponse::new(
+            StatusCode::OK,
+            HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static(operation.media_type()),
+            )]),
+            Box::pin(futures::stream::once(async move { Ok(body.into()) })),
+        ))
     }
 
     fn github_repositories(
@@ -173,6 +214,8 @@ impl SyntheticProvider {
             tracing::info!(target: TARGET, event = "provider_totals", response_calls = counters.responses,
                 refresh_calls = counters.refreshes, baseline_calls = counters.attempts[0],
                 broker_retry_once_calls = counters.attempts[1], broker_retry_exhausted_calls = counters.attempts[2],
+                github_advertisement_calls = counters.github_advertisements,
+                github_upload_pack_calls = counters.github_upload_packs,
                 "provider_totals");
         }
     }
@@ -298,6 +341,9 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         if headers.contains_key("proxy-authorization") || headers.contains_key("cookie") {
             return Err(BrokerUpstreamError::Protocol);
         }
+        if target.host_str() == Some("github.com") {
+            return self.github_git(&method, &target, &headers, &body).await;
+        }
         if method == Method::GET
             && target.origin().ascii_serialization() == "https://api.github.com"
             && target.path() == "/user/repos"
@@ -391,6 +437,92 @@ fn validate_access(token: &str) -> Result<u64, BrokerUpstreamError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn github_fetch_counts_only_authenticated_successful_backend_responses() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let runtime = tempfile::Builder::new()
+            .prefix("kind-git-provider-test-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/dev/shm")
+            .unwrap();
+        let git = super::super::git::Fixture::create(runtime.path())
+            .await
+            .unwrap();
+        let provider = SyntheticProvider::with_git(git.clone());
+        let advertisement =
+            "https://github.com/synthetic-user/repository-01.git/info/refs?service=git-upload-pack"
+                .parse()
+                .unwrap();
+        let mut headers = HeaderMap::new();
+        assert!(
+            provider
+                .github_git(&Method::GET, &advertisement, &headers, &[])
+                .await
+                .is_err()
+        );
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode("x-access-token:gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            ))
+            .unwrap(),
+        );
+        headers.insert(
+            "user-agent",
+            HeaderValue::from_static("Codewire-Credential-Broker"),
+        );
+        headers.insert("accept-encoding", HeaderValue::from_static("identity"));
+        let other =
+            "https://github.com/synthetic-user/repository-02.git/info/refs?service=git-upload-pack"
+                .parse()
+                .unwrap();
+        assert!(
+            provider
+                .github_git(&Method::GET, &other, &headers, &[])
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.0.lock().unwrap().github_advertisements, 0);
+        assert_eq!(provider.0.lock().unwrap().github_upload_packs, 0);
+        provider
+            .github_git(&Method::GET, &advertisement, &headers, &[])
+            .await
+            .unwrap();
+        let upload = "https://github.com/synthetic-user/repository-01.git/git-upload-pack"
+            .parse()
+            .unwrap();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("application/x-git-upload-pack-request"),
+        );
+        assert!(
+            provider
+                .github_git(&Method::POST, &upload, &headers, b"malformed")
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.0.lock().unwrap().github_upload_packs, 0);
+        let want = format!("want {}\n", super::super::git::REVISION);
+        let request = format!("{:04x}{want}00000009done\n", want.len() + 4);
+        provider
+            .github_git(&Method::POST, &upload, &headers, request.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(provider.0.lock().unwrap().github_advertisements, 1);
+        assert_eq!(provider.0.lock().unwrap().github_upload_packs, 1);
+        git.close().await.unwrap();
+        assert!(
+            provider
+                .github_git(&Method::POST, &upload, &headers, request.as_bytes())
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.0.lock().unwrap().github_upload_packs, 1);
+    }
 
     #[test]
     fn repository_fixture_is_bounded_paginated_and_requires_its_synthetic_identity() {

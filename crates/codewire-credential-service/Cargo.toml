@@ -65,6 +65,8 @@ base64 = { workspace = true }
 codewire-client = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform-test-support"] }
+flate2 = { workspace = true }
+libc = "0.2"
 rcgen = "0.13"
 reqwest = { workspace = true }
 tempfile = { workspace = true }
