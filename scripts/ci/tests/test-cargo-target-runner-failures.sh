@@ -131,12 +131,15 @@ with open(os.environ['COMPOSITION_TRACE'], 'a') as output:
     output.write(json.dumps(record) + '\\n')
 if record['tool'] == 'cargo' and sys.argv[1] == os.environ.get('COMPOSITION_FAIL'):
     sys.exit(43)
+if record['tool'] == os.environ.get('COMPOSITION_FAIL_TOOL'):
+    sys.exit(44)
 ''')
 tool.chmod(0o755)
 for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
                'scripts/ci/tests/test-admin-proto-boundary.sh',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py',
+               'crates/codewire-local-vmm/macos-vz-runner/Tests/test_console_pair_static_contract.py',
                'scripts/ci/verify/build-local-vmm-initramfs.sh',
                'scripts/ci/release/package-codewire-desktop.sh'):
     destination = fixture / helper
@@ -150,13 +153,15 @@ environment = dict(PATH=f'{binary}:{os.environ["PATH"]}',
                    RUST_COMPOSE_FORMAT='true', RUST_COMPOSE_FORMAT_DONE='true')
 cases = 0
 
-def run(tokens, family='rust-transport', fail=None, status=None):
+def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None):
     global cases
     cases += 1
     trace.write_text('')
     env = dict(environment, VERIFICATION_SELECTION='|valid:v3|' + '|'.join(tokens) + '|complete|')
     if fail:
         env['COMPOSITION_FAIL'] = fail
+    if fail_tool:
+        env['COMPOSITION_FAIL_TOOL'] = fail_tool
     result = subprocess.run(['bash', str(runner), family], env=env,
                             text=True, capture_output=True)
     records = [json.loads(line) for line in trace.read_text().splitlines()]
@@ -200,7 +205,11 @@ assert sum(r['tool'] == 'package-codewire-desktop.sh' for r in records) == 1
 assert sum(r['tool'] == 'build-local-vmm-initramfs.sh' for r in records) == 1
 assert sum(r['tool'] == 'test_ipc_system.sh' for r in records) == 1
 assert sum(r['tool'] == 'test_static_contract.py' for r in records) == 1
+assert sum(r['tool'] == 'test_console_pair_static_contract.py' for r in records) == 1
 assert sum('--target' in r['args'] and 'aarch64-apple-darwin' in r['args'] for r in records) == 1
+
+records, _ = run(special, fail_tool='test_console_pair_static_contract.py', status=44)
+assert records[-1]['tool'] == 'test_console_pair_static_contract.py'
 
 for command in ('fmt', 'build', 'clippy', 'test'):
     records, _ = run(both, fail=command)
