@@ -345,19 +345,78 @@ class HelperTests(unittest.TestCase):
     def test_cancel_kills_fixture_grandchild(self):
         cancel = threading.Event()
         marker = self.root / "escaped"
-        child = f"import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).touch()"
-        parent = (f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}]); "
-                  "print('started', flush=True); time.sleep(20)")
-        timer = threading.Timer(.3, cancel.set)
-        timer.start()
+        ready = self.root / "grandchild-ready"
+        child = (f"import time; from pathlib import Path; Path({str(ready)!r}).touch(); "
+                 f"time.sleep(1); Path({str(marker)!r}).touch()")
+        # TERM reaches both processes. The fixture parent must reap its own
+        # child before exiting, not rely on the runner's PID 1 orphan reaper.
+        parent = f'''import signal, subprocess, sys, time
+cancelled = False
+def stop(signum, frame):
+    global cancelled
+    cancelled = True
+signal.signal(signal.SIGTERM, stop)
+child = subprocess.Popen([sys.executable, '-c', {child!r}])
+deadline = time.monotonic() + 20
+while not cancelled and time.monotonic() < deadline:
+    time.sleep(.01)
+child.wait(timeout=2)
+'''
+        finished = threading.Event()
+
+        def cancel_after_ready():
+            deadline = time.monotonic() + 3
+            while not ready.exists() and time.monotonic() < deadline:
+                if finished.wait(.01):
+                    return
+            cancel.set()
+
+        observer = threading.Thread(target=cancel_after_ready)
+        observer.start()
         try:
             status = helper.run_command([sys.executable, "-c", parent], self.root, os.environ.copy(),
                                         self.root / "cancel.log", cancel, time.monotonic() + 5)
         finally:
-            timer.cancel()
+            finished.set()
+            observer.join()
         self.assertEqual(status, 130)
+        self.assertTrue(ready.exists(), "cancellation must exercise a running grandchild")
         time.sleep(1)
         self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux orphan-reaper regression")
+    def test_cancel_fixture_reaps_before_its_parent_exits(self):
+        # A container's PID 1 need not promptly reap an orphan. Keep adoption
+        # inside this disposable subprocess so the fixture cannot rely on it;
+        # even an assertion failure reaps every adopted fixture child.
+        probe = r'''
+import ctypes, importlib.util, os, signal, sys, unittest
+libc = ctypes.CDLL(None, use_errno=True)
+assert libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER, this process only
+signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+spec = importlib.util.spec_from_file_location("cancel_fixture", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+result = unittest.TestResult()
+adopted = []
+try:
+    module.HelperTests("test_cancel_kills_fixture_grandchild").run(result)
+finally:
+    while True:
+        try:
+            child, status = os.waitpid(-1, 0)
+        except ChildProcessError:
+            break
+        adopted.append(status)
+assert result.wasSuccessful(), result.errors + result.failures
+assert not adopted, "cancellation fixture orphaned a child"
+print("cooperative cancellation: no adopted children")
+'''
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", probe, __file__],
+                                env={"PATH": os.defpath}, capture_output=True, text=True,
+                                timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "cooperative cancellation: no adopted children")
 
     def test_worker_failure_saves_evidence_not_success(self):
         run = self.root / "run"
