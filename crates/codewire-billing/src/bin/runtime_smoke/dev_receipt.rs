@@ -61,7 +61,7 @@ fn validate_database_url(raw: &str) -> anyhow::Result<()> {
     let url = url::Url::parse(raw)?;
     ensure!(
         url.scheme() == "postgres"
-            && url.host_str() == Some("codewire-db-rw.dev")
+            && url.host_str() == Some("codewire-db-rw.dev.svc.cluster.local.")
             && url.port() == Some(5432)
             && url.username() == "codewire"
             && url.password().is_some_and(|p| !p.is_empty())
@@ -312,7 +312,7 @@ mod tests {
             ("BILLING_RUNTIME_BASE_URL", DEV_BILLING_URL),
             (
                 "DATABASE_URL",
-                "postgres://codewire:synthetic@codewire-db-rw.dev:5432/codewire?sslmode=require",
+                "postgres://codewire:synthetic@codewire-db-rw.dev.svc.cluster.local.:5432/codewire?sslmode=require",
             ),
             ("BILLING_RUNTIME_WEBHOOK_SECRET", "synthetic"),
             ("BILLING_RECEIPT_EXPECTED_USER_ID", "synthetic-user"),
@@ -359,11 +359,11 @@ mod tests {
 
     #[test]
     fn database_binding_rejects_other_targets_and_overrides() {
-        let good = "postgres://codewire:synthetic@codewire-db-rw.dev:5432/codewire?sslmode=require";
+        let good = "postgres://codewire:synthetic@codewire-db-rw.dev.svc.cluster.local.:5432/codewire?sslmode=require";
         validate_database_url(good).unwrap();
         for bad in [
-            good.replace(".dev", ".prod"),
-            good.replace(".dev", ".dev.attacker.test"),
+            good.replace(".dev.svc.cluster.local.", ".prod.svc.cluster.local."),
+            good.replace(".svc.cluster.local.", ".attacker.test"),
             good.replace("5432", "6432"),
             good.replace("/codewire?", "/postgres?"),
             good.replace("require", "disable"),
