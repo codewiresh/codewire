@@ -15,6 +15,8 @@ export const githubCheckoutImage = process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAG
 // Public deterministic fixture identity; not a credential. The install marker
 // proves setup checked out the repository BEFORE running the user's command.
 const checkoutCommit = "78e440926ea15ee9644a69199694e39f6f06e3ce";
+// Install Command is a single-line input: newlines would become spaces and
+// silently turn these checks into arguments to `set`, skipping the marker.
 export const githubCheckoutInstall = [
   "set -eu",
   "cd /workspace/repository-01",
@@ -22,9 +24,32 @@ export const githubCheckoutInstall = [
   "test \"$(cat proof.txt)\" = 'initial-private-checkout-synthetic-v1'",
   "test \"$(wc -c < proof.txt)\" -eq 38",
   "printf 'checkout-before-install-ok\\n' > /workspace/github-checkout-proof",
-].join("\n");
+].join("; ");
 
 type GitCounters = { advertisement: number; uploadPack: number };
+
+async function waitForGithubCheckoutSetup(environmentId: string) {
+  // Running makes Exec available, but setup continues asynchronously. Read
+  // only status metadata; setup errors may contain child output, so never
+  // return their contents to browser reports.
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    const [row] = await sql`
+      SELECT e.state, b.setup_complete,
+             COALESCE(b.setup_error, '') <> '' AS setup_failed
+      FROM environments e
+      LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
+      WHERE e.id = ${environmentId}
+    `;
+    if (!row || row.state !== "running") {
+      throw new Error("GitHub checkout environment is no longer running");
+    }
+    if (row.setup_failed) throw new Error("GitHub checkout setup failed");
+    if (row.setup_complete) return;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error("GitHub checkout setup did not complete within 180000ms");
+}
 
 export async function githubGitCounters(): Promise<GitCounters> {
   const context = process.env.PLAYWRIGHT_KUBE_CONTEXT;
@@ -64,10 +89,12 @@ export async function verifyGithubCheckout(page: Page, orgId: string, profileId:
   expect(created?.id).toBeTruthy();
   expect(created.profile_id).toBe(profileId);
   expect(Number(created.profile_revision)).toBe(1);
+  expect(created.project_spec.install_command).toBe(githubCheckoutInstall);
   expect(created.project_spec.repositories).toEqual([{
     source: githubCheckoutUrl, branch: "main", destination: "/workspace/repository-01",
   }]);
   await waitForEnvironmentState(created.id, ["running"], 300_000);
+  await waitForGithubCheckoutSetup(created.id);
   const after = await githubGitCounters();
   expect(after.advertisement).toBeGreaterThan(before.advertisement);
   expect(after.uploadPack).toBeGreaterThan(before.uploadPack);

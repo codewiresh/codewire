@@ -144,6 +144,7 @@ test.describe("managed provider credential browser journey", () => {
       await source.getByRole("textbox", { name: "Branch", exact: true }).fill("main");
       await page.getByLabel("Workspace image").fill(githubCheckoutImage);
       await page.getByLabel("Install Command").fill(githubCheckoutInstall);
+      await expect(page.getByLabel("Install Command")).toHaveValue(githubCheckoutInstall);
       await page.getByLabel("TTL").fill("3600s");
       const before = await githubGitCounters();
       await page.getByRole("button", { name: "Create Sandbox", exact: true }).click();
