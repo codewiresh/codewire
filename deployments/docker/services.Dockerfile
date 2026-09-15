@@ -128,6 +128,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
       --bin codewire-idp \
       --bin sidecar-smoke \
       --bin codewire-billing \
+      --bin billing-runtime-smoke \
       --bin codewire-coordinator \
       --bin codewire-db-migrate \
       --bin codewire-udp-relay && \
@@ -144,6 +145,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-orchestration" /out/codewire-orchestration && \
     cp "target/$CODEWIRE_RUST_PROFILE/sidecar-smoke" /out/sidecar-smoke && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-billing" /out/codewire-billing && \
+    cp "target/$CODEWIRE_RUST_PROFILE/billing-runtime-smoke" /out/codewire-billing-runtime-smoke && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-coordinator" /out/codewire-coordinator && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-db-migrate" /out/codewire-db-migrate && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-udp-relay" /out/codewire-udp-relay && \
@@ -173,6 +175,7 @@ COPY --from=builder /out/codewire-idp /codewire-idp
 COPY --from=builder /out/codewire-orchestration /codewire-orchestration
 COPY --from=builder /out/sidecar-smoke /sidecar-smoke
 COPY --from=builder /out/codewire-billing /codewire-billing
+COPY --from=builder /out/codewire-billing-runtime-smoke /codewire-billing-runtime-smoke
 COPY --from=builder /out/codewire-coordinator /codewire-coordinator
 COPY --from=builder /out/codewire-db-migrate /codewire-db-migrate
 COPY --from=builder /out/codewire-udp-relay /codewire-udp-relay
