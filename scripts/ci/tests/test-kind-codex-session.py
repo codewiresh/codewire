@@ -393,6 +393,91 @@ class DiagnosticTests(unittest.TestCase):
         for line in self.CANARY.splitlines():
             self.assertNotIn(line, output)
 
+    def test_cancellation_after_stderr_read_keeps_the_diagnostic(self):
+        # Deliver the real signal after bytes leave the real child pipe but
+        # before the driver records them. No scheduling luck or sleep is needed.
+        script = (
+            "import os, signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "sys.stdin.readline()\n"
+            f"os.write(2, {self.CANARY.encode()!r})\n"
+            "while True: time.sleep(0.01)\n"
+        )
+        original_read = os.read
+        original_mask = driver.signal.pthread_sigmask(driver.signal.SIG_BLOCK, [])
+        for interruption in (driver.signal.SIGTERM, driver.signal.SIGINT):
+            with self.subTest(interruption=interruption):
+                delivered = []
+                def read_then_interrupt(fd, size):
+                    data = original_read(fd, size)
+                    if data == self.CANARY.encode() and not delivered:
+                        delivered.append(interruption)
+                        os.kill(os.getpid(), interruption)
+                    return data
+                with patch.object(driver, "SHUTDOWN_GRACE", 0.05), \
+                        patch.object(driver.os, "read", read_then_interrupt):
+                    event, output = self.failed_main(script, real_cancellation=True)
+                self.assertEqual(delivered, [interruption])
+                self.assertEqual(event["reason"], "interrupted")
+                self.assertEqual(event["phase"], "initialize")
+                self.assertIsNone(event["child_status"])
+                self.assertEqual(event["stderr_class"], "unclassified")
+                self.assertEqual(driver.signal.pthread_sigmask(driver.signal.SIG_BLOCK, []), original_mask)
+                for line in self.CANARY.splitlines():
+                    self.assertNotIn(line, output)
+
+    def test_cancellation_without_stderr_does_not_invent_a_diagnostic(self):
+        for interruption in (driver.signal.SIGTERM, driver.signal.SIGINT):
+            with self.subTest(interruption=interruption):
+                script = (
+                    "import os, signal, sys, time\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "sys.stdin.readline()\n"
+                    f"os.kill(os.getppid(), {int(interruption)})\n"
+                    "while True: time.sleep(0.01)\n"
+                )
+                with patch.object(driver, "SHUTDOWN_GRACE", 0.05):
+                    event, _ = self.failed_main(script, real_cancellation=True)
+                self.assertEqual(event["reason"], "interrupted")
+                self.assertEqual(event["phase"], "initialize")
+                self.assertIsNone(event["child_status"])
+                self.assertEqual(event["stderr_class"], "none")
+
+    def test_stderr_read_restores_the_exact_signal_mask_on_every_exit(self):
+        original_sigmask = driver.signal.pthread_sigmask
+        previous = original_sigmask(driver.signal.SIG_BLOCK, {driver.signal.SIGUSR1})
+        expected = original_sigmask(driver.signal.SIG_BLOCK, [])
+        try:
+            for scenario in ("data", "eof", "read_error", "record_error", "block_error"):
+                with self.subTest(scenario=scenario), contextlib.ExitStack() as patches:
+                    # Only the bounded collector is exercised here; the tests
+                    # above exercise real children, pipes, interruption and cleanup.
+                    server = driver.Server.__new__(driver.Server)
+                    server.stderr_bytes = 0
+                    server.stderr_prefix = bytearray()
+                    payload = b"" if scenario == "eof" else b"synthetic-stderr"
+                    read = patches.enter_context(patch.object(driver.os, "read", return_value=payload))
+                    if scenario == "read_error":
+                        read.side_effect = OSError("synthetic read failure")
+                    if scenario == "record_error":
+                        patches.enter_context(patch.object(server, "observe_stderr", side_effect=RuntimeError("synthetic record failure")))
+                    if scenario == "block_error":
+                        def block_then_fail(how, mask):
+                            result = original_sigmask(how, mask)
+                            if how == driver.signal.SIG_BLOCK and mask == {driver.signal.SIGTERM, driver.signal.SIGINT}:
+                                raise RuntimeError("synthetic pending handler")
+                            return result
+                        patches.enter_context(patch.object(driver.signal, "pthread_sigmask", block_then_fail))
+                    if scenario.endswith("error"):
+                        with self.assertRaises(OSError if scenario == "read_error" else RuntimeError):
+                            server._read_stderr(123)
+                    else:
+                        self.assertEqual(server._read_stderr(123), payload)
+                        self.assertEqual(server.stderr_bytes, len(payload))
+                    self.assertEqual(original_sigmask(driver.signal.SIG_BLOCK, []), expected)
+        finally:
+            original_sigmask(driver.signal.SIG_SETMASK, previous)
+
     def test_failed_launch_does_not_disclose_executable_path(self):
         event, output = self.failed_main()
         self.assertEqual(event, {
