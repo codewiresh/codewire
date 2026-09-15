@@ -217,6 +217,11 @@ dev_topology_ready() {
   done
 }
 
+dev_application_all_scopes_ready() {
+  normal_cli_ready && owner_runtime_ready &&
+    [[ -n "${CODEWIRE_SERVER_URL:-}" && -n "${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" ]]
+}
+
 provider_oauth_config_ready() {
   local config_dir="$ACCEPTANCE_PROVIDER_SSH_FRESH_OAUTH_CONFIG_DIR"
   local runtime_parent="${XDG_RUNTIME_DIR:-}"
@@ -238,7 +243,9 @@ readiness_reason() {
       local_platform_mesh_ready || { printf '%s' 'explicit normal CLI/local platform/Mesh inputs unavailable'; return 1; }
       ;;
     dev-application-all-scopes)
-      dev_topology_ready || { printf '%s' 'explicit normal CLI/actual Dev topology inputs unavailable'; return 1; }
+      dev_application_all_scopes_ready || {
+        printf '%s' 'explicit normal CLI/Dev API inputs unavailable'; return 1;
+      }
       [[ -n "${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" &&
          -n "${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}" &&
          -n "${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}" ]] || {
@@ -360,18 +367,6 @@ start_fixed_child() {
         EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" \
         EXPECTED_CODEWIRE_ADMIN_USER_ID="${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}" \
         EXPECTED_CODEWIRE_ORGANIZATION_ID="${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}" \
-        KUBECONFIG="${KUBECONFIG:-}" \
-        KUBE_CONTEXT="${KUBE_CONTEXT:-}" \
-        CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}" \
-        SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}" \
-        EXPECTED_NODE="${EXPECTED_NODE:-}" \
-        EXPECTED_TAILNET_PATH_TRANSPORT="${EXPECTED_TAILNET_PATH_TRANSPORT:-peer_relay}" \
-        EXPECTED_TAILNET_PEER_RELAY_ENDPOINT="${EXPECTED_TAILNET_PEER_RELAY_ENDPOINT:-}" \
-        EXPECTED_UDP_RELAY_BIND_ADDRS="${EXPECTED_UDP_RELAY_BIND_ADDRS:-}" \
-        EXPECTED_UDP_RELAY_ALLOCATOR_URL="${EXPECTED_UDP_RELAY_ALLOCATOR_URL:-}" \
-        EXPECTED_TAILNET_DIRECT_UDP_LB_IP="${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-}" \
-        EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-}" \
-        EXPECTED_RUNTIME_TRANSPORT_REGION="${EXPECTED_RUNTIME_TRANSPORT_REGION:-}" \
         XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
         SMOKE_TMP_PARENT="${SMOKE_TMP_PARENT:-}" \
         "$ROOT/scripts/ci/verify/runtime-dev-commodity-smoke.sh" \

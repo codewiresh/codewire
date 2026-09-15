@@ -32,6 +32,8 @@ fail() {
 }
 
 assert_static_contract() {
+  local application_secret_smoke normalized_smoke pod_shape
+
   bash -n "$SMOKE"
   bash -n "$WRAPPER"
   bash -n "$CANDIDATE"
@@ -75,6 +77,18 @@ assert_static_contract() {
   done
   grep -Fq '[[ "$CODEWIRE_SERVER_URL" == "$EXPECTED_CODEWIRE_DEV_SERVER_URL"' \
     "$SMOKE" || fail "smoke no longer checks its externally configured dev endpoint"
+  normalized_smoke="$(sed -E ':join; /\\$/ { N; s/\\\n[[:space:]]*/ /; b join; }' "$SMOKE")"
+  if rg -i 'kubectl_dev[^#]*(secret|gateway_secret)' <<<"$normalized_smoke" >/dev/null; then
+    fail "runtime smoke reads Kubernetes Secret resources instead of proving their use through workload behavior"
+  fi
+  pod_shape="$(awk '/^assert_pod_shape\(\)/,/^}/' "$SMOKE")"
+  rg -F '.type == "Ready" and .status == "True"' <<<"$pod_shape" >/dev/null ||
+    fail "gateway host-key proof no longer requires observed Pod readiness"
+  rg -F '.secret.secretName == ("cw-gateway-host-key-" + $id)' <<<"$pod_shape" >/dev/null ||
+    fail "gateway host-key proof no longer binds the Deployment volume reference"
+  application_secret_smoke="$(awk '/^run_application_secrets_smoke\(\)/,/^}/' "$SMOKE")"
+  rg -F 'cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty' <<<"$application_secret_smoke" >/dev/null ||
+    fail "application-secret smoke no longer proves the live managed exec path"
   awk '/^run_tailnet_doctor\(\)/,/^}/' "$SMOKE" \
     | rg -F 'capture_tailnet_doctor_failure_diagnostics' >/dev/null || \
     fail "tailnet doctor no longer captures safe allocator diagnostics"
@@ -327,16 +341,9 @@ EOF
 
   APPLICATION_ONLY_KUBECTL_LOG="$kubectl_log" \
     PATH="$fake_bin:$PATH" \
-    SMOKE_SKIP_KUBE=1 \
     CODEWIRE_SERVER_URL=https://dev.example.invalid \
     EXPECTED_CODEWIRE_DEV_SERVER_URL=https://dev.example.invalid \
-    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.10:41641 \
-    EXPECTED_UDP_RELAY_BIND_ADDRS=0.0.0.0:41641 \
-    EXPECTED_UDP_RELAY_ALLOCATOR_URL=https://allocator.example.invalid \
-    EXPECTED_TAILNET_DIRECT_UDP_LB_IP=192.0.2.11 \
-    EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE=test-zone \
-    EXPECTED_RUNTIME_TRANSPORT_REGION=test-region \
-    "$WRAPPER" --help >"$output"
+    "$WRAPPER" --only application-secrets-all-scopes --help >"$output"
 
   [[ ! -e "$kubectl_log" ]] ||
     fail "application-only wrapper invoked kubectl"

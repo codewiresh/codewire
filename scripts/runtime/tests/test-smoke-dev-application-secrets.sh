@@ -176,6 +176,8 @@ run_kube_assertions() {
 }
 kubectl_dev() {
   local generation project pod_uid pod_name=owned-sandbox resource object pod_env
+  [[ "$APP_SECRET_ALL_SCOPES" != 1 ]] ||
+    fail 'all-scope application smoke invoked Kubernetes'
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   generation="$(jq -r '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")"
   project="$(jq -r '.[0].source_selection.secrets.project // ""' "$TMPDIR_SMOKE/environments.db")"
@@ -372,9 +374,10 @@ expect_failure duplicate-all-scope-phase validate_application_all_scopes_options
 pass
 pass
 
-for invalid in saved-config inherited-config api-key generic-key endpoint existing keep skip-kube email user-id org-id relative-cw; do
+for invalid in saved-config inherited-config api-key generic-key endpoint existing keep kube-access email user-id org-id relative-cw; do
   reject_all_scope_options() {
     fresh_login_fixture
+    SMOKE_SKIP_KUBE=1
     case "$invalid" in
       saved-config) CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$APP_TEST_ROOT/saved" ;;
       inherited-config) CW_CONFIG_DIR="$APP_TEST_ROOT/saved" ;;
@@ -383,7 +386,7 @@ for invalid in saved-config inherited-config api-key generic-key endpoint existi
       endpoint) CODEWIRE_SERVER_URL=https://other.invalid ;;
       existing) SMOKE_EXISTING_ENV_ID=unowned ;;
       keep) SMOKE_KEEP_ENV=1 ;;
-      skip-kube) SMOKE_SKIP_KUBE=1 ;;
+      kube-access) SMOKE_SKIP_KUBE=0 ;;
       email) EXPECTED_CODEWIRE_ADMIN_EMAIL='' ;;
       user-id) EXPECTED_CODEWIRE_ADMIN_USER_ID=not-an-id ;;
       org-id) EXPECTED_CODEWIRE_ORGANIZATION_ID=00000000000000000000000000000000 ;;
@@ -395,6 +398,7 @@ for invalid in saved-config inherited-config api-key generic-key endpoint existi
 done
 
 fresh_login_fixture
+SMOKE_SKIP_KUBE=1
 validate_application_all_scopes_options
 export AWS_SECRET_ACCESS_KEY=forbidden-owner-provider SSH_AUTH_SOCK=/forbidden/owner-agent
 prepare_fresh_oauth_cli

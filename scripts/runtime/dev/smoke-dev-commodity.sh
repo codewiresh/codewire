@@ -1078,10 +1078,8 @@ validate_application_all_scopes_options() {
   [[ "$ALLOW_NON_DEV" == 0 && "$CODEWIRE_SERVER_URL" == https://codewire-dev.sh &&
      "$EXPECTED_CODEWIRE_DEV_SERVER_URL" == https://codewire-dev.sh ]] ||
     die 'application-secrets-all-scopes requires the exact https://codewire-dev.sh endpoint'
-  [[ -z "$SMOKE_EXISTING_ENV_ID" && "$SMOKE_KEEP_ENV" == 0 && "$SMOKE_SKIP_KUBE" == 0 ]] ||
-    die 'application-secrets-all-scopes requires a fresh disposable environment and Kubernetes checks'
-  [[ -n "$SANDBOX_NAMESPACE" ]] ||
-    die 'application-secrets-all-scopes requires SANDBOX_NAMESPACE'
+  [[ -z "$SMOKE_EXISTING_ENV_ID" && "$SMOKE_KEEP_ENV" == 0 && "$SMOKE_SKIP_KUBE" == 1 ]] ||
+    die 'application-secrets-all-scopes requires a fresh disposable environment without Kubernetes access'
   [[ -n "$EXPECTED_CODEWIRE_ADMIN_EMAIL" ]] ||
     die 'application-secrets-all-scopes requires an exact account email'
   [[ "$EXPECTED_CODEWIRE_ADMIN_USER_ID" =~ ^[0-9a-f]{32}$ &&
@@ -1703,19 +1701,23 @@ run_application_secrets_smoke() {
     # Restart completion additionally requires a new exact Pod UID below.
     wait_until 'current application source, workflow authority and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
       application_environment_ready "$project" "$generation"
-    # Running precedes setup. Setup recovery may replace the workspace Pod, so
-    # discover and assert its current identity only after setup has committed.
-    if [[ "$phase" == a ]]; then run_kube_assertions; fi
+    # The all-scope journey stays on the public API/data plane: setup readiness
+    # plus its child-visible marker prove restart completion and workspace
+    # preservation. The ordinary project-only journey retains its Kubernetes
+    # identity and PVC assertions.
+    if [[ "$phase" == a && "$APP_SECRET_ALL_SCOPES" != 1 ]]; then run_kube_assertions; fi
     generation="$(jq -er .operation_generation "$TMPDIR_SMOKE/app-environment.json")"
-    capture_application_pod "$phase" "$generation"
-    if [[ -n "$previous_uid" ]]; then
-      [[ "$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")" != "$previous_uid" ]] || die 'source replacement reused the old Pod'
-      [[ "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
-        die 'source replacement changed persistent workspace claims'
-      [[ "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
-        die 'source replacement changed the exact owned SandboxClaim'
+    if [[ "$APP_SECRET_ALL_SCOPES" != 1 ]]; then
+      capture_application_pod "$phase" "$generation"
+      if [[ -n "$previous_uid" ]]; then
+        [[ "$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")" != "$previous_uid" ]] || die 'source replacement reused the old Pod'
+        [[ "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
+          die 'source replacement changed persistent workspace claims'
+        [[ "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
+          die 'source replacement changed the exact owned SandboxClaim'
+      fi
+      previous_uid="$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")"
     fi
-    previous_uid="$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")"
     if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
       guest_script="$(application_all_scopes_guest_check "$hashes_name")"
     else
@@ -2083,7 +2085,6 @@ assert_pod_shape() {
   local gateway_deploy_json="$TMPDIR_SMOKE/gateway-deployment.json"
   local runtime_class gateway_runtime_class node gateway_node node_label gateway_node_label
   local gateway_image gateway_status_image gateway_image_id containers gateway_containers
-  local gateway_secret_names gateway_secret_count gateway_secret_resource gateway_secret_data_size
   local gateway_host_key_env gateway_daemon_timeout gateway_startup_failure_threshold
   local gateway_progress_deadline gateway_restart_count
 
@@ -2092,16 +2093,6 @@ assert_pod_shape() {
   kubectl_dev -n "$SANDBOX_NAMESPACE" get deploy \
     -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
     -o json >"$gateway_deploy_json"
-  gateway_secret_names="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get secret \
-    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway-host-key" \
-    -o name)"
-  gateway_secret_count="$(printf '%s\n' "$gateway_secret_names" | sed '/^$/d' | wc -l | tr -d ' ')"
-  gateway_secret_resource="$(printf '%s\n' "$gateway_secret_names" | sed -n '1p')"
-  gateway_secret_data_size=0
-  if [[ -n "$gateway_secret_resource" ]]; then
-    gateway_secret_data_size="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get "$gateway_secret_resource" \
-      -o jsonpath='{.data.host_ed25519}' | wc -c | tr -d ' ')"
-  fi
   runtime_class="$(jq -r '.spec.runtimeClassName // ""' "$pod_json")"
   gateway_runtime_class="$(jq -r '.spec.runtimeClassName // ""' "$gateway_pod_json")"
   node="$(jq -r '.spec.nodeName // ""' "$pod_json")"
@@ -2142,12 +2133,13 @@ assert_pod_shape() {
   assert_docker_socket_contract "$pod_json"
   [[ "$gateway_containers" == "codewire-gateway" ]] || \
     die "gateway pod containers=$gateway_containers, want codewire-gateway"
+  jq -e '
+    [.status.conditions[]? | select(.type == "Ready" and .status == "True")]
+    | length == 1
+  ' "$gateway_pod_json" >/dev/null || \
+    die "gateway pod is not Ready after the readiness wait"
   jq -e '.items[]?.spec.template.spec.containers[]? | select(.name=="codewire-gateway")' "$gateway_deploy_json" >/dev/null || \
     die "gateway Deployment is missing codewire-gateway container"
-  [[ "$gateway_secret_count" == "1" ]] || \
-    die "gateway host key Secret count=$gateway_secret_count, want 1"
-  [[ "$gateway_secret_data_size" -gt 0 ]] || \
-    die "gateway host key Secret is missing host_ed25519 data"
   [[ "$gateway_host_key_env" == "/codewire/gateway/ssh/host_ed25519" ]] || \
     die "gateway CODEWIRE_SSH_HOST_KEY_PATH=$gateway_host_key_env, want /codewire/gateway/ssh/host_ed25519"
   if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
@@ -2165,22 +2157,40 @@ assert_pod_shape() {
     [[ "$gateway_startup_failure_threshold" == "45" ]] || \
       die "non-confidential gateway startup failureThreshold=$gateway_startup_failure_threshold, want 45"
   fi
-  jq -e '
-    .items[0].spec.template.spec
+  # The observed Ready state proves the required Secret volume mounted, the
+  # init copy completed and the gateway parsed the resulting host key. General
+  # end-to-end modes separately prove the live gateway path; inspecting Secret
+  # objects or their data would add no behavioral evidence.
+  jq -e --arg id "$ENV_ID" '
+    (.items | length == 1)
+    and (.items[0].metadata.labels["codewire.sh/environment-id"] == $id)
+    and (.items[0].metadata.labels["codewire.sh/type"] == "gateway")
+    and (.items[0].spec.template.spec
     | (
         [
           .initContainers[]?
           | select(
               .name == "codewire-gateway-host-key-init"
-              and ([.volumeMounts[]? | select(.name == "gateway-host-key" and .readOnly == true)] | length == 1)
+              and ([.volumeMounts[]? | select(
+                .name == "gateway-host-key"
+                and .mountPath == "/codewire/gateway-host-key"
+                and .readOnly == true
+              )] | length == 1)
               and ([.volumeMounts[]? | select(.name == "workspace")] | length == 0)
+              and ((.command[2] // "") | contains("/codewire/gateway-host-key/host_ed25519"))
+              and ((.command[2] // "") | contains("/codewire/gateway/ssh/host_ed25519"))
+              and ((.command[2] // "") | contains("chmod 0600"))
             )
         ] | length == 1
       )
       and (
         [
           .volumes[]?
-          | select(.name == "gateway-host-key" and .secret.secretName != null)
+          | select(
+              .name == "gateway-host-key"
+              and .secret.secretName == ("cw-gateway-host-key-" + $id)
+              and .secret.items == [{key:"host_ed25519", path:"host_ed25519", mode:292}]
+            )
         ] | length == 1
       )
       and (
@@ -2191,8 +2201,9 @@ assert_pod_shape() {
           | select(.name == "workspace")
         ] | length == 0
       )
+    )
   ' "$gateway_deploy_json" >/dev/null || \
-    die "gateway Deployment must seed host key from a read-only Secret without mounting workspace state"
+    die "gateway Deployment must project host_ed25519 through its read-only host-key volume without mounting workspace state"
   if [[ -n "$EXPECTED_GATEWAY_IMAGE" ]]; then
     [[ "$gateway_image" == "$EXPECTED_GATEWAY_IMAGE" ]] || \
       die "gateway image=$gateway_image, want $EXPECTED_GATEWAY_IMAGE"
@@ -4752,6 +4763,7 @@ main() {
   fi
   if application_all_scopes_requested; then
     APP_SECRET_ALL_SCOPES=1
+    SMOKE_SKIP_KUBE=1
     validate_application_all_scopes_options
   elif application_secrets_selected; then
     validate_application_secrets_options
