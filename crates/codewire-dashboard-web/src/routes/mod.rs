@@ -340,7 +340,10 @@ pub(crate) fn router() -> Router<AppState> {
             get(sandbox_detail_slash_redirect),
         )
         .route("/{slug}/{environment_id}/", get(terminal::page))
-        .route("/{slug}/{environment_id}/ports/", get(environments::port_fragment))
+        .route(
+            "/{slug}/{environment_id}/ports/",
+            get(environments::port_fragment),
+        )
         .route("/{slug}", get(organization_slash_redirect))
         .route("/{slug}/", get(environments::page))
 }
