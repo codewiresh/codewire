@@ -69,6 +69,23 @@
 [data-dashboard-app] .cw-profile-delete form { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding-top: .75rem; }
 [data-dashboard-app] .cw-profile-delete p { margin: 0; }
 
+[data-dashboard-app] .cw-settings-list-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+[data-dashboard-app] .cw-settings-list-heading > .cw-button { flex: none; }
+[data-dashboard-app] .cw-credential-row > .cw-button,
+[data-dashboard-app] .cw-profile-row > .cw-button { justify-self: start; }
+[data-dashboard-app] .cw-credential-dialog { width: min(44rem, calc(100vw - 2rem)); }
+[data-dashboard-app] .cw-credential-dialog .cw-dialog-body { display: grid; gap: 1rem; }
+[data-dashboard-app] .cw-credential-dialog .cw-settings-form { margin: 0; padding: 0; border: 0; background: none; }
+[data-dashboard-app] .cw-credential-dialog .cw-settings-form > h3,
+[data-dashboard-app] .cw-credential-dialog .cw-settings-form > p { grid-column: 1 / -1; margin: 0; line-height: 1.5; }
+[data-dashboard-app] .cw-credential-dialog .cw-credential-actions { border: 0; padding: 0; }
+[data-dashboard-app] .cw-credential-dialog .cw-credential-actions form:not(.cw-settings-form) { align-items: start; flex-direction: column; }
+[data-dashboard-app] .cw-credential-dialog .cw-credential-actions .cw-settings-form { margin-top: .75rem; }
+[data-dashboard-app] .cw-credential-types { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
+[data-dashboard-app] .cw-credential-types li { display: grid; gap: .35rem; }
+[data-dashboard-app] .cw-credential-types .cw-button { justify-content: start; }
+[data-dashboard-app] .cw-credential-types p { margin: 0; color: var(--fg-secondary); font-size: .75rem; }
+
 @media (max-width: 63.9375rem) {
   [data-dashboard-app] .cw-settings-layout { min-height: calc(100vh - 3.5rem); }
 }
@@ -83,6 +100,7 @@
   [data-dashboard-app] .cw-settings-content { padding: 1rem .8rem 2rem; }
   [data-dashboard-app] .cw-settings-form { grid-template-columns: 1fr; }
   [data-dashboard-app] .cw-credential-add-grid { grid-template-columns: 1fr; }
+  [data-dashboard-app] .cw-settings-list-heading { align-items: start; flex-direction: column; }
   [data-dashboard-app] .cw-settings-account-links { align-items: stretch; flex-direction: column; }
   [data-dashboard-app] .cw-settings-account-links form { width: 100%; margin-left: 0; }
   [data-dashboard-app] .cw-settings-account-links form .cw-button { width: 100%; }

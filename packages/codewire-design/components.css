@@ -72,6 +72,21 @@
   box-shadow: var(--shadow-overlay);
 }
 
+dialog.cw-dialog {
+  padding: 0;
+  margin: auto;
+  color: var(--fg-primary);
+}
+
+dialog.cw-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.cw-dialog-header h2 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
 .cw-dialog-header,
 .cw-dialog-body,
 .cw-dialog-actions {

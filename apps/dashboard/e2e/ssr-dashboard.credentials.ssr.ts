@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { bypassTwoFactor, cleanupUser, createAuthenticatedSession, getUserId, seedSyntheticUser } from "./helpers/db";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import {
@@ -8,6 +8,13 @@ import {
 } from "./helpers/github-checkout";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
+
+async function openGithubConnection(page: Page) {
+  await page.getByRole("button", { name: "Add credential", exact: true }).click();
+  await page.getByRole("dialog", { name: "Add credential", exact: true })
+    .getByRole("button", { name: "GitHub", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Connect GitHub", exact: true })).toBeVisible();
+}
 
 test.describe("managed provider credential browser journey", () => {
   test.skip(
@@ -41,6 +48,8 @@ test.describe("managed provider credential browser journey", () => {
 
       const settings = await page.goto("/settings/credentials/");
       expect(settings?.status()).toBe(200);
+      await expect(page.locator("dialog[open]")).toHaveCount(0);
+      await openGithubConnection(page);
       const form = page.getByRole("form", { name: "GitHub", exact: true });
       await expect(form.locator('[name="name"]')).toHaveCount(0);
       await expect(form.getByRole("button", { name: "Connect GitHub", exact: true }).locator("svg use"))
@@ -84,6 +93,7 @@ test.describe("managed provider credential browser journey", () => {
       expect(rendered?.includes("gho_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
+      await openGithubConnection(page);
       await page.getByRole("form", { name: "GitHub", exact: true })
         .getByRole("button", { name: "Connect GitHub", exact: true }).click();
       await expect(page.getByRole("alert")).toContainText("No credential was overwritten");
@@ -92,7 +102,9 @@ test.describe("managed provider credential browser journey", () => {
       await expect(row).toContainText("Generation 1");
 
       const profileName = "github-repository-browser";
+      await page.getByRole("button", { name: "Create profile", exact: true }).click();
       const createProfile = page.locator('form[action^="/settings/credentials/_actions/profiles/create"]');
+      await expect(page.getByRole("dialog", { name: "Create profile", exact: true })).toBeVisible();
       await createProfile.getByRole("textbox", { name: "Profile name", exact: true }).fill(profileName);
       const githubChoice = createProfile.getByRole("combobox", { name: "GitHub", exact: true });
       const credentialId = await githubChoice.locator("option", { hasText: name }).getAttribute("value");
@@ -155,11 +167,13 @@ test.describe("managed provider credential browser journey", () => {
       // The normal destroy finished before removing its selected profile.
       await page.goto("/settings/credentials/");
       profileRow = page.locator(".cw-profile-row", { hasText: profileName });
+      await profileRow.getByRole("button", { name: "Edit profile", exact: true }).click();
       await profileRow.getByText("Delete profile", { exact: true }).click();
       await profileRow.getByRole("button", { name: `Delete ${profileName}`, exact: true }).click();
       await expect(profileRow).toHaveCount(0);
       row = page.locator(".cw-credential-row", { hasText: name });
 
+      await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
       await row.getByText("Revoke", { exact: true }).click();
       await row.getByRole("button", { name: `Revoke ${name}`, exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-revoked`);
@@ -168,6 +182,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(row).toContainText("Revoked");
       await expect(row).toContainText("Generation 2");
 
+      await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
       await row.getByText("Delete", { exact: true }).click();
       await row.getByRole("button", { name: `Delete ${name}`, exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-deleted`);

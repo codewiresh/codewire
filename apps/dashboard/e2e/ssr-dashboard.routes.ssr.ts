@@ -217,21 +217,28 @@ test.describe("server-rendered public, auth, and account routes", () => {
     test.skip(!!isMobile, "desktop credential settings contract");
     const response = await page.goto("/settings/credentials/");
     expect(response?.status()).toBe(200);
-    await expect(page.getByRole("heading", { name: "Credentials", exact: true })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Connect provider account" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Add API key" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Add SSH identity" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Credential inventory" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Profiles", exact: true })).toBeVisible();
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
     await expect(page.locator('form[action="/settings/credentials/_actions/profiles/create"]')).toHaveCount(1);
-    const connectCard = page.locator("section", {
-      has: page.getByRole("heading", { name: "Connect provider account", exact: true }),
-    });
-    await expect(connectCard.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(2);
+    await expect(page.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(2);
     for (const provider of ["GitHub", "OpenAI Codex"]) {
-      await expect(connectCard.getByRole("form", { name: provider, exact: true }))
+      await page.getByRole("button", { name: "Add credential", exact: true }).click();
+      await page.getByRole("dialog", { name: "Add credential", exact: true })
+        .getByRole("button", { name: provider, exact: true }).click();
+      const connection = page.getByRole("dialog", { name: provider === "GitHub" ? "Connect GitHub" : "Connect Codex", exact: true });
+      await expect(connection.getByRole("form", { name: provider, exact: true }))
         .toHaveAttribute("action", "/settings/credentials/_actions/credentials/oauth/enroll");
+      if (provider === "GitHub") {
+        await expect(connection.locator('[name="name"]')).toHaveCount(0);
+      } else {
+        await expect(connection).toContainText("Enable device code authorization for Codex");
+        await expect(connection.getByRole("link", { name: "ChatGPT Security settings", exact: true }))
+          .toHaveAttribute("href", "https://chatgpt.com/#settings/Security");
+      }
+      await connection.getByRole("button", { name: "Cancel", exact: true }).click();
     }
-    await expect(connectCard.getByRole("form", { name: "GitHub", exact: true }).locator('[name="name"]')).toHaveCount(0);
+    await page.getByRole("button", { name: "Create profile", exact: true }).click();
     const profileName = page.getByRole("textbox", { name: "Profile name", exact: true });
     await expect(profileName).toHaveAttribute("maxlength", "128");
     await expect(profileName).toHaveAccessibleDescription(/lowercase letters/);
@@ -242,9 +249,8 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await profileName.fill("work_1.github");
     expect(await profileName.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true);
     await profileName.clear();
-    await expect(connectCard).toContainText("Enable device code authorization for Codex");
-    await expect(connectCard.getByRole("link", { name: "ChatGPT Security settings", exact: true }))
-      .toHaveAttribute("href", "https://chatgpt.com/#settings/Security");
+    await page.getByRole("dialog", { name: "Create profile", exact: true })
+      .getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.locator('form[action$="/credentials/api-key/add"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/generate"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/import"]')).toHaveCount(1);

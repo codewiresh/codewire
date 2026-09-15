@@ -1,5 +1,129 @@
 const app = document.querySelector("[data-dashboard-app]");
 
+(() => {
+  "use strict";
+  // Native dialogs own focus trapping and Escape. Keep only presentation state
+  // here: no form values, credentials, terminal output or capabilities.
+  const dialogOpeners = new WeakMap();
+  const initializedDialogs = new WeakSet();
+  const dialogVersions = new WeakMap();
+  const dialogRequests = new WeakMap();
+  const dialogRequestSequences = new WeakMap();
+  const currentDialogRequest = (request) => request?.dialog.open
+    && dialogVersions.get(request.dialog) === request.version
+    && dialogRequestSequences.get(request.target) === request.sequence;
+  const openDialog = (dialog, opener = document.activeElement) => {
+    if (!(dialog instanceof HTMLDialogElement) || dialog.open) return;
+    const previous = opener instanceof Element ? opener.closest("dialog[data-dialog]") : null;
+    const originalOpener = previous ? dialogOpeners.get(previous) : opener;
+    if (previous?.open) previous.close();
+    dialogOpeners.set(dialog, originalOpener);
+    dialogVersions.set(dialog, (dialogVersions.get(dialog) || 0) + 1);
+    dialog.showModal();
+    dialog.dispatchEvent(new Event("codewire:dialog-open", { bubbles: true }));
+  };
+
+  const initializeDialogs = (root = document) => {
+    const dialogs = Array.from(root.querySelectorAll?.("dialog[data-dialog]") || []);
+    if (root instanceof HTMLDialogElement && root.matches("[data-dialog]")) dialogs.unshift(root);
+    dialogs.forEach((dialog) => {
+      if (initializedDialogs.has(dialog)) return;
+      initializedDialogs.add(dialog);
+      let backdropPress = false;
+      const outside = (event) => {
+        const bounds = dialog.getBoundingClientRect();
+        return event.target === dialog && (event.clientX < bounds.left || event.clientX > bounds.right
+          || event.clientY < bounds.top || event.clientY > bounds.bottom);
+      };
+      dialog.addEventListener("pointerdown", (event) => { backdropPress = outside(event); });
+      dialog.addEventListener("click", (event) => {
+        // Dragging from a form field onto the backdrop must not discard a form.
+        if (backdropPress && outside(event)) dialog.close();
+        backdropPress = false;
+      });
+      dialog.addEventListener("close", () => {
+        if (dialog.open) return;
+        dialogVersions.set(dialog, (dialogVersions.get(dialog) || 0) + 1);
+        dialog.querySelectorAll("[data-dialog-private]").forEach((control) => {
+          if (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) control.value = "";
+        });
+        const opener = dialogOpeners.get(dialog);
+        dialogOpeners.delete(dialog);
+        // A chooser may have switched directly to another dialog. Do not steal
+        // focus from that dialog when the queued close event is delivered.
+        if (!document.querySelector("dialog:modal") && opener instanceof HTMLElement && opener.isConnected) {
+          opener.focus({ preventScroll: true });
+        }
+      });
+      if (dialog.hasAttribute("data-dialog-auto-open") && !document.querySelector("dialog:modal")) openDialog(dialog);
+    });
+  };
+
+  initializeDialogs();
+  document.addEventListener("htmx:beforeRequest", (event) => {
+    const dialog = event.detail?.target?.closest("dialog[data-dialog]");
+    if (!(dialog instanceof HTMLDialogElement)) return;
+    const target = event.detail.target;
+    const sequence = (dialogRequestSequences.get(target) || 0) + 1;
+    dialogRequestSequences.set(target, sequence);
+    dialogRequests.set(event.detail.xhr, { dialog, target, sequence, version: dialogVersions.get(dialog) });
+    // Keep Close available, but don't allow stale forms to submit while their
+    // fresh state or a mutation acknowledgement is still in flight.
+    target.inert = true;
+    target.setAttribute("aria-busy", "true");
+    const error = dialog.querySelector("[data-dialog-load-error]");
+    if (error) error.hidden = true;
+  });
+  document.addEventListener("htmx:beforeSwap", (event) => {
+    const request = dialogRequests.get(event.detail?.xhr);
+    if (request && !currentDialogRequest(request)) {
+      event.detail.shouldSwap = false;
+    }
+  });
+  document.addEventListener("htmx:beforeOnLoad", (event) => {
+    const request = dialogRequests.get(event.detail?.xhr);
+    if (request && !currentDialogRequest(request)) {
+      // HTMX handles redirect/refresh headers before beforeSwap. A late response
+      // for a dismissed dialog must not navigate or replace this document.
+      event.preventDefault();
+    }
+  });
+  document.addEventListener("htmx:afterRequest", (event) => {
+    const request = dialogRequests.get(event.detail?.xhr);
+    if (!currentDialogRequest(request)) return;
+    request.target.removeAttribute("aria-busy");
+    const status = event.detail.xhr.status;
+    request.target.inert = !((status >= 200 && status < 300) || status === 422);
+  });
+  const dialogRequestError = (event) => {
+    const request = dialogRequests.get(event.detail?.xhr);
+    if (!currentDialogRequest(request)) return;
+    const error = request.dialog.querySelector("[data-dialog-load-error]");
+    if (error) error.hidden = false;
+  };
+  document.addEventListener("htmx:sendError", dialogRequestError);
+  document.addEventListener("htmx:responseError", dialogRequestError);
+  document.addEventListener("htmx:timeout", dialogRequestError);
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const trigger = target?.closest("[data-dialog-open]");
+    if (trigger instanceof HTMLButtonElement) {
+      const dialog = document.getElementById(trigger.dataset.dialogOpen);
+      if (dialog?.matches("dialog[data-dialog]")) {
+        event.preventDefault();
+        openDialog(dialog, trigger);
+      }
+    } else if (target?.closest("[data-dialog-close]")) {
+      const dialog = target.closest("dialog[data-dialog]");
+      if (dialog instanceof HTMLDialogElement) {
+        event.preventDefault();
+        dialog.close();
+      }
+    }
+  });
+  document.addEventListener("htmx:afterSwap", (event) => initializeDialogs(event.target instanceof Element ? event.target : document));
+})();
+
 const nameToSlug = (name) => name
   .toLowerCase()
   .replace(/[^a-z0-9]+/g, "-")
@@ -108,10 +232,8 @@ if (app) {
 
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    document.querySelectorAll(".cw-org-details[open]").forEach((details) => {
-      const panel = details.querySelector(":scope > .cw-card");
-      const summary = details.querySelector(":scope > summary");
-      if (target && !panel?.contains(target) && !summary?.contains(target)) details.removeAttribute("open");
+    document.querySelectorAll(".cw-org-details[open], .cw-action-menu[open], .cw-filter-menu[open]").forEach((details) => {
+      if (target && !details.contains(target)) details.removeAttribute("open");
     });
     const drawerTrigger = target?.closest("[data-drawer-trigger]");
     if (drawerTrigger instanceof HTMLAnchorElement && openDrawer(drawerTrigger.href)) {
@@ -148,13 +270,18 @@ if (app) {
       openQuickSearch();
       return;
     }
+    const openDetails = document.querySelector(".cw-org-details[open], .cw-action-menu[open], .cw-filter-menu[open]");
+    if (event.key === "Escape" && openDetails) {
+      openDetails.removeAttribute("open");
+      openDetails.querySelector(":scope > summary")?.focus({ preventScroll: true });
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Escape" && closeDrawer()) {
       event.preventDefault();
       return;
     }
     if (event.key === "Escape") {
-      const openDetails = document.querySelector(".cw-org-details[open]");
-      if (openDetails) openDetails.removeAttribute("open");
       closeSidebar();
     }
   });

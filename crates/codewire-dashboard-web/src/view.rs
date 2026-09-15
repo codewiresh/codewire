@@ -388,6 +388,7 @@ pub(crate) struct CredentialProfileRowView {
 }
 
 pub(crate) struct CredentialSettingsView {
+    pub(crate) active_dialog: String,
     pub(crate) credentials: Vec<CredentialRowView>,
     pub(crate) profiles: Vec<CredentialProfileRowView>,
     pub(crate) choices: CredentialChoicesView,
@@ -756,6 +757,8 @@ pub(crate) struct TerminalPageView {
     pub(crate) organization_id: String,
     pub(crate) environment: EnvironmentRow,
     pub(crate) websocket_origin: String,
+    pub(crate) message: String,
+    pub(crate) error: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1598,6 +1601,7 @@ mod secret_debug_tests {
     #[test]
     fn credential_settings_debug_redacts_csrf_capability() {
         let page = CredentialSettingsView {
+            active_dialog: String::new(),
             credentials: Vec::new(),
             profiles: Vec::new(),
             choices: CredentialChoicesView::default(),

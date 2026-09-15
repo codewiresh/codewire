@@ -5,6 +5,102 @@ import { expect, test } from "@playwright/test";
 // separately covers transport; this preview never pretends to be a backend.
 test.use({ storageState: { cookies: [], origins: [] } });
 
+test("ports load in place and late dismissed responses cannot redirect or replace current content", async ({ page }) => {
+  const designOrigin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!designOrigin, "Run make design-system for the focused fixture check");
+  await page.goto(`${designOrigin}/reference/fixtures/terminal.html`);
+  const originalUrl = page.url();
+  const terminal = await page.locator("[data-terminal-root]").elementHandle();
+  const ports = page.getByRole("button", { name: "Ports", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Ports · Example Sandbox", exact: true });
+  await ports.click();
+  await expect(dialog.getByText("Internal 3000 · Creator", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "Open preview" })).toHaveAttribute("href", "https://web-5d1db-example.cwpreview.sh");
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("ports-dialog.png") });
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  let releaseStale: (() => void) | undefined;
+  let requests = 0;
+  await page.route("**/reference/fixtures/terminal-ports.html", async (route) => {
+    requests += 1;
+    if (requests === 1) {
+      await new Promise<void>((resolve) => { releaseStale = resolve; });
+      await route.fulfill({ status: 200, headers: { "HX-Redirect": "/stale-dialog-must-not-navigate", "X-Stale-Fixture": "true" }, body: "<p>Stale response</p>" });
+    } else await route.continue();
+  });
+  await ports.click();
+  await expect.poll(() => Boolean(releaseStale)).toBe(true);
+  await expect(page.locator("#sandbox-ports-content")).toHaveJSProperty("inert", true);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await ports.click();
+  const staleResponse = page.waitForResponse((response) => response.headers()["x-stale-fixture"] === "true");
+  releaseStale!();
+  await staleResponse;
+  // HTMX serializes requests from the same dialog element. The queued fresh
+  // request runs after the obsolete response has been suppressed.
+  await expect.poll(() => requests).toBe(2);
+  await expect(page.locator("#sandbox-ports-content")).toHaveJSProperty("inert", false);
+  await expect(dialog.getByText("Internal 3000 · Creator", { exact: true })).toBeVisible();
+  await expect(page.getByText("Stale response", { exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await page.unroute("**/reference/fixtures/terminal-ports.html");
+  await page.route("**/reference/fixtures/terminal-ports.html", (route) => route.fulfill({ status: 503, body: "Synthetic unavailable" }));
+  await ports.click();
+  await expect(dialog.getByRole("alert")).toContainText("The ports could not be refreshed");
+  await expect(page.locator("#sandbox-ports-content")).toHaveJSProperty("inert", true);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(ports).toBeFocused();
+  expect(page.url()).toBe(originalUrl);
+  expect(await terminal!.evaluate((element) => element === document.querySelector("[data-terminal-root]"))).toBe(true);
+});
+
+test("sandbox dialogs and resize dismiss without navigation or terminal replacement", async ({ page }) => {
+  const designOrigin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!designOrigin, "Run make design-system for the focused fixture check");
+  await page.goto(`${designOrigin}/reference/fixtures/terminal.html`);
+  await expect(page.locator(".xterm")).toBeVisible();
+  const terminal = await page.locator("[data-terminal-root]").elementHandle();
+  const originalUrl = page.url();
+  for (const name of ["Stop", "Delete"]) {
+    const trigger = page.getByRole("button", { name, exact: true });
+    const dialog = page.getByRole("dialog", { name: `${name} Example Sandbox?`, exact: true });
+    await trigger.click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+    await trigger.click();
+    await page.keyboard.press("Escape");
+    await expect(dialog).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+    await trigger.click();
+    const bounds = (await dialog.locator("p").boundingBox())!;
+    await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(5, 5);
+    await page.mouse.up();
+    await expect(dialog).toBeVisible();
+    await page.mouse.click(5, 5);
+    await expect(dialog).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+  }
+  const resize = page.locator(".cw-action-menu");
+  const summary = resize.locator("summary");
+  await summary.click();
+  await resize.getByLabel("CPU (millicores)").fill("3000");
+  await expect(resize).toHaveJSProperty("open", true);
+  await page.getByRole("heading", { name: "Sandbox terminal", exact: true }).click();
+  await expect(resize).toHaveJSProperty("open", false);
+  await summary.click();
+  await expect(resize.getByLabel("CPU (millicores)")).toHaveValue("3000");
+  await page.keyboard.press("Escape");
+  await expect(resize).toHaveJSProperty("open", false);
+  await expect(summary).toBeFocused();
+  expect(page.url()).toBe(originalUrl);
+  expect(await terminal!.evaluate((element) => element === document.querySelector("[data-terminal-root]"))).toBe(true);
+});
+
 test("terminal presentation preserves colors, metrics, selection and strict CSP", async ({ page, context }) => {
   const designOrigin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!designOrigin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for the focused fixture check");

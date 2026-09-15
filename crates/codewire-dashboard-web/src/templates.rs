@@ -293,6 +293,16 @@ pub(crate) struct TerminalTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "environment-ports.html")]
+pub(crate) struct EnvironmentPortsTemplate<'a> {
+    pub(crate) organization: &'a OrganizationContext,
+    pub(crate) panel: &'a crate::view::EnvironmentPortPanelView,
+    pub(crate) csrf_token: &'a str,
+    pub(crate) in_dialog: bool,
+    pub(crate) message: &'a str,
+}
+
+#[derive(Template)]
 #[template(path = "error.html")]
 pub(crate) struct ErrorTemplate<'a> {
     pub(crate) message: &'a str,

@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="../../styles.css">
   <link rel="stylesheet" href="../../components.css">
   <link rel="stylesheet" href="../../routes/dashboard.css">
+  <link rel="stylesheet" href="../../routes/environments.css">
   <link rel="stylesheet" href="../../routes/terminal.css">
   <link rel="stylesheet" href="terminal.css">
   <link rel="stylesheet" href="/assets/codewire/xterm-6.0.0.css" integrity="sha384-n2n7twoohnW+d3myBKaUgl7DSiwidw6MkQy9oesGzkPpMjejKRR3XlnD+5yCdtBD">
@@ -19,12 +20,38 @@
   <script src="/assets/codewire/addon-fit-0.11.0.js" integrity="sha384-txoiwu4RR2GD3qySbaj+BbzibkLbSJRcfqGYMu6z1EqHil4A2dyBiBW5dlacG6OR" defer></script>
   <script src="/assets/codewire/addon-web-links-0.12.0.js" integrity="sha384-0IIwkXq0LAkIxEVKxlOxWbje2g/VT+5CzVTZiEukyiZ02pOl/O+M0fkpEKAYqto9" defer></script>
   <script src="../../terminal-renderer.js" defer></script>
+  <script src="../../dashboard.js" defer></script>
   <script src="../../terminal-presentation.js" defer></script>
   <script src="terminal.js" nonce="codewire-terminal-design-preview" defer></script>
 </head>
 <body class="cw-body" data-dashboard-app>
   <main class="terminal-fixture">
     <header><a href="index.html">Design fixtures</a><h1>Sandbox terminal</h1><p>Read-only sample output. Select text to copy; this preview does not connect to a sandbox.</p></header>
+    <section class="cw-sandbox-heading" aria-label="Sandbox status and actions">
+      <div><h2>Example Sandbox</h2><p>Running</p></div>
+      <div class="cw-sandbox-actions">
+        <button class="cw-button cw-button--outline cw-button--small cw-button--pill" type="button" data-dialog-open="sandbox-stop">Stop</button>
+        <details class="cw-action-menu"><summary class="cw-button cw-button--outline cw-button--small cw-button--pill">Resize</summary><form><label>CPU (millicores)<input class="cw-input" name="cpu_millicores" type="number" min="100" max="128000" value="2000" required></label><label>Memory (MiB)<input class="cw-input" name="memory_mb" type="number" min="128" max="1048576" value="4096" required></label><label>Disk (GiB)<input class="cw-input" name="disk_gb" type="number" min="1" max="16384" value="20" required></label><button class="cw-button cw-button--small" type="button" disabled>Review resize</button></form></details>
+        <button class="cw-button cw-button--outline cw-button--small cw-button--pill" type="button" data-dialog-open="sandbox-ports">Ports</button>
+        <button class="cw-button cw-button--outline cw-button--small cw-button--pill cw-danger-button" type="button" data-dialog-open="sandbox-delete">Delete</button>
+      </div>
+    </section>
+    <dialog class="cw-dialog" data-dialog id="sandbox-stop" aria-labelledby="sandbox-stop-title" aria-describedby="sandbox-stop-description">
+      <header class="cw-dialog-header"><h2 id="sandbox-stop-title">Stop Example Sandbox?</h2></header>
+      <p class="cw-dialog-body" id="sandbox-stop-description">Running processes and terminal sessions will end. Workspace files are kept so you can start the Sandbox again.</p>
+      <form class="cw-dialog-actions" method="dialog"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Stop Sandbox</button></form>
+    </dialog>
+    <dialog class="cw-dialog" data-dialog id="sandbox-delete" aria-labelledby="sandbox-delete-title" aria-describedby="sandbox-delete-description">
+      <header class="cw-dialog-header"><h2 id="sandbox-delete-title">Delete Example Sandbox?</h2></header>
+      <p class="cw-dialog-body" id="sandbox-delete-description">This permanently deletes the Sandbox and its workspace files. This cannot be undone.</p>
+      <form class="cw-dialog-actions" method="dialog"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button cw-danger-button" type="submit">Delete Sandbox</button></form>
+    </dialog>
+    <dialog class="cw-dialog cw-port-dialog" data-dialog id="sandbox-ports" aria-labelledby="sandbox-ports-title" hx-get="terminal-ports.html" hx-trigger="codewire:dialog-open" hx-request='{"timeout":30000}' hx-target="#sandbox-ports-content">
+      <header class="cw-dialog-header"><h2 id="sandbox-ports-title">Ports · Example Sandbox</h2></header>
+      <p class="cw-dialog-body cw-alert cw-alert--error" data-dialog-load-error role="alert" hidden>The ports could not be refreshed. Close and reopen this dialog to check the current state before trying again.</p>
+      <div class="cw-dialog-body" id="sandbox-ports-content"><p>Loading preview ports…</p></div>
+      <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Close</button></footer>
+    </dialog>
     <section class="cw-sandbox-terminal" aria-label="Sandbox terminal">
       <header class="cw-terminal-toolbar"><p class="cw-terminal-copy-status" data-terminal-copy-status role="status"></p><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-copy disabled>Copy selection</button></header>
       <div class="cw-terminal-panel" data-terminal-root aria-label="Terminal preview"><p class="cw-terminal-status" data-terminal-status>Loading preview…</p></div>

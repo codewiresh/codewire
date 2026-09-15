@@ -59,6 +59,9 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
 
     const settings = await page.goto(`/settings/credentials/?org=${slug}`);
     expect(settings?.status()).toBe(200);
+    await page.getByRole("button", { name: "Add credential", exact: true }).click();
+    await page.getByRole("dialog", { name: "Add credential", exact: true })
+      .getByRole("button", { name: "GitHub", exact: true }).click();
     const github = page.getByRole("form", { name: "GitHub", exact: true });
     await expect(github.locator('[name="name"]')).toHaveCount(0);
     await expect(github.getByRole("button", { name: "Connect GitHub", exact: true }).locator("svg use"))
