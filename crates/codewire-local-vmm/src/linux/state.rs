@@ -12,10 +12,10 @@ use super::path::{FileIdentity, PathError, PrivateRoot, SocketIdentity};
 use super::process::ProcessIdentity;
 
 pub const PERSISTED_STATE_SCHEMA_VERSION: u32 = 1;
-pub const MINIMUM_STATE_DISK_BYTES: u64 = 256 * 1024 * 1024;
-pub const MINIMUM_ROOT_DISK_BYTES: u64 = 256 * 1024 * 1024;
+pub use crate::supervisor_metadata::legacy::{
+    MINIMUM_DOCKER_DISK_BYTES, MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES,
+};
 pub const DEFAULT_ROOT_DISK_BYTES: u64 = 1024 * 1024 * 1024;
-pub const MINIMUM_DOCKER_DISK_BYTES: u64 = 1024 * 1024 * 1024;
 pub const DEFAULT_DOCKER_DISK_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const MAXIMUM_ROOT_GENERATIONS: usize = 64;
 const EXT4_SUPERBLOCK_OFFSET: u64 = 1024;

@@ -7,10 +7,12 @@
 mod bootstrap;
 mod metadata;
 mod sources;
-pub(crate) use metadata::{
-    EnvironmentRecord, RunnerRecord, StoredEnvironmentState, SupervisorState,
+#[cfg(test)]
+pub(crate) use crate::supervisor_metadata::SUPERVISOR_STATE_SCHEMA;
+pub(crate) use crate::supervisor_metadata::{
+    EnvironmentRecord, PlatformSourceAuthority, RunnerRecord, StoredEnvironmentState,
+    SupervisorState,
 };
-pub(crate) use sources::PlatformSourceAuthority;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
@@ -50,22 +52,21 @@ use crate::control::v1;
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
-use crate::generation::{GenerationError, ensure_root_generation, valid_root_disk_bytes};
+use crate::generation::{GenerationError, ensure_root_generation};
 use crate::host_port::{
     HostPortBinding, canonical_host_port_bindings, validate_canonical_host_port_bindings,
 };
 use crate::lifecycle::{EffectDurability, LifecycleEffect, next_effect};
+#[cfg(test)]
+use crate::linux::ProcessIdentity;
 use crate::linux::path::{PathError, PrivateRoot, SocketIdentity};
 use crate::linux::process::signal_unreaped_child;
 use crate::linux::state::{
     DeletionTreeLocation, StateError, cleanup_trashed_vm, cleanup_unreferenced_root_generations,
     deletion_tree_location, move_stopped_vm_to_trash,
 };
-use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError, VmPaths};
-use crate::mesh_ingress::{
-    MeshAttachment, MeshEnrollmentAuthSource, canonical_mesh_ingress_ports,
-    validate_canonical_mesh_ingress_ports,
-};
+use crate::linux::{LiveProcess, RecoveryError, VmPaths};
+use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::oci::{
     ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
     RegistryResolverError, ResolvedDescriptor, ResolvedImage, Sha256Digest,
@@ -84,6 +85,14 @@ use crate::supervisor_client::{operation_outcome, operation_terminal, read_selec
 use crate::supervisor_config::NATIVE_SUPERVISOR_PROTOCOL_VERSION;
 pub use crate::supervisor_config::NativeRuntimeConfig;
 use crate::supervisor_config::{SupervisorConfigError, supervisor_info};
+#[cfg(test)]
+use crate::supervisor_metadata::oci_storage_generation;
+use crate::supervisor_metadata::{
+    environment_access_metadata_valid, host_ports_to_proto, mesh_attachment_to_proto,
+    runner_event_error_code_valid, valid_environment_name, valid_sha256,
+    validate_host_ports_for_project, validate_mesh_for_project, validate_project_intent,
+    workspace_storage_generation,
+};
 use crate::supervisor_store::{
     OperationKind, OperationPhase, OperationRecord, SupervisorOperationReader, SupervisorStore,
     SupervisorStoreError,
@@ -100,7 +109,6 @@ use crate::workspace_plan::{
     prepare_direct_input, prepare_repository_plan, validate_local_mount_destination,
 };
 
-pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 3;
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const _: () = assert!(
@@ -424,20 +432,6 @@ pub fn inspect_orphans(root: &Path) -> Result<v1::ListOrphansResponse, Superviso
         .transpose()?
         .unwrap_or_default();
     orphan_inventory_response(&root, &state, &deletion_trash_names)
-}
-
-fn contains_forbidden_state_key(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(fields) => fields.iter().any(|(name, value)| {
-            let name = name.to_ascii_lowercase();
-            name.contains("capability")
-                || name.contains("credential")
-                || name.contains("token")
-                || contains_forbidden_state_key(value)
-        }),
-        serde_json::Value::Array(values) => values.iter().any(contains_forbidden_state_key),
-        _ => false,
-    }
 }
 
 struct SupervisorLock(File);
@@ -3904,8 +3898,9 @@ impl LocalSupervisorService for SupervisorRpc {
                 "native local environment has no selected skills",
             ));
         }
-        let prior_storage_generation =
-            workspace_storage_generation(active).map_err(Status::from)?;
+        let prior_storage_generation = workspace_storage_generation(active)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?;
         let target_generation = environment
             .generation
             .checked_add(1)
@@ -4487,14 +4482,6 @@ async fn relay_runner_start_events(
     Err(SupervisorError::InvalidRunnerResponse)
 }
 
-fn runner_event_error_code_valid(error_code: &str) -> bool {
-    !error_code.is_empty()
-        && error_code.len() <= 64
-        && error_code
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-}
-
 fn runner_event_is_prior_baseline(
     generation: u64,
     state: StoredEnvironmentState,
@@ -4587,7 +4574,9 @@ fn operation_proto_with_runner(
         .ok()
         .filter(|stage| *stage != v1::RunnerStage::Unspecified)
         .ok_or_else(|| Status::internal("runner progress stage is invalid"))?;
-    StoredEnvironmentState::from_proto(runner.state).map_err(Status::from)?;
+    StoredEnvironmentState::from_proto(runner.state)
+        .map_err(SupervisorError::from)
+        .map_err(Status::from)?;
     let guest_stage = v1::GuestBootStage::try_from(event.guest_stage)
         .map_err(|_| Status::internal("guest progress stage is invalid"))?;
     if (event.guest_sequence == 0) != (guest_stage == v1::GuestBootStage::Unspecified) {
@@ -4799,16 +4788,6 @@ fn host_ports_from_proto(
         .collect()
 }
 
-fn host_ports_to_proto(bindings: &[HostPortBinding]) -> Vec<v1::HostPortBinding> {
-    bindings
-        .iter()
-        .map(|binding| v1::HostPortBinding {
-            host_port: u32::from(binding.host_port),
-            guest_port: u32::from(binding.guest_port),
-        })
-        .collect()
-}
-
 fn direct_share_attachments_to_proto(
     plan: &WorkspacePlan,
 ) -> Result<Vec<v1::DirectShareAttachment>, SupervisorError> {
@@ -4909,21 +4888,6 @@ fn mesh_attachment_from_proto(
         .transpose()
 }
 
-fn mesh_attachment_to_proto(attachment: Option<&MeshAttachment>) -> Option<v1::MeshAttachment> {
-    attachment.map(|attachment| v1::MeshAttachment {
-        mesh_url: attachment.mesh_url.clone(),
-        organization_id: attachment.organization_id.clone(),
-        network_id: attachment.network_id.clone(),
-        node_name: attachment.node_name.clone(),
-        guest_ports: attachment
-            .guest_ports
-            .iter()
-            .map(|port| u32::from(*port))
-            .collect(),
-        auth_source: mesh_auth_source_to_proto(attachment.auth_source) as i32,
-    })
-}
-
 fn mesh_auth_source_from_proto(raw: i32) -> Result<MeshEnrollmentAuthSource, SupervisorError> {
     match v1::MeshEnrollmentAuthSource::try_from(raw) {
         Ok(v1::MeshEnrollmentAuthSource::StandaloneLocal) => {
@@ -4936,49 +4900,6 @@ fn mesh_auth_source_from_proto(raw: i32) -> Result<MeshEnrollmentAuthSource, Sup
             Err(SupervisorError::InvalidRequest)
         }
     }
-}
-
-fn mesh_auth_source_to_proto(source: MeshEnrollmentAuthSource) -> v1::MeshEnrollmentAuthSource {
-    match source {
-        MeshEnrollmentAuthSource::StandaloneLocal => v1::MeshEnrollmentAuthSource::StandaloneLocal,
-        MeshEnrollmentAuthSource::HostedCurrent => v1::MeshEnrollmentAuthSource::HostedCurrent,
-    }
-}
-
-fn validate_host_ports_for_project(
-    bindings: &[HostPortBinding],
-    project: &codewire_project::ProjectSpec,
-) -> Result<(), SupervisorError> {
-    validate_canonical_host_port_bindings(bindings).map_err(|_| SupervisorError::InvalidRequest)?;
-    let application_ports = project
-        .application_ports
-        .iter()
-        .map(|port| port.port)
-        .collect::<BTreeSet<_>>();
-    if bindings
-        .iter()
-        .any(|binding| !application_ports.contains(&binding.guest_port))
-    {
-        return Err(SupervisorError::InvalidRequest);
-    }
-    Ok(())
-}
-
-fn validate_mesh_for_project(
-    attachment: &MeshAttachment,
-    project: &codewire_project::ProjectSpec,
-) -> Result<(), SupervisorError> {
-    attachment
-        .validate()
-        .map_err(|_| SupervisorError::InvalidRequest)?;
-    let guest_ports =
-        canonical_mesh_ingress_ports(project.application_ports.iter().map(|port| port.port))
-            .map_err(|_| SupervisorError::InvalidRequest)?;
-    if attachment.guest_ports != guest_ports {
-        return Err(SupervisorError::InvalidRequest);
-    }
-    validate_canonical_mesh_ingress_ports(&attachment.guest_ports)
-        .map_err(|_| SupervisorError::InvalidRequest)
 }
 
 fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, SupervisorError> {
@@ -5084,41 +5005,6 @@ fn validate_request_destinations(
     Ok(())
 }
 
-fn validate_project_intent(
-    canonical_json: &[u8],
-    expected_sha256: &str,
-    expected_resources: Option<(u32, u32, u64)>,
-) -> Result<(), ()> {
-    const GIB: u64 = 1024 * 1024 * 1024;
-
-    if canonical_json.is_empty()
-        || canonical_json.len() > codewire_project::MAX_PROJECT_DOCUMENT_BYTES
-        || !valid_sha256(expected_sha256)
-    {
-        return Err(());
-    }
-    let spec: codewire_project::ProjectSpec =
-        serde_json::from_slice(canonical_json).map_err(|_| ())?;
-    spec.validate().map_err(|_| ())?;
-    if spec.canonical_json().map_err(|_| ())? != canonical_json
-        || format!("{:x}", Sha256::digest(canonical_json)) != expected_sha256
-        || spec.image.is_empty()
-        || !spec.preset.is_empty()
-        || spec.agents.install == Some(true)
-    {
-        return Err(());
-    }
-    if let Some((vcpus, memory_mib, disk_bytes)) = expected_resources
-        && (!disk_bytes.is_multiple_of(GIB)
-            || spec.resources.cpu_millicores != vcpus.checked_mul(1_000)
-            || spec.resources.memory_mib != Some(u64::from(memory_mib))
-            || spec.resources.disk_gib != Some(disk_bytes / GIB))
-    {
-        return Err(());
-    }
-    Ok(())
-}
-
 fn create_request_access_selection(
     request: &v1::CreateEnvironmentRequest,
     project: &codewire_project::ProjectSpec,
@@ -5164,54 +5050,6 @@ fn environment_uses_access_profile(
         return Err(SupervisorError::InvalidState);
     }
     Ok(environment.access_binding.is_some())
-}
-
-fn environment_access_metadata_valid(environment: &EnvironmentRecord) -> bool {
-    let Some(json) = environment.project_spec_json.as_deref() else {
-        return false;
-    };
-    let Some(sha256) = environment.project_spec_sha256.as_deref() else {
-        return false;
-    };
-    if validate_project_intent(json, sha256, None).is_err() {
-        return false;
-    }
-    let Ok(project) = serde_json::from_slice::<codewire_project::ProjectSpec>(json) else {
-        return false;
-    };
-    let (profile_id, revision, reference) = match (
-        environment.access_profile.as_ref(),
-        environment.access_binding.as_ref(),
-    ) {
-        (None, None) => (String::new(), 0, String::new()),
-        (Some(reference), Some(binding)) => {
-            if binding.validate().is_err()
-                || !access_environment_id(environment.id).is_ok_and(|environment_id| {
-                    environment_id.as_str() == binding.environment_id.as_str()
-                })
-            {
-                return false;
-            }
-            (
-                binding.profile_id.to_string(),
-                binding.profile_revision,
-                reference.to_string(),
-            )
-        }
-        _ => return false,
-    };
-    let authority = environment
-        .platform_source_authority
-        .as_ref()
-        .map(PlatformSourceAuthority::proto);
-    sources::validate_source_metadata(
-        &project,
-        &profile_id,
-        revision,
-        &reference,
-        authority.as_ref(),
-    )
-    .is_ok()
 }
 
 fn delete_operation_revoke_access(
@@ -5881,46 +5719,6 @@ fn artifact_generation_for_boot(
     Ok(generation)
 }
 
-fn oci_storage_generation(
-    oci_generation: &str,
-    artifact_generation: &str,
-    root_disk_bytes: u64,
-) -> Result<String, SupervisorError> {
-    if !valid_sha256(oci_generation)
-        || !valid_sha256(artifact_generation)
-        || !valid_root_disk_bytes(root_disk_bytes)
-    {
-        return Err(SupervisorError::InvalidState);
-    }
-    let mut digest = Sha256::new();
-    digest.update(b"codewire-root-generation-oci-storage-v1\0");
-    digest.update(oci_generation.as_bytes());
-    digest.update(artifact_generation.as_bytes());
-    digest.update(root_disk_bytes.to_le_bytes());
-    Ok(format!("{:x}", digest.finalize()))
-}
-
-fn workspace_storage_generation(
-    generation: &WorkspaceGenerationRecord,
-) -> Result<String, SupervisorError> {
-    let oci = oci_storage_generation(
-        &generation.root_generation,
-        generation.artifact_generation()?,
-        generation.root_disk_bytes,
-    )?;
-    let Some(snapshot) = generation.skill_snapshot()? else {
-        return Ok(oci);
-    };
-    let snapshot_sha256 = snapshot
-        .sha256()
-        .map_err(|_| SupervisorError::WorkspaceGeneration)?;
-    let mut digest = Sha256::new();
-    digest.update(b"codewire-root-generation-with-skills-v1\0");
-    digest.update(oci.as_bytes());
-    digest.update(snapshot_sha256.as_bytes());
-    Ok(format!("{:x}", digest.finalize()))
-}
-
 fn referenced_root_storage_generations(
     environment: &EnvironmentRecord,
 ) -> Result<BTreeSet<String>, SupervisorError> {
@@ -6521,23 +6319,6 @@ fn validate_workspace_transition_start(
         }
     }
     Ok(())
-}
-
-fn valid_environment_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 63
-        && bytes[0].is_ascii_alphanumeric()
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn allocate_vsock_cid(environment_id: Uuid) -> u32 {
@@ -10149,7 +9930,8 @@ mod tests {
             validate_host_ports_for_project(
                 &[HostPortBinding::new(18_081, 3_001).unwrap()],
                 &project,
-            ),
+            )
+            .map_err(SupervisorError::from),
             Err(SupervisorError::InvalidRequest)
         ));
     }
@@ -10832,14 +10614,14 @@ mod tests {
         environment.project_spec_json = None;
         environment.project_spec_sha256 = None;
         assert!(matches!(
-            environment.validate("dev"),
+            environment.validate("dev").map_err(SupervisorError::from),
             Err(SupervisorError::InvalidState)
         ));
 
         let mut environment = project_environment();
         environment.active_artifact_generation = None;
         assert!(matches!(
-            environment.validate("dev"),
+            environment.validate("dev").map_err(SupervisorError::from),
             Err(SupervisorError::InvalidState)
         ));
     }

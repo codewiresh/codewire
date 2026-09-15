@@ -1500,10 +1500,12 @@ grep -qF 'if selected transport_pkg_codewire_vmm_guest_probe; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'if selected transport_pkg_codewire_local_vmm; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'cargo check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+[[ "$(grep -cFx '    scripts/ci/verify/check-darwin-cross.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh")" == 1 ]]
+grep -qF 'exec "$zigbuild_bin" check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
+  "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF -- '--target aarch64-apple-darwin' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+  "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF 'scripts/ci/verify/build-local-vmm-initramfs.sh --verify' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 
