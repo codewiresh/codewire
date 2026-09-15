@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use reqwest::{Client, StatusCode};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{invoice_paid_event, required_env, stripe_signature};
@@ -154,8 +154,8 @@ pub(super) async fn run() -> anyhow::Result<()> {
     // SHARE blocks email changes/deletion while allowing ordinary reads and
     // FK checks. NOWAIT makes an existing account mutation fail closed.
     let mut recipient_guard = pool.begin().await?;
-    // Serialize the entire attempt, including success cleanup, so a concurrent
-    // invocation cannot observe a missing tombstone and later recreate rows.
+    // Serialize the entire attempt so a concurrent invocation cannot seed or
+    // deliver the same deterministic fixture before its tombstone is visible.
     let owned: bool =
         sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(&fixture.event)
@@ -181,7 +181,6 @@ pub(super) async fn run() -> anyhow::Result<()> {
     )
     .await?;
 
-    let mut proof = pool.begin().await?;
     let proven: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM stripe_invoices i
@@ -208,7 +207,7 @@ pub(super) async fn run() -> anyhow::Result<()> {
     .bind(&fixture.member)
     .bind(&config.email)
     .bind(&fixture.event)
-    .fetch_one(&mut *proof)
+    .fetch_one(&pool)
     .await?;
     ensure!(proven, "durable receipt proof missing");
     // Ensure the guard survived the bounded HTTP request before emitting proof.
@@ -216,10 +215,13 @@ pub(super) async fn run() -> anyhow::Result<()> {
         .execute(&mut *recipient_guard)
         .await?;
     println!("{RECEIPT}");
-    cleanup(&mut proof, &fixture).await?;
-    proof.commit().await?;
     recipient_guard.commit().await?;
-    println!("billing-dev-receipt: owned fixture cleaned; attempt tombstone retained");
+    // Retain the complete synthetic fixture. Deleting the parent organization
+    // could cascade through a concurrent product write that this harness does
+    // not own, and a parent row lock cannot cover the visibility gap between
+    // the seed commit and lock acquisition. The attempt UUID is the durable
+    // tombstone; any cleanup is a separately reviewed operation.
+    println!("billing-dev-receipt: owned fixture retained; attempt tombstone active");
     Ok(())
 }
 
@@ -259,45 +261,6 @@ async fn seed(pool: &PgPool, config: &Config, fixture: &Fixture) -> anyhow::Resu
     .await?;
     ensure!(receipt_absent, "receipt already present");
     tx.commit().await?;
-    Ok(())
-}
-
-async fn cleanup(tx: &mut Transaction<'_, Postgres>, fixture: &Fixture) -> anyhow::Result<()> {
-    // Keep stripe_webhook_events as a durable attempt tombstone. All other
-    // deletes bind exact fixture IDs. Errors roll back the entire cleanup.
-    for (sql, first, second) in [
-        (
-            "DELETE FROM billing_events WHERE stripe_item_id = $1 AND org_id = $2 AND event_type = 'invoice_paid'",
-            &fixture.invoice,
-            &fixture.org,
-        ),
-        (
-            "DELETE FROM stripe_invoices WHERE stripe_invoice_id = $1 AND org_id = $2 AND receipt_sent_at IS NOT NULL",
-            &fixture.invoice,
-            &fixture.org,
-        ),
-        (
-            "DELETE FROM org_members WHERE id = $1 AND org_id = $2",
-            &fixture.member,
-            &fixture.org,
-        ),
-        (
-            "DELETE FROM organizations WHERE id = $1 AND stripe_customer_id = $2",
-            &fixture.org,
-            &fixture.customer,
-        ),
-    ] {
-        ensure!(
-            sqlx::query(sql)
-                .bind(first)
-                .bind(second)
-                .execute(&mut **tx)
-                .await?
-                .rows_affected()
-                == 1,
-            "owned cleanup mismatch"
-        );
-    }
     Ok(())
 }
 
