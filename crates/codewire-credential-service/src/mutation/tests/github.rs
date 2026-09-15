@@ -27,15 +27,13 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
         ensure!(!h.control("version.pid").exists());
         ensure!(h.count().await? == 0);
         ensure!(h.provider.generate_calls.load(Ordering::SeqCst) == 0);
-        let mut stream = h
-            .rpc
-            .enroll_github_request(Auth::Alice, json!({"name":"work-github"}))
-            .await?;
+        let mut stream = h.rpc.enroll_github_request(Auth::Alice, json!({})).await?;
         github_challenge(&mut stream).await?;
         h.release()?;
         let metadata = stream.committed().await?;
         h.drained().await?;
         ensure!(metadata["provider"] == "github" && metadata["accountHint"] == "synthetic-user");
+        ensure!(metadata["name"] == "synthetic-user");
         ensure!(metadata["revocationGeneration"] == "1");
         let credential_id = CredentialId::parse(id(&metadata)?)?;
         let owner = Owner::User(OwnerId::parse(ALICE)?);
@@ -53,13 +51,22 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
                     .any(|value| value == GITHUB_TOKEN.as_bytes())
             );
         }
+        // Connecting an account twice is create-only, never implicit upsert.
+        h.reset_login().await?;
+        let mut duplicate = h.rpc.enroll_github_request(Auth::Alice, json!({})).await?;
+        github_challenge(&mut duplicate).await?;
+        h.release()?;
+        duplicate.error("already_exists").await?;
+        h.drained().await?;
+        ensure!(h.count().await? == 1 && !h.logged_out());
+        ensure!(h.store.record(&owner, &credential_id).await? == original);
         h.reset_login().await?;
         let mut stream = h
             .rpc
             .enroll_github_request(
                 Auth::Alice,
                 json!({
-                    "name":"work-github", "credentialId":credential_id.as_str(),
+                    "name":"synthetic-user", "credentialId":credential_id.as_str(),
                     "expectedRevocationGeneration":"1"
                 }),
             )
@@ -69,9 +76,42 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
         let replaced = stream.committed().await?;
         h.drained().await?;
         ensure!(replaced["id"] == metadata["id"] && replaced["revocationGeneration"] == "2");
+        ensure!(replaced["name"] == metadata["name"]);
         ensure!(h.count().await? == 1 && !h.logged_out());
         let stored = h.store.record(&owner, &credential_id).await?;
         ensure!(stored.version.material_generation == original.version.material_generation + 1);
+        // Legacy named clients still create and reconnect the same identity,
+        // even when its canonical reference is not the verified account name.
+        h.reset_login().await?;
+        let mut legacy = h
+            .rpc
+            .enroll_github_request(Auth::Alice, json!({"name":"work-github"}))
+            .await?;
+        github_challenge(&mut legacy).await?;
+        h.release()?;
+        let legacy_metadata = legacy.committed().await?;
+        h.drained().await?;
+        ensure!(legacy_metadata["name"] == "work-github");
+        ensure!(legacy_metadata["accountHint"] == "synthetic-user");
+        h.reset_login().await?;
+        let mut reconnect = h
+            .rpc
+            .enroll_github_request(
+                Auth::Alice,
+                json!({
+                    "name":"work-github", "credentialId":id(&legacy_metadata)?,
+                    "expectedRevocationGeneration":"1"
+                }),
+            )
+            .await?;
+        github_challenge(&mut reconnect).await?;
+        h.release()?;
+        let legacy_replaced = reconnect.committed().await?;
+        h.drained().await?;
+        ensure!(legacy_replaced["id"] == legacy_metadata["id"]);
+        ensure!(legacy_replaced["name"] == "work-github");
+        ensure!(legacy_replaced["revocationGeneration"] == "2");
+        ensure!(h.count().await? == 2 && !h.logged_out());
         Ok(())
     }
     .await;

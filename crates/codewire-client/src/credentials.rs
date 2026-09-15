@@ -3,6 +3,19 @@
 use crate::*;
 
 impl CodewireClient {
+    /// One account-scoped repository page for an exact selected profile revision.
+    /// No provider material or runtime grant is returned. Never advances a profile.
+    pub async fn list_github_repositories(
+        &self,
+        request: ListGithubRepositoriesRequest,
+    ) -> Result<ListGithubRepositoriesResponse, ClientError> {
+        self.github_repositories
+            .list_github_repositories_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     /// Rename the exact observed identity without changing its material or bindings.
     pub async fn rename_credential(
         &self,

@@ -25,6 +25,9 @@ pub const MANAGED_HTTP_PORT: u16 = 38_081;
 /// Base-URL path for the distinct OpenAI API-key profile slot. Only POST
 /// responses is admitted; ordinary Codex configuration retains its own route.
 pub const MANAGED_OPENAI_API_PREFIX: &str = "/_codewire/openai/v1";
+/// Smart Git prefix on the existing managed HTTP ingress. Only the selected
+/// GitHub adapter may resolve this route to an upstream provider.
+pub const MANAGED_GITHUB_GIT_PREFIX: &str = "/_codewire/github/";
 
 /// Stock clients configured by selected profile slots, not credential auth kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +36,7 @@ pub enum ManagedCredentialClient {
     OpenAi,
     Anthropic,
     Ssh,
+    GitHub,
 }
 
 impl ManagedCredentialClient {
@@ -42,6 +46,7 @@ impl ManagedCredentialClient {
             Self::OpenAi => 2,
             Self::Anthropic => 4,
             Self::Ssh => 8,
+            Self::GitHub => 16,
         }
     }
 
@@ -56,6 +61,9 @@ impl ManagedCredentialClient {
                 "CLAUDE_CODE_OAUTH_TOKEN",
             ],
             Self::Ssh => &["SSH_AUTH_SOCK"],
+            // Checkout owns an exact command-scoped URL rewrite, never a
+            // provider token or an ambient/global Git configuration.
+            Self::GitHub => &[],
         }
     }
 }
@@ -67,7 +75,7 @@ pub enum ManagedCredentialClientPlacement {
     Platform,
 }
 
-const MANAGED_CLIENT_ENCODINGS: [&str; 16] = [
+const MANAGED_CLIENT_ENCODINGS: [&str; 32] = [
     "v1:none",
     "v1:codex",
     "v1:openai",
@@ -84,6 +92,25 @@ const MANAGED_CLIENT_ENCODINGS: [&str; 16] = [
     "v1:codex,anthropic,ssh",
     "v1:openai,anthropic,ssh",
     "v1:codex,openai,anthropic,ssh",
+    // Preserve every existing v1 byte. GitHub combinations use a finite v2
+    // hexadecimal bitset so every encoding still fits the native seed's
+    // existing 32-byte, NUL-terminated field without changing its ABI.
+    "v2:10",
+    "v2:11",
+    "v2:12",
+    "v2:13",
+    "v2:14",
+    "v2:15",
+    "v2:16",
+    "v2:17",
+    "v2:18",
+    "v2:19",
+    "v2:1a",
+    "v2:1b",
+    "v2:1c",
+    "v2:1d",
+    "v2:1e",
+    "v2:1f",
 ];
 
 /// Material-free stock-client selection. This is not a grant, a credential,
@@ -93,8 +120,7 @@ const MANAGED_CLIENT_ENCODINGS: [&str; 16] = [
 pub struct ManagedCredentialClients(u8);
 
 impl ManagedCredentialClients {
-    /// Validate exact closed profile slot names, including duplicates of the
-    /// known GitHub slot that intentionally selects no client in this slice.
+    /// Validate exact closed profile slot names, including duplicates.
     /// Processing fails by the sixth item at the latest; no unbounded collection
     /// of caller strings or credential metadata is retained.
     pub fn from_profile_slots<'a>(
@@ -115,12 +141,12 @@ impl ManagedCredentialClients {
                 return Err(ProjectionError::InvalidManagedClientSelection);
             }
             seen |= bit;
-            clients |= bit & 15;
+            clients |= bit;
         }
         Ok(Self(clients))
     }
 
-    /// One of sixteen canonical tokens for private bootstrap metadata. Empty
+    /// One of 32 canonical tokens for private bootstrap metadata. Empty
     /// selection is explicit; unversioned or reordered forms are not aliases.
     pub fn encode(self) -> &'static str {
         MANAGED_CLIENT_ENCODINGS[usize::from(self.0)]
@@ -147,6 +173,7 @@ impl ManagedCredentialClients {
             ManagedCredentialClient::OpenAi,
             ManagedCredentialClient::Anthropic,
             ManagedCredentialClient::Ssh,
+            ManagedCredentialClient::GitHub,
         ]
         .into_iter()
         .filter(|client| self.contains(*client))

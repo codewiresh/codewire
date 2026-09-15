@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
+from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -270,6 +270,179 @@ class CredentialServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.CredentialService",
                 input=GetCredentialRequest,
                 output=GetCredentialResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+class GithubRepositoryService(Protocol):
+    async def list_github_repositories(self, request: ListGithubRepositoriesRequest, ctx: RequestContext[ListGithubRepositoriesRequest, ListGithubRepositoriesResponse]) -> ListGithubRepositoriesResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+
+class GithubRepositoryServiceASGIApplication(ConnectASGIApplication[GithubRepositoryService]):
+    def __init__(
+        self,
+        service: GithubRepositoryService | AsyncGenerator[GithubRepositoryService],
+        *,
+        interceptors: Iterable[Interceptor] = (),
+        read_max_bytes: int | None = None,
+        compressions: Iterable[Compression] | None = None,
+        codecs: Iterable[Codec] | None = _DEFAULT_CODECS,
+    ) -> None:
+        super().__init__(
+            service=service,
+            endpoints=lambda svc: {
+                "/codewire.v1.GithubRepositoryService/ListGithubRepositories": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListGithubRepositories",
+                        service_name="codewire.v1.GithubRepositoryService",
+                        input=ListGithubRepositoriesRequest,
+                        output=ListGithubRepositoriesResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_github_repositories,
+                ),
+            },
+            interceptors=interceptors,
+            read_max_bytes=read_max_bytes,
+            compressions=compressions,
+            codecs=codecs,
+        )
+
+    @property
+    def path(self) -> str:
+        """Returns the URL path to mount the application to when serving multiple applications."""
+        return "/codewire.v1.GithubRepositoryService"
+
+
+class GithubRepositoryServiceClient(ConnectClient):
+    def __init__(
+        self,
+        address: str,
+        *,
+        codec: Codec | None = _PROTO_BINARY_CODEC,
+        protocol: ProtocolType = ProtocolType.CONNECT,
+        accept_compression: Iterable[Compression] | None = None,
+        send_compression: Compression | None = _GZIP_COMPRESSION,
+        timeout_ms: int | None = None,
+        read_max_bytes: int | None = None,
+        interceptors: Iterable[Interceptor] = (),
+        http_client: Client | None = None,
+    ) -> None:
+        super().__init__(
+            address=address,
+            codec=codec,
+            protocol=protocol,
+            accept_compression=accept_compression,
+            send_compression=send_compression,
+            timeout_ms=timeout_ms,
+            read_max_bytes=read_max_bytes,
+            interceptors=interceptors,
+            http_client=http_client,
+        )
+    async def list_github_repositories(
+        self,
+        request: ListGithubRepositoriesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListGithubRepositoriesResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListGithubRepositories",
+                service_name="codewire.v1.GithubRepositoryService",
+                input=ListGithubRepositoriesRequest,
+                output=ListGithubRepositoriesResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+class GithubRepositoryServiceSync(Protocol):
+    def list_github_repositories(self, request: ListGithubRepositoriesRequest, ctx: RequestContext[ListGithubRepositoriesRequest, ListGithubRepositoriesResponse]) -> ListGithubRepositoriesResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+
+class GithubRepositoryServiceWSGIApplication(ConnectWSGIApplication):
+    def __init__(
+        self,
+        service: GithubRepositoryServiceSync,
+        interceptors: Iterable[InterceptorSync] = (),
+        read_max_bytes: int | None = None,
+        compressions: Iterable[Compression] | None = None,
+        codecs: Iterable[Codec] | None = _DEFAULT_CODECS,
+    ) -> None:
+        super().__init__(
+            endpoints={
+                "/codewire.v1.GithubRepositoryService/ListGithubRepositories": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListGithubRepositories",
+                        service_name="codewire.v1.GithubRepositoryService",
+                        input=ListGithubRepositoriesRequest,
+                        output=ListGithubRepositoriesResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_github_repositories,
+                ),
+            },
+            interceptors=interceptors,
+            read_max_bytes=read_max_bytes,
+            compressions=compressions,
+            codecs=codecs,
+        )
+
+    @property
+    def path(self) -> str:
+        """Returns the URL path to mount the application to when serving multiple applications."""
+        return "/codewire.v1.GithubRepositoryService"
+
+
+class GithubRepositoryServiceClientSync(ConnectClientSync):
+    def __init__(
+        self,
+        address: str,
+        *,
+        codec: Codec | None = _PROTO_BINARY_CODEC,
+        protocol: ProtocolType = ProtocolType.CONNECT,
+        accept_compression: Iterable[Compression] | None = None,
+        send_compression: Compression | None = _GZIP_COMPRESSION,
+        timeout_ms: int | None = None,
+        read_max_bytes: int | None = None,
+        interceptors: Iterable[InterceptorSync] = (),
+        http_client: SyncClient | None = None,
+    ) -> None:
+        super().__init__(
+            address=address,
+            codec=codec,
+            protocol=protocol,
+            accept_compression=accept_compression,
+            send_compression=send_compression,
+            timeout_ms=timeout_ms,
+            read_max_bytes=read_max_bytes,
+            interceptors=interceptors,
+            http_client=http_client,
+        )
+    def list_github_repositories(
+        self,
+        request: ListGithubRepositoriesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListGithubRepositoriesResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListGithubRepositories",
+                service_name="codewire.v1.GithubRepositoryService",
+                input=ListGithubRepositoriesRequest,
+                output=ListGithubRepositoriesResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

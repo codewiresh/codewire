@@ -657,7 +657,7 @@ mod tests {
             vec!["openai"],
             vec!["anthropic"],
             vec!["ssh"],
-            vec!["codex", "openai", "anthropic", "ssh"],
+            vec!["codex", "openai", "anthropic", "ssh", "github"],
         ] {
             let mut opts = credential_opts();
             opts.managed_credential_clients =

@@ -35,6 +35,44 @@ CREDENTIAL_STATUS_REVOKED: CredentialStatus
 CREDENTIAL_STATUS_EXPIRED: CredentialStatus
 CREDENTIAL_STATUS_REFRESH_FAILED: CredentialStatus
 
+class ListGithubRepositoriesRequest(_message.Message):
+    __slots__ = ("profile_id", "profile_revision", "page_size", "page_token")
+    PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
+    PROFILE_REVISION_FIELD_NUMBER: _ClassVar[int]
+    PAGE_SIZE_FIELD_NUMBER: _ClassVar[int]
+    PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    profile_id: str
+    profile_revision: int
+    page_size: int
+    page_token: str
+    def __init__(self, profile_id: _Optional[str] = ..., profile_revision: _Optional[int] = ..., page_size: _Optional[int] = ..., page_token: _Optional[str] = ...) -> None: ...
+
+class GithubRepository(_message.Message):
+    __slots__ = ("repository_id", "full_name", "default_branch", "clone_url", "is_private", "archived", "disabled")
+    REPOSITORY_ID_FIELD_NUMBER: _ClassVar[int]
+    FULL_NAME_FIELD_NUMBER: _ClassVar[int]
+    DEFAULT_BRANCH_FIELD_NUMBER: _ClassVar[int]
+    CLONE_URL_FIELD_NUMBER: _ClassVar[int]
+    IS_PRIVATE_FIELD_NUMBER: _ClassVar[int]
+    ARCHIVED_FIELD_NUMBER: _ClassVar[int]
+    DISABLED_FIELD_NUMBER: _ClassVar[int]
+    repository_id: str
+    full_name: str
+    default_branch: str
+    clone_url: str
+    is_private: bool
+    archived: bool
+    disabled: bool
+    def __init__(self, repository_id: _Optional[str] = ..., full_name: _Optional[str] = ..., default_branch: _Optional[str] = ..., clone_url: _Optional[str] = ..., is_private: _Optional[bool] = ..., archived: _Optional[bool] = ..., disabled: _Optional[bool] = ...) -> None: ...
+
+class ListGithubRepositoriesResponse(_message.Message):
+    __slots__ = ("repositories", "next_page_token")
+    REPOSITORIES_FIELD_NUMBER: _ClassVar[int]
+    NEXT_PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    repositories: _containers.RepeatedCompositeFieldContainer[GithubRepository]
+    next_page_token: str
+    def __init__(self, repositories: _Optional[_Iterable[_Union[GithubRepository, _Mapping]]] = ..., next_page_token: _Optional[str] = ...) -> None: ...
+
 class Credential(_message.Message):
     __slots__ = ("id", "name", "provider", "authentication_kind", "account_hint", "status", "expires_at_unix", "revocation_generation", "ssh_public_key")
     ID_FIELD_NUMBER: _ClassVar[int]

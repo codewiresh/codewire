@@ -358,6 +358,16 @@ pub(crate) struct CredentialRowView {
     pub(crate) oauth_provider: &'static str,
 }
 
+impl CredentialRowView {
+    pub(crate) fn display_name(&self) -> &str {
+        if self.oauth_provider == "github" && !self.account_hint.is_empty() {
+            &self.account_hint
+        } else {
+            &self.name
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CredentialProfileEntryView {
     pub(crate) slot: &'static str,
@@ -514,6 +524,7 @@ pub(crate) struct CredentialOAuthSubmission {
     #[serde(rename = "_csrf")]
     pub(crate) csrf: String,
     pub(crate) provider: String,
+    #[serde(default)]
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) credential_id: String,

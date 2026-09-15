@@ -977,8 +977,9 @@ mod tests {
             (vec!["openai"], false, true, false, false),
             (vec!["anthropic"], false, false, true, false),
             (vec!["ssh"], false, false, false, true),
+            (vec!["github"], false, false, false, false),
             (
-                vec!["codex", "openai", "anthropic", "ssh"],
+                vec!["codex", "openai", "anthropic", "ssh", "github"],
                 true,
                 true,
                 true,

@@ -23,6 +23,8 @@ const _ = connect.IsAtLeastVersion1_13_0
 const (
 	// CredentialServiceName is the fully-qualified name of the CredentialService service.
 	CredentialServiceName = "codewire.v1.CredentialService"
+	// GithubRepositoryServiceName is the fully-qualified name of the GithubRepositoryService service.
+	GithubRepositoryServiceName = "codewire.v1.GithubRepositoryService"
 	// CredentialMutationServiceName is the fully-qualified name of the CredentialMutationService
 	// service.
 	CredentialMutationServiceName = "codewire.v1.CredentialMutationService"
@@ -42,6 +44,9 @@ const (
 	// CredentialServiceGetCredentialProcedure is the fully-qualified name of the CredentialService's
 	// GetCredential RPC.
 	CredentialServiceGetCredentialProcedure = "/codewire.v1.CredentialService/GetCredential"
+	// GithubRepositoryServiceListGithubRepositoriesProcedure is the fully-qualified name of the
+	// GithubRepositoryService's ListGithubRepositories RPC.
+	GithubRepositoryServiceListGithubRepositoriesProcedure = "/codewire.v1.GithubRepositoryService/ListGithubRepositories"
 	// CredentialMutationServiceEnrollCodexProcedure is the fully-qualified name of the
 	// CredentialMutationService's EnrollCodex RPC.
 	CredentialMutationServiceEnrollCodexProcedure = "/codewire.v1.CredentialMutationService/EnrollCodex"
@@ -169,6 +174,79 @@ func (UnimplementedCredentialServiceHandler) ListCredentials(context.Context, *c
 
 func (UnimplementedCredentialServiceHandler) GetCredential(context.Context, *connect.Request[v1.GetCredentialRequest]) (*connect.Response[v1.GetCredentialResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialService.GetCredential is not implemented"))
+}
+
+// GithubRepositoryServiceClient is a client for the codewire.v1.GithubRepositoryService service.
+type GithubRepositoryServiceClient interface {
+	ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error)
+}
+
+// NewGithubRepositoryServiceClient constructs a client for the codewire.v1.GithubRepositoryService
+// service. By default, it uses the Connect protocol with the binary Protobuf Codec, asks for
+// gzipped responses, and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply
+// the connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewGithubRepositoryServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) GithubRepositoryServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	githubRepositoryServiceMethods := v1.File_codewire_v1_credential_proto.Services().ByName("GithubRepositoryService").Methods()
+	return &githubRepositoryServiceClient{
+		listGithubRepositories: connect.NewClient[v1.ListGithubRepositoriesRequest, v1.ListGithubRepositoriesResponse](
+			httpClient,
+			baseURL+GithubRepositoryServiceListGithubRepositoriesProcedure,
+			connect.WithSchema(githubRepositoryServiceMethods.ByName("ListGithubRepositories")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// githubRepositoryServiceClient implements GithubRepositoryServiceClient.
+type githubRepositoryServiceClient struct {
+	listGithubRepositories *connect.Client[v1.ListGithubRepositoriesRequest, v1.ListGithubRepositoriesResponse]
+}
+
+// ListGithubRepositories calls codewire.v1.GithubRepositoryService.ListGithubRepositories.
+func (c *githubRepositoryServiceClient) ListGithubRepositories(ctx context.Context, req *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error) {
+	return c.listGithubRepositories.CallUnary(ctx, req)
+}
+
+// GithubRepositoryServiceHandler is an implementation of the codewire.v1.GithubRepositoryService
+// service.
+type GithubRepositoryServiceHandler interface {
+	ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error)
+}
+
+// NewGithubRepositoryServiceHandler builds an HTTP handler from the service implementation. It
+// returns the path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewGithubRepositoryServiceHandler(svc GithubRepositoryServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	githubRepositoryServiceMethods := v1.File_codewire_v1_credential_proto.Services().ByName("GithubRepositoryService").Methods()
+	githubRepositoryServiceListGithubRepositoriesHandler := connect.NewUnaryHandler(
+		GithubRepositoryServiceListGithubRepositoriesProcedure,
+		svc.ListGithubRepositories,
+		connect.WithSchema(githubRepositoryServiceMethods.ByName("ListGithubRepositories")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/codewire.v1.GithubRepositoryService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case GithubRepositoryServiceListGithubRepositoriesProcedure:
+			githubRepositoryServiceListGithubRepositoriesHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedGithubRepositoryServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedGithubRepositoryServiceHandler struct{}
+
+func (UnimplementedGithubRepositoryServiceHandler) ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.GithubRepositoryService.ListGithubRepositories is not implemented"))
 }
 
 // CredentialMutationServiceClient is a client for the codewire.v1.CredentialMutationService

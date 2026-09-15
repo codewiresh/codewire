@@ -5,7 +5,11 @@ use crate::process_test_support::{
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 const TOKEN: &str = "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const PROMPT: &str = "\n! First copy your one-time code: ABCD-EFGH\nTo continue, open this URL in your web browser: https://github.com/login/device\n";
+// Source-derived transcript, not generated from the parser's expected strings:
+// https://github.com/cli/cli/blob/v2.97.0/internal/authflow/flow.go#L53-L66
+// The empty notice contributes the leading newline (line 86). The device code
+// is synthetic; noninteractive mode and NO_COLOR preserve the upstream text.
+const PROMPT: &str = "\n! First copy your one-time code: ABCD-EFGH\nOpen this URL to continue in your web browser: https://github.com/login/device\n";
 const SUCCESS: &str = "✓ Authentication complete.\n- gh config set -h github.com git_protocol https\n✓ Configured git protocol\n! Authentication credentials saved in plain text\n✓ Logged in as synthetic-user\n";
 const VERSION: &str =
     "gh version 2.97.0 (2026-07-20)\nhttps://github.com/cli/cli/releases/tag/v2.97.0\n";
@@ -14,6 +18,62 @@ fn hosts(login: &str, token: &str) -> String {
     format!(
         "github.com:\n    users:\n        {login}:\n            oauth_token: {token}\n    git_protocol: https\n    oauth_token: {token}\n    user: {login}\n"
     )
+}
+
+#[test]
+fn pinned_upstream_noninteractive_prompt_releases_challenge_before_authorization() {
+    let mut parser = ChallengeParser::new(1234);
+    let challenge = parser.push(PROMPT.as_bytes()).unwrap().unwrap();
+    assert_eq!(challenge.user_code(), "ABCD-EFGH");
+    assert_eq!(
+        challenge.verification_url(),
+        "https://github.com/login/device"
+    );
+    assert_eq!(challenge.expires_at_unix(), 1234);
+    assert_eq!(parser.finish(), Err(GitHubEnrollmentError::InvalidOutput));
+}
+
+// Explicit network proof against a trusted official artifact. Never use a
+// discovered executable, saved login, user authorization, or token import.
+#[tokio::test]
+#[ignore = "requires explicit pinned gh executable and GitHub device-challenge network access"]
+async fn official_gh_device_challenge_cancels_before_authorization() {
+    let executable = std::env::var_os("CODEWIRE_GITHUB_CHALLENGE_SMOKE_EXECUTABLE")
+        .expect("set CODEWIRE_GITHUB_CHALLENGE_SMOKE_EXECUTABLE to the trusted pinned gh artifact");
+    let runtime = tempfile::Builder::new()
+        .prefix("codewire-github-challenge-smoke-")
+        .tempdir_in("/dev/shm")
+        .unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = GitHubEnrollmentConfig::new(
+        executable.into(),
+        runtime.path().into(),
+        "/usr/bin:/bin".into(),
+    )
+    .unwrap();
+    // Automatic recursive TempDir cleanup cannot authorize removing staging
+    // after a failed drain. Retain that exceptional state just like the owner.
+    let runtime = runtime.keep();
+    let owner = GitHubEnrollmentOwner::new(config);
+    let mut pending = owner.start_with_lifetime(Duration::from_secs(30)).unwrap();
+    let challenge = pending.challenge().await;
+    let cancelled = pending.cancel().await;
+    let drained = owner.shutdown().await;
+    // Await both cleanup owners before assertions, including on challenge
+    // failure. Never print the challenge, arbitrary provider output, or paths.
+    assert_eq!(drained, Ok(()));
+    assert!(
+        std::fs::remove_dir(&runtime).is_ok(),
+        "staging was not empty after drain"
+    );
+    let challenge = challenge.expect("the pinned gh device challenge was not accepted");
+    assert_eq!(cancelled, Ok(()));
+    assert_eq!(
+        challenge.verification_url(),
+        "https://github.com/login/device"
+    );
+    // Challenge construction already requires the production code grammar.
+    assert_eq!(challenge.user_code().len(), 9);
 }
 
 #[test]
@@ -46,6 +106,12 @@ fn pinned_transcript_accepts_every_chunk_boundary_and_redacts_challenge() {
 fn transcript_rejects_arbitrary_urls_codes_controls_duplicates_and_missing_terminal() {
     let transcript = format!("{PROMPT}{SUCCESS}");
     for changed in [
+        // This invented wording previously appeared in both parser and fixture;
+        // it is not the pinned upstream noninteractive prompt.
+        transcript.replace(
+            "Open this URL to continue in your web browser:",
+            "To continue, open this URL in your web browser:",
+        ),
         transcript.replace("github.com/login/device", "example.test/login/device"),
         transcript.replace(
             "github.com/login/device",

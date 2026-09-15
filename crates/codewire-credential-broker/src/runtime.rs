@@ -470,6 +470,15 @@ pub struct BrokerUpstreamRequest {
 }
 
 impl BrokerUpstreamRequest {
+    pub(crate) fn new(method: Method, target: Url, headers: HeaderMap, body: Vec<u8>) -> Self {
+        Self {
+            method,
+            target,
+            headers,
+            body,
+        }
+    }
+
     pub fn into_parts(self) -> (Method, Url, HeaderMap, Vec<u8>) {
         (self.method, self.target, self.headers, self.body)
     }
@@ -495,7 +504,7 @@ impl BrokerUpstreamResponse {
         }
     }
 
-    fn into_parts(self) -> (StatusCode, HeaderMap, BrokerUpstreamBody) {
+    pub(crate) fn into_parts(self) -> (StatusCode, HeaderMap, BrokerUpstreamBody) {
         (self.status, self.headers, self.body)
     }
 }

@@ -4,10 +4,13 @@ import {
   CredentialStatus,
   EnrollCodexRequestSchema,
   SshPublicKeySchema,
+  GithubRepositorySchema,
+  ListGithubRepositoriesRequestSchema,
+  ListGithubRepositoriesResponseSchema,
   type Credential as ProtoCredential,
   type EnrollCodexResponse,
 } from "@codewire/proto-ts/gen/codewire/v1/credential_pb";
-import type { CredentialClient, CredentialMutationClient } from "./transport.js";
+import type { CredentialClient, CredentialMutationClient, GithubRepositoryClient } from "./transport.js";
 import { mapConnectError } from "./types.js";
 
 /** Personal platform metadata. No provider token or protected-store reference. */
@@ -33,6 +36,22 @@ export interface Credential {
 export interface SshPublicKey {
   openssh: string;
   fingerprint: string;
+}
+
+/** Allowlisted repository metadata, never provider JSON or a checkout grant. */
+export interface GithubRepository {
+  repository_id: string;
+  full_name: string;
+  default_branch: string;
+  clone_url: string;
+  is_private: boolean;
+  archived: boolean;
+  disabled: boolean;
+}
+
+export interface GithubRepositoryPage {
+  repositories: GithubRepository[];
+  next_page_token: string;
 }
 
 export interface CodexEnrollmentOptions {
@@ -89,6 +108,16 @@ function assertFields(
 
 /** Throws when credential metadata or Codex reconnect gains an unmapped field. */
 export function assertCredentialConverterCoverage(): void {
+  assertFields("GitHub repository", GithubRepositorySchema.fields, new Map([
+    [1, "repository_id"], [2, "full_name"], [3, "default_branch"], [4, "clone_url"],
+    [5, "is_private"], [6, "archived"], [7, "disabled"],
+  ]));
+  assertFields("GitHub repository request", ListGithubRepositoriesRequestSchema.fields, new Map([
+    [1, "profile_id"], [2, "profile_revision"], [3, "page_size"], [4, "page_token"],
+  ]));
+  assertFields("GitHub repository response", ListGithubRepositoriesResponseSchema.fields, new Map([
+    [1, "repositories"], [2, "next_page_token"],
+  ]));
   assertFields("credential", CredentialSchema.fields, new Map([
     [1, "id"], [2, "name"], [3, "provider"], [4, "authentication_kind"],
     [5, "account_hint"], [6, "status"], [7, "expires_at_unix"],
@@ -146,7 +175,29 @@ function fromCredential(value: ProtoCredential | undefined): Credential {
  * API key. Enrollment/lifecycle require OAuth even when metadata permits a
  * session. These methods never choose delivery mode or retry mutations. */
 export class Credentials {
-  constructor(private client: CredentialClient, private mutations: CredentialMutationClient) {}
+  constructor(private client: CredentialClient, private mutations: CredentialMutationClient,
+    private repositories?: GithubRepositoryClient) {}
+
+  /** Fetch one page without silently advancing the selected profile revision. */
+  async listGithubRepositories(
+    profileId: string, profileRevision: bigint, pageSize = 50, pageToken = "",
+  ): Promise<GithubRepositoryPage> {
+    generation(profileRevision);
+    if (!profileId || !Number.isInteger(pageSize) || pageSize < 0 || pageSize > 100 || pageToken.length > 128) {
+      throw new Error("invalid GitHub repository selection or page");
+    }
+    if (!this.repositories) throw new Error("GitHub repository client is not configured");
+    try {
+      const response = await this.repositories.listGithubRepositories({ profileId, profileRevision, pageSize, pageToken });
+      return {
+        repositories: response.repositories.map((value) => ({
+          repository_id: value.repositoryId, full_name: value.fullName, default_branch: value.defaultBranch,
+          clone_url: value.cloneUrl, is_private: value.isPrivate, archived: value.archived, disabled: value.disabled,
+        })),
+        next_page_token: response.nextPageToken,
+      };
+    } catch (error) { throw mapConnectError(error); }
+  }
 
   async list(): Promise<Credential[]> {
     try {

@@ -223,10 +223,12 @@ weakening of the required local hardware gate.
 - Keep production templates and editable `packages/codewire-design` fixtures on
   the same tokens, components, and route CSS. A fidelity change is incomplete
   when only the fixture or only the production template changes.
-- “UI iteration checkpoint” is an explicit checkpoint: edit locally and run
-  only focused syntax, type, accessibility, or rendered-fixture checks. Do not
-  commit, push, open a PR, run CI, rebuild product images, or recreate Kind
-  until the owner says “land it.”
+- “UI iteration checkpoint” gates landing, not ordinary local development.
+  Edit locally, run focused checks, and rebuild local images or update scoped
+  development services as needed to review the real application. Image
+  rebuilds do not require separate approval. Do not commit, push, open a PR,
+  run hosted CI, or recreate Kind until the owner says “land it.” Preserve
+  unrelated state and the existing production and credential boundaries.
 - During active iteration use `make design-system`, `make dashboard-watch`, or
   `make dashboard-watch-kind`. Run `scripts/dev/preflight.sh --explain` before
   the final landing gate. If an obviously UI-only change is unclassified or

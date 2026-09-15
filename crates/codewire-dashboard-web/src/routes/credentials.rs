@@ -8,6 +8,7 @@ use axum::{
     response::Response,
 };
 use chrono::{NaiveDateTime, Utc};
+use codewire_access::AccessProfileName;
 use codewire_proto::codewire::v1::AccessProfileEntry;
 use connectrpc::ErrorCode;
 use serde::Deserialize;
@@ -420,7 +421,7 @@ pub(super) async fn enroll_oauth_action(
         }
         _ => return page_redirect("credential-invalid", true, &query.org, &headers),
     };
-    if !valid_credential_name(name) {
+    if !valid_oauth_name(&provider, name, reconnect.0.is_some()) {
         return page_redirect("credential-invalid", true, &query.org, &headers);
     }
 
@@ -498,17 +499,59 @@ fn render_enrollment_event(
         credentials_connect::OAuthEnrollmentEvent::Committed => format!(
             "<div class=\"cw-alert cw-alert--success\" role=\"status\">Credential connected.</div><p><a class=\"cw-button\" href=\"{return_path}\">Return to credentials</a></p></div></section></div></main></body></html>"
         ),
-        credentials_connect::OAuthEnrollmentEvent::Failed { uncertain } => {
-            let message = if uncertain {
-                "The final acknowledgement was not received. Return to credentials and inspect the named credential before retrying."
+        credentials_connect::OAuthEnrollmentEvent::Failed { reason, uncertain } => {
+            use credentials_connect::OAuthEnrollmentFailure as Failure;
+            let message = match reason {
+                Failure::SignInRequired => {
+                    "Your account session no longer permits this connection. Sign in again, then return to credentials."
+                }
+                Failure::Unavailable => {
+                    "The credential service is unavailable or busy. Return to credentials and try again later."
+                }
+                Failure::AlreadyExists => {
+                    "A credential with this account name already exists. No credential was overwritten. Return to credentials to inspect the existing connection and its connection reference before choosing Reconnect."
+                }
+                Failure::Changed => {
+                    "The credential changed or was removed while connecting. Return to credentials and use its current Reconnect action."
+                }
+                Failure::Unsupported => {
+                    "Codewire could not verify the provider login version or response. If another attempt fails, ask an administrator to check the credential service."
+                }
+                Failure::Invalid => {
+                    "The connection request was not valid. Return to credentials and start a new connection."
+                }
+                Failure::NotCompleted => {
+                    "Provider authorization did not complete. Return to credentials to start a new connection and finish the provider's authorization steps."
+                }
+                Failure::Expired => {
+                    "This connection attempt expired. Return to credentials to start a new authorization code."
+                }
+                Failure::Cancelled => {
+                    "This connection attempt was cancelled. Return to credentials to start again."
+                }
+                Failure::UnexpectedResponse => {
+                    "Codewire did not receive a valid final connection response. Return to credentials to check the account status."
+                }
+            };
+            let reconciliation = if uncertain {
+                "<p>The credential may already have been saved. Inspect the account in credentials before retrying; do not create another connection until its status is clear.</p>"
             } else {
-                "The credential could not be connected. Return to credentials and try again."
+                ""
             };
             format!(
-                "<div class=\"cw-alert cw-alert--error\" role=\"alert\">{message}</div><p><a class=\"cw-button\" href=\"{return_path}\">Return to credentials</a></p></div></section></div></main></body></html>"
+                "<div class=\"cw-alert cw-alert--error\" role=\"alert\">{message}</div>{reconciliation}<p><a class=\"cw-button\" href=\"{return_path}\">Return to credentials</a></p></div></section></div></main></body></html>"
             )
         }
     }
+}
+
+fn valid_oauth_name(
+    provider: &credentials_connect::OAuthProvider,
+    name: &str,
+    reconnect: bool,
+) -> bool {
+    matches!(provider, credentials_connect::OAuthProvider::Github) && !reconnect && name.is_empty()
+        || valid_credential_name(name)
 }
 
 fn escape_html(value: &str) -> String {
@@ -612,7 +655,7 @@ fn entries(
 }
 
 fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 128 && !name.bytes().any(|byte| byte.is_ascii_control())
+    AccessProfileName::parse(name).is_ok()
 }
 
 fn valid_credential_name(name: &str) -> bool {
@@ -684,7 +727,9 @@ fn credential_mutation_error(
 }
 
 fn mutation_error_code(code: ErrorCode, delete: bool) -> &'static str {
-    if code == ErrorCode::Aborted || code == ErrorCode::AlreadyExists {
+    if code == ErrorCode::InvalidArgument {
+        "profile-invalid"
+    } else if code == ErrorCode::Aborted || code == ErrorCode::AlreadyExists {
         "profile-conflict"
     } else if delete && code == ErrorCode::FailedPrecondition {
         "profile-in-use"
@@ -739,7 +784,9 @@ fn approved_error(code: &str) -> &'static str {
             "The credential operation may have completed. Reload and inspect it before retrying."
         }
         "credential-request-failed" => "The credential change could not be completed. Try again.",
-        "profile-invalid" => "The credential profile is invalid.",
+        "profile-invalid" => {
+            "Check the profile name and selected credentials. Use 1–128 lowercase letters, numbers, hyphens, underscores or dots; start and end with a letter or number."
+        }
         "profile-conflict" => "The credential profile changed. Reload and try again.",
         "profile-in-use" => "The credential profile is still in use and cannot be deleted.",
         "request-failed" => "The credential profile change could not be completed. Try again.",
@@ -750,6 +797,32 @@ fn approved_error(code: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_names_match_the_shared_identifier_contract() {
+        for name in [
+            "a",
+            "1",
+            "github-repository-browser",
+            "work_1.v2",
+            &"a".repeat(128),
+        ] {
+            assert!(valid_name(name), "valid profile name: {name}");
+        }
+        for name in [
+            "",
+            "GitHub repository browser",
+            "Work",
+            "work profile",
+            "-work",
+            "work.",
+            "wörk",
+            &"a".repeat(129),
+        ] {
+            assert!(!valid_name(name), "invalid profile name: {name}");
+        }
+        assert!(valid_credential_name("Work API"));
+    }
 
     #[test]
     fn entries_are_closed_and_use_exact_credential_ids() {
@@ -778,6 +851,54 @@ mod tests {
     }
 
     #[test]
+    fn github_create_can_omit_name_but_reconnect_and_codex_cannot() {
+        use credentials_connect::OAuthProvider::{Codex, Github};
+        let submission: CredentialOAuthSubmission = serde_json::from_value(serde_json::json!({
+            "_csrf": "synthetic-csrf", "provider": "github"
+        }))
+        .unwrap();
+        assert!(submission.name.is_empty());
+        assert!(valid_oauth_name(&Github, "", false));
+        assert!(!valid_oauth_name(&Github, "", true));
+        assert!(!valid_oauth_name(&Codex, "", false));
+        assert!(valid_oauth_name(&Github, "legacy-name", true));
+        assert!(valid_oauth_name(&Github, "legacy-name", false));
+    }
+
+    #[test]
+    fn enrollment_errors_explain_recovery_and_uncertain_publication_separately() {
+        use credentials_connect::{
+            OAuthEnrollmentEvent as Event, OAuthEnrollmentFailure as Failure,
+        };
+        let duplicate = render_enrollment_event(
+            Event::Failed {
+                reason: Failure::AlreadyExists,
+                uncertain: false,
+            },
+            "/settings/credentials/",
+        );
+        assert!(duplicate.contains("No credential was overwritten"));
+        assert!(!duplicate.contains("may already have been saved"));
+        let uncertain = render_enrollment_event(
+            Event::Failed {
+                reason: Failure::Unavailable,
+                uncertain: true,
+            },
+            "/settings/credentials/",
+        );
+        assert!(uncertain.contains("unavailable or busy"));
+        assert!(uncertain.contains("may already have been saved"));
+        let unsupported = render_enrollment_event(
+            Event::Failed {
+                reason: Failure::Unsupported,
+                uncertain: false,
+            },
+            "/settings/credentials/",
+        );
+        assert!(unsupported.contains("administrator to check the credential service"));
+    }
+
+    #[test]
     fn redirects_preserve_only_static_messages() {
         assert_eq!(
             approved_message("profile-created"),
@@ -785,6 +906,11 @@ mod tests {
         );
         assert!(approved_message("attacker text").is_empty());
         assert!(approved_error("attacker text").is_empty());
+        assert_eq!(
+            mutation_error_code(ErrorCode::InvalidArgument, false),
+            "profile-invalid"
+        );
+        assert!(approved_error("profile-invalid").contains("selected credentials"));
         assert_eq!(
             mutation_error_code(ErrorCode::FailedPrecondition, false),
             "request-failed"

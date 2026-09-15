@@ -895,7 +895,7 @@ fn install_selected_client_recipe(fixture: &mut Fixture, opts: &TemplateOpts) {
 
 #[tokio::test]
 async fn suspended_client_replacement_removes_codex_fields_and_preserves_unrelated_spec() {
-    for slots in [vec![], vec!["openai"]] {
+    for slots in [vec![], vec!["openai"], vec!["github"]] {
         let mut initial_opts = opts();
         initial_opts.managed_credential_clients =
             codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();

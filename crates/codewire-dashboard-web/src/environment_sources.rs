@@ -291,7 +291,18 @@ mod tests {
     struct SourceFieldsTemplate<'a> {
         source_fields_id: &'a str,
         sources: &'a EnvironmentSourceFieldsView,
+        organization: &'a SourceFieldsOrganization,
     }
+
+    struct SourceFieldsOrganization {
+        slug: &'static str,
+        secrets_url: &'static str,
+    }
+
+    const ORGANIZATION: SourceFieldsOrganization = SourceFieldsOrganization {
+        slug: "test-org",
+        secrets_url: "/test-org/secrets/",
+    };
 
     #[test]
     fn profile_options_keep_exact_revision_without_selecting_it() {
@@ -431,6 +442,7 @@ mod tests {
             let body = SourceFieldsTemplate {
                 source_fields_id,
                 sources: &sources,
+                organization: &ORGANIZATION,
             }
             .render()
             .expect("selection fields");
@@ -441,7 +453,15 @@ mod tests {
             assert!(body.contains("revision 7"));
             assert!(!body.contains("<unsafe-"));
             assert!(!body.contains(" disabled"));
-            assert!(body.contains("name=\"confirm_personal_credentials\" value=\"true\">"));
+            assert!(!body.contains("name=\"confirm_personal_credentials\""));
+            assert!(!body.contains("name=\"confirm_personal_secrets\""));
+            assert!(body.contains("href=\"/test-org/secrets/user/\""));
+            assert!(body.contains("href=\"/test-org/secrets/organization/\""));
+            assert!(body.contains("href=\"/test-org/secrets/\""));
+            assert!(body.contains("href=\"/settings/credentials/?org=test-org\""));
+            assert!(body.contains("<nav aria-label=\"Manage provider credentials\">"));
+            assert!(!body.contains("No secret projects are available"));
+            assert!(!body.contains("You have no credential profiles yet"));
             for forbidden in [
                 "secret_value",
                 "private_key",
@@ -470,11 +490,56 @@ mod tests {
         let body = SourceFieldsTemplate {
             source_fields_id: "edit",
             sources: &sources,
+            organization: &ORGANIZATION,
         }
         .render()
         .expect("unavailable fields");
         assert!(body.contains("aria-describedby=\"edit-project-help\" disabled>"));
         assert!(body.contains("aria-describedby=\"edit-credentials-help\" disabled>"));
         assert!(body.contains("role=\"alert\">Project names could not be loaded."));
+        assert!(!body.contains("No secret projects are available"));
+        assert!(!body.contains("You have no credential profiles yet"));
+        assert!(body.contains("href=\"/test-org/secrets/user/\""));
+        assert!(body.contains("Manage personal credentials and profiles</a>"));
+    }
+
+    #[test]
+    fn empty_catalogs_offer_scoped_setup_without_claiming_all_secrets_are_empty() {
+        let sources = EnvironmentSourceFieldsView {
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            ..Default::default()
+        };
+        let body = SourceFieldsTemplate {
+            source_fields_id: "create",
+            sources: &sources,
+            organization: &ORGANIZATION,
+        }
+        .render()
+        .expect("empty source options");
+        assert!(body.contains("No secret projects are available in this organization."));
+        assert!(body.contains("You have no credential profiles yet."));
+        assert!(body.contains("<nav aria-label=\"Manage provider credentials\">"));
+        assert!(body.contains("Create a profile in Settings, then select it here.</p>"));
+        assert!(body.contains("href=\"/test-org/secrets/user/\""));
+        assert!(body.contains("href=\"/test-org/secrets/organization/\""));
+        assert!(body.contains("href=\"/test-org/secrets/\""));
+        assert!(body.contains(
+            "href=\"/settings/credentials/?org=test-org\">Add credentials and create a profile</a>"
+        ));
+        assert!(!body.contains("No personal secrets"));
+        assert!(!body.contains("No organization secrets"));
+        assert!(!body.contains(" checked"));
+        assert!(!body.contains(" selected"));
+
+        let disabled = SourceFieldsTemplate {
+            source_fields_id: "create",
+            sources: &EnvironmentSourceFieldsView::default(),
+            organization: &ORGANIZATION,
+        }
+        .render()
+        .expect("disabled source options");
+        assert!(!disabled.contains("No secret projects are available"));
+        assert!(!disabled.contains("You have no credential profiles yet"));
     }
 }

@@ -13,7 +13,7 @@ import { PortService } from "@codewire/proto-ts/gen/codewire/v1/port_pb";
 import { PresetService } from "@codewire/proto-ts/gen/codewire/v1/preset_pb";
 import { SecretService } from "@codewire/proto-ts/gen/codewire/v1/secret_pb";
 import { AccessProfileService } from "@codewire/proto-ts/gen/codewire/v1/access_profile_pb";
-import { CredentialService, CredentialMutationService } from "@codewire/proto-ts/gen/codewire/v1/credential_pb";
+import { CredentialService, CredentialMutationService, GithubRepositoryService } from "@codewire/proto-ts/gen/codewire/v1/credential_pb";
 
 export type ApiKeyClient = Client<typeof ApiKeyService>;
 export type EnvironmentClient = Client<typeof EnvironmentService>;
@@ -25,10 +25,12 @@ export type SecretClient = Client<typeof SecretService>;
 export type AccessProfileClient = Client<typeof AccessProfileService>;
 export type CredentialClient = Client<typeof CredentialService>;
 export type CredentialMutationClient = Client<typeof CredentialMutationService>;
+export type GithubRepositoryClient = Client<typeof GithubRepositoryService>;
 
 export interface CodewireClients {
   credentials: CredentialClient;
   credentialMutations: CredentialMutationClient;
+  githubRepositories: GithubRepositoryClient;
   accessProfiles: AccessProfileClient;
   apiKeys: ApiKeyClient;
   environments: EnvironmentClient;
@@ -77,6 +79,7 @@ export function createCodewireClients(
   return {
     credentials: createClient(CredentialService, fetchTransport),
     credentialMutations: createClient(CredentialMutationService, fetchTransport),
+    githubRepositories: createClient(GithubRepositoryService, fetchTransport),
     accessProfiles: createClient(AccessProfileService, fetchTransport),
     apiKeys: createClient(ApiKeyService, fetchTransport),
     environments: createClient(EnvironmentService, fetchTransport),
