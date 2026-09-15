@@ -41,6 +41,8 @@ use crate::worker::activity_authority::{
 };
 use crate::worker::gatewayauth::{SCOPE_DAEMON, issue_token};
 
+mod session_mutation;
+
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(120);
 const DAEMON_STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -177,13 +179,20 @@ pub async fn launch_environment_daemon_session_core(
         &[DAEMON_CAPABILITY_SESSIONS],
     )
     .await?;
-    client
-        .launch_session(authorize(request, &token)?)
-        .await
-        .map_err(daemon_session_error)?
-        .into_inner()
-        .session
-        .ok_or_else(|| AppError::InternalMsg("environment daemon returned no session".into()))
+    let request = authorize(request, &token)?;
+    session_mutation::run(
+        &state.pool,
+        org_id,
+        environment_id,
+        session_mutation::Acknowledgement::Launch,
+        async move {
+            client
+                .launch_session(request)
+                .await
+                .map(|reply| reply.into_inner().session)
+        },
+    )
+    .await
 }
 
 pub async fn list_environment_daemon_sessions_core(
@@ -285,18 +294,25 @@ pub async fn stop_environment_daemon_session_core(
         &[DAEMON_CAPABILITY_SESSIONS],
     )
     .await?;
-    client
-        .stop_session(authorize(
-            v1::StopSessionRequest {
-                session_id: session_id.to_string(),
-            },
-            &token,
-        )?)
-        .await
-        .map_err(daemon_session_error)?
-        .into_inner()
-        .session
-        .ok_or_else(|| AppError::InternalMsg("environment daemon returned no session".into()))
+    let request = authorize(
+        v1::StopSessionRequest {
+            session_id: session_id.to_string(),
+        },
+        &token,
+    )?;
+    session_mutation::run(
+        &state.pool,
+        org_id,
+        environment_id,
+        session_mutation::Acknowledgement::Stop(session_id.to_string()),
+        async move {
+            client
+                .stop_session(request)
+                .await
+                .map(|reply| reply.into_inner().session)
+        },
+    )
+    .await
 }
 
 pub async fn restart_environment_daemon_session_core(
@@ -314,18 +330,25 @@ pub async fn restart_environment_daemon_session_core(
         &[DAEMON_CAPABILITY_SESSIONS],
     )
     .await?;
-    client
-        .restart_session(authorize(
-            v1::RestartSessionRequest {
-                session_id: session_id.to_string(),
-            },
-            &token,
-        )?)
-        .await
-        .map_err(daemon_session_error)?
-        .into_inner()
-        .session
-        .ok_or_else(|| AppError::InternalMsg("environment daemon returned no session".into()))
+    let request = authorize(
+        v1::RestartSessionRequest {
+            session_id: session_id.to_string(),
+        },
+        &token,
+    )?;
+    session_mutation::run(
+        &state.pool,
+        org_id,
+        environment_id,
+        session_mutation::Acknowledgement::Restart(session_id.to_string()),
+        async move {
+            client
+                .restart_session(request)
+                .await
+                .map(|reply| reply.into_inner().session)
+        },
+    )
+    .await
 }
 
 pub async fn read_environment_daemon_session_output_core(

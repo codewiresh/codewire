@@ -17,15 +17,16 @@ readonly DASHBOARD_DOCKERFILE="$ROOT/apps/dashboard/Dockerfile"
 readonly MESH_DOCKERFILE="$ROOT/deployments/docker/mesh.Dockerfile"
 readonly GATEWAY_DOCKERFILE="$ROOT/deployments/docker/gateway.Dockerfile"
 readonly DERP_DOCKERFILE="$ROOT/deployments/docker/derp.Dockerfile"
-readonly SERVICES_BINARIES=(
-  codewire-idp
-  codewire-orchestration
-  sidecar-smoke
-  codewire-billing
-  codewire-coordinator
-  codewire-db-migrate
-  codewire-udp-relay
-  codewire-credential-service
+readonly SERVICES_BINARY_ARTIFACTS=(
+  codewire-idp:codewire-idp
+  codewire-orchestration:codewire-orchestration
+  sidecar-smoke:sidecar-smoke
+  codewire-billing:codewire-billing
+  billing-runtime-smoke:codewire-billing-runtime-smoke
+  codewire-coordinator:codewire-coordinator
+  codewire-db-migrate:codewire-db-migrate
+  codewire-udp-relay:codewire-udp-relay
+  codewire-credential-service:codewire-credential-service
 )
 
 fail() {
@@ -64,7 +65,7 @@ build_invocation_count() {
 mkdir -p "$ROOT/.tmp"
 
 verify_services_dockerfile_contract() {
-  local mount binary fixture_block architecture ssh_hash crypto_hash triplet ssh_block
+  local mount binary artifact fixture_block architecture ssh_hash crypto_hash triplet ssh_block
   local mounts=(
     'id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked'
     'id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked'
@@ -192,16 +193,18 @@ verify_services_dockerfile_contract() {
   grep -qF 'test ! -e /usr/bin/git && test ! -e /usr/lib/git-core/git-http-backend' "$SERVICES_DOCKERFILE" ||
     fail 'release runtime does not prove Git fixture payload absence'
 
-  for binary in "${SERVICES_BINARIES[@]}"; do
+  for binary_artifact in "${SERVICES_BINARY_ARTIFACTS[@]}"; do
+    binary="${binary_artifact%%:*}"
+    artifact="${binary_artifact#*:}"
     [[ "$(grep -cF -- "--bin ${binary}" "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
       fail "services build does not request ${binary} exactly once"
     [[ "$(grep -cF "target/\$CODEWIRE_RUST_PROFILE/${binary}" "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
       fail "services build does not copy ${binary} out of Cargo target exactly once"
-    [[ "$(grep -cF "/out/${binary}" "$SERVICES_DOCKERFILE")" -eq 2 ]] ||
-      fail "services image does not move ${binary} through the non-cache output exactly once"
-    grep -qF "COPY --from=builder /out/${binary} /${binary}" \
+    [[ "$(grep -Ec "/out/${artifact}([[:space:]]|$)" "$SERVICES_DOCKERFILE")" -eq 2 ]] ||
+      fail "services image does not move ${artifact} through the non-cache output exactly once"
+    grep -qF "COPY --from=builder /out/${artifact} /${artifact}" \
       "$SERVICES_DOCKERFILE" ||
-      fail "services runtime image is missing ${binary}"
+      fail "services runtime image is missing ${artifact}"
   done
 }
 

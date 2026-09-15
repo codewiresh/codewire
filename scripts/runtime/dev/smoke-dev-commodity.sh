@@ -112,6 +112,8 @@ declare -a SMOKE_OAUTH_ENV=()
 APP_SECRET_DOCUMENT=""
 APP_SECRET_CREATE_ATTEMPTED=0
 APP_SECRET_ALL_SCOPES=0
+APP_WORKSPACE_MARKER_SHA256=""
+APP_RESTART_WITNESS_SESSION_ID=""
 SMOKE_OAUTH_LOGIN_ATTEMPTED=0
 SMOKE_OAUTH_LOGIN_DIR=""
 SMOKE_OAUTH_RUNTIME_PARENT=""
@@ -1078,10 +1080,8 @@ validate_application_all_scopes_options() {
   [[ "$ALLOW_NON_DEV" == 0 && "$CODEWIRE_SERVER_URL" == https://codewire-dev.sh &&
      "$EXPECTED_CODEWIRE_DEV_SERVER_URL" == https://codewire-dev.sh ]] ||
     die 'application-secrets-all-scopes requires the exact https://codewire-dev.sh endpoint'
-  [[ -z "$SMOKE_EXISTING_ENV_ID" && "$SMOKE_KEEP_ENV" == 0 && "$SMOKE_SKIP_KUBE" == 0 ]] ||
-    die 'application-secrets-all-scopes requires a fresh disposable environment and Kubernetes checks'
-  [[ -n "$SANDBOX_NAMESPACE" ]] ||
-    die 'application-secrets-all-scopes requires SANDBOX_NAMESPACE'
+  [[ -z "$SMOKE_EXISTING_ENV_ID" && "$SMOKE_KEEP_ENV" == 0 && "$SMOKE_SKIP_KUBE" == 1 ]] ||
+    die 'application-secrets-all-scopes requires a fresh disposable environment without Kubernetes access'
   [[ -n "$EXPECTED_CODEWIRE_ADMIN_EMAIL" ]] ||
     die 'application-secrets-all-scopes requires an exact account email'
   [[ "$EXPECTED_CODEWIRE_ADMIN_USER_ID" =~ ^[0-9a-f]{32}$ &&
@@ -1383,7 +1383,7 @@ prepare_application_all_scope_secrets() {
      ${#APP_SECRET_ALL_HASHES_CLEAR[@]} == ${#APP_SECRET_ALL_KEYS[@]})) ||
     die 'all-scope application hash matrix is incomplete'
   checks="$(application_all_scopes_hash_checks APP_SECRET_ALL_HASHES_A)"
-  install="set -eu; $checks test ! -e /workspace/.cw-app-smoke; mkdir /workspace/.cw-app-smoke; printf '1\\n' > /workspace/.cw-app-smoke/install-count; printf 'workspace-preserved\\n' > /workspace/.cw-app-smoke/preserved"
+  install="set -eu; $checks test ! -e /workspace/.cw-app-smoke; mkdir /workspace/.cw-app-smoke; printf '1\\n' > /workspace/.cw-app-smoke/install-count"
   startup="set -eu; { "
   for index in "${!APP_SECRET_ALL_KEYS[@]}"; do
     key="${APP_SECRET_ALL_KEYS[$index]}"
@@ -1576,9 +1576,10 @@ SCRIPT
 }
 
 application_all_scopes_guest_check() {
-  local hashes_name="$1"
+  local hashes_name="$1" marker_sha256="$2"
   local -n hashes="$hashes_name"
   local checks index key hash startup_checks='' keys_json config_key
+  [[ "$marker_sha256" =~ ^[0-9a-f]{64}$ ]] || die 'application workspace marker digest is invalid'
   checks="$(application_all_scopes_hash_checks "$hashes_name")"
   for index in "${!APP_SECRET_ALL_KEYS[@]}"; do
     key="${APP_SECRET_ALL_KEYS[$index]}"; hash="${hashes[$index]}"
@@ -1592,7 +1593,8 @@ set -eu
 application_fail() { printf 'application check failed: %s\\n' "\$1" >&2; exit 1; }
 $checks
 test "\$(cat /workspace/.cw-app-smoke/install-count)" = 1 || application_fail install-count
-test "\$(cat /workspace/.cw-app-smoke/preserved)" = workspace-preserved || application_fail workspace-preservation
+test -f /workspace/.cw-app-smoke/preservation-marker || application_fail workspace-marker-missing
+test "\$(sha256sum /workspace/.cw-app-smoke/preservation-marker | cut -d ' ' -f 1)" = '$marker_sha256' || application_fail workspace-marker-replaced
 attempt=0
 until $startup_checks; do
   attempt=\$((attempt + 1)); test "\$attempt" -lt 100 || application_fail startup-projection; sleep 0.1
@@ -1616,6 +1618,117 @@ for path in sessions:
 PY
 printf 'application-secret-check-ok\\n'
 SCRIPT
+}
+
+create_application_workspace_marker() {
+  local marker_script output="$TMPDIR_SMOKE/app-workspace-marker-sha256.out"
+  # The marker bytes never leave the managed workspace. The host retains only
+  # their digest so later public cw run calls can prove workspace continuity.
+  # shellcheck disable=SC2016 # Expanded only by the managed guest shell.
+  marker_script='set -eu; marker=/workspace/.cw-app-smoke/preservation-marker; test ! -e "$marker"; umask 077; head -c 32 /dev/urandom > "$marker"; sha256sum "$marker" | cut -d " " -f 1'
+  cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- /bin/sh -c "$marker_script" \
+    >"$output" 2>"$TMPDIR_SMOKE/app-workspace-marker.err" ||
+    die 'managed workspace marker creation failed; output suppressed'
+  APP_WORKSPACE_MARKER_SHA256="$(cat "$output")"
+  [[ "$APP_WORKSPACE_MARKER_SHA256" =~ ^[0-9a-f]{64}$ && "$(wc -l <"$output")" == 1 ]] ||
+    die 'managed workspace marker returned an invalid digest receipt'
+}
+
+application_restart_witness_guest() {
+  local hashes_name="$1" marker_sha256="$2"
+  local checks witness_lifetime
+  [[ "$marker_sha256" =~ ^[0-9a-f]{64}$ ]] || die 'application restart witness marker digest is invalid'
+  checks="$(application_all_scopes_hash_checks "$hashes_name")"
+  witness_lifetime=$((SMOKE_TIMEOUT_SECONDS + 300))
+  cat <<SCRIPT
+set -eu
+$checks
+test -f /workspace/.cw-app-smoke/preservation-marker
+test "\$(sha256sum /workspace/.cw-app-smoke/preservation-marker | cut -d ' ' -f 1)" = '$marker_sha256'
+printf 'application-restart-witness-ready\\n'
+exec sleep '$witness_lifetime'
+SCRIPT
+}
+
+application_restart_witness_ready() {
+  local phase="$1" session_id="$2"
+  local logs="$TMPDIR_SMOKE/app-restart-witness-$phase.log"
+  local sessions="$TMPDIR_SMOKE/app-restart-witness-$phase-ready.json"
+  local error="$TMPDIR_SMOKE/app-restart-witness-$phase-ready.err"
+
+  if ! cw_with_timeout 30 logs "$ENV_ID" "$session_id" --raw >"$logs" 2>"$error"; then
+    SMOKE_LAST_WAIT_DETAIL="public logs did not return exact managed session $session_id"
+    return 1
+  fi
+  if ! grep -qx application-restart-witness-ready "$logs"; then
+    SMOKE_LAST_WAIT_DETAIL="exact managed session $session_id has not emitted its ready receipt"
+    return 1
+  fi
+  if ! cw_with_timeout 30 list "$ENV_ID" --output json >"$sessions" 2>"$error"; then
+    SMOKE_LAST_WAIT_DETAIL="public session list did not return for exact managed session $session_id"
+    return 1
+  fi
+  if ! jq -e --arg id "$session_id" '
+    type == "array" and
+    ([.[] | select(.session_id == $id)] | length) == 1 and
+    ([.[] | select(.session_id == $id)][0].state == "Running")
+  ' "$sessions" >/dev/null; then
+    SMOKE_LAST_WAIT_DETAIL="exact managed session $session_id is not uniquely Running after its ready receipt"
+    return 1
+  fi
+}
+
+start_application_restart_witness() {
+  local hashes_name="$1" phase="$2" guest_script deadline session_id
+  local launch="$TMPDIR_SMOKE/app-restart-witness-$phase-launch.json"
+  local error="$TMPDIR_SMOKE/app-restart-witness-$phase-launch.err"
+  [[ -z "$APP_RESTART_WITNESS_SESSION_ID" ]] || die 'application restart witness is already running'
+  guest_script="$(application_restart_witness_guest "$hashes_name" "$APP_WORKSPACE_MARKER_SHA256")"
+  cw_with_timeout 30 run --no-tty --output json "$ENV_ID" -- /bin/sh -c "$guest_script" \
+    >"$launch" 2>"$error" || die 'managed application restart witness launch failed; output suppressed'
+  jq -e '
+    type == "object" and
+    (.session_id | type == "string" and length > 0) and
+    (.state == "Starting" or .state == "Running") and
+    (.command | type == "array" and length == 3 and
+      .[0] == "/bin/sh" and .[1] == "-c" and
+      (.[2] | contains("application-restart-witness-ready"))) and
+    .pty == false and .exit_code == null
+  ' "$launch" >/dev/null || die 'managed application restart witness returned invalid session identity metadata'
+  session_id="$(jq -er '.session_id' "$launch")" || die 'managed application restart witness session identity is missing'
+  APP_RESTART_WITNESS_SESSION_ID="$session_id"
+  deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
+  wait_until "exact managed session $session_id readiness" "$deadline" \
+    application_restart_witness_ready "$phase" "$session_id"
+}
+
+application_restart_witness_terminal() {
+  local phase="$1" session_id="$2"
+  local sessions="$TMPDIR_SMOKE/app-restart-witness-$phase-terminal.json"
+  local error="$TMPDIR_SMOKE/app-restart-witness-$phase-terminal.err"
+  if ! cw_with_timeout 30 list "$ENV_ID" --output json >"$sessions" 2>"$error"; then
+    SMOKE_LAST_WAIT_DETAIL="public session list did not return for exact managed session $session_id"
+    return 1
+  fi
+  if ! jq -e --arg id "$session_id" '
+    type == "array" and
+    ([.[] | select(.session_id == $id)] | length) == 1 and
+    ([.[] | select(.session_id == $id)][0].state as $state |
+      $state == "Stopped" or $state == "Exited" or
+      $state == "Failed" or $state == "Interrupted")
+  ' "$sessions" >/dev/null; then
+    SMOKE_LAST_WAIT_DETAIL="exact managed session $session_id is missing, ambiguous or non-terminal"
+    return 1
+  fi
+}
+
+wait_for_application_restart_witness_termination() {
+  local phase="$1" deadline session_id="$APP_RESTART_WITNESS_SESSION_ID"
+  [[ -n "$session_id" ]] || die 'application restart witness session identity is missing'
+  deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
+  wait_until "exact managed session $session_id to reach a terminal state after source $phase" "$deadline" \
+    application_restart_witness_terminal "$phase" "$session_id"
+  APP_RESTART_WITNESS_SESSION_ID=""
 }
 
 run_application_secret_pty() {
@@ -1687,6 +1800,9 @@ run_application_secrets_smoke() {
         application_environment_ready "platform:id:${APP_SECRET_IDS[0]}" 0 || die 'unconfirmed source edit changed selection'
         [[ "$(jq -r .operation_generation "$TMPDIR_SMOKE/app-environment.json")" == "$generation" ]] ||
           die 'unconfirmed source edit changed generation'
+        if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+          start_application_restart_witness APP_SECRET_ALL_HASHES_A "$phase"
+        fi
         cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --yes --output json \
           >"$TMPDIR_SMOKE/app-update-b.json" 2>"$TMPDIR_SMOKE/app-update-b.err" || die 'application source replacement failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-b.json" "$project" "$generation"
@@ -1694,30 +1810,43 @@ run_application_secrets_smoke() {
       clear)
         project=''; expected=absent
         hashes_name=APP_SECRET_ALL_HASHES_CLEAR
+        if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+          start_application_restart_witness APP_SECRET_ALL_HASHES_B "$phase"
+        fi
         cw_with_timeout 30 env --platform update "$ENV_ID" --clear-secrets --yes --output json \
           >"$TMPDIR_SMOKE/app-update-clear.json" 2>"$TMPDIR_SMOKE/app-update-clear.err" || die 'application source clear failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
         ;;
     esac
+    if [[ "$phase" != a && "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+      wait_for_application_restart_witness_termination "$phase"
+    fi
     # Generation fences the owning Temporal workflow, not each source edit.
     # Restart completion additionally requires a new exact Pod UID below.
     wait_until 'current application source, workflow authority and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
       application_environment_ready "$project" "$generation"
-    # Running precedes setup. Setup recovery may replace the workspace Pod, so
-    # discover and assert its current identity only after setup has committed.
-    if [[ "$phase" == a ]]; then run_kube_assertions; fi
+    # The all-scope journey stays on the public API/data plane: setup readiness
+    # plus its child-visible marker prove restart completion and workspace
+    # preservation. The ordinary project-only journey retains its Kubernetes
+    # identity and PVC assertions.
+    if [[ "$phase" == a && "$APP_SECRET_ALL_SCOPES" != 1 ]]; then run_kube_assertions; fi
     generation="$(jq -er .operation_generation "$TMPDIR_SMOKE/app-environment.json")"
-    capture_application_pod "$phase" "$generation"
-    if [[ -n "$previous_uid" ]]; then
-      [[ "$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")" != "$previous_uid" ]] || die 'source replacement reused the old Pod'
-      [[ "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
-        die 'source replacement changed persistent workspace claims'
-      [[ "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
-        die 'source replacement changed the exact owned SandboxClaim'
+    if [[ "$APP_SECRET_ALL_SCOPES" != 1 ]]; then
+      capture_application_pod "$phase" "$generation"
+      if [[ -n "$previous_uid" ]]; then
+        [[ "$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")" != "$previous_uid" ]] || die 'source replacement reused the old Pod'
+        [[ "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
+          die 'source replacement changed persistent workspace claims'
+        [[ "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
+          die 'source replacement changed the exact owned SandboxClaim'
+      fi
+      previous_uid="$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")"
     fi
-    previous_uid="$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")"
+    if [[ "$phase" == a && "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+      create_application_workspace_marker
+    fi
     if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
-      guest_script="$(application_all_scopes_guest_check "$hashes_name")"
+      guest_script="$(application_all_scopes_guest_check "$hashes_name" "$APP_WORKSPACE_MARKER_SHA256")"
     else
       guest_script="$(application_guest_check "$expected")"
     fi
@@ -2083,7 +2212,6 @@ assert_pod_shape() {
   local gateway_deploy_json="$TMPDIR_SMOKE/gateway-deployment.json"
   local runtime_class gateway_runtime_class node gateway_node node_label gateway_node_label
   local gateway_image gateway_status_image gateway_image_id containers gateway_containers
-  local gateway_secret_names gateway_secret_count gateway_secret_resource gateway_secret_data_size
   local gateway_host_key_env gateway_daemon_timeout gateway_startup_failure_threshold
   local gateway_progress_deadline gateway_restart_count
 
@@ -2092,16 +2220,6 @@ assert_pod_shape() {
   kubectl_dev -n "$SANDBOX_NAMESPACE" get deploy \
     -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
     -o json >"$gateway_deploy_json"
-  gateway_secret_names="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get secret \
-    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway-host-key" \
-    -o name)"
-  gateway_secret_count="$(printf '%s\n' "$gateway_secret_names" | sed '/^$/d' | wc -l | tr -d ' ')"
-  gateway_secret_resource="$(printf '%s\n' "$gateway_secret_names" | sed -n '1p')"
-  gateway_secret_data_size=0
-  if [[ -n "$gateway_secret_resource" ]]; then
-    gateway_secret_data_size="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get "$gateway_secret_resource" \
-      -o jsonpath='{.data.host_ed25519}' | wc -c | tr -d ' ')"
-  fi
   runtime_class="$(jq -r '.spec.runtimeClassName // ""' "$pod_json")"
   gateway_runtime_class="$(jq -r '.spec.runtimeClassName // ""' "$gateway_pod_json")"
   node="$(jq -r '.spec.nodeName // ""' "$pod_json")"
@@ -2144,10 +2262,6 @@ assert_pod_shape() {
     die "gateway pod containers=$gateway_containers, want codewire-gateway"
   jq -e '.items[]?.spec.template.spec.containers[]? | select(.name=="codewire-gateway")' "$gateway_deploy_json" >/dev/null || \
     die "gateway Deployment is missing codewire-gateway container"
-  [[ "$gateway_secret_count" == "1" ]] || \
-    die "gateway host key Secret count=$gateway_secret_count, want 1"
-  [[ "$gateway_secret_data_size" -gt 0 ]] || \
-    die "gateway host key Secret is missing host_ed25519 data"
   [[ "$gateway_host_key_env" == "/codewire/gateway/ssh/host_ed25519" ]] || \
     die "gateway CODEWIRE_SSH_HOST_KEY_PATH=$gateway_host_key_env, want /codewire/gateway/ssh/host_ed25519"
   if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
@@ -2165,34 +2279,67 @@ assert_pod_shape() {
     [[ "$gateway_startup_failure_threshold" == "45" ]] || \
       die "non-confidential gateway startup failureThreshold=$gateway_startup_failure_threshold, want 45"
   fi
-  jq -e '
-    .items[0].spec.template.spec
+  # Bind readiness and the exact host-key projection/copy shape to this one
+  # observed Pod. General end-to-end modes separately prove the live gateway
+  # path; inspecting Secret objects or their data would add no behavior proof.
+  jq -e --arg id "$ENV_ID" --arg pod "$GATEWAY_POD_NAME" '
+    .metadata.name == $pod
+    and .metadata.labels["codewire.sh/environment-id"] == $id
+    and .metadata.labels["codewire.sh/type"] == "gateway"
+    and ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length == 1)
+    and (.spec
     | (
         [
           .initContainers[]?
           | select(
               .name == "codewire-gateway-host-key-init"
-              and ([.volumeMounts[]? | select(.name == "gateway-host-key" and .readOnly == true)] | length == 1)
+              and ([.volumeMounts[]? | select(
+                .name == "gateway-host-key"
+                and .mountPath == "/codewire/gateway-host-key"
+                and .readOnly == true
+              )] | length == 1)
+              and ([.volumeMounts[]? | select(
+                .name == "gateway-state"
+                and .mountPath == "/codewire/gateway"
+              )] | length == 1)
               and ([.volumeMounts[]? | select(.name == "workspace")] | length == 0)
+              and ((.command[2] // "") | contains("/codewire/gateway-host-key/host_ed25519"))
+              and ((.command[2] // "") | contains("/codewire/gateway/ssh/host_ed25519"))
+              and ((.command[2] // "") | contains("chmod 0600"))
+            )
+        ] | length == 1
+      )
+      and (
+        [.volumes[]? | select(.name == "gateway-state" and .emptyDir == {})] | length == 1
+      )
+      and (
+        [
+          .volumes[]?
+          | select(
+              .name == "gateway-host-key"
+              and .secret.secretName == ("cw-gateway-host-key-" + $id)
+              and .secret.items == [{key:"host_ed25519", path:"host_ed25519", mode:292}]
             )
         ] | length == 1
       )
       and (
         [
-          .volumes[]?
-          | select(.name == "gateway-host-key" and .secret.secretName != null)
+          .containers[]?
+          | select(
+              .name == "codewire-gateway"
+              and ([.volumeMounts[]? | select(
+                .name == "gateway-state"
+                and .mountPath == "/codewire/gateway"
+              )] | length == 1)
+              and ([.volumeMounts[]? | select(
+                .name == "gateway-host-key" or .name == "workspace"
+              )] | length == 0)
+            )
         ] | length == 1
       )
-      and (
-        [
-          .containers[]?
-          | select(.name == "codewire-gateway")
-          | .volumeMounts[]?
-          | select(.name == "workspace")
-        ] | length == 0
-      )
-  ' "$gateway_deploy_json" >/dev/null || \
-    die "gateway Deployment must seed host key from a read-only Secret without mounting workspace state"
+    )
+  ' "$gateway_pod_json" >/dev/null || \
+    die "Ready gateway Pod must project host_ed25519 through the exact read-only host-key init/volume shape"
   if [[ -n "$EXPECTED_GATEWAY_IMAGE" ]]; then
     [[ "$gateway_image" == "$EXPECTED_GATEWAY_IMAGE" ]] || \
       die "gateway image=$gateway_image, want $EXPECTED_GATEWAY_IMAGE"
@@ -4752,6 +4899,7 @@ main() {
   fi
   if application_all_scopes_requested; then
     APP_SECRET_ALL_SCOPES=1
+    SMOKE_SKIP_KUBE=1
     validate_application_all_scopes_options
   elif application_secrets_selected; then
     validate_application_secrets_options
