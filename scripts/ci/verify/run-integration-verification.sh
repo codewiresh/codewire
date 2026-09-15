@@ -340,6 +340,13 @@ run_database() {
   fi
   assert_passed_count "environment external cleanup matrix" "$logfile" 3
 
+  logfile="$RUN_DIR/environment-session-admission.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_daemon::session_mutation::tests::db_' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment session admission matrix" "$logfile" 4
+
   logfile="$RUN_DIR/environment-destroy-template-hint.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib \
