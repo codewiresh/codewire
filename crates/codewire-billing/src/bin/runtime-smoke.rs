@@ -19,8 +19,25 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
+#[path = "runtime_smoke/dev_receipt.rs"]
+mod dev_receipt;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--dev-receipt-only"] {
+        // Never expose database errors, recipient values, URLs, or secrets in
+        // the live receipt harness's error chain.
+        return dev_receipt::run().await.map_err(|_| {
+            anyhow::anyhow!(
+                "billing-dev-receipt: failed; delivery may be uncertain; do not retry; retain and inspect attempt"
+            )
+        });
+    }
+    anyhow::ensure!(
+        args.is_empty(),
+        "unsupported billing runtime smoke arguments"
+    );
     let base_url = required_env("BILLING_RUNTIME_BASE_URL")?
         .trim_end_matches('/')
         .to_owned();

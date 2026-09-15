@@ -32,6 +32,8 @@ fail() {
 }
 
 assert_static_contract() {
+  local application_secret_smoke gateway_host_key_shape normalized_smoke pod_shape
+
   bash -n "$SMOKE"
   bash -n "$WRAPPER"
   bash -n "$CANDIDATE"
@@ -75,6 +77,47 @@ assert_static_contract() {
   done
   grep -Fq '[[ "$CODEWIRE_SERVER_URL" == "$EXPECTED_CODEWIRE_DEV_SERVER_URL"' \
     "$SMOKE" || fail "smoke no longer checks its externally configured dev endpoint"
+  normalized_smoke="$(sed -E ':join; /\\$/ { N; s/\\\n[[:space:]]*/ /; b join; }' "$SMOKE")"
+  if rg -i 'kubectl_dev[^#]*(secret|gateway_secret)' <<<"$normalized_smoke" >/dev/null; then
+    fail "runtime smoke reads Kubernetes Secret resources instead of proving their use through workload behavior"
+  fi
+  pod_shape="$(awk '/^assert_pod_shape\(\)/,/^}/' "$SMOKE")"
+  gateway_host_key_shape="$(awk '/# Bind readiness and the exact host-key/,/Ready gateway Pod must project/' <<<"$pod_shape")"
+  rg -F '.metadata.name == $pod' <<<"$gateway_host_key_shape" >/dev/null ||
+    fail "gateway host-key proof is not bound to the observed Pod"
+  rg -F '.type == "Ready" and .status == "True"' <<<"$gateway_host_key_shape" >/dev/null ||
+    fail "gateway host-key proof no longer requires observed Pod readiness"
+  rg -F '.secret.secretName == ("cw-gateway-host-key-" + $id)' <<<"$gateway_host_key_shape" >/dev/null ||
+    fail "gateway host-key proof no longer binds the Pod volume reference"
+  rg -F "' \"\$gateway_pod_json\" >/dev/null" <<<"$gateway_host_key_shape" >/dev/null ||
+    fail "gateway host-key proof is not evaluated against the Ready Pod document"
+  if rg -F 'gateway_deploy_json' <<<"$gateway_host_key_shape" >/dev/null; then
+    fail "gateway host-key proof reverted to an unbound Deployment template"
+  fi
+  application_secret_smoke="$(awk '/^run_application_secrets_smoke\(\)/,/^}/' "$SMOKE")"
+  rg -F 'cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty' <<<"$application_secret_smoke" >/dev/null ||
+    fail "application-secret smoke no longer proves the live managed exec path"
+  [[ "$(rg -c 'start_application_restart_witness APP_SECRET_ALL_HASHES_' <<<"$application_secret_smoke")" == 2 ]] ||
+    fail "all-scope application smoke no longer starts a witness before both source restarts"
+  rg -F 'wait_for_application_restart_witness_termination "$phase"' <<<"$application_secret_smoke" >/dev/null ||
+    fail "all-scope application smoke no longer requires exact old session termination"
+  restart_witness="$(awk '/^application_restart_witness_guest\(\)/,/^run_application_secret_pty\(\)/' "$SMOKE")"
+  rg -F 'cw_with_timeout 30 run --no-tty --output json "$ENV_ID"' <<<"$restart_witness" >/dev/null ||
+    fail "restart witness no longer captures the durable session identity from public JSON launch output"
+  rg -F 'cw_with_timeout 30 logs "$ENV_ID" "$session_id" --raw' <<<"$restart_witness" >/dev/null ||
+    fail "restart witness no longer binds its ready receipt to exact-session public logs"
+  [[ "$(rg -F -c 'cw_with_timeout 30 list "$ENV_ID" --output json' <<<"$restart_witness")" == 2 ]] ||
+    fail "restart witness no longer checks exact-session readiness and termination through public session lists"
+  for terminal_state in Stopped Exited Failed Interrupted; do
+    rg -F "\$state == \"$terminal_state\"" <<<"$restart_witness" >/dev/null ||
+      fail "restart witness no longer recognizes terminal session state $terminal_state"
+  done
+  if rg -e 'APP_RESTART_WITNESS_PID|kill -0|stop_application_restart_witness' <<<"$restart_witness" >/dev/null; then
+    fail "restart witness reverted to host attachment/PID termination proof"
+  fi
+  awk '/^create_application_workspace_marker\(\)/,/^}/' "$SMOKE" |
+    rg -F 'head -c 32 /dev/urandom' >/dev/null ||
+    fail "all-scope application marker is no longer guest-randomized"
   awk '/^run_tailnet_doctor\(\)/,/^}/' "$SMOKE" \
     | rg -F 'capture_tailnet_doctor_failure_diagnostics' >/dev/null || \
     fail "tailnet doctor no longer captures safe allocator diagnostics"
@@ -327,16 +370,9 @@ EOF
 
   APPLICATION_ONLY_KUBECTL_LOG="$kubectl_log" \
     PATH="$fake_bin:$PATH" \
-    SMOKE_SKIP_KUBE=1 \
     CODEWIRE_SERVER_URL=https://dev.example.invalid \
     EXPECTED_CODEWIRE_DEV_SERVER_URL=https://dev.example.invalid \
-    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.10:41641 \
-    EXPECTED_UDP_RELAY_BIND_ADDRS=0.0.0.0:41641 \
-    EXPECTED_UDP_RELAY_ALLOCATOR_URL=https://allocator.example.invalid \
-    EXPECTED_TAILNET_DIRECT_UDP_LB_IP=192.0.2.11 \
-    EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE=test-zone \
-    EXPECTED_RUNTIME_TRANSPORT_REGION=test-region \
-    "$WRAPPER" --help >"$output"
+    "$WRAPPER" --only application-secrets-all-scopes --help >"$output"
 
   [[ ! -e "$kubectl_log" ]] ||
     fail "application-only wrapper invoked kubectl"

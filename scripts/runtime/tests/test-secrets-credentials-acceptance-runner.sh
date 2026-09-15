@@ -92,7 +92,10 @@ case "$label" in
     ;;
   dev-application-all-scopes)
     [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --only application-secrets-all-scopes" &&
-       -z "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR+x}" && -z "${CW_CONFIG_DIR+x}" ]] || exit 95
+       -z "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR+x}" && -z "${CW_CONFIG_DIR+x}" &&
+       -z "${KUBECONFIG+x}" && -z "${KUBE_CONTEXT+x}" &&
+       -z "${CODEWIRE_SERVER_NAMESPACE+x}" && -z "${SANDBOX_NAMESPACE+x}" &&
+       -z "${EXPECTED_NODE+x}" && -z "${EXPECTED_TAILNET_PATH_TRANSPORT+x}" ]] || exit 95
     ;;
   dev-provider-ssh)
     [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --only provider-ssh" ]] || exit 96
@@ -113,7 +116,7 @@ for forbidden in CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY CW_CONFIG_DIR \
     SSH_AUTH_SOCK BAO_TOKEN HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY; do
   [[ -z "${!forbidden+x}" ]] || exit 97
 done
-[[ "$HOME" == /nonexistent && "$PATH" == /usr/local/bin:/usr/bin:/bin ]] || exit 99
+[[ "$HOME" == /nonexistent && "$PATH" == /usr/bin:/bin ]] || exit 99
 printf '%s\n' "$label" >>"$calls"
 printf 'opaque child output: %s\n' "$label"
 if [[ -f "$fixtures/stdin-$label" ]]; then
