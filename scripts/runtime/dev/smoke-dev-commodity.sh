@@ -113,7 +113,7 @@ APP_SECRET_DOCUMENT=""
 APP_SECRET_CREATE_ATTEMPTED=0
 APP_SECRET_ALL_SCOPES=0
 APP_WORKSPACE_MARKER_SHA256=""
-APP_RESTART_WITNESS_PID=""
+APP_RESTART_WITNESS_SESSION_ID=""
 SMOKE_OAUTH_LOGIN_ATTEMPTED=0
 SMOKE_OAUTH_LOGIN_DIR=""
 SMOKE_OAUTH_RUNTIME_PARENT=""
@@ -443,7 +443,6 @@ done
 
 cleanup() {
   local rc=$?
-  stop_application_restart_witness || true
   stop_peer_relay_packet_diagnostics || true
   if [[ "$rc" != "0" ]]; then
     collect_failure_diagnostics "failure" || true
@@ -1651,55 +1650,85 @@ exec sleep '$witness_lifetime'
 SCRIPT
 }
 
-stop_application_restart_witness() {
-  local pid="${APP_RESTART_WITNESS_PID:-}"
-  [[ -n "$pid" ]] || return 0
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  APP_RESTART_WITNESS_PID=""
+application_restart_witness_ready() {
+  local phase="$1" session_id="$2"
+  local logs="$TMPDIR_SMOKE/app-restart-witness-$phase.log"
+  local sessions="$TMPDIR_SMOKE/app-restart-witness-$phase-ready.json"
+  local error="$TMPDIR_SMOKE/app-restart-witness-$phase-ready.err"
+
+  if ! cw_with_timeout 30 logs "$ENV_ID" "$session_id" --raw >"$logs" 2>"$error"; then
+    SMOKE_LAST_WAIT_DETAIL="public logs did not return exact managed session $session_id"
+    return 1
+  fi
+  if ! grep -qx application-restart-witness-ready "$logs"; then
+    SMOKE_LAST_WAIT_DETAIL="exact managed session $session_id has not emitted its ready receipt"
+    return 1
+  fi
+  if ! cw_with_timeout 30 list "$ENV_ID" --output json >"$sessions" 2>"$error"; then
+    SMOKE_LAST_WAIT_DETAIL="public session list did not return for exact managed session $session_id"
+    return 1
+  fi
+  if ! jq -e --arg id "$session_id" '
+    type == "array" and
+    ([.[] | select(.session_id == $id)] | length) == 1 and
+    ([.[] | select(.session_id == $id)][0].state == "Running")
+  ' "$sessions" >/dev/null; then
+    SMOKE_LAST_WAIT_DETAIL="exact managed session $session_id is not uniquely Running after its ready receipt"
+    return 1
+  fi
 }
 
 start_application_restart_witness() {
-  local hashes_name="$1" phase="$2" guest_script deadline
-  local stdout="$TMPDIR_SMOKE/app-restart-witness-$phase.out"
-  local stderr="$TMPDIR_SMOKE/app-restart-witness-$phase.err"
-  [[ -z "$APP_RESTART_WITNESS_PID" ]] || die 'application restart witness is already running'
+  local hashes_name="$1" phase="$2" guest_script deadline session_id
+  local launch="$TMPDIR_SMOKE/app-restart-witness-$phase-launch.json"
+  local error="$TMPDIR_SMOKE/app-restart-witness-$phase-launch.err"
+  [[ -z "$APP_RESTART_WITNESS_SESSION_ID" ]] || die 'application restart witness is already running'
   guest_script="$(application_restart_witness_guest "$hashes_name" "$APP_WORKSPACE_MARKER_SHA256")"
-  cw_with_timeout "$((SMOKE_TIMEOUT_SECONDS + 300))" run --no-tty "$ENV_ID" -- /bin/sh -c "$guest_script" \
-    >"$stdout" 2>"$stderr" &
-  APP_RESTART_WITNESS_PID=$!
+  cw_with_timeout 30 run --no-tty --output json "$ENV_ID" -- /bin/sh -c "$guest_script" \
+    >"$launch" 2>"$error" || die 'managed application restart witness launch failed; output suppressed'
+  jq -e '
+    type == "object" and
+    (.session_id | type == "string" and length > 0) and
+    (.state == "Starting" or .state == "Running") and
+    (.command | type == "array" and length == 3 and
+      .[0] == "/bin/sh" and .[1] == "-c" and
+      (.[2] | contains("application-restart-witness-ready"))) and
+    .pty == false and .exit_code == null
+  ' "$launch" >/dev/null || die 'managed application restart witness returned invalid session identity metadata'
+  session_id="$(jq -er '.session_id' "$launch")" || die 'managed application restart witness session identity is missing'
+  APP_RESTART_WITNESS_SESSION_ID="$session_id"
   deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
-  while (( $(seconds_now) < deadline )); do
-    if grep -qx application-restart-witness-ready "$stdout"; then
-      if kill -0 "$APP_RESTART_WITNESS_PID" 2>/dev/null; then return 0; fi
-      wait "$APP_RESTART_WITNESS_PID" 2>/dev/null || true
-      APP_RESTART_WITNESS_PID=""
-      die 'application restart witness exited before source replacement'
-    fi
-    if ! kill -0 "$APP_RESTART_WITNESS_PID" 2>/dev/null; then
-      wait "$APP_RESTART_WITNESS_PID" 2>/dev/null || true
-      APP_RESTART_WITNESS_PID=""
-      die 'application restart witness failed before its ready receipt'
-    fi
-    sleep 5
-  done
-  stop_application_restart_witness
-  die 'timed out waiting for application restart witness readiness'
+  wait_until "exact managed session $session_id readiness" "$deadline" \
+    application_restart_witness_ready "$phase" "$session_id"
+}
+
+application_restart_witness_terminal() {
+  local phase="$1" session_id="$2"
+  local sessions="$TMPDIR_SMOKE/app-restart-witness-$phase-terminal.json"
+  local error="$TMPDIR_SMOKE/app-restart-witness-$phase-terminal.err"
+  if ! cw_with_timeout 30 list "$ENV_ID" --output json >"$sessions" 2>"$error"; then
+    SMOKE_LAST_WAIT_DETAIL="public session list did not return for exact managed session $session_id"
+    return 1
+  fi
+  if ! jq -e --arg id "$session_id" '
+    type == "array" and
+    ([.[] | select(.session_id == $id)] | length) == 1 and
+    ([.[] | select(.session_id == $id)][0].state as $state |
+      $state == "Stopped" or $state == "Exited" or
+      $state == "Failed" or $state == "Interrupted")
+  ' "$sessions" >/dev/null; then
+    SMOKE_LAST_WAIT_DETAIL="exact managed session $session_id is missing, ambiguous or non-terminal"
+    return 1
+  fi
 }
 
 wait_for_application_restart_witness_termination() {
-  local phase="$1" deadline
-  [[ -n "$APP_RESTART_WITNESS_PID" ]] || die 'application restart witness is missing'
+  local phase="$1" deadline session_id="$APP_RESTART_WITNESS_SESSION_ID"
+  [[ -n "$session_id" ]] || die 'application restart witness session identity is missing'
   deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
-  while kill -0 "$APP_RESTART_WITNESS_PID" 2>/dev/null; do
-    if (( $(seconds_now) >= deadline )); then
-      stop_application_restart_witness
-      die "source $phase did not terminate the old managed application child"
-    fi
-    sleep 5
-  done
-  wait "$APP_RESTART_WITNESS_PID" 2>/dev/null || true
-  APP_RESTART_WITNESS_PID=""
+  wait_until "exact managed session $session_id to reach a terminal state after source $phase" "$deadline" \
+    application_restart_witness_terminal "$phase" "$session_id"
+  APP_RESTART_WITNESS_SESSION_ID=""
 }
 
 run_application_secret_pty() {

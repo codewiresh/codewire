@@ -38,7 +38,7 @@ fixture() {
   APP_SECRET_PROJECTS=(); APP_SECRET_IDS=(); APP_SECRET_VALUES=(); APP_SECRET_HASHES=()
   APP_SECRET_USER_ATTEMPTS=(); APP_SECRET_ORG_ATTEMPTS=(); APP_SECRET_ALL_KEYS=()
   APP_SECRET_ALL_HASHES_A=(); APP_SECRET_ALL_HASHES_B=(); APP_SECRET_ALL_HASHES_CLEAR=()
-  SMOKE_OAUTH_ENV=(); APP_SECRET_ALL_SCOPES=0; APP_WORKSPACE_MARKER_SHA256=''; APP_RESTART_WITNESS_PID=''
+  SMOKE_OAUTH_ENV=(); APP_SECRET_ALL_SCOPES=0; APP_WORKSPACE_MARKER_SHA256=''; APP_RESTART_WITNESS_SESSION_ID=''
   SMOKE_OAUTH_LOGIN_ATTEMPTED=0
   SMOKE_OAUTH_LOGIN_DIR=''; SMOKE_OAUTH_RUNTIME_PARENT=''; SMOKE_OAUTH_RUNTIME_DIR=''
   APP_SECRET_DOCUMENT=''; APP_SECRET_CREATE_ATTEMPTED=0; ENV_ID=''; CLAIM_NAME=fixture-claim
@@ -60,6 +60,8 @@ fixture() {
   printf '[]\n' >"$TMPDIR_SMOKE/user.db"
   printf '[]\n' >"$TMPDIR_SMOKE/organization.db"
   printf '[]\n' >"$TMPDIR_SMOKE/environments.db"
+  printf '[]\n' >"$TMPDIR_SMOKE/sessions.db"
+  printf '[]\n' >"$TMPDIR_SMOKE/host-attachments.db"
   printf '1\n' >"$TMPDIR_SMOKE/pod-incarnation"
   : >"$TMPDIR_SMOKE/calls"
 }
@@ -152,9 +154,18 @@ cw() {
         "$TMPDIR_SMOKE/environments.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/environments.db"
       printf '%s\n' "$(( $(<"$TMPDIR_SMOKE/pod-incarnation") + 1 ))" >"$TMPDIR_SMOKE/pod-incarnation"
-      if [[ "$APP_SECRET_ALL_SCOPES" == 1 && -n "$APP_RESTART_WITNESS_PID" &&
-            "$APP_FAILURE" != witness-not-terminated ]]; then
-        kill "$APP_RESTART_WITNESS_PID"
+      # Model the old false-positive mechanism independently: the host-side
+      # attachment transport always ends, but that says nothing about whether
+      # the durable managed session ended in the guest.
+      jq 'map(if .state == "Attached" then .state = "Terminated" else . end)' \
+        "$TMPDIR_SMOKE/host-attachments.db" >"$TMPDIR_SMOKE/host-attachments.next"
+      mv "$TMPDIR_SMOKE/host-attachments.next" "$TMPDIR_SMOKE/host-attachments.db"
+      if [[ "$APP_SECRET_ALL_SCOPES" == 1 &&
+            "$APP_FAILURE" != attachment-terminated-session-running ]]; then
+        jq 'map(if .state == "Running" then
+          .state = "Interrupted" | .status_message = "source update interrupted session"
+          else . end)' "$TMPDIR_SMOKE/sessions.db" >"$TMPDIR_SMOKE/sessions.next"
+        mv "$TMPDIR_SMOKE/sessions.next" "$TMPDIR_SMOKE/sessions.db"
       fi
       case "$APP_FAILURE" in
         marker-replacement) printf 'replacement-marker\n' >"$TMPDIR_SMOKE/workspace-marker" ;;
@@ -173,18 +184,34 @@ cw() {
     'run --no-tty '*'/dev/urandom'*)
       printf 'fixture-random-workspace-marker\n' >"$TMPDIR_SMOKE/workspace-marker"
       sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1 ;;
-    'run --no-tty '*'application-restart-witness-ready'*)
+    'run --no-tty --output json '*'application-restart-witness-ready'*)
+      local session_count session_id guest_command
       [[ -f "$TMPDIR_SMOKE/workspace-marker" ]] || return 1
       [[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]] || return 1
-      printf 'application-restart-witness-ready\n'
-      while :; do command sleep 0.05; done ;;
+      session_count="$(jq length "$TMPDIR_SMOKE/sessions.db")"
+      printf -v session_id 'fixture-witness-%d' "$((session_count + 1))"
+      guest_command="${9-}"
+      jq --arg id "$session_id" --arg command "$guest_command" '. + [{
+        session_id:$id,state:"Running",command:["/bin/sh","-c",$command],
+        working_dir:"/workspace",pty:false,exit_code:null,output_end_offset:36,status_message:""
+      }]' "$TMPDIR_SMOKE/sessions.db" >"$TMPDIR_SMOKE/sessions.next"
+      mv "$TMPDIR_SMOKE/sessions.next" "$TMPDIR_SMOKE/sessions.db"
+      jq --arg id "$session_id" '. + [{session_id:$id,state:"Attached"}]' \
+        "$TMPDIR_SMOKE/host-attachments.db" >"$TMPDIR_SMOKE/host-attachments.next"
+      mv "$TMPDIR_SMOKE/host-attachments.next" "$TMPDIR_SMOKE/host-attachments.db"
+      printf 'application-restart-witness-ready\n' >"$TMPDIR_SMOKE/session-$session_id.log"
+      jq --arg id "$session_id" '.[] | select(.session_id == $id)' "$TMPDIR_SMOKE/sessions.db" ;;
+    'logs '*' --raw')
+      local session_id="$3"
+      jq -e --arg id "$session_id" 'any(.[]; .session_id == $id)' "$TMPDIR_SMOKE/sessions.db" >/dev/null || return 1
+      cat "$TMPDIR_SMOKE/session-$session_id.log" ;;
     'run --no-tty '*)
       if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
         [[ -f "$TMPDIR_SMOKE/workspace-marker" ]] || return 1
         [[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]] || return 1
       fi
       printf 'application-secret-check-ok\n' ;;
-    'list '*" --output json") printf '[]\n' ;;
+    'list '*" --output json") cat "$TMPDIR_SMOKE/sessions.db" ;;
     *) fail "unexpected mock CLI operation: $*" ;;
   esac
 }
@@ -657,7 +684,18 @@ run_application_secrets_smoke
 [[ "$APP_WORKSPACE_MARKER_SHA256" =~ ^[0-9a-f]{64}$ ]]
 [[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]]
 [[ "$(awk '$0 == "application-restart-witness-ready" { count++ } END { print count + 0 }' \
-  "$TMPDIR_SMOKE"/app-restart-witness-*.out)" == 2 ]]
+  "$TMPDIR_SMOKE"/app-restart-witness-*.log)" == 2 ]]
+jq -e '
+  length == 2 and
+  ([.[].session_id] | unique | length) == 2 and
+  all(.[]; .state == "Interrupted")
+' "$TMPDIR_SMOKE/sessions.db" >/dev/null ||
+  fail 'all-scope restart witnesses were not distinct durable sessions interrupted by their source updates'
+jq -e 'length == 2 and all(.[]; .state == "Terminated")' \
+  "$TMPDIR_SMOKE/host-attachments.db" >/dev/null ||
+  fail 'all-scope fixture did not terminate each modeled host attachment'
+[[ "$(jq -r .session_id "$TMPDIR_SMOKE"/app-restart-witness-*-launch.json | sort -u | wc -l)" == 2 ]] ||
+  fail 'JSON witness launches did not capture two distinct session identities'
 grep -Fq -- '--secrets platform:id:00000000-0000-4000-8000-000000000002 --user-secrets platform --org-secrets --yes --output json' \
   "$TMPDIR_SMOKE/calls" || fail 'all-scope update did not resubmit every selector'
 jq -e '.[0].source_selection.secrets == {}' "$TMPDIR_SMOKE/environments.db" >/dev/null
@@ -729,9 +767,10 @@ for value in "${APP_SECRET_VALUES[@]}"; do
 done
 pass
 
-for failure in witness-not-terminated marker-replacement marker-missing; do
+for failure in attachment-terminated-session-running marker-replacement marker-missing; do
   reject_public_restart_proof() {
     fixture
+    trap 'cp "$TMPDIR_SMOKE/sessions.db" "$APP_TEST_ROOT/failure-sessions.json"; cp "$TMPDIR_SMOKE/host-attachments.db" "$APP_TEST_ROOT/failure-host-attachments.json"; cp "$TMPDIR_SMOKE/calls" "$APP_TEST_ROOT/failure-calls"' EXIT
     APP_SECRET_ALL_SCOPES=1
     prepare_application_secrets
     create_environment
@@ -740,8 +779,18 @@ for failure in witness-not-terminated marker-replacement marker-missing; do
   }
   expect_failure "$failure" reject_public_restart_proof
   case "$failure" in
-    witness-not-terminated)
-      grep -Fq 'source b did not terminate the old managed application child' "$APP_TEST_ROOT/failure.err" ;;
+    attachment-terminated-session-running)
+      # `cw run --output json` has already returned on the host. Leaving its
+      # exact durable session Running must still fail the restart proof.
+      grep -Fq 'timed out waiting for exact managed session fixture-witness-1 to reach a terminal state after source b' \
+        "$APP_TEST_ROOT/failure.err"
+      jq -e 'length == 1 and .[0].session_id == "fixture-witness-1" and .[0].state == "Running"' \
+        "$APP_TEST_ROOT/failure-sessions.json" >/dev/null
+      jq -e 'length == 1 and .[0].session_id == "fixture-witness-1" and .[0].state == "Terminated"' \
+        "$APP_TEST_ROOT/failure-host-attachments.json" >/dev/null
+      grep -Fq 'run --no-tty --output json' "$APP_TEST_ROOT/failure-calls"
+      grep -Fq 'logs 00000000-0000-4000-8000-000000000099 fixture-witness-1 --raw' \
+        "$APP_TEST_ROOT/failure-calls" ;;
     marker-replacement|marker-missing)
       grep -Fq 'managed application-secret exec failed; output suppressed' "$APP_TEST_ROOT/failure.err" ;;
   esac

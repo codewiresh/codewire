@@ -100,7 +100,21 @@ assert_static_contract() {
   [[ "$(rg -c 'start_application_restart_witness APP_SECRET_ALL_HASHES_' <<<"$application_secret_smoke")" == 2 ]] ||
     fail "all-scope application smoke no longer starts a witness before both source restarts"
   rg -F 'wait_for_application_restart_witness_termination "$phase"' <<<"$application_secret_smoke" >/dev/null ||
-    fail "all-scope application smoke no longer requires old managed-child termination"
+    fail "all-scope application smoke no longer requires exact old session termination"
+  restart_witness="$(awk '/^application_restart_witness_guest\(\)/,/^run_application_secret_pty\(\)/' "$SMOKE")"
+  rg -F 'cw_with_timeout 30 run --no-tty --output json "$ENV_ID"' <<<"$restart_witness" >/dev/null ||
+    fail "restart witness no longer captures the durable session identity from public JSON launch output"
+  rg -F 'cw_with_timeout 30 logs "$ENV_ID" "$session_id" --raw' <<<"$restart_witness" >/dev/null ||
+    fail "restart witness no longer binds its ready receipt to exact-session public logs"
+  [[ "$(rg -F -c 'cw_with_timeout 30 list "$ENV_ID" --output json' <<<"$restart_witness")" == 2 ]] ||
+    fail "restart witness no longer checks exact-session readiness and termination through public session lists"
+  for terminal_state in Stopped Exited Failed Interrupted; do
+    rg -F "\$state == \"$terminal_state\"" <<<"$restart_witness" >/dev/null ||
+      fail "restart witness no longer recognizes terminal session state $terminal_state"
+  done
+  if rg -e 'APP_RESTART_WITNESS_PID|kill -0|stop_application_restart_witness' <<<"$restart_witness" >/dev/null; then
+    fail "restart witness reverted to host attachment/PID termination proof"
+  fi
   awk '/^create_application_workspace_marker\(\)/,/^}/' "$SMOKE" |
     rg -F 'head -c 32 /dev/urandom' >/dev/null ||
     fail "all-scope application marker is no longer guest-randomized"
