@@ -312,22 +312,27 @@ mod tests {
             invalid.server_url = server.into();
             assert!(validate_source_metadata(&project, "", 0, "", Some(&invalid)).is_err());
         }
-        authority.profile_slots = vec!["codex".into()];
+        authority.profile_slots = vec!["github".into()];
         assert!(validate_source_metadata(&project, "", 0, "", Some(&authority)).is_err());
         project.credentials = Some(codewire_project::CredentialBinding {
             profile: "platform:id:11111111-1111-4111-8111-111111111111".into(),
         });
-        validate_source_metadata(
-            &project,
-            "11111111-1111-4111-8111-111111111111",
-            7,
-            "user/work",
-            Some(&authority),
-        )
-        .unwrap();
+        for slot in ["codex", "github"] {
+            authority.profile_slots = vec![slot.into()];
+            validate_source_metadata(
+                &project,
+                "11111111-1111-4111-8111-111111111111",
+                7,
+                "user/work",
+                Some(&authority),
+            )
+            .unwrap();
+        }
         for profile_slots in [
             vec!["codex".into(), "codex".into()],
             vec!["openai".into(), "codex".into()],
+            vec!["github".into(), "codex".into()],
+            vec!["GitHub".into()],
             vec!["unregistered".into()],
         ] {
             let mut invalid = authority.clone();
@@ -342,10 +347,10 @@ mod tests {
             server_url: "https://synthetic.invalid".into(),
             organization_id: "test-org".into(),
             user_id: "test-owner".into(),
-            profile_slots: ["codex".into(), "openai".into()].into(),
+            profile_slots: ["codex".into(), "github".into(), "openai".into()].into(),
         };
         let encoded = serde_json::to_string(&authority).unwrap();
-        assert!(encoded.contains(r#""profile_slots":["codex","openai"]"#));
+        assert!(encoded.contains(r#""profile_slots":["codex","github","openai"]"#));
         assert_eq!(
             serde_json::from_str::<PlatformSourceAuthority>(&encoded).unwrap(),
             authority
@@ -353,6 +358,7 @@ mod tests {
         for invalid in [
             r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner"}"#,
             r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner","profile_slots":["openai","codex"]}"#,
+            r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner","profile_slots":["github","codex"]}"#,
             r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner","profile_slots":["codex","codex"]}"#,
         ] {
             assert!(serde_json::from_str::<PlatformSourceAuthority>(invalid).is_err());

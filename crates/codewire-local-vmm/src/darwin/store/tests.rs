@@ -10,9 +10,11 @@ use std::time::Instant;
 use rusqlite::types::Value;
 use sha2::{Digest as _, Sha256};
 
+use codewire_access::{AccessProfileId, EnvironmentAccessBinding, EnvironmentId};
+
 use crate::supervisor_metadata::workspace::WorkspaceSourceMode;
 use crate::supervisor_metadata::workspace_plan::WorkspacePlan;
-use crate::supervisor_metadata::{EnvironmentRecord, RunnerRecord};
+use crate::supervisor_metadata::{EnvironmentRecord, PlatformSourceAuthority, RunnerRecord};
 
 pub(in crate::darwin) struct Fixture {
     _temporary: tempfile::TempDir,
@@ -123,14 +125,18 @@ pub(in crate::darwin) fn environment(name: &str) -> EnvironmentRecord {
 
 fn insert_record(connection: &Connection, record: &EnvironmentRecord, id_text: &str) {
     connection.execute(
-        "INSERT INTO environments (id, name, desired_state, observed_state, vcpus, memory_mib, disk_bytes, docker_disk_bytes, generation, host_ports_json, mesh_attachment_json, workspace_plan_json, project_spec_json, project_spec_sha256, access_profile_reference, access_profile_id, access_profile_revision, runner_json, active_artifact_generation, staging_artifact_generation, active_workspace_generation_json, staging_workspace_generation_json, rollback_workspace_generation_json, platform_source_authority_json) VALUES (?1, ?2, 'stopped', 'stopped', ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11, NULL, NULL, NULL, ?12, ?13, ?14, NULL, NULL, NULL, NULL)",
+        "INSERT INTO environments (id, name, desired_state, observed_state, vcpus, memory_mib, disk_bytes, docker_disk_bytes, generation, host_ports_json, mesh_attachment_json, workspace_plan_json, project_spec_json, project_spec_sha256, access_profile_reference, access_profile_id, access_profile_revision, runner_json, active_artifact_generation, staging_artifact_generation, active_workspace_generation_json, staging_workspace_generation_json, rollback_workspace_generation_json, platform_source_authority_json) VALUES (?1, ?2, 'stopped', 'stopped', ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, NULL, NULL, NULL, ?18)",
         params![id_text, record.name, record.vcpus, record.memory_mib,
             record.disk_bytes, record.docker_disk_bytes, record.generation,
             serde_json::to_vec(&record.host_ports).unwrap(),
             record.workspace_plan.encode_canonical().unwrap(), record.project_spec_json,
             record.project_spec_sha256,
+            record.access_profile.as_ref().map(ToString::to_string),
+            record.access_binding.as_ref().map(|binding| binding.profile_id.to_string()),
+            record.access_binding.as_ref().map(|binding| binding.profile_revision),
             record.runner.as_ref().map(|runner| serde_json::to_vec(runner).unwrap()),
-            record.active_artifact_generation, record.staging_artifact_generation],
+            record.active_artifact_generation, record.staging_artifact_generation,
+            record.platform_source_authority.as_ref().map(|authority| serde_json::to_vec(authority).unwrap())],
     ).unwrap();
 }
 
@@ -197,6 +203,47 @@ fn initializes_full_native_schema_once_and_verifies_durability_on_reopen() {
         "reopen must not rewrite boot or namespace"
     );
     assert_eq!(reopened.state().unwrap(), SupervisorState::default());
+}
+
+#[test]
+fn github_profile_slot_round_trips_through_the_native_store() {
+    let fixture = Fixture::new();
+    let mut record = environment("github");
+    let profile_id = "11111111-1111-4111-8111-111111111111";
+    let mut project: codewire_project::ProjectSpec =
+        serde_json::from_slice(record.project_spec_json.as_ref().unwrap()).unwrap();
+    project.credentials = Some(codewire_project::CredentialBinding {
+        profile: format!("platform:id:{profile_id}"),
+    });
+    let project_json = project.canonical_json().unwrap();
+    record.project_spec_sha256 = Some(format!("{:x}", Sha256::digest(&project_json)));
+    record.project_spec_json = Some(project_json);
+    record.access_profile = Some("user/work".parse().unwrap());
+    record.access_binding = Some(EnvironmentAccessBinding {
+        environment_id: EnvironmentId::parse(record.id.to_string()).unwrap(),
+        profile_id: AccessProfileId::parse(profile_id).unwrap(),
+        profile_revision: 9,
+    });
+    record.platform_source_authority = Some(PlatformSourceAuthority {
+        server_url: "https://synthetic.invalid".to_owned(),
+        organization_id: "synthetic-org".to_owned(),
+        user_id: "synthetic-owner".to_owned(),
+        profile_slots: ["github".to_owned()].into(),
+    });
+    record.validate("github").unwrap();
+
+    fixture.seed(std::slice::from_ref(&record));
+    let store = fixture.open().unwrap();
+    let loaded = store.state().unwrap();
+    assert_eq!(loaded.environments.get("github"), Some(&record));
+    assert_eq!(
+        loaded.environments["github"]
+            .platform_source_authority
+            .as_ref()
+            .unwrap()
+            .profile_slots,
+        ["github".to_owned()].into()
+    );
 }
 
 #[test]
