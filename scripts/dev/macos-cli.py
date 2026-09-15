@@ -468,6 +468,7 @@ def worker(root, run):
                         command([str(binary), *args, "--help"])
                     shutil.copy2(binary, run / "artifacts/cw-aarch64-apple-darwin")
                 if action in ("test", "verify"):
+                    command(["python3", str(source / "crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"), "-v"])
                     command(["cargo", "test", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin"])
                     command(["cargo", "test", *native, "-p", "codewire-local-vmm", "--lib"])
                 if action in ("clippy", "verify"):
@@ -478,6 +479,10 @@ def worker(root, run):
                 if request["intel"]:
                     command(["cargo", "build", *common, "--target", "x86_64-apple-darwin",
                              "-p", "codewire-cli-bin", "--bin", "cw"])
+                    # Link native primitives too: unused FFI can disappear from
+                    # the CLI binary. Never execute this Intel test binary.
+                    command(["cargo", "test", *common, "--target", "x86_64-apple-darwin",
+                             "-p", "codewire-local-vmm", "--lib", "--no-run"])
                     shutil.copy2(root / "target/x86_64-apple-darwin/debug/cw",
                                  run / "artifacts/cw-x86_64-apple-darwin")
             elif component in VZ_FIXTURES:

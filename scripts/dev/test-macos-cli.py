@@ -24,6 +24,12 @@ spec.loader.exec_module(helper)
 
 
 class HelperTests(unittest.TestCase):
+    def test_owned_mount_fixture_synthetic_contract(self):
+        contract = Path(__file__).resolve().parents[2] / "crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"
+        result = subprocess.run([sys.executable, str(contract), "-v"], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 8 tests", result.stderr)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="cw-macos-test-")
         self.addCleanup(self.temporary.cleanup)
@@ -506,13 +512,17 @@ print("cooperative cancellation: no adopted children")
         result = json.loads((run / "result.json").read_text())
         self.assertEqual(result["status"], "passed")
         commands = [item["argv"] for item in result["commands"]]
+        self.assertIn(["python3", str(self.root / "source/crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"), "-v"], commands)
         cargo = [argv for argv in commands if argv[0] == "cargo" and argv[1] != "-V"]
-        self.assertEqual([argv[1] for argv in cargo], ["build", "test", "test", "clippy", "clippy", "build"])
+        self.assertEqual([argv[1] for argv in cargo],
+                         ["build", "test", "test", "clippy", "clippy", "build", "test"])
         self.assertEqual(cargo[2], ["cargo", "test", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib"])
         self.assertEqual(cargo[4], ["cargo", "clippy", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib",
                                    "--", "-D", "warnings"])
+        self.assertEqual(cargo[6], ["cargo", "test", "--locked", "--offline", "--target",
+                                   "x86_64-apple-darwin", "-p", "codewire-local-vmm", "--lib", "--no-run"])
         for argv in cargo:
             self.assertIn("--offline", argv)
             self.assertIn("--locked", argv)
@@ -525,13 +535,19 @@ print("cooperative cancellation: no adopted children")
         self.check_vz_fixture_plan("vz-fixture", "macos-production-init-fixture", "codewire-macos-vz-fixture")
 
     def test_shared_native_library_failure_prevents_cli_test_success(self):
+        self.check_native_library_failure("aarch64-apple-darwin")
+
+    def test_intel_library_link_failure_prevents_cli_test_success(self):
+        self.check_native_library_failure("x86_64-apple-darwin")
+
+    def check_native_library_failure(self, target):
         run = self.worker_fixture(action="test")
         reader, writer = os.pipe()
         stdin = os.fdopen(reader, "r")
 
         def fixture_command(argv, cwd, env, log, cancel, deadline):
             log.write_text("synthetic shared-library failure")
-            return 1 if "codewire-local-vmm" in argv else 0
+            return 1 if "codewire-local-vmm" in argv and target in argv else 0
 
         try:
             with mock.patch.object(sys, "stdin", stdin), mock.patch.object(signal, "signal"), \
@@ -547,6 +563,7 @@ print("cooperative cancellation: no adopted children")
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["commands"][-1]["exit_code"], 1)
         self.assertIn("codewire-local-vmm", result["commands"][-1]["argv"])
+        self.assertIn(target, result["commands"][-1]["argv"])
         self.assertEqual(helper.evidence_status(run, "fixture"), "failed")
 
     def test_vz_workload_network_is_opt_in_and_collects_only_its_binary(self):
