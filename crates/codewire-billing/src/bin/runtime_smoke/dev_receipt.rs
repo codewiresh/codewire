@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use anyhow::ensure;
-use codewire_server_core::config::database_url_from_env;
+use codewire_server_core::config::database_url_from_parts;
 use reqwest::{Client, StatusCode};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -25,13 +25,25 @@ struct Config {
 impl Config {
     fn from_reader(
         read: impl Fn(&str) -> anyhow::Result<String>,
-        database_url: String,
+        database_url_override_present: bool,
     ) -> anyhow::Result<Self> {
+        ensure!(
+            !database_url_override_present,
+            "DATABASE_URL is forbidden in Dev receipt mode"
+        );
         ensure!(read("ENVIRONMENT")? == "dev", "Dev required");
         ensure!(
             read("BILLING_RUNTIME_BASE_URL")? == DEV_BILLING_URL,
             "Dev billing endpoint required"
         );
+        let database_url = database_url_from_parts(
+            &read("DB_HOST")?,
+            &read("DB_PORT")?,
+            &read("DB_USER")?,
+            &read("DB_PASSWORD")?,
+            &read("DB_NAME")?,
+            &read("DB_SSLMODE")?,
+        )?;
         validate_database_url(&database_url)?;
         let webhook_secret = read("BILLING_RUNTIME_WEBHOOK_SECRET")?;
         let user_id = read("BILLING_RECEIPT_EXPECTED_USER_ID")?;
@@ -133,7 +145,9 @@ async fn post_once(http: &Client, base: &str, secret: &str, payload: String) -> 
 }
 
 pub(super) async fn run() -> anyhow::Result<()> {
-    let config = Config::from_reader(required_env, database_url_from_env()?)?;
+    let database_url_override_present =
+        std::env::var_os("DATABASE_URL").is_some_and(|value| !value.is_empty());
+    let config = Config::from_reader(required_env, database_url_override_present)?;
     let fixture = Fixture::new(config.attempt);
     let http = http_client()?;
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -272,10 +286,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_mode_requires_all_explicit_non_database_bindings_without_defaults() {
+    fn live_mode_requires_all_explicit_bindings_without_defaults() {
         let inputs = std::collections::HashMap::from([
             ("ENVIRONMENT", "dev"),
             ("BILLING_RUNTIME_BASE_URL", DEV_BILLING_URL),
+            ("DB_HOST", "codewire-db-rw.dev.svc.cluster.local."),
+            ("DB_PORT", "5432"),
+            ("DB_USER", "codewire"),
+            ("DB_PASSWORD", "synthetic"),
+            ("DB_NAME", "codewire"),
+            ("DB_SSLMODE", "require"),
             ("BILLING_RUNTIME_WEBHOOK_SECRET", "synthetic"),
             ("BILLING_RECEIPT_EXPECTED_USER_ID", "synthetic-user"),
             ("BILLING_RECEIPT_EXPECTED_EMAIL", "recipient@example.test"),
@@ -284,10 +304,6 @@ mod tests {
                 "877b1810-bcb7-4e68-97df-cda73287ee3d",
             ),
         ]);
-        let database_url = || {
-            "postgres://codewire:synthetic@codewire-db-rw.dev.svc.cluster.local.:5432/codewire?sslmode=require"
-                .to_owned()
-        };
         let parse = |values: &std::collections::HashMap<&str, &str>| {
             Config::from_reader(
                 |name| {
@@ -296,7 +312,7 @@ mod tests {
                         .map(|v| v.to_string())
                         .ok_or_else(|| anyhow::anyhow!("missing"))
                 },
-                database_url(),
+                false,
             )
         };
         assert!(parse(&inputs).is_ok());
@@ -312,6 +328,12 @@ mod tests {
                 "BILLING_RUNTIME_BASE_URL",
                 "http://codewire-billing.dev.svc.cluster.local:8081/",
             ),
+            ("DB_HOST", "codewire-db-rw.prod.svc.cluster.local."),
+            ("DB_PORT", "6432"),
+            ("DB_USER", "postgres"),
+            ("DB_PASSWORD", ""),
+            ("DB_NAME", "postgres"),
+            ("DB_SSLMODE", "disable"),
             ("BILLING_RUNTIME_WEBHOOK_SECRET", ""),
             ("BILLING_RECEIPT_EXPECTED_USER_ID", ""),
             ("BILLING_RECEIPT_EXPECTED_EMAIL", "recipient@example.test\n"),
@@ -324,6 +346,18 @@ mod tests {
             invalid.insert(name, value);
             assert!(parse(&invalid).is_err(), "{name}");
         }
+        assert!(
+            Config::from_reader(
+                |name| {
+                    inputs
+                        .get(name)
+                        .map(|v| v.to_string())
+                        .ok_or_else(|| anyhow::anyhow!("missing"))
+                },
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]

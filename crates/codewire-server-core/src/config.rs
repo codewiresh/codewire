@@ -130,30 +130,54 @@ pub fn database_url_from_env() -> Result<String, ConfigError> {
         optional("DB_PASSWORD").ok_or(ConfigError::Missing("DATABASE_URL or DB_PASSWORD"))?;
     let db_name = optional("DB_NAME").unwrap_or_else(|| "codewire".to_string());
     let db_sslmode = optional("DB_SSLMODE").unwrap_or_else(|| "require".to_string());
+
+    database_url_from_parts(
+        &db_host,
+        &db_port,
+        &db_user,
+        &db_password,
+        &db_name,
+        &db_sslmode,
+    )
+}
+
+/// Construct a Postgres connection string from separately supplied fields.
+///
+/// This keeps password escaping and typed port validation in one shared
+/// implementation for callers that intentionally forbid `DATABASE_URL` and
+/// require explicit structured inputs.
+pub fn database_url_from_parts(
+    db_host: &str,
+    db_port: &str,
+    db_user: &str,
+    db_password: &str,
+    db_name: &str,
+    db_sslmode: &str,
+) -> Result<String, ConfigError> {
     let db_port = db_port
         .parse::<u16>()
         .map_err(|source| ConfigError::Parse {
             var: "DB_PORT",
-            value: db_port,
+            value: db_port.to_string(),
             source: anyhow::Error::new(source),
         })?;
 
     let mut url = url::Url::parse("postgres://localhost").expect("static database URL parses");
-    url.set_username(&db_user).map_err(|_| ConfigError::Parse {
+    url.set_username(db_user).map_err(|_| ConfigError::Parse {
         var: "DB_USER",
-        value: db_user.clone(),
+        value: db_user.to_string(),
         source: anyhow::anyhow!("invalid database username"),
     })?;
-    url.set_password(Some(&db_password))
+    url.set_password(Some(db_password))
         .map_err(|_| ConfigError::Parse {
             var: "DB_PASSWORD",
             value: "<redacted>".to_string(),
             source: anyhow::anyhow!("invalid database password"),
         })?;
-    url.set_host(Some(&db_host))
+    url.set_host(Some(db_host))
         .map_err(|source| ConfigError::Parse {
             var: "DB_HOST",
-            value: db_host.clone(),
+            value: db_host.to_string(),
             source: anyhow::Error::new(source),
         })?;
     url.set_port(Some(db_port))
@@ -162,8 +186,8 @@ pub fn database_url_from_env() -> Result<String, ConfigError> {
             value: db_port.to_string(),
             source: anyhow::anyhow!("invalid database port"),
         })?;
-    url.set_path(&db_name);
-    url.query_pairs_mut().append_pair("sslmode", &db_sslmode);
+    url.set_path(db_name);
+    url.query_pairs_mut().append_pair("sslmode", db_sslmode);
 
     Ok(url.to_string())
 }
