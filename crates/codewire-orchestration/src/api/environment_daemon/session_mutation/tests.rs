@@ -155,6 +155,22 @@ struct Fixture {
     id: String,
 }
 
+fn fixture_id() -> String {
+    // Reused as the organization route slug: the full UUID remains unique,
+    // while this prefix keeps the fixture within the canonical 48-byte bound.
+    format!("session-{}", Uuid::new_v4())
+}
+
+#[test]
+fn database_fixture_identity_obeys_the_canonical_route_slug_contract() {
+    let id = fixture_id();
+    assert!(codewire_server_core::organization_slug::valid_organization_slug(&id));
+    assert!(Uuid::parse_str(id.strip_prefix("session-").unwrap()).is_ok());
+    assert_ne!(id, fixture_id());
+    let rejected = format!("session-admission-{}", Uuid::new_v4());
+    assert!(!codewire_server_core::organization_slug::valid_organization_slug(&rejected));
+}
+
 impl Fixture {
     async fn seed() -> Self {
         let url = std::env::var("TEST_DATABASE_URL")
@@ -164,7 +180,7 @@ impl Fixture {
             .connect(&url)
             .await
             .expect("connect disposable database");
-        let id = format!("session-admission-{}", Uuid::new_v4());
+        let id = fixture_id();
         sqlx::query("INSERT INTO users (id, email, name, email_verified) VALUES ($1, $2, 'Session admission test', true)")
             .bind(&id).bind(format!("{id}@example.test")).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, 'Session admission test', $1, $1)")
