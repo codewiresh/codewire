@@ -205,6 +205,20 @@ class Server:
         remaining = MAX_STDERR_DIAGNOSTIC - len(self.stderr_prefix)
         self.stderr_prefix.extend(data[:remaining])
 
+    def _read_stderr(self, fd):
+        # This single-threaded collector reads a nonblocking pipe. Defer only
+        # its cancellation signals until consumed bytes have been recorded.
+        # Query first: blocking itself may deliver an already-pending Python
+        # handler, so the mask-changing call belongs inside the restoration guard.
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+            data = os.read(fd, 65536)
+            self.observe_stderr(data)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        return data
+
     def failure_diagnostics(self, trace):
         # Sample status before closing stdin or sending cleanup signals. A null
         # status is unknown/still running, never the later forced-cleanup exit.
@@ -285,7 +299,8 @@ class Server:
 
     def pump(self, timeout, closing=False):
         for key, _ in self.selector.select(max(0, timeout)):
-            data = os.read(key.fileobj.fileno(), 65536)
+            fd = key.fileobj.fileno()
+            data = self._read_stderr(fd) if key.data == "stderr" else os.read(fd, 65536)
             if not data:
                 self.selector.unregister(key.fileobj)
                 if not closing:
@@ -297,7 +312,6 @@ class Server:
                     for value in self.frames.feed(data):
                         self.receive(value)
             else:
-                self.observe_stderr(data)
                 if self.stderr_bytes > MAX_OUTPUT and not closing:
                     raise Failure("stderr_output_limit")
         if self.process.poll() is not None and not closing:
