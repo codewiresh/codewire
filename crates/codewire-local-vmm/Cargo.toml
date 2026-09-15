@@ -95,9 +95,11 @@ url = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
-# Developer-only transport proof. None of these optional dependencies is enabled
-# by the default Darwin CLI or its release graph.
+# Shared configuration/compatibility hashing is SDK-free. The optional
+# dependencies below remain developer-only transport proof, excluded from the
+# default Darwin CLI and its release graph.
 [target.'cfg(target_os = "macos")'.dependencies]
+sha2 = { workspace = true }
 async-trait = { workspace = true, optional = true }
 codewire-daemon = { workspace = true, optional = true }
 codewire-netstack = { workspace = true, optional = true }
