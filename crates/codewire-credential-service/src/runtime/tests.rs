@@ -124,6 +124,7 @@ impl Addresses {
     fn release(self, tls: ServerTlsFiles) -> Result<Listeners> {
         Ok(Listeners {
             public: self.public.local_addr()?,
+            public_origin: http::HeaderValue::from_static("https://codewire.example"),
             private: self.private.local_addr()?,
             tls,
         })
@@ -236,7 +237,6 @@ impl Running {
         let provider = h.provider.clone();
         let task = tokio::spawn(serve_owned(
             listeners,
-            http::HeaderValue::from_static("https://codewire.example"),
             pool,
             provider,
             owner,
@@ -326,6 +326,7 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
         }
         let listeners = Listeners {
             public,
+            public_origin: http::HeaderValue::from_static("https://codewire.example"),
             private,
             tls: identity.files()?,
         };
@@ -335,7 +336,6 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
         // must still be closed by the runtime's error cleanup path.
         let actual = serve_owned(
             listeners,
-            http::HeaderValue::from_static("https://codewire.example"),
             h.pool.clone(),
             h.provider.clone(),
             h.owner.clone(),

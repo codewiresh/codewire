@@ -54,6 +54,20 @@ fn selection_rejects_noncanonical_or_unbounded_inputs() {
 }
 
 #[test]
+fn continuation_pages_accept_only_the_inclusive_supported_range() {
+    for page in [2, github::MAX_PAGE] {
+        let mut value = request();
+        value.page_token = format!("v1.{page}.50.{}", "a".repeat(64));
+        assert_eq!(Selection::parse(value).unwrap().page, page);
+    }
+    for page in [0, 1, github::MAX_PAGE + 1, u32::MAX] {
+        let mut value = request();
+        value.page_token = format!("v1.{page}.50.{}", "a".repeat(64));
+        assert!(matches!(Selection::parse(value), Err(Error::InvalidInput)));
+    }
+}
+
+#[test]
 fn closed_errors_never_echo_request_or_provider_details() {
     for value in [
         Error::InvalidInput,

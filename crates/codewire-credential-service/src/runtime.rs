@@ -174,10 +174,10 @@ async fn run_connected(
     serve_owned(
         Listeners {
             public: config.public_listen,
+            public_origin: config.public_origin,
             private: config.private_listen,
             tls: config.private_tls,
         },
-        config.public_origin,
         pool,
         authorities.delegation_provider(),
         mutation,
@@ -238,6 +238,7 @@ fn enrollment_config(
 
 struct Listeners {
     public: std::net::SocketAddr,
+    public_origin: http::HeaderValue,
     private: std::net::SocketAddr,
     tls: ServerTlsFiles,
 }
@@ -246,7 +247,6 @@ struct Listeners {
 // these exact listeners/owners without adding production fixture switches.
 async fn serve_owned<A, U>(
     listeners: Listeners,
-    public_origin: http::HeaderValue,
     pool: PgPool,
     provider: Arc<dyn KekProvider>,
     mutation: Arc<CredentialMutationOwner>,
@@ -298,12 +298,12 @@ where
                 mutation.router(),
                 ConnectAuthLayer::credential_mutation(
                     AuthState { pool: pool.clone() },
-                    public_origin.clone(),
+                    listeners.public_origin.clone(),
                 ),
             )
             .with_connect_routes_auth(
                 repositories.router(),
-                ConnectAuthLayer::github_repository(AuthState { pool }, public_origin),
+                ConnectAuthLayer::github_repository(AuthState { pool }, listeners.public_origin),
             )
             .into_router();
         let grpc = bridge.clone().into_server();

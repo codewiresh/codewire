@@ -270,7 +270,7 @@ impl Selection {
                 return Err(Error::InvalidInput);
             }
             let page = fields[1].parse::<u32>().map_err(|_| Error::InvalidInput)?;
-            if page < 2 || page > github::MAX_PAGE || fields[1] != page.to_string() {
+            if !(2..=github::MAX_PAGE).contains(&page) || fields[1] != page.to_string() {
                 return Err(Error::InvalidInput);
             }
             page

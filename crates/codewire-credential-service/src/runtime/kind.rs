@@ -99,7 +99,6 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         tracing::info!(target: TARGET, event = "fixture_starting", "fixture_starting");
         let result = serve_owned(
             config.listeners,
-            config.public_origin,
             pool.clone(),
             Arc::new(TestKekProvider),
             mutation,
