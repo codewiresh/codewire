@@ -420,6 +420,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
+      scripts/ci/tests/test-darwin-cross-check.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-service-ssh-image-verifier.sh|\
       scripts/ci/verify/run-product-verification.sh|\
@@ -1093,6 +1094,7 @@ if [ "$event_selected" = false ]; then
         # server-core verifier, not just by the private protocol endpoints.
         select_token rust_pkg_codewire_server_core
         ;;
+      scripts/ci/verify/check-darwin-cross.sh|\
       scripts/ci/verify/build-local-vmm-initramfs.sh|\
       scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh|\
       scripts/ci/verify/smoke-native-local-environment.sh|\

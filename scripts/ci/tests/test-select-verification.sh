@@ -1010,8 +1010,18 @@ run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head fal
   "$policy" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
 run_present_paths_case macos_formatter_developer_tool pull_request refs/pull/2064/head false \
   "$policy" scripts/dev/macos-ext4-tool.py scripts/dev/test-macos-ext4-tool.py
+run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pull/2064/head false \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
 run_present_paths_case macos_formatter_unknown pull_request refs/pull/2064/head false \
   "$all_product" scripts/dev/macos-ext4-tool-future.py
+run_present_paths_case darwin_cross_check pull_request refs/pull/20655/head false \
+  'policy policy_shell transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/ci/verify/check-darwin-cross.sh
+run_present_paths_case darwin_cross_check_tests pull_request refs/pull/20656/head false \
+  "$policy policy_shell" scripts/ci/tests/test-darwin-cross-check.sh
+run_present_paths_case darwin_cross_test_unknown pull_request refs/pull/20656/head false \
+  "$all_product" scripts/ci/tests/test-darwin-cross-check-future.sh
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
