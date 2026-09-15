@@ -37,3 +37,9 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
 zeroize = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+codewire-local-vmm = { path = "../codewire-local-vmm" }
+libc = "0.2"
+tempfile = { workspace = true }
+tonic = { workspace = true }

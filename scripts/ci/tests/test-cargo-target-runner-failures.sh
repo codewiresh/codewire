@@ -132,6 +132,21 @@ record = dict(tool=os.environ.get('COMPOSITION_TOOL_NAME', Path(sys.argv[0]).nam
               flags=os.environ.get('RUSTFLAGS'))
 with open(os.environ['COMPOSITION_TRACE'], 'a') as output:
     output.write(json.dumps(record) + '\\n')
+if record['tool'] == 'zig':
+    print('0.15.2')
+    sys.exit(0)
+if record['tool'] == 'cargo-zigbuild' and sys.argv[1:] == ['--version']:
+    print('cargo-zigbuild 0.23.0')
+    sys.exit(0)
+if record['tool'] == 'cargo-zigbuild':
+    assert os.environ['CARGO_ZIGBUILD_PYTHON_PATH'] == '/usr/bin/false'
+    assert os.environ['CARGO_ZIGBUILD_ZIG_PATH'] == str(Path(sys.argv[0]).with_name('zig'))
+    os.environ['COMPOSITION_DARWIN_COMPILER'] = 'pinned-zig'
+    os.execv(str(Path(sys.argv[0]).with_name('cargo')), ['cargo', *sys.argv[1:]])
+if record['tool'] == 'cargo' and sys.argv[1] == 'check' and 'aarch64-apple-darwin' in sys.argv:
+    if os.environ.get('COMPOSITION_DARWIN_COMPILER') != 'pinned-zig':
+        print('fixture bare Cargo lacks the Darwin C compiler', file=sys.stderr)
+        sys.exit(47)
 if record['tool'] == 'cargo' and sys.argv[1] == os.environ.get('COMPOSITION_FAIL'):
     sys.exit(43)
 if record['tool'] == os.environ.get('COMPOSITION_FAIL_TOOL'):
@@ -142,6 +157,10 @@ if record['tool'] == 'cargo' and sys.argv[1:] == json.loads(os.environ.get('COMP
     sys.exit(46)
 ''')
 tool.chmod(0o755)
+for name in ('zig', 'cargo-zigbuild'):
+    shutil.copy(tool, binary / name)
+shutil.copy(source_root / 'scripts/ci/verify/check-darwin-cross.sh',
+            runner.parent / 'check-darwin-cross.sh')
 for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
                'scripts/ci/tests/test-admin-proto-boundary.sh',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh',
@@ -224,7 +243,22 @@ assert sum(r['tool'] == 'cargo' and r['args'] == product_test for r in records) 
 assert sum(r['tool'] == 'cargo' and r['args'][0] == 'clippy' and
            product_feature in r['args'] and 'codewire-macos-product-network-fixture' in r['args']
            for r in records) == 1
-assert sum('--target' in r['args'] and 'aarch64-apple-darwin' in r['args'] for r in records) == 1
+darwin_check = ['check', '--locked', '-p', 'codewire-local-vmm',
+                '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin']
+assert sum(r['tool'] == 'cargo' and r['args'] == darwin_check for r in records) == 1
+assert sum(r['tool'] == 'cargo-zigbuild' and r['args'] == darwin_check for r in records) == 1
+assert all(r['args'] == darwin_check for r in records if 'aarch64-apple-darwin' in r['args'])
+
+# Old fail/new pass uses the actual runner with only its old bare check restored.
+# The synthetic Cargo rejects missing cross-compilation setup, not the package
+# or target. The new runner must still make exactly the same Cargo check once.
+new_check = '    scripts/ci/verify/check-darwin-cross.sh\n'
+assert production.count(new_check) == 1
+old_check = '    cargo ' + ' '.join(darwin_check) + '\n'
+runner.write_text(production.replace(new_check, old_check))
+old_records, _ = run(special, status=47)
+assert old_records[-1]['tool'] == 'cargo' and old_records[-1]['args'] == darwin_check
+runner.write_text(production)
 
 workload_feature = 'macos-workload-network-fixture'
 workload_test = ['test', '--locked', '-p', 'codewire-local-vmm', '--features',
@@ -259,7 +293,7 @@ for command in (workload_test, workload_clippy, client_test, client_clippy,
 
 # Every new command must fail the actual shared entrypoint, not merely a
 # duplicated list in the fixture. A later command may not hide its failure.
-for command in (workload_test, workload_clippy, client_test, client_clippy, transcript_test):
+for command in (darwin_check, workload_test, workload_clippy, client_test, client_clippy, transcript_test):
     records, _ = run(special, fail_args=command, status=46)
     assert records[-1]['args'] == command
 
@@ -288,6 +322,7 @@ print(f'Rust/transport composition trace: {cases} cases passed')
 policy_body = production.split('run_policy_core() {', 1)[1].split('\n}\n', 1)[0]
 policy_helpers = re.findall(r'^  (?:python3 (?:-B )?)?((?:scripts|crates)/[\w/.-]+)', policy_body, re.M)
 assert 'scripts/dev/test-macos-vz-workload-network.py' in policy_helpers
+assert 'scripts/ci/tests/test-darwin-cross-check.sh' in policy_helpers
 canary_guard = 'crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py'
 assert canary_guard in policy_helpers, 'composition fixture omitted the actual crate-local policy guard'
 for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh']:
@@ -325,9 +360,10 @@ git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'synthetic selected workload 
 receipt_owner = fixture / 'scripts/ci/receipts/local-prepush-receipt.py'
 preflight = fixture / 'scripts/dev/preflight.sh'
 receipt_cases = [dict(COMPOSITION_FAIL_TOOL=name) for name in
-                 (Path(canary_guard).name, 'test-macos-vz-workload-network.py')]
+                 (Path(canary_guard).name, 'test-macos-vz-workload-network.py',
+                  'test-darwin-cross-check.sh')]
 receipt_cases += [dict(COMPOSITION_FAIL_ARGS=json.dumps(command)) for command in
-                 (workload_test, workload_clippy, client_test, client_clippy, transcript_test)]
+                 (darwin_check, workload_test, workload_clippy, client_test, client_clippy, transcript_test)]
 for injected in receipt_cases:
     trace.write_text('')
     result = subprocess.run([str(preflight), '--for-push', '--emit-receipt'], cwd=fixture,

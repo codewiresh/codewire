@@ -11,8 +11,8 @@ use codewire_vmm_guest_probe::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::generation::valid_root_disk_bytes;
 use crate::oci::{OciArchitecture, ResolvedImage};
+use crate::supervisor_metadata::legacy::valid_root_disk_bytes;
 
 const WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 4;
 const MAXIMUM_WORKSPACE_GENERATION_BYTES: usize = 512 * 1024;
@@ -74,6 +74,7 @@ impl WorkspaceGenerationRecord {
         )
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn new_with_skill_snapshot(
         project_spec_json: &[u8],
         project_sha256: String,
@@ -180,6 +181,7 @@ impl WorkspaceGenerationRecord {
     /// currently authorized source selectors. In particular, rolling back a
     /// workspace must not roll back credential or application-secret choices.
     /// The immutable built generation, setup hash and skill plan are untouched.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn project_intent_with_current_sources(
         &self,
         current_project_json: &[u8],
@@ -198,6 +200,7 @@ impl WorkspaceGenerationRecord {
         Ok((bytes, sha256))
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn project_spec_json(&self) -> Result<&[u8], WorkspaceGenerationError> {
         self.validate()?;
         Ok(self.project_spec_json.as_bytes())
@@ -215,6 +218,7 @@ impl WorkspaceGenerationRecord {
         Ok(self.skill_snapshot.as_ref())
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn encode_canonical(&self) -> Result<Vec<u8>, WorkspaceGenerationError> {
         self.validate()?;
         encode_bounded(self)
@@ -345,7 +349,7 @@ mod tests {
             project_spec_json: String::from_utf8(project_spec_json).unwrap(),
             artifact_generation: "a".repeat(64),
             image,
-            root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
+            root_disk_bytes: crate::supervisor_metadata::legacy::MINIMUM_ROOT_DISK_BYTES,
             skill_snapshot: None,
         }
     }

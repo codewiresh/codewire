@@ -1,0 +1,186 @@
+//! Persisted Linux direct-share identity and its closed codec validation.
+
+#[cfg(any(target_os = "linux", test))]
+use std::path::PathBuf;
+
+#[cfg(any(target_os = "linux", test))]
+use codewire_vmm_guest_probe::DirectSharePlanError;
+use serde::{Deserialize, Serialize};
+
+const EXT4_SUPER_MAGIC: i64 = 0x0000_ef53;
+const TMPFS_MAGIC: i64 = 0x0102_1994;
+const XFS_SUPER_MAGIC: i64 = 0x5846_5342;
+const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
+const OVERLAYFS_SUPER_MAGIC: i64 = 0x794c_7630;
+const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
+const F2FS_SUPER_MAGIC: i64 = 0xf2f5_2010;
+const BCACHEFS_SUPER_MAGIC: i64 = 0xca45_1a4e;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectShareIdentity {
+    device_major: u32,
+    device_minor: u32,
+    inode: u64,
+    mount_id: u64,
+    owner_uid: u32,
+    filesystem_magic: i64,
+}
+
+impl DirectShareIdentity {
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_captured_parts(
+        device_major: u32,
+        device_minor: u32,
+        inode: u64,
+        mount_id: u64,
+        owner_uid: u32,
+        filesystem_magic: i64,
+    ) -> Self {
+        Self {
+            device_major,
+            device_minor,
+            inode,
+            mount_id,
+            owner_uid,
+            filesystem_magic,
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        device_major: u32,
+        device_minor: u32,
+        inode: u64,
+        mount_id: u64,
+        owner_uid: u32,
+        filesystem_magic: i64,
+    ) -> Result<Self, DirectShareError> {
+        let identity = Self {
+            device_major,
+            device_minor,
+            inode,
+            mount_id,
+            owner_uid,
+            filesystem_magic,
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn device_major(&self) -> u32 {
+        self.device_major
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn device_minor(&self) -> u32 {
+        self.device_minor
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn mount_id(&self) -> u64 {
+        self.mount_id
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn owner_uid(&self) -> u32 {
+        self.owner_uid
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn filesystem_magic(&self) -> i64 {
+        self.filesystem_magic
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), DirectShareError> {
+        if self.inode == 0
+            || self.mount_id == 0
+            || self.owner_uid != current_uid()
+            || !allowed_filesystem(self.filesystem_magic)
+        {
+            return Err(DirectShareError::InvalidDirectory);
+        }
+        Ok(())
+    }
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and no memory effects.
+    unsafe { libc::geteuid() }
+}
+
+pub(crate) fn allowed_filesystem(magic: i64) -> bool {
+    matches!(
+        magic,
+        EXT4_SUPER_MAGIC
+            | TMPFS_MAGIC
+            | XFS_SUPER_MAGIC
+            | BTRFS_SUPER_MAGIC
+            | OVERLAYFS_SUPER_MAGIC
+            | ZFS_SUPER_MAGIC
+            | F2FS_SUPER_MAGIC
+            | BCACHEFS_SUPER_MAGIC
+    )
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DirectShareError {
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share source path is invalid: {0}")]
+    InvalidPath(PathBuf),
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share source path is not canonical: {0}")]
+    NonCanonical(PathBuf),
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share source overlaps protected or overly broad host state: {0}")]
+    ForbiddenSource(PathBuf),
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share source is not owned by the current user: {0}")]
+    WrongOwner(PathBuf),
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share source filesystem is unsupported: {0}")]
+    UnsupportedFilesystem(PathBuf),
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share source is a mount alias: {0}")]
+    MountAlias(PathBuf),
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share source contains a nested mount: {0}")]
+    NestedMount(PathBuf),
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share source changed after admission: {0}")]
+    SourceChanged(PathBuf),
+    #[error("direct-share source is not a valid directory")]
+    InvalidDirectory,
+    #[cfg(any(target_os = "linux", test))]
+    #[error("current user's home directory is unavailable for direct-share policy")]
+    MissingHomeDirectory,
+    #[cfg(any(target_os = "linux", test))]
+    #[error("host mount table is malformed")]
+    InvalidMountTable,
+    #[cfg(any(target_os = "linux", test))]
+    #[error(transparent)]
+    GuestPlan(#[from] DirectSharePlanError),
+    #[cfg(target_os = "linux")]
+    #[error("open direct-share source {path}: {source}")]
+    Open {
+        path: PathBuf,
+        source: rustix::io::Errno,
+    },
+    #[cfg(target_os = "linux")]
+    #[error("inspect direct-share source: {0}")]
+    Inspect(rustix::io::Errno),
+    #[cfg(any(target_os = "linux", test))]
+    #[error("direct-share filesystem operation failed for {path}: {source}")]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}

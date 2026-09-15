@@ -151,7 +151,7 @@ impl PrivateRoot {
         &self.path
     }
 
-    fn revalidate_named(&self) -> Result<(), PathError> {
+    pub(crate) fn revalidate_named(&self) -> Result<(), PathError> {
         let named = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW_ANY)
@@ -342,6 +342,38 @@ impl PrivateRoot {
             self.revalidate_named()?;
             Ok(admitted)
         })
+    }
+
+    /// Revalidate a retained regular file without opening or closing that inode.
+    /// SQLite uses process-owned POSIX locks: even closing an unrelated descriptor
+    /// for its database or SHM would release locks outside SQLite's bookkeeping.
+    pub(crate) fn revalidate_regular(
+        &self,
+        relative: &Path,
+        retained: &ConfinedFile,
+    ) -> Result<(), PathError> {
+        single_name(relative)?;
+        self.revalidate_named()?;
+        let path = self.path.join(relative);
+        self.require_mount(retained.file(), &path)?;
+        let identity = regular_identity(
+            retained.file(),
+            &path,
+            None,
+            false,
+            Some(retained.identity().mode & 0o777),
+        )?;
+        let expected = retained.identity();
+        if identity.device != expected.device
+            || identity.inode != expected.inode
+            || identity.uid != expected.uid
+            || identity.mode != expected.mode
+            || identity.links != expected.links
+        {
+            return Err(PathError::ObjectIdentityChanged(path));
+        }
+        self.require_named_file(relative, retained.file())?;
+        self.revalidate_named()
     }
 
     pub fn atomic_replace(
@@ -782,6 +814,17 @@ fn admit_file(
     executable: bool,
     permissions: Option<u32>,
 ) -> Result<ConfinedFile, PathError> {
+    let identity = regular_identity(&file, path, expected_size, executable, permissions)?;
+    Ok(ConfinedFile { identity, file })
+}
+
+fn regular_identity(
+    file: &File,
+    path: &Path,
+    expected_size: Option<u64>,
+    executable: bool,
+    permissions: Option<u32>,
+) -> Result<FileIdentity, PathError> {
     let metadata = file.metadata().map_err(|error| io_at(path, error))?;
     if !metadata.is_file()
         || metadata.uid() != current_uid()
@@ -793,11 +836,8 @@ fn admit_file(
     {
         return Err(PathError::UnsafeFile(path.to_owned()));
     }
-    acl::require_empty(&file).map_err(|error| io_at(path, error))?;
-    Ok(ConfinedFile {
-        identity: FileIdentity::from_metadata(&metadata),
-        file,
-    })
+    acl::require_empty(file).map_err(|error| io_at(path, error))?;
+    Ok(FileIdentity::from_metadata(&metadata))
 }
 
 fn same_node(left: &Metadata, right: &Metadata) -> bool {

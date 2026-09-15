@@ -5,29 +5,42 @@
 //! already-connected AF_UNIX stream bridge plus this authenticated record. The
 //! worker admits the stream only for an immutable guest-port allowlist.
 
+#[cfg(any(target_os = "linux", test))]
 use std::collections::BTreeSet;
+#[cfg(any(target_os = "linux", test))]
 use std::os::unix::net::UnixStream as StdUnixStream;
+#[cfg(any(target_os = "linux", test))]
 use std::sync::Arc;
 
+#[cfg(any(target_os = "linux", test))]
 use hmac::{Hmac, Mac as _};
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "linux", test))]
 use sha2::Sha256;
+#[cfg(any(target_os = "linux", test))]
 use tokio::sync::mpsc;
 use url::{Host, Url};
+#[cfg(any(target_os = "linux", test))]
 use uuid::Uuid;
 
 use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
 
+#[cfg(any(target_os = "linux", test))]
 pub const MESH_INGRESS_CONTROL_KEY_LEN: usize = 32;
+#[cfg(any(target_os = "linux", test))]
 pub const MESH_INGRESS_CONTROL_FRAME_LEN: usize = 80;
 pub const MAX_MESH_INGRESS_PORTS: usize = 64;
+#[cfg(any(target_os = "linux", test))]
 pub(crate) const MESH_INGRESS_QUEUE_CAPACITY: usize = 64;
 const MAX_MESH_URL_BYTES: usize = 2_048;
 const MAX_MESH_ID_BYTES: usize = 255;
 
+#[cfg(any(target_os = "linux", test))]
 const MESH_INGRESS_CONTROL_MAGIC: &[u8; 8] = b"CWMESHI1";
+#[cfg(any(target_os = "linux", test))]
 const MESH_INGRESS_CONTROL_TAG_OFFSET: usize = 48;
 
+#[cfg(any(target_os = "linux", test))]
 type HmacSha256 = Hmac<Sha256>;
 
 /// Non-secret durable selection of the owner credential store used to mint a
@@ -40,6 +53,7 @@ pub enum MeshEnrollmentAuthSource {
 }
 
 /// One connected Mesh stream admitted by the generation-bound host receiver.
+#[cfg(any(target_os = "linux", test))]
 pub struct AcceptedMeshIngress {
     pub binding: MeshIngressBinding,
     pub stream: StdUnixStream,
@@ -49,11 +63,13 @@ pub struct AcceptedMeshIngress {
 /// already-connected stream for a pre-admitted guest port. The runner remains
 /// the only owner of the worker control key and re-authenticates every stream.
 #[derive(Clone)]
+#[cfg(any(target_os = "linux", test))]
 pub struct MeshIngressPublisher {
     allowed_ports: Arc<[u16]>,
     sender: mpsc::Sender<AcceptedMeshIngress>,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl MeshIngressPublisher {
     pub fn publish(&self, guest_port: u16, stream: StdUnixStream) -> Result<(), MeshIngressError> {
         let binding = MeshIngressBinding::new(guest_port)?;
@@ -70,6 +86,7 @@ impl MeshIngressPublisher {
 }
 
 /// Create the bounded runner-owned Mesh admission queue.
+#[cfg(any(target_os = "linux", test))]
 pub fn mesh_ingress_channel(
     allowed_ports: &[u16],
 ) -> Result<(MeshIngressPublisher, mpsc::Receiver<AcceptedMeshIngress>), MeshIngressError> {
@@ -101,6 +118,7 @@ pub struct MeshAttachment {
 }
 
 impl MeshAttachment {
+    #[cfg(any(target_os = "linux", test))]
     pub fn new(
         mesh_url: &str,
         organization_id: &str,
@@ -210,6 +228,7 @@ fn canonical_mesh_node_name(raw: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn is_mesh_ingress_control_frame(frame: &[u8; MESH_INGRESS_CONTROL_FRAME_LEN]) -> bool {
     &frame[..MESH_INGRESS_CONTROL_MAGIC.len()] == MESH_INGRESS_CONTROL_MAGIC
 }
@@ -264,11 +283,13 @@ pub fn validate_canonical_mesh_ingress_ports(ports: &[u16]) -> Result<(), MeshIn
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 pub struct MeshIngressControlFrame {
     pub binding: MeshIngressBinding,
     pub sequence: u64,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl MeshIngressControlFrame {
     pub fn encode(
         vm_id: Uuid,
@@ -291,6 +312,7 @@ impl MeshIngressControlFrame {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub struct MeshIngressControlReceiver {
     vm_id: Uuid,
     generation: u64,
@@ -298,6 +320,7 @@ pub struct MeshIngressControlReceiver {
     allowed_ports: BTreeSet<u16>,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl MeshIngressControlReceiver {
     pub fn new(
         vm_id: Uuid,
@@ -363,6 +386,7 @@ impl MeshIngressControlReceiver {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn validate_control_identity(
     vm_id: Uuid,
     generation: u64,
@@ -378,6 +402,7 @@ fn validate_control_identity(
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn authenticate(
     message: &[u8],
     key: &[u8; MESH_INGRESS_CONTROL_KEY_LEN],
@@ -399,20 +424,28 @@ pub enum MeshIngressError {
     TooManyPorts,
     #[error("Mesh ingress ports are duplicated or not canonical")]
     DuplicatePort,
+    #[cfg(any(target_os = "linux", test))]
     #[error("Mesh ingress control identity is invalid")]
     InvalidIdentity,
+    #[cfg(any(target_os = "linux", test))]
     #[error("Mesh ingress control key is invalid")]
     InvalidKey,
+    #[cfg(any(target_os = "linux", test))]
     #[error("Mesh ingress control frame is invalid")]
     InvalidFrame,
+    #[cfg(any(target_os = "linux", test))]
     #[error("Mesh ingress control authentication failed")]
     Authentication,
+    #[cfg(any(target_os = "linux", test))]
     #[error("Mesh ingress guest port is not allowed")]
     PortDenied,
+    #[cfg(any(target_os = "linux", test))]
     #[error("Mesh ingress publisher is closed")]
     PublisherClosed,
+    #[cfg(any(target_os = "linux", test))]
     #[error("Mesh ingress publisher queue is full")]
     PublisherFull,
+    #[cfg(any(target_os = "linux", test))]
     #[error("Mesh ingress control sequence overflowed")]
     SequenceOverflow,
 }

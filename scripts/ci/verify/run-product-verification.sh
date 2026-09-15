@@ -141,6 +141,8 @@ run_verification_shell_syntax() {
       scripts/ci/tests/test-pre-push-worktree.sh \
       scripts/ci/verify/integration-postgres.sh \
       scripts/ci/verify/run-product-verification.sh \
+      scripts/ci/verify/check-darwin-cross.sh \
+      scripts/ci/tests/test-darwin-cross-check.sh \
       scripts/ci/verify/check-curated-rust-locks.sh \
       scripts/ci/tests/test-curated-rust-locks.sh \
       scripts/ci/verify/run-integration-verification.sh \
@@ -175,6 +177,7 @@ run_policy_core() {
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-cargo-target-runner-failures.sh
+  scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
   scripts/ci/tests/test-rust-toolchain.sh
   scripts/ci/tests/test-cargo-cache-capacity.sh
@@ -592,8 +595,7 @@ run_transport() {
     cargo clippy --locked -p codewire-local-vmm --features macos-product-network-fixture \
       --lib --bin codewire-macos-product-network-fixture \
       --bin codewire-macos-console-pair-fixture -- -D warnings
-    cargo check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
-      --target aarch64-apple-darwin
+    scripts/ci/verify/check-darwin-cross.sh
     # The opt-in developer verifier is not exercised by default package tests.
     # Keep its production-codec preparation and control-loop proof selected.
     cargo test --locked -p codewire-local-vmm --features macos-production-init-fixture \

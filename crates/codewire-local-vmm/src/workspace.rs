@@ -14,7 +14,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use rustix::fs::{Dir, Mode, OFlags, ResolveFlags, openat2, readlinkat};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
@@ -23,6 +22,7 @@ use crate::linux::state::{
     MINIMUM_DOCKER_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths,
 };
 use crate::oci::ContentStore;
+pub use crate::supervisor_metadata::workspace::WorkspaceSourceMode;
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
 use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
 
@@ -47,13 +47,6 @@ pub enum WorkspaceSelection {
     Clone,
     Copy,
     Direct,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceSourceMode {
-    Clone,
-    Copy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

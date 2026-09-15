@@ -16,11 +16,10 @@ use uuid::Uuid;
 
 use crate::linux::path::PrivateRoot;
 use crate::linux::state::{
-    MAXIMUM_ROOT_GENERATIONS, MINIMUM_ROOT_DISK_BYTES, RootGenerationPaths, StateDiskIdentity,
-    VmPaths, admitted_generation_names,
+    MAXIMUM_ROOT_GENERATIONS, RootGenerationPaths, StateDiskIdentity, VmPaths,
+    admitted_generation_names,
 };
-
-const MAXIMUM_ROOT_DISK_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+pub(crate) use crate::supervisor_metadata::legacy::valid_root_disk_bytes;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootGenerationDisk {
@@ -143,11 +142,6 @@ pub(crate) fn ensure_root_generation(
     })
 }
 
-pub(crate) fn valid_root_disk_bytes(disk_bytes: u64) -> bool {
-    (MINIMUM_ROOT_DISK_BYTES..=MAXIMUM_ROOT_DISK_BYTES).contains(&disk_bytes)
-        && disk_bytes.is_multiple_of(1024 * 1024)
-}
-
 fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), GenerationError> {
     let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
         .into_iter()
@@ -250,6 +244,8 @@ pub enum GenerationError {
 mod tests {
     use std::io::{Seek as _, SeekFrom, Write as _};
     use std::os::unix::fs::PermissionsExt as _;
+
+    use crate::supervisor_metadata::legacy::{MAXIMUM_ROOT_DISK_BYTES, MINIMUM_ROOT_DISK_BYTES};
 
     use super::*;
 
