@@ -239,12 +239,12 @@ fn captured_clients_are_exact_slots_not_provider_families_or_global_configuratio
         (vec!["codex"], "v1:codex"),
         (vec!["openai"], "v1:openai"),
         (vec!["anthropic"], "v1:anthropic"),
-        (vec!["github"], "v1:none"),
+        (vec!["github"], "v2:10"),
         (vec!["ssh"], "v1:ssh"),
         (vec!["codex", "openai"], "v1:codex,openai"),
         (
             vec!["codex", "openai", "anthropic", "github", "ssh"],
-            "v1:codex,openai,anthropic,ssh",
+            "v2:1f",
         ),
     ] {
         let (project, mut captured) = selected_profile();

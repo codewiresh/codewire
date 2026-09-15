@@ -25,18 +25,18 @@
                 <li><label class="cw-source-choice"><input type="checkbox" name="include_user_secrets" value="platform" checked><span>Personal secrets<small>Your platform account</small></span></label></li>
               </ul>
               <div class="cw-field"><label class="cw-label" for="environment-edit-secret-project">Secret project</label><select class="cw-select" id="environment-edit-secret-project" name="secret_project" aria-describedby="environment-edit-project-help"><option value="">No project secrets</option><option value="6bf8d155-e84c-4fc5-b479-b17022fe41dd" selected>development</option></select><p id="environment-edit-project-help" class="cw-field-help">A named collection on the platform, not a deployment stage.</p></div>
-              <label class="cw-source-choice"><input type="checkbox" name="confirm_personal_secrets" value="true"><span>I confirm that the selected personal application secrets may be read by Sandbox processes.</span></label>
             </fieldset>
             <p class="cw-field-help">When names overlap: organization, then project, then personal. Ordinary environment configuration wins over all three.</p>
+            <nav aria-label="Manage application secrets"><ul class="cw-source-choices"><li><a href="application-secrets.html">Add or manage personal secrets</a></li><li><a href="application-secrets.html">Manage organization secrets</a></li><li><a href="application-secrets.html">Manage secret projects</a></li></ul></nav>
           </section>
           <section class="cw-create-panel cw-credential-panel" aria-labelledby="environment-edit-credentials-title">
             <header class="cw-create-panel-heading"><h3 id="environment-edit-credentials-title">Provider credentials</h3></header>
             <p id="environment-edit-credentials-help" class="cw-panel-help">A profile selects named provider identities. Private keys and tokens stay outside the Sandbox behind a proxy, signer, or repository executor.</p>
             <fieldset class="cw-source-fields" aria-describedby="environment-edit-credentials-help"><legend>Platform credential profile</legend>
               <div class="cw-field"><label class="cw-label" for="environment-edit-credential-profile">Credential profile</label><select class="cw-select" id="environment-edit-credential-profile" name="credential_profile"><option value="">No provider credentials</option><option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7" selected>work · revision 7 · 2 identities</option><option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@8">work · revision 8 · 3 identities</option></select></div>
-              <label class="cw-source-choice"><input type="checkbox" name="confirm_personal_credentials" value="true"><span>I confirm use of my personal credentials from the selected profile revision.</span></label>
             </fieldset>
             <p class="cw-field-help">Editing a profile does not change an existing Sandbox's bound revision. Selecting no profile removes provider access on the next managed launch.</p>
+            <nav aria-label="Manage provider credentials"><ul class="cw-source-choices"><li><a href="settings-credentials.html">Manage personal credentials and profiles</a></li></ul></nav>
           </section>
 <label class="cw-source-choice"><input type="checkbox" name="allow_restart" value="true"><span>I confirm the managed restart and interruption of current sessions.</span></label>
           <p class="cw-field-help">Clear both application-source checkboxes and choose no project to remove application secrets. Choose no provider credentials to clear the profile.</p>

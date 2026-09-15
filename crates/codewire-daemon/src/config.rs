@@ -239,6 +239,35 @@ mod tests {
     }
 
     #[test]
+    fn hosted_github_bootstrap_keeps_the_exact_selected_client() {
+        for token in ["v2:10", "v2:1f"] {
+            let values = [
+                (HOSTED_PROJECTION_SHA256_ENV, "ab".repeat(32)),
+                (MANAGED_CREDENTIAL_CLIENTS_ENV, token.to_owned()),
+                (ENVIRONMENT_ID_ENV, Uuid::new_v4().to_string()),
+                (ENVIRONMENT_GENERATION_ENV, "7".into()),
+            ];
+            let mut config = fixture();
+            config
+                .configure_hosted_projection(|name| {
+                    values
+                        .iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| value.clone().into())
+                })
+                .unwrap();
+            assert_eq!(config.managed_credential_clients.encode(), token);
+            assert!(
+                config
+                    .managed_credential_clients
+                    .contains(codewire_access::ManagedCredentialClient::GitHub)
+            );
+            assert!(config.credential_bridge.is_some());
+            assert!(config.launch_projection.is_some());
+        }
+    }
+
+    #[test]
     fn hosted_selection_configuration_is_explicit_canonical_and_metadata_only() {
         let id = Uuid::new_v4().to_string();
         let mut config = fixture();

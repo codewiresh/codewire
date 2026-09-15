@@ -166,6 +166,31 @@ verify_services_dockerfile_contract() {
     fail 'services image does not validate the exact ignored fixture entrypoint'
   grep -qF 'COPY --from=builder /out/kind-fixtures/ /codewire-kind-fixtures/' "$SERVICES_DOCKERFILE" ||
     fail 'services-ci fixture has no explicit image artifact path'
+  # The synthetic provider's stock Git comes only from the pinned toolchain,
+  # inside the same feature/profile fence. Never add it to production, copy
+  # client network helpers or replace the final base's runtime libraries.
+  # shellcheck disable=SC2016
+  grep -qF 'test "$(git --version)" = '\''git version 2.39.5'\''' <<<"$fixture_block" ||
+    fail 'Kind Git fixture no longer checks the pinned toolchain Git version'
+  for binary in \
+    'install -D /usr/bin/git /out/kind-git-runtime/usr/bin/git' \
+    'install -D /usr/lib/git-core/git-http-backend /out/kind-git-runtime/usr/lib/git-core/git-http-backend' \
+    'ln -s ../../bin/git /out/kind-git-runtime/usr/lib/git-core/git' \
+    'ln -s git /out/kind-git-runtime/usr/lib/git-core/git-upload-pack' \
+    'ln -s git /out/kind-git-runtime/usr/lib/git-core/git-pack-objects' \
+    'install -Dm644 /usr/share/doc/git/copyright /out/kind-git-runtime/usr/share/doc/git/copyright'; do
+    grep -qF "$binary" <<<"$fixture_block" || fail "Kind Git payload escaped CI fence: $binary"
+  done
+  [[ "$(grep -c '/out/kind-git-runtime/' "$SERVICES_DOCKERFILE")" -eq 7 ]] ||
+    fail 'unexpected Kind Git payload copy or runtime dependency'
+  grep -Fxq 'COPY --from=builder /out/kind-git-runtime/ /' "$SERVICES_DOCKERFILE" ||
+    fail 'Kind Git fixture lacks the explicit CI-only runtime artifact path'
+  grep -qF "grep -qx 'runtime::kind::git::tests::stock_git_smart_http_round_trip: test'" "$SERVICES_DOCKERFILE" ||
+    fail 'final runtime Git proof can silently select zero tests'
+  grep -qF 'runtime::kind::git::tests::stock_git_smart_http_round_trip --test-threads=1' "$SERVICES_DOCKERFILE" ||
+    fail 'final runtime does not execute the real stock Git transfer proof'
+  grep -qF 'test ! -e /usr/bin/git && test ! -e /usr/lib/git-core/git-http-backend' "$SERVICES_DOCKERFILE" ||
+    fail 'release runtime does not prove Git fixture payload absence'
 
   for binary in "${SERVICES_BINARIES[@]}"; do
     [[ "$(grep -cF -- "--bin ${binary}" "$SERVICES_DOCKERFILE")" -eq 1 ]] ||

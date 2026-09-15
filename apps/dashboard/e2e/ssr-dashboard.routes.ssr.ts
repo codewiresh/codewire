@@ -226,7 +226,22 @@ test.describe("server-rendered public, auth, and account routes", () => {
     const connectCard = page.locator("section", {
       has: page.getByRole("heading", { name: "Connect provider account", exact: true }),
     });
-    await expect(connectCard.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
+    await expect(connectCard.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(2);
+    for (const provider of ["GitHub", "OpenAI Codex"]) {
+      await expect(connectCard.getByRole("form", { name: provider, exact: true }))
+        .toHaveAttribute("action", "/settings/credentials/_actions/credentials/oauth/enroll");
+    }
+    await expect(connectCard.getByRole("form", { name: "GitHub", exact: true }).locator('[name="name"]')).toHaveCount(0);
+    const profileName = page.getByRole("textbox", { name: "Profile name", exact: true });
+    await expect(profileName).toHaveAttribute("maxlength", "128");
+    await expect(profileName).toHaveAccessibleDescription(/lowercase letters/);
+    for (const name of ["Work", "work profile", "-work", "work."]) {
+      await profileName.fill(name);
+      expect(await profileName.evaluate((input: HTMLInputElement) => input.validity.patternMismatch)).toBe(true);
+    }
+    await profileName.fill("work_1.github");
+    expect(await profileName.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true);
+    await profileName.clear();
     await expect(connectCard).toContainText("Enable device code authorization for Codex");
     await expect(connectCard.getByRole("link", { name: "ChatGPT Security settings", exact: true }))
       .toHaveAttribute("href", "https://chatgpt.com/#settings/Security");

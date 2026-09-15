@@ -16,7 +16,6 @@ const PUBLIC_ORIGIN: &str = "http://127.0.0.1:8090";
 pub(super) struct Config {
     pub(super) database_url: Zeroizing<String>,
     pub(super) listeners: Listeners,
-    pub(super) public_origin: http::HeaderValue,
     pub(super) runtime_directory: PathBuf,
 }
 
@@ -84,9 +83,9 @@ impl Config {
         }
         Ok(Self {
             database_url,
-            public_origin: http::HeaderValue::from_static(PUBLIC_ORIGIN),
             listeners: Listeners {
                 public: ([0, 0, 0, 0], 8086).into(),
+                public_origin: http::HeaderValue::from_static(PUBLIC_ORIGIN),
                 private: ([0, 0, 0, 0], 9443).into(),
                 tls,
             },

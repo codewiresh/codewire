@@ -4,6 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use axum::http::HeaderValue;
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
+use buffa::Message as _;
 use codewire_proto::codewire::v1::{
     AccessProfile, AccessProfileEntry, AccessProfileServiceClient, AddApiKeyCredentialRequest,
     AddSshCredentialRequest, CreateAccessProfileRequest, Credential, CredentialAuthenticationKind,
@@ -15,7 +20,7 @@ use codewire_proto::codewire::v1::{
     enroll_codex_response, enroll_github_response, get_credential_request,
 };
 use connectrpc::{
-    ConnectError,
+    ConnectError, ErrorCode,
     client::{CallOptions, ClientConfig},
 };
 
@@ -59,8 +64,100 @@ pub(crate) enum OAuthEnrollmentEvent {
     },
     Committed,
     Failed {
+        reason: OAuthEnrollmentFailure,
         uncertain: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OAuthEnrollmentFailure {
+    SignInRequired,
+    Unavailable,
+    AlreadyExists,
+    Changed,
+    Unsupported,
+    Invalid,
+    NotCompleted,
+    Expired,
+    Cancelled,
+    UnexpectedResponse,
+}
+
+fn failed(uncertain: bool) -> OAuthEnrollmentEvent {
+    OAuthEnrollmentEvent::Failed {
+        reason: OAuthEnrollmentFailure::UnexpectedResponse,
+        uncertain,
+    }
+}
+
+fn failed_error(error: &ConnectError, uncertain: bool) -> OAuthEnrollmentEvent {
+    use OAuthEnrollmentFailure as Failure;
+    // Do not render or retain an upstream message, detail metadata, provider
+    // output or challenge. Only these closed reasons cross into the view.
+    let trusted_reason = match enrollment_error_reason(error) {
+        Ok(reason) => reason,
+        Err(()) => return failed(uncertain),
+    };
+    let reason = match (trusted_reason.as_deref(), error.code) {
+        (Some("CREDENTIAL_REVISION_CHANGED"), ErrorCode::FailedPrecondition) => Failure::Changed,
+        (Some("CREDENTIAL_ENROLLMENT_FAILED"), ErrorCode::FailedPrecondition) => {
+            Failure::NotCompleted
+        }
+        (Some("CREDENTIAL_ENROLLMENT_UNSUPPORTED"), ErrorCode::FailedPrecondition) => {
+            Failure::Unsupported
+        }
+        (Some("CREDENTIAL_ENROLLMENT_CLEANUP_FAILED"), ErrorCode::Unavailable)
+        | (Some("CREDENTIAL_MUTATION_UNCERTAIN"), ErrorCode::Unknown) => {
+            return failed(true);
+        }
+        (Some(_), _) => return failed(uncertain),
+        (None, _) => match error.code {
+            ErrorCode::Unauthenticated | ErrorCode::PermissionDenied => Failure::SignInRequired,
+            ErrorCode::Unavailable | ErrorCode::ResourceExhausted => Failure::Unavailable,
+            ErrorCode::AlreadyExists => Failure::AlreadyExists,
+            ErrorCode::Aborted | ErrorCode::NotFound => Failure::Changed,
+            ErrorCode::InvalidArgument => Failure::Invalid,
+            ErrorCode::DeadlineExceeded => Failure::Expired,
+            ErrorCode::Canceled => Failure::Cancelled,
+            _ => Failure::UnexpectedResponse,
+        },
+    };
+    // These failures are proven before publication. Other failures after a
+    // challenge can leave publication uncertain, so preserve reconciliation.
+    let uncertain = uncertain
+        && !matches!(
+            reason,
+            Failure::AlreadyExists
+                | Failure::Changed
+                | Failure::Unsupported
+                | Failure::NotCompleted
+        );
+    OAuthEnrollmentEvent::Failed { reason, uncertain }
+}
+
+fn enrollment_error_reason(error: &ConnectError) -> Result<Option<String>, ()> {
+    let mut details = error.details.iter().filter(|detail| {
+        matches!(
+            detail.type_url.as_str(),
+            "google.rpc.ErrorInfo" | "type.googleapis.com/google.rpc.ErrorInfo"
+        )
+    });
+    let Some(detail) = details.next() else {
+        return Ok(None);
+    };
+    if details.next().is_some() {
+        return Err(());
+    }
+    let encoded = detail.value.as_deref().ok_or(())?;
+    let bytes = STANDARD_NO_PAD
+        .decode(encoded)
+        .or_else(|_| STANDARD.decode(encoded))
+        .map_err(|_| ())?;
+    let info = codewire_proto::google::rpc::ErrorInfo::decode_from_slice(&bytes).map_err(|_| ())?;
+    if info.domain != "codewire.sh" || info.reason.is_empty() {
+        return Err(());
+    }
+    Ok(Some(info.reason))
 }
 
 pub(crate) struct CredentialSettingsData {
@@ -121,10 +218,8 @@ pub(crate) async fn run_oauth_enrollment(
 ) {
     let expected = match enrollment_expected(&state, cookie.clone(), &request).await {
         Ok(expected) => expected,
-        Err(_) => {
-            let _ = events
-                .send(OAuthEnrollmentEvent::Failed { uncertain: false })
-                .await;
+        Err(error) => {
+            let _ = events.send(failed_error(&error, false)).await;
             return;
         }
     };
@@ -145,11 +240,12 @@ pub(crate) async fn run_oauth_enrollment(
                 _ = events.closed() => return,
                 result = client.enroll_codex_with_options(rpc, options) => result,
             };
-            let Ok(mut stream) = stream else {
-                let _ = events
-                    .send(OAuthEnrollmentEvent::Failed { uncertain: false })
-                    .await;
-                return;
+            let mut stream = match stream {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let _ = events.send(failed_error(&error, false)).await;
+                    return;
+                }
             };
             let mut challenged = false;
             loop {
@@ -193,32 +289,26 @@ pub(crate) async fn run_oauth_enrollment(
                             let event = if matches!(terminal, Ok(None)) {
                                 OAuthEnrollmentEvent::Committed
                             } else {
-                                OAuthEnrollmentEvent::Failed { uncertain: true }
+                                failed(true)
                             };
                             let _ = events.send(event).await;
                             return;
                         }
                         Some(enroll_codex_response::Event::Credential(_)) => {
-                            let _ = events
-                                .send(OAuthEnrollmentEvent::Failed { uncertain: true })
-                                .await;
+                            let _ = events.send(failed(true)).await;
                             return;
                         }
                         _ => {
-                            let _ = events
-                                .send(OAuthEnrollmentEvent::Failed {
-                                    uncertain: challenged,
-                                })
-                                .await;
+                            let _ = events.send(failed(challenged)).await;
                             return;
                         }
                     },
-                    Ok(None) | Err(_) => {
-                        let _ = events
-                            .send(OAuthEnrollmentEvent::Failed {
-                                uncertain: challenged,
-                            })
-                            .await;
+                    Ok(None) => {
+                        let _ = events.send(failed(challenged)).await;
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = events.send(failed_error(&error, challenged)).await;
                         return;
                     }
                 }
@@ -235,11 +325,12 @@ pub(crate) async fn run_oauth_enrollment(
                 _ = events.closed() => return,
                 result = client.enroll_github_with_options(rpc, options) => result,
             };
-            let Ok(mut stream) = stream else {
-                let _ = events
-                    .send(OAuthEnrollmentEvent::Failed { uncertain: false })
-                    .await;
-                return;
+            let mut stream = match stream {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let _ = events.send(failed_error(&error, false)).await;
+                    return;
+                }
             };
             let mut challenged = false;
             loop {
@@ -283,32 +374,26 @@ pub(crate) async fn run_oauth_enrollment(
                             let event = if matches!(terminal, Ok(None)) {
                                 OAuthEnrollmentEvent::Committed
                             } else {
-                                OAuthEnrollmentEvent::Failed { uncertain: true }
+                                failed(true)
                             };
                             let _ = events.send(event).await;
                             return;
                         }
                         Some(enroll_github_response::Event::Credential(_)) => {
-                            let _ = events
-                                .send(OAuthEnrollmentEvent::Failed { uncertain: true })
-                                .await;
+                            let _ = events.send(failed(true)).await;
                             return;
                         }
                         _ => {
-                            let _ = events
-                                .send(OAuthEnrollmentEvent::Failed {
-                                    uncertain: challenged,
-                                })
-                                .await;
+                            let _ = events.send(failed(challenged)).await;
                             return;
                         }
                     },
-                    Ok(None) | Err(_) => {
-                        let _ = events
-                            .send(OAuthEnrollmentEvent::Failed {
-                                uncertain: challenged,
-                            })
-                            .await;
+                    Ok(None) => {
+                        let _ = events.send(failed(challenged)).await;
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = events.send(failed_error(&error, challenged)).await;
                         return;
                     }
                 }
@@ -352,7 +437,11 @@ fn validate_oauth_ack(
     if credential.provider != provider
         || credential.authentication_kind != CredentialAuthenticationKind::Oauth
         || credential.status != CredentialStatus::Active
-        || credential.name != expected_name
+        || if provider == "github" && expected.is_none() && expected_name.is_empty() {
+            credential.account_hint.as_deref() != Some(credential.name.as_str())
+        } else {
+            credential.name != expected_name
+        }
     {
         return Err(invalid_metadata());
     }
@@ -790,7 +879,11 @@ fn build_settings_data(
     mut credentials: Vec<Credential>,
     mut profiles: Vec<AccessProfile>,
 ) -> Result<CredentialSettingsData, ConnectError> {
-    credentials.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    credentials.sort_by(|a, b| {
+        credential_display_name(a)
+            .cmp(credential_display_name(b))
+            .then(a.id.cmp(&b.id))
+    });
     profiles.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
 
     let mut seen_credentials = BTreeSet::new();
@@ -834,7 +927,7 @@ fn build_settings_data(
         };
         let choice = CredentialChoiceView {
             id: credential.id.clone(),
-            name: credential.name.clone(),
+            name: credential_display_name(&credential).to_owned(),
             status,
         };
         match slot {
@@ -845,7 +938,10 @@ fn build_settings_data(
             "ssh" => choices.ssh.push(choice),
             _ => unreachable!("credential_slot returns a closed slot"),
         }
-        credential_index.insert(credential.id.clone(), (credential.name.clone(), slot));
+        credential_index.insert(
+            credential.id.clone(),
+            (credential_display_name(&credential).to_owned(), slot),
+        );
         rows.push(CredentialRowView {
             id: credential.id,
             name: credential.name,
@@ -876,9 +972,7 @@ fn build_settings_data(
     for profile in profiles {
         if exact_id(&profile.id).is_err()
             || !seen_profiles.insert(profile.id.clone())
-            || profile.name.is_empty()
-            || profile.name.len() > 128
-            || profile.name.bytes().any(|byte| byte.is_ascii_control())
+            || codewire_access::AccessProfileName::parse(&profile.name).is_err()
             || profile.revision == 0
             || profile.revision > i64::MAX as u64
             || profile.entries.len() > 5
@@ -924,6 +1018,18 @@ fn build_settings_data(
         profiles: profile_rows,
         choices,
     })
+}
+
+fn credential_display_name(credential: &Credential) -> &str {
+    if credential.provider == "github" {
+        credential
+            .account_hint
+            .as_deref()
+            .filter(|hint| !hint.is_empty())
+            .unwrap_or(&credential.name)
+    } else {
+        &credential.name
+    }
 }
 
 fn validate_credential_metadata(credential: &Credential) -> Result<(), ConnectError> {
@@ -1027,9 +1133,7 @@ fn validate_profile_ack(
     if exact_id(&profile.id).is_err()
         || expected_id.is_some_and(|id| profile.id != id)
         || expected_name.is_some_and(|name| profile.name != name)
-        || profile.name.is_empty()
-        || profile.name.len() > 128
-        || profile.name.bytes().any(|byte| byte.is_ascii_control())
+        || codewire_access::AccessProfileName::parse(&profile.name).is_err()
         || profile.revision != expected_revision
         || canonical_entries(&profile.entries)? != *expected_entries
     {
@@ -1178,6 +1282,38 @@ mod tests {
     }
 
     #[test]
+    fn github_display_uses_verified_account_without_changing_canonical_reconnect_name() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        let mut github = credential(
+            id,
+            "legacy-reference",
+            "github",
+            CredentialAuthenticationKind::Oauth,
+        );
+        github.account_hint = Some("verified-user".into());
+        let data = build_settings_data(
+            vec![github],
+            vec![AccessProfile {
+                id: "00000000-0000-4000-8000-000000000002".into(),
+                name: "work".into(),
+                revision: 1,
+                entries: vec![AccessProfileEntry {
+                    capability_slot: "github".into(),
+                    credential_id: id.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        assert_eq!(data.credentials[0].display_name(), "verified-user");
+        assert_eq!(data.credentials[0].name, "legacy-reference");
+        assert_eq!(data.choices.github[0].name, "verified-user");
+        assert_eq!(data.profiles[0].entries[0].credential, "verified-user");
+        assert_eq!(data.profiles[0].github, id);
+    }
+
+    #[test]
     fn inventory_rejects_cross_slot_profiles_and_private_shape_drift() {
         let credential_id = "00000000-0000-4000-8000-000000000001";
         let profile_id = "00000000-0000-4000-8000-000000000002";
@@ -1251,6 +1387,12 @@ mod tests {
         validate_profile_ack(&create_ack, None, Some("work"), 1, &expected).unwrap();
         assert!(validate_profile_ack(&create_ack, None, Some("other"), 1, &expected).is_err());
 
+        let mut invalid_name = create_ack.clone();
+        invalid_name.name = "GitHub repository browser".into();
+        assert!(validate_profile_ack(&invalid_name, None, None, 1, &expected).is_err());
+        invalid_name.entries.clear();
+        assert!(build_settings_data(Vec::new(), vec![invalid_name]).is_err());
+
         let mut malformed = create_ack;
         malformed.id = "not-an-id".into();
         assert!(validate_profile_ack(&malformed, None, Some("work"), 1, &expected).is_err());
@@ -1315,6 +1457,20 @@ mod tests {
         };
         assert!(valid_github_challenge(&github));
 
+        let mut automatic = credential(
+            "00000000-0000-4000-8000-000000000002",
+            "verified-account",
+            "github",
+            CredentialAuthenticationKind::Oauth,
+        );
+        automatic.account_hint = Some("verified-account".into());
+        validate_oauth_ack(&automatic, "github", "", &None).unwrap();
+        automatic.account_hint = Some("different-account".into());
+        assert!(validate_oauth_ack(&automatic, "github", "", &None).is_err());
+        automatic.account_hint = None;
+        assert!(validate_oauth_ack(&automatic, "github", "", &None).is_err());
+        assert!(validate_oauth_ack(&automatic, "openai", "", &None).is_err());
+
         let mut current = credential(
             "00000000-0000-4000-8000-000000000001",
             "Work GitHub",
@@ -1324,6 +1480,7 @@ mod tests {
         current.status = CredentialStatus::Revoked.into();
         current.expires_at_unix = Some(4_102_444_800);
         current.account_hint = Some("old-account".into());
+        assert_eq!(credential_display_name(&current), "old-account");
         let mut replacement = current.clone();
         replacement.status = CredentialStatus::Active.into();
         replacement.revocation_generation = 2;
@@ -1337,5 +1494,105 @@ mod tests {
         .unwrap();
         replacement.expires_at_unix = None;
         assert!(validate_oauth_ack(&replacement, "github", "Work GitHub", &Some(current)).is_err());
+    }
+
+    #[test]
+    fn oauth_failure_reasons_are_closed_and_keep_uncertain_publication_distinct() {
+        use OAuthEnrollmentFailure as Failure;
+        let cases = [
+            (
+                ErrorCode::Unauthenticated,
+                "",
+                Failure::SignInRequired,
+                true,
+            ),
+            (ErrorCode::Unavailable, "", Failure::Unavailable, true),
+            (ErrorCode::AlreadyExists, "", Failure::AlreadyExists, false),
+            (
+                ErrorCode::FailedPrecondition,
+                "CREDENTIAL_REVISION_CHANGED",
+                Failure::Changed,
+                false,
+            ),
+            (
+                ErrorCode::FailedPrecondition,
+                "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
+                Failure::Unsupported,
+                false,
+            ),
+            (
+                ErrorCode::FailedPrecondition,
+                "CREDENTIAL_ENROLLMENT_FAILED",
+                Failure::NotCompleted,
+                false,
+            ),
+            (ErrorCode::DeadlineExceeded, "", Failure::Expired, true),
+            (ErrorCode::Canceled, "", Failure::Cancelled, true),
+            (
+                ErrorCode::Unknown,
+                "CREDENTIAL_MUTATION_UNCERTAIN",
+                Failure::UnexpectedResponse,
+                true,
+            ),
+            (
+                ErrorCode::Unavailable,
+                "CREDENTIAL_ENROLLMENT_CLEANUP_FAILED",
+                Failure::UnexpectedResponse,
+                true,
+            ),
+            (
+                ErrorCode::FailedPrecondition,
+                "synthetic-private-marker",
+                Failure::UnexpectedResponse,
+                true,
+            ),
+        ];
+        for (code, reason, expected, expected_uncertain) in cases {
+            let detail = codewire_proto::google::rpc::ErrorInfo {
+                domain: "codewire.sh".into(),
+                reason: reason.into(),
+                ..Default::default()
+            };
+            let mut error = ConnectError::new(code, "synthetic-private-marker");
+            if !reason.is_empty() {
+                error.details.push(connectrpc::ErrorDetail::from_message(
+                    "google.rpc.ErrorInfo",
+                    &detail,
+                ));
+            }
+            let OAuthEnrollmentEvent::Failed { reason, uncertain } = failed_error(&error, true)
+            else {
+                panic!("expected a closed failure");
+            };
+            assert_eq!(reason, expected);
+            assert_eq!(uncertain, expected_uncertain);
+            assert!(!format!("{reason:?}").contains("synthetic-private-marker"));
+        }
+        for (domain, code, duplicate) in [
+            ("foreign.example", ErrorCode::FailedPrecondition, false),
+            ("codewire.sh", ErrorCode::Unavailable, false),
+            ("codewire.sh", ErrorCode::FailedPrecondition, true),
+        ] {
+            let detail = codewire_proto::google::rpc::ErrorInfo {
+                domain: domain.into(),
+                reason: "CREDENTIAL_ENROLLMENT_UNSUPPORTED".into(),
+                ..Default::default()
+            };
+            let mut error = ConnectError::new(code, "synthetic-private-marker");
+            error.details.push(connectrpc::ErrorDetail::from_message(
+                "google.rpc.ErrorInfo",
+                &detail,
+            ));
+            if duplicate {
+                error.details.push(error.details[0].clone());
+            }
+            assert!(matches!(
+                failed_error(&error, true),
+                OAuthEnrollmentEvent::Failed {
+                    reason: Failure::UnexpectedResponse,
+                    uncertain: true
+                }
+            ));
+        }
     }
 }

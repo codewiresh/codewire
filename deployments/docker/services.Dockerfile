@@ -148,7 +148,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-db-migrate" /out/codewire-db-migrate && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-udp-relay" /out/codewire-udp-relay && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-credential-service" /out/codewire-credential-service && \
-    mkdir -p /out/kind-fixtures && \
+    mkdir -p /out/kind-fixtures /out/kind-git-runtime && \
     if [ "$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e ]; then \
       test "$CODEWIRE_RUST_PROFILE" = ci && \
       codewire-rust-build cargo test --locked --profile ci \
@@ -158,7 +158,14 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
       test -n "$credential_fixture" && test -x "$credential_fixture" && \
       "$credential_fixture" --list > /tmp/credential-fixture-tests.txt && \
       grep -qx 'runtime::kind::serve_kind_credential_fixture: test' /tmp/credential-fixture-tests.txt && \
-      cp "$credential_fixture" /out/kind-fixtures/credential-service; \
+      cp "$credential_fixture" /out/kind-fixtures/credential-service && \
+      test "$(git --version)" = 'git version 2.39.5' && \
+      install -D /usr/bin/git /out/kind-git-runtime/usr/bin/git && \
+      install -D /usr/lib/git-core/git-http-backend /out/kind-git-runtime/usr/lib/git-core/git-http-backend && \
+      ln -s ../../bin/git /out/kind-git-runtime/usr/lib/git-core/git && \
+      ln -s git /out/kind-git-runtime/usr/lib/git-core/git-upload-pack && \
+      ln -s git /out/kind-git-runtime/usr/lib/git-core/git-pack-objects && \
+      install -Dm644 /usr/share/doc/git/copyright /out/kind-git-runtime/usr/share/doc/git/copyright; \
     fi
 
 FROM ssh-runtime
@@ -173,10 +180,28 @@ COPY --from=builder /out/codewire-credential-service /codewire-credential-servic
 # Empty in the release graph: cfg(test) code is built only by services-ci's
 # existing kind-e2e feature/profile pair. No production fixture switch exists.
 COPY --from=builder /out/kind-fixtures/ /codewire-kind-fixtures/
+# Stock Git from the already digest-pinned Rust/Bookworm toolchain, only for
+# the synthetic smart-HTTP provider. No client HTTP/SSH helpers, package resolver
+# or new download. The pinned Debian runtime already supplies libpcre2/libz and
+# libc/loader; do not overwrite them with the builder's older libc. Like the
+# libtest payload above, this directory is empty outside kind-e2e + profile ci.
+COPY --from=builder /out/kind-git-runtime/ /
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=codex-enrollment /codex/codex /usr/local/bin/codex
 COPY --from=github-enrollment /gh/bin/gh /usr/local/bin/gh
 COPY --from=github-enrollment /gh/LICENSE /usr/share/licenses/gh/LICENSE
 COPY deployments/docker/licenses/codex-LICENSE deployments/docker/licenses/codex-NOTICE /usr/share/licenses/codex/
 USER 65532:65532
+# Exercise the minimal Git closure in the actual non-root runtime, including
+# CGI advertisement/pack transfer and child cleanup. Release proves absence.
+RUN if [ -x /codewire-kind-fixtures/credential-service ]; then \
+      /codewire-kind-fixtures/credential-service --list > /tmp/kind-git-tests.txt && \
+      grep -qx 'runtime::kind::git::tests::stock_git_smart_http_round_trip: test' /tmp/kind-git-tests.txt && \
+      /codewire-kind-fixtures/credential-service --exact \
+        runtime::kind::git::tests::stock_git_smart_http_round_trip --test-threads=1 && \
+      rm /tmp/kind-git-tests.txt; \
+    else \
+      test ! -e /usr/bin/git && test ! -e /usr/lib/git-core/git-http-backend && \
+      test ! -e /usr/lib/git-core/git-upload-pack && test ! -e /usr/lib/git-core/git-pack-objects; \
+    fi
 # No ENTRYPOINT: each deployment sets `command` to pick its binary.

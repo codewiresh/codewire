@@ -5,12 +5,13 @@ fn clients(slots: &[&str]) -> ManagedCredentialClients {
 }
 
 #[test]
-fn managed_clients_validate_exact_slots_before_discarding_unmanaged_slots() {
+fn managed_clients_validate_exact_slots_without_discarding_github() {
     assert_eq!(clients(&[]), ManagedCredentialClients::default());
-    assert_eq!(clients(&["github"]), clients(&[]));
+    assert_ne!(clients(&["github"]), clients(&[]));
+    assert!(clients(&["github"]).contains(ManagedCredentialClient::GitHub));
     assert_eq!(
         clients(&["anthropic", "github", "codex", "ssh", "openai"]),
-        clients(&["codex", "openai", "anthropic", "ssh"])
+        clients(&["codex", "openai", "anthropic", "ssh", "github"])
     );
     for slot in ["codex", "openai", "anthropic", "github", "ssh"] {
         assert_eq!(
@@ -49,8 +50,8 @@ fn managed_clients_validate_exact_slots_before_discarding_unmanaged_slots() {
 }
 
 #[test]
-fn managed_clients_have_exactly_sixteen_canonical_private_encodings() {
-    let slots = ["codex", "openai", "anthropic", "ssh"];
+fn managed_clients_have_exactly_32_canonical_private_encodings_preserving_v1() {
+    let slots = ["codex", "openai", "anthropic", "ssh", "github"];
     let encodings = [
         "v1:none",
         "v1:codex",
@@ -68,6 +69,22 @@ fn managed_clients_have_exactly_sixteen_canonical_private_encodings() {
         "v1:codex,anthropic,ssh",
         "v1:openai,anthropic,ssh",
         "v1:codex,openai,anthropic,ssh",
+        "v2:10",
+        "v2:11",
+        "v2:12",
+        "v2:13",
+        "v2:14",
+        "v2:15",
+        "v2:16",
+        "v2:17",
+        "v2:18",
+        "v2:19",
+        "v2:1a",
+        "v2:1b",
+        "v2:1c",
+        "v2:1d",
+        "v2:1e",
+        "v2:1f",
     ];
     let mut unique = BTreeSet::new();
     for (bits, expected) in encodings.into_iter().enumerate() {
@@ -79,13 +96,14 @@ fn managed_clients_have_exactly_sixteen_canonical_private_encodings() {
         )
         .unwrap();
         assert_eq!(selected.encode(), expected);
+        assert!(selected.encode().len() < 32);
         assert!(unique.insert(selected.encode()));
         assert_eq!(
             ManagedCredentialClients::decode(expected).unwrap(),
             selected
         );
     }
-    assert_eq!(unique.len(), 16);
+    assert_eq!(unique.len(), 32);
     assert_eq!(
         encodings[..8].to_vec(),
         [
@@ -106,6 +124,11 @@ fn managed_clients_have_exactly_sixteen_canonical_private_encodings() {
         "codex",
         "v0:codex",
         "v2:codex",
+        "v2:00",
+        "v2:0f",
+        "v2:20",
+        "v2:1F",
+        "v2:010",
         "v1:",
         "v1:0",
         "v1:github",
@@ -270,6 +293,7 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
     }
     assert_eq!(MANAGED_HTTP_PORT, 38_081);
     assert_eq!(MANAGED_OPENAI_API_PREFIX, "/_codewire/openai/v1");
+    assert_eq!(MANAGED_GITHUB_GIT_PREFIX, "/_codewire/github/");
     assert_eq!(CODEX_NATIVE_HOME, "/run/codewire-agent/codex");
     assert_eq!(SSH_NATIVE_AUTH_SOCK, "/run/codewire-host/ssh-agent.sock");
     assert_eq!(SSH_PLATFORM_AUTH_SOCK, "/codewire/run/ssh-agent.sock");
@@ -277,8 +301,8 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
 
 #[test]
 fn managed_client_projection_covers_all_owned_names_without_environment_lookup() {
-    for bits in 0..16 {
-        let slots = ["codex", "openai", "anthropic", "ssh"];
+    for bits in 0..32 {
+        let slots = ["codex", "openai", "anthropic", "ssh", "github"];
         let selected = ManagedCredentialClients::from_profile_slots(
             slots
                 .iter()

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
     <title>{{ page.environment.name }} · Sandbox · Codewire</title>
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
@@ -15,7 +15,9 @@
     <script src="/assets/codewire/addon-fit-0.11.0.js" integrity="sha384-txoiwu4RR2GD3qySbaj+BbzibkLbSJRcfqGYMu6z1EqHil4A2dyBiBW5dlacG6OR" defer></script>
     <script src="/assets/codewire/addon-web-links-0.12.0.js" integrity="sha384-0IIwkXq0LAkIxEVKxlOxWbje2g/VT+5CzVTZiEukyiZ02pOl/O+M0fkpEKAYqto9" defer></script>
     <script src="/assets/codewire/dashboard-v1.js" defer></script>
-    <script src="/assets/codewire/terminal-v1.js" defer></script>
+    <script src="/assets/codewire/terminal-renderer-v1.js" defer></script>
+    <script src="/assets/codewire/terminal-presentation-v1.js" defer></script>
+    <script src="/assets/codewire/terminal-v1.js" nonce="{{ style_nonce }}" defer></script>
   </head>
   <body class="cw-body cw-terminal-page" data-route="sandbox-detail" data-terminal-websocket-origin="{{ page.websocket_origin }}">
     <div class="cw-app cw-sandbox-detail-app" data-dashboard-app data-mobile-open="false">
@@ -37,6 +39,7 @@
           </div>
         </section>
         <section class="cw-sandbox-terminal" aria-label="Sandbox terminal">
+          <header class="cw-terminal-toolbar"><p class="cw-terminal-copy-status" data-terminal-copy-status role="status"></p><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-copy disabled>Copy selection</button></header>
           <div class="cw-terminal-panel cw-terminal-panel--fullscreen" data-terminal-root data-terminal-org-id="{{ page.organization_id }}" data-terminal-environment-id="{{ page.environment.id }}" data-terminal-running="{{ page.environment.can_stop }}" aria-label="Interactive terminal"><p class="cw-terminal-status" data-terminal-status>{% if page.environment.can_stop %}Connecting…{% else %}Start this Sandbox to connect.{% endif %}</p></div>
           <noscript><section class="cw-terminal-fallback"><h2>Use the CLI terminal</h2><p>The browser terminal needs JavaScript. You can connect without it:</p><code>cw shell {{ page.environment.id }}</code></section></noscript>
         </section>

@@ -9,6 +9,7 @@
 mod authentication;
 mod config;
 mod enrollment;
+mod git;
 mod provider;
 
 use super::*;
@@ -60,7 +61,9 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
     .map_err(|_| RuntimeError::Database)?;
     let result = async {
         config::assert_restricted_login(&pool).await?;
-        let provider = provider::SyntheticProvider::new();
+        let git = git::Fixture::create(&config.runtime_directory).await
+            .map_err(|_| RuntimeError::Configuration("Kind Git fixture"))?;
+        let provider = provider::SyntheticProvider::with_git(git.clone());
         // Keep the private tmpfs fixture alive through both owner drains.
         let (fixture, enrollment, github) = enrollment::Fixture::create(&config.runtime_directory)?;
         let store = Arc::new(PlatformCredentialStore::new(
@@ -84,17 +87,22 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         let bridge = ssh::configure(bridge, &config.runtime_directory)?;
         let mutation = Arc::new(CredentialMutationOwner::new(
             pool.clone(),
-            store,
+            store.clone(),
             CodexEnrollmentOwner::new(enrollment),
             GitHubEnrollmentOwner::new(github),
+        ));
+        let repositories = Arc::new(GithubRepositoryOwner::new(
+            pool.clone(),
+            store,
+            Arc::new(provider.clone()),
         ));
         tracing::info!(target: TARGET, event = "fixture_starting", "fixture_starting");
         let result = serve_owned(
             config.listeners,
-            config.public_origin,
             pool.clone(),
             Arc::new(TestKekProvider),
             mutation,
+            repositories,
             bridge,
             async {
                 let signal = tokio::select! {
@@ -105,8 +113,10 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             },
         )
         .await;
+        let git_drain = git.close().await;
+        tracing::info!(target: TARGET, event = "github_git_drained", success = git_drain.is_ok(), "github_git_drained");
         provider.log_totals();
-        match result {
+        match result.and(git_drain.map_err(|_| RuntimeError::Cleanup)) {
             Ok(()) => fixture.close(),
             Err(error) => {
                 // A listener/signal error can mask a simultaneous owner

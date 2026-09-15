@@ -53,6 +53,7 @@ pub enum CredentialMutationError {
     InUse,
     MustBeRevoked,
     EnrollmentFailed,
+    EnrollmentUnsupported,
     CleanupFailed,
     PublicationUnknown,
 }
@@ -328,6 +329,7 @@ struct Events<T = EnrollCodexResponse> {
 
 enum EnrollmentTarget {
     Create(String),
+    CreateGithubAccount,
     Reconnect(CredentialRecord),
 }
 

@@ -87,6 +87,9 @@ codewire.localhost {
 			flush_interval -1
 		}
 	}
+	handle /codewire.v1.GithubRepositoryService/* {
+		reverse_proxy 127.0.0.1:8086
+	}
 	handle /codewire.* {
 		reverse_proxy 127.0.0.1:8084
 	}

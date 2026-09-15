@@ -98,6 +98,34 @@ pub(super) fn github_error(error: GitHubEnrollmentError) -> Error {
             Error::Unavailable
         }
         GitHubEnrollmentError::Cleanup => Error::CleanupFailed,
+        GitHubEnrollmentError::UnsupportedVersion
+        | GitHubEnrollmentError::InvalidOutput
+        | GitHubEnrollmentError::InvalidResult => Error::EnrollmentUnsupported,
         _ => Error::EnrollmentFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_failures_keep_unsupported_provider_responses_distinct() {
+        for error in [
+            GitHubEnrollmentError::UnsupportedVersion,
+            GitHubEnrollmentError::InvalidOutput,
+            GitHubEnrollmentError::InvalidResult,
+        ] {
+            assert_eq!(github_error(error), Error::EnrollmentUnsupported);
+        }
+        assert_eq!(
+            github_error(GitHubEnrollmentError::Failed),
+            Error::EnrollmentFailed
+        );
+        assert_eq!(github_error(GitHubEnrollmentError::Expired), Error::Expired);
+        assert_eq!(
+            github_error(GitHubEnrollmentError::Cleanup),
+            Error::CleanupFailed
+        );
     }
 }

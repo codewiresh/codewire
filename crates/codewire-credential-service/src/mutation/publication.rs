@@ -48,6 +48,17 @@ pub(super) async fn enroll(
     let prepared = async {
         scope.check()?;
         let (material, account_hint) = completed.take_material()?;
+        let target = match target {
+            EnrollmentTarget::CreateGithubAccount => {
+                if completed.provider() != "github" {
+                    return Err(Error::EnrollmentFailed);
+                }
+                let name = account_hint.as_deref().ok_or(Error::EnrollmentFailed)?;
+                super::validate_name(name)?;
+                EnrollmentTarget::Create(name.to_owned())
+            }
+            target => target,
+        };
         // All provider/envelope work precedes the identity/publication locks.
         match target {
             EnrollmentTarget::Create(name) => {
@@ -84,6 +95,7 @@ pub(super) async fn enroll(
                     .map_err(store_error)?;
                 Ok(Mutation::Replace(Box::new(prepared)))
             }
+            EnrollmentTarget::CreateGithubAccount => unreachable!("resolved above"),
         }
     }
     .await;

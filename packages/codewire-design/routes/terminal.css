@@ -8,6 +8,10 @@
 .cw-terminal-page-main { min-height: 0; }
 .cw-terminal-panel { position: relative; height: 100%; min-height: 12rem; overflow: hidden; background: #0a0a0a; }
 .cw-terminal-panel--fullscreen { min-height: 100%; }
+.cw-sandbox-terminal { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.cw-sandbox-terminal .cw-terminal-panel--fullscreen { min-height: 0; }
+.cw-terminal-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-bottom: 1px solid #27272a; }
+.cw-terminal-copy-status { flex: 1; margin: 0; color: #a1a1aa; font: .75rem var(--font-mono); }
 .cw-terminal-panel .terminal { height: 100%; padding: .5rem; }
 .cw-terminal-status { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; margin: 0; background: rgba(10, 10, 10, .88); color: #a1a1aa; font-size: .8125rem; }
 .cw-terminal-status[hidden] { display: none; }

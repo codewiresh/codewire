@@ -21,9 +21,9 @@ use codewire_proto::codewire::console::v1::BillingServiceClient;
 use codewire_proto::codewire::v1::{
     AccessProfileServiceClient, ApiKeyServiceClient, CredentialMutationServiceClient,
     CredentialServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
-    ExecServiceClient, FileServiceClient, MeshInviteServiceClient, MeshNetworkServiceClient,
-    MeshNodeServiceClient, OrganizationServiceClient, PortServiceClient, PresetServiceClient,
-    SecretServiceClient,
+    ExecServiceClient, FileServiceClient, GithubRepositoryServiceClient, MeshInviteServiceClient,
+    MeshNetworkServiceClient, MeshNodeServiceClient, OrganizationServiceClient, PortServiceClient,
+    PresetServiceClient, SecretServiceClient,
 };
 use connectrpc::ConnectError;
 use connectrpc::client::{BoxFuture, CallOptions, ClientBody, ClientTransport};
@@ -111,10 +111,11 @@ pub use codewire_proto::codewire::v1::{
     CredentialStatus, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest,
     EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest,
     GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse,
-    GithubDeviceChallenge, ListCredentialsRequest, ListCredentialsResponse,
-    RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest,
-    RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse,
-    SshPublicKey, enroll_codex_response, enroll_github_response, get_credential_request,
+    GithubDeviceChallenge, GithubRepository, ListCredentialsRequest, ListCredentialsResponse,
+    ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest,
+    RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse,
+    RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, SshPublicKey,
+    enroll_codex_response, enroll_github_response, get_credential_request,
 };
 pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
@@ -179,6 +180,7 @@ pub struct CodewireClient {
     access_profiles: AccessProfileServiceClient<ReqwestConnectTransport>,
     credentials: CredentialServiceClient<ReqwestConnectTransport>,
     credential_mutations: CredentialMutationServiceClient<ReqwestConnectTransport>,
+    github_repositories: GithubRepositoryServiceClient<ReqwestConnectTransport>,
     billing: BillingServiceClient<ReqwestConnectTransport>,
     mesh_networks: MeshNetworkServiceClient<ReqwestConnectTransport>,
     mesh_nodes: MeshNodeServiceClient<ReqwestConnectTransport>,
@@ -365,6 +367,7 @@ impl CodewireClient {
         let access_profile_config = config.connect_config()?;
         let credential_config = config.connect_config()?;
         let credential_mutation_config = config.connect_config()?;
+        let github_repository_config = config.connect_config()?;
         let billing_config = config.connect_config()?;
         let mesh_network_config = config.mesh_connect_config()?;
         let mesh_node_config = config.mesh_connect_config()?;
@@ -405,6 +408,10 @@ impl CodewireClient {
             credential_mutations: CredentialMutationServiceClient::new(
                 ReqwestConnectTransport(http.clone()),
                 credential_mutation_config,
+            ),
+            github_repositories: GithubRepositoryServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                github_repository_config,
             ),
             billing: BillingServiceClient::new(
                 ReqwestConnectTransport(http.clone()),

@@ -8,7 +8,8 @@ use super::{OAuthBearerAuthority, OAuthBearerAuthorityError};
 
 const PUBLICATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Authority admitted specifically for `CredentialMutationService`.
+/// Authority admitted specifically for `CredentialMutationService` and the
+/// finite account-owned `GithubRepositoryService`, never runtime delegation.
 ///
 /// It is process-local and nonserializable. The session variant retains only
 /// the stored digest and exact row identity, never the browser cookie.
