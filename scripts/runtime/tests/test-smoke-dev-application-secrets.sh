@@ -38,7 +38,8 @@ fixture() {
   APP_SECRET_PROJECTS=(); APP_SECRET_IDS=(); APP_SECRET_VALUES=(); APP_SECRET_HASHES=()
   APP_SECRET_USER_ATTEMPTS=(); APP_SECRET_ORG_ATTEMPTS=(); APP_SECRET_ALL_KEYS=()
   APP_SECRET_ALL_HASHES_A=(); APP_SECRET_ALL_HASHES_B=(); APP_SECRET_ALL_HASHES_CLEAR=()
-  SMOKE_OAUTH_ENV=(); APP_SECRET_ALL_SCOPES=0; SMOKE_OAUTH_LOGIN_ATTEMPTED=0
+  SMOKE_OAUTH_ENV=(); APP_SECRET_ALL_SCOPES=0; APP_WORKSPACE_MARKER_SHA256=''; APP_RESTART_WITNESS_PID=''
+  SMOKE_OAUTH_LOGIN_ATTEMPTED=0
   SMOKE_OAUTH_LOGIN_DIR=''; SMOKE_OAUTH_RUNTIME_PARENT=''; SMOKE_OAUTH_RUNTIME_DIR=''
   APP_SECRET_DOCUMENT=''; APP_SECRET_CREATE_ATTEMPTED=0; ENV_ID=''; CLAIM_NAME=fixture-claim
   SMOKE_NAME=fixture-env; SMOKE_TIMEOUT_SECONDS=1; SMOKE_EXEC_TIMEOUT=5
@@ -151,6 +152,14 @@ cw() {
         "$TMPDIR_SMOKE/environments.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/environments.db"
       printf '%s\n' "$(( $(<"$TMPDIR_SMOKE/pod-incarnation") + 1 ))" >"$TMPDIR_SMOKE/pod-incarnation"
+      if [[ "$APP_SECRET_ALL_SCOPES" == 1 && -n "$APP_RESTART_WITNESS_PID" &&
+            "$APP_FAILURE" != witness-not-terminated ]]; then
+        kill "$APP_RESTART_WITNESS_PID"
+      fi
+      case "$APP_FAILURE" in
+        marker-replacement) printf 'replacement-marker\n' >"$TMPDIR_SMOKE/workspace-marker" ;;
+        marker-missing) rm -f -- "$TMPDIR_SMOKE/workspace-marker" ;;
+      esac
       if [[ "$APP_FAILURE" == bad-update || ( "$APP_FAILURE" == bad-clear && "$project" == '' ) ]]; then
         printf '{"outcome":"restart_required"}\n'
       else
@@ -161,7 +170,20 @@ cw() {
     'env --platform rm --yes '*)
       jq '.[0].state="destroyed"' "$TMPDIR_SMOKE/environments.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/environments.db" ;;
-    'run --no-tty '*) printf 'application-secret-check-ok\n' ;;
+    'run --no-tty '*'/dev/urandom'*)
+      printf 'fixture-random-workspace-marker\n' >"$TMPDIR_SMOKE/workspace-marker"
+      sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1 ;;
+    'run --no-tty '*'application-restart-witness-ready'*)
+      [[ -f "$TMPDIR_SMOKE/workspace-marker" ]] || return 1
+      [[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]] || return 1
+      printf 'application-restart-witness-ready\n'
+      while :; do command sleep 0.05; done ;;
+    'run --no-tty '*)
+      if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+        [[ -f "$TMPDIR_SMOKE/workspace-marker" ]] || return 1
+        [[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]] || return 1
+      fi
+      printf 'application-secret-check-ok\n' ;;
     'list '*" --output json") printf '[]\n' ;;
     *) fail "unexpected mock CLI operation: $*" ;;
   esac
@@ -627,8 +649,15 @@ jq -e --arg project "platform:id:${APP_SECRET_IDS[0]}" --arg config "$config_key
 ' "$APP_SECRET_DOCUMENT" >/dev/null
 /bin/sh -n < <(jq -r .install_command "$APP_SECRET_DOCUMENT")
 /bin/sh -n < <(jq -r .startup_script "$APP_SECRET_DOCUMENT")
+if grep -Fq preservation-marker < <(jq -r '.install_command,.startup_script' "$APP_SECRET_DOCUMENT"); then
+  fail 'all-scope setup scripts recreate the post-setup workspace marker'
+fi
 create_environment
 run_application_secrets_smoke
+[[ "$APP_WORKSPACE_MARKER_SHA256" =~ ^[0-9a-f]{64}$ ]]
+[[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]]
+[[ "$(awk '$0 == "application-restart-witness-ready" { count++ } END { print count + 0 }' \
+  "$TMPDIR_SMOKE"/app-restart-witness-*.out)" == 2 ]]
 grep -Fq -- '--secrets platform:id:00000000-0000-4000-8000-000000000002 --user-secrets platform --org-secrets --yes --output json' \
   "$TMPDIR_SMOKE/calls" || fail 'all-scope update did not resubmit every selector'
 jq -e '.[0].source_selection.secrets == {}' "$TMPDIR_SMOKE/environments.db" >/dev/null
@@ -656,15 +685,25 @@ all_env_a=(
 )
 env "${all_env_a[@]}" /bin/sh -c "$install"
 env "${all_env_a[@]}" /bin/sh -c "$startup"
+printf 'fixture-random-workspace-marker\n' >"$guest_root/workspace/.cw-app-smoke/preservation-marker"
+marker_sha256="$(sha256sum "$guest_root/workspace/.cw-app-smoke/preservation-marker" | cut -d ' ' -f 1)"
 jq -n --arg key "${APP_SECRET_ALL_KEYS[5]}" '{($key):"ordinary-config"}' \
   >"$guest_root/home/.codewire/environment.json"
 jq -n --arg key "${APP_SECRET_ALL_KEYS[5]}" '{env:[($key + "=ordinary-config")]}' \
   >"$guest_root/home/.codewire/daemon/sessions/one/session.json"
-check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_A)"
+check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_A "$marker_sha256")"
 check="${check//\/workspace/$guest_root/workspace}"
 check="${check//\/home\/codewire/$guest_root/home}"
 env "${all_env_a[@]}" /bin/sh -c "$check" >"$TMPDIR_SMOKE/all-check-a.out"
 grep -qx application-secret-check-ok "$TMPDIR_SMOKE/all-check-a.out"
+printf 'replacement-marker\n' >"$guest_root/workspace/.cw-app-smoke/preservation-marker"
+expect_failure marker-replacement env "${all_env_a[@]}" /bin/sh -c "$check"
+grep -qx 'application check failed: workspace-marker-replaced' "$APP_TEST_ROOT/failure.err"
+printf 'fixture-random-workspace-marker\n' >"$guest_root/workspace/.cw-app-smoke/preservation-marker"
+rm -f -- "$guest_root/workspace/.cw-app-smoke/preservation-marker"
+expect_failure marker-missing env "${all_env_a[@]}" /bin/sh -c "$check"
+grep -qx 'application check failed: workspace-marker-missing' "$APP_TEST_ROOT/failure.err"
+printf 'fixture-random-workspace-marker\n' >"$guest_root/workspace/.cw-app-smoke/preservation-marker"
 all_env_b=(
   "${APP_SECRET_ALL_KEYS[0]}=${APP_SECRET_VALUES[0]}"
   "${APP_SECRET_ALL_KEYS[1]}=${APP_SECRET_VALUES[11]}"
@@ -674,13 +713,13 @@ all_env_b=(
   "${APP_SECRET_ALL_KEYS[5]}=ordinary-config"
 )
 env "${all_env_b[@]}" /bin/sh -c "$startup"
-check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_B)"
+check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_B "$marker_sha256")"
 check="${check//\/workspace/$guest_root/workspace}"
 check="${check//\/home\/codewire/$guest_root/home}"
 env "${all_env_b[@]}" /bin/sh -c "$check" >"$TMPDIR_SMOKE/all-check-b.out"
 grep -qx application-secret-check-ok "$TMPDIR_SMOKE/all-check-b.out"
 env "${APP_SECRET_ALL_KEYS[5]}=ordinary-config" /bin/sh -c "$startup"
-check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_CLEAR)"
+check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_CLEAR "$marker_sha256")"
 check="${check//\/workspace/$guest_root/workspace}"
 check="${check//\/home\/codewire/$guest_root/home}"
 env "${APP_SECRET_ALL_KEYS[5]}=ordinary-config" /bin/sh -c "$check" >"$TMPDIR_SMOKE/all-check-clear.out"
@@ -689,6 +728,24 @@ for value in "${APP_SECRET_VALUES[@]}"; do
   if grep -Fq "$value" <<<"$install$startup$check"; then fail 'generated guest assertion retained a synthetic canary'; fi
 done
 pass
+
+for failure in witness-not-terminated marker-replacement marker-missing; do
+  reject_public_restart_proof() {
+    fixture
+    APP_SECRET_ALL_SCOPES=1
+    prepare_application_secrets
+    create_environment
+    APP_FAILURE="$failure"
+    run_application_secrets_smoke
+  }
+  expect_failure "$failure" reject_public_restart_proof
+  case "$failure" in
+    witness-not-terminated)
+      grep -Fq 'source b did not terminate the old managed application child' "$APP_TEST_ROOT/failure.err" ;;
+    marker-replacement|marker-missing)
+      grep -Fq 'managed application-secret exec failed; output suppressed' "$APP_TEST_ROOT/failure.err" ;;
+  esac
+done
 
 # A malformed acknowledgement cannot be excused by a later successful restart.
 for failure in bad-update bad-clear; do

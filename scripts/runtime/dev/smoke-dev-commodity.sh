@@ -112,6 +112,8 @@ declare -a SMOKE_OAUTH_ENV=()
 APP_SECRET_DOCUMENT=""
 APP_SECRET_CREATE_ATTEMPTED=0
 APP_SECRET_ALL_SCOPES=0
+APP_WORKSPACE_MARKER_SHA256=""
+APP_RESTART_WITNESS_PID=""
 SMOKE_OAUTH_LOGIN_ATTEMPTED=0
 SMOKE_OAUTH_LOGIN_DIR=""
 SMOKE_OAUTH_RUNTIME_PARENT=""
@@ -441,6 +443,7 @@ done
 
 cleanup() {
   local rc=$?
+  stop_application_restart_witness || true
   stop_peer_relay_packet_diagnostics || true
   if [[ "$rc" != "0" ]]; then
     collect_failure_diagnostics "failure" || true
@@ -1381,7 +1384,7 @@ prepare_application_all_scope_secrets() {
      ${#APP_SECRET_ALL_HASHES_CLEAR[@]} == ${#APP_SECRET_ALL_KEYS[@]})) ||
     die 'all-scope application hash matrix is incomplete'
   checks="$(application_all_scopes_hash_checks APP_SECRET_ALL_HASHES_A)"
-  install="set -eu; $checks test ! -e /workspace/.cw-app-smoke; mkdir /workspace/.cw-app-smoke; printf '1\\n' > /workspace/.cw-app-smoke/install-count; printf 'workspace-preserved\\n' > /workspace/.cw-app-smoke/preserved"
+  install="set -eu; $checks test ! -e /workspace/.cw-app-smoke; mkdir /workspace/.cw-app-smoke; printf '1\\n' > /workspace/.cw-app-smoke/install-count"
   startup="set -eu; { "
   for index in "${!APP_SECRET_ALL_KEYS[@]}"; do
     key="${APP_SECRET_ALL_KEYS[$index]}"
@@ -1574,9 +1577,10 @@ SCRIPT
 }
 
 application_all_scopes_guest_check() {
-  local hashes_name="$1"
+  local hashes_name="$1" marker_sha256="$2"
   local -n hashes="$hashes_name"
   local checks index key hash startup_checks='' keys_json config_key
+  [[ "$marker_sha256" =~ ^[0-9a-f]{64}$ ]] || die 'application workspace marker digest is invalid'
   checks="$(application_all_scopes_hash_checks "$hashes_name")"
   for index in "${!APP_SECRET_ALL_KEYS[@]}"; do
     key="${APP_SECRET_ALL_KEYS[$index]}"; hash="${hashes[$index]}"
@@ -1590,7 +1594,8 @@ set -eu
 application_fail() { printf 'application check failed: %s\\n' "\$1" >&2; exit 1; }
 $checks
 test "\$(cat /workspace/.cw-app-smoke/install-count)" = 1 || application_fail install-count
-test "\$(cat /workspace/.cw-app-smoke/preserved)" = workspace-preserved || application_fail workspace-preservation
+test -f /workspace/.cw-app-smoke/preservation-marker || application_fail workspace-marker-missing
+test "\$(sha256sum /workspace/.cw-app-smoke/preservation-marker | cut -d ' ' -f 1)" = '$marker_sha256' || application_fail workspace-marker-replaced
 attempt=0
 until $startup_checks; do
   attempt=\$((attempt + 1)); test "\$attempt" -lt 100 || application_fail startup-projection; sleep 0.1
@@ -1614,6 +1619,87 @@ for path in sessions:
 PY
 printf 'application-secret-check-ok\\n'
 SCRIPT
+}
+
+create_application_workspace_marker() {
+  local marker_script output="$TMPDIR_SMOKE/app-workspace-marker-sha256.out"
+  # The marker bytes never leave the managed workspace. The host retains only
+  # their digest so later public cw run calls can prove workspace continuity.
+  # shellcheck disable=SC2016 # Expanded only by the managed guest shell.
+  marker_script='set -eu; marker=/workspace/.cw-app-smoke/preservation-marker; test ! -e "$marker"; umask 077; head -c 32 /dev/urandom > "$marker"; sha256sum "$marker" | cut -d " " -f 1'
+  cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- /bin/sh -c "$marker_script" \
+    >"$output" 2>"$TMPDIR_SMOKE/app-workspace-marker.err" ||
+    die 'managed workspace marker creation failed; output suppressed'
+  APP_WORKSPACE_MARKER_SHA256="$(cat "$output")"
+  [[ "$APP_WORKSPACE_MARKER_SHA256" =~ ^[0-9a-f]{64}$ && "$(wc -l <"$output")" == 1 ]] ||
+    die 'managed workspace marker returned an invalid digest receipt'
+}
+
+application_restart_witness_guest() {
+  local hashes_name="$1" marker_sha256="$2"
+  local checks witness_lifetime
+  [[ "$marker_sha256" =~ ^[0-9a-f]{64}$ ]] || die 'application restart witness marker digest is invalid'
+  checks="$(application_all_scopes_hash_checks "$hashes_name")"
+  witness_lifetime=$((SMOKE_TIMEOUT_SECONDS + 300))
+  cat <<SCRIPT
+set -eu
+$checks
+test -f /workspace/.cw-app-smoke/preservation-marker
+test "\$(sha256sum /workspace/.cw-app-smoke/preservation-marker | cut -d ' ' -f 1)" = '$marker_sha256'
+printf 'application-restart-witness-ready\\n'
+exec sleep '$witness_lifetime'
+SCRIPT
+}
+
+stop_application_restart_witness() {
+  local pid="${APP_RESTART_WITNESS_PID:-}"
+  [[ -n "$pid" ]] || return 0
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  APP_RESTART_WITNESS_PID=""
+}
+
+start_application_restart_witness() {
+  local hashes_name="$1" phase="$2" guest_script deadline
+  local stdout="$TMPDIR_SMOKE/app-restart-witness-$phase.out"
+  local stderr="$TMPDIR_SMOKE/app-restart-witness-$phase.err"
+  [[ -z "$APP_RESTART_WITNESS_PID" ]] || die 'application restart witness is already running'
+  guest_script="$(application_restart_witness_guest "$hashes_name" "$APP_WORKSPACE_MARKER_SHA256")"
+  cw_with_timeout "$((SMOKE_TIMEOUT_SECONDS + 300))" run --no-tty "$ENV_ID" -- /bin/sh -c "$guest_script" \
+    >"$stdout" 2>"$stderr" &
+  APP_RESTART_WITNESS_PID=$!
+  deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
+  while (( $(seconds_now) < deadline )); do
+    if grep -qx application-restart-witness-ready "$stdout"; then
+      if kill -0 "$APP_RESTART_WITNESS_PID" 2>/dev/null; then return 0; fi
+      wait "$APP_RESTART_WITNESS_PID" 2>/dev/null || true
+      APP_RESTART_WITNESS_PID=""
+      die 'application restart witness exited before source replacement'
+    fi
+    if ! kill -0 "$APP_RESTART_WITNESS_PID" 2>/dev/null; then
+      wait "$APP_RESTART_WITNESS_PID" 2>/dev/null || true
+      APP_RESTART_WITNESS_PID=""
+      die 'application restart witness failed before its ready receipt'
+    fi
+    sleep 5
+  done
+  stop_application_restart_witness
+  die 'timed out waiting for application restart witness readiness'
+}
+
+wait_for_application_restart_witness_termination() {
+  local phase="$1" deadline
+  [[ -n "$APP_RESTART_WITNESS_PID" ]] || die 'application restart witness is missing'
+  deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
+  while kill -0 "$APP_RESTART_WITNESS_PID" 2>/dev/null; do
+    if (( $(seconds_now) >= deadline )); then
+      stop_application_restart_witness
+      die "source $phase did not terminate the old managed application child"
+    fi
+    sleep 5
+  done
+  wait "$APP_RESTART_WITNESS_PID" 2>/dev/null || true
+  APP_RESTART_WITNESS_PID=""
 }
 
 run_application_secret_pty() {
@@ -1685,6 +1771,9 @@ run_application_secrets_smoke() {
         application_environment_ready "platform:id:${APP_SECRET_IDS[0]}" 0 || die 'unconfirmed source edit changed selection'
         [[ "$(jq -r .operation_generation "$TMPDIR_SMOKE/app-environment.json")" == "$generation" ]] ||
           die 'unconfirmed source edit changed generation'
+        if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+          start_application_restart_witness APP_SECRET_ALL_HASHES_A "$phase"
+        fi
         cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --yes --output json \
           >"$TMPDIR_SMOKE/app-update-b.json" 2>"$TMPDIR_SMOKE/app-update-b.err" || die 'application source replacement failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-b.json" "$project" "$generation"
@@ -1692,11 +1781,17 @@ run_application_secrets_smoke() {
       clear)
         project=''; expected=absent
         hashes_name=APP_SECRET_ALL_HASHES_CLEAR
+        if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+          start_application_restart_witness APP_SECRET_ALL_HASHES_B "$phase"
+        fi
         cw_with_timeout 30 env --platform update "$ENV_ID" --clear-secrets --yes --output json \
           >"$TMPDIR_SMOKE/app-update-clear.json" 2>"$TMPDIR_SMOKE/app-update-clear.err" || die 'application source clear failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
         ;;
     esac
+    if [[ "$phase" != a && "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+      wait_for_application_restart_witness_termination "$phase"
+    fi
     # Generation fences the owning Temporal workflow, not each source edit.
     # Restart completion additionally requires a new exact Pod UID below.
     wait_until 'current application source, workflow authority and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
@@ -1718,8 +1813,11 @@ run_application_secrets_smoke() {
       fi
       previous_uid="$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")"
     fi
+    if [[ "$phase" == a && "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
+      create_application_workspace_marker
+    fi
     if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
-      guest_script="$(application_all_scopes_guest_check "$hashes_name")"
+      guest_script="$(application_all_scopes_guest_check "$hashes_name" "$APP_WORKSPACE_MARKER_SHA256")"
     else
       guest_script="$(application_guest_check "$expected")"
     fi
@@ -2133,11 +2231,6 @@ assert_pod_shape() {
   assert_docker_socket_contract "$pod_json"
   [[ "$gateway_containers" == "codewire-gateway" ]] || \
     die "gateway pod containers=$gateway_containers, want codewire-gateway"
-  jq -e '
-    [.status.conditions[]? | select(.type == "Ready" and .status == "True")]
-    | length == 1
-  ' "$gateway_pod_json" >/dev/null || \
-    die "gateway pod is not Ready after the readiness wait"
   jq -e '.items[]?.spec.template.spec.containers[]? | select(.name=="codewire-gateway")' "$gateway_deploy_json" >/dev/null || \
     die "gateway Deployment is missing codewire-gateway container"
   [[ "$gateway_host_key_env" == "/codewire/gateway/ssh/host_ed25519" ]] || \
@@ -2157,15 +2250,15 @@ assert_pod_shape() {
     [[ "$gateway_startup_failure_threshold" == "45" ]] || \
       die "non-confidential gateway startup failureThreshold=$gateway_startup_failure_threshold, want 45"
   fi
-  # The observed Ready state proves the required Secret volume mounted, the
-  # init copy completed and the gateway parsed the resulting host key. General
-  # end-to-end modes separately prove the live gateway path; inspecting Secret
-  # objects or their data would add no behavioral evidence.
-  jq -e --arg id "$ENV_ID" '
-    (.items | length == 1)
-    and (.items[0].metadata.labels["codewire.sh/environment-id"] == $id)
-    and (.items[0].metadata.labels["codewire.sh/type"] == "gateway")
-    and (.items[0].spec.template.spec
+  # Bind readiness and the exact host-key projection/copy shape to this one
+  # observed Pod. General end-to-end modes separately prove the live gateway
+  # path; inspecting Secret objects or their data would add no behavior proof.
+  jq -e --arg id "$ENV_ID" --arg pod "$GATEWAY_POD_NAME" '
+    .metadata.name == $pod
+    and .metadata.labels["codewire.sh/environment-id"] == $id
+    and .metadata.labels["codewire.sh/type"] == "gateway"
+    and ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length == 1)
+    and (.spec
     | (
         [
           .initContainers[]?
@@ -2176,12 +2269,19 @@ assert_pod_shape() {
                 and .mountPath == "/codewire/gateway-host-key"
                 and .readOnly == true
               )] | length == 1)
+              and ([.volumeMounts[]? | select(
+                .name == "gateway-state"
+                and .mountPath == "/codewire/gateway"
+              )] | length == 1)
               and ([.volumeMounts[]? | select(.name == "workspace")] | length == 0)
               and ((.command[2] // "") | contains("/codewire/gateway-host-key/host_ed25519"))
               and ((.command[2] // "") | contains("/codewire/gateway/ssh/host_ed25519"))
               and ((.command[2] // "") | contains("chmod 0600"))
             )
         ] | length == 1
+      )
+      and (
+        [.volumes[]? | select(.name == "gateway-state" and .emptyDir == {})] | length == 1
       )
       and (
         [
@@ -2196,14 +2296,21 @@ assert_pod_shape() {
       and (
         [
           .containers[]?
-          | select(.name == "codewire-gateway")
-          | .volumeMounts[]?
-          | select(.name == "workspace")
-        ] | length == 0
+          | select(
+              .name == "codewire-gateway"
+              and ([.volumeMounts[]? | select(
+                .name == "gateway-state"
+                and .mountPath == "/codewire/gateway"
+              )] | length == 1)
+              and ([.volumeMounts[]? | select(
+                .name == "gateway-host-key" or .name == "workspace"
+              )] | length == 0)
+            )
+        ] | length == 1
       )
     )
-  ' "$gateway_deploy_json" >/dev/null || \
-    die "gateway Deployment must project host_ed25519 through its read-only host-key volume without mounting workspace state"
+  ' "$gateway_pod_json" >/dev/null || \
+    die "Ready gateway Pod must project host_ed25519 through the exact read-only host-key init/volume shape"
   if [[ -n "$EXPECTED_GATEWAY_IMAGE" ]]; then
     [[ "$gateway_image" == "$EXPECTED_GATEWAY_IMAGE" ]] || \
       die "gateway image=$gateway_image, want $EXPECTED_GATEWAY_IMAGE"

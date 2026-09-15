@@ -32,7 +32,7 @@ fail() {
 }
 
 assert_static_contract() {
-  local application_secret_smoke normalized_smoke pod_shape
+  local application_secret_smoke gateway_host_key_shape normalized_smoke pod_shape
 
   bash -n "$SMOKE"
   bash -n "$WRAPPER"
@@ -82,13 +82,28 @@ assert_static_contract() {
     fail "runtime smoke reads Kubernetes Secret resources instead of proving their use through workload behavior"
   fi
   pod_shape="$(awk '/^assert_pod_shape\(\)/,/^}/' "$SMOKE")"
-  rg -F '.type == "Ready" and .status == "True"' <<<"$pod_shape" >/dev/null ||
+  gateway_host_key_shape="$(awk '/# Bind readiness and the exact host-key/,/Ready gateway Pod must project/' <<<"$pod_shape")"
+  rg -F '.metadata.name == $pod' <<<"$gateway_host_key_shape" >/dev/null ||
+    fail "gateway host-key proof is not bound to the observed Pod"
+  rg -F '.type == "Ready" and .status == "True"' <<<"$gateway_host_key_shape" >/dev/null ||
     fail "gateway host-key proof no longer requires observed Pod readiness"
-  rg -F '.secret.secretName == ("cw-gateway-host-key-" + $id)' <<<"$pod_shape" >/dev/null ||
-    fail "gateway host-key proof no longer binds the Deployment volume reference"
+  rg -F '.secret.secretName == ("cw-gateway-host-key-" + $id)' <<<"$gateway_host_key_shape" >/dev/null ||
+    fail "gateway host-key proof no longer binds the Pod volume reference"
+  rg -F "' \"\$gateway_pod_json\" >/dev/null" <<<"$gateway_host_key_shape" >/dev/null ||
+    fail "gateway host-key proof is not evaluated against the Ready Pod document"
+  if rg -F 'gateway_deploy_json' <<<"$gateway_host_key_shape" >/dev/null; then
+    fail "gateway host-key proof reverted to an unbound Deployment template"
+  fi
   application_secret_smoke="$(awk '/^run_application_secrets_smoke\(\)/,/^}/' "$SMOKE")"
   rg -F 'cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty' <<<"$application_secret_smoke" >/dev/null ||
     fail "application-secret smoke no longer proves the live managed exec path"
+  [[ "$(rg -c 'start_application_restart_witness APP_SECRET_ALL_HASHES_' <<<"$application_secret_smoke")" == 2 ]] ||
+    fail "all-scope application smoke no longer starts a witness before both source restarts"
+  rg -F 'wait_for_application_restart_witness_termination "$phase"' <<<"$application_secret_smoke" >/dev/null ||
+    fail "all-scope application smoke no longer requires old managed-child termination"
+  awk '/^create_application_workspace_marker\(\)/,/^}/' "$SMOKE" |
+    rg -F 'head -c 32 /dev/urandom' >/dev/null ||
+    fail "all-scope application marker is no longer guest-randomized"
   awk '/^run_tailnet_doctor\(\)/,/^}/' "$SMOKE" \
     | rg -F 'capture_tailnet_doctor_failure_diagnostics' >/dev/null || \
     fail "tailnet doctor no longer captures safe allocator diagnostics"
