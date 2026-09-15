@@ -32,6 +32,14 @@ SMOKE_TAILNET_PEER_TIMEOUT="${SMOKE_TAILNET_PEER_TIMEOUT:-30s}"
 SMOKE_TAILNET_DOCTOR_TIMEOUT="${SMOKE_TAILNET_DOCTOR_TIMEOUT:-180}"
 SMOKE_SSH_CONNECT_TIMEOUT="${SMOKE_SSH_CONNECT_TIMEOUT:-60}"
 
+previous_arg=""
+for arg in "$@"; do
+  if [[ "$previous_arg" == "--only" && "$arg" == "application-secrets-all-scopes" ]]; then
+    SMOKE_SKIP_KUBE=1
+  fi
+  previous_arg="$arg"
+done
+
 die() {
   printf '[runtime-smoke-ci] ERROR: %s\n' "$*" >&2
   exit 1
@@ -48,13 +56,7 @@ esac
 command -v jq >/dev/null 2>&1 || die "missing required command: jq"
 for required in \
   CODEWIRE_SERVER_URL \
-  EXPECTED_CODEWIRE_DEV_SERVER_URL \
-  EXPECTED_TAILNET_PEER_RELAY_ENDPOINT \
-  EXPECTED_UDP_RELAY_BIND_ADDRS \
-  EXPECTED_UDP_RELAY_ALLOCATOR_URL \
-  EXPECTED_TAILNET_DIRECT_UDP_LB_IP \
-  EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE \
-  EXPECTED_RUNTIME_TRANSPORT_REGION; do
+  EXPECTED_CODEWIRE_DEV_SERVER_URL; do
   [[ -n "${!required:-}" ]] || die "$required is required"
 done
 
@@ -67,7 +69,13 @@ if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
     KUBE_CONTEXT \
     CODEWIRE_SERVER_NAMESPACE \
     SANDBOX_NAMESPACE \
-    EXPECTED_NODE; do
+    EXPECTED_NODE \
+    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT \
+    EXPECTED_UDP_RELAY_BIND_ADDRS \
+    EXPECTED_UDP_RELAY_ALLOCATOR_URL \
+    EXPECTED_TAILNET_DIRECT_UDP_LB_IP \
+    EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE \
+    EXPECTED_RUNTIME_TRANSPORT_REGION; do
     [[ -n "${!required:-}" ]] || die "$required is required"
   done
 fi
