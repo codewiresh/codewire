@@ -8,11 +8,13 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
     site_key = "TURNSTILE_SITE_KEY"
     secret_key = "TURNSTILE_SECRET_KEY"
     public_config = "codewire-dashboard-public-config"
+    verifier_secret = "codewire-idp-turnstile"
+    dev_site_key = "0x4AAAAAAE2ghrxixpYKpljB"
     overlays = [
-        ("deployments/k8s/overlays/dev", False),
-        ("deployments/k8s/overlays/production", False),
-        ("deployments/k8s/overlays/local-kind", True),
-        ("deployments/k8s/overlays/local-kind-static", True),
+        ("deployments/k8s/overlays/dev", "dev"),
+        ("deployments/k8s/overlays/production", "production"),
+        ("deployments/k8s/overlays/local-kind", "local"),
+        ("deployments/k8s/overlays/local-kind-static", "local"),
     ]
     failures: list[str] = []
 
@@ -28,15 +30,15 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
         matches = expression.findall(document)
         return matches[0] if len(matches) == 1 else None
 
-    def dashboard(resources: list[str], label: str) -> str | None:
+    def deployment(resources: list[str], name: str, label: str) -> str | None:
         matches = [
             resource
             for resource in resources
             if top_level_field(resource, "kind") == "Deployment"
-            and resource_name(resource) == "codewire-dashboard"
+            and resource_name(resource) == name
         ]
         if len(matches) != 1:
-            fail(f"{label}: expected exactly one Deployment/codewire-dashboard, found {len(matches)}")
+            fail(f"{label}: expected exactly one Deployment/{name}, found {len(matches)}")
             return None
         return matches[0]
 
@@ -48,28 +50,57 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
             fail(f"{label}: dashboard must project {site_key} exactly once")
             return
         expected = (
-            r"^          valueFrom:\s*\n"
-            r"            configMapKeyRef:\s*\n"
-            r"              key: TURNSTILE_SITE_KEY\s*\n"
-            r"              name: codewire-dashboard-public-config(?:-[a-z0-9]{10})?\s*\n"
-            r"              optional: true\s*$"
+            r"^          valueFrom:[ \t]*\n"
+            r"            configMapKeyRef:[ \t]*\n"
+            r"              key: TURNSTILE_SITE_KEY[ \t]*\n"
+            r"              name: codewire-dashboard-public-config(?:-[a-z0-9]{10})?[ \t]*\n"
+            r"              optional: true[ \t]*\n?\Z"
         )
         if not re.search(expected, entry, re.MULTILINE):
             fail(f"{label}: dashboard must optionally read {site_key} from only {public_config}")
         if secret_key in entry:
             fail(f"{label}: dashboard must never receive {secret_key}")
 
+    def assert_idp_projection(document: str, label: str, active: bool) -> None:
+        if site_key in document or public_config in document:
+            fail(f"{label}: IdP must never receive the public Turnstile projection")
+        secret_entry = env_entry(document, secret_key)
+        frontend_entry = env_entry(document, "FRONTEND_URL")
+        if not active:
+            if secret_entry is not None or secret_key in document or verifier_secret in document:
+                fail(f"{label}: inactive IdP must not receive the Turnstile verifier Secret")
+            return
+        expected_secret = (
+            r"^          valueFrom:[ \t]*\n"
+            r"            secretKeyRef:[ \t]*\n"
+            r"              key: TURNSTILE_SECRET_KEY[ \t]*\n"
+            r"              name: codewire-idp-turnstile[ \t]*\n?\Z"
+        )
+        if secret_entry is None or not re.search(expected_secret, secret_entry, re.MULTILINE):
+            fail(f"{label}: IdP must require only {secret_key} from {verifier_secret}")
+        if document.count(secret_key) != 2 or document.count(verifier_secret) != 1:
+            fail(f"{label}: IdP must contain exactly one bounded Turnstile verifier projection")
+        if frontend_entry is None or not re.search(
+            r"^          value: https://codewire-dev\.sh[ \t]*\n?\Z",
+            frontend_entry,
+            re.MULTILINE,
+        ):
+            fail(f"{label}: IdP must bind Turnstile verification to https://codewire-dev.sh")
+
     try:
         config_source = read_text("deployments/k8s/base/config.env")
         if re.search(r"^TURNSTILE_(?:SITE|SECRET)_KEY=", config_source, re.MULTILINE):
             fail("shared codewire-config source must not contain either Turnstile value")
 
-        for path, local in overlays:
+        for path, mode in overlays:
             label = f"{path} (rendered)"
             resources = documents(run(["kustomize", "build", path]).stdout)
-            rendered_dashboard = dashboard(resources, label)
+            rendered_dashboard = deployment(resources, "codewire-dashboard", label)
+            rendered_idp = deployment(resources, "codewire-idp", label)
             if rendered_dashboard is not None:
                 assert_public_key_projection(rendered_dashboard, label)
+            if rendered_idp is not None:
+                assert_idp_projection(rendered_idp, label, mode == "dev")
 
             config_maps = [
                 resource
@@ -81,12 +112,16 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
                 fail(f"{label}: expected one generated {public_config} ConfigMap, found {len(config_maps)}")
             else:
                 config_map = config_maps[0]
-                if not re.search(r"^  TURNSTILE_SITE_KEY: .*?$", config_map, re.MULTILINE):
-                    fail(f"{label}: generated {public_config} must contain {site_key}")
+                expected_value = dev_site_key if mode == "dev" else '""'
+                if not re.search(
+                    rf"^  TURNSTILE_SITE_KEY: {re.escape(expected_value)}$",
+                    config_map,
+                    re.MULTILINE,
+                ):
+                    state = "the hostname-bound Dev key" if mode == "dev" else "an empty value"
+                    fail(f"{label}: generated {public_config} must contain {state}")
                 if re.search(r"^  TURNSTILE_SECRET_KEY:", config_map, re.MULTILINE):
                     fail(f"{label}: generated {public_config} must never contain {secret_key}")
-                if local and not re.search(r'^  TURNSTILE_SITE_KEY: ""$', config_map, re.MULTILINE):
-                    fail(f"{label}: local Kind must leave {site_key} empty")
 
             shared_config_maps = [
                 resource
@@ -104,9 +139,16 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
                     continue
                 name = resource_name(resource) or "<unnamed>"
                 if name == "codewire-dashboard":
+                    if verifier_secret in resource:
+                        fail(f"{label}: dashboard must never receive {verifier_secret}")
                     continue
-                if public_config in resource or site_key in resource:
-                    fail(f"{label}: unrelated Deployment/{name} inherits the Turnstile public projection")
+                if name == "codewire-idp":
+                    continue
+                if any(
+                    marker in resource
+                    for marker in (public_config, site_key, secret_key, verifier_secret)
+                ):
+                    fail(f"{label}: unrelated Deployment/{name} inherits a Turnstile projection")
     except Exception as error:  # noqa: BLE001 - repository policy boundary
         fail(str(error))
 
