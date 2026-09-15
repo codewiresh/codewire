@@ -24,6 +24,8 @@ pub mod egress_broker;
 pub mod generation;
 #[cfg(target_os = "linux")]
 pub mod host_port;
+#[cfg(target_os = "macos")]
+pub(crate) mod host_port;
 #[cfg(target_os = "linux")]
 pub mod hybrid_vsock;
 #[cfg(target_os = "linux")]
@@ -34,6 +36,8 @@ pub mod macos_console_pair_fixture;
 pub mod mesh_enrollment;
 #[cfg(target_os = "linux")]
 pub mod mesh_ingress;
+#[cfg(target_os = "macos")]
+pub(crate) mod mesh_ingress;
 #[cfg(target_os = "linux")]
 pub mod mesh_process;
 #[cfg(target_os = "linux")]
@@ -46,15 +50,25 @@ pub mod network_worker;
 pub mod supervisor_client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervisor_config;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod supervisor_metadata;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod supervisor_store_codec;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod supervisor_store_error;
 #[cfg(target_os = "linux")]
 pub mod workspace;
 #[cfg(target_os = "linux")]
 mod workspace_plan;
+#[cfg(target_os = "macos")]
+pub(crate) use supervisor_metadata::workspace_plan;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub mod oci;
+#[cfg(target_os = "macos")]
+pub(crate) mod oci;
 #[cfg(target_os = "linux")]
 mod orphan;
 #[cfg(target_os = "linux")]
@@ -71,7 +85,7 @@ pub mod supervisor;
 mod supervisor_store;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod uds;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod workspace_generation;
 
 #[cfg(target_os = "linux")]

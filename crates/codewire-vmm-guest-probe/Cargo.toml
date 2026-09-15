@@ -21,6 +21,9 @@ path = "src/main.rs"
 
 [dependencies]
 codewire-access = { workspace = true }
+codewire-project = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
@@ -31,14 +34,11 @@ zeroize = { workspace = true }
 anyhow = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-gateway-proto = { workspace = true }
-codewire-project = { workspace = true }
 codewire-workload-secrets = { workspace = true }
 flate2 = { workspace = true }
 libc = "0.2"
 oci-spec = { workspace = true }
 rustix = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 tar = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

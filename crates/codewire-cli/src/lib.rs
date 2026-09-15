@@ -193,7 +193,7 @@ enum Command {
     },
     #[command(name = "__hosted-daemon", hide = true)]
     HostedDaemon,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-supervisor", hide = true)]
     NativeSupervisor(NativeSupervisorArgs),
     #[cfg(target_os = "linux")]
@@ -362,7 +362,7 @@ where
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         Command::HostedDaemon => run_hosted_daemon().await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeRunner(args) => run_native_runner(args).await,

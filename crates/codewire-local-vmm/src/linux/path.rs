@@ -9,21 +9,12 @@ use rustix::fs::{
     renameat_with, unlinkat,
 };
 
+pub use crate::supervisor_metadata::legacy::{FileIdentity, SocketIdentity};
+
 const RESOLVE_PRIVATE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FileIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub size: u64,
-    pub uid: u32,
-    pub mode: u32,
-    pub links: u64,
-}
 
 impl FileIdentity {
     pub fn from_metadata(metadata: &Metadata) -> Self {
@@ -505,15 +496,6 @@ impl PrivateRoot {
             source,
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SocketIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub uid: u32,
-    pub mode: u32,
 }
 
 impl SocketIdentity {

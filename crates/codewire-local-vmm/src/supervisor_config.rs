@@ -14,6 +14,9 @@ use crate::control::v1;
 
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
+// The first Darwin stopped-state dispatcher joins version 6: there is no older
+// detached Darwin service, and Linux behavior and wire/configuration contracts
+// are unchanged. Subsequent Darwin behavior changes follow the same bump rule.
 pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 6;
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
