@@ -18,8 +18,7 @@ macos-workload-network-fixture = [
 ]
 macos-production-init-fixture = [
     "dep:async-trait", "dep:codewire-daemon", "dep:codewire-netstack",
-    "dep:codewire-vmm-guest-probe", "dep:hyper-util", "dep:rand",
-    "dep:tokio", "dep:tower", "dep:uuid", "dep:zeroize",
+    "dep:codewire-vmm-guest-probe", "dep:rand", "dep:zeroize",
 ]
 
 [[bin]]
@@ -95,7 +94,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
-# Shared configuration/compatibility hashing is SDK-free. The optional
+# Shared configuration and existing-endpoint client are SDK-free. The optional
 # dependencies below remain developer-only transport proof, excluded from the
 # default Darwin CLI and its release graph.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -104,12 +103,13 @@ async-trait = { workspace = true, optional = true }
 codewire-daemon = { workspace = true, optional = true }
 codewire-netstack = { workspace = true, optional = true }
 codewire-vmm-guest-probe = { workspace = true, optional = true }
-hyper-util = { workspace = true, optional = true }
+http = { workspace = true }
+hyper-util = { workspace = true }
 libc = "0.2"
 rand = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+uuid = { workspace = true }
 zeroize = { workspace = true, optional = true }
 
 [build-dependencies]

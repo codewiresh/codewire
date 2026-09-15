@@ -369,9 +369,11 @@ async fn source_request_replay_is_exact_after_completion_and_client_disconnect()
     let socket = core.config.supervisor_socket();
     let service = test_supervisor_service(core);
     let (identity, shutdown, server) = spawn_test_supervisor_server(&socket, service.clone());
-    let mut client = NativeSupervisorClient::connect(&socket).await.unwrap();
+    let mut client = NativeSupervisorClient::connect(&socket)
+        .await
+        .unwrap()
+        .into_rpc_client_for_test();
     let submitted = client
-        .inner
         .update_environment_sources(request.clone())
         .await
         .unwrap()

@@ -43,6 +43,8 @@ pub mod network_session;
 #[cfg(target_os = "linux")]
 pub mod network_worker;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod supervisor_client;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervisor_config;
 #[cfg(target_os = "linux")]
 pub mod workspace;
@@ -67,7 +69,7 @@ mod skill_snapshot;
 pub mod supervisor;
 #[cfg(target_os = "linux")]
 mod supervisor_store;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod uds;
 #[cfg(target_os = "linux")]
 mod workspace_generation;
