@@ -1,101 +1,13 @@
 //! Exact material-free source metadata for the native lifecycle.
 
+mod metadata;
 pub(super) mod platform;
 mod transition;
+pub(crate) use metadata::PlatformSourceAuthority;
 
 use codewire_project::{ProjectSpec, StoragePlacement, StorageReference};
 
 use super::*;
-
-/// Pinned platform authority, not a cached credential or delegation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PlatformSourceAuthority {
-    server_url: String,
-    organization_id: String,
-    user_id: String,
-    #[serde(with = "canonical_profile_slots")]
-    profile_slots: BTreeSet<String>,
-}
-
-impl PlatformSourceAuthority {
-    pub(super) fn from_proto(value: &v1::PlatformSourceAuthority) -> Result<Self, SupervisorError> {
-        let profile_slots = value.profile_slots.iter().cloned().collect::<BTreeSet<_>>();
-        if profile_slots.len() != value.profile_slots.len()
-            || value
-                .profile_slots
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
-        {
-            return Err(SupervisorError::InvalidRequest);
-        }
-        let result = Self {
-            server_url: value.server_url.clone(),
-            organization_id: value.organization_id.clone(),
-            user_id: value.user_id.clone(),
-            profile_slots,
-        };
-        result.validate()?;
-        Ok(result)
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), SupervisorError> {
-        let server =
-            url::Url::parse(&self.server_url).map_err(|_| SupervisorError::InvalidRequest)?;
-        if self.server_url.len() > 2048
-            || !matches!(server.scheme(), "https" | "http")
-            || server.host_str().is_none()
-            || !server.username().is_empty()
-            || server.password().is_some()
-            || server.query().is_some()
-            || server.fragment().is_some()
-            || !matches!(server.path(), "" | "/")
-            || !valid_identity(&self.organization_id)
-            || !valid_identity(&self.user_id)
-            || codewire_access::ManagedCredentialClients::from_profile_slots(
-                self.profile_slots.iter().map(String::as_str),
-            )
-            .is_err()
-        {
-            return Err(SupervisorError::InvalidRequest);
-        }
-        Ok(())
-    }
-
-    pub(super) fn proto(&self) -> v1::PlatformSourceAuthority {
-        v1::PlatformSourceAuthority {
-            server_url: self.server_url.clone(),
-            organization_id: self.organization_id.clone(),
-            user_id: self.user_id.clone(),
-            profile_slots: self.profile_slots.iter().cloned().collect(),
-        }
-    }
-}
-
-mod canonical_profile_slots {
-    use super::*;
-    use serde::{Deserializer, Serializer, de::Error as _};
-
-    pub(super) fn serialize<S>(slots: &BTreeSet<String>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        slots.serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let values = Vec::<String>::deserialize(deserializer)?;
-        if values.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(D::Error::custom(
-                "platform profile slots must be unique and sorted",
-            ));
-        }
-        Ok(values.into_iter().collect())
-    }
-}
 
 fn valid_identity(value: &str) -> bool {
     !value.is_empty()
