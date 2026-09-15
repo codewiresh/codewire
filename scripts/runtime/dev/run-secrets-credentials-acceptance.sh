@@ -293,7 +293,7 @@ readiness_reason() {
 
 start_isolated_child() {
   setsid env --default-signal=HUP --default-signal=INT --default-signal=TERM -i \
-    PATH=/usr/local/bin:/usr/bin:/bin \
+    PATH=/usr/bin:/bin \
     HOME=/nonexistent \
     USER="$(id -un)" \
     LOGNAME="$(id -un)" \

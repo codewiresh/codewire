@@ -116,7 +116,7 @@ for forbidden in CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY CW_CONFIG_DIR \
     SSH_AUTH_SOCK BAO_TOKEN HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY; do
   [[ -z "${!forbidden+x}" ]] || exit 97
 done
-[[ "$HOME" == /nonexistent && "$PATH" == /usr/local/bin:/usr/bin:/bin ]] || exit 99
+[[ "$HOME" == /nonexistent && "$PATH" == /usr/bin:/bin ]] || exit 99
 printf '%s\n' "$label" >>"$calls"
 printf 'opaque child output: %s\n' "$label"
 if [[ -f "$fixtures/stdin-$label" ]]; then
