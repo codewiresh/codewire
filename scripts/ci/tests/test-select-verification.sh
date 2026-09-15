@@ -1023,6 +1023,14 @@ run_present_paths_case macos_workload_network pull_request refs/pull/20646/head 
   scripts/dev/macos-vz-workload-network.py scripts/dev/test-macos-vz-workload-network.py
 run_present_paths_case macos_workload_network_unknown pull_request refs/pull/20647/head false \
   "$all_product" scripts/dev/macos-vz-workload-network-future.py
+run_present_paths_case macos_workspace_inputs_parent pull_request refs/pull/20652/head true \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/dev/macos-vz-workspace-inputs.py
+run_present_paths_case macos_workspace_inputs_tests pull_request refs/pull/20653/head true \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/dev/test-macos-vz-workspace-inputs.py
+run_present_paths_case macos_workspace_inputs_unknown pull_request refs/pull/20654/head false \
+  "$all_product" scripts/dev/macos-vz-workspace-inputs-future.py
 run_paths_case macos_workload_network_rust pull_request refs/pull/20648/head true \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/src/bin/codewire-macos-workload-network-fixture.rs \
