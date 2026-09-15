@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Preserve the Linux-hosted Darwin package check, including bundled C inputs.
+# Installation belongs to the selected workflow job or local developer setup.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly DARWIN_CHECK_ZIG_VERSION=0.15.2
+readonly DARWIN_CHECK_ZIGBUILD_VERSION=0.23.0
+
+die() {
+  printf '[darwin-cross] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ $# -eq 0 ]] || die 'usage: check-darwin-cross.sh (no arguments)'
+[[ "$(uname -s)" == Linux ]] || die 'this cross-check requires a Linux host; use the native Mac developer loop on macOS'
+cd "$ROOT"
+
+# cargo-zigbuild preserves inherited compiler settings with add_env_if_missing.
+# Both cc-rs target spellings matter: the hyphenated spelling takes precedence
+# over the underscore spelling that cargo-zigbuild installs. Empty overrides
+# also count as present. Never silently use a different compiler or Apple SDK.
+for variable in \
+    CC CXX AR RANLIB LD TARGET_CC TARGET_CXX TARGET_AR TARGET_RANLIB TARGET_LD \
+    CC_aarch64_apple_darwin CXX_aarch64_apple_darwin \
+    AR_aarch64_apple_darwin RANLIB_aarch64_apple_darwin LD_aarch64_apple_darwin \
+    CC_aarch64-apple-darwin CXX_aarch64-apple-darwin \
+    AR_aarch64-apple-darwin RANLIB_aarch64-apple-darwin LD_aarch64-apple-darwin \
+    CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER SDKROOT ZIG_COMMAND \
+    CARGO_ZIGBUILD_ZIG_PATH CARGO_ZIGBUILD_PYTHON_PATH \
+    CARGO_ZIGBUILD_ZIG_VERSION CARGO_ZIGBUILD_RUSTC_VERSION CARGO \
+    CARGO_BIN_EXE_cargo-zigbuild LIBSQLITE3_SYS_USE_PKG_CONFIG LIBSQLITE3_FLAGS \
+    CFLAGS CXXFLAGS TARGET_CFLAGS TARGET_CXXFLAGS \
+    CFLAGS_aarch64_apple_darwin CXXFLAGS_aarch64_apple_darwin \
+    CFLAGS_aarch64-apple-darwin CXXFLAGS_aarch64-apple-darwin; do
+  if printenv "$variable" >/dev/null; then
+    die "unset inherited $variable before the pinned Darwin cross-check"
+  fi
+done
+
+# Workflow pins may confirm the checked-in versions, but cannot replace them.
+if [[ ${ZIG_VERSION+x} && "$ZIG_VERSION" != "$DARWIN_CHECK_ZIG_VERSION" ]]; then
+  die "ZIG_VERSION must match the checked-in $DARWIN_CHECK_ZIG_VERSION pin"
+fi
+if [[ ${CARGO_ZIGBUILD_VERSION+x} && "$CARGO_ZIGBUILD_VERSION" != "$DARWIN_CHECK_ZIGBUILD_VERSION" ]]; then
+  die "CARGO_ZIGBUILD_VERSION must match the checked-in $DARWIN_CHECK_ZIGBUILD_VERSION pin"
+fi
+
+zig_bin="$(type -P zig)" || die "install Zig $DARWIN_CHECK_ZIG_VERSION on PATH"
+zigbuild_bin="$(type -P cargo-zigbuild)" || die "install cargo-zigbuild $DARWIN_CHECK_ZIGBUILD_VERSION on PATH"
+[[ "$zig_bin" == /* ]] || zig_bin="$PWD/$zig_bin"
+[[ "$zigbuild_bin" == /* ]] || zigbuild_bin="$PWD/$zigbuild_bin"
+zig_version="$("$zig_bin" version)" || die 'the Zig version command failed'
+[[ "$zig_version" == "$DARWIN_CHECK_ZIG_VERSION" ]] || die "installed Zig must be $DARWIN_CHECK_ZIG_VERSION"
+zigbuild_version="$("$zigbuild_bin" --version)" || die 'the cargo-zigbuild version command failed'
+[[ "$zigbuild_version" == "cargo-zigbuild $DARWIN_CHECK_ZIGBUILD_VERSION" ]] || die "installed cargo-zigbuild must be $DARWIN_CHECK_ZIGBUILD_VERSION"
+
+# Version 0.23.0 tries `python3 -m ziglang` before the Zig binary. Disable that
+# discovery with a failing executable, then bind the binary we just verified.
+# These are supported upstream discovery inputs, not compiler or SDK shims.
+[[ -x /usr/bin/false ]] || die 'missing /usr/bin/false for disabling Python Zig discovery'
+export CARGO_ZIGBUILD_PYTHON_PATH=/usr/bin/false
+export CARGO_ZIGBUILD_ZIG_PATH="$zig_bin"
+printf '[darwin-cross] Zig %s; cargo-zigbuild %s; target aarch64-apple-darwin\n' \
+  "$zig_version" "$DARWIN_CHECK_ZIGBUILD_VERSION"
+
+# `cargo zigbuild check` is a build invocation, not this check subcommand.
+# Keep the original packages, locked resolution, target and default features.
+# exec propagates the one actual Cargo check's failure to qualification.
+exec "$zigbuild_bin" check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
+  --target aarch64-apple-darwin

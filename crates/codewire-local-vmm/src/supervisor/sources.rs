@@ -9,13 +9,6 @@ use codewire_project::{ProjectSpec, StoragePlacement, StorageReference};
 
 use super::*;
 
-fn valid_identity(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
-}
-
 fn exact_reference(reference: StorageReference<'_>) -> Result<StoragePlacement, SupervisorError> {
     let placement = reference.placement.ok_or(SupervisorError::InvalidRequest)?;
     let id = reference
@@ -145,51 +138,14 @@ pub(super) fn validate_source_metadata(
     profile_reference: &str,
     authority: Option<&v1::PlatformSourceAuthority>,
 ) -> Result<Option<(AccessProfileId, u64, AccessProfileReference)>, SupervisorError> {
-    let mut uses_platform =
-        project.secrets.organization || project.secrets.user == Some(StoragePlacement::Platform);
-    if !project.secrets.project.is_empty() {
-        uses_platform |= exact_reference(
-            StorageReference::project(&project.secrets.project)
-                .map_err(|_| SupervisorError::InvalidRequest)?,
-        )? == StoragePlacement::Platform;
-    }
-    let mut platform_profile = false;
-    let binding = match &project.credentials {
-        Some(credentials) => {
-            let selected = StorageReference::profile(&credentials.profile)
-                .map_err(|_| SupervisorError::InvalidRequest)?;
-            let placement = exact_reference(selected)?;
-            if selected.selector.strip_prefix("id:") != Some(profile_id) || revision == 0 {
-                return Err(SupervisorError::InvalidRequest);
-            }
-            let reference = profile_reference
-                .parse::<AccessProfileReference>()
-                .map_err(|_| SupervisorError::InvalidRequest)?;
-            if placement == StoragePlacement::Local && reference.scope() != AccessProfileScope::User
-            {
-                return Err(SupervisorError::InvalidRequest);
-            }
-            platform_profile = placement == StoragePlacement::Platform;
-            uses_platform |= placement == StoragePlacement::Platform;
-            Some((
-                AccessProfileId::parse(profile_id).map_err(|_| SupervisorError::InvalidRequest)?,
-                revision,
-                reference,
-            ))
-        }
-        None if profile_id.is_empty() && revision == 0 && profile_reference.is_empty() => None,
-        None => return Err(SupervisorError::InvalidRequest),
-    };
-    if uses_platform != authority.is_some() {
-        return Err(SupervisorError::InvalidRequest);
-    }
-    if let Some(authority) = authority {
-        let authority = PlatformSourceAuthority::from_proto(authority)?;
-        if !platform_profile && !authority.profile_slots.is_empty() {
-            return Err(SupervisorError::InvalidRequest);
-        }
-    }
-    Ok(binding)
+    crate::supervisor_metadata::validate_source_metadata(
+        project,
+        profile_id,
+        revision,
+        profile_reference,
+        authority,
+    )
+    .map_err(SupervisorError::from)
 }
 
 #[cfg(test)]

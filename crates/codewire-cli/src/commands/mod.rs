@@ -18,6 +18,10 @@ use super::*;
 mod native;
 #[cfg(target_os = "linux")]
 pub(crate) use native::*;
+#[cfg(target_os = "macos")]
+mod native_supervisor;
+#[cfg(target_os = "macos")]
+pub(crate) use native_supervisor::run_native_supervisor;
 #[cfg(target_os = "linux")]
 mod credential_authority;
 #[cfg(target_os = "linux")]
@@ -204,7 +208,7 @@ pub(crate) struct EnvArgs {
     pub(crate) command: EnvCommand,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeSupervisorArgs {
     #[arg(long)]

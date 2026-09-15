@@ -6,7 +6,7 @@ mod network;
 #[cfg(feature = "macos-workload-network-fixture")]
 pub mod macos_workload_network_fixture;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod direct_share;
 
 /// Codewire-owned persistent Codex home projected into the workspace.
@@ -20,7 +20,7 @@ mod seed;
 mod setup;
 mod vz_inode_probe;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod skill_snapshot;
 
 #[cfg(target_os = "linux")]
@@ -34,7 +34,7 @@ mod setup_verify;
 #[cfg(target_os = "linux")]
 mod workspace_plan;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use direct_share::{
     DIRECT_SHARE_PLAN_PATH, DIRECT_SHARE_PLAN_RELATIVE_PATH, DirectShareMount, DirectSharePlan,
     DirectSharePlanError, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_DIRECT_SHARES,
@@ -65,7 +65,7 @@ pub use setup::{
     SetupBlob, SetupError, SetupHeader, SetupLayer, SetupLayerBlob, SetupObject, Sha256Value,
     oci_root_generation,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use skill_snapshot::{
     MAX_SKILL_SNAPSHOT_PLAN_BYTES, SKILL_SNAPSHOT_CONTENT_PATH,
     SKILL_SNAPSHOT_CONTENT_RELATIVE_PATH, SKILL_SNAPSHOT_PLAN_PATH,

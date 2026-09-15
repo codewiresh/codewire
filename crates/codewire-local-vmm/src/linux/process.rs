@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rustix::process::{
@@ -10,17 +10,7 @@ use rustix::process::{
 use sha2::{Digest, Sha256};
 
 use super::path::FileIdentity;
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProcessIdentity {
-    pub pid: u32,
-    pub boot_id: String,
-    pub start_time_ticks: u64,
-    pub executable: PathBuf,
-    pub executable_file: FileIdentity,
-    pub executable_sha256: String,
-}
+pub use crate::supervisor_metadata::legacy::ProcessIdentity;
 
 impl ProcessIdentity {
     pub fn capture(pid: u32) -> Result<Self, RecoveryError> {

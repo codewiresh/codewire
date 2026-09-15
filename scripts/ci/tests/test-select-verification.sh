@@ -1008,6 +1008,11 @@ run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
   "$policy" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
+run_present_paths_case darwin_cross_check pull_request refs/pull/20655/head false \
+  'policy policy_shell transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/ci/verify/check-darwin-cross.sh
+run_present_paths_case darwin_cross_check_tests pull_request refs/pull/20656/head false \
+  "$policy policy_shell" scripts/ci/tests/test-darwin-cross-check.sh
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
@@ -1486,10 +1491,12 @@ grep -qF 'if selected transport_pkg_codewire_vmm_guest_probe; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'if selected transport_pkg_codewire_local_vmm; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'cargo check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+[[ "$(grep -cFx '    scripts/ci/verify/check-darwin-cross.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh")" == 1 ]]
+grep -qF 'exec "$zigbuild_bin" check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
+  "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF -- '--target aarch64-apple-darwin' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+  "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF 'scripts/ci/verify/build-local-vmm-initramfs.sh --verify' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 
