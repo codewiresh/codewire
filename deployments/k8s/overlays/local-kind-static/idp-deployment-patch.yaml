@@ -24,6 +24,8 @@
       value: /var/run/secrets/codewire/idp-signing-keks
     - name: IDP_SIGNING_ACTIVE_KEK_ID
       value: v1
+    - name: IDP_TURNSTILE_BYPASS_EMAIL
+      value: codewire-e2e@example.test
     - name: POD_NAMESPACE
       valueFrom:
         fieldRef:

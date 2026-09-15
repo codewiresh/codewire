@@ -7,6 +7,7 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
 
     site_key = "TURNSTILE_SITE_KEY"
     secret_key = "TURNSTILE_SECRET_KEY"
+    bypass_email = "IDP_TURNSTILE_BYPASS_EMAIL"
     public_config = "codewire-dashboard-public-config"
     verifier_secret = "codewire-idp-turnstile"
     dev_site_key = "0x4AAAAAAE2ghrxixpYKpljB"
@@ -43,8 +44,11 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
         return matches[0]
 
     def assert_public_key_projection(document: str, label: str) -> None:
-        if re.search(rf"^        - name: {re.escape(secret_key)}\s*$", document, re.MULTILINE):
-            fail(f"{label}: dashboard must never receive {secret_key}")
+        for private_name in (secret_key, bypass_email):
+            if re.search(
+                rf"^        - name: {re.escape(private_name)}\s*$", document, re.MULTILINE
+            ):
+                fail(f"{label}: dashboard must never receive {private_name}")
         entry = env_entry(document, site_key)
         if entry is None:
             fail(f"{label}: dashboard must project {site_key} exactly once")
@@ -61,12 +65,27 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
         if secret_key in entry:
             fail(f"{label}: dashboard must never receive {secret_key}")
 
-    def assert_idp_projection(document: str, label: str, active: bool) -> None:
+    def assert_idp_projection(document: str, label: str, mode: str) -> None:
         if site_key in document or public_config in document:
             fail(f"{label}: IdP must never receive the public Turnstile projection")
         secret_entry = env_entry(document, secret_key)
         frontend_entry = env_entry(document, "FRONTEND_URL")
-        if not active:
+        bypass_entry = env_entry(document, bypass_email)
+        expected_bypass = {
+            "dev": "hello@codewire.sh",
+            "local": "codewire-e2e@example.test",
+        }.get(mode)
+        if expected_bypass is None:
+            if bypass_entry is not None or bypass_email in document:
+                fail(f"{label}: production IdP must not receive the Turnstile bypass email")
+        elif bypass_entry is None or not re.search(
+            rf"^          value: {re.escape(expected_bypass)}[ \t]*\n?\Z",
+            bypass_entry,
+            re.MULTILINE,
+        ):
+            fail(f"{label}: IdP must bind the Turnstile bypass to {expected_bypass}")
+
+        if mode != "dev":
             if secret_entry is not None or secret_key in document or verifier_secret in document:
                 fail(f"{label}: inactive IdP must not receive the Turnstile verifier Secret")
             return
@@ -89,8 +108,12 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
 
     try:
         config_source = read_text("deployments/k8s/base/config.env")
-        if re.search(r"^TURNSTILE_(?:SITE|SECRET)_KEY=", config_source, re.MULTILINE):
-            fail("shared codewire-config source must not contain either Turnstile value")
+        if re.search(
+            r"^(?:TURNSTILE_(?:SITE|SECRET)_KEY|IDP_TURNSTILE_BYPASS_EMAIL)=",
+            config_source,
+            re.MULTILINE,
+        ):
+            fail("shared codewire-config source must not contain a Turnstile value")
 
         for path, mode in overlays:
             label = f"{path} (rendered)"
@@ -100,7 +123,7 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
             if rendered_dashboard is not None:
                 assert_public_key_projection(rendered_dashboard, label)
             if rendered_idp is not None:
-                assert_idp_projection(rendered_idp, label, mode == "dev")
+                assert_idp_projection(rendered_idp, label, mode)
 
             config_maps = [
                 resource
@@ -131,7 +154,10 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
             ]
             if len(shared_config_maps) != 1:
                 fail(f"{label}: expected one generated shared codewire-config ConfigMap")
-            elif site_key in shared_config_maps[0] or secret_key in shared_config_maps[0]:
+            elif any(
+                marker in shared_config_maps[0]
+                for marker in (site_key, secret_key, bypass_email)
+            ):
                 fail(f"{label}: shared codewire-config must not contain a Turnstile value")
 
             for resource in resources:
@@ -146,7 +172,13 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
                     continue
                 if any(
                     marker in resource
-                    for marker in (public_config, site_key, secret_key, verifier_secret)
+                    for marker in (
+                        public_config,
+                        site_key,
+                        secret_key,
+                        verifier_secret,
+                        bypass_email,
+                    )
                 ):
                     fail(f"{label}: unrelated Deployment/{name} inherits a Turnstile projection")
     except Exception as error:  # noqa: BLE001 - repository policy boundary
