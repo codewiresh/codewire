@@ -28,14 +28,42 @@ class FormatterContractTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="cw-formatter-test-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        # Shared scratch parents can pass setgid to new directories. These
+        # freshly owned fixture paths must meet the real exact-mode contract.
+        self.root.chmod(0o700)
         self.bundle = self.root / "bundle"
         self.probe = self.root / "probe"
         self.bundle.mkdir(mode=0o700)
         self.probe.mkdir(mode=0o700)
+        self.bundle.chmod(0o700)
+        self.probe.chmod(0o700)
         self.binary = self.bundle / "mke2fs"
         tool.write_new(self.binary, b"synthetic executable; never run", 0o500)
         self.checksum = hashlib.sha256(self.binary.read_bytes()).hexdigest()
         tool.write_new(self.bundle / "mke2fs.conf", tool.CONFIG, 0o400)
+
+    def test_fixture_normalizes_owned_directories_under_setgid_scratch(self):
+        scratch = self.root / "setgid-scratch"
+        scratch.mkdir(mode=0o700)
+        scratch.chmod(0o2700)
+        temporary_directory = tempfile.TemporaryDirectory
+        case = FormatterContractTests("test_fixed_argv_environment_and_exact_created_file")
+        self.addCleanup(case.doCleanups)
+        with mock.patch.object(tempfile, "TemporaryDirectory", side_effect=lambda **kwargs:
+                               temporary_directory(dir=scratch, **kwargs)):
+            case.setUp()
+        for path in (case.root, case.bundle, case.probe):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            tool.private_directory(path)
+        self.assertEqual(stat.S_IMODE(scratch.stat().st_mode), 0o2700)
+
+    def test_special_directory_bits_still_reject_before_format_effects(self):
+        command = mock.Mock()
+        self.bundle.chmod(0o2700)
+        with self.assertRaisesRegex(ValueError, "owned private directory"):
+            tool.format_empty(self.bundle, self.checksum, self.probe, 256, "CWROOT", command)
+        command.assert_not_called()
+        self.assertEqual(list(self.probe.iterdir()), [])
 
     def test_exact_file_admission_and_retained_replacement_refusal(self):
         with tool.admitted_file(self.binary, self.checksum, 4096, 0o500):
