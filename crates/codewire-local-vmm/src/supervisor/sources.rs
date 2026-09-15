@@ -9,13 +9,6 @@ use codewire_project::{ProjectSpec, StoragePlacement, StorageReference};
 
 use super::*;
 
-fn valid_identity(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
-}
-
 fn exact_reference(reference: StorageReference<'_>) -> Result<StoragePlacement, SupervisorError> {
     let placement = reference.placement.ok_or(SupervisorError::InvalidRequest)?;
     let id = reference
@@ -145,51 +138,14 @@ pub(super) fn validate_source_metadata(
     profile_reference: &str,
     authority: Option<&v1::PlatformSourceAuthority>,
 ) -> Result<Option<(AccessProfileId, u64, AccessProfileReference)>, SupervisorError> {
-    let mut uses_platform =
-        project.secrets.organization || project.secrets.user == Some(StoragePlacement::Platform);
-    if !project.secrets.project.is_empty() {
-        uses_platform |= exact_reference(
-            StorageReference::project(&project.secrets.project)
-                .map_err(|_| SupervisorError::InvalidRequest)?,
-        )? == StoragePlacement::Platform;
-    }
-    let mut platform_profile = false;
-    let binding = match &project.credentials {
-        Some(credentials) => {
-            let selected = StorageReference::profile(&credentials.profile)
-                .map_err(|_| SupervisorError::InvalidRequest)?;
-            let placement = exact_reference(selected)?;
-            if selected.selector.strip_prefix("id:") != Some(profile_id) || revision == 0 {
-                return Err(SupervisorError::InvalidRequest);
-            }
-            let reference = profile_reference
-                .parse::<AccessProfileReference>()
-                .map_err(|_| SupervisorError::InvalidRequest)?;
-            if placement == StoragePlacement::Local && reference.scope() != AccessProfileScope::User
-            {
-                return Err(SupervisorError::InvalidRequest);
-            }
-            platform_profile = placement == StoragePlacement::Platform;
-            uses_platform |= placement == StoragePlacement::Platform;
-            Some((
-                AccessProfileId::parse(profile_id).map_err(|_| SupervisorError::InvalidRequest)?,
-                revision,
-                reference,
-            ))
-        }
-        None if profile_id.is_empty() && revision == 0 && profile_reference.is_empty() => None,
-        None => return Err(SupervisorError::InvalidRequest),
-    };
-    if uses_platform != authority.is_some() {
-        return Err(SupervisorError::InvalidRequest);
-    }
-    if let Some(authority) = authority {
-        let authority = PlatformSourceAuthority::from_proto(authority)?;
-        if !platform_profile && !authority.profile_slots.is_empty() {
-            return Err(SupervisorError::InvalidRequest);
-        }
-    }
-    Ok(binding)
+    crate::supervisor_metadata::validate_source_metadata(
+        project,
+        profile_id,
+        revision,
+        profile_reference,
+        authority,
+    )
+    .map_err(SupervisorError::from)
 }
 
 #[cfg(test)]
@@ -356,22 +312,27 @@ mod tests {
             invalid.server_url = server.into();
             assert!(validate_source_metadata(&project, "", 0, "", Some(&invalid)).is_err());
         }
-        authority.profile_slots = vec!["codex".into()];
+        authority.profile_slots = vec!["github".into()];
         assert!(validate_source_metadata(&project, "", 0, "", Some(&authority)).is_err());
         project.credentials = Some(codewire_project::CredentialBinding {
             profile: "platform:id:11111111-1111-4111-8111-111111111111".into(),
         });
-        validate_source_metadata(
-            &project,
-            "11111111-1111-4111-8111-111111111111",
-            7,
-            "user/work",
-            Some(&authority),
-        )
-        .unwrap();
+        for slot in ["codex", "github"] {
+            authority.profile_slots = vec![slot.into()];
+            validate_source_metadata(
+                &project,
+                "11111111-1111-4111-8111-111111111111",
+                7,
+                "user/work",
+                Some(&authority),
+            )
+            .unwrap();
+        }
         for profile_slots in [
             vec!["codex".into(), "codex".into()],
             vec!["openai".into(), "codex".into()],
+            vec!["github".into(), "codex".into()],
+            vec!["GitHub".into()],
             vec!["unregistered".into()],
         ] {
             let mut invalid = authority.clone();
@@ -386,10 +347,10 @@ mod tests {
             server_url: "https://synthetic.invalid".into(),
             organization_id: "test-org".into(),
             user_id: "test-owner".into(),
-            profile_slots: ["codex".into(), "openai".into()].into(),
+            profile_slots: ["codex".into(), "github".into(), "openai".into()].into(),
         };
         let encoded = serde_json::to_string(&authority).unwrap();
-        assert!(encoded.contains(r#""profile_slots":["codex","openai"]"#));
+        assert!(encoded.contains(r#""profile_slots":["codex","github","openai"]"#));
         assert_eq!(
             serde_json::from_str::<PlatformSourceAuthority>(&encoded).unwrap(),
             authority
@@ -397,6 +358,7 @@ mod tests {
         for invalid in [
             r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner"}"#,
             r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner","profile_slots":["openai","codex"]}"#,
+            r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner","profile_slots":["github","codex"]}"#,
             r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner","profile_slots":["codex","codex"]}"#,
         ] {
             assert!(serde_json::from_str::<PlatformSourceAuthority>(invalid).is_err());

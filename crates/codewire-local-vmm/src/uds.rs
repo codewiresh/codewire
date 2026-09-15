@@ -3,10 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
-use tokio::net::UnixStream;
 #[cfg(target_os = "linux")]
-use tokio::net::{UnixListener, unix::SocketAddr};
-#[cfg(target_os = "linux")]
+use tokio::net::unix::SocketAddr;
+use tokio::net::{UnixListener, UnixStream};
 use tokio_stream::{Stream, StreamExt as _, wrappers::UnixListenerStream};
 use tonic::transport::{Channel, Endpoint};
 
@@ -14,7 +13,6 @@ use tonic::transport::{Channel, Endpoint};
 use crate::darwin::path as host_path;
 #[cfg(target_os = "linux")]
 use crate::linux::path as host_path;
-#[cfg(target_os = "linux")]
 use host_path::{PrivateRoot, set_socket_private};
 use host_path::{SocketIdentity, current_uid};
 
@@ -25,9 +23,23 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 // progress and cancellation remain separate operation-level concerns.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(21 * 60);
 
-#[cfg(target_os = "linux")]
 pub(crate) fn bind_owner_only(
     socket: &Path,
+) -> Result<
+    (
+        impl Stream<Item = Result<UnixStream, io::Error>> + Send + 'static,
+        SocketIdentity,
+    ),
+    UdsError,
+> {
+    bind_owner_only_with_uid(socket, current_uid())
+}
+
+// The production entrypoint always supplies the actual owner UID. Native tests
+// substitute only the expected UID, never fabricated kernel peer credentials.
+pub(crate) fn bind_owner_only_with_uid(
+    socket: &Path,
+    uid: u32,
 ) -> Result<
     (
         impl Stream<Item = Result<UnixStream, io::Error>> + Send + 'static,
@@ -49,7 +61,6 @@ pub(crate) fn bind_owner_only(
         source,
     })?;
     let identity = set_socket_private(socket)?;
-    let uid = current_uid();
     let incoming = UnixListenerStream::new(listener).filter_map(move |result| match result {
         Ok(stream) => match stream.peer_cred() {
             Ok(credential) if credential.uid() == uid => Some(Ok(stream)),
@@ -188,7 +199,6 @@ fn owner_only_connector_with_uid(
     }))
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn remove_bound_socket(
     socket: &Path,
     identity: &SocketIdentity,

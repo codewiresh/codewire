@@ -60,6 +60,9 @@ codewire-local-vmm = { path = "../codewire-local-vmm" }
 rustix = { workspace = true }
 tempfile = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+codewire-local-vmm = { path = "../codewire-local-vmm" }
+
 [dev-dependencies]
 buffa = { workspace = true }
 tempfile = { workspace = true }

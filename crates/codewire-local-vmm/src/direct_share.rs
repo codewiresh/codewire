@@ -13,33 +13,14 @@ use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Component, Path, PathBuf};
 
+use codewire_vmm_guest_probe::DirectShareMount;
 use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, StatxFlags, openat2, statx};
-use serde::{Deserialize, Serialize};
-
-use codewire_vmm_guest_probe::{DirectShareMount, DirectSharePlanError};
 
 use crate::linux::path::current_uid;
+use crate::supervisor_metadata::direct_share::allowed_filesystem;
+pub(crate) use crate::supervisor_metadata::direct_share::{DirectShareError, DirectShareIdentity};
 
 const MAXIMUM_HOST_PATH_BYTES: usize = 4096;
-const EXT4_SUPER_MAGIC: i64 = 0x0000_ef53;
-const TMPFS_MAGIC: i64 = 0x0102_1994;
-const XFS_SUPER_MAGIC: i64 = 0x5846_5342;
-const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
-const OVERLAYFS_SUPER_MAGIC: i64 = 0x794c_7630;
-const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
-const F2FS_SUPER_MAGIC: i64 = 0xf2f5_2010;
-const BCACHEFS_SUPER_MAGIC: i64 = 0xca45_1a4e;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DirectShareIdentity {
-    device_major: u32,
-    device_minor: u32,
-    inode: u64,
-    mount_id: u64,
-    owner_uid: u32,
-    filesystem_magic: i64,
-}
 
 #[derive(Debug)]
 pub(crate) struct AdmittedDirectShare {
@@ -59,64 +40,6 @@ impl AdmittedDirectShare {
 
     pub(crate) fn descriptor(&self) -> &OwnedFd {
         &self.descriptor
-    }
-}
-
-impl DirectShareIdentity {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        device_major: u32,
-        device_minor: u32,
-        inode: u64,
-        mount_id: u64,
-        owner_uid: u32,
-        filesystem_magic: i64,
-    ) -> Result<Self, DirectShareError> {
-        let identity = Self {
-            device_major,
-            device_minor,
-            inode,
-            mount_id,
-            owner_uid,
-            filesystem_magic,
-        };
-        identity.validate()?;
-        Ok(identity)
-    }
-
-    pub(crate) fn device_major(&self) -> u32 {
-        self.device_major
-    }
-
-    pub(crate) fn device_minor(&self) -> u32 {
-        self.device_minor
-    }
-
-    pub(crate) fn inode(&self) -> u64 {
-        self.inode
-    }
-
-    pub(crate) fn mount_id(&self) -> u64 {
-        self.mount_id
-    }
-
-    pub(crate) fn owner_uid(&self) -> u32 {
-        self.owner_uid
-    }
-
-    pub(crate) fn filesystem_magic(&self) -> i64 {
-        self.filesystem_magic
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), DirectShareError> {
-        if self.inode == 0
-            || self.mount_id == 0
-            || self.owner_uid != current_uid()
-            || !allowed_filesystem(self.filesystem_magic)
-        {
-            return Err(DirectShareError::InvalidDirectory);
-        }
-        Ok(())
     }
 }
 
@@ -182,14 +105,14 @@ pub(crate) fn admit_direct_share(
         return Err(DirectShareError::SourceChanged(canonical));
     }
     let identity = capture_identity(&descriptor)?;
-    if identity.owner_uid != current_uid() {
+    if identity.owner_uid() != current_uid() {
         return Err(DirectShareError::WrongOwner(canonical));
     }
-    if !allowed_filesystem(identity.filesystem_magic) {
+    if !allowed_filesystem(identity.filesystem_magic()) {
         return Err(DirectShareError::UnsupportedFilesystem(canonical));
     }
     identity.validate()?;
-    reject_mount_alias_or_submounts(&canonical, identity.mount_id)?;
+    reject_mount_alias_or_submounts(&canonical, identity.mount_id())?;
     Ok(AdmittedDirectShare {
         path: canonical,
         identity,
@@ -256,14 +179,14 @@ fn capture_identity(descriptor: &OwnedFd) -> Result<DirectShareIdentity, DirectS
         return Err(DirectShareError::InvalidDirectory);
     }
     let filesystem = rustix::fs::fstatfs(descriptor).map_err(DirectShareError::Inspect)?;
-    Ok(DirectShareIdentity {
-        device_major: metadata.stx_dev_major,
-        device_minor: metadata.stx_dev_minor,
-        inode: metadata.stx_ino,
-        mount_id: metadata.stx_mnt_id,
-        owner_uid: metadata.stx_uid,
-        filesystem_magic: filesystem.f_type as i64,
-    })
+    Ok(DirectShareIdentity::from_captured_parts(
+        metadata.stx_dev_major,
+        metadata.stx_dev_minor,
+        metadata.stx_ino,
+        metadata.stx_mnt_id,
+        metadata.stx_uid,
+        filesystem.f_type as i64,
+    ))
 }
 
 fn validate_normal_absolute_path(path: &Path) -> Result<(), DirectShareError> {
@@ -350,20 +273,6 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-fn allowed_filesystem(magic: i64) -> bool {
-    matches!(
-        magic,
-        EXT4_SUPER_MAGIC
-            | TMPFS_MAGIC
-            | XFS_SUPER_MAGIC
-            | BTRFS_SUPER_MAGIC
-            | OVERLAYFS_SUPER_MAGIC
-            | ZFS_SUPER_MAGIC
-            | F2FS_SUPER_MAGIC
-            | BCACHEFS_SUPER_MAGIC
-    )
-}
-
 fn reject_mount_alias_or_submounts(
     path: &Path,
     source_mount_id: u64,
@@ -428,46 +337,6 @@ fn unescape_mount_field(field: &[u8]) -> Result<Vec<u8>, DirectShareError> {
         index += 4;
     }
     Ok(output)
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum DirectShareError {
-    #[error("direct-share source path is invalid: {0}")]
-    InvalidPath(PathBuf),
-    #[error("direct-share source path is not canonical: {0}")]
-    NonCanonical(PathBuf),
-    #[error("direct-share source overlaps protected or overly broad host state: {0}")]
-    ForbiddenSource(PathBuf),
-    #[error("direct-share source is not owned by the current user: {0}")]
-    WrongOwner(PathBuf),
-    #[error("direct-share source filesystem is unsupported: {0}")]
-    UnsupportedFilesystem(PathBuf),
-    #[error("direct-share source is a mount alias: {0}")]
-    MountAlias(PathBuf),
-    #[error("direct-share source contains a nested mount: {0}")]
-    NestedMount(PathBuf),
-    #[error("direct-share source changed after admission: {0}")]
-    SourceChanged(PathBuf),
-    #[error("direct-share source is not a valid directory")]
-    InvalidDirectory,
-    #[error("current user's home directory is unavailable for direct-share policy")]
-    MissingHomeDirectory,
-    #[error("host mount table is malformed")]
-    InvalidMountTable,
-    #[error(transparent)]
-    GuestPlan(#[from] DirectSharePlanError),
-    #[error("open direct-share source {path}: {source}")]
-    Open {
-        path: PathBuf,
-        source: rustix::io::Errno,
-    },
-    #[error("inspect direct-share source: {0}")]
-    Inspect(rustix::io::Errno),
-    #[error("direct-share filesystem operation failed for {path}: {source}")]
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
 }
 
 #[cfg(test)]
