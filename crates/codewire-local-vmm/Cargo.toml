@@ -18,7 +18,7 @@ macos-workload-network-fixture = [
 ]
 macos-production-init-fixture = [
     "dep:async-trait", "dep:codewire-daemon", "dep:codewire-netstack",
-    "dep:codewire-vmm-guest-probe", "dep:hyper-util", "dep:libc", "dep:rand",
+    "dep:codewire-vmm-guest-probe", "dep:hyper-util", "dep:rand",
     "dep:tokio", "dep:tower", "dep:uuid", "dep:zeroize",
 ]
 
@@ -105,7 +105,7 @@ codewire-daemon = { workspace = true, optional = true }
 codewire-netstack = { workspace = true, optional = true }
 codewire-vmm-guest-probe = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
-libc = { version = "0.2", optional = true }
+libc = "0.2"
 rand = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
