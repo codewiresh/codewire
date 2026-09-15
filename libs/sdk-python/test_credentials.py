@@ -11,6 +11,7 @@ from codewire.credentials import _credential
 from codewire.v1 import credential_pb2 as pb
 from codewire.v1.credential_connect import (
     CredentialServiceWSGIApplication, CredentialMutationServiceWSGIApplication,
+    GithubRepositoryServiceWSGIApplication,
 )
 
 
@@ -42,6 +43,13 @@ class CredentialFixture:
         self.record("ListCredentials", request, ctx)
         return pb.ListCredentialsResponse(credentials=[self.credential()],
                                           next_page_token="page-two" if not request.page_token else "")
+
+    def list_github_repositories(self, request, ctx):
+        self.record("ListGithubRepositories", request, ctx)
+        return pb.ListGithubRepositoriesResponse(repositories=[pb.GithubRepository(
+            repository_id="42", full_name="owner/private", default_branch="main",
+            clone_url="https://github.com/owner/private.git", is_private=True,
+        )], next_page_token="opaque-next")
 
     def get_credential(self, request, ctx):
         self.record("GetCredential", request, ctx)
@@ -103,12 +111,14 @@ class CredentialsTestCase(unittest.TestCase):
         self.fixture = CredentialFixture()
         metadata = CredentialServiceWSGIApplication(self.fixture)
         mutations = CredentialMutationServiceWSGIApplication(self.fixture)
+        repositories = GithubRepositoryServiceWSGIApplication(self.fixture)
         self.paths = []
 
         def app(environ, start_response):
             path = environ["PATH_INFO"]
             self.paths.append(path)
-            service = metadata if path.startswith("/codewire.v1.CredentialService/") else mutations
+            service = repositories if path.startswith("/codewire.v1.GithubRepositoryService/") else (
+                metadata if path.startswith("/codewire.v1.CredentialService/") else mutations)
             return service(environ, start_response)
 
         self.http = httpx.Client(transport=httpx.WSGITransport(app=app))
@@ -135,6 +145,22 @@ class CredentialsTestCase(unittest.TestCase):
             self.assertEqual(self.fixture.calls[-1][1].WhichOneof("selector"), "name")
         with self.assertRaisesRegex(RuntimeError, "omitted credential"):
             self.cw.credentials.get("missing")
+
+    def test_repository_page_keeps_exact_profile_and_allowlisted_metadata(self):
+        page = self.cw.credentials.list_github_repositories("profile-one", EXACT, page_size=50, page_token="opaque-page")
+        self.assertEqual(page, {"repositories": [{"repository_id":"42", "full_name":"owner/private", "default_branch":"main",
+            "clone_url":"https://github.com/owner/private.git", "is_private":True, "archived":False, "disabled":False}],
+            "next_page_token":"opaque-next"})
+        request = self.fixture.calls[0][1]
+        self.assertEqual((request.profile_id,request.profile_revision,request.page_size,request.page_token),
+                         ("profile-one",EXACT,50,"opaque-page"))
+        self.assertEqual(self.paths,["/codewire.v1.GithubRepositoryService/ListGithubRepositories"])
+        self.assertEqual(set(pb.GithubRepository.DESCRIPTOR.fields_by_name), set(page["repositories"][0]))
+        for kwargs in [{"profile_revision":0}, {"profile_revision":EXACT,"page_size":101},
+                       {"profile_revision":EXACT,"page_token":"x"*129}]:
+            with self.assertRaises(ValueError):
+                self.cw.credentials.list_github_repositories("profile-one",**kwargs)
+        self.assertEqual(len(self.fixture.calls),1)
 
     def test_ssh_metadata_preserves_public_registration_data(self):
         value = self.cw.credentials.get_by_name("ssh")

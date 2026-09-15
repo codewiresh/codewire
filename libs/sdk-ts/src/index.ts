@@ -35,7 +35,7 @@ export class Codewire {
     this.secrets = new Secrets(clients.secrets, orgId);
     this.secretProjects = new SecretProjects(clients.secrets, orgId);
     this.accessProfiles = new AccessProfiles(clients.accessProfiles);
-    this.credentials = new Credentials(clients.credentials, clients.credentialMutations);
+    this.credentials = new Credentials(clients.credentials, clients.credentialMutations, clients.githubRepositories);
   }
 }
 
@@ -48,6 +48,8 @@ export { Credentials, EnrollmentOutcomeUnknownError } from "./credentials.js";
 export type {
   Credential,
   SshPublicKey,
+  GithubRepository,
+  GithubRepositoryPage,
   CodexDeviceChallenge,
   CodexEnrollmentEvent,
   CodexEnrollmentOptions,

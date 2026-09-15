@@ -2129,10 +2129,10 @@ mod tests {
     }
 
     #[test]
-    fn selected_create_preserves_choices_and_independent_confirmations_on_rerender() {
+    fn selected_create_preserves_explicit_source_intent_on_rerender() {
         let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
         let submission = EnvironmentSubmission::parse(format!(
-            "image=example.test%2Fworkspace&secret_project={id}&credential_profile={id}%407&include_user_secrets=platform&confirm_personal_secrets=true&confirm_personal_credentials=true"
+            "image=example.test%2Fworkspace&secret_project={id}&credential_profile={id}%407&include_user_secrets=platform"
         ).as_bytes()).unwrap();
         let mut form = submission.form_view("token".into());
         let options = || EnvironmentCreateOptions {
@@ -2231,8 +2231,8 @@ mod tests {
         assert!(html.contains("name=\"expected_operation_generation\" value=\"9\""));
         assert!(html.contains(&format!("name=\"expected_secret_project\" value=\"{id}\"")));
         assert!(html.contains("name=\"expected_include_user_secrets\" value=\"platform\""));
-        assert!(html.contains("name=\"confirm_personal_secrets\" value=\"true\">"));
-        assert!(html.contains("name=\"confirm_personal_credentials\" value=\"true\">"));
+        assert!(!html.contains("name=\"confirm_personal_secrets\""));
+        assert!(!html.contains("name=\"confirm_personal_credentials\""));
         assert!(html.contains("type=\"submit\">Save sources</button>"));
         assert!(!html.contains("<unsafe>"));
         let request = crate::environment_source_forms::update_request(format!(
@@ -2498,10 +2498,8 @@ mod tests {
         assert!(html.contains("value=\"repository\" placeholder=\"repo\""));
         assert!(!html.contains("value=\"/workspace/repository\""));
         for retired in [
-            "Connect GitHub",
             "GitHub connected",
             "/api/v1/github/",
-            "data-github-repository-picker",
             "data-repository-virtual-list",
             "data-show-github-repositories",
             "Analyze and generate from repo",
@@ -2659,7 +2657,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_repository_entry_is_always_available() {
+    fn manual_repository_entry_coexists_with_unavailable_github_profile_selection() {
         let form = default_create_form("csrf-token".to_owned(), true);
         let organization = OrganizationContext {
             id: "organization-id".to_owned(),
@@ -2683,13 +2681,59 @@ mod tests {
         .render()
         .expect("environment form");
 
-        assert!(html.contains("Repository URL"));
-        assert!(html.contains("Branch"));
-        assert!(html.contains("Mount path"));
-        assert!(html.contains("data-manual-repositories"));
-        assert!(!html.contains("data-github-repository-picker"));
+        let (manual_form, picker) = html.split_once("<dialog ").expect("native GitHub dialog");
+        assert!(manual_form.contains("Repository URL"));
+        assert!(manual_form.contains("Branch"));
+        assert!(manual_form.contains("Mount path"));
+        assert!(manual_form.contains("data-manual-repositories"));
+        assert!(manual_form.contains("Custom Git URL"));
+        let index = form.repositories[0].index;
+        for (name_prefix, id_prefix) in [
+            ("repo_url", "repo-url"),
+            ("repo_branch", "repo-branch"),
+            ("repo_mount", "repo-mount"),
+        ] {
+            let name = format!("{name_prefix}_{index}");
+            let id = format!("{id_prefix}-{index}");
+            assert!(manual_form.contains(&format!("for=\"{id}\"")));
+            let input = manual_form
+                .split("<input ")
+                .skip(1)
+                .filter_map(|element| element.split('>').next())
+                .find(|tag| tag.contains(&format!("name=\"{name}\"")))
+                .expect("manual input outside the picker");
+            assert!(input.contains(&format!("id=\"{id}\"")));
+            assert!(!input.split_ascii_whitespace().any(|attribute| {
+                attribute == "disabled" || attribute.starts_with("disabled=")
+            }));
+        }
+        assert!(manual_form.contains("type=\"button\" data-open-github-repositories aria-haspopup=\"dialog\" aria-controls=\"github-repository-picker\""));
+        assert!(
+            manual_form
+                .contains("<a href=\"/settings/credentials/?org=organization\">Connect GitHub</a>")
+        );
+        let dialog = picker.split('>').next().expect("dialog opening tag");
+        assert!(dialog.contains("id=\"github-repository-picker\""));
+        assert!(dialog.contains("aria-labelledby=\"github-repository-picker-title\""));
+        assert!(dialog.contains("data-github-repository-picker"));
+        assert!(
+            dialog
+                .contains("data-repositories-url=\"/organization/_fragments/github-repositories\"")
+        );
+        assert!(
+            !dialog
+                .split_ascii_whitespace()
+                .any(|attribute| attribute == "open" || attribute.starts_with("open="))
+        );
+        assert!(
+            picker.contains(
+                "<h2 id=\"github-repository-picker-title\">Choose a GitHub repository</h2>"
+            )
+        );
+        assert!(!form.sources.credential_selection_enabled);
+        assert!(picker.contains("data-github-profile disabled"));
         assert!(!html.contains("data-show-github-repositories"));
-        assert!(!html.contains("Connect GitHub"));
+        assert!(!html.contains("GitHub connected"));
     }
 
     #[test]

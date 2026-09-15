@@ -57,6 +57,50 @@ func (*EnrollmentOutcomeUnknownError) Error() string {
 // No method chooses a delivery mode or fetches and retries a stale mutation.
 type CredentialService struct{ client *Client }
 
+// GithubRepository is allowlisted metadata, never provider JSON or a checkout grant.
+type GithubRepository struct {
+	RepositoryID  string `json:"repository_id"`
+	FullName      string `json:"full_name"`
+	DefaultBranch string `json:"default_branch"`
+	CloneURL      string `json:"clone_url"`
+	IsPrivate     bool   `json:"is_private"`
+	Archived      bool   `json:"archived"`
+	Disabled      bool   `json:"disabled"`
+}
+
+type GithubRepositoryPage struct {
+	Repositories  []GithubRepository `json:"repositories"`
+	NextPageToken string             `json:"next_page_token"`
+}
+
+// ListGithubRepositories fetches one page for the exact selected personal profile.
+// It never advances the profile revision or attaches credentials to an environment.
+func (s *CredentialService) ListGithubRepositories(ctx context.Context, profileID string, profileRevision uint64, pageSize int32, pageToken string) (*GithubRepositoryPage, error) {
+	if err := ensureCredentialConverterCoverage(); err != nil {
+		return nil, err
+	}
+	if profileID == "" || profileRevision == 0 || pageSize < 0 || pageSize > 100 || len(pageToken) > 128 {
+		return nil, fmt.Errorf("codewire: invalid GitHub repository selection or page")
+	}
+	response, err := s.client.githubRepositories.ListGithubRepositories(ctx, connect.NewRequest(&codewirev1.ListGithubRepositoriesRequest{
+		ProfileId: profileID, ProfileRevision: profileRevision, PageSize: pageSize, PageToken: pageToken,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	page := &GithubRepositoryPage{Repositories: make([]GithubRepository, 0, len(response.Msg.Repositories)), NextPageToken: response.Msg.NextPageToken}
+	for _, value := range response.Msg.Repositories {
+		if value == nil {
+			return nil, fmt.Errorf("codewire: missing GitHub repository metadata")
+		}
+		page.Repositories = append(page.Repositories, GithubRepository{
+			RepositoryID: value.RepositoryId, FullName: value.FullName, DefaultBranch: value.DefaultBranch,
+			CloneURL: value.CloneUrl, IsPrivate: value.IsPrivate, Archived: value.Archived, Disabled: value.Disabled,
+		})
+	}
+	return page, nil
+}
+
 // Bounded admission/cleanup room around the server's original 15-minute limit.
 // This does not change the timeout of any ordinary SDK request.
 const credentialEnrollmentTimeout = 16 * time.Minute
@@ -118,6 +162,12 @@ func ensureCredentialConverterCoverage() error {
 		}
 		credentialConverterCoverageErr = ensureDescriptorCoverage("SSH public key", messages.ByName("SshPublicKey"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "openssh", 2: "fingerprint",
+		})
+		if credentialConverterCoverageErr != nil {
+			return
+		}
+		credentialConverterCoverageErr = ensureDescriptorCoverage("GitHub repository", messages.ByName("GithubRepository"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "repository_id", 2: "full_name", 3: "default_branch", 4: "clone_url", 5: "is_private", 6: "archived", 7: "disabled",
 		})
 	})
 	return credentialConverterCoverageErr

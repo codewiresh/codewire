@@ -35,6 +35,7 @@ export async function runCredentialTests(): Promise<void> {
   try {
     await scope.run(fixture, async () => {
       await checkCredentialTransport(assertTimers);
+      await checkGithubRepositoryTransport();
       await assertTimers(0);
       console.log("Credentials: generated metadata/CAS, incremental enrollment, cancellation, uncertain acknowledgement and deadline cleanup passed");
     });
@@ -42,6 +43,32 @@ export async function runCredentialTests(): Promise<void> {
     ownership.disable();
     scope.disable();
   }
+}
+
+async function checkGithubRepositoryTransport(): Promise<void> {
+  const calls: Record<string, unknown>[] = [];
+  const revision = 9_007_199_254_741_009n;
+  const cw = new Codewire({ apiKey: "synthetic-opaque-oauth", baseUrl: "https://sdk.example.test",
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      assert.equal(request.headers.get("authorization"), "Bearer synthetic-opaque-oauth");
+      const url = new URL(request.url);
+      assert.equal(url.pathname, "/codewire.v1.GithubRepositoryService/ListGithubRepositories");
+      const body = request.method === "GET" ? JSON.parse(url.searchParams.get("message") ?? "{}") : await request.json();
+      calls.push(body);
+      return new Response(JSON.stringify({ repositories: [{repositoryId:"42",fullName:"owner/private",defaultBranch:"main",
+        cloneUrl:"https://github.com/owner/private.git",isPrivate:true,archived:false,disabled:false}],nextPageToken:"opaque-next" }),
+        {headers:{"Content-Type":"application/json"}});
+    },
+  });
+  const page = await cw.credentials.listGithubRepositories("profile-one", revision, 50, "opaque-page");
+  assert.deepEqual(calls, [{profileId:"profile-one",profileRevision:revision.toString(),pageSize:50,pageToken:"opaque-page"}]);
+  assert.deepEqual(page, { repositories: [{repository_id:"42",full_name:"owner/private",default_branch:"main",
+    clone_url:"https://github.com/owner/private.git",is_private:true,archived:false,disabled:false}],next_page_token:"opaque-next" });
+  await assert.rejects(cw.credentials.listGithubRepositories("profile-one", 0n));
+  await assert.rejects(cw.credentials.listGithubRepositories("profile-one", revision, 101));
+  await assert.rejects(cw.credentials.listGithubRepositories("profile-one", revision, 50, "x".repeat(129)));
+  assert.equal(calls.length,1,"invalid selections must not call the provider or advance the profile");
 }
 
 async function checkCredentialTransport(assertTimers: (expected: number) => Promise<void>): Promise<void> {

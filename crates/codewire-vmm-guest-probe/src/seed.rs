@@ -645,14 +645,38 @@ mod tests {
             "v1:codex,anthropic,ssh",
             "v1:openai,anthropic,ssh",
             "v1:codex,openai,anthropic,ssh",
+            "v2:10",
+            "v2:11",
+            "v2:12",
+            "v2:13",
+            "v2:14",
+            "v2:15",
+            "v2:16",
+            "v2:17",
+            "v2:18",
+            "v2:19",
+            "v2:1a",
+            "v2:1b",
+            "v2:1c",
+            "v2:1d",
+            "v2:1e",
+            "v2:1f",
         ] {
+            assert!(clients.len() < RESERVED_OFFSET - MANAGED_CREDENTIAL_CLIENTS_OFFSET);
             let clients = ManagedCredentialClients::decode(clients).unwrap();
             let seed = base.clone().with_managed_credential_clients(clients);
             assert_eq!(seed.vm_id(), base.vm_id());
             assert_eq!(seed.generation(), base.generation());
             assert_eq!(seed.auth_token(), base.auth_token());
             assert_eq!(seed.environment_projection_sha256(), None);
-            let decoded = Seed::decode(&seed.encode()).unwrap();
+            let encoded = seed.encode();
+            assert!(
+                encoded[RESERVED_OFFSET..HEADER_LEN]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+            assert_eq!(get_u16(&encoded, VERSION_OFFSET), 8);
+            let decoded = Seed::decode(&encoded).unwrap();
             assert_eq!(decoded.managed_credential_clients(), clients);
             assert_eq!(decoded, seed);
         }

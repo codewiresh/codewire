@@ -12,7 +12,7 @@ use super::{GitHubDeviceChallenge, GitHubEnrollmentError as Error, GitHubOAuthIm
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_LINE_BYTES: usize = 4096;
 const DEVICE_URL: &str =
-    "To continue, open this URL in your web browser: https://github.com/login/device";
+    "Open this URL to continue in your web browser: https://github.com/login/device";
 const SUCCESS: &[&str] = &[
     "✓ Authentication complete.",
     "- gh config set -h github.com git_protocol https",

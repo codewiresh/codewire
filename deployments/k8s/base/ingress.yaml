@@ -492,6 +492,13 @@ spec:
                 name: codewire-credential-service
                 port:
                   name: http
+          - path: /codewire\.v1\.GithubRepositoryService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-credential-service
+                port:
+                  name: http
           - path: /codewire\.
             pathType: ImplementationSpecific
             backend:

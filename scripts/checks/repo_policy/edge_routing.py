@@ -100,6 +100,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
     assert_mesh_connect_backend_topology(ownership, owners, per_file, fail)
     assert_credential_mutation_edges(per_file, fail)
     assert_credential_delegation_edges(per_file, fail)
+    assert_github_repository_edges(per_file, fail)
     assert_internal_connect_listener_exemption(unrouted, per_file, fail)
     assert_mesh_primary_origin_rest_edge(fail)
     if getattr(_args, "self_test", False):
@@ -110,6 +111,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
             mesh_primary_origin_rest_edge_self_test()
             credential_mutation_edges_self_test(per_file)
             credential_delegation_edges_self_test(per_file)
+            github_repository_edges_self_test(per_file)
             native_grpc_opt_in_sites_self_test()
         except RuntimeError as error:
             fail(f"Connect edge self-test: {error}")
@@ -152,7 +154,65 @@ INTERNAL_CONNECT_SERVICES = {
 ISOLATED_CREDENTIAL_SERVICES = {
     "codewire.v1.CredentialMutationService",
     "codewire.v1.CredentialDelegationService",
+    "codewire.v1.GithubRepositoryService",
 }
+
+
+def assert_github_repository_edges(
+    per_file: dict[str, dict[str, Any]],
+    fail: Callable[[str], None],
+    reader: Callable[[str], str] = read_text,
+) -> None:
+    service = "codewire.v1.GithubRepositoryService"
+    for file, data in per_file.items():
+        rules = [rule for rule in data["rules"] if rule["service"] == service]
+        if len(rules) != 1 or rules[0]["backend"] != "credential-service":
+            fail(f"{file}: GitHub discovery requires the isolated credential listener")
+        text = reader(file)
+        if file.startswith("Caddyfile"):
+            block = caddy_handle_block(text, f"/{service}/*") or ""
+            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8086\b", block):
+                fail(f"{file}: GitHub discovery must use public port 8086")
+        else:
+            expected = (
+                "path: /codewire\\.v1\\.GithubRepositoryService/ "
+                "pathType: ImplementationSpecific backend: service: "
+                "name: codewire-credential-service port: name: http"
+            )
+            if expected not in re.sub(r"\s+", " ", text):
+                fail(f"{file}: GitHub discovery must use credential-service http, never broker TLS")
+
+
+def github_repository_edges_self_test(per_file: dict[str, dict[str, Any]]) -> None:
+    service = "codewire.v1.GithubRepositoryService"
+    for file in per_file:
+        broken = copy.deepcopy(per_file)
+        for rule in broken[file]["rules"]:
+            if rule["service"] == service:
+                rule["backend"] = "orchestration"
+        failures: list[str] = []
+        assert_github_repository_edges(broken, failures.append)
+        if not any(file in message and "isolated credential listener" in message for message in failures):
+            raise RuntimeError(f"{file}: accepted GitHub discovery through orchestration")
+    for file in per_file:
+        original = read_text(file)
+        before = caddy_handle_block(original, f"/{service}/*") if file.startswith("Caddyfile") else (
+            "path: /codewire\\.v1\\.GithubRepositoryService/\n"
+            "            pathType: ImplementationSpecific\n"
+            "            backend:\n"
+            "              service:\n"
+            "                name: codewire-credential-service\n"
+            "                port:\n"
+            "                  name: http"
+        )
+        if not before or before not in original:
+            raise RuntimeError(f"{file}: missing GitHub discovery negative fixture")
+        after = before.replace(":8086", ":9443") if file.startswith("Caddyfile") else before.replace("name: http", "name: broker-tls")
+        changed = original.replace(before, after, 1)
+        failures = []
+        assert_github_repository_edges(per_file, failures.append, lambda path: changed if path == file else read_text(path))
+        if not any(file in message for message in failures):
+            raise RuntimeError(f"{file}: accepted GitHub discovery through broker TLS")
 
 
 def assert_credential_mutation_edges(

@@ -3,7 +3,9 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use connectrpc::ErrorCode;
+use rand::{RngCore as _, rngs::OsRng};
 use url::Url;
 
 use crate::{
@@ -15,6 +17,41 @@ use crate::{
 pub(crate) const HTMX_REQUEST: &str = "hx-request";
 const HTMX_REDIRECT: &str = "hx-redirect";
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'";
+
+/// Only server-generated nonces can extend the terminal's style policy. This
+/// capability never permits inline script or style attributes.
+pub(crate) struct TerminalStyleNonce(String);
+
+impl TerminalStyleNonce {
+    pub(crate) fn new() -> Self {
+        let mut bytes = [0_u8; 24];
+        OsRng.fill_bytes(&mut bytes);
+        Self(STANDARD.encode(bytes))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub(crate) fn render_terminal_page(
+    template: impl Template,
+    connect_origin: &str,
+    nonce: &TerminalStyleNonce,
+) -> Response {
+    match template.render() {
+        Ok(body) => html_response_with_terminal_styles(
+            StatusCode::OK,
+            body,
+            Some(connect_origin),
+            Some(nonce),
+        ),
+        Err(_) => render_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The dashboard could not be rendered.",
+        ),
+    }
+}
 
 pub(crate) fn render_page(template: impl Template) -> Response {
     render_template(StatusCode::OK, template)
@@ -169,6 +206,15 @@ pub(crate) fn redirect(location: String, headers: &HeaderMap) -> Response {
 }
 
 fn html_response(status: StatusCode, body: String, connect_origin: Option<&str>) -> Response {
+    html_response_with_terminal_styles(status, body, connect_origin, None)
+}
+
+fn html_response_with_terminal_styles(
+    status: StatusCode,
+    body: String,
+    connect_origin: Option<&str>,
+    nonce: Option<&TerminalStyleNonce>,
+) -> Response {
     let mut response = (
         status,
         [
@@ -180,7 +226,7 @@ fn html_response(status: StatusCode, body: String, connect_origin: Option<&str>)
         body,
     )
         .into_response();
-    let policy = connect_origin.map_or_else(
+    let mut policy = connect_origin.map_or_else(
         || CONTENT_SECURITY_POLICY.to_owned(),
         |origin| {
             CONTENT_SECURITY_POLICY.replace(
@@ -189,6 +235,12 @@ fn html_response(status: StatusCode, body: String, connect_origin: Option<&str>)
             )
         },
     );
+    if let Some(nonce) = nonce {
+        policy.push_str(&format!(
+            " 'nonce-{}'; style-src-attr 'none'",
+            nonce.as_str()
+        ));
+    }
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_str(&policy).expect("validated CSP connect origin"),
@@ -199,6 +251,27 @@ fn html_response(status: StatusCode, body: String, connect_origin: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_style_nonce_is_fresh_and_does_not_authorize_scripts_or_attributes() {
+        let nonce = TerminalStyleNonce::new();
+        assert_ne!(nonce.as_str(), TerminalStyleNonce::new().as_str());
+        assert_eq!(STANDARD.decode(nonce.as_str()).unwrap().len(), 24);
+        let response = html_response_with_terminal_styles(
+            StatusCode::OK,
+            "terminal".to_owned(),
+            Some("wss://codewire.test"),
+            Some(&nonce),
+        );
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(policy.contains(&format!("style-src 'self' 'nonce-{}'", nonce.as_str())));
+        assert!(policy.contains("script-src 'self';"));
+        assert!(policy.contains("style-src-attr 'none'"));
+        assert!(!policy.contains("unsafe-inline"));
+        assert!(!policy.contains("unsafe-eval"));
+    }
 
     #[test]
     fn authenticated_html_is_not_cached_and_has_browser_boundaries() {

@@ -508,6 +508,14 @@ impl ConnectAuthLayer {
         }
     }
 
+    /// Finite account-owned GitHub metadata operations inside the isolated
+    /// authority. Keep the same exact-Origin session/original-OAuth policy and
+    /// opaque retained authority as credential mutations; this does not admit
+    /// browser sessions to delegation or ordinary runtime grants.
+    pub fn github_repository(state: AuthState, session_origin: HeaderValue) -> Self {
+        Self::credential_mutation(state, session_origin)
+    }
+
     /// D3 `admin` mount: every method additionally requires `is_admin`
     /// (non-admin users get `permission_denied`).
     pub fn admin(state: AuthState) -> Self {

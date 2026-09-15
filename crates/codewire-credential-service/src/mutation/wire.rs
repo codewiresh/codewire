@@ -5,7 +5,9 @@ use codewire_protected_store::ProtectedValue;
 use codewire_proto::codewire::v1::{self as proto, CredentialMutationService};
 use codewire_server_core::auth::CredentialMutationAuthority;
 use codewire_server_core::connect::{credential_mutation_authority, wire_error};
-use codewire_server_core::connect_error::{ConnectCode, ConnectError};
+use codewire_server_core::connect_error::{
+    ConnectCode, ConnectError, ConnectErrorDetail, ERROR_INFO_DOMAIN, ErrorInfo,
+};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 
 use super::{CredentialMutationOwner, Error};
@@ -316,6 +318,10 @@ fn error(error: Error) -> connectrpc::ConnectError {
             ConnectCode::FailedPrecondition,
             "isolated provider enrollment did not complete",
         ),
+        Error::EnrollmentUnsupported => (
+            ConnectCode::FailedPrecondition,
+            "isolated provider enrollment version or response is unsupported",
+        ),
         Error::CleanupFailed => (
             ConnectCode::Unavailable,
             "enrollment cleanup failed; reconcile stored metadata before retrying; no stored credential was revoked",
@@ -325,9 +331,78 @@ fn error(error: Error) -> connectrpc::ConnectError {
             "credential mutation may have completed; inspect current metadata before retrying",
         ),
     };
+    // Closed classifications only: provider stderr, material, SQL and source
+    // errors are never retained in the service error or its public detail.
+    let reason = match error {
+        Error::StaleRevision => "CREDENTIAL_REVISION_CHANGED",
+        Error::EnrollmentFailed => "CREDENTIAL_ENROLLMENT_FAILED",
+        Error::EnrollmentUnsupported => "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
+        Error::CleanupFailed => "CREDENTIAL_ENROLLMENT_CLEANUP_FAILED",
+        Error::PublicationUnknown => "CREDENTIAL_MUTATION_UNCERTAIN",
+        _ => "",
+    };
     wire_error(&ConnectError {
         code,
         message: message.to_owned(),
-        details: Vec::new(),
+        details: if reason.is_empty() {
+            Vec::new()
+        } else {
+            vec![ConnectErrorDetail::ErrorInfo(ErrorInfo {
+                reason: reason.into(),
+                domain: ERROR_INFO_DOMAIN.into(),
+                metadata: Default::default(),
+            })]
+        },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+    use buffa::Message as _;
+
+    #[test]
+    fn enrollment_wire_reasons_are_closed_domain_bound_and_material_free() {
+        for (failure, reason, code) in [
+            (
+                Error::StaleRevision,
+                "CREDENTIAL_REVISION_CHANGED",
+                connectrpc::ErrorCode::FailedPrecondition,
+            ),
+            (
+                Error::EnrollmentFailed,
+                "CREDENTIAL_ENROLLMENT_FAILED",
+                connectrpc::ErrorCode::FailedPrecondition,
+            ),
+            (
+                Error::EnrollmentUnsupported,
+                "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
+                connectrpc::ErrorCode::FailedPrecondition,
+            ),
+            (
+                Error::CleanupFailed,
+                "CREDENTIAL_ENROLLMENT_CLEANUP_FAILED",
+                connectrpc::ErrorCode::Unavailable,
+            ),
+            (
+                Error::PublicationUnknown,
+                "CREDENTIAL_MUTATION_UNCERTAIN",
+                connectrpc::ErrorCode::Unknown,
+            ),
+        ] {
+            let wire = error(failure);
+            assert_eq!(wire.code, code);
+            assert_eq!(wire.details.len(), 1);
+            let detail = &wire.details[0];
+            assert!(detail.debug.is_none());
+            let bytes = STANDARD_NO_PAD
+                .decode(detail.value.as_deref().unwrap())
+                .unwrap();
+            let info = codewire_proto::google::rpc::ErrorInfo::decode_from_slice(&bytes).unwrap();
+            assert_eq!(info.domain, ERROR_INFO_DOMAIN);
+            assert_eq!(info.reason, reason);
+            assert!(info.metadata.is_empty());
+        }
+    }
 }

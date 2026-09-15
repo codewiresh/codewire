@@ -12,6 +12,7 @@ mod credentials;
 mod dashboard;
 mod device;
 mod environments;
+mod github_repositories;
 mod invitations;
 mod organization_governance;
 mod organizations;
@@ -230,6 +231,10 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/{slug}/new", get(organization_slash_redirect))
         .route("/{slug}/new/", get(environments::new_page))
+        .route(
+            "/{slug}/_fragments/github-repositories",
+            post(github_repositories::repositories),
+        )
         .route(
             "/{slug}/_actions/sandboxes/create",
             post(environments::create),

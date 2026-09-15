@@ -5,6 +5,7 @@
   const MSG_RESIZE = 0x01;
   const DEFAULT_COLS = 120;
   const DEFAULT_ROWS = 32;
+  const styleNonce = document.currentScript?.nonce || "";
   let activeSession = null;
 
   function setStatus(root, message, tone) {
@@ -56,30 +57,28 @@
       setStatus(root, "Environment is not running", "muted");
       return null;
     }
-    if (!globalThis.Terminal || !globalThis.FitAddon?.FitAddon || !globalThis.WebLinksAddon?.WebLinksAddon) {
+    if (!globalThis.CodewireTerminalPresentation) {
       setStatus(root, "Terminal assets could not be loaded", "danger");
       return null;
     }
 
     root.dataset.terminalSettled = "false";
     setStatus(root, "Connecting…", "muted");
-    const terminal = new globalThis.Terminal({
-      cursorBlink: true,
-      fontSize: 13,
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace",
-      theme: {
-        background: "#0a0a0a",
-        foreground: "#e4e4e7",
-        cursor: "#e4e4e7",
-        selectionBackground: "#3f3f46",
-      },
-    });
-    const fit = new globalThis.FitAddon.FitAddon();
-    terminal.loadAddon(fit);
-    terminal.loadAddon(new globalThis.WebLinksAddon.WebLinksAddon());
-    terminal.open(root);
-
     let socket;
+    let presentation;
+    try {
+      presentation = globalThis.CodewireTerminalPresentation.open(root, styleNonce, {
+        onResize: ({ cols, rows }) => {
+          if (socket?.readyState === WebSocket.OPEN) socket.send(resizeFrame(cols, rows));
+        },
+      });
+    } catch {
+      root.dataset.terminalSettled = "true";
+      setStatus(root, "Terminal rendering is unavailable. Reload the page or use the CLI terminal.", "danger");
+      return null;
+    }
+
+    const { terminal, fit, fitAndResize } = presentation;
     let disposed = false;
     let settled = false;
     const settlementWaiters = [];
@@ -89,24 +88,12 @@
       root.dataset.terminalSettled = "true";
       for (const resolve of settlementWaiters.splice(0)) resolve();
     };
-    const fitAndResize = () => {
-      if (disposed) return;
-      try {
-        fit.fit();
-      } catch {
-        return;
-      }
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(resizeFrame(terminal.cols, terminal.rows));
-      }
-    };
-
     try {
       socket = new WebSocket(terminalUrl(root), ["terminal"]);
     } catch {
       setStatus(root, "Terminal endpoint is unavailable", "danger");
       settle();
-      terminal.dispose();
+      presentation.dispose();
       return null;
     }
     socket.binaryType = "arraybuffer";
@@ -134,13 +121,6 @@
       frame.set(encoded, 1);
       socket.send(frame);
     });
-    const resize = terminal.onResize(({ cols, rows }) => {
-      if (socket.readyState === WebSocket.OPEN) socket.send(resizeFrame(cols, rows));
-    });
-    const observer = new ResizeObserver(() => requestAnimationFrame(fitAndResize));
-    observer.observe(root);
-    requestAnimationFrame(fitAndResize);
-
     return {
       root,
       terminal,
@@ -158,10 +138,8 @@
           settle();
         }
         disposed = true;
-        observer.disconnect();
         input.dispose();
-        resize.dispose();
-        terminal.dispose();
+        presentation.dispose();
       },
     };
   }

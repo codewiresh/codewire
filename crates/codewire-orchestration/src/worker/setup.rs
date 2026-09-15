@@ -42,6 +42,7 @@ const SETUP_MUTATION_STATES: &[&str] = &["running"];
 // Leave room beneath its unchanged 16-request bound for provider traffic.
 const SETUP_REPOSITORY_CONCURRENCY: usize = 4;
 
+mod github_checkout;
 mod ssh_checkout;
 
 async fn observe_repository_chains<F: std::future::Future>(
@@ -1428,8 +1429,13 @@ impl SetupOps for WorkerSetupOps<'_> {
                 .map(|repo| (repo.url.as_str(), repo.mount_path.as_str())),
         )?;
         // Validate every trust/selection input before even the first checkout
-        // removal. Missing metadata must never select an ambient SSH agent.
+        // removal. Missing metadata must never select an ambient SSH agent or
+        // silently downgrade a potentially protected GitHub checkout.
         let ssh_commands = ssh_checkout::commands(
+            &input.repos,
+            self.env.managed_credential_clients.as_ref().ok().copied(),
+        )?;
+        let github_commands = github_checkout::commands(
             &input.repos,
             self.env.managed_credential_clients.as_ref().ok().copied(),
         )?;
@@ -1447,7 +1453,8 @@ impl SetupOps for WorkerSetupOps<'_> {
             .repos
             .iter()
             .zip(ssh_commands)
-            .map(|(repo, ssh_command)| {
+            .zip(github_commands)
+            .map(|((repo, ssh_command), github_command)| {
                 let repo = repo.clone();
                 let namespace = input.namespace.clone();
                 let env_id = input.environment_id.clone();
@@ -1475,7 +1482,13 @@ impl SetupOps for WorkerSetupOps<'_> {
                     #[cfg(not(feature = "kind-e2e"))]
                     let clone: Vec<String> =
                         vec!["git".into(), "clone".into(), repo.url.clone(), dir.clone()];
-                    let clone = ssh_command.unwrap_or(clone);
+                    let clone = ssh_command
+                        .or_else(|| {
+                            github_command
+                                .as_ref()
+                                .map(|commands| commands.clone.clone())
+                        })
+                        .unwrap_or(clone);
                     if let Err(e) = this
                         .workspace_exec(&namespace, &env_id, &clone, "", &BTreeMap::new())
                         .await
@@ -1497,6 +1510,10 @@ impl SetupOps for WorkerSetupOps<'_> {
                             checkout.push("--detach".into());
                         }
                         checkout.push(selector.clone());
+                        let checkout = github_command
+                            .as_ref()
+                            .and_then(|commands| commands.checkout.clone())
+                            .unwrap_or(checkout);
                         if let Err(e) = this
                             .workspace_exec(&namespace, &env_id, &checkout, &dir, &BTreeMap::new())
                             .await

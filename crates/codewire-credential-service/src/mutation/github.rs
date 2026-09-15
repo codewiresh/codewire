@@ -15,8 +15,13 @@ impl CredentialMutationOwner {
         credential_id: Option<String>,
         expected_revision: Option<u64>,
     ) -> Result<Events<EnrollGithubResponse>, Error> {
-        validate_name(&name)?;
         let replacement = replacement_selector(credential_id, expected_revision)?;
+        // Existing named API callers remain supported. Only a create with no
+        // name selects the verified provider account as its canonical name.
+        // Reconnect still fences the exact previously observed name/version.
+        if !name.is_empty() || replacement.is_some() {
+            validate_name(&name)?;
+        }
         let scope = Scope::new(authority, self.stop.child_token(), ENROLLMENT_TIMEOUT)?;
         let accepting = self.accepting.lock().map_err(|_| Error::Unavailable)?;
         let permit = self.admit(*accepting)?;
@@ -44,7 +49,12 @@ async fn run(
     replacement: Option<(CredentialId, u64)>,
     sender: &mpsc::Sender<Result<EnrollGithubResponse, Error>>,
 ) -> Result<(), Error> {
-    let target = enrollment_target(&shared, scope, "github", name, replacement).await?;
+    let target = if name.is_empty() && replacement.is_none() {
+        scope.check()?;
+        EnrollmentTarget::CreateGithubAccount
+    } else {
+        enrollment_target(&shared, scope, "github", name, replacement).await?
+    };
     let mut pending = shared.github_enrollment.start().map_err(github_error)?;
     let challenge = scope
         .wait(pending.challenge())

@@ -22,6 +22,8 @@ pub mod mutation;
 mod objects;
 mod projection;
 #[cfg(feature = "enrollment")]
+mod repositories;
+#[cfg(feature = "enrollment")]
 pub mod runtime;
 
 pub use authority::{KubernetesPlatformBridgeAuthenticator, KubernetesPlatformRuntimeAuthority};

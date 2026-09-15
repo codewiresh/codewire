@@ -61,6 +61,163 @@ fn prepared(operation: GitHubOperation) -> PreparedGitHubRequest {
 }
 
 #[test]
+fn gzip_fetch_keeps_exact_bounded_wire_body_and_fixed_upstream_without_decompression() {
+    // Deterministic gzip member for the Git flush packet "0000" (gzip -n).
+    let body = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x33\x30\x30\x30\x00\x00\x72\xc4\x9b\x0c\x04\x00\x00\x00";
+    let adapter = GitHubOAuthAdapter::new().unwrap();
+    let mut input = headers("application/x-git-upload-pack-request");
+    input.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    let request = adapter
+        .validate_request(
+            "github-https",
+            &Method::POST,
+            "/owner/repo.git/git-upload-pack",
+            None,
+            input.clone(),
+            body.to_vec(),
+        )
+        .unwrap();
+    let (method, target, outbound, forwarded, response) = adapter
+        .prepare_validated(lease(GitHubOperation::GitFetch), request)
+        .unwrap()
+        .into_parts();
+    assert_eq!(method, Method::POST);
+    assert_eq!(
+        target.as_str(),
+        "https://github.com/owner/repo.git/git-upload-pack"
+    );
+    assert_eq!(outbound[header::CONTENT_ENCODING], "gzip");
+    assert_eq!(forwarded, body);
+    assert_eq!(outbound[header::ACCEPT_ENCODING], "identity");
+    // Request compatibility does not allow compressed provider responses.
+    let mut compressed_response = headers("application/x-git-upload-pack-result");
+    compressed_response.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    assert!(
+        response
+            .begin(StatusCode::OK, &compressed_response)
+            .is_err()
+    );
+    assert!(
+        adapter
+            .validate_request(
+                "github-https",
+                &Method::POST,
+                "/owner/repo.git/git-upload-pack",
+                None,
+                input.clone(),
+                vec![0; MAX_REQUEST_BYTES + 1]
+            )
+            .is_err()
+    );
+    assert!(
+        adapter
+            .validate_request(
+                "github-https",
+                &Method::POST,
+                "/owner/repo.git/git-upload-pack",
+                None,
+                input,
+                Vec::new()
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn gzip_is_only_one_exact_coding_on_fetch_post_never_an_api_push_or_get_alias() {
+    let adapter = GitHubOAuthAdapter::new().unwrap();
+    for coding in [
+        "GZIP",
+        "br",
+        "deflate",
+        "identity,gzip",
+        "gzip,identity",
+        "gzip;q=1",
+        "",
+        " gzip",
+    ] {
+        let mut input = headers("application/x-git-upload-pack-request");
+        input.insert(
+            header::CONTENT_ENCODING,
+            HeaderValue::from_str(coding).unwrap(),
+        );
+        assert!(
+            adapter
+                .validate_request(
+                    "github-https",
+                    &Method::POST,
+                    "/owner/repo.git/git-upload-pack",
+                    None,
+                    input,
+                    b"opaque".to_vec()
+                )
+                .is_err(),
+            "{coding:?}"
+        );
+    }
+    let mut input = headers("application/x-git-upload-pack-request");
+    input.append(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    input.append(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    assert!(
+        adapter
+            .validate_request(
+                "github-https",
+                &Method::POST,
+                "/owner/repo.git/git-upload-pack",
+                None,
+                input,
+                b"opaque".to_vec()
+            )
+            .is_err()
+    );
+    for (route, method, path, query, media) in [
+        (
+            "github-api",
+            Method::POST,
+            "/graphql",
+            None,
+            "application/json",
+        ),
+        (
+            "github-api",
+            Method::POST,
+            "/user/repos",
+            None,
+            "application/json",
+        ),
+        (
+            "github-https",
+            Method::POST,
+            "/owner/repo.git/git-receive-pack",
+            None,
+            "application/x-git-receive-pack-request",
+        ),
+        (
+            "github-https",
+            Method::GET,
+            "/owner/repo.git/info/refs",
+            Some("service=git-upload-pack"),
+            "application/x-git-upload-pack-request",
+        ),
+        (
+            "github-https",
+            Method::POST,
+            "/owner/repo.git/git-upload-pack",
+            None,
+            "application/json",
+        ),
+    ] {
+        let mut input = headers(media);
+        input.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        assert!(
+            adapter
+                .validate_request(route, &method, path, query, input, b"opaque".to_vec())
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn finite_routes_bind_exact_operations_and_never_normalize_path_aliases() {
     for (route, method, path, query, expected) in [
         (
