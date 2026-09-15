@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import io
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -107,6 +111,90 @@ def assert_success(command: str, expected: str, self_test: bool) -> None:
         )
 
 
+def assert_turnstile_negative_fixtures() -> None:
+    overlays = [
+        "deployments/k8s/overlays/dev",
+        "deployments/k8s/overlays/production",
+        "deployments/k8s/overlays/local-kind",
+        "deployments/k8s/overlays/local-kind-static",
+    ]
+    rendered = {
+        overlay: subprocess.run(
+            ["kustomize", "build", overlay],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+        for overlay in overlays
+    }
+
+    def assert_rejected(
+        label: str,
+        overlay: str,
+        old: str,
+        new: str,
+        expected: str,
+    ) -> None:
+        fixture = rendered.copy()
+        if fixture[overlay].count(old) != 1:
+            raise AssertionError(f"{label}: fixture mutation target is not unique")
+        fixture[overlay] = fixture[overlay].replace(old, new)
+
+        def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+            if args[:2] != ["kustomize", "build"] or args[2] not in fixture:
+                raise AssertionError(f"{label}: unexpected command {args!r}")
+            return SimpleNamespace(stdout=fixture[args[2]])
+
+        stderr = io.StringIO()
+        with patch.object(turnstile_security, "run", side_effect=fake_run), redirect_stderr(stderr):
+            result = turnstile_security.check_turnstile_access_projection(None)
+        if result != 1 or expected not in stderr.getvalue():
+            raise AssertionError(
+                f"{label}: expected rejection containing {expected!r}; "
+                f"exit={result}; stderr={stderr.getvalue()!r}"
+            )
+
+    dev = "deployments/k8s/overlays/dev"
+    production = "deployments/k8s/overlays/production"
+    assert_rejected(
+        "missing-dev-widget-key",
+        dev,
+        "  TURNSTILE_SITE_KEY: 0x4AAAAAAE2ghrxixpYKpljB\n",
+        '  TURNSTILE_SITE_KEY: ""\n',
+        "hostname-bound Dev key",
+    )
+    assert_rejected(
+        "wrong-idp-secret",
+        dev,
+        "              name: codewire-idp-turnstile\n",
+        "              name: codewire-idp-turnstile-wrong\n",
+        "IdP must require only TURNSTILE_SECRET_KEY",
+    )
+    assert_rejected(
+        "optional-idp-secret",
+        dev,
+        "              name: codewire-idp-turnstile\n",
+        "              name: codewire-idp-turnstile\n              optional: true\n",
+        "IdP must require only TURNSTILE_SECRET_KEY",
+    )
+    assert_rejected(
+        "wrong-idp-hostname",
+        dev,
+        "        - name: FRONTEND_URL\n          value: https://codewire-dev.sh\n",
+        "        - name: FRONTEND_URL\n          value: https://wrong.invalid\n",
+        "bind Turnstile verification to https://codewire-dev.sh",
+    )
+    assert_rejected(
+        "active-production-widget",
+        production,
+        '  TURNSTILE_SITE_KEY: ""\n',
+        "  TURNSTILE_SITE_KEY: 0x4AAAAAAE2ghrxixpYKpljB\n",
+        "must contain an empty value",
+    )
+
+
 def main() -> None:
     help_result = run("--help")
     if help_result.returncode != 0:
@@ -117,6 +205,8 @@ def main() -> None:
         if not checker.__module__.startswith("repo_policy."):
             raise AssertionError(f"{command} is not owned by a policy-domain module")
         assert_success(command, _expected, _self_test)
+
+    assert_turnstile_negative_fixtures()
 
     invalid = run("not-a-policy-command")
     if invalid.returncode != 2 or "invalid choice" not in invalid.stderr:
