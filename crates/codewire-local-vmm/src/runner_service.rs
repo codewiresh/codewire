@@ -15,7 +15,6 @@ use futures::Stream;
 use rand::{RngCore as _, rngs::OsRng};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -52,8 +51,11 @@ const MAXIMUM_GUEST_PROGRESS_FRAMES: usize = 64;
 const RUNNER_WATCH_BUFFER: usize = 8;
 // Bump for every detached-runner behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 2;
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 3;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(3);
 const GENERATION_ACCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const GENERATION_ACCESS_MAX_BYTES: usize = 4096;
 
@@ -154,6 +156,19 @@ impl RunnerClient {
         Ok(())
     }
 
+    pub async fn shutdown(&mut self, environment_id: Uuid, generation: u64) -> Result<(), Status> {
+        tokio::time::timeout(
+            RUNNER_SHUTDOWN_TIMEOUT,
+            self.inner.shutdown_runner(v1::ShutdownRunnerRequest {
+                environment_id: environment_id.to_string(),
+                generation,
+            }),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("runner shutdown timed out"))??;
+        Ok(())
+    }
+
     pub async fn daemon_access(&mut self) -> Result<v1::DaemonAccess, Status> {
         Ok(self
             .inner
@@ -222,7 +237,13 @@ fn validate_generation_access(
 /// Its token is ephemeral and never Debug/serialized except the private reply.
 struct GenerationAccessCell {
     environment_id: Uuid,
-    current: SyncMutex<Option<PublishedGenerationAccess>>,
+    current: SyncMutex<GenerationAccessState>,
+}
+
+#[derive(Default)]
+struct GenerationAccessState {
+    retiring: bool,
+    access: Option<PublishedGenerationAccess>,
 }
 
 struct PublishedGenerationAccess {
@@ -242,8 +263,20 @@ impl GenerationAccessCell {
     fn new(environment_id: Uuid) -> Arc<Self> {
         Arc::new(Self {
             environment_id,
-            current: SyncMutex::new(None),
+            current: SyncMutex::new(GenerationAccessState::default()),
         })
+    }
+
+    fn retire(&self) {
+        // Publication, lookup, and this permanent revocation use one lock.
+        // No install/get can race a separate retirement flag and restore a
+        // capability after the lifecycle owner has begun retirement.
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        current.retiring = true;
+        current.access = None;
     }
 
     fn publish(self: &Arc<Self>, running: &RunningVm) -> Result<GenerationAccessGuard, Status> {
@@ -282,12 +315,15 @@ impl GenerationAccessCell {
             .current
             .lock()
             .map_err(|_| Status::unavailable("runner generation access unavailable"))?;
-        if current.is_some() {
+        if current.retiring {
+            return Err(Status::failed_precondition("runner is retiring"));
+        }
+        if current.access.is_some() {
             return Err(Status::failed_precondition(
                 "runner generation access already owned",
             ));
         }
-        *current = Some(PublishedGenerationAccess {
+        current.access = Some(PublishedGenerationAccess {
             generation,
             socket: access.hybrid_socket,
             port: access.guest_port,
@@ -313,7 +349,11 @@ impl GenerationAccessCell {
             .current
             .lock()
             .map_err(|_| Status::unavailable("runner generation access unavailable"))?;
+        if current.retiring {
+            return Err(Status::failed_precondition("runner is retiring"));
+        }
         let access = current
+            .access
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("runner generation access unavailable"))?;
         if access.generation != generation {
@@ -322,7 +362,7 @@ impl GenerationAccessCell {
             ));
         }
         if !generation_process_alive(&access.liveness) {
-            *current = None;
+            current.access = None;
             return Err(Status::failed_precondition("runner generation is not live"));
         }
         Ok(v1::DaemonAccess {
@@ -341,10 +381,11 @@ impl GenerationAccessGuard {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if current
+            .access
             .as_ref()
             .is_some_and(|access| access.generation == self.generation)
         {
-            *current = None;
+            current.access = None;
         }
     }
 }
@@ -524,29 +565,75 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             state: v1::EnvironmentState::Stopped,
             error_code: None,
             adopted: false,
+            retirement: RetirementState::Active,
             mesh_data_dir: config.mesh_data_dir,
             platform_config_dir: config.platform_config_dir,
         })),
         adoption: adoption_tx,
         events,
         generation_access,
+        shutdown: watch::channel(None).0,
     };
-    let (incoming, socket_identity) = bind_owner_only(&config.socket)?;
-    let server = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(EnvironmentRunnerServiceServer::new(service))
-            .serve_with_incoming(incoming)
-            .await
-    });
+    let server = tokio::spawn(serve_runner_rpc(config.socket, service));
     let adoption = adoption_rx.recv().await.ok_or(RunnerServiceError::Serve)?;
     clear_parent_death_signal().map_err(|_| RunnerServiceError::Adoption)?;
     let _ = adoption.acknowledged.send(());
-    let result = server
-        .await
-        .map_err(|_| RunnerServiceError::Serve)?
-        .map_err(|_| RunnerServiceError::Serve);
-    remove_bound_socket(&config.socket, &socket_identity)?;
+    server.await.map_err(|_| RunnerServiceError::Serve)?
+}
+
+async fn wait_runner_shutdown(shutdown: &mut watch::Receiver<Option<v1::RunnerEvent>>) {
+    loop {
+        if shutdown.borrow().is_some() || shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn serve_runner_rpc(socket: PathBuf, service: RunnerRpc) -> Result<(), RunnerServiceError> {
+    let (incoming, socket_identity) = bind_owner_only(&socket)?;
+    let result = {
+        let mut shutdown = service.shutdown.subscribe();
+        let mut drain = shutdown.clone();
+        let server = tonic::transport::Server::builder()
+            .add_service(EnvironmentRunnerServiceServer::new(service))
+            .serve_with_incoming_shutdown(incoming, async move {
+                wait_runner_shutdown(&mut shutdown).await;
+            });
+        tokio::pin!(server);
+        tokio::select! {
+            result = &mut server => result.map_err(|_| RunnerServiceError::Serve),
+            () = wait_runner_shutdown(&mut drain) => {
+                // Give in-flight unary responses and terminal watcher events a
+                // chance to flush. A non-reading owner must not keep a retired
+                // process alive forever; timeout is an error, not a successful
+                // graceful drain. The supervisor separately observes process exit.
+                tokio::time::timeout(RUNNER_SERVER_DRAIN_TIMEOUT, &mut server)
+                    .await
+                    .map_err(|_| RunnerServiceError::Serve)
+                    .and_then(|result| result.map_err(|_| RunnerServiceError::Serve))
+            }
+        }
+    }; // Drop the server future and listener before unlinking their exact name.
+    remove_bound_socket(&socket, &socket_identity)?;
     result
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetirementState {
+    Active,
+    Preparing,
+    Prepared,
+    ShutdownRequested,
+}
+
+impl RetirementState {
+    fn require_active(self) -> Result<(), Status> {
+        if self == Self::Active {
+            Ok(())
+        } else {
+            Err(Status::failed_precondition("runner is retiring"))
+        }
+    }
 }
 
 struct RunnerState {
@@ -561,6 +648,7 @@ struct RunnerState {
     state: v1::EnvironmentState,
     error_code: Option<&'static str>,
     adopted: bool,
+    retirement: RetirementState,
     mesh_data_dir: PathBuf,
     platform_config_dir: PathBuf,
 }
@@ -681,6 +769,9 @@ struct RunnerRpc {
     adoption: mpsc::Sender<AdoptionRequest>,
     events: Arc<RunnerEvents>,
     generation_access: Arc<GenerationAccessCell>,
+    // Carries the final prepared event as well as the shutdown signal, so
+    // watchers cannot select shutdown and lose the final state before EOF.
+    shutdown: watch::Sender<Option<v1::RunnerEvent>>,
 }
 
 struct AdoptionRequest {
@@ -707,6 +798,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         if requested != state.environment_id {
             return Err(Status::permission_denied("runner identity mismatch"));
         }
+        state.retirement.require_active()?;
         if state.adopted {
             return Ok(Response::new(state.info()));
         }
@@ -720,6 +812,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             .await
             .map_err(|_| Status::unavailable("runner adoption was not acknowledged"))?;
         let mut state = self.state.lock().await;
+        state.retirement.require_active()?;
         state.adopted = true;
         let info = state.info();
         self.events.publish(
@@ -770,21 +863,32 @@ impl EnvironmentRunnerService for RunnerRpc {
         if environment_id != self.events.environment_id {
             return Err(Status::permission_denied("runner identity mismatch"));
         }
-        let mut events = self.events.subscribe();
-        let (sender, receiver) = mpsc::channel(RUNNER_WATCH_BUFFER);
-        tokio::spawn(async move {
-            let initial = events.borrow_and_update().clone();
-            if sender.send(Ok(initial)).await.is_err() {
-                return;
-            }
-            while events.changed().await.is_ok() {
-                let event = events.borrow_and_update().clone();
-                if sender.send(Ok(event)).await.is_err() {
-                    return;
+        // A demand-driven stream owns no detached producer. It coalesces
+        // ordinary watch updates as before and always yields the final
+        // retirement event (once) before EOF, including a late subscriber.
+        let stream = futures::stream::unfold(
+            (self.events.subscribe(), self.shutdown.subscribe(), 0),
+            |(mut events, mut shutdown, mut sequence)| async move {
+                loop {
+                    let terminal = shutdown.borrow_and_update().clone();
+                    let event = terminal
+                        .clone()
+                        .unwrap_or_else(|| events.borrow_and_update().clone());
+                    if event.sequence > sequence {
+                        sequence = event.sequence;
+                        return Some((Ok(event), (events, shutdown, sequence)));
+                    }
+                    if terminal.is_some() {
+                        return None;
+                    }
+                    tokio::select! {
+                        changed = events.changed() => if changed.is_err() { return None; },
+                        changed = shutdown.changed() => if changed.is_err() { return None; },
+                    }
                 }
-            }
-        });
-        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+            },
+        );
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn start_vm(
@@ -808,6 +912,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 })?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
+        state.retirement.require_active()?;
         if !state.adopted {
             return Err(Status::failed_precondition("runner is not adopted"));
         }
@@ -1019,6 +1124,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         _request: Request<v1::StopVmRequest>,
     ) -> Result<Response<v1::RunnerInfo>, Status> {
         let mut state = self.state.lock().await;
+        state.retirement.require_active()?;
         state.generation_access = None;
         state
             .observe_exit()
@@ -1068,6 +1174,19 @@ impl EnvironmentRunnerService for RunnerRpc {
         _request: Request<v1::PrepareRetireRunnerRequest>,
     ) -> Result<Response<v1::PrepareRetireRunnerResponse>, Status> {
         let mut state = self.state.lock().await;
+        if !state.adopted {
+            return Err(Status::failed_precondition("runner is not adopted"));
+        }
+        if matches!(
+            state.retirement,
+            RetirementState::Prepared | RetirementState::ShutdownRequested
+        ) {
+            return Ok(Response::new(v1::PrepareRetireRunnerResponse {}));
+        }
+        // Once accepted, even a failed or cancelled cleanup never reopens
+        // Start/Grow/daemon access. A later Prepare may retry the owned cleanup.
+        state.retirement = RetirementState::Preparing;
+        self.generation_access.retire();
         state.generation_access = None;
         self.events.publish(
             state.state,
@@ -1101,7 +1220,36 @@ impl EnvironmentRunnerService for RunnerRpc {
             None,
             None,
         )?;
+        state.retirement = RetirementState::Prepared;
         Ok(Response::new(v1::PrepareRetireRunnerResponse {}))
+    }
+
+    async fn shutdown_runner(
+        &self,
+        request: Request<v1::ShutdownRunnerRequest>,
+    ) -> Result<Response<v1::ShutdownRunnerResponse>, Status> {
+        let request = request.into_inner();
+        let environment_id = parse_environment_id(&request.environment_id)?;
+        let mut state = self.state.lock().await;
+        if environment_id != state.environment_id || request.generation != state.generation {
+            return Err(Status::permission_denied("runner identity mismatch"));
+        }
+        if !state.adopted
+            || !matches!(
+                state.retirement,
+                RetirementState::Prepared | RetirementState::ShutdownRequested
+            )
+        {
+            return Err(Status::failed_precondition(
+                "runner retirement is not prepared",
+            ));
+        }
+        if state.retirement != RetirementState::ShutdownRequested {
+            state.retirement = RetirementState::ShutdownRequested;
+            self.shutdown
+                .send_replace(Some(self.events.sender.borrow().clone()));
+        }
+        Ok(Response::new(v1::ShutdownRunnerResponse {}))
     }
 
     async fn grow_state_disk(
@@ -1111,6 +1259,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let request = request.into_inner();
         let environment_id = parse_environment_id(&request.environment_id)?;
         let mut state = self.state.lock().await;
+        state.retirement.require_active()?;
         if !state.adopted {
             return Err(Status::failed_precondition("runner is not adopted"));
         }
@@ -1153,6 +1302,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         _request: Request<v1::GetDaemonAccessRequest>,
     ) -> Result<Response<v1::DaemonAccess>, Status> {
         let mut state = self.state.lock().await;
+        state.retirement.require_active()?;
         state
             .observe_exit()
             .await
@@ -1763,12 +1913,14 @@ mod tests {
                 state: v1::EnvironmentState::Starting,
                 error_code: None,
                 adopted: true,
+                retirement: RetirementState::Active,
                 mesh_data_dir: parent.path().join("mesh"),
                 platform_config_dir: parent.path().join("platform"),
             })),
             adoption: mpsc::channel(1).0,
             events: Arc::new(RunnerEvents::new(environment_id, "synthetic".into(), 1)),
             generation_access: GenerationAccessCell::new(environment_id),
+            shutdown: watch::channel(None).0,
         };
         (parent, rpc)
     }
@@ -1800,6 +1952,309 @@ mod tests {
         assert!(cell.get(environment_id, 2).is_err());
     }
 
+    #[test]
+    fn retirement_atomically_revokes_and_permanently_fences_generation_access() {
+        let (_parent, _listener, access) = bootstrap_access();
+        let id = Uuid::new_v4();
+        let cell = GenerationAccessCell::new(id);
+        let guard = cell
+            .install(1, access.clone(), current_process_liveness())
+            .unwrap();
+        cell.retire();
+        assert!(cell.current.lock().unwrap().access.is_none());
+        assert!(cell.get(id, 1).is_err());
+        assert!(
+            cell.install(2, access.clone(), current_process_liveness())
+                .is_err()
+        );
+        drop(guard);
+        cell.retire();
+        assert!(cell.install(1, access, current_process_liveness()).is_err());
+    }
+
+    fn stopped_start_request(id: Uuid) -> v1::StartVmRequest {
+        v1::StartVmRequest {
+            environment_id: id.to_string(),
+            generation: 2,
+            vcpus: 1,
+            memory_mib: 128,
+            vsock_cid: 42,
+            daemon_vsock_port: 7777,
+            state_disk_bytes: 128 * 1024 * 1024,
+            managed_credential_clients: codewire_access::ManagedCredentialClients::default()
+                .encode()
+                .to_owned(),
+            ..Default::default()
+        }
+    }
+
+    async fn assert_retired_capabilities_denied(rpc: &RunnerRpc) {
+        let id = rpc.events.environment_id;
+        for result in [
+            rpc.start_vm(Request::new(stopped_start_request(id)))
+                .await
+                .map(drop),
+            rpc.stop_vm(Request::new(v1::StopVmRequest {}))
+                .await
+                .map(drop),
+            rpc.grow_state_disk(Request::new(v1::GrowStateDiskRequest {
+                environment_id: id.to_string(),
+                disk_bytes: 256 * 1024 * 1024,
+            }))
+            .await
+            .map(drop),
+            rpc.adopt_runner(Request::new(v1::AdoptRunnerRequest {
+                environment_id: id.to_string(),
+            }))
+            .await
+            .map(drop),
+            rpc.get_daemon_access(Request::new(v1::GetDaemonAccessRequest {}))
+                .await
+                .map(drop),
+            rpc.get_generation_daemon_access(Request::new(v1::GetGenerationDaemonAccessRequest {
+                environment_id: id.to_string(),
+                generation: 1,
+            }))
+            .await
+            .map(drop),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(error.message(), "runner is retiring");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_prepare_stays_fenced_and_can_be_retried() {
+        let (_parent, rpc) = bootstrap_rpc();
+        let (_transport, _listener, access) = bootstrap_access();
+        let guard = rpc
+            .generation_access
+            .install(1, access.clone(), current_process_liveness())
+            .unwrap();
+        // The existing bounded event error forces failure before cleanup.
+        rpc.events.sequence.store(u64::MAX, Ordering::Relaxed);
+        assert!(
+            rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            rpc.state.lock().await.retirement,
+            RetirementState::Preparing
+        );
+        assert_retired_capabilities_denied(&rpc).await;
+        assert!(
+            rpc.generation_access
+                .install(2, access, current_process_liveness())
+                .is_err()
+        );
+        let id = rpc.events.environment_id;
+        assert_eq!(
+            rpc.shutdown_runner(Request::new(v1::ShutdownRunnerRequest {
+                environment_id: id.to_string(),
+                generation: 1,
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert!(rpc.shutdown.borrow().is_none());
+        drop(guard);
+
+        rpc.events.sequence.store(1, Ordering::Relaxed);
+        rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}))
+            .await
+            .unwrap();
+        assert_eq!(rpc.state.lock().await.retirement, RetirementState::Prepared);
+        assert_retired_capabilities_denied(&rpc).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_requires_exact_adopted_prepared_identity_and_is_idempotent() {
+        let (_parent, rpc) = bootstrap_rpc();
+        let id = rpc.events.environment_id;
+        let request = v1::ShutdownRunnerRequest {
+            environment_id: id.to_string(),
+            generation: 1,
+        };
+        assert_eq!(
+            rpc.shutdown_runner(Request::new(request.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+        rpc.state.lock().await.adopted = false;
+        assert!(
+            rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}))
+                .await
+                .is_err()
+        );
+        assert_eq!(rpc.state.lock().await.retirement, RetirementState::Active);
+        assert!(!rpc.generation_access.current.lock().unwrap().retiring);
+        rpc.state.lock().await.adopted = true;
+        rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}))
+            .await
+            .unwrap();
+        let sequence = rpc.events.sequence.load(Ordering::Acquire);
+        rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}))
+            .await
+            .unwrap();
+        assert_eq!(rpc.events.sequence.load(Ordering::Acquire), sequence);
+        for wrong in [
+            v1::ShutdownRunnerRequest {
+                environment_id: Uuid::new_v4().to_string(),
+                generation: 1,
+            },
+            v1::ShutdownRunnerRequest {
+                environment_id: id.to_string(),
+                generation: 2,
+            },
+        ] {
+            assert_eq!(
+                rpc.shutdown_runner(Request::new(wrong))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+            assert!(rpc.shutdown.borrow().is_none());
+        }
+        rpc.shutdown_runner(Request::new(request.clone()))
+            .await
+            .unwrap();
+        rpc.shutdown_runner(Request::new(request)).await.unwrap();
+        rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}))
+            .await
+            .unwrap();
+        assert_eq!(rpc.events.sequence.load(Ordering::Acquire), sequence);
+        assert_eq!(
+            rpc.state.lock().await.retirement,
+            RetirementState::ShutdownRequested
+        );
+        assert_retired_capabilities_denied(&rpc).await;
+    }
+
+    #[tokio::test]
+    async fn retirement_and_start_linearize_in_both_lock_orders() {
+        for prepare_first in [false, true] {
+            let (_parent, rpc) = bootstrap_rpc();
+            let id = rpc.events.environment_id;
+            let held = rpc.state.lock().await;
+            let start = rpc.start_vm(Request::new(stopped_start_request(id)));
+            let prepare =
+                rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}));
+            tokio::pin!(start, prepare);
+            // Poll each future once while holding the mutex to deterministically
+            // enqueue both orders. Tokio's mutex preserves waiter order.
+            if prepare_first {
+                assert!(futures::poll!(&mut prepare).is_pending());
+                assert!(futures::poll!(&mut start).is_pending());
+            } else {
+                assert!(futures::poll!(&mut start).is_pending());
+                assert!(futures::poll!(&mut prepare).is_pending());
+            }
+            drop(held);
+            let (started, prepared) = tokio::join!(start, prepare);
+            prepared.unwrap();
+            let start_error = started.unwrap_err();
+            if prepare_first {
+                assert_eq!(start_error.message(), "runner is retiring");
+                assert_eq!(rpc.events.sequence.load(Ordering::Acquire), 3);
+            } else {
+                // This metadata-only fixture cannot launch its nonexistent
+                // artifact. Start enters its real preparation path first;
+                // retirement then cleans it up and permanently fences it.
+                assert_ne!(start_error.message(), "runner is retiring");
+                assert!(rpc.events.sequence.load(Ordering::Acquire) > 3);
+            }
+            assert_eq!(rpc.state.lock().await.retirement, RetirementState::Prepared);
+            assert_retired_capabilities_denied(&rpc).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_prepare_and_late_watch_are_idempotent_and_terminal() {
+        use futures::StreamExt as _;
+        let (_parent, rpc) = bootstrap_rpc();
+        let first = rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}));
+        let second = rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}));
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(rpc.events.sequence.load(Ordering::Acquire), 3);
+        let id = rpc.events.environment_id;
+        rpc.shutdown_runner(Request::new(v1::ShutdownRunnerRequest {
+            environment_id: id.to_string(),
+            generation: 1,
+        }))
+        .await
+        .unwrap();
+        let mut stream = rpc
+            .watch_runner(Request::new(v1::WatchRunnerRequest {
+                environment_id: id.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let final_event = stream.next().await.unwrap().unwrap();
+        assert_eq!(final_event.sequence, 3);
+        assert_eq!(final_event.stage, v1::RunnerStage::Stopped as i32);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn real_uds_shutdown_flushes_response_final_watch_and_removes_socket() {
+        let (parent, rpc) = bootstrap_rpc();
+        let id = rpc.events.environment_id;
+        let socket = parent.path().join("retire.sock");
+        let server = tokio::spawn(serve_runner_rpc(socket.clone(), rpc.clone()));
+        let mut client = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(client) = RunnerClient::connect(&socket).await {
+                    break client;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut early = client.watch(id).await.unwrap();
+        client.prepare_retire().await.unwrap();
+        let mut late = client.watch(id).await.unwrap();
+        // Do not consume either stream before shutdown; both must retain the
+        // final event while the unary response still reaches this client.
+        client.shutdown(id, 1).await.unwrap();
+        for stream in [&mut early, &mut late] {
+            let final_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut last = None;
+                while let Some(event) = stream.message().await.unwrap() {
+                    last = Some(event);
+                }
+                last.unwrap()
+            })
+            .await
+            .unwrap();
+            assert_eq!(final_event.stage, v1::RunnerStage::Stopped as i32);
+            assert_eq!(
+                final_event.runner.unwrap().state,
+                v1::EnvironmentState::Stopped as i32
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!socket.exists());
+        assert_eq!(
+            rpc.state.lock().await.retirement,
+            RetirementState::ShutdownRequested
+        );
+    }
+
     #[tokio::test]
     async fn cancelling_startup_owner_revokes_generation_access() {
         let (_parent, _listener, access) = bootstrap_access();
@@ -1822,6 +2277,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonreading_watch_cannot_hold_a_retired_server_past_its_drain_bound() {
+        let (parent, rpc) = bootstrap_rpc();
+        let id = rpc.events.environment_id;
+        let socket = parent.path().join("blocked-watch.sock");
+        let server = tokio::spawn(serve_runner_rpc(socket.clone(), rpc));
+        let mut client = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(client) = RunnerClient::connect(&socket).await {
+                    break client;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let connector = crate::uds::owner_only_connector(&socket).unwrap();
+        let channel = tonic::transport::Endpoint::from_static("http://codewire-retirement-test")
+            // Deliberately never provide body flow control on this separate
+            // owner connection. The normal shutdown client remains readable.
+            .initial_stream_window_size(0)
+            .connect_with_connector(connector)
+            .await
+            .unwrap();
+        let mut unresponsive = EnvironmentRunnerServiceClient::new(channel);
+        let _unread = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            unresponsive.watch_runner(v1::WatchRunnerRequest {
+                environment_id: id.to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        client.prepare_retire().await.unwrap();
+        client.shutdown(id, 1).await.unwrap();
+        let result = tokio::time::timeout(
+            RUNNER_SERVER_DRAIN_TIMEOUT + std::time::Duration::from_secs(1),
+            server,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            matches!(result, Err(RunnerServiceError::Serve)),
+            "blocked stream is not a successful graceful drain"
+        );
+        assert!(!socket.exists());
+    }
+
+    #[tokio::test]
     async fn generation_access_denies_exited_process_before_state_observation() {
         let (_parent, _listener, access) = bootstrap_access();
         let environment_id = Uuid::new_v4();
@@ -1839,7 +2344,7 @@ mod tests {
         child.kill().await.unwrap();
         child.wait().await.unwrap();
         assert!(cell.get(environment_id, 1).is_err());
-        assert!(cell.current.lock().unwrap().is_none());
+        assert!(cell.current.lock().unwrap().access.is_none());
     }
 
     #[tokio::test]
@@ -2059,7 +2564,9 @@ mod tests {
         })
         .unwrap();
 
-        for actual in [0, 1, NATIVE_RUNNER_PROTOCOL_VERSION + 1] {
+        for actual in
+            (0..NATIVE_RUNNER_PROTOCOL_VERSION).chain([NATIVE_RUNNER_PROTOCOL_VERSION + 1])
+        {
             let error = admit_runner_protocol_info(&v1::RunnerProtocolInfo {
                 protocol_version: actual,
             })

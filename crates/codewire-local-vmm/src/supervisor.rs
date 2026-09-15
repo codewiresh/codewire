@@ -92,18 +92,35 @@ use crate::workspace_plan::{
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 3;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
-const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 5;
+const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 6;
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
 const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+const _: () = assert!(
+    RUNNER_EXIT_TIMEOUT.as_nanos() > crate::runner_service::RUNNER_SERVER_DRAIN_TIMEOUT.as_nanos()
+);
 const OPERATION_WATCH_BUFFER: usize = 8;
 const OPERATION_PROGRESS_CAPACITY: usize = 256;
 const RUNNER_EVENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAXIMUM_RUNNER_EVENTS: usize = 128;
 const DAEMON_VSOCK_PORT: u32 = 7777;
 const DEFAULT_OCI_ROOT_DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+
+async fn request_runner_shutdown_and_observe(
+    client: &mut RunnerClient,
+    environment_id: Uuid,
+    generation: u64,
+    live: &LiveProcess,
+) -> Result<bool, crate::RecoveryError> {
+    // A missing response does not prove the request had no effect. Always
+    // observe exact process exit for the full natural-exit window. This borrows
+    // only the birth-pinned descriptor; the caller retains its unreaped Child
+    // until the subsequent Linux pidfd fallback and reap, if needed.
+    let _ = client.shutdown(environment_id, generation).await;
+    live.wait_exited(RUNNER_EXIT_TIMEOUT).await
+}
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
 mod public_api;
@@ -3732,8 +3749,14 @@ impl SupervisorCore {
             .prepare_retire()
             .await
             .map_err(|_| SupervisorError::RunnerRetirement)?;
+        let generation = self.environment(name)?.generation;
+        let live = self
+            .live_runners
+            .get(&environment_id)
+            .ok_or(SupervisorError::InvalidState)?;
+        let _ = request_runner_shutdown_and_observe(&mut client, environment_id, generation, live)
+            .await?;
         drop(client);
-
         self.terminate_recorded_runner(name).await?;
         let environment = self.environment_mut(name)?;
         environment.runner = None;
@@ -8342,6 +8365,7 @@ mod tests {
     struct TestRunnerProtocolService {
         reply: TestRunnerProtocolReply,
         useful_calls: Arc<AtomicUsize>,
+        shutdown_effect: Option<Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>>,
     }
 
     impl TestRunnerProtocolService {
@@ -8421,6 +8445,21 @@ mod tests {
             self.unexpected_use()
         }
 
+        async fn shutdown_runner(
+            &self,
+            _request: Request<v1::ShutdownRunnerRequest>,
+        ) -> Result<Response<v1::ShutdownRunnerResponse>, Status> {
+            if let Some(effect) = &self.shutdown_effect {
+                if let Some(mut input) = effect.lock().unwrap().take() {
+                    std::io::Write::write_all(&mut input, b"retire\n").unwrap();
+                }
+                return Err(Status::unavailable(
+                    "synthetic response lost after shutdown effect",
+                ));
+            }
+            self.unexpected_use()
+        }
+
         async fn get_daemon_access(
             &self,
             _request: Request<v1::GetDaemonAccessRequest>,
@@ -8450,6 +8489,7 @@ mod tests {
         let service = TestRunnerProtocolService {
             reply,
             useful_calls: Arc::clone(&useful_calls),
+            shutdown_effect: None,
         };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
@@ -8473,6 +8513,82 @@ mod tests {
         socket_identity: SocketIdentity,
     ) -> (Uuid, ProcessIdentity) {
         attach_named_test_runner_process(core, "dev", socket_identity)
+    }
+
+    #[tokio::test]
+    async fn unacknowledged_runner_shutdown_still_observes_natural_exit() {
+        use crate::control::v1::environment_runner_service_server::EnvironmentRunnerServiceServer;
+        let parent = tempfile::tempdir().unwrap();
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = parent.path().join("shutdown.sock");
+        let executable = fs::canonicalize("/bin/sh").unwrap();
+        let mut child = Command::new(&executable)
+            .args([
+                "-c",
+                "read -r retirement_command; test \"$retirement_command\" = retire",
+            ])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let live = LiveProcess::capture_child(child.id(), &executable).unwrap();
+        let service = TestRunnerProtocolService {
+            reply: TestRunnerProtocolReply::Version(3),
+            useful_calls: Arc::new(AtomicUsize::new(0)),
+            shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.stdin.take()))),
+        };
+        let (incoming, identity) = bind_owner_only(&socket).unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(EnvironmentRunnerServiceServer::new(service))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        let mut client = RunnerClient::connect(&socket).await.unwrap();
+        // The mock performs the actual child shutdown effect, then returns an
+        // unavailable response. The supervisor must still observe normal exit,
+        // with the Child retained here rather than moved into a detached wait.
+        assert!(
+            request_runner_shutdown_and_observe(&mut client, Uuid::new_v4(), 1, &live)
+                .await
+                .unwrap()
+        );
+        assert!(child.try_wait().unwrap().unwrap().success());
+        assert!(live.is_exited().unwrap());
+        drop(client);
+        stop.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &identity).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unresponsive_runner_retains_child_and_exact_pidfd_for_fallback() {
+        let parent = tempfile::tempdir().unwrap();
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = parent.path().join("unresponsive.sock");
+        let (identity, calls, stop, server) =
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
+        let executable = fs::canonicalize("/bin/sleep").unwrap();
+        let mut child = Command::new(&executable).arg("60").spawn().unwrap();
+        let live = LiveProcess::capture_child(child.id(), &executable).unwrap();
+        let mut client = RunnerClient::connect(&socket).await.unwrap();
+        assert!(
+            !request_runner_shutdown_and_observe(&mut client, Uuid::new_v4(), 1, &live)
+                .await
+                .unwrap()
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(child.try_wait().unwrap().is_none());
+        live.signal(Signal::KILL).unwrap();
+        assert!(!child.wait().unwrap().success());
+        assert!(live.is_exited().unwrap());
+        drop(client);
+        stop.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &identity).unwrap();
     }
 
     fn attach_named_test_runner_process(
@@ -13440,6 +13556,12 @@ mod tests {
             } if actual == NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1
         ));
         assert!(error.to_string().contains("protocol version mismatch"));
+
+        info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION - 1;
+        assert!(matches!(
+            admit_supervisor_info(&info, None),
+            Err(SupervisorError::SupervisorProtocolMismatch { .. })
+        ));
 
         info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION;
         info.configuration_sha256.pop();
