@@ -469,9 +469,12 @@ def worker(root, run):
                     shutil.copy2(binary, run / "artifacts/cw-aarch64-apple-darwin")
                 if action in ("test", "verify"):
                     command(["cargo", "test", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin"])
+                    command(["cargo", "test", *native, "-p", "codewire-local-vmm", "--lib"])
                 if action in ("clippy", "verify"):
                     command(["cargo", "clippy", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin",
                              "--all-targets", "--", "-D", "warnings"])
+                    command(["cargo", "clippy", *native, "-p", "codewire-local-vmm", "--lib",
+                             "--", "-D", "warnings"])
                 if request["intel"]:
                     command(["cargo", "build", *common, "--target", "x86_64-apple-darwin",
                              "-p", "codewire-cli-bin", "--bin", "cw"])

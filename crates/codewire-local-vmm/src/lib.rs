@@ -40,6 +40,8 @@ pub mod mesh_transport;
 pub mod network_session;
 #[cfg(target_os = "linux")]
 pub mod network_worker;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod supervisor_config;
 #[cfg(target_os = "linux")]
 pub mod workspace;
 #[cfg(target_os = "linux")]

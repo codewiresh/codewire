@@ -507,7 +507,12 @@ print("cooperative cancellation: no adopted children")
         self.assertEqual(result["status"], "passed")
         commands = [item["argv"] for item in result["commands"]]
         cargo = [argv for argv in commands if argv[0] == "cargo" and argv[1] != "-V"]
-        self.assertEqual([argv[1] for argv in cargo], ["build", "test", "clippy", "build"])
+        self.assertEqual([argv[1] for argv in cargo], ["build", "test", "test", "clippy", "clippy", "build"])
+        self.assertEqual(cargo[2], ["cargo", "test", "--locked", "--offline", "--target",
+                                   "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib"])
+        self.assertEqual(cargo[4], ["cargo", "clippy", "--locked", "--offline", "--target",
+                                   "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib",
+                                   "--", "-D", "warnings"])
         for argv in cargo:
             self.assertIn("--offline", argv)
             self.assertIn("--locked", argv)
@@ -518,6 +523,31 @@ print("cooperative cancellation: no adopted children")
 
     def test_vz_production_fixture_is_opt_in_and_collects_only_its_binary(self):
         self.check_vz_fixture_plan("vz-fixture", "macos-production-init-fixture", "codewire-macos-vz-fixture")
+
+    def test_shared_native_library_failure_prevents_cli_test_success(self):
+        run = self.worker_fixture(action="test")
+        reader, writer = os.pipe()
+        stdin = os.fdopen(reader, "r")
+
+        def fixture_command(argv, cwd, env, log, cancel, deadline):
+            log.write_text("synthetic shared-library failure")
+            return 1 if "codewire-local-vmm" in argv else 0
+
+        try:
+            with mock.patch.object(sys, "stdin", stdin), mock.patch.object(signal, "signal"), \
+                 mock.patch.object(helper.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(helper.platform, "machine", return_value="arm64"), \
+                 mock.patch.object(helper, "output", return_value="fixture macOS"), \
+                 mock.patch.object(helper, "run_command", side_effect=fixture_command):
+                self.assertEqual(helper.worker(self.root, run), 1)
+        finally:
+            os.close(writer)
+            stdin.close()
+        result = json.loads((run / "result.json").read_text())
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["commands"][-1]["exit_code"], 1)
+        self.assertIn("codewire-local-vmm", result["commands"][-1]["argv"])
+        self.assertEqual(helper.evidence_status(run, "fixture"), "failed")
 
     def test_vz_workload_network_is_opt_in_and_collects_only_its_binary(self):
         self.check_vz_fixture_plan("vz-workload-network", "macos-workload-network-fixture", "codewire-macos-workload-network-fixture")
