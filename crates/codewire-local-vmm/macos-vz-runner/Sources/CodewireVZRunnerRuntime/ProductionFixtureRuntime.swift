@@ -202,7 +202,7 @@ import Foundation
     }
   }
 
-  private class FixtureCompletion<Value>: @unchecked Sendable {
+  class FixtureCompletion<Value>: @unchecked Sendable {
     let lock = NSLock()
     private let signal = DispatchSemaphore(value: 0)
     private var value: Result<Value, any Error>?
@@ -241,7 +241,7 @@ import Foundation
   }
 
   @available(macOS 15.0, *)
-  private final class FixtureConnectionCompletion: FixtureCompletion<VZVirtioSocketConnection>,
+  final class FixtureConnectionCompletion: FixtureCompletion<VZVirtioSocketConnection>,
     @unchecked Sendable
   {
     override func dispose(_ value: VZVirtioSocketConnection) { value.close() }

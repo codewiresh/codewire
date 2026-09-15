@@ -341,6 +341,9 @@ class ProbeFixture(unittest.TestCase):
             "scripts/ci/verify/workspace-image-artifact.py", "scripts/ci/verify/workspace-agent-contract.sh"}
         for path in paths:
             self.write(self.root / path, (ROOT / path).read_text() if (ROOT / path).is_file() else "synthetic\n")
+            # Model the archive's canonical checkout mode, independently of
+            # the caller's private umask; the real guard compares exact modes.
+            (self.root / path).chmod(0o644)
         for path in self.root.rglob("*.sh"):
             path.chmod(0o755)
         def git(*args):
@@ -383,6 +386,35 @@ class ProbeFixture(unittest.TestCase):
                 "AWS_SHARED_CREDENTIALS_FILE": str(self.credential), "AWS_PROFILE": "default",
                 "AWS_EC2_METADATA_DISABLED": "true",
                 "CODEWIRE_WORKSPACE_CACHE_SEED_REPORT": json.dumps(seed)}
+
+    def test_private_umask_fixture_preserves_exact_archive_mutation_and_restore(self):
+        previous_umask = os.umask(0o077)
+        try:
+            self.fixture_repository()
+            self.report.mkdir()
+            identity = probes.artifact.source_identity(self.root)
+            probes.write(self.report / "identity.json", {**identity, "buildkit_image": PIN})
+            archive = self.work / "source.tar"
+            subprocess.run(
+                ["git", "-C", str(self.root), "archive", "--format=tar", "--output", str(archive), "HEAD"],
+                check=True,
+            )
+            derived = self.work / "derived"
+            derived.mkdir()
+            probes.derive(archive, derived, self.report, self.credential, "1" * 32)
+            original = (self.root / probes.MAIN).read_bytes()
+            backup = self.work / "cw-main.original"
+            probes.mutate(self.root, self.report, backup)
+            context = probes.read(self.report / "cw-context.json")
+            self.assertEqual(context["before"]["mode"], 0o644)
+            self.assertEqual(context["after"]["mode"], 0o644)
+            self.assertEqual(context["changed_paths"], [probes.MAIN])
+            probes.restore(self.root, self.report, backup)
+            self.assertEqual((self.root / probes.MAIN).read_bytes(), original)
+            self.assertTrue(probes.read(self.report / "cw-context.json")["restored"])
+            self.assertFalse(backup.exists())
+        finally:
+            os.umask(previous_umask)
 
     def run_harness(self, failure=""):
         environment = self.fixture_repository()

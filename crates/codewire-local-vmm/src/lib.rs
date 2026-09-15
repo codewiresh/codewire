@@ -14,6 +14,8 @@ pub mod ch_api;
 #[cfg(target_os = "linux")]
 pub mod cloud_hypervisor;
 pub mod control;
+#[cfg(target_os = "macos")]
+pub mod darwin;
 #[cfg(target_os = "linux")]
 mod direct_share;
 #[cfg(target_os = "linux")]
@@ -26,6 +28,8 @@ pub mod host_port;
 pub mod hybrid_vsock;
 #[cfg(target_os = "linux")]
 mod lifecycle;
+#[cfg(all(target_os = "linux", feature = "macos-console-pair-fixture"))]
+pub mod macos_console_pair_fixture;
 #[cfg(target_os = "linux")]
 pub mod mesh_enrollment;
 #[cfg(target_os = "linux")]
@@ -38,6 +42,10 @@ pub mod mesh_transport;
 pub mod network_session;
 #[cfg(target_os = "linux")]
 pub mod network_worker;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod supervisor_client;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod supervisor_config;
 #[cfg(target_os = "linux")]
 pub mod workspace;
 #[cfg(target_os = "linux")]
@@ -61,7 +69,7 @@ mod skill_snapshot;
 pub mod supervisor;
 #[cfg(target_os = "linux")]
 mod supervisor_store;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod uds;
 #[cfg(target_os = "linux")]
 mod workspace_generation;

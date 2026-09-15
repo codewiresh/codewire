@@ -49,6 +49,10 @@ service EnvironmentRunnerService {
   // Stops the exact owned VMM and releases its device handles. The runner
   // never removes environment storage; only the supervisor may tombstone it.
   rpc PrepareRetireRunner(PrepareRetireRunnerRequest) returns (PrepareRetireRunnerResponse);
+  // Requests process exit only after successful resource retirement. The
+  // supervisor must still observe the exact process exit before clearing its
+  // durable ownership record or removing environment storage.
+  rpc ShutdownRunner(ShutdownRunnerRequest) returns (ShutdownRunnerResponse);
   rpc GetDaemonAccess(GetDaemonAccessRequest) returns (DaemonAccess);
   // Owner-only startup seam. Never waits on the main runner state mutex and
   // never admits a different or dead generation. Normal access stays Ready-only.
@@ -541,6 +545,11 @@ message GrowStateDiskResponse {
 }
 message PrepareRetireRunnerRequest {}
 message PrepareRetireRunnerResponse {}
+message ShutdownRunnerRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+}
+message ShutdownRunnerResponse {}
 message GetDaemonAccessRequest {}
 
 message GetGenerationDaemonAccessRequest {

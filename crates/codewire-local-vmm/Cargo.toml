@@ -10,11 +10,31 @@ build = "build.rs"
 
 [features]
 synthetic-oci-input-smoke = []
+macos-console-pair-fixture = []
+macos-product-network-fixture = ["macos-console-pair-fixture"]
+macos-workload-network-fixture = [
+    "macos-production-init-fixture",
+    "codewire-vmm-guest-probe/macos-workload-network-fixture",
+]
 macos-production-init-fixture = [
     "dep:async-trait", "dep:codewire-daemon", "dep:codewire-netstack",
-    "dep:codewire-vmm-guest-probe", "dep:hyper-util", "dep:libc", "dep:rand",
-    "dep:tokio", "dep:tower", "dep:uuid", "dep:zeroize",
+    "dep:codewire-vmm-guest-probe", "dep:rand", "dep:zeroize",
 ]
+
+[[bin]]
+name = "codewire-macos-workload-network-fixture"
+path = "src/bin/codewire-macos-workload-network-fixture.rs"
+required-features = ["macos-workload-network-fixture"]
+
+[[bin]]
+name = "codewire-macos-product-network-fixture"
+path = "src/bin/codewire-macos-product-network-fixture.rs"
+required-features = ["macos-product-network-fixture"]
+
+[[bin]]
+name = "codewire-macos-console-pair-fixture"
+path = "src/bin/codewire-macos-console-pair-fixture.rs"
+required-features = ["macos-console-pair-fixture"]
 
 [[bin]]
 name = "codewire-macos-vz-fixture"
@@ -74,19 +94,22 @@ url = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
-# Developer-only transport proof. None of these optional dependencies is enabled
-# by the default Darwin CLI or its release graph.
+# Shared configuration and existing-endpoint client are SDK-free. The optional
+# dependencies below remain developer-only transport proof, excluded from the
+# default Darwin CLI and its release graph.
 [target.'cfg(target_os = "macos")'.dependencies]
+sha2 = { workspace = true }
 async-trait = { workspace = true, optional = true }
 codewire-daemon = { workspace = true, optional = true }
 codewire-netstack = { workspace = true, optional = true }
 codewire-vmm-guest-probe = { workspace = true, optional = true }
-hyper-util = { workspace = true, optional = true }
-libc = { version = "0.2", optional = true }
+http = { workspace = true }
+hyper-util = { workspace = true }
+libc = "0.2"
 rand = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+uuid = { workspace = true }
 zeroize = { workspace = true, optional = true }
 
 [build-dependencies]
