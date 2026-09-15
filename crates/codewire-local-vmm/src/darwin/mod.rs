@@ -4,6 +4,7 @@
 
 mod acl;
 pub mod path;
+pub mod process;
 
 #[cfg(test)]
 mod path_capability_tests;
