@@ -81,14 +81,16 @@ async function issueTerminalTicket(page: Page): Promise<string> {
 }
 
 async function expectTerminalLeaseDrained() {
-  const [lease] = await sql`
-    SELECT COUNT(*)::int AS count
-    FROM organization_mutation_leases
-    WHERE organization_id = ${orgId}
-      AND mutation_class = 'environment_runtime_dispatch'
-      AND state IN ('active', 'resolution_required')
-  `;
-  expect(lease.count).toBe(0);
+  await expect.poll(async () => {
+    const [lease] = await sql`
+      SELECT COUNT(*)::int AS count
+      FROM organization_mutation_leases
+      WHERE organization_id = ${orgId}
+        AND mutation_class = 'environment_runtime_dispatch'
+        AND state IN ('active', 'resolution_required')
+    `;
+    return lease.count;
+  }, { timeout: 15_000 }).toBe(0);
 }
 
 async function closeTicketBeforeAttachment(page: Page, ticket: string) {

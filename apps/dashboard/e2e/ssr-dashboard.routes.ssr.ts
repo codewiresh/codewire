@@ -221,17 +221,22 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.getByRole("heading", { name: "Profiles", exact: true })).toBeVisible();
     await expect(page.locator("dialog[open]")).toHaveCount(0);
     await expect(page.locator('form[action="/settings/credentials/_actions/profiles/create"]')).toHaveCount(1);
-    await expect(page.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(2);
+    await expect(page.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
+    await expect(page.locator('form[action$="/github/authorize"]')).toHaveCount(1);
     for (const provider of ["GitHub", "OpenAI Codex"]) {
       await page.getByRole("button", { name: "Add credential", exact: true }).click();
       await page.getByRole("dialog", { name: "Add credential", exact: true })
         .getByRole("button", { name: provider, exact: true }).click();
       const connection = page.getByRole("dialog", { name: provider === "GitHub" ? "Connect GitHub" : "Connect Codex", exact: true });
-      await expect(connection.getByRole("form", { name: provider, exact: true }))
-        .toHaveAttribute("action", "/settings/credentials/_actions/credentials/oauth/enroll");
       if (provider === "GitHub") {
-        await expect(connection.locator('[name="name"]')).toHaveCount(0);
+        const github = connection.getByRole("form", { name: "GitHub App", exact: true });
+        await expect(github).toHaveAttribute("action", "/settings/credentials/_actions/github/authorize");
+        await expect(github.locator('[name="name"]')).toHaveCount(0);
+        await expect(github.getByRole("button", { name: "Continue to GitHub", exact: true }))
+          .toBeVisible();
       } else {
+        await expect(connection.getByRole("form", { name: provider, exact: true }))
+          .toHaveAttribute("action", "/settings/credentials/_actions/credentials/oauth/enroll");
         await expect(connection).toContainText("Enable device code authorization for Codex");
         await expect(connection.getByRole("link", { name: "ChatGPT Security settings", exact: true }))
           .toHaveAttribute("href", "https://chatgpt.com/#settings/Security");

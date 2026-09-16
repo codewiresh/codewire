@@ -29,12 +29,16 @@ async function completeGithubAppConnection(page: Page, code: string) {
   }));
   let state = "";
   try {
+    // Keep the checked-in route in place until the browser has actually
+    // followed the authorization redirect. Waiting only for the 303 response
+    // races its Location navigation and can send the test browser to GitHub.
+    const githubLanding = page.waitForURL(installation);
     const authorization = page.waitForResponse((response) => (
       response.url().includes("/settings/credentials/_actions/github/authorize")
       && response.request().method() === "POST"
     ));
     await form.getByRole("button", { name: "Continue to GitHub", exact: true }).click();
-    const response = await authorization;
+    const [response] = await Promise.all([authorization, githubLanding]);
     expect(response.status()).toBe(303);
     expect(response.headers()["cache-control"]).toBe("no-store");
     const location = response.headers().location;
@@ -49,6 +53,7 @@ async function completeGithubAppConnection(page: Page, code: string) {
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Lax");
     expect(cookie).toContain("Path=/settings/credentials/github/");
+    await expect(page).toHaveTitle("Kind GitHub App fixture");
   } finally {
     await page.unroute(installation);
   }
@@ -57,7 +62,10 @@ async function completeGithubAppConnection(page: Page, code: string) {
     response.url().includes("/settings/credentials/github/callback?")
     && response.request().method() === "GET"
   ));
-  await page.goto(`/settings/credentials/github/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
+  await page.goto(new URL(
+    `/settings/credentials/github/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    ssrUrl,
+  ).toString());
   const response = await callback;
   expect(response.status()).toBe(303);
   expect(response.headers()["cache-control"]).toBe("no-store, max-age=0");
