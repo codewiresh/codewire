@@ -228,6 +228,27 @@ def permanent_raw_surface_failures(
 def permanent_raw_surface_self_test(
     sources: dict[str, str], policy: dict[str, Any], client_sources: dict[str, str]
 ) -> None:
+    # The cookie-owned IdP inventory is an explicit identity boundary, not a
+    # wildcard exception for new control-plane or authentication procedures.
+    session_routes = {"/api/auth/sessions", "/api/auth/sessions/revoke"}
+    prior_policy = dict(policy)
+    prior_policy["allowed_raw_routes"] = [
+        route for route in policy["allowed_raw_routes"] if route not in session_routes
+    ]
+    prior_failures = permanent_raw_surface_failures(sources, prior_policy, client_sources)
+    if not any(
+        failure.startswith("unapproved raw routes:")
+        and all(route in failure for route in session_routes)
+        for failure in prior_failures
+    ):
+        raise RuntimeError("permanent raw guard lost the exact session-route admission proof")
+    unknown_identity = dict(sources)
+    unknown_identity["crates/codewire-idp/src/restored_session.rs"] = (
+        'fn restored() { Router::new().route("/api/auth/sessions/unapproved", get(handler)); }'
+    )
+    if not permanent_raw_surface_failures(unknown_identity, policy, client_sources):
+        raise RuntimeError("permanent raw guard accepted an unapproved identity route")
+
     restored_route = dict(sources)
     restored_route["crates/codewire-orchestration/src/restored_raw.rs"] = (
         'fn restored() { Router::new().route("/api/v1/restored", get(handler)); }'
