@@ -131,6 +131,20 @@ async function closeTicketBeforeAttachment(page: Page, ticket: string) {
   expect(result).toBe("closed:1000");
 }
 
+async function sourceDeletionDeadline(): Promise<string> {
+  // shutdown_at is a naive UTC source timestamp, with PostgreSQL microsecond
+  // precision. Compare the exact BFF nanosecond representation, not a rounded
+  // JavaScript Date or a guessed deadline computed from the requested TTL.
+  const [source] = await sql`
+    SELECT protected,
+           to_char(shutdown_at, 'YYYY-MM-DD"T"HH24:MI:SS.US') || '000Z' AS deadline
+    FROM environments WHERE id = ${environmentId} AND org_id = ${orgId}
+  `;
+  expect(source?.protected).toBe(false);
+  expect(source?.deadline).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/);
+  return source.deadline as string;
+}
+
 async function seedPinnedPreset() {
   presetId = crypto.randomUUID();
   await sql`
@@ -569,6 +583,8 @@ test.describe.serial("server-rendered environments", () => {
     // Runtime Running precedes setup completion; projection and workspace
     // replacement still belong to setup until this authenticated status arrives.
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
+    const initialDeadline = await sourceDeletionDeadline();
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", initialDeadline, { timeout: 30_000 });
     await expect(page.getByRole("tab")).toHaveCount(0);
     let launchRequests = 0;
     let stopRequests = 0;
@@ -819,16 +835,19 @@ test.describe.serial("server-rendered environments", () => {
     await expect(stopDialog).not.toBeVisible();
     const [notStopped] = await sql`SELECT state FROM environments WHERE id = ${environmentId}`;
     expect(notStopped.state).toBe("running");
+    const stopDeadline = await sourceDeletionDeadline();
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     await stopDialog.getByRole("button", { name: "Stop Sandbox", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/${slug}/${environmentId}/\\?message=`));
     await waitForEnvironmentState(environmentId, ["stopped"], 120_000);
     await expect(page.locator("[data-sandbox-state]")).toContainText("stopped", { timeout: 30_000 });
+    expect(await sourceDeletionDeadline()).toBe(stopDeadline);
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", stopDeadline);
     await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
     // Stopped compute changes are saved for Start, not a disguised restart.
     await page.getByRole("button", { name: "Resize", exact: true }).click();
-    await resizeDialog.getByLabel("CPU (millicores)", { exact: true }).fill("1500");
-    await resizeDialog.getByLabel("Memory (MiB)", { exact: true }).fill("3072");
+    await resizeDialog.getByLabel("CPU (millicores)", { exact: true }).fill("750");
+    await resizeDialog.getByLabel("Memory (MiB)", { exact: true }).fill("1536");
     const stoppedReview = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/plan"));
     await resizeDialog.getByRole("button", { name: "Review resize", exact: true }).click();
     const stoppedPlanResponse = await stoppedReview;
@@ -845,12 +864,13 @@ test.describe.serial("server-rendered environments", () => {
     await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
     await resizeDialog.getByRole("button", { name: "Close", exact: true }).click();
     const [deferred] = await sql`SELECT state, cpu_millicores, memory_mb FROM environments WHERE id = ${environmentId}`;
-    expect(deferred).toMatchObject({ state: "stopped", cpu_millicores: 1500, memory_mb: 3072 });
+    expect(deferred).toMatchObject({ state: "stopped", cpu_millicores: 750, memory_mb: 1536 });
     await expect(page.locator("[data-sandbox-resources]")).toHaveCount(2);
-    await expect(page.locator("[data-sandbox-resources]")).toContainText(["1.5 vCPU", "1.5 vCPU"], { timeout: 30_000 });
+    await expect(page.locator("[data-sandbox-resources]")).toHaveText(["0.75 vCPU · 1536 MiB · 10 GiB", "0.75 vCPU · 1536 MiB · 10 GiB"], { timeout: 30_000 });
     await page.goto(`/${slug}/`);
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("stopped");
+    await expect(row.locator(".cw-sandbox-lifetime time")).toHaveAttribute("datetime", await sourceDeletionDeadline());
 
     await openRowActions(row);
     await row.getByText("Secrets and credentials", { exact: true }).click();
@@ -872,11 +892,18 @@ test.describe.serial("server-rendered environments", () => {
     expect(cleared.state).toBe("stopped");
 
     await page.goto(`/${slug}/${environmentId}/`);
+    const beforeStartDeadline = await sourceDeletionDeadline();
     await page.getByRole("button", { name: "Start", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/${slug}/${environmentId}/\\?message=`));
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await expect(page.locator("[data-sandbox-state]")).toContainText(/running/i, { timeout: 30_000 });
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
+    // Running is observed before the subsequent deadline write. Wait for that
+    // source-owned write rather than assuming lifecycle completion implies it.
+    await expect.poll(sourceDeletionDeadline, { timeout: 30_000 }).not.toBe(beforeStartDeadline);
+    const restartedDeadline = await sourceDeletionDeadline();
+    expect(restartedDeadline).not.toBe(beforeStartDeadline);
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", restartedDeadline, { timeout: 30_000 });
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
     await page.getByRole("button", { name: "Delete", exact: true }).click();

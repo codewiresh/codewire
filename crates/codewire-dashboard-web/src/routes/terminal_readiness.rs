@@ -31,6 +31,8 @@ struct Detail {
     tone: &'static str,
     last_event: String,
     resources: String,
+    deletion_state: &'static str,
+    shutdown_at: Option<String>,
     cpu_millicores: i32,
     memory_mib: i32,
     disk_gib: i32,
@@ -78,6 +80,8 @@ impl Readiness {
                 tone: row.state_tone,
                 last_event: row.last_event,
                 resources: row.resources,
+                deletion_state: row.deletion_state,
+                shutdown_at: row.shutdown_at,
                 cpu_millicores: row.cpu_millicores,
                 memory_mib: row.memory_mb,
                 disk_gib: row.disk_gb,
@@ -191,7 +195,51 @@ mod tests {
         assert_eq!(value["running"], false);
         assert_eq!(value["setupComplete"], false);
         assert_eq!(value.as_object().unwrap().len(), 4);
+        assert_eq!(value["detail"].as_object().unwrap().len(), 15);
+        assert_eq!(value["detail"]["deletionState"], "unscheduled");
+        assert_eq!(value["detail"]["shutdownAt"], serde_json::Value::Null);
         assert!(!value.to_string().contains("canary"));
+    }
+
+    #[test]
+    fn deletion_metadata_never_changes_observed_lifecycle_or_authority() {
+        use codewire_proto::codewire::v1::{Environment, EnvironmentState};
+        for protected in [false, true] {
+            let mut source = Environment {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                state: EnvironmentState::Running.into(),
+                cpu_millicores: 750,
+                memory_mb: 1536,
+                disk_gb: 10,
+                protected,
+                ..Default::default()
+            };
+            let mut timestamp = source.shutdown_at.into_option().unwrap_or_default();
+            timestamp.seconds = 0;
+            timestamp.nanos = 123_456_789;
+            source.shutdown_at = Some(timestamp).into();
+            let value = serde_json::to_value(Readiness::new(
+                environment_connect::environment_row(source),
+                true,
+                DesiredState::Started as i32,
+            ))
+            .unwrap();
+            assert_eq!(value["running"], true);
+            assert_eq!(value["setupComplete"], true);
+            assert_eq!(value["detail"]["stopEligible"], true);
+            assert_eq!(value["detail"]["pending"], false);
+            if protected {
+                assert_eq!(value["detail"]["deletionState"], "protected");
+                assert!(value["detail"]["shutdownAt"].is_null());
+            } else {
+                assert_eq!(value["detail"]["deletionState"], "scheduled");
+                assert_eq!(
+                    value["detail"]["shutdownAt"],
+                    "1970-01-01T00:00:00.123456789Z"
+                );
+            }
+            assert!(serde_json::to_vec(&value).unwrap().len() <= 2048);
+        }
     }
 
     #[test]

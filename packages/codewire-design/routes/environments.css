@@ -69,6 +69,7 @@
 .cw-sandbox-table td { overflow: hidden; color: #8a8a8a; text-overflow: ellipsis; white-space: nowrap; }
 .cw-sandbox-table .cw-environment-name { max-width: none; color: #ededed; font: 500 13px/18px var(--font-mono); }
 .cw-sandbox-table .cw-environment-preset { overflow: hidden; margin-top: 1px; color: #5f5f5f; font-size: 10px; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.cw-sandbox-table .cw-sandbox-lifetime { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 .cw-sandbox-table .cw-status { gap: 0; padding: 2px 7px; border-radius: 4px; background: #1b1b1b; color: #9a9a9a; font-size: 11px; line-height: 15px; text-transform: capitalize; }
 .cw-sandbox-table .cw-status::before { display: none; }
 .cw-sandbox-table .cw-status[data-tone="success"] { background: rgba(63,185,80,.11); color: #3fb950; }

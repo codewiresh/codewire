@@ -16,7 +16,7 @@ async function transport(page: Page) {
     environmentId: environment, running: true, setupComplete: true,
     detail: { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
       resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
-      startEligible: false, stopEligible: true, deleteEligible: true, actionsAllowed: true, pending: false },
+      startEligible: false, stopEligible: true, deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false },
   } }));
   await page.route("**/_actions/resize/plan", async (route) => {
     state.plans += 1;

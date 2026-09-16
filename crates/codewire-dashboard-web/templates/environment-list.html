@@ -9,7 +9,7 @@
     <tbody>
       {% for sandbox in page.environments %}
       <tr>
-        <td><a class="cw-environment-name" href="/{{ organization.slug }}/{{ sandbox.id }}/" title="{{ sandbox.id }}">{{ sandbox.name }}</a>{% if !sandbox.preset_name.is_empty() %}<small class="cw-environment-preset">{{ sandbox.preset_name }}</small>{% endif %}{% if sandbox.isolation_tier == "confidential" %}<small class="cw-environment-preset">Confidential</small>{% endif %}</td>
+        <td><a class="cw-environment-name" href="/{{ organization.slug }}/{{ sandbox.id }}/" title="{{ sandbox.id }}">{{ sandbox.name }}</a>{% if !sandbox.preset_name.is_empty() %}<small class="cw-environment-preset">{{ sandbox.preset_name }}</small>{% endif %}{% if sandbox.isolation_tier == "confidential" %}<small class="cw-environment-preset">Confidential</small>{% endif %}<small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: {% let lifetime = sandbox %}{% include "environment-lifetime.html" %}</small></td>
         <td><span class="cw-status" data-tone="{{ sandbox.state_tone }}"><span class="cw-sr-only" aria-hidden="true">{{ sandbox.state_symbol }}</span>{{ sandbox.state }}</span></td>
         <td><span class="cw-stub-badge" title="Snapshots are coming soon">Coming soon</span></td>
         <td class="cw-mono cw-muted" aria-label="Region unavailable">—</td>

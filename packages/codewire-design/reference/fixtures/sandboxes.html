@@ -16,6 +16,10 @@
     .fixture-head ol { display: flex; gap: 10px; margin: 0; padding: 0; list-style: none; }
     .fixture-head li + li::before { margin-right: 10px; content: "/"; }
     .fixture-content { padding: 22px 20px; }
+    @media (max-width: 48rem) {
+      .fixture-sidebar { display: none; }
+      .fixture-main { margin-left: 0; }
+    }
   </style>
 </head>
 <body class="cw-body" data-dashboard-app data-route="sandboxes">
@@ -63,7 +67,7 @@
       <div class="cw-table-shell cw-sandbox-table-shell">
         <table class="cw-table cw-sandbox-table">
           <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Snapshot</th><th scope="col">Region</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead>
-          <tbody><tr id="quiet-mesa"><td><strong class="cw-environment-name">quiet-mesa</strong></td><td><span class="cw-status" data-tone="success">Running</span></td><td class="cw-mono">codewire/base:1.4</td><td class="cw-mono">eu</td><td>4 vCPU · 8 GiB · 10 GiB</td><td>started 2 min ago</td><td>12 Aug 2026</td><td><button class="cw-icon-button" type="button" aria-label="Actions for quiet-mesa">•••</button></td></tr><tr id="dry-harbor"><td><strong class="cw-environment-name">dry-harbor</strong></td><td><span class="cw-status">Stopped</span></td><td class="cw-mono">codewire/python:3.13</td><td class="cw-mono">us</td><td>1 vCPU · 2 GiB · 3 GiB</td><td>stopped 3 h ago</td><td>09 Aug 2026</td><td><button class="cw-icon-button" type="button" aria-label="Actions for dry-harbor">•••</button></td></tr></tbody>
+          <tbody><tr id="quiet-mesa"><td><strong class="cw-environment-name">quiet-mesa</strong><small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: <time datetime="2026-09-17T00:26:00.123456789Z">17 Sep 2026, 00:26 UTC</time></small></td><td><span class="cw-status" data-tone="success">Running</span></td><td class="cw-mono">codewire/base:1.4</td><td class="cw-mono">eu</td><td>4 vCPU · 8 GiB · 10 GiB</td><td>started 2 min ago</td><td>12 Aug 2026</td><td><button class="cw-icon-button" type="button" aria-label="Actions for quiet-mesa">•••</button></td></tr><tr id="dry-harbor"><td><strong class="cw-environment-name">dry-harbor</strong><small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: Protected from automatic deletion</small></td><td><span class="cw-status">Stopped</span></td><td class="cw-mono">codewire/python:3.13</td><td class="cw-mono">us</td><td>1 vCPU · 2 GiB · 3 GiB</td><td>stopped 3 h ago</td><td>09 Aug 2026</td><td><button class="cw-icon-button" type="button" aria-label="Actions for dry-harbor">•••</button></td></tr></tbody>
         </table>
       </div>
     </section>

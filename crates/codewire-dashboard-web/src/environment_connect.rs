@@ -662,9 +662,9 @@ pub(crate) fn resize_operation_view(
 fn resize_resources_label(resources: Option<EnvironmentResources>) -> String {
     let resources = resources.unwrap_or_default();
     format!(
-        "{} vCPU / {} GiB / {} GiB disk",
-        compact_decimal(f64::from(resources.cpu_millicores) / 1_000.0),
-        compact_decimal(f64::from(resources.memory_mb) / 1_024.0),
+        "{} vCPU / {} / {} GiB disk",
+        cpu_label(resources.cpu_millicores),
+        memory_label(resources.memory_mb),
         resources.disk_gb,
     )
 }
@@ -706,6 +706,7 @@ pub(crate) async fn delete_port(
 
 pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
     let sources = source_summary(&environment);
+    let (deletion_state, shutdown_at, shutdown_at_label) = deletion_deadline(&environment);
     let state = state_name(environment.state.to_i32());
     let display_name = if environment.name.trim().is_empty() {
         environment.id.chars().take(8).collect()
@@ -738,11 +739,14 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
             .map(|timestamp| past_time(timestamp.seconds))
             .unwrap_or_else(|| "—".to_owned()),
         cost: format!("${:.2}", running_seconds * per_second),
+        deletion_state,
+        shutdown_at,
+        shutdown_at_label,
         running_time: duration_label(environment.total_running_seconds),
         resources: format!(
-            "{} vCPU · {} GiB · {} GiB",
-            compact_decimal(cpu_vcpu),
-            compact_decimal(memory_gib),
+            "{} vCPU · {} · {} GiB",
+            cpu_label(environment.cpu_millicores),
+            memory_label(environment.memory_mb),
             environment.disk_gb,
         ),
         cpu_millicores: environment.cpu_millicores,
@@ -893,12 +897,53 @@ fn duration_label(seconds: i32) -> String {
     }
 }
 
-fn compact_decimal(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{value:.0}")
+fn cpu_label(millicores: i32) -> String {
+    let value = i64::from(millicores).abs();
+    let sign = if millicores < 0 { "-" } else { "" };
+    if value % 1000 == 0 {
+        format!("{sign}{}", value / 1000)
     } else {
-        format!("{value:.1}")
+        let fraction = format!("{:03}", value % 1000);
+        format!("{sign}{}.{}", value / 1000, fraction.trim_end_matches('0'))
     }
+}
+
+fn memory_label(mib: i32) -> String {
+    if mib % 1024 == 0 {
+        format!("{} GiB", mib / 1024)
+    } else {
+        format!("{mib} MiB")
+    }
+}
+
+/// Only the source deadline is authoritative. Neither activity nor a passed
+/// deadline changes observed lifecycle state; backend cleanup can be pending.
+fn deletion_deadline(environment: &Environment) -> (&'static str, Option<String>, String) {
+    if environment.protected {
+        return (
+            "protected",
+            None,
+            "Protected from automatic deletion".into(),
+        );
+    }
+    let Some(timestamp) = environment.shutdown_at.as_option() else {
+        return ("unscheduled", None, "Not currently scheduled".into());
+    };
+    // Bound the canonical wire value to four-digit UTC years and valid nanos.
+    if !(-62_135_596_800..=253_402_300_799).contains(&timestamp.seconds)
+        || !(0..=999_999_999).contains(&timestamp.nanos)
+    {
+        return ("unavailable", None, "Deletion deadline unavailable".into());
+    }
+    let Some(date) = chrono::DateTime::from_timestamp(timestamp.seconds, timestamp.nanos as u32)
+    else {
+        return ("unavailable", None, "Deletion deadline unavailable".into());
+    };
+    (
+        "scheduled",
+        Some(date.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+        date.format("%d %b %Y, %H:%M UTC").to_string(),
+    )
 }
 
 fn past_time(seconds: i64) -> String {
@@ -919,6 +964,115 @@ fn past_time(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_deadline(seconds: i64, nanos: i32) -> Environment {
+        let mut environment = Environment::default();
+        let mut timestamp = environment.shutdown_at.into_option().unwrap_or_default();
+        timestamp.seconds = seconds;
+        timestamp.nanos = nanos;
+        environment.shutdown_at = Some(timestamp).into();
+        environment
+    }
+
+    #[test]
+    fn resource_labels_preserve_exact_cpu_and_memory_without_changing_prices() {
+        for (millicores, expected) in [
+            (100, "0.1"),
+            (750, "0.75"),
+            (1000, "1"),
+            (1001, "1.001"),
+            (1250, "1.25"),
+            (128000, "128"),
+        ] {
+            assert_eq!(cpu_label(millicores), expected);
+        }
+        assert_eq!(memory_label(128), "128 MiB");
+        assert_eq!(memory_label(1536), "1536 MiB");
+        assert_eq!(memory_label(2048), "2 GiB");
+        let row = environment_row(Environment {
+            cpu_millicores: 750,
+            memory_mb: 1536,
+            disk_gb: 10,
+            total_running_seconds: 3600,
+            ..Default::default()
+        });
+        assert_eq!(row.resources, "0.75 vCPU · 1536 MiB · 10 GiB");
+        assert_eq!(
+            resize_resources_label(Some(EnvironmentResources {
+                cpu_millicores: 750,
+                memory_mb: 1536,
+                disk_gb: 10,
+                ..Default::default()
+            })),
+            "0.75 vCPU / 1536 MiB / 10 GiB disk"
+        );
+        let price = format!("${:.2}", 3600.0 * (0.75 * 0.000_014 + 1.5 * 0.000_004_5));
+        assert_eq!(row.cost, price);
+        assert_eq!(row.hourly_rate, format!("{price}/h"));
+    }
+
+    #[test]
+    fn deletion_deadline_preserves_precision_and_never_infers_lifecycle() {
+        let seconds = chrono::DateTime::parse_from_rfc3339("2026-09-17T00:26:00Z")
+            .unwrap()
+            .timestamp();
+        let mut environment = with_deadline(seconds, 123_456_789);
+        environment.state = EnvironmentState::Running.into();
+        let row = environment_row(environment);
+        assert_eq!(row.deletion_state, "scheduled");
+        assert_eq!(
+            row.shutdown_at.as_deref(),
+            Some("2026-09-17T00:26:00.123456789Z")
+        );
+        assert_eq!(row.shutdown_at_label, "17 Sep 2026, 00:26 UTC");
+        let mut past = with_deadline(0, 0);
+        past.state = EnvironmentState::Running.into();
+        let row = environment_row(past);
+        assert_eq!(row.state, "running");
+        assert!(row.can_stop);
+        assert_eq!(row.deletion_state, "scheduled");
+    }
+
+    #[test]
+    fn deletion_deadline_distinguishes_absence_protection_and_invalid_source() {
+        assert_eq!(
+            deletion_deadline(&Environment::default()),
+            ("unscheduled", None, "Not currently scheduled".into())
+        );
+        for (seconds, nanos) in [
+            (-62_135_596_801, 0),
+            (253_402_300_800, 0),
+            (0, -1),
+            (0, 1_000_000_000),
+        ] {
+            let mut environment = with_deadline(seconds, nanos);
+            assert_eq!(
+                deletion_deadline(&environment),
+                ("unavailable", None, "Deletion deadline unavailable".into())
+            );
+            environment.protected = true;
+            assert_eq!(
+                deletion_deadline(&environment),
+                (
+                    "protected",
+                    None,
+                    "Protected from automatic deletion".into()
+                )
+            );
+        }
+        assert_eq!(
+            deletion_deadline(&with_deadline(-62_135_596_800, 0))
+                .1
+                .as_deref(),
+            Some("0001-01-01T00:00:00.000000000Z")
+        );
+        assert_eq!(
+            deletion_deadline(&with_deadline(253_402_300_799, 999_999_999))
+                .1
+                .as_deref(),
+            Some("9999-12-31T23:59:59.999999999Z")
+        );
+    }
 
     fn resize_identity_fixture() -> (Environment, EnvironmentResizeOperation) {
         (

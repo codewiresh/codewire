@@ -2,10 +2,36 @@
   "use strict";
   const P = globalThis.CodewireTerminalProtocol;
   const states = ["pending", "pending build", "building", "build failed", "pulling snapshot", "creating", "starting", "running", "stopping", "stopped", "archiving", "archived", "restoring", "resizing", "destroying", "destroyed", "error", "unknown"];
-  const detailFields = ["state", "desiredState", "tone", "lastEvent", "resources", "cpuMillicores", "memoryMib", "diskGib", "startEligible", "stopEligible", "deleteEligible", "actionsAllowed", "pending"];
+  const detailFields = ["state", "desiredState", "tone", "lastEvent", "resources", "deletionState", "shutdownAt", "cpuMillicores", "memoryMib", "diskGib", "startEligible", "stopEligible", "deleteEligible", "actionsAllowed", "pending"];
+
+  function validDeadline(value) {
+    if (value.deletionState !== "scheduled") {
+      return ["unscheduled", "protected", "unavailable"].includes(value.deletionState) && value.shutdownAt === null;
+    }
+    if (typeof value.shutdownAt !== "string" || !/^(?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/.test(value.shutdownAt)) return false;
+    const date = new Date(value.shutdownAt);
+    // Date parsing alone normalizes impossible calendar days. Require an exact
+    // UTC round trip, preserving the original nanoseconds in <time datetime>.
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 23) === value.shutdownAt.slice(0, 23);
+  }
+
+  function showDeadline(node, detail) {
+    if (detail.deletionState !== "scheduled") {
+      node.textContent = { unscheduled: "Not currently scheduled", protected: "Protected from automatic deletion",
+        unavailable: "Deletion deadline unavailable" }[detail.deletionState];
+      return;
+    }
+    const date = new Date(detail.shutdownAt);
+    const pad = (value) => String(value).padStart(2, "0");
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const time = document.createElement("time");
+    time.dateTime = detail.shutdownAt;
+    time.textContent = `${pad(date.getUTCDate())} ${months[date.getUTCMonth()]} ${String(date.getUTCFullYear()).padStart(4, "0")}, ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`;
+    node.replaceChildren(time);
+  }
 
   function validDetail(value) {
-    return P.closed(value, detailFields) && states.includes(value.state)
+    return P.closed(value, detailFields) && states.includes(value.state) && validDeadline(value)
       && ["started", "stopped", "destroyed", "archived", "resized", "unknown"].includes(value.desiredState)
       && ["success", "danger", "neutral", "warning"].includes(value.tone)
       && ["lastEvent", "resources"].every((key) => typeof value[key] === "string" && value[key].length <= 128)
@@ -38,6 +64,7 @@
         state.dataset.tone = detail.tone;
         heading.querySelector("[data-sandbox-last-event]").textContent = detail.lastEvent;
         document.querySelectorAll("[data-sandbox-resources]").forEach((node) => { node.textContent = detail.resources; });
+        heading.querySelectorAll("[data-sandbox-lifetime]").forEach((node) => { showDeadline(node, detail); });
         // Never overwrite a draft while its Resize menu is open or focused.
         const resize = document.querySelector('dialog[data-resize-enhanced="true"]') || document.querySelector("details[data-sandbox-resize]");
         if (resize && !resize.open && !resize.contains(document.activeElement)) {
