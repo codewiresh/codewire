@@ -38,6 +38,10 @@
 .cw-terminal-tab-panel > .cw-terminal-panel { grid-row: 3; }
 /* Detail chrome must not consume the shell's minimum usable output area.
    Short viewports scroll the main area rather than stretching the footer. */
+.cw-sandbox-detail-main .cw-terminal-panel {
+  contain: size;
+}
+
 .cw-sandbox-detail-main .cw-durable-terminal { grid-template-rows: auto auto auto auto minmax(min-content, 1fr); }
 .cw-sandbox-detail-main .cw-terminal-tab-panel { grid-template-rows: auto auto minmax(180px, 1fr); }
 .cw-sandbox-detail-main .cw-sandbox-terminal:not(.cw-durable-terminal) { grid-template-rows: auto minmax(180px, 1fr); }

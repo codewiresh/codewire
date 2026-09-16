@@ -90,9 +90,13 @@ test("detail layout keeps usable output and compact footer with alerts and short
       const bounds = await page.locator(".cw-sandbox-detail-main").evaluate((main) => {
         const output = main.querySelector("[data-terminal-root]")!.getBoundingClientRect();
         const footer = main.querySelector(".cw-terminal-footer")!.getBoundingClientRect();
-        return { overlap: output.bottom > footer.top, horizontalOverflow: main.scrollWidth > main.clientWidth };
+        return { overlap: output.bottom > footer.top, horizontalOverflow: main.scrollWidth > main.clientWidth,
+          verticalOverflow: main.scrollHeight - main.clientHeight };
       });
-      expect(bounds).toEqual({ overlap: false, horizontalOverflow: false });
+      expect(bounds.overlap).toBe(false);
+      expect(bounds.horizontalOverflow).toBe(false);
+      if (viewport.height >= 844) expect(bounds.verticalOverflow,
+        `${viewport.width}×${viewport.height}, lifecycle alert ${showAlert ? "visible" : "hidden"}`).toBeLessThanOrEqual(1);
       // A short screen retains output instead of hiding it to avoid scrolling.
       await page.locator(".cw-terminal-footer").scrollIntoViewIfNeeded();
       await expect(page.locator(".cw-terminal-footer")).toBeInViewport();
