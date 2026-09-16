@@ -785,6 +785,14 @@ if [ "$event_selected" = false ]; then
         select_js_security
         recognized=true
         ;;
+      .supplychain/bun-baseline.json)
+        # The independent source-approval job verifies this tracked registry
+        # review baseline against the protected base. Repository CI needs only
+        # its static policy contract; this data file cannot affect a product
+        # image or Kind topology by itself.
+        select_token policy
+        recognized=true
+        ;;
       packages/codewire-types/package.json)
         # Deletion-only tombstone; no JavaScript package remains here.
         recognized=true
