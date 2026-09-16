@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sandbox Resize fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/terminal.css">
+  <script src="../../dashboard.js" defer></script><script src="../../terminal-protocol.js" defer></script>
+  <script src="../../terminal-readiness.js" defer></script><script src="../../sandbox-resize.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+<main class="cw-main">
+  <header><h1>Sandbox Resize</h1><p>Controller fixture with synthetic responses. This page does not resize a real Sandbox.</p></header>
+  <section aria-label="Sandbox status and actions" data-sandbox-observation data-sandbox-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+    <dl><div><dt>State</dt><dd data-sandbox-state>running</dd></div><div><dt>Last event</dt><dd data-sandbox-last-event>just now</dd></div><div><dt>Resources</dt><dd data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</dd></div></dl>
+    <p data-sandbox-observation-status role="status" hidden></p>
+    <button class="cw-button" type="button" data-dialog-open="sandbox-resize" data-resize-open hidden>Resize</button>
+    <button class="cw-button" type="button" data-sandbox-action="stop">Stop</button>
+    <details data-sandbox-resize><summary>Resize</summary><form method="post" action="/fixture-org/_actions/sandboxes/resize/plan"><input type="hidden" name="_csrf" value="synthetic"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><label>CPU (millicores)<input name="cpu_millicores" type="number" value="1000"></label><label>Memory (MiB)<input name="memory_mb" type="number" value="2048"></label><label>Disk (GiB)<input name="disk_gb" type="number" value="10"></label><button type="submit">Review resize</button></form></details>
+  </section>
+  <dialog class="cw-dialog" data-dialog data-sandbox-resize id="sandbox-resize" data-resize-account-id="account-a" data-resize-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-resize-org-slug="fixture-org" aria-labelledby="sandbox-resize-title">
+    <header class="cw-dialog-header"><h2 id="sandbox-resize-title">Resize Fixture Sandbox</h2></header>
+    <section class="cw-dialog-body" aria-label="Resize resources" data-resize-content>
+      <p>Review the proposed change before applying it. Some changes require a restart.</p>
+      <form data-resize-plan-form><input type="hidden" name="_csrf" value="synthetic-fixture-csrf">
+        <fieldset data-resize-inputs><legend>Requested resources</legend>
+          <label for="resize-cpu">CPU (millicores)</label><input class="cw-input" id="resize-cpu" name="cpu_millicores" type="number" min="100" max="128000" value="1000" required><p class="cw-field-help">1,000 millicores is one vCPU.</p>
+          <label for="resize-memory">Memory (MiB)</label><input class="cw-input" id="resize-memory" name="memory_mb" type="number" min="128" max="1048576" value="2048" required>
+          <label for="resize-disk">Disk (GiB)</label><input class="cw-input" id="resize-disk" name="disk_gb" type="number" min="1" max="16384" value="10" required>
+          <button class="cw-button" type="submit" data-resize-review>Review resize</button>
+        </fieldset>
+      </form>
+      <section aria-labelledby="resize-review-title" data-resize-plan hidden><h3 id="resize-review-title">Proposed change</h3>
+        <p data-resize-summary></p><p data-resize-mode></p><p class="cw-alert" data-resize-disk-warning hidden>Growing the workspace disk cannot be undone. You cannot shrink it back to its previous size.</p>
+        <form data-resize-apply-form><fieldset data-resize-consents><legend>Confirm this change</legend>
+          <label data-resize-restart-consent hidden><input type="checkbox" name="allow_restart">Allow a restart of this Sandbox.</label>
+          <label data-resize-session-consent hidden><input type="checkbox" name="force">Allow the active terminal sessions shown in this review to end.</label>
+          <button class="cw-button" type="submit" data-resize-apply>Apply resize</button>
+        </fieldset></form>
+      </section>
+      <p role="status" data-resize-status></p><button class="cw-button cw-button--outline" type="button" data-resize-observe hidden>Check resize status</button>
+    </section>
+    <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Close</button></footer>
+  </dialog>
+  <section aria-label="Sandbox terminal status" data-terminal-readiness data-terminal-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-terminal-org-slug="fixture-org">
+    <button class="cw-button" type="button" data-terminal-readiness-refresh>Refresh sandbox status</button>
+  </section>
+</main>
+</body>
+</html>

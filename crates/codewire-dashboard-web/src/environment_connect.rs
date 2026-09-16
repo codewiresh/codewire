@@ -429,15 +429,16 @@ pub(crate) async fn plan_environment_resize(
     memory_mb: i32,
     disk_gb: i32,
 ) -> Result<(EnvironmentResizePlan, Environment), ConnectError> {
+    let request = PlanEnvironmentResizeRequest {
+        org_id,
+        environment_id,
+        cpu_millicores,
+        memory_mb,
+        disk_gb,
+        ..Default::default()
+    };
     let response = environment_client(state, cookie)
-        .plan_environment_resize(PlanEnvironmentResizeRequest {
-            org_id,
-            environment_id,
-            cpu_millicores,
-            memory_mb,
-            disk_gb,
-            ..Default::default()
-        })
+        .plan_environment_resize(request.clone())
         .await?
         .into_owned();
     let plan = response
@@ -448,6 +449,7 @@ pub(crate) async fn plan_environment_resize(
         .environment
         .into_option()
         .ok_or_else(|| ConnectError::internal("resize environment was omitted"))?;
+    verify_resize_plan(&request, &plan, &environment)?;
     Ok((plan, environment))
 }
 
@@ -457,29 +459,7 @@ pub(crate) async fn resize_environment(
     request: ResizeEnvironmentRequest,
 ) -> Result<EnvironmentResizeOperation, ConnectError> {
     let response = environment_client(state, cookie)
-        .resize_environment(request)
-        .await?
-        .into_owned();
-    response
-        .operation
-        .into_option()
-        .ok_or_else(|| ConnectError::internal("resize operation was omitted"))
-}
-
-pub(crate) async fn environment_resize_operation(
-    state: &AppState,
-    cookie: HeaderValue,
-    org_id: String,
-    environment_id: String,
-    operation_id: String,
-) -> Result<(EnvironmentResizeOperation, Environment), ConnectError> {
-    let response = environment_client(state, cookie)
-        .get_environment_resize_operation(GetEnvironmentResizeOperationRequest {
-            org_id,
-            environment_id,
-            operation_id,
-            ..Default::default()
-        })
+        .resize_environment(request.clone())
         .await?
         .into_owned();
     let operation = response
@@ -490,7 +470,128 @@ pub(crate) async fn environment_resize_operation(
         .environment
         .into_option()
         .ok_or_else(|| ConnectError::internal("resize environment was omitted"))?;
+    verify_resize_acknowledgement(&request, &operation, &environment)?;
+    Ok(operation)
+}
+
+pub(crate) async fn environment_resize_operation(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    environment_id: String,
+    operation_id: String,
+) -> Result<(EnvironmentResizeOperation, Environment), ConnectError> {
+    let request = GetEnvironmentResizeOperationRequest {
+        org_id,
+        environment_id,
+        operation_id,
+        ..Default::default()
+    };
+    let response = environment_client(state, cookie)
+        .get_environment_resize_operation(request.clone())
+        .await?
+        .into_owned();
+    let operation = response
+        .operation
+        .into_option()
+        .ok_or_else(|| ConnectError::internal("resize operation was omitted"))?;
+    let environment = response
+        .environment
+        .into_option()
+        .ok_or_else(|| ConnectError::internal("resize environment was omitted"))?;
+    verify_resize_operation(&request, &operation, &environment)?;
     Ok((operation, environment))
+}
+
+fn resize_environment_matches(
+    environment: &Environment,
+    org_id: &str,
+    environment_id: &str,
+) -> bool {
+    !org_id.is_empty()
+        && !environment_id.is_empty()
+        && environment.org_id == org_id
+        && environment.id == environment_id
+}
+
+fn resize_resources_match(
+    resources: Option<&EnvironmentResources>,
+    cpu_millicores: i32,
+    memory_mb: i32,
+    disk_gb: i32,
+) -> bool {
+    resources.is_some_and(|resources| {
+        resources.cpu_millicores == cpu_millicores
+            && resources.memory_mb == memory_mb
+            && resources.disk_gb == disk_gb
+    })
+}
+
+fn verify_resize_plan(
+    request: &PlanEnvironmentResizeRequest,
+    plan: &EnvironmentResizePlan,
+    environment: &Environment,
+) -> Result<(), ConnectError> {
+    if !resize_environment_matches(environment, &request.org_id, &request.environment_id)
+        || !resize_resources_match(
+            plan.desired_resources.as_option(),
+            request.cpu_millicores,
+            request.memory_mb,
+            request.disk_gb,
+        )
+    {
+        return Err(ConnectError::internal("resize plan identity did not match"));
+    }
+    Ok(())
+}
+
+fn verify_resize_acknowledgement(
+    request: &ResizeEnvironmentRequest,
+    operation: &EnvironmentResizeOperation,
+    environment: &Environment,
+) -> Result<(), ConnectError> {
+    if !resize_environment_matches(environment, &request.org_id, &request.environment_id)
+        || operation.environment_id != request.environment_id
+        || operation.id.len() != 32
+        || !operation
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || request.request_id.is_empty()
+        || operation.request_id != request.request_id
+        || operation.disruption_policy != request.disruption_policy
+        || !resize_resources_match(
+            operation.desired_resources.as_option(),
+            request.cpu_millicores,
+            request.memory_mb,
+            request.disk_gb,
+        )
+    {
+        return Err(ConnectError::internal(
+            "resize acknowledgement identity did not match",
+        ));
+    }
+    // Force is bound to this immutable request by the owning backend; it is not
+    // echoed in an operation. Resource equality alone is never an acknowledgement.
+    Ok(())
+}
+
+fn verify_resize_operation(
+    request: &GetEnvironmentResizeOperationRequest,
+    operation: &EnvironmentResizeOperation,
+    environment: &Environment,
+) -> Result<(), ConnectError> {
+    if !resize_environment_matches(environment, &request.org_id, &request.environment_id)
+        || request.operation_id.is_empty()
+        || operation.id != request.operation_id
+        || operation.environment_id != request.environment_id
+        || operation.request_id.is_empty()
+    {
+        return Err(ConnectError::internal(
+            "resize operation identity did not match",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn resize_confirmation(
@@ -818,6 +919,197 @@ fn past_time(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resize_identity_fixture() -> (Environment, EnvironmentResizeOperation) {
+        (
+            Environment {
+                id: "sandbox".into(),
+                org_id: "organization".into(),
+                ..Default::default()
+            },
+            EnvironmentResizeOperation {
+                id: "0123456789abcdef0123456789abcdef".into(),
+                environment_id: "sandbox".into(),
+                request_id: "request".into(),
+                desired_resources: Some(EnvironmentResources {
+                    cpu_millicores: 2000,
+                    memory_mb: 4096,
+                    disk_gb: 20,
+                    ..Default::default()
+                })
+                .into(),
+                disruption_policy:
+                    codewire_proto::codewire::v1::EnvironmentResizeDisruptionPolicy::LiveOnly.into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn resize_plan_binds_organization_sandbox_and_requested_resources() {
+        let (environment, operation) = resize_identity_fixture();
+        let request = PlanEnvironmentResizeRequest {
+            org_id: "organization".into(),
+            environment_id: "sandbox".into(),
+            cpu_millicores: 2000,
+            memory_mb: 4096,
+            disk_gb: 20,
+            ..Default::default()
+        };
+        let plan = EnvironmentResizePlan {
+            desired_resources: operation.desired_resources,
+            ..Default::default()
+        };
+        assert!(verify_resize_plan(&request, &plan, &environment).is_ok());
+        for wrong_environment in [
+            Environment {
+                id: "foreign".into(),
+                ..environment.clone()
+            },
+            Environment {
+                org_id: "foreign".into(),
+                ..environment.clone()
+            },
+        ] {
+            assert!(verify_resize_plan(&request, &plan, &wrong_environment).is_err());
+        }
+        for desired in [
+            None,
+            Some(EnvironmentResources {
+                cpu_millicores: 4000,
+                memory_mb: 4096,
+                disk_gb: 20,
+                ..Default::default()
+            }),
+            Some(EnvironmentResources {
+                cpu_millicores: 2000,
+                memory_mb: 8192,
+                disk_gb: 20,
+                ..Default::default()
+            }),
+            Some(EnvironmentResources {
+                cpu_millicores: 2000,
+                memory_mb: 4096,
+                disk_gb: 40,
+                ..Default::default()
+            }),
+        ] {
+            let wrong_plan = EnvironmentResizePlan {
+                desired_resources: desired.into(),
+                ..plan.clone()
+            };
+            assert!(verify_resize_plan(&request, &wrong_plan, &environment).is_err());
+        }
+    }
+
+    #[test]
+    fn resize_acknowledgement_requires_exact_request_not_just_equal_resources() {
+        let (environment, operation) = resize_identity_fixture();
+        let request = ResizeEnvironmentRequest {
+            org_id: "organization".into(),
+            environment_id: "sandbox".into(),
+            request_id: "request".into(),
+            cpu_millicores: 2000,
+            memory_mb: 4096,
+            disk_gb: 20,
+            disruption_policy:
+                codewire_proto::codewire::v1::EnvironmentResizeDisruptionPolicy::LiveOnly.into(),
+            ..Default::default()
+        };
+        assert!(verify_resize_acknowledgement(&request, &operation, &environment).is_ok());
+        for wrong_operation in [
+            EnvironmentResizeOperation {
+                request_id: "another-request".into(),
+                ..operation.clone()
+            },
+            EnvironmentResizeOperation {
+                environment_id: "foreign".into(),
+                ..operation.clone()
+            },
+            EnvironmentResizeOperation {
+                id: "not-an-operation".into(),
+                ..operation.clone()
+            },
+            EnvironmentResizeOperation {
+                id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                ..operation.clone()
+            },
+            EnvironmentResizeOperation {
+                disruption_policy:
+                    codewire_proto::codewire::v1::EnvironmentResizeDisruptionPolicy::AllowRestart
+                        .into(),
+                ..operation.clone()
+            },
+            EnvironmentResizeOperation {
+                desired_resources: None.into(),
+                ..operation.clone()
+            },
+            EnvironmentResizeOperation {
+                desired_resources: Some(EnvironmentResources {
+                    cpu_millicores: 4000,
+                    memory_mb: 4096,
+                    disk_gb: 20,
+                    ..Default::default()
+                })
+                .into(),
+                ..operation.clone()
+            },
+        ] {
+            assert!(
+                verify_resize_acknowledgement(&request, &wrong_operation, &environment).is_err()
+            );
+        }
+        let foreign = Environment {
+            org_id: "foreign".into(),
+            ..environment.clone()
+        };
+        assert!(verify_resize_acknowledgement(&request, &operation, &foreign).is_err());
+        let empty_request = ResizeEnvironmentRequest {
+            request_id: String::new(),
+            ..request
+        };
+        assert!(verify_resize_acknowledgement(&empty_request, &operation, &environment).is_err());
+    }
+
+    #[test]
+    fn resize_operation_poll_requires_exact_operation_and_environment_identity() {
+        let (environment, operation) = resize_identity_fixture();
+        let request = GetEnvironmentResizeOperationRequest {
+            org_id: "organization".into(),
+            environment_id: "sandbox".into(),
+            operation_id: operation.id.clone(),
+            ..Default::default()
+        };
+        assert!(verify_resize_operation(&request, &operation, &environment).is_ok());
+        for wrong_operation in [
+            EnvironmentResizeOperation {
+                id: "fedcba9876543210fedcba9876543210".into(),
+                ..operation.clone()
+            },
+            EnvironmentResizeOperation {
+                environment_id: "foreign".into(),
+                ..operation.clone()
+            },
+            EnvironmentResizeOperation {
+                request_id: String::new(),
+                ..operation.clone()
+            },
+        ] {
+            assert!(verify_resize_operation(&request, &wrong_operation, &environment).is_err());
+        }
+        for foreign in [
+            Environment {
+                id: "foreign".into(),
+                ..environment.clone()
+            },
+            Environment {
+                org_id: "foreign".into(),
+                ..environment.clone()
+            },
+        ] {
+            assert!(verify_resize_operation(&request, &operation, &foreign).is_err());
+        }
+    }
 
     #[test]
     fn source_summary_displays_only_exact_metadata_and_never_infers_missing_selection() {

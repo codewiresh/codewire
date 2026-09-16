@@ -7,6 +7,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::{
+    auth::{authenticated_identity, enforce_two_factor},
     environment_connect,
     error::WebError,
     response::{TerminalStyleNonce, error_page, render_terminal_page},
@@ -42,6 +43,16 @@ pub(super) async fn page(
             Ok(context) => context,
             Err(response) => return response,
         };
+    // Capture the immutable actor from this request's authenticated cookie,
+    // never from terminal inventory, display names or browser storage. Private
+    // Resize requests compare it with freshly authenticated identity again.
+    let identity = match authenticated_identity(&state, &headers).await {
+        Ok(identity) => identity,
+        Err(error) => return error_page(error),
+    };
+    if let Err(error) = enforce_two_factor(&identity) {
+        return error_page(error);
+    }
     let mut environment =
         match environment_connect::environment(&state, cookie, &organization.id, &environment_id)
             .await
@@ -62,6 +73,7 @@ pub(super) async fn page(
             }
         };
     let view = TerminalPageView {
+        account_id: identity.id,
         organization_id: organization.id.clone(),
         environment,
         websocket_origin,

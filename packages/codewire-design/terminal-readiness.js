@@ -24,6 +24,8 @@
     const observesDetail = heading?.dataset.sandboxEnvironmentId === environmentId;
     let submissionPending = false;
     let returnedAfterSubmission = false;
+    let resizeLocked = false;
+    let lastObservation = null;
     function observe(available, value) {
       if (!observesDetail) return;
       const detail = value?.detail;
@@ -37,13 +39,19 @@
         heading.querySelector("[data-sandbox-last-event]").textContent = detail.lastEvent;
         document.querySelectorAll("[data-sandbox-resources]").forEach((node) => { node.textContent = detail.resources; });
         // Never overwrite a draft while its Resize menu is open or focused.
-        const resize = document.querySelector("[data-sandbox-resize]");
+        const resize = document.querySelector('dialog[data-resize-enhanced="true"]') || document.querySelector("details[data-sandbox-resize]");
         if (resize && !resize.open && !resize.contains(document.activeElement)) {
           for (const [name, key] of [["cpu_millicores", "cpuMillicores"], ["memory_mb", "memoryMib"], ["disk_gb", "diskGib"]]) {
             resize.querySelector(`[name="${name}"]`).value = String(detail[key]);
           }
         }
-        if (resize && !resize.open) resize.hidden = !detail.actionsAllowed;
+        if (resize instanceof HTMLDetailsElement && !resize.open) resize.hidden = !detail.actionsAllowed;
+        // The enhanced Resize dialog owns its controls and unknown-outcome
+        // latch. Never re-expose its native fallback behind that latch.
+        if (document.querySelector("[data-resize-open]")) {
+          const fallback = document.querySelector("details[data-sandbox-resize]");
+          if (fallback && document.querySelector('dialog[data-resize-enhanced="true"]')) fallback.hidden = true;
+        }
       }
       status.textContent = !available ? "Sandbox status is unavailable. Last known values are shown; actions are paused."
         : submissionPending ? returnedAfterSubmission
@@ -56,7 +64,8 @@
       if (reload) reload.hidden = !returnedAfterSubmission;
       for (const control of document.querySelectorAll("[data-sandbox-action]")) {
         const action = control.dataset.sandboxAction;
-        const eligible = available && !submissionPending && ({ start: detail.startEligible, stop: detail.stopEligible,
+        const eligible = available && !submissionPending && !(resizeLocked && ["start", "stop", "delete", "resize"].includes(action))
+          && ({ start: detail.startEligible, stop: detail.stopEligible,
           delete: detail.deleteEligible, resize: detail.actionsAllowed && !detail.pending,
           ports: detail.actionsAllowed, connect: value.running && value.setupComplete })[action] === true;
         if (control instanceof HTMLButtonElement) control.disabled = !eligible;
@@ -78,12 +87,21 @@
     let paused = document.hidden;
     let lastRequest = -Infinity;
     const report = (available, value) => {
+      lastObservation = { available, value };
       observe(available, value);
       document.dispatchEvent(new CustomEvent("codewire:sandbox-status", {
         detail: { environmentId, available, running: value?.running === true,
-          setupComplete: value?.setupComplete === true },
+          setupComplete: value?.setupComplete === true, actionsAllowed: value?.detail?.actionsAllowed === true,
+          pending: value?.detail?.pending !== false },
       }));
     };
+    document.addEventListener("codewire:resize-mutation-status", (event) => {
+      if (event.detail?.environmentId !== environmentId || typeof event.detail.locked !== "boolean") return;
+      resizeLocked = event.detail.locked;
+      // Lock lifecycle controls without reporting the terminal unavailable or
+      // detaching it. Only source-owned running/setup observation can do that.
+      if (lastObservation) observe(lastObservation.available, lastObservation.value);
+    });
     const controls = () => { if (button) button.disabled = !!pending || paused; };
     function invalidate() {
       epoch += 1;

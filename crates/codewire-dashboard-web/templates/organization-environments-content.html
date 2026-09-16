@@ -25,6 +25,7 @@
   <section class="cw-card cw-detail-panel" aria-labelledby="resize-confirmation-title">
     <div class="cw-card-header"><div><h2 id="resize-confirmation-title" class="cw-card-title">Confirm resize · {{ resize.environment_name }}</h2><p class="cw-card-description">{{ resize.previous_resources }} → {{ resize.desired_resources }}</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Cancel</a></div>
     <div class="cw-card-content">
+      {% if let Some(detail_url) = resize.detail_url(organization.slug) %}<p><a href="{{ detail_url }}">Back to Sandbox</a></p>{% endif %}
       <p><strong>Planned application:</strong> {{ resize.execution_mode }}.</p>
       {% if !resize.reason.is_empty() %}<p>{{ resize.reason }}</p>{% endif %}
       {% if !resize.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in resize.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}

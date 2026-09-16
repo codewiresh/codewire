@@ -766,8 +766,61 @@ pub(crate) struct EnvironmentResizeOperationView {
     pub(crate) pod_replaced: bool,
 }
 
+fn resize_detail_url(slug: &str, environment_id: &str) -> Option<String> {
+    if !codewire_server_core::organization_slug::valid_organization_slug(slug)
+        || !uuid::Uuid::parse_str(environment_id).is_ok_and(|id| id.to_string() == environment_id)
+    {
+        return None;
+    }
+    Some(format!("/{slug}/{environment_id}/"))
+}
+
+impl EnvironmentResizeConfirmationView {
+    pub(crate) fn detail_url(&self, slug: &str) -> Option<String> {
+        resize_detail_url(slug, &self.environment_id)
+    }
+}
+
+impl EnvironmentResizeOperationView {
+    pub(crate) fn detail_url(&self, slug: &str) -> Option<String> {
+        resize_detail_url(slug, &self.environment_id)
+    }
+}
+
+#[cfg(test)]
+mod resize_detail_link_tests {
+    use super::resize_detail_url;
+
+    #[test]
+    fn native_resize_return_links_only_use_canonical_same_org_paths() {
+        let environment = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        assert_eq!(
+            resize_detail_url("example-org", environment),
+            Some(format!("/example-org/{environment}/"))
+        );
+        for slug in [
+            "../foreign",
+            "//foreign",
+            "https://foreign.test",
+            "",
+            "UPPERCASE",
+        ] {
+            assert!(resize_detail_url(slug, environment).is_none());
+        }
+        for environment in [
+            "../foreign",
+            "environment-id",
+            "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+            "",
+        ] {
+            assert!(resize_detail_url("example-org", environment).is_none());
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalPageView {
+    pub(crate) account_id: String,
     pub(crate) organization_id: String,
     pub(crate) environment: EnvironmentRow,
     pub(crate) websocket_origin: String,
