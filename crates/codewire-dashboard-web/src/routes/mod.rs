@@ -21,6 +21,8 @@ mod secrets_presets;
 mod settings;
 mod snapshots;
 mod terminal;
+mod terminal_readiness;
+mod terminal_sessions;
 
 use axum::{
     Router,
@@ -348,6 +350,22 @@ pub(crate) fn router() -> Router<AppState> {
             get(sandbox_detail_slash_redirect),
         )
         .route("/{slug}/{environment_id}/", get(terminal::page))
+        .route(
+            "/{slug}/{environment_id}/_fragments/terminal-readiness",
+            get(terminal_readiness::get),
+        )
+        .route(
+            "/{slug}/{environment_id}/_fragments/terminal-sessions",
+            get(terminal_sessions::list),
+        )
+        .route(
+            "/{slug}/{environment_id}/_actions/terminal-sessions/launch",
+            post(terminal_sessions::launch).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/{slug}/{environment_id}/_actions/terminal-sessions/stop",
+            post(terminal_sessions::stop).layer(DefaultBodyLimit::max(2048)),
+        )
         .route(
             "/{slug}/{environment_id}/ports/",
             get(environments::port_fragment),

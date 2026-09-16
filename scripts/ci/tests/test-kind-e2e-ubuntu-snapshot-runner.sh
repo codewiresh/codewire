@@ -48,6 +48,11 @@ ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
 )" ] || die 'prepared Kind snapshot profile does not select exactly the three affected mobile surfaces'
+[ "$(expected_snapshots prepared-kind-terminal)" = "$(cat <<'EOF'
+ssr-dashboard.environments.ssr.ts-snapshots/terminal-drawer-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.environments.ssr.ts-snapshots/terminal-full-mobile-dashboard-ssr-desktop-ubuntu24-cft145.png
+EOF
+)" ] || die 'terminal snapshot profile does not select exactly the two existing terminal goldens'
 if expected_snapshots unknown-profile >/dev/null 2>&1; then
   die 'unknown snapshot profile was accepted'
 fi
@@ -66,6 +71,21 @@ fi
   [ "$(snapshot_profile_database_url prepared-kind-management-secrets-mobile)" = \
     'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
   die 'prepared Kind snapshot topology changed'
+[ "$(snapshot_profile_context prepared-kind-terminal)" = kind-codewire-e2e-ci ] &&
+  [ "$(snapshot_profile_namespace prepared-kind-terminal)" = codewire-e2e ] &&
+  [ "$(snapshot_profile_origin prepared-kind-terminal)" = http://127.0.0.1:8090 ] &&
+  [ "$(snapshot_profile_database_url prepared-kind-terminal)" = \
+    'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
+  die 'terminal snapshot profile changed the prepared Kind topology'
+terminal_renderer="$(sed -n '/^          prepared-kind-terminal)/,/;;/p' "$RUNNER")"
+if ! grep -Fq -- '--project=dashboard-ssr-desktop' <<<"$terminal_renderer" ||
+    ! grep -Fq 'creates, runs, exposes a port, stops, starts, and destroys through real Kind' \
+      <<<"$terminal_renderer"; then
+  die 'terminal profile does not run the existing real lifecycle assertions'
+fi
+if grep -Eq -- '--project=dashboard-ssr-mobile|--grep-invert|--no-deps' <<<"$terminal_renderer"; then
+  die 'terminal profile changed the existing lifecycle project or skipped dependencies'
+fi
 [ "$(retired_snapshots)" = "$(cat <<'EOF'
 ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png
 ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
@@ -346,6 +366,50 @@ if read_container_id "$cidfile" >/dev/null 2>&1; then
   die 'missing Docker container ID file was accepted'
 fi
 
+workspace_alias="localhost/codewire-ci/workspace:source-$(printf '%064d' 1)"
+workspace_calls="$fixture/workspace-calls"
+(
+  isolated_docker_client() {
+    printf '%s\n' "$*" >>"$workspace_calls"
+    printf '%s\n' "$workspace_alias"
+  }
+  kubectl() {
+    printf '%s\n' "$*" >>"$workspace_calls"
+    printf '1\ncodewire-e2e-ci\n%s\n' "$workspace_alias"
+  }
+  [ "$(prepared_terminal_workspace_image isolated-config)" = "$workspace_alias" ]
+) || die 'source-verified prepared terminal workspace was rejected'
+# shellcheck disable=SC2016
+grep -Fq "isolated-config python3 $ROOT/scripts/ci/verify/workspace-image-artifact.py reuse $ROOT $ROOT/.tmp/codewire-workspace-image-verification.json" \
+  "$workspace_calls" || die 'terminal workspace bypassed the stock source/image/archive proof'
+grep -Fq -- '--context kind-codewire-e2e-ci -n codewire-e2e get configmap/codewire-kind-e2e-prepared' \
+  "$workspace_calls" || die 'terminal workspace did not bind the exact prepared cluster marker'
+for marker in wrong-image wrong-cluster wrong-version; do
+  if (
+    isolated_docker_client() { printf '%s\n' "$workspace_alias"; }
+    kubectl() {
+      case "$marker" in
+        wrong-image) printf '1\ncodewire-e2e-ci\npublished-image\n' ;;
+        wrong-cluster) printf '1\nother-cluster\n%s\n' "$workspace_alias" ;;
+        wrong-version) printf '2\ncodewire-e2e-ci\n%s\n' "$workspace_alias" ;;
+      esac
+    }
+    prepared_terminal_workspace_image isolated-config >/dev/null 2>&1
+  ); then
+    die "terminal workspace accepted $marker"
+  fi
+done
+if (
+  isolated_docker_client() { return 42; }
+  kubectl() { die 'cluster marker used despite failed source proof'; }
+  prepared_terminal_workspace_image isolated-config >/dev/null 2>&1
+); then
+  die 'terminal workspace accepted missing or stale source proof'
+fi
+# shellcheck disable=SC2016
+grep -Fq -- '--env PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$runtime_workspace_image"' "$RUNNER" ||
+  die 'renderer does not pass the verified workspace into the real lifecycle journey'
+
 topology_calls="$fixture/topology-calls"
 (
   isolated_docker_client() {
@@ -497,7 +561,7 @@ while IFS= read -r snapshot; do
     "$snapshot_repo/$snapshot_relative_dir/$snapshot"
 done < <(expected_snapshots)
 git -C "$snapshot_repo" add "$snapshot_relative_dir"
-git -C "$snapshot_repo" -c user.name=Codewire -c user.email=codewire@example.invalid \
+git -C "$snapshot_repo" -c commit.gpgsign=false -c user.name=Codewire -c user.email=codewire@example.invalid \
   commit -qm 'snapshot validator fixture'
 while IFS= read -r snapshot; do
   rm "$snapshot_repo/$snapshot_relative_dir/$snapshot"
@@ -523,7 +587,7 @@ unexpected_snapshot='ssr-dashboard.read.ssr.ts-snapshots/unexpected-dashboard-ss
 printf '\x89PNG\r\n\x1a\nunexpected\n' > \
   "$snapshot_repo/$snapshot_relative_dir/$unexpected_snapshot"
 git -C "$snapshot_repo" add "$snapshot_relative_dir/$unexpected_snapshot"
-git -C "$snapshot_repo" -c user.name=Codewire -c user.email=codewire@example.invalid \
+git -C "$snapshot_repo" -c commit.gpgsign=false -c user.name=Codewire -c user.email=codewire@example.invalid \
   commit -qm 'add unapproved deletion fixture'
 rm "$snapshot_repo/$snapshot_relative_dir/$unexpected_snapshot"
 if validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" >/dev/null 2>&1; then
@@ -556,33 +620,35 @@ if validate_snapshot_stage "$baseline" "$stage" >/dev/null 2>&1; then
   die 'an unexpected snapshot mutation was accepted'
 fi
 
-prepared_baseline="$fixture/prepared-baseline"
-prepared_stage="$fixture/prepared-stage"
-prepared_target="$fixture/prepared-target"
+for prepared_profile in prepared-kind-management-secrets-mobile prepared-kind-terminal; do
+prepared_baseline="$fixture/$prepared_profile-baseline"
+prepared_stage="$fixture/$prepared_profile-stage"
+prepared_target="$fixture/$prepared_profile-target"
 mkdir -p "$prepared_target"
 while IFS= read -r prepared_snapshot; do
   mkdir -p "$prepared_baseline/$(dirname "$prepared_snapshot")"
   printf '\x89PNG\r\n\x1a\nprepared baseline\n' >"$prepared_baseline/$prepared_snapshot"
-done < <(expected_snapshots prepared-kind-management-secrets-mobile)
+done < <(expected_snapshots "$prepared_profile")
 cp -a "$prepared_baseline/." "$prepared_stage/"
 while IFS= read -r prepared_snapshot; do
   printf 'changed\n' >>"$prepared_stage/$prepared_snapshot"
-done < <(expected_snapshots prepared-kind-management-secrets-mobile)
+done < <(expected_snapshots "$prepared_profile")
 validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
-  prepared-kind-management-secrets-mobile ||
-  die 'prepared Kind management-secrets-mobile update was rejected'
+  "$prepared_profile" ||
+  die "prepared Kind $prepared_profile update was rejected"
 promote_snapshots "$prepared_stage" "$prepared_target" \
-  prepared-kind-management-secrets-mobile
+  "$prepared_profile"
 while IFS= read -r prepared_snapshot; do
   cmp -s "$prepared_stage/$prepared_snapshot" "$prepared_target/$prepared_snapshot" ||
     die 'prepared Kind profile did not promote every allowlisted snapshot'
-done < <(expected_snapshots prepared-kind-management-secrets-mobile)
+done < <(expected_snapshots "$prepared_profile")
 mkdir -p "$prepared_stage/$(dirname "$current_snapshot")"
 printf '\x89PNG\r\n\x1a\nunapproved\n' >"$prepared_stage/$current_snapshot"
 if validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
-    prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
-  die 'prepared Kind profile accepted a mutation outside its three targets'
+    "$prepared_profile" >/dev/null 2>&1; then
+  die "prepared Kind $prepared_profile accepted a mutation outside its targets"
 fi
+done
 rm -f "$stage/$unapproved_stage_snapshot"
 unapproved_stage_link='ssr-dashboard.management-visual.ssr.ts-snapshots/unapproved-link.png'
 ln -s "$stage/$current_snapshot" "$stage/$unapproved_stage_link"
@@ -606,6 +672,9 @@ fi
 if "$RUNNER" --prepared-kind-management-secrets-mobile \
     --prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
   die 'duplicate prepared Kind profile flag was accepted'
+fi
+if "$RUNNER" --prepared-kind-terminal --prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
+  die 'two different prepared Kind profiles were accepted together'
 fi
 grep -Fq 'scripts/ci/tests/test-kind-e2e-ubuntu-snapshot-runner.sh' "$PRODUCT_VERIFY" ||
   die 'snapshot runner contract test is not wired into edge verification'
