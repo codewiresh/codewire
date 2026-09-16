@@ -4,6 +4,9 @@ The IdP exposes cookie-only session inventory and revocation for the Account
 screen. These routes never accept API keys, OAuth tokens, or bearer session
 tokens. The actor must be an enabled account with two-factor authentication
 enabled. They do not change the existing factor enrollment flow.
+These two exact routes are registered in the permanent raw identity policy.
+The dashboard calls the internal IdP origin; this change adds no public ingress
+path or wildcard raw control-plane exception.
 
 `GET /api/auth/sessions?account_id=<expected-account>&cursor=<optional-id>`
 returns `account_id`, `current_session` (`id`, `expires_at`), `sessions`
@@ -36,4 +39,4 @@ API keys. These are distinct lifetimes and controls.
 
 Focused proof is `cargo test -p codewire-idp --lib session_inventory` and the
 six synthetic PostgreSQL tests in `tests/session_inventory.rs`. The checked-in
-database verification requires all six tests and rejects missing-database skips.
+service verification requires all six tests and rejects missing-database skips.
