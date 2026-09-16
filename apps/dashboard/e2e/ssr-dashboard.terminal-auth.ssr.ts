@@ -29,7 +29,7 @@ async function rawRequest(
     {
       headers: {
         Connection: "Upgrade", Upgrade: "websocket",
-        "Sec-WebSocket-Key": "c3ludGhldGljLXRlc3QtaQ==",
+        "Sec-WebSocket-Key": Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64"),
         "Sec-WebSocket-Version": "13",
         "Sec-WebSocket-Protocol": "codewire.durable-terminal.v1",
         Origin: dashboard,

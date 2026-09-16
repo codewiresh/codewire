@@ -848,7 +848,7 @@ main() {
               --config apps/dashboard/playwright.config.ts \
               --project=dashboard-ssr-desktop \
               apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
-              --grep "creates, runs, exposes a port, stops, starts, and destroys through real Kind" \
+              --grep "selects a platform secret project and preserves it after a form error|creates, runs, exposes a port, stops, starts, and destroys through real Kind" \
               --output /tmp/codewire-run/test-results \
               --update-snapshots=changed --retries=0 --workers=1 --reporter=line
             ;;
