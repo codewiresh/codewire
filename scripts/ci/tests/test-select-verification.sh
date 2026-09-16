@@ -523,6 +523,12 @@ run_paths_case material_free_credential_bridge pull_request refs/pull/6011/head 
 run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/authority.rs
+run_paths_case credential_service_kind_runtime_without_opt_in pull_request refs/pull/6011/head false \
+  'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind/provider.rs
+run_paths_case credential_service_kind_runtime_with_opt_in pull_request refs/pull/6011/head true \
+  'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind/provider.rs
 run_paths_case shared_credential_tls_source pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service rust_pkg_codewire_tls transport transport_pkg_codewire_gateway' \
   crates/codewire-tls/src/files.rs
