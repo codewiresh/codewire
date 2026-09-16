@@ -16,6 +16,7 @@ use tokio_stream::{StreamExt as _, wrappers::ReceiverStream};
 use url::Url;
 
 use crate::{
+    connect::{settings_data as git_identity_data, update_git_identity},
     credentials_connect,
     environment_source_forms::exact_id,
     error::WebError,
@@ -32,7 +33,7 @@ use crate::{
         CredentialProfileDeleteSubmission, CredentialProfileUpdateSubmission,
         CredentialRenameSubmission, CredentialRevisionSubmission, CredentialRotateSubmission,
         CredentialSettingsView, CredentialSshGenerateSubmission, CredentialSshImportSubmission,
-        GitHubAppAuthorizationSubmission,
+        GitHubAppAuthorizationSubmission, GitIdentitySubmission,
     },
 };
 
@@ -88,6 +89,13 @@ pub(super) async fn page(
     {
         return error_page(error);
     }
+    let git_identity = match git_identity_data(&state, cookie.clone()).await {
+        Ok(identity) => identity,
+        Err(WebError::Connect(error)) if error.code == ErrorCode::Unauthenticated => {
+            return login_redirect(&continuation, &headers);
+        }
+        Err(error) => return error_page(error),
+    };
     let data = match credentials_connect::settings_data(&state, cookie).await {
         Ok(data) => data,
         Err(error) if error.code == ErrorCode::Unauthenticated => {
@@ -97,6 +105,12 @@ pub(super) async fn page(
     };
     let csrf = new_csrf_token();
     let page = CredentialSettingsView {
+        git_identity,
+        git_identity_feedback: query.message == "identity-saved"
+            || matches!(
+                query.error.as_str(),
+                "identity-invalid" | "identity-request-failed"
+            ),
         active_dialog: approved_dialog(&query.dialog, &data),
         credentials: data.credentials,
         profiles: data.profiles,
@@ -112,6 +126,51 @@ pub(super) async fn page(
         }),
         csrf_cookie(&state.public_origin, &csrf),
     )
+}
+
+pub(super) async fn update_identity_action(
+    State(state): State<AppState>,
+    Query(query): Query<QueryParameters>,
+    headers: HeaderMap,
+    form: Result<Form<GitIdentitySubmission>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return git_identity_redirect("identity-invalid", true, &query.org, &headers);
+    };
+    let cookie = match super::settings::mutation_cookie(
+        &state, &headers, &form.csrf, &query.org, PATH,
+    )
+    .await
+    {
+        Ok(cookie) => cookie,
+        Err(response) => return response,
+    };
+    if form.git_name.len() > 256 || form.git_email.len() > 320 {
+        return git_identity_redirect("identity-invalid", true, &query.org, &headers);
+    }
+    match update_git_identity(
+        &state,
+        cookie,
+        form.git_name.trim().into(),
+        form.git_email.trim().into(),
+    )
+    .await
+    {
+        Ok(()) => git_identity_redirect("identity-saved", false, &query.org, &headers),
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&page_path(&query.org), &headers)
+        }
+        Err(_) => git_identity_redirect("identity-request-failed", true, &query.org, &headers),
+    }
+}
+
+fn git_identity_redirect(code: &str, error: bool, org: &str, headers: &HeaderMap) -> Response {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if !org.is_empty() {
+        query.append_pair("org", org);
+    }
+    query.append_pair(if error { "error" } else { "message" }, code);
+    redirect(format!("{PATH}?{}#git-identity", query.finish()), headers)
 }
 
 pub(super) async fn create_profile_action(
@@ -1020,6 +1079,7 @@ fn page_error_redirect(code: &str, dialog: &str, org: &str, headers: &HeaderMap)
 
 fn approved_message(code: &str) -> &'static str {
     match code {
+        "identity-saved" => "Git commit identity saved.",
         "credential-added" => "API key credential added.",
         "credential-generated" => "SSH identity generated.",
         "credential-imported" => "SSH identity imported.",
@@ -1037,6 +1097,10 @@ fn approved_message(code: &str) -> &'static str {
 
 fn approved_error(code: &str) -> &'static str {
     match code {
+        "identity-invalid" => "The Git commit identity submission is invalid or too long.",
+        "identity-request-failed" => {
+            "The Git commit identity change could not be confirmed. Reload before trying again."
+        }
         "credential-invalid" => "The credential submission is invalid.",
         "credential-conflict" => "The credential changed. Reload and try again.",
         "credential-in-use" => {
@@ -1142,6 +1206,8 @@ mod tests {
         };
         let data = dialog_data();
         let page = CredentialSettingsView {
+            git_identity: Default::default(),
+            git_identity_feedback: false,
             active_dialog: approved_dialog(active_dialog, &data),
             credentials: data.credentials,
             profiles: data.profiles,

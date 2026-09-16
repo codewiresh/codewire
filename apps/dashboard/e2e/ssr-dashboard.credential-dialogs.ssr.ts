@@ -26,7 +26,7 @@ test("credential types switch native dialogs and cancellation restores focus wit
   await expect(github).toBeVisible();
   await expect(page.locator("dialog[open]")).toHaveCount(1);
   await expect(github.locator('input[name="name"]')).toHaveCount(0);
-  await expect(github.getByRole("button", { name: "Connect GitHub", exact: true })).toBeFocused();
+  await expect(github.getByRole("button", { name: "Continue to GitHub", exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(github).not.toBeVisible();
   await expect(add).toBeFocused();

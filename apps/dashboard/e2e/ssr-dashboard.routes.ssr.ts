@@ -300,17 +300,21 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.getByText("No snapshots yet", { exact: true })).toBeVisible();
   });
 
-  test("account placeholders preserve the current authenticated product behavior", async ({ page, isMobile }) => {
+  test("Account and Credentials preserve authenticated navigation with consolidated sections", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop account contract");
     for (const [route, heading] of [
       ["/settings/", "Account"],
       ["/settings/credentials/", "Credentials"],
-      ["/settings/security/", "Security settings"],
+      ["/settings/security/", "Security"],
       ["/settings/sessions/", "Active sessions"],
     ] as const) {
       const response = await page.goto(route);
       expect(response?.status()).toBe(200);
       await expect(page.getByRole("heading", { name: heading, exact: true }).first()).toBeVisible();
+      if (route.includes("security") || route.includes("sessions")) {
+        await expect(page).toHaveURL(`/settings/#${route.includes("security") ? "security" : "sessions"}`);
+        await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
+      }
     }
   });
 

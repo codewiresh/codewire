@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { getOrgForUser } from "./helpers/org";
+import { USERS } from "./helpers/seed";
 
 const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -20,22 +22,39 @@ test.describe.serial("server-rendered settings mutations", () => {
     test.skip(!!isMobile, "desktop settings mutation contract");
     const browserServiceCalls = watchBrowserServiceCalls(page);
 
-    await page.goto("/settings/");
-    const form = page.locator('form[action="/settings/_actions/git-identity"]');
-    const name = form.getByLabel("Name", { exact: true });
-    const email = form.getByLabel("Email", { exact: true });
+    const org = await getOrgForUser(USERS.master.email);
+    if (!org) throw new Error("Synthetic settings owner has no organization");
+    const context = `?org=${encodeURIComponent(org.slug)}`;
+    await page.goto(`/settings/credentials/${context}`);
+    const form = page.locator('form[action^="/settings/credentials/_actions/git-identity"]');
+    const name = form.getByLabel("Commit author name", { exact: true });
+    const email = form.getByLabel("Commit author email", { exact: true });
     const originalName = await name.inputValue();
     const originalEmail = await email.inputValue();
-    await name.fill("SSR Git Identity");
-    await email.fill(`ssr-git-${runId}@example.test`);
-    await page.getByRole("button", { name: "Save identity" }).click();
-    await expect(page.getByRole("status")).toContainText("Git identity saved");
-    await expect(page.getByLabel("Name", { exact: true }).last()).toHaveValue("SSR Git Identity");
-
-    await page.locator('form[action="/settings/_actions/git-identity"]').getByLabel("Name", { exact: true }).fill(originalName);
-    await page.locator('form[action="/settings/_actions/git-identity"]').getByLabel("Email", { exact: true }).fill(originalEmail);
-    await page.getByRole("button", { name: "Save identity" }).click();
-    await expect(page.getByRole("status")).toContainText("Git identity saved");
+    try {
+      await name.fill("SSR Git Identity");
+      await email.fill(`ssr-git-${runId}@example.test`);
+      await page.getByRole("button", { name: "Save commit identity" }).click();
+      await expect(page.getByRole("status")).toContainText("Git commit identity saved");
+      await expect(page).toHaveURL(`/settings/credentials/${context}&message=identity-saved#git-identity`);
+      await expect(page.getByLabel("Commit author name", { exact: true }).last()).toHaveValue("SSR Git Identity");
+    } finally {
+      // Restore even when a post-save assertion fails; exercise the retained
+      // legacy POST contract without a redirect that would discard its body.
+      await page.goto(`/settings/credentials/${context}`);
+      const identity = page.locator('form[action^="/settings/credentials/_actions/git-identity"]');
+      const csrf = await identity.locator('[name="_csrf"]').inputValue();
+      const response = await page.context().request.post(`/settings/_actions/git-identity${context}`, {
+        form: { _csrf: csrf, git_name: originalName, git_email: originalEmail },
+        headers: { Origin: new URL(page.url()).origin }, maxRedirects: 0,
+      });
+      expect(response.status()).toBe(303);
+      expect(response.headers().location).toContain(`org=${encodeURIComponent(org.slug)}`);
+      expect(response.headers().location).toContain("message=identity-saved#git-identity");
+      await page.goto(response.headers().location);
+      await expect(page.getByLabel("Commit author name", { exact: true }).last()).toHaveValue(originalName);
+      await expect(page.getByLabel("Commit author email", { exact: true }).last()).toHaveValue(originalEmail);
+    }
     expect(browserServiceCalls).toEqual([]);
   });
 });
