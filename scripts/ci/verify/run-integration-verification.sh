@@ -971,6 +971,8 @@ start_orchestration_process() {
 start_orchestration() {
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
     -f "$ROOT/tests/fixtures/orchestration/seed.sql"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+    -f "$ROOT/tests/fixtures/orchestration/runtime-ready.sql"
   start_temporal
   start_orchestration_kube_stub
   start_orchestration_daemon_fixture
