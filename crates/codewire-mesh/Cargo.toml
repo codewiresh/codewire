@@ -42,5 +42,6 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+codewire-client = { workspace = true }
 reqwest = { workspace = true }
 tower = { workspace = true }

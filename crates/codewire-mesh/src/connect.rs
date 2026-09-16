@@ -884,7 +884,11 @@ fn timestamp(value: chrono::DateTime<Utc>) -> Timestamp {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration as StdDuration;
 
+    use codewire_client::{
+        ClientConfig as CodewireClientConfig, CodewireClient, StaticTokenProvider,
+    };
     use codewire_server_core::auth::hash_api_key;
     use connectrpc::client::{ClientConfig, HttpClient};
     use connectrpc::{ConnectError, ErrorCode};
@@ -970,6 +974,36 @@ mod tests {
             org_id: ORG.to_string(),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn codewire_client_mesh_unary_calls_interoperate_over_http1_and_h2c() {
+        let (addr, task) = start(MemoryStore::new()).await;
+        let config = CodewireClientConfig::new(format!("http://{addr}")).expect("client config");
+
+        let clients = [
+            CodewireClient::with_http(
+                config.clone(),
+                StaticTokenProvider::new(API_KEY).expect("token"),
+                reqwest::Client::new(),
+            )
+            .expect("HTTP/1.1 client"),
+            CodewireClient::new(config, StaticTokenProvider::new(API_KEY).expect("token"))
+                .expect("h2c client"),
+        ];
+
+        for client in clients {
+            let response = tokio::time::timeout(
+                StdDuration::from_secs(5),
+                client.list_mesh_networks(network_request()),
+            )
+            .await
+            .expect("Mesh unary request must not stall")
+            .expect("list Mesh networks");
+            assert!(response.networks.is_empty());
+        }
+
+        task.abort();
     }
 
     fn scoped_request_org(organization_id: &str) -> ListMeshNodesRequest {
