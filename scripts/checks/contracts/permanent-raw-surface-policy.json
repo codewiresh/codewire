@@ -11,6 +11,8 @@
     "/api/auth/get-session",
     "/api/auth/reset-password",
     "/api/auth/send-verification-email",
+    "/api/auth/sessions",
+    "/api/auth/sessions/revoke",
     "/api/auth/sign-in",
     "/api/auth/sign-out",
     "/api/auth/sign-up",

@@ -547,6 +547,16 @@ run_idp() {
   fi
   assert_passed_count "idp db_flow" "$logfile" 13
 
+  logfile="$RUN_DIR/idp-session-inventory.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo_ci test --profile ci -p codewire-idp --test session_inventory -- --nocapture \
+    | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::idp session inventory DB tests skipped"
+    return 1
+  fi
+  assert_passed_count "idp session inventory" "$logfile" 7
+
   logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --profile ci -p codewire-idp --test rewrap_cli -- --nocapture \
