@@ -555,7 +555,7 @@ run_idp() {
     echo "::error::idp session inventory DB tests skipped"
     return 1
   fi
-  assert_passed_count "idp session inventory" "$logfile" 6
+  assert_passed_count "idp session inventory" "$logfile" 7
 
   logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
