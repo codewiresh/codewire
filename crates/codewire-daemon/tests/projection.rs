@@ -32,7 +32,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::Request;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use uuid::Uuid;
 
 const TOKEN: &str = "synthetic-projection-conformance-token";
@@ -154,7 +154,9 @@ fn create_launcher_adapter(root: &Path) {
          export CW_SYNTHETIC_LAUNCH_ARG_0=\"$1\"\n\
          export CW_SYNTHETIC_LAUNCH_ARG_1=\"$2\"\n\
          export CW_SYNTHETIC_LAUNCH_ARG_2=\"$3\"\n\
+         printf '%s\\n' \"$$\" > {}\n\
          exec {} --exact projection_launcher_child --nocapture\n",
+        quote_shell(root.join("launcher.pid").to_str().unwrap()),
         quote_shell(executable.to_str().unwrap()),
     );
     let adapter = root.join("launcher");
@@ -169,14 +171,25 @@ struct Harness {
     stdout: JoinHandle<Vec<u8>>,
     stderr: JoinHandle<Vec<u8>>,
     stop_projection: Option<oneshot::Sender<()>>,
-    projection: Option<JoinHandle<usize>>,
+    projection: Option<JoinHandle<(usize, usize)>>,
     session_client: SessionClient,
     client: DaemonServiceClient<Channel>,
     root: tempfile::TempDir,
+    endpoint: String,
+}
+
+struct ProjectionGate {
+    index: usize,
+    requested: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
 }
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with_gate(None).await
+    }
+
+    async fn start_with_gate(mut gate: Option<ProjectionGate>) -> Self {
         let root = tempfile::Builder::new()
             .prefix("cw-proj-")
             .tempdir()
@@ -235,7 +248,7 @@ impl Harness {
         let client = bounded(DaemonServiceClient::connect(endpoint.clone()))
             .await
             .unwrap();
-        let session_client = bounded(SessionClient::connect(endpoint, TOKEN))
+        let session_client = bounded(SessionClient::connect(endpoint.clone(), TOKEN))
             .await
             .unwrap();
         let mut connection =
@@ -254,22 +267,36 @@ impl Harness {
             let mut ids = BTreeSet::new();
             let mut recipients = BTreeSet::new();
             let mut count = 0;
+            let mut gated_request_id = None;
+            let mut cancellations = BTreeSet::new();
             loop {
                 let message = tokio::select! {
                     _ = &mut stop => break,
                     message = connection.receive() => message.unwrap().expect("projection bridge closed"),
                 };
-                let Some(
-                    bridge_v1::credential_bridge_guest_message::Payload::EnvironmentProjection(
-                        request,
-                    ),
-                ) = message.payload
-                else {
-                    panic!("unexpected synthetic bridge operation");
+                let request = match message.payload {
+                    Some(
+                        bridge_v1::credential_bridge_guest_message::Payload::EnvironmentProjection(
+                            request,
+                        ),
+                    ) => request,
+                    Some(bridge_v1::credential_bridge_guest_message::Payload::Cancel(cancel)) => {
+                        assert_eq!(Some(&cancel.request_id), gated_request_id.as_ref());
+                        assert!(ids.contains(&cancel.request_id));
+                        assert!(cancellations.insert(cancel.request_id));
+                        continue;
+                    }
+                    _ => panic!("unexpected synthetic bridge operation"),
                 };
                 assert!(ids.insert(request.request_id.clone()));
                 assert!(recipients.insert(request.recipient_public_key.clone()));
                 assert_eq!(request.selection_sha256, SELECTION);
+                if gate.as_ref().is_some_and(|gate| gate.index == count) {
+                    let gate = gate.take().unwrap();
+                    gated_request_id = Some(request.request_id.clone());
+                    gate.requested.send(()).unwrap();
+                    bounded(gate.release).await.unwrap();
+                }
                 let context = ProjectionContext {
                     environment_id: *environment.as_bytes(),
                     operation_generation: GENERATION,
@@ -323,7 +350,7 @@ impl Harness {
                 .unwrap();
                 count += 1;
             }
-            count
+            (count, cancellations.len())
         });
         Self {
             child,
@@ -335,6 +362,7 @@ impl Harness {
             session_client,
             client,
             root,
+            endpoint,
         }
     }
 
@@ -428,9 +456,16 @@ impl Harness {
         }
     }
 
-    async fn stop(mut self) {
+    async fn stop(self) {
+        self.stop_with_cancellations(0).await;
+    }
+
+    async fn stop_with_cancellations(mut self, cancellations: usize) {
         self.stop_projection.take().unwrap().send(()).unwrap();
-        assert_eq!(bounded(self.projection.take().unwrap()).await.unwrap(), 2);
+        assert_eq!(
+            bounded(self.projection.take().unwrap()).await.unwrap(),
+            (2, cancellations)
+        );
         drop(self.stdin.take());
         let status = bounded(self.child.wait()).await.unwrap();
         let stdout = bounded(self.stdout).await.unwrap();
@@ -492,7 +527,10 @@ async fn transient_projection_preserves_override_and_terminal_exit_twice() {
 }
 
 async fn launch_and_restart(pty: bool) {
-    let mut harness = Harness::start().await;
+    launch_and_restart_with_harness(Harness::start().await, pty).await;
+}
+
+async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool) {
     let term = if pty { "requested-term" } else { "" };
     let launched = bounded(
         harness
@@ -573,4 +611,250 @@ async fn managed_non_pty_restart_preserves_explicit_and_empty_values_with_fresh_
 #[tokio::test]
 async fn managed_pty_restart_preserves_explicit_and_empty_values_with_fresh_projection() {
     launch_and_restart(true).await;
+}
+
+async fn cancelled_launch_reaps_and_settles_without_a_late_launch(pty: bool) {
+    let (requested, received) = oneshot::channel();
+    let (release, gate) = oneshot::channel();
+    let mut harness = Harness::start_with_gate(Some(ProjectionGate {
+        index: 0,
+        requested,
+        release: gate,
+    }))
+    .await;
+    let request = v1::LaunchSessionRequest {
+        command: vec!["/bin/sh".into(), "-c".into(), PROBE.into()],
+        working_dir: harness
+            .root
+            .path()
+            .join("workspace")
+            .to_str()
+            .unwrap()
+            .into(),
+        env: REQUEST_ENV.iter().map(|entry| (*entry).into()).collect(),
+        pty,
+        term: if pty {
+            "requested-term".into()
+        } else {
+            String::new()
+        },
+        width: 80,
+        height: 24,
+    };
+    // Match the former private unary deadline, not a sleep racing launch.
+    // The real bridge gate proves the request reached its exact launcher.
+    let channel = Endpoint::from_shared(harness.endpoint.clone())
+        .unwrap()
+        .timeout(Duration::from_secs(5))
+        .connect()
+        .await
+        .unwrap();
+    let mut deadline_client = DaemonServiceClient::new(channel);
+    let pending_request = request.clone();
+    let mut pending = tokio::spawn(async move {
+        deadline_client
+            .launch_session(authorized(pending_request))
+            .await
+    });
+    bounded(async {
+        tokio::select! {
+            ready = received => ready.unwrap(),
+            result = &mut pending => panic!("launch settled before its projection gate: {result:?}"),
+        }
+    }).await;
+    let sessions = harness
+        .client
+        .list_sessions(authorized(v1::ListSessionsRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .sessions;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].state,
+        v1::SessionLifecycleState::Starting as i32
+    );
+    let id = sessions[0].session_id.clone();
+    let pid: u32 = std::fs::read_to_string(harness.root.path().join("launcher.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(bounded(pending).await.unwrap().is_err());
+    bounded(async {
+        while Path::new(&format!("/proc/{pid}")).exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let settled = tokio::time::timeout(BOUND, async {
+        loop {
+            let record = harness
+                .client
+                .get_session(authorized(v1::GetSessionRequest {
+                    session_id: id.clone(),
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .session
+                .unwrap();
+            if record.state != v1::SessionLifecycleState::Starting as i32 {
+                break record;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled launch left a Starting record after its child was reaped");
+    assert_eq!(settled.state, v1::SessionLifecycleState::Failed as i32);
+    assert!(settled.started_at.is_none());
+    assert!(settled.finished_at.is_some());
+    assert!(settled.exit_code.is_none());
+    assert_eq!(settled.output_end_offset, 0);
+    release.send(()).unwrap();
+
+    // A later explicit Launch is distinct; opening the old projection gate
+    // must neither resurrect its session nor replay its command.
+    let fresh = bounded(harness.client.launch_session(authorized(request)))
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_ne!(fresh.session_id, id);
+    harness.exited(&fresh.session_id).await;
+    assert_probe(
+        &harness.output(&fresh.session_id, 0, pty).await,
+        SECOND,
+        pty,
+    );
+    assert!(harness.output(&id, 0, pty).await.is_empty());
+    let old = harness
+        .client
+        .get_session(authorized(v1::GetSessionRequest { session_id: id }))
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(old.state, v1::SessionLifecycleState::Failed as i32);
+    harness.stop_with_cancellations(1).await;
+}
+
+#[tokio::test]
+async fn cancelled_pty_launch_reaps_and_settles_without_a_late_launch() {
+    cancelled_launch_reaps_and_settles_without_a_late_launch(true).await;
+}
+
+#[tokio::test]
+async fn cancelled_pipe_launch_reaps_and_settles_without_a_late_launch() {
+    cancelled_launch_reaps_and_settles_without_a_late_launch(false).await;
+}
+
+async fn delayed_projection_fits_launch_budget(index: usize) {
+    let (requested, received) = oneshot::channel();
+    let (release, gate) = oneshot::channel();
+    let mut harness = Harness::start_with_gate(Some(ProjectionGate {
+        index,
+        requested,
+        release: gate,
+    }))
+    .await;
+    // Composed daemon proof of the Launch/Restart budget. The platform unit
+    // test binds its operation-specific policy to the original projection TTL;
+    // this real RPC/launcher/bridge path proves a projection beyond five
+    // seconds succeeds without changing its authorization expiry.
+    let channel = Endpoint::from_shared(harness.endpoint.clone())
+        .unwrap()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(40))
+        .connect()
+        .await
+        .unwrap();
+    harness.client = DaemonServiceClient::new(channel);
+    let delay = tokio::spawn(async move {
+        bounded(received).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        release.send(()).unwrap();
+    });
+    launch_and_restart_with_harness(harness, true).await;
+    delay.await.unwrap();
+}
+
+#[tokio::test]
+async fn daemon_shutdown_reaps_a_launch_with_its_real_projection_still_pending() {
+    let (requested, observed) = oneshot::channel();
+    let (_release, gate) = oneshot::channel();
+    let mut harness = Harness::start_with_gate(Some(ProjectionGate {
+        index: 0,
+        requested,
+        release: gate,
+    }))
+    .await;
+    let marker = harness.root.path().join("must-not-run-on-shutdown");
+    let request = v1::LaunchSessionRequest {
+        command: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!("printf late > {}", quote_shell(marker.to_str().unwrap())),
+        ],
+        ..Default::default()
+    };
+    let mut client = harness.client.clone();
+    let pending = tokio::spawn(async move { client.launch_session(authorized(request)).await });
+    bounded(observed).await.unwrap();
+    let pid: u32 = std::fs::read_to_string(harness.root.path().join("launcher.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(Path::new(&format!("/proc/{pid}")).exists());
+    // Keep the host connected and its exact response gated until after daemon
+    // termination. Closing the owned fixture pipe must cancel launch itself,
+    // not rely on a host disconnect or the thirty-second authorization expiry.
+    drop(harness.stdin.take());
+    let status = tokio::time::timeout(Duration::from_secs(15), harness.child.wait())
+        .await
+        .expect("shutdown settles without releasing projection")
+        .unwrap();
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(!marker.exists());
+    let result = bounded(pending).await.unwrap();
+    if let Ok(response) = result {
+        assert_eq!(
+            response.into_inner().session.unwrap().state,
+            v1::SessionLifecycleState::Failed as i32
+        );
+    }
+    // The external observer is intentionally still gated; it never provided
+    // projection success. Retire this fixture-owned task after product exit.
+    let projection = harness.projection.take().unwrap();
+    projection.abort();
+    let _ = projection.await;
+    let stdout = bounded(harness.stdout).await.unwrap();
+    let stderr = bounded(harness.stderr).await.unwrap();
+    assert!(
+        status.success(),
+        "daemon shutdown failed: {} {}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    assert!(!harness.root.path().join("provider.sock").exists());
+    assert_eq!(
+        std::fs::read_dir(harness.root.path().join("processes"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn projected_launch_allows_projection_beyond_connect_timeout() {
+    delayed_projection_fits_launch_budget(0).await;
+}
+
+#[tokio::test]
+async fn projected_restart_allows_projection_beyond_connect_timeout() {
+    delayed_projection_fits_launch_budget(1).await;
 }

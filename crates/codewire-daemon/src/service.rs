@@ -53,6 +53,10 @@ impl DaemonRuntimeState {
 }
 
 impl DaemonServiceImpl {
+    pub(crate) fn session_engine(&self) -> SessionEngine {
+        self.session_engine.clone()
+    }
+
     pub fn new(config: Config) -> Self {
         Self::with_runtime_state(config, DaemonRuntimeState::ready())
     }
