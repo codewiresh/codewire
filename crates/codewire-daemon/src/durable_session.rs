@@ -226,6 +226,29 @@ pub enum SessionError {
 }
 
 impl SessionEngine {
+    /// Test-only transcript preparation through the real append/compaction
+    /// path. Fixed capture-size frames separate Attach control assertions from
+    /// platform-dependent PTY read fragmentation and fsync throughput.
+    #[cfg(test)]
+    pub(crate) async fn append_test_output(
+        &self,
+        session_id: &str,
+        data: &[u8],
+    ) -> Result<(), SessionError> {
+        self.ensure_initialized().await?;
+        let handle = self.handle(session_id)?;
+        for frame in data.chunks(OUTPUT_BUFFER_SIZE) {
+            append_output(
+                &self.inner.root,
+                &handle,
+                v1::SessionOutputStream::Pty,
+                frame,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(config: &Config, credential_bridge: CredentialBridge) -> Self {
         Self {
             inner: Arc::new(SessionEngineInner {

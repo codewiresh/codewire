@@ -60,6 +60,8 @@ use crate::email_password::{
     VerificationPurpose, create_verification_in_transaction, send_verification_email,
 };
 
+mod session_inventory;
+
 /// Web session lifetime: 8 hours (`auth.SessionDuration`, 28800s).
 pub(crate) const SESSION_DURATION_SECS: i64 = 8 * 60 * 60;
 /// Account lockout window after 5 failed sign-ins: 15 minutes.
@@ -1521,6 +1523,7 @@ fn router_with_state(
         .route("/api/auth/sign-in", post(sign_in))
         .route("/api/auth/sign-out", post(sign_out))
         .route("/api/auth/get-session", get(get_session))
+        .merge(session_inventory::router())
         .with_state(state)
 }
 
