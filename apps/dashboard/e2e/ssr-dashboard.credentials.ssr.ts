@@ -213,6 +213,8 @@ test.describe("managed provider credential browser journey", () => {
       await expect(profileRow).toHaveCount(0);
       row = page.locator(".cw-credential-row", { hasText: name });
 
+      await expect(row).toContainText("Active");
+      await expect(row).toContainText("Generation 2");
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
       await row.getByText("Revoke", { exact: true }).click();
       await row.getByRole("button", { name: `Revoke ${name}`, exact: true }).click();
@@ -220,7 +222,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page.getByRole("status")).toHaveText("Credential revoked.");
       row = page.locator(".cw-credential-row", { hasText: name });
       await expect(row).toContainText("Revoked");
-      await expect(row).toContainText("Generation 2");
+      await expect(row).toContainText("Generation 3");
 
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
       await row.getByText("Delete", { exact: true }).click();
