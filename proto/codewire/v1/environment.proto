@@ -168,6 +168,10 @@ message CreateEnvironmentRequest {
   optional uint64 expected_profile_revision = 26;
   bool confirm_personal_credentials = 27;
   bool confirm_personal_secrets = 28;
+  // Explicitly create without HTTPS previews, including inherited preset or
+  // repository defaults. Requires project_spec.application_ports to be empty.
+  // False preserves existing default inheritance; this is not network isolation.
+  bool omit_application_previews = 29;
 }
 
 // Complete selection. Empty means no sources and no provider profile.

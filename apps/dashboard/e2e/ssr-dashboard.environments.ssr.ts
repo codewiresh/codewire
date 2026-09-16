@@ -175,8 +175,8 @@ async function openConfiguredImageForm(page: Page) {
   await page.getByLabel("TTL").fill("3600s");
   await page.locator('input[name="agent"][value="codex"]').check();
   await page.getByRole("button", { name: "Add", exact: true }).click();
-  await page.getByLabel("Container port").fill("3000");
-  await page.getByLabel("Port label").fill("web");
+  await page.getByLabel("Internal port", { exact: true }).fill("3000");
+  await page.getByLabel("Preview label", { exact: true }).fill("web");
 }
 
 test.describe.serial("server-rendered environments", () => {
@@ -322,13 +322,13 @@ test.describe.serial("server-rendered environments", () => {
 
     await page.locator('input[name="agent"][value="codex"]').check();
     await page.getByRole("button", { name: "Add", exact: true }).click();
-    await page.getByLabel("Container port").fill("3000");
-    await page.getByLabel("Port label").fill("web");
+    await page.getByLabel("Internal port", { exact: true }).fill("3000");
+    await page.getByLabel("Preview label", { exact: true }).fill("web");
     await page.getByLabel("Install Command").fill("bun install");
     await page.getByLabel("Startup Script").fill("bun run dev");
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
-    await expect(page.getByLabel("Container port")).toHaveValue("3000");
-    await expect(page.getByLabel("Port label")).toHaveValue("web");
+    await expect(page.getByLabel("Internal port", { exact: true })).toHaveValue("3000");
+    await expect(page.getByLabel("Preview label", { exact: true })).toHaveValue("web");
     await expect(page.getByRole("heading", { name: "Application secrets", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Provider credentials", exact: true })).toBeVisible();
     await expect(page.getByLabel("Personal secrets", { exact: false })).toBeEnabled();

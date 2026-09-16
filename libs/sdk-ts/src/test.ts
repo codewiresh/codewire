@@ -804,6 +804,20 @@ async function runTests() {
   assert(createEnvironment.projectSpec?.secrets?.user === 2, "create environment preserves the personal-secret platform origin");
   assert(createEnvironment.expectedProfileRevision === 9_007_199_254_741_009n, "create environment preserves profile revision losslessly");
   assert(createEnvironment.confirmPersonalCredentials && createEnvironment.confirmPersonalSecrets, "create environment preserves explicit personal-source confirmations");
+  assert(createEnvironment.omitApplicationPreviews === false, "create preview omission defaults false");
+  for (const omit of [true, false]) {
+    assert(toProtoCreateEnvironmentRequest("org_test", { project_spec: { schema_version: 1, working_directory: "/workspace" }, omit_application_previews: omit }).omitApplicationPreviews === omit,
+      "create preserves explicit preview omission");
+  }
+  for (const invalid of [1, "true", null]) {
+    let rejected = false;
+    try {
+      toProtoCreateEnvironmentRequest("org_test", { project_spec: { schema_version: 1, working_directory: "/workspace" }, omit_application_previews: invalid as never });
+    } catch (error) {
+      rejected = error instanceof Error && error.message.includes("explicit boolean");
+    }
+    assert(rejected, "create preview omission rejects nonbooleans");
+  }
   let rejectedMissingProjectSpec = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {} as never);
@@ -1504,7 +1518,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 162;
+  const expectedAssertions = 168;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

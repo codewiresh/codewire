@@ -17,7 +17,14 @@
 .cw-agent-pills input { position: absolute; opacity: 0; }
 .cw-agent-pills span { display: block; padding: .4rem .75rem; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); font-size: .8125rem; }
 .cw-agent-pills input:checked + span { border-color: var(--accent); background: var(--accent-muted); color: var(--fg-primary); }
-.cw-app-port-row { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) 9rem auto; align-items: center; gap: var(--space-2); }
+.cw-app-port-row { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) 9rem auto; align-items: start; gap: var(--space-2); }
+.cw-app-port-row .cw-field { min-width: 0; }
+.cw-app-port-row .cw-label { min-height: 2.5em; }
+.cw-app-port-row .cw-field-error { overflow-wrap: anywhere; }
+.cw-port-rows, .cw-port-actions { list-style: none; padding: 0; margin: 0; }
+.cw-port-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.cw-preview-pattern { overflow-wrap: anywhere; }
+[data-preview-copy-status]:empty { display: none; }
 .cw-environment-name, .cw-environment-preset { display: block; }
 .cw-environment-name { max-width: 18rem; overflow: hidden; font: 500 .8125rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .cw-environment-preset { margin-top: .2rem; color: var(--fg-tertiary); font-size: .6875rem; }
@@ -172,7 +179,7 @@
 .cw-source-fields:disabled .cw-source-choice { color: var(--fg-tertiary); }
 .cw-source-fields .cw-select { width: 100%; min-width: 0; }
 .cw-port-rows { display: grid; gap: 8px; }
-.cw-environment-create .cw-app-port-row { grid-template-columns: 82px minmax(0,1fr) 116px 18px; gap: 8px; }
+.cw-environment-create .cw-app-port-row { grid-template-columns: 82px minmax(0,1fr) minmax(9rem,1fr) 18px; gap: 8px; }
 .cw-environment-create .cw-app-port-row :is(.cw-input,.cw-select) { min-height: 32px; padding: 7px 9px; font-size: 12px; }
 .cw-panel-help { margin: -4px 0 0; color: #7a7a7a; font-size: 12px; line-height: 18px; }
 .cw-agent-pills { gap: 8px; }

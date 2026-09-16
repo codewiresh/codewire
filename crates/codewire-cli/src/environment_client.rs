@@ -981,6 +981,7 @@ fn proto_create_environment_request(
         expected_profile_revision: request.expected_profile_revision,
         confirm_personal_credentials: request.confirm_personal_credentials,
         confirm_personal_secrets: request.confirm_personal_secrets,
+        omit_application_previews: request.omit_application_previews,
         ..Default::default()
     }
 }
@@ -1057,6 +1058,7 @@ fn create_environment_request_from_proto(
         expected_profile_revision: value.expected_profile_revision,
         confirm_personal_credentials: value.confirm_personal_credentials,
         confirm_personal_secrets: value.confirm_personal_secrets,
+        omit_application_previews: value.omit_application_previews,
     })
 }
 
@@ -1485,6 +1487,24 @@ mod tests {
 
     const SOURCE_UPDATE_PATH: &str = "/codewire.v1.EnvironmentService/UpdateEnvironmentSources";
     const LIST_ENVIRONMENTS_PATH: &str = "/codewire.v1.EnvironmentService/ListEnvironments";
+
+    #[test]
+    fn prepared_create_round_trip_preserves_explicit_no_previews() {
+        for omit_application_previews in [false, true] {
+            let request = CreateEnvironmentRequest {
+                omit_application_previews,
+                ..Default::default()
+            };
+            let wire = proto_create_environment_request("org_test", &request);
+            assert_eq!(wire.omit_application_previews, omit_application_previews);
+            let restored = create_environment_request_from_proto(wire).unwrap();
+            assert_eq!(
+                restored.omit_application_previews,
+                omit_application_previews
+            );
+            assert!(restored.project_spec.application_ports.is_empty());
+        }
+    }
 
     fn test_client(server: &MockServer) -> EnvironmentClient {
         EnvironmentClient {

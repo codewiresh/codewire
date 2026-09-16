@@ -183,6 +183,8 @@ type CreateEnvironmentBody struct {
 	ExpectedProfileRevision    *uint64     `json:"expected_profile_revision,omitempty"`
 	ConfirmPersonalCredentials bool        `json:"confirm_personal_credentials,omitempty"`
 	ConfirmPersonalSecrets     bool        `json:"confirm_personal_secrets,omitempty"`
+	// OmitApplicationPreviews suppresses inherited creation defaults, not network access.
+	OmitApplicationPreviews bool `json:"omit_application_previews,omitempty"`
 }
 
 // UpdateEnvironmentSourcesRequest replaces only an environment's complete
