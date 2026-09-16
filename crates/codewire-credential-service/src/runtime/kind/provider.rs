@@ -471,7 +471,7 @@ fn github_bearer_authorization(headers: &HeaderMap) -> bool {
     [GITHUB_DEVICE_TOKEN, GITHUB_APP_USER_TOKEN]
         .iter()
         .any(|token| {
-            value == &HeaderValue::from_str(&format!("Bearer {token}")).expect("synthetic token")
+            value == HeaderValue::from_str(&format!("Bearer {token}")).expect("synthetic token")
         })
 }
 
