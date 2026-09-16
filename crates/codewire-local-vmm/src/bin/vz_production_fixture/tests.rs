@@ -744,6 +744,7 @@ fn running_record(output_end_offset: u64) -> v1::SessionRecord {
         started_at: Some(Default::default()),
         finished_at: None,
         exit_code: None,
+        output_start_offset: 0,
         output_end_offset,
         status_message: "session running".to_owned(),
     }
