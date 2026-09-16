@@ -715,8 +715,13 @@ test.describe.serial("server-rendered environments", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     expect((await terminalRoot.boundingBox())!.height).toBeGreaterThanOrEqual(180);
     expect((await page.locator(".cw-terminal-footer").boundingBox())!.height).toBeLessThan(100);
+    await expect(page.locator("[data-sandbox-lifetime] time")).toBeVisible();
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", await sourceDeletionDeadline());
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveText(/^\d{2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} UTC$/);
     await expect(page).toHaveScreenshot("terminal-full-mobile.png", {
-      mask: [page.locator(".xterm-rows")],
+      // The live deadline is asserted against the source above. Mask only its
+      // variable text in the golden; retain the label and metadata layout.
+      mask: [page.locator(".xterm-rows"), page.locator("[data-sandbox-lifetime] time")],
       maskColor: "#080808",
     });
     await page.setViewportSize({ width: 1440, height: 900 });
