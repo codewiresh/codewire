@@ -42,7 +42,7 @@ ENVIRONMENT_SESSION_OUTPUT_STREAM_STDERR: EnvironmentSessionOutputStream
 ENVIRONMENT_SESSION_OUTPUT_STREAM_PTY: EnvironmentSessionOutputStream
 
 class EnvironmentSession(_message.Message):
-    __slots__ = ("session_id", "state", "command", "working_dir", "pty", "created_at", "started_at", "finished_at", "exit_code", "output_end_offset", "status_message")
+    __slots__ = ("session_id", "state", "command", "working_dir", "pty", "created_at", "started_at", "finished_at", "exit_code", "output_end_offset", "status_message", "output_start_offset")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     COMMAND_FIELD_NUMBER: _ClassVar[int]
@@ -54,6 +54,7 @@ class EnvironmentSession(_message.Message):
     EXIT_CODE_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_END_OFFSET_FIELD_NUMBER: _ClassVar[int]
     STATUS_MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_START_OFFSET_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     state: EnvironmentSessionState
     command: _containers.RepeatedScalarFieldContainer[str]
@@ -65,7 +66,8 @@ class EnvironmentSession(_message.Message):
     exit_code: int
     output_end_offset: int
     status_message: str
-    def __init__(self, session_id: _Optional[str] = ..., state: _Optional[_Union[EnvironmentSessionState, str]] = ..., command: _Optional[_Iterable[str]] = ..., working_dir: _Optional[str] = ..., pty: _Optional[bool] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., exit_code: _Optional[int] = ..., output_end_offset: _Optional[int] = ..., status_message: _Optional[str] = ...) -> None: ...
+    output_start_offset: int
+    def __init__(self, session_id: _Optional[str] = ..., state: _Optional[_Union[EnvironmentSessionState, str]] = ..., command: _Optional[_Iterable[str]] = ..., working_dir: _Optional[str] = ..., pty: _Optional[bool] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., exit_code: _Optional[int] = ..., output_end_offset: _Optional[int] = ..., status_message: _Optional[str] = ..., output_start_offset: _Optional[int] = ...) -> None: ...
 
 class EnvironmentSessionOutputChunk(_message.Message):
     __slots__ = ("offset", "next_offset", "stream", "data")
@@ -177,28 +179,34 @@ class RestartSessionResponse(_message.Message):
     def __init__(self, session: _Optional[_Union[EnvironmentSession, _Mapping]] = ...) -> None: ...
 
 class ReadSessionOutputRequest(_message.Message):
-    __slots__ = ("org_id", "environment_id", "session_id", "offset", "limit")
+    __slots__ = ("org_id", "environment_id", "session_id", "offset", "limit", "allow_history_gap")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     OFFSET_FIELD_NUMBER: _ClassVar[int]
     LIMIT_FIELD_NUMBER: _ClassVar[int]
+    ALLOW_HISTORY_GAP_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     environment_id: str
     session_id: str
     offset: int
     limit: int
-    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., session_id: _Optional[str] = ..., offset: _Optional[int] = ..., limit: _Optional[int] = ...) -> None: ...
+    allow_history_gap: bool
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., session_id: _Optional[str] = ..., offset: _Optional[int] = ..., limit: _Optional[int] = ..., allow_history_gap: _Optional[bool] = ...) -> None: ...
 
 class ReadSessionOutputResponse(_message.Message):
-    __slots__ = ("chunks", "next_offset", "eof")
+    __slots__ = ("chunks", "next_offset", "eof", "retained_start_offset", "history_gap")
     CHUNKS_FIELD_NUMBER: _ClassVar[int]
     NEXT_OFFSET_FIELD_NUMBER: _ClassVar[int]
     EOF_FIELD_NUMBER: _ClassVar[int]
+    RETAINED_START_OFFSET_FIELD_NUMBER: _ClassVar[int]
+    HISTORY_GAP_FIELD_NUMBER: _ClassVar[int]
     chunks: _containers.RepeatedCompositeFieldContainer[EnvironmentSessionOutputChunk]
     next_offset: int
     eof: bool
-    def __init__(self, chunks: _Optional[_Iterable[_Union[EnvironmentSessionOutputChunk, _Mapping]]] = ..., next_offset: _Optional[int] = ..., eof: _Optional[bool] = ...) -> None: ...
+    retained_start_offset: int
+    history_gap: bool
+    def __init__(self, chunks: _Optional[_Iterable[_Union[EnvironmentSessionOutputChunk, _Mapping]]] = ..., next_offset: _Optional[int] = ..., eof: _Optional[bool] = ..., retained_start_offset: _Optional[int] = ..., history_gap: _Optional[bool] = ...) -> None: ...
 
 class AttachSessionOpen(_message.Message):
     __slots__ = ("org_id", "environment_id", "session_id", "output_offset")
@@ -238,10 +246,20 @@ class AttachSessionStatus(_message.Message):
     session: EnvironmentSession
     def __init__(self, session: _Optional[_Union[EnvironmentSession, _Mapping]] = ...) -> None: ...
 
+class EnvironmentSessionOutputGap(_message.Message):
+    __slots__ = ("requested_offset", "retained_start_offset")
+    REQUESTED_OFFSET_FIELD_NUMBER: _ClassVar[int]
+    RETAINED_START_OFFSET_FIELD_NUMBER: _ClassVar[int]
+    requested_offset: int
+    retained_start_offset: int
+    def __init__(self, requested_offset: _Optional[int] = ..., retained_start_offset: _Optional[int] = ...) -> None: ...
+
 class AttachSessionResponse(_message.Message):
-    __slots__ = ("output", "status")
+    __slots__ = ("output", "status", "history_gap")
     OUTPUT_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
+    HISTORY_GAP_FIELD_NUMBER: _ClassVar[int]
     output: EnvironmentSessionOutputChunk
     status: AttachSessionStatus
-    def __init__(self, output: _Optional[_Union[EnvironmentSessionOutputChunk, _Mapping]] = ..., status: _Optional[_Union[AttachSessionStatus, _Mapping]] = ...) -> None: ...
+    history_gap: EnvironmentSessionOutputGap
+    def __init__(self, output: _Optional[_Union[EnvironmentSessionOutputChunk, _Mapping]] = ..., status: _Optional[_Union[AttachSessionStatus, _Mapping]] = ..., history_gap: _Optional[_Union[EnvironmentSessionOutputGap, _Mapping]] = ...) -> None: ...

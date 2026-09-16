@@ -11,6 +11,7 @@ pub(crate) struct EnvironmentSessionView {
     pub(crate) pty: bool,
     pub(crate) exit_code: Option<i32>,
     pub(crate) output_end_offset: u64,
+    pub(crate) output_start_offset: u64,
     pub(crate) status_message: String,
 }
 
@@ -18,6 +19,7 @@ pub(crate) struct EnvironmentSessionView {
 struct EnvironmentSessionOutput {
     chunks: Vec<Vec<u8>>,
     next_offset: u64,
+    history_gap: bool,
 }
 
 #[derive(Clone)]
@@ -95,6 +97,7 @@ impl EnvironmentSessionTarget {
                         .map(|chunk| chunk.data)
                         .collect(),
                     next_offset: response.next_offset,
+                    history_gap: response.history_gap,
                 })
             }
             Self::Platform {
@@ -110,6 +113,7 @@ impl EnvironmentSessionTarget {
                         session_id: session_id.to_string(),
                         offset,
                         limit: 0,
+                        allow_history_gap: true,
                         ..Default::default()
                     })
                     .await
@@ -121,6 +125,7 @@ impl EnvironmentSessionTarget {
                         .map(|chunk| chunk.data)
                         .collect(),
                     next_offset: response.next_offset,
+                    history_gap: response.history_gap,
                 })
             }
         }
@@ -391,6 +396,7 @@ fn platform_environment_session_view(
         pty: session.pty,
         exit_code: session.exit_code,
         output_end_offset: session.output_end_offset,
+        output_start_offset: session.output_start_offset,
         status_message: session.status_message,
     }
 }
@@ -812,6 +818,10 @@ async fn attach_platform_environment_session(
                     Err(error) => return Err(display_client_error(error)),
                 };
                 match event.event {
+                    Some(codewire_client::attach_session_response::Event::HistoryGap(gap)) => {
+                        eprintln!("\r\n[cw] older output unavailable; replaying recent history");
+                        output_offset = gap.retained_start_offset;
+                    }
                     Some(codewire_client::attach_session_response::Event::Output(output)) => {
                         write_session_output(&mut stdout, &output.data, raw_output)?;
                         output_offset = output.next_offset;
@@ -1091,6 +1101,9 @@ pub(crate) async fn handle_logs_command(globals: &Globals, args: LogsArgs) -> an
         SessionSelection::Create => anyhow::bail!("no sessions in the selected environment"),
     };
     let output = target.read_output(&session.session_id, 0).await?;
+    if output.history_gap {
+        eprintln!("[cw] older output unavailable; showing recent history");
+    }
     let data = output.chunks.concat();
     let data = tail_session_output(&data, args.tail);
     let mut stdout = std::io::stdout();

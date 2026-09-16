@@ -59,9 +59,12 @@ message EnvironmentSession {
   optional int32 exit_code = 9;
   uint64 output_end_offset = 10;
   string status_message = 11;
+  // Absolute byte cursor of the oldest retained output. Earlier output is unavailable.
+  uint64 output_start_offset = 12;
 }
 
-// Output offsets are byte positions over the ordered retained output sequence.
+// Output offsets are absolute byte positions over the ordered output sequence.
+// Retention never renumbers cursors.
 message EnvironmentSessionOutputChunk {
   uint64 offset = 1;
   uint64 next_offset = 2;
@@ -130,12 +133,17 @@ message ReadSessionOutputRequest {
   string session_id = 3;
   uint64 offset = 4;
   uint64 limit = 5;
+  // Opt in to partial replay after retention. Older clients fail visibly.
+  bool allow_history_gap = 6;
 }
 
 message ReadSessionOutputResponse {
   repeated EnvironmentSessionOutputChunk chunks = 1;
   uint64 next_offset = 2;
   bool eof = 3;
+  uint64 retained_start_offset = 4;
+  // True when the requested cursor precedes retained_start_offset.
+  bool history_gap = 5;
 }
 
 // AttachSessionOpen must be the first frame in an attach stream.
@@ -165,9 +173,16 @@ message AttachSessionStatus {
   EnvironmentSession session = 1;
 }
 
+// Sent before replay when a requested cursor is older than retained history.
+message EnvironmentSessionOutputGap {
+  uint64 requested_offset = 1;
+  uint64 retained_start_offset = 2;
+}
+
 message AttachSessionResponse {
   oneof event {
     EnvironmentSessionOutputChunk output = 1;
     AttachSessionStatus status = 2;
+    EnvironmentSessionOutputGap history_gap = 3;
   }
 }

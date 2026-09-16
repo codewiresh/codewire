@@ -374,6 +374,7 @@ impl Harness {
                 session_id: id.into(),
                 offset,
                 limit: 64 * 1024,
+                allow_history_gap: false,
             },
         )))
         .await

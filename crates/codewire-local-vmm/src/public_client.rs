@@ -223,6 +223,7 @@ impl NativePublicSessionClient {
                 session_id: session_id.to_owned(),
                 offset,
                 limit,
+                allow_history_gap: true,
                 ..Default::default()
             })
             .await

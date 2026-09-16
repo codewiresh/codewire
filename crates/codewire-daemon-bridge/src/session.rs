@@ -313,6 +313,7 @@ where
                     session_id: request.session_id.to_owned(),
                     offset: request.offset,
                     limit: request.limit,
+                    allow_history_gap: request.allow_history_gap,
                 },
             )
             .await?;
@@ -320,6 +321,8 @@ where
             chunks: output.chunks.into_iter().map(public_output_chunk).collect(),
             next_offset: output.next_offset,
             eof: output.eof,
+            retained_start_offset: output.retained_start_offset,
+            history_gap: output.history_gap,
             ..Default::default()
         })
     }
@@ -487,6 +490,18 @@ where
     A: EnvironmentSessionAttachment,
 {
     let event = match output.payload {
+        Some(v1::session_attach_message::Payload::HistoryGap(gap)) => {
+            if gap.requested_offset >= gap.retained_start_offset {
+                return Err(AttachOutputError::InvalidFrame);
+            }
+            proto::attach_session_response::Event::HistoryGap(Box::new(
+                proto::EnvironmentSessionOutputGap {
+                    requested_offset: gap.requested_offset,
+                    retained_start_offset: gap.retained_start_offset,
+                    ..Default::default()
+                },
+            ))
+        }
         Some(v1::session_attach_message::Payload::Output(chunk)) => {
             proto::attach_session_response::Event::Output(Box::new(public_output_chunk(chunk)))
         }
@@ -515,6 +530,7 @@ where
             record.state = status.state;
             record.exit_code = status.exit_code;
             record.output_end_offset = status.output_end_offset;
+            record.output_start_offset = status.output_start_offset;
             record.status_message = status.message;
             if state == v1::SessionLifecycleState::Starting {
                 record.started_at = None;
@@ -611,6 +627,7 @@ pub fn public_session(record: v1::SessionRecord) -> proto::EnvironmentSession {
             .into(),
         exit_code: record.exit_code,
         output_end_offset: record.output_end_offset,
+        output_start_offset: record.output_start_offset,
         status_message: record.status_message,
         ..Default::default()
     }
@@ -676,6 +693,7 @@ mod tests {
                 (9, "exit_code"),
                 (10, "output_end_offset"),
                 (11, "status_message"),
+                (12, "output_start_offset"),
             ],
         ),
         (
@@ -730,11 +748,18 @@ mod tests {
                 (3, "session_id"),
                 (4, "offset"),
                 (5, "limit"),
+                (6, "allow_history_gap"),
             ],
         ),
         (
             "codewire.v1.ReadSessionOutputResponse",
-            &[(1, "chunks"), (2, "next_offset"), (3, "eof")],
+            &[
+                (1, "chunks"),
+                (2, "next_offset"),
+                (3, "eof"),
+                (4, "retained_start_offset"),
+                (5, "history_gap"),
+            ],
         ),
         (
             "codewire.v1.AttachSessionOpen",
@@ -755,8 +780,12 @@ mod tests {
         ),
         ("codewire.v1.AttachSessionStatus", &[(1, "session")]),
         (
+            "codewire.v1.EnvironmentSessionOutputGap",
+            &[(1, "requested_offset"), (2, "retained_start_offset")],
+        ),
+        (
             "codewire.v1.AttachSessionResponse",
-            &[(1, "output"), (2, "status")],
+            &[(1, "output"), (2, "status"), (3, "history_gap")],
         ),
     ];
 
@@ -771,6 +800,7 @@ mod tests {
     struct TestBackend {
         authorization_error: Option<connectrpc::ConnectError>,
         validation_calls: Arc<AtomicUsize>,
+        output_reads: Arc<Mutex<Vec<v1::ReadSessionOutputRequest>>>,
     }
 
     impl TestBackend {
@@ -778,6 +808,7 @@ mod tests {
             Self {
                 authorization_error: None,
                 validation_calls: Arc::new(AtomicUsize::new(0)),
+                output_reads: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -788,6 +819,7 @@ mod tests {
                     "authentication required",
                 )),
                 validation_calls: Arc::new(AtomicUsize::new(0)),
+                output_reads: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -906,9 +938,10 @@ mod tests {
             _ctx: &RequestContext,
             _org_id: &str,
             _environment_id: &str,
-            _request: v1::ReadSessionOutputRequest,
+            request: v1::ReadSessionOutputRequest,
         ) -> Result<v1::ReadSessionOutputResponse, connectrpc::ConnectError> {
-            unreachable!("not used by bridge unit tests")
+            self.output_reads.lock().await.push(request);
+            Ok(v1::ReadSessionOutputResponse::default())
         }
 
         async fn attach(
@@ -972,6 +1005,7 @@ mod tests {
                             state: v1::SessionLifecycleState::Exited as i32,
                             exit_code: Some(0),
                             output_end_offset: 12,
+                            output_start_offset: 0,
                             message: "session exited with status 0".into(),
                         },
                     )),
@@ -1073,6 +1107,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unary_bridge_preserves_explicit_history_gap_opt_in() {
+        let backend = TestBackend::allowed();
+        let reads = backend.output_reads.clone();
+        let bridge = EnvironmentSessionBridge::new(backend);
+        for allow_history_gap in [false, true] {
+            let message = proto::ReadSessionOutputRequest {
+                org_id: "org-1".into(),
+                environment_id: "environment-1".into(),
+                session_id: "session-1".into(),
+                offset: 19,
+                limit: 23,
+                allow_history_gap,
+                ..Default::default()
+            };
+            let body = bytes::Bytes::from(message.encode_to_vec());
+            let view = proto::ReadSessionOutputRequest::decode_view(&body).unwrap();
+            let request = ServiceRequest::from_parts(&view, &body);
+            proto::EnvironmentSessionService::read_session_output(
+                &bridge,
+                RequestContext::default(),
+                request,
+            )
+            .await
+            .unwrap();
+        }
+        let reads = reads.lock().await;
+        assert_eq!(reads.len(), 2);
+        assert!(!reads[0].allow_history_gap);
+        assert!(reads[1].allow_history_gap);
+        assert!(
+            reads
+                .iter()
+                .all(|request| request.offset == 19 && request.limit == 23)
+        );
+    }
+
+    #[tokio::test]
     async fn queued_nonterminal_status_is_not_promoted_ahead_of_output() {
         let mut attachment = RecordingAttachment {
             inputs: Arc::new(Mutex::new(Vec::new())),
@@ -1096,6 +1167,7 @@ mod tests {
                     state: v1::SessionLifecycleState::Running as i32,
                     exit_code: None,
                     output_end_offset: 0,
+                    output_start_offset: 0,
                     message: "session running".into(),
                 },
             )),
@@ -1116,6 +1188,48 @@ mod tests {
         assert_eq!(session.output_end_offset, 0);
         assert_eq!(session.status_message, "session running");
         assert!(session.finished_at.as_option().is_none());
+    }
+
+    #[tokio::test]
+    async fn retention_gap_is_forwarded_without_a_session_lookup_and_invalid_gaps_fail() {
+        let mut attachment = RecordingAttachment {
+            inputs: Arc::new(Mutex::new(Vec::new())),
+            half_closed: Arc::new(AtomicBool::new(true)),
+            half_close_notify: Arc::new(Notify::new()),
+            outputs: VecDeque::new(),
+            session_result: Err(connectrpc::ConnectError::new(
+                ErrorCode::Unavailable,
+                "unused lookup",
+            )),
+        };
+        for (requested_offset, retained_start_offset, valid) in
+            [(0, 4096, true), (4096, 4096, false), (4097, 4096, false)]
+        {
+            let result = public_attach_output(
+                v1::SessionAttachMessage {
+                    payload: Some(v1::session_attach_message::Payload::HistoryGap(
+                        v1::SessionOutputGap {
+                            requested_offset,
+                            retained_start_offset,
+                        },
+                    )),
+                },
+                &mut attachment,
+                "session-1",
+            )
+            .await;
+            if valid {
+                let Some(proto::attach_session_response::Event::HistoryGap(gap)) =
+                    result.expect("valid gap").event
+                else {
+                    panic!("expected gap");
+                };
+                assert_eq!(gap.requested_offset, requested_offset);
+                assert_eq!(gap.retained_start_offset, retained_start_offset);
+            } else {
+                assert!(matches!(result, Err(AttachOutputError::InvalidFrame)));
+            }
+        }
     }
 
     #[tokio::test]
@@ -1232,6 +1346,7 @@ mod tests {
             working_dir: "/workspace".into(),
             pty: true,
             output_end_offset: 41,
+            output_start_offset: 19,
             ..Default::default()
         };
         let public = public_session(record);
@@ -1241,5 +1356,6 @@ mod tests {
             Some(proto::EnvironmentSessionState::Running)
         );
         assert_eq!(public.output_end_offset, 41);
+        assert_eq!(public.output_start_offset, 19);
     }
 }
