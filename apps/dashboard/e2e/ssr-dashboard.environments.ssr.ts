@@ -192,6 +192,18 @@ test.describe.serial("server-rendered environments", () => {
   });
 
   test.afterAll(async () => {
+    if (process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_PROFILE === "prepared-kind-terminal") {
+      // The isolated renderer has no Kubernetes authority. Only remove SQL
+      // fixture data once product Destroy has proved external resource absence.
+      // A failed live fixture remains intact for the owning host to diagnose.
+      const unsafe = await sql`
+        SELECT id FROM environments WHERE org_id = ${orgId}
+          AND (state IS DISTINCT FROM 'destroyed' OR external_cleanup_completed_at IS NULL)
+      `;
+      if (unsafe.length !== 0) throw new Error("Terminal renderer retained an environment without external cleanup proof; host cleanup is required");
+      await cleanupTestOrg(slug);
+      return;
+    }
     await cleanupEnvironments(slug);
     await cleanupTestOrg(slug);
   });
@@ -812,6 +824,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(deleteDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await deleteDialog.getByRole("button", { name: "Delete Sandbox", exact: true }).click();
     await waitForEnvironmentState(environmentId, ["destroyed"], 120_000);
+    const [destroyed] = await sql`SELECT external_cleanup_completed_at FROM environments WHERE id = ${environmentId}`;
+    expect(destroyed.external_cleanup_completed_at).not.toBeNull();
     await page.goto(`/${slug}/?state=destroyed`);
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("destroyed");

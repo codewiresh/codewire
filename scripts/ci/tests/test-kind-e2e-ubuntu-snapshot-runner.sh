@@ -86,6 +86,16 @@ fi
 if grep -Eq -- '--project=dashboard-ssr-mobile|--grep-invert|--no-deps' <<<"$terminal_renderer"; then
   die 'terminal profile changed the existing lifecycle project or skipped dependencies'
 fi
+grep -Fq 'selects a platform secret project and preserves it after a form error' <<<"$terminal_renderer" ||
+  die 'terminal profile skipped its native secret-project creation prerequisite'
+for cleanup_contract in \
+    'process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_PROFILE === "prepared-kind-terminal"' \
+    "state IS DISTINCT FROM 'destroyed' OR external_cleanup_completed_at IS NULL" \
+    'Terminal renderer retained an environment without external cleanup proof; host cleanup is required' \
+    'expect(destroyed.external_cleanup_completed_at).not.toBeNull()'; do
+  grep -Fq "$cleanup_contract" "$ENVIRONMENT_SPEC" ||
+    die "terminal renderer cleanup lost required absence proof: $cleanup_contract"
+done
 [ "$(retired_snapshots)" = "$(cat <<'EOF'
 ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png
 ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
