@@ -18,66 +18,54 @@ async function openGithubConnection(page: Page) {
 
 async function completeGithubAppConnection(page: Page, code: string) {
   const form = page.getByRole("form", { name: "GitHub App", exact: true });
-  const installation = /^https:\/\/github\.com\/apps\/codewire-synthetic\/installations\/new\?/;
-  // The production handoff navigates to GitHub. The Kind journey preserves
-  // that redirect and state boundary, then uses its checked-in synthetic
-  // provider callback without granting the browser external network access.
-  let resolveGithubLanding: (() => void) | undefined;
-  const githubLanding = new Promise<void>((resolve) => { resolveGithubLanding = resolve; });
-  await page.route(installation, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "text/html",
-      body: "<!doctype html><title>Kind GitHub App fixture</title>",
-    });
-    resolveGithubLanding?.();
-  });
+  const githubAuthorizePath = "/settings/credentials/_actions/github/authorize";
+  const githubInstallationPath = "/apps/codewire-synthetic/installations/new";
+  // The native form hands the browser to GitHub after this 303. The Kind
+  // fixture must not load a provider-controlled page, so submit the exact
+  // form action through this browser context's request client instead. It
+  // shares the session and callback-state cookie jar with the page, letting
+  // the test exercise the real authorization and callback routes without an
+  // external-network navigation race.
+  const action = await form.getAttribute("action");
+  const csrf = await form.locator('[name="_csrf"]').inputValue();
+  if (!action) throw new Error("GitHub App authorization form omitted its action");
+  expect(new URL(action, ssrUrl).pathname).toBe(githubAuthorizePath);
   let state = "";
-  try {
-    // Keep the checked-in route in place until the browser has actually
-    // followed the authorization redirect. Waiting only for the 303 response
-    // races its Location navigation and can send the test browser to GitHub.
-    // Do not wait for the synthetic page to finish loading: the next step
-    // deliberately replaces it with GitHub's registered callback, which is a
-    // valid aborted provider-page navigation in Chromium.
-    const authorization = page.waitForResponse((response) => (
-      response.url().includes("/settings/credentials/_actions/github/authorize")
-      && response.request().method() === "POST"
-    ));
-    await form.getByRole("button", { name: "Continue to GitHub", exact: true }).click();
-    const response = await authorization;
-    expect(response.status()).toBe(303);
-    expect(response.headers()["cache-control"]).toBe("no-store");
-    const location = response.headers().location;
-    if (!location) throw new Error("GitHub App authorization omitted its installation redirect");
-    const target = new URL(location);
-    expect(target.origin).toBe("https://github.com");
-    expect(target.pathname).toBe("/apps/codewire-synthetic/installations/new");
-    state = target.searchParams.get("state") || "";
-    if (!state) throw new Error("GitHub App authorization omitted its state fence");
-    const cookie = response.headers()["set-cookie"] || "";
-    expect(cookie).toContain("codewire_github_app_authorization=");
-    expect(cookie).toContain("HttpOnly");
-    expect(cookie).toContain("SameSite=Lax");
-    expect(cookie).toContain("Path=/settings/credentials/github/");
-    await githubLanding;
-  } finally {
-    await page.unroute(installation);
-  }
+  const authorization = await page.context().request.post(new URL(action, ssrUrl).toString(), {
+    form: { _csrf: csrf },
+    headers: {
+      Origin: ssrUrl,
+      Referer: `${ssrUrl}/settings/credentials/`,
+    },
+    maxRedirects: 0,
+  });
+  expect(authorization.status()).toBe(303);
+  expect(authorization.headers()["cache-control"]).toBe("no-store");
+  const location = authorization.headers().location;
+  if (!location) throw new Error("GitHub App authorization omitted its installation redirect");
+  const target = new URL(location);
+  expect(target.origin).toBe("https://github.com");
+  expect(target.pathname).toBe(githubInstallationPath);
+  state = target.searchParams.get("state") || "";
+  if (!state) throw new Error("GitHub App authorization omitted its state fence");
+  const cookie = authorization.headers()["set-cookie"] || "";
+  expect(cookie).toContain("codewire_github_app_authorization=");
+  expect(cookie).toContain("HttpOnly");
+  expect(cookie).toContain("SameSite=Lax");
+  expect(cookie).toContain("Path=/settings/credentials/github/");
 
-  const callback = page.waitForResponse((response) => (
-    response.url().includes("/settings/credentials/github/callback?")
-    && response.request().method() === "GET"
-  ));
-  await page.goto(new URL(
+  const callbackUrl = new URL(
     `/settings/credentials/github/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
     ssrUrl,
-  ).toString());
-  const response = await callback;
+  ).toString();
+  const response = await page.context().request.get(callbackUrl, { maxRedirects: 0 });
   expect(response.status()).toBe(303);
   expect(response.headers()["cache-control"]).toBe("no-store, max-age=0");
   expect(response.headers()["referrer-policy"]).toBe("no-referrer");
   expect(response.headers()["set-cookie"] || "").toContain("Max-Age=0");
+  const completion = response.headers().location;
+  if (!completion) throw new Error("GitHub App callback omitted its completion redirect");
+  await page.goto(new URL(completion, ssrUrl).toString());
 }
 
 test.describe("managed provider credential browser journey", () => {
