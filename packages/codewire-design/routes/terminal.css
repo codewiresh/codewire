@@ -87,6 +87,9 @@ dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
   .cw-terminal-heading .cw-status { display: none; }
   .cw-terminal-footer { gap: var(--space-3); }
   .cw-terminal-session-tools select { width: 100%; max-width: 100%; }
-  .cw-terminal-session-tools form { width: 100%; }
+  .cw-terminal-session-tools form { display: grid; grid-template-columns: minmax(0, 1fr) auto; width: 100%; }
+  .cw-terminal-session-tools form > label { grid-column: 1 / -1; }
+  .cw-terminal-session-tools select { min-width: 0; }
   .cw-terminal-tab-panel .cw-terminal-copy-status { flex-basis: 100%; }
+  .cw-terminal-copy-status:empty { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }

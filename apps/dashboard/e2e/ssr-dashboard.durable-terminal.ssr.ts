@@ -98,12 +98,14 @@ test("detail layout keeps usable output and compact footer with alerts and short
         const output = main.querySelector("[data-terminal-root]")!.getBoundingClientRect();
         const footer = main.querySelector(".cw-terminal-footer")!.getBoundingClientRect();
         return { overlap: output.bottom > footer.top, horizontalOverflow: main.scrollWidth > main.clientWidth,
-          verticalOverflow: main.scrollHeight - main.clientHeight };
+          verticalOverflow: main.scrollHeight - main.clientHeight,
+          sections: [...main.children].map((node) => ({ name: node.tagName, class: node.className,
+            height: Math.round(node.getBoundingClientRect().height) })) };
       });
       expect(bounds.overlap).toBe(false);
       expect(bounds.horizontalOverflow).toBe(false);
       if (viewport.height >= 844) expect(bounds.verticalOverflow,
-        `${viewport.width}×${viewport.height}, lifecycle alert ${showAlert ? "visible" : "hidden"}`).toBeLessThanOrEqual(1);
+        `${viewport.width}×${viewport.height}, lifecycle alert ${showAlert ? "visible" : "hidden"}: ${JSON.stringify(bounds.sections)}`).toBeLessThanOrEqual(1);
       // A short screen retains output instead of hiding it to avoid scrolling.
       await page.locator(".cw-terminal-footer").scrollIntoViewIfNeeded();
       await expect(page.locator(".cw-terminal-footer")).toBeInViewport();
@@ -651,6 +653,9 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
     const panel = page.getByRole("tabpanel");
     const copy = panel.getByRole("button", { name: "Copy selection", exact: true });
     await expect(copy).toBeDisabled();
+    // Keep the empty live region in the accessibility tree, without reserving
+    // a blank mobile toolbar row before its first clipboard announcement.
+    await expect(panel.locator("[data-terminal-copy-status]")).not.toHaveCSS("display", "none");
     const renderedOutput = panel.locator(".xterm-rows").getByText(text, { exact: true });
     // Switching tabs can schedule a fit/repaint. Copy the visible rendered
     // output, not stale row text while that presentation is still hidden.

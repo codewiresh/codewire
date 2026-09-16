@@ -23,8 +23,11 @@ const csrf = randomBytes(32).toString("base64url");
 test.use({ storageState: { cookies: [], origins: [] }, trace: "off", screenshot: "off" });
 
 async function closed(response: APIResponse, status: number, error: string) {
-  expect(response.status()).toBe(status);
-  expect(await response.json()).toEqual({ error });
+  const body = await response.json();
+  const code = typeof body.error === "string" && /^[a-z-]{1,48}$/.test(body.error)
+    ? body.error : "unrecognized-resize-response";
+  expect(response.status(), code).toBe(status);
+  expect(body).toEqual({ error });
   expect(response.headers()["cache-control"]).toBe("no-store");
   expect(response.headers().vary).toBe("Cookie");
   expect(response.headers().location).toBeUndefined();
@@ -37,10 +40,12 @@ function headers(cookie = `codewire.session_token=${token}`) {
 
 async function action(request: APIRequestContext, name: "plan" | "apply", options: {
   cookie?: string; origin?: string; account?: string; csrf?: string; extra?: Record<string, string>;
+  authorization?: string;
 } = {}) {
   return request.post(`${base}/_actions/resize/${name}`, {
     maxRedirects: 0,
-    headers: { ...headers(options.cookie), Origin: options.origin ?? origin },
+    headers: { ...headers(options.cookie), Origin: options.origin ?? origin,
+      ...(options.authorization ? { Authorization: options.authorization } : {}) },
     form: { _csrf: options.csrf ?? csrf, account_id: options.account ?? account,
       cpu_millicores: "1000", memory_mb: "2048", disk_gb: "10",
       ...(name === "apply" ? { request_id: requestId, allow_restart: "false", force: "false" } : {}),
@@ -88,11 +93,16 @@ test.describe.serial("private Resize browser admission", () => {
       await closed(await action(request, name, {
         cookie: `codewire.session_token=${token}; codewire.session_token=${token}`,
       }), 401, "sign-in-required");
+      await closed(await action(request, name, { authorization: "Bearer synthetic-rejected-token" }), 401, "sign-in-required");
       await closed(await action(request, name, { extra: { command: "must-not-execute" } }), 400, "invalid-request");
     }
     await closed(await request.get(`${base}/_fragments/resize-operation`, {
       headers: headers(), params: { account_id: "stale-account", operation_id: operationId }, maxRedirects: 0,
     }), 409, "account-changed");
+    await closed(await request.get(`${base}/_fragments/resize-operation`, {
+      headers: headers(`codewire.session_token=${token}; codewire.session_token=${token}`),
+      params: { account_id: account, operation_id: operationId }, maxRedirects: 0,
+    }), 401, "sign-in-required");
     await closed(await request.get(`${base}/_fragments/resize-operation`, {
       headers: headers(), params: { account_id: account, operation_id: "noncanonical" }, maxRedirects: 0,
     }), 400, "invalid-request");

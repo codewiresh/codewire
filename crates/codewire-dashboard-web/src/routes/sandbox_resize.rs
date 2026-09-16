@@ -228,6 +228,32 @@ struct Context {
     cookie: HeaderValue,
 }
 
+fn unique_browser_session_authority(headers: &HeaderMap) -> bool {
+    if headers.contains_key(header::AUTHORIZATION) {
+        return false;
+    }
+    let mut fields = headers.get_all(header::COOKIE).iter();
+    let Some(raw) = fields.next().and_then(|field| field.to_str().ok()) else {
+        return false;
+    };
+    if fields.next().is_some() {
+        return false;
+    }
+    let mut session = None;
+    for pair in raw.split(';') {
+        let Some((name, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
+        if name.trim() != codewire_server_core::auth::SESSION_COOKIE_NAME {
+            continue;
+        }
+        if value.trim().is_empty() || session.replace(value).is_some() {
+            return false;
+        }
+    }
+    session.is_some()
+}
+
 async fn context(
     state: &AppState,
     headers: &HeaderMap,
@@ -240,6 +266,12 @@ async fn context(
         || !valid_account_id(account_id)
     {
         return Err(failure(StatusCode::BAD_REQUEST, "invalid-request"));
+    }
+    // General page authentication retains its established cookie precedence.
+    // This private actor-bound operation must never choose among duplicate
+    // session cookies or silently discard a concurrent bearer authority.
+    if !unique_browser_session_authority(headers) {
+        return Err(failure(StatusCode::UNAUTHORIZED, "sign-in-required"));
     }
     let identity = authenticated_identity(state, headers)
         .await
@@ -267,8 +299,10 @@ async fn context(
     })
 }
 
-fn valid_action(state: &AppState, headers: &HeaderMap, csrf: &str) -> bool {
-    request_has_same_origin(headers, &state.public_origin) && valid_csrf_token(headers, csrf)
+fn valid_action(public_origin: &str, headers: &HeaderMap, csrf: &str) -> bool {
+    headers.get_all(header::ORIGIN).iter().count() == 1
+        && request_has_same_origin(headers, public_origin)
+        && valid_csrf_token(headers, csrf)
 }
 
 pub(super) async fn plan(
@@ -283,7 +317,7 @@ pub(super) async fn plan(
     let Ok(Form(form)) = form else {
         return failure(StatusCode::BAD_REQUEST, "invalid-request");
     };
-    if !valid_action(&state, &headers, &form.csrf) {
+    if !valid_action(&state.public_origin, &headers, &form.csrf) {
         return failure(StatusCode::FORBIDDEN, "request-rejected");
     }
     if Resources::new(form.cpu_millicores, form.memory_mb, form.disk_gb).is_none() {
@@ -333,7 +367,7 @@ pub(super) async fn apply(
     let Ok(Form(form)) = form else {
         return failure(StatusCode::BAD_REQUEST, "invalid-request");
     };
-    if !valid_action(&state, &headers, &form.csrf) {
+    if !valid_action(&state.public_origin, &headers, &form.csrf) {
         return failure(StatusCode::FORBIDDEN, "request-rejected");
     }
     if !canonical_operation_id(&form.request_id)
@@ -414,6 +448,58 @@ pub(super) async fn operation(
 mod tests {
     use super::*;
     use axum::{body::Body, extract::FromRequest, http::Request};
+
+    #[test]
+    fn private_resize_actions_require_exactly_one_matching_origin() {
+        let origin = "https://dashboard.example.test";
+        let csrf = crate::security::new_csrf_token();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("codewire_ssr_csrf={csrf}").parse().unwrap(),
+        );
+        headers.insert(
+            header::REFERER,
+            format!("{origin}/settings/").parse().unwrap(),
+        );
+        assert!(!valid_action(origin, &headers, &csrf));
+        headers.insert(header::ORIGIN, origin.parse().unwrap());
+        assert!(valid_action(origin, &headers, &csrf));
+        headers.append(header::ORIGIN, origin.parse().unwrap());
+        assert!(!valid_action(origin, &headers, &csrf));
+        headers.insert(
+            header::ORIGIN,
+            "https://foreign.example.test".parse().unwrap(),
+        );
+        assert!(!valid_action(origin, &headers, &csrf));
+    }
+
+    #[test]
+    fn private_resize_requires_one_unmixed_browser_session_authority() {
+        let mut headers = HeaderMap::new();
+        assert!(!unique_browser_session_authority(&headers));
+        headers.insert(header::COOKIE, "other=value".parse().unwrap());
+        assert!(!unique_browser_session_authority(&headers));
+        headers.insert(
+            header::COOKIE,
+            "codewire.session_token=synthetic".parse().unwrap(),
+        );
+        assert!(unique_browser_session_authority(&headers));
+        headers.insert(header::AUTHORIZATION, "Bearer synthetic".parse().unwrap());
+        assert!(!unique_browser_session_authority(&headers));
+        headers.remove(header::AUTHORIZATION);
+        headers.append(header::COOKIE, "other=value".parse().unwrap());
+        assert!(!unique_browser_session_authority(&headers));
+        for raw in [
+            "codewire.session_token=",
+            "codewire.session_token=synthetic; codewire.session_token=synthetic",
+            "codewire.session_token=synthetic; codewire.session_token =different",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, raw.parse().unwrap());
+            assert!(!unique_browser_session_authority(&headers));
+        }
+    }
 
     fn resources() -> EnvironmentResources {
         EnvironmentResources {
