@@ -741,12 +741,13 @@ mod tests {
             .github_git(&Method::POST, &upload, &refreshed_post, request.as_bytes())
             .await
             .unwrap();
-        let counters = provider.0.lock().unwrap();
-        assert_eq!(counters.github_advertisements, 2);
-        assert_eq!(counters.github_upload_packs, 2);
-        assert_eq!(counters.github_refreshed_advertisements, 1);
-        assert_eq!(counters.github_refreshed_upload_packs, 1);
-        drop(counters);
+        {
+            let counters = provider.0.lock().unwrap();
+            assert_eq!(counters.github_advertisements, 2);
+            assert_eq!(counters.github_upload_packs, 2);
+            assert_eq!(counters.github_refreshed_advertisements, 1);
+            assert_eq!(counters.github_refreshed_upload_packs, 1);
+        }
         git.close().await.unwrap();
         assert!(
             provider
