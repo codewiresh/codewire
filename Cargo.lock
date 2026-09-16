@@ -2015,6 +2015,7 @@ dependencies = [
  "buffa-types",
  "bytes",
  "chrono",
+ "codewire-client",
  "codewire-proto",
  "codewire-server-core",
  "codewire-tailnet",
