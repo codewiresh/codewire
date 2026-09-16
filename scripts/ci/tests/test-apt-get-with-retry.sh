@@ -153,9 +153,9 @@ run_case() {
         pid="$(<"$pid_file")"
         state="$(ps -o stat= -p "$pid" || true)"
         # A Z-state process has exited and cannot continue an APT transaction.
-        # In CI containers, PID 1 may defer reaping it after the real timeout
-        # has already reaped its direct child, so only a live process is a
-        # cleanup failure here.
+        # In CI containers, PID 1 may defer reaping an already terminated
+        # process after timeout control completes, so only a live process is
+        # a cleanup failure here.
         state="${state//[[:space:]]/}"
         [[ -z "$state" || "$state" == Z* ]] || fail "$name left its TERM-responsive fixture process $pid ($state)"
       done
