@@ -148,6 +148,8 @@ run_paths_case repository_attributes pull_request refs/pull/1010/head false "$po
   .gitattributes
 run_paths_case gitleaks_policy pull_request refs/pull/10101/head false \
   'policy security' .gitleaks.toml
+run_paths_case bun_review_baseline pull_request refs/pull/10102/head false \
+  "$policy" .supplychain/bun-baseline.json
 run_paths_case license_texts pull_request refs/pull/1011/head false "$policy" \
   LICENSE LICENSE-MIT LICENSE-APACHE LICENSE-BSD-3-CLAUSE \
   crates/codewire-cli/LICENSE packages/codewire-proto-ts/LICENSE-APACHE \
