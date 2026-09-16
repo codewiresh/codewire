@@ -72,6 +72,34 @@ function output(connection: Connection, text: string, offset = 0n) {
   return offset + BigInt(data.length);
 }
 
+test("detail layout keeps usable output and compact footer with alerts and short viewports", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "usable-terminal-output\r\n");
+  const terminal = page.locator("[data-terminal-root]");
+  await expect(terminal.locator(".xterm-rows")).toContainText("usable-terminal-output");
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 390, height: 560 }]) {
+    await page.setViewportSize(viewport);
+    for (const showAlert of [false, true]) {
+      await page.locator("#fixture-lifecycle-message").evaluate((node, visible) => { (node as HTMLElement).hidden = !visible; }, showAlert);
+      await expect.poll(async () => (await terminal.boundingBox())!.height).toBeGreaterThanOrEqual(180);
+      expect((await page.locator(".cw-terminal-footer").boundingBox())!.height).toBeLessThan(100);
+      const bounds = await page.locator(".cw-sandbox-detail-main").evaluate((main) => {
+        const output = main.querySelector("[data-terminal-root]")!.getBoundingClientRect();
+        const footer = main.querySelector(".cw-terminal-footer")!.getBoundingClientRect();
+        return { overlap: output.bottom > footer.top, horizontalOverflow: main.scrollWidth > main.clientWidth };
+      });
+      expect(bounds).toEqual({ overlap: false, horizontalOverflow: false });
+      // A short screen retains output instead of hiding it to avoid scrolling.
+      await page.locator(".cw-terminal-footer").scrollIntoViewIfNeeded();
+      await expect(page.locator(".cw-terminal-footer")).toBeInViewport();
+    }
+  }
+});
+
 async function holdRenderCallbacks(page: Page) {
   await page.addInitScript(() => {
     type Presentation = { terminal: { write(data: string | Uint8Array, callback?: () => void): void } };
@@ -612,7 +640,11 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
     const panel = page.getByRole("tabpanel");
     const copy = panel.getByRole("button", { name: "Copy selection", exact: true });
     await expect(copy).toBeDisabled();
-    const bounds = (await panel.locator(".xterm-rows").getByText(text, { exact: true }).boundingBox())!;
+    const renderedOutput = panel.locator(".xterm-rows").getByText(text, { exact: true });
+    // Switching tabs can schedule a fit/repaint. Copy the visible rendered
+    // output, not stale row text while that presentation is still hidden.
+    await expect(renderedOutput).toBeVisible();
+    const bounds = (await renderedOutput.boundingBox())!;
     await page.mouse.move(bounds.x, bounds.y + bounds.height / 2);
     await page.mouse.down();
     await page.mouse.move(bounds.x + bounds.width, bounds.y + bounds.height / 2, { steps: 12 });

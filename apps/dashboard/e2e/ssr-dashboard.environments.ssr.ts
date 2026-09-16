@@ -697,6 +697,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("heading", { name: environmentName, exact: true })).toBeVisible();
     await expect(page.locator(".cw-terminal-page .xterm")).toBeVisible({ timeout: 15_000 });
     await page.setViewportSize({ width: 390, height: 844 });
+    expect((await terminalRoot.boundingBox())!.height).toBeGreaterThanOrEqual(180);
+    expect((await page.locator(".cw-terminal-footer").boundingBox())!.height).toBeLessThan(100);
     await expect(page).toHaveScreenshot("terminal-full-mobile.png", {
       mask: [page.locator(".xterm-rows")],
       maskColor: "#080808",
