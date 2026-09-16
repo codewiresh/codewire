@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::io::{Read, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_gateway_proto::daemon::v1;
 use portable_pty::{PtySize, native_pty_system};
@@ -12,6 +13,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::task::TaskTracker;
 use tonic::Status;
 use uuid::Uuid;
 
@@ -29,6 +32,9 @@ const OUTPUT_BUFFER_SIZE: usize = 32 * 1024;
 const OUTPUT_FRAME_HEADER_SIZE: usize = 17;
 const DEFAULT_OUTPUT_READ_LIMIT: u64 = 256 * 1024;
 const MAX_OUTPUT_READ_LIMIT: u64 = 4 * 1024 * 1024;
+const LAUNCH_OPERATION_TIMEOUT: Duration = Duration::from_secs(40);
+const LAUNCH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const LAUNCH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 // Compact at twice the retained byte/frame budget, amortizing disk rewrites.
 const RETAINED_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const RETAINED_OUTPUT_FRAMES: usize = 2048;
@@ -57,6 +63,9 @@ struct SessionEngineInner {
     sessions: Mutex<BTreeMap<String, Arc<SessionHandle>>>,
     active: Mutex<HashMap<String, ActiveSession>>,
     retention_admission: AsyncMutex<()>,
+    launch_admission: Mutex<()>,
+    launches: TaskTracker,
+    shutdown: CancellationToken,
 }
 
 struct SessionHandle {
@@ -190,6 +199,9 @@ struct PersistedSession {
     // retire. Older/ambiguous failures keep their cleanup obligation.
     #[serde(default)]
     cleanup_confirmed: bool,
+    // An interrupted launch may still own a child; preserve this recovery fence.
+    #[serde(default)]
+    cleanup_unknown: bool,
     status_message: String,
 }
 
@@ -224,6 +236,9 @@ impl SessionEngine {
                 sessions: Mutex::new(BTreeMap::new()),
                 active: Mutex::new(HashMap::new()),
                 retention_admission: AsyncMutex::new(()),
+                launch_admission: Mutex::new(()),
+                launches: TaskTracker::new(),
+                shutdown: CancellationToken::new(),
             }),
         }
     }
@@ -232,7 +247,89 @@ impl SessionEngine {
         &self,
         request: v1::LaunchSessionRequest,
     ) -> Result<v1::SessionRecord, SessionError> {
+        let engine = self.clone();
+        self.own_launch(move |cancel| async move { engine.launch_inner(request, cancel).await })
+            .await
+    }
+
+    pub(crate) fn cancel_on_drop(&self) -> DropGuard {
+        self.inner.shutdown.clone().drop_guard()
+    }
+
+    pub(crate) fn cancel_launches(&self) {
+        let _admission = lock(&self.inner.launch_admission);
+        self.inner.shutdown.cancel();
+        self.inner.launches.close();
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), SessionError> {
+        self.cancel_launches();
+        let deadline = tokio::time::Instant::now() + LAUNCH_SHUTDOWN_TIMEOUT;
+        tokio::time::timeout_at(deadline, self.inner.launches.wait())
+            .await
+            .map_err(|_| SessionError::Internal("session launch cleanup did not settle".into()))?;
+        let handles = lock(&self.inner.sessions)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for handle in handles {
+            let metadata = tokio::time::timeout_at(deadline, handle.metadata.lock())
+                .await
+                .map_err(|_| {
+                    SessionError::Internal("session launch cleanup did not settle".into())
+                })?;
+            if metadata.cleanup_unknown {
+                return Err(SessionError::Internal(
+                    "session launch cleanup remains unconfirmed".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn own_launch<F, Fut>(&self, operation: F) -> Result<v1::SessionRecord, SessionError>
+    where
+        F: FnOnce(CancellationToken) -> Fut,
+        Fut: Future<Output = Result<v1::SessionRecord, SessionError>> + Send + 'static,
+    {
+        let (task, guard) = {
+            let _admission = lock(&self.inner.launch_admission);
+            if self.inner.shutdown.is_cancelled() {
+                return Err(launch_cancelled_error());
+            }
+            let cancel = self.inner.shutdown.child_token();
+            let guard = cancel.clone().drop_guard();
+            let operation = operation(cancel.clone());
+            let task = self.inner.launches.spawn(async move {
+                tokio::pin!(operation);
+                tokio::select! {
+                    result = &mut operation => result,
+                    _ = tokio::time::sleep(LAUNCH_OPERATION_TIMEOUT) => {
+                        // Cooperative cancellation retains the operation lock and
+                        // exact child until cleanup/persistence has completed.
+                        cancel.cancel();
+                        operation.await
+                    }
+                }
+            });
+            (task, guard)
+        };
+        let result = task.await.map_err(|_| {
+            SessionError::Internal("session launch outcome could not be confirmed".into())
+        });
+        guard.disarm();
+        result?
+    }
+
+    async fn launch_inner(
+        &self,
+        request: v1::LaunchSessionRequest,
+        cancel: CancellationToken,
+    ) -> Result<v1::SessionRecord, SessionError> {
         self.ensure_initialized().await?;
+        if cancel.is_cancelled() {
+            return Err(launch_cancelled_error());
+        }
         let command = if request.command.is_empty() {
             vec![default_shell_for(&self.inner.config)]
         } else {
@@ -258,8 +355,18 @@ impl SessionEngine {
             )));
         }
 
-        let admission = self.inner.retention_admission.lock().await;
+        let admission = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(launch_cancelled_error()),
+            admission = self.inner.retention_admission.lock() => admission,
+        };
+        if cancel.is_cancelled() {
+            return Err(launch_cancelled_error());
+        }
         self.make_record_room().await?;
+        if cancel.is_cancelled() {
+            return Err(launch_cancelled_error());
+        }
         let session_id = self.create_session_id().await?;
         let persisted = PersistedSession {
             session_id: session_id.clone(),
@@ -278,6 +385,7 @@ impl SessionEngine {
             output_end_offset: 0,
             output_start_offset: 0,
             cleanup_confirmed: false,
+            cleanup_unknown: true,
             status_message: "session starting".into(),
         };
         let handle = Arc::new(SessionHandle {
@@ -293,7 +401,7 @@ impl SessionEngine {
         }
         lock(&self.inner.sessions).insert(session_id, handle.clone());
         drop(admission);
-        self.start_process(handle.clone()).await
+        self.start_process(handle.clone(), &cancel).await
     }
 
     async fn make_record_room(&self) -> Result<(), SessionError> {
@@ -371,14 +479,48 @@ impl SessionEngine {
     }
 
     pub async fn restart(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
+        let engine = self.clone();
+        let session_id = session_id.to_string();
+        self.own_launch(
+            move |cancel| async move { engine.restart_inner(&session_id, cancel).await },
+        )
+        .await
+    }
+
+    async fn restart_inner(
+        &self,
+        session_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<v1::SessionRecord, SessionError> {
         self.ensure_initialized().await?;
-        let admission = self.inner.retention_admission.lock().await;
+        let admission = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(launch_cancelled_error()),
+            admission = self.inner.retention_admission.lock() => admission,
+        };
         validate_session_id(session_id)?;
         let handle = self.handle(session_id)?;
+        if cancel.is_cancelled() {
+            return Err(launch_cancelled_error());
+        }
         handle.launch_cancellation.send_replace(true);
-        let _operation = handle.operation.lock().await;
+        let _operation = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(launch_cancelled_error()),
+            operation = handle.operation.lock() => operation,
+        };
+        if handle.metadata.lock().await.cleanup_unknown {
+            return Err(SessionError::FailedPrecondition(
+                "session launch cleanup is unconfirmed; restart is unavailable".into(),
+            ));
+        }
         if lock(&self.inner.active).contains_key(session_id) {
+            // Once Stop is dispatched, retain the operation lock until the
+            // previous monitor settles. Caller loss cannot cancel its cleanup.
             self.stop_active(session_id, &handle).await?;
+        }
+        if cancel.is_cancelled() {
+            return Err(launch_cancelled_error());
         }
         handle.launch_cancellation.send_replace(false);
 
@@ -388,12 +530,13 @@ impl SessionEngine {
             metadata.started_at = None;
             metadata.finished_at = None;
             metadata.exit_code = None;
-            metadata.cleanup_confirmed = false;
             metadata.status_message = "session restarting".into();
+            metadata.cleanup_unknown = true;
+            metadata.cleanup_confirmed = false;
             persist_metadata(&self.inner.root, &metadata).await?;
         }
         drop(admission);
-        self.start_process(handle.clone()).await
+        self.start_process(handle.clone(), &cancel).await
     }
 
     pub async fn read_output(
@@ -573,10 +716,16 @@ impl SessionEngine {
     async fn start_process(
         &self,
         handle: Arc<SessionHandle>,
+        cancel: &CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
+        if launch_is_cancelled(&handle, cancel) {
+            return self
+                .record_unspawned_failure(handle, "session launch cancelled".into())
+                .await;
+        }
         let snapshot = handle.metadata.lock().await.clone();
         if snapshot.pty {
-            return self.start_pty_process(handle, snapshot).await;
+            return self.start_pty_process(handle, snapshot, cancel).await;
         }
         let command = &snapshot.command;
         let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
@@ -609,6 +758,12 @@ impl SessionEngine {
         };
         let mut process = prepared.tokio_command();
 
+        if launch_is_cancelled(&handle, cancel) {
+            return self
+                .record_unspawned_failure(handle, "session launch cancelled".into())
+                .await;
+        }
+
         let mut child = match process.spawn() {
             Ok(child) => {
                 prepared.spawned();
@@ -622,45 +777,66 @@ impl SessionEngine {
         };
         let projection = tokio::select! {
             biased;
+            _ = cancel.cancelled() => Err(std::io::Error::other("environment launch cancelled")),
             _ = wait_for_launch_cancellation(&handle) => Err(std::io::Error::other("environment launch cancelled")),
             result = prepared.project_spawned(child.id()) => result,
         };
         if projection.is_err() {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let confirmed = terminate_native_launch(&mut child).await;
             return self
-                .record_startup_failure(handle, "environment launch denied or expired".into())
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    "environment launch denied or expired".into(),
+                )
                 .await;
         }
         let Some(stdin) = child.stdin.take() else {
-            let _ = child.kill().await;
+            let confirmed = terminate_native_launch(&mut child).await;
             return self
-                .record_startup_failure(handle, "session stdin pipe is unavailable".into())
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    "session stdin pipe is unavailable".into(),
+                )
                 .await;
         };
         let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill().await;
+            let confirmed = terminate_native_launch(&mut child).await;
             return self
-                .record_startup_failure(handle, "session stdout pipe is unavailable".into())
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    "session stdout pipe is unavailable".into(),
+                )
                 .await;
         };
         let Some(stderr) = child.stderr.take() else {
-            let _ = child.kill().await;
+            let confirmed = terminate_native_launch(&mut child).await;
             return self
-                .record_startup_failure(handle, "session stderr pipe is unavailable".into())
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    "session stderr pipe is unavailable".into(),
+                )
                 .await;
         };
 
-        let record = {
-            let mut metadata = handle.metadata.lock().await;
-            metadata.state = v1::SessionLifecycleState::Running as i32;
-            metadata.started_at = Some(PersistedTimestamp::now());
-            metadata.finished_at = None;
-            metadata.exit_code = None;
-            metadata.status_message = "session running".into();
-            persist_metadata(&self.inner.root, &metadata).await?;
-            metadata.to_record()
-        };
+        let running = self.record_starting_running(&handle).await;
+        if running.is_err() || launch_is_cancelled(&handle, cancel) {
+            let confirmed = terminate_native_launch(&mut child).await;
+            return self
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    "session launch cancelled or could not be recorded".into(),
+                )
+                .await;
+        }
+        let record = running?;
+
+        // Ownership transfers below without an intervening await.
+        let monitor_handle = handle.clone();
 
         let stdout_task = tokio::spawn(capture_output(
             self.inner.root.clone(),
@@ -685,7 +861,7 @@ impl SessionEngine {
                 inner,
                 session_id,
                 token,
-                handle,
+                handle: monitor_handle,
                 child,
                 stdin: Some(stdin),
                 control: control_rx,
@@ -702,14 +878,14 @@ impl SessionEngine {
                 task,
             },
         );
-        let _ = start_tx.send(());
-        Ok(record)
+        self.complete_handoff(handle, start_tx, record).await
     }
 
     async fn start_pty_process(
         &self,
         handle: Arc<SessionHandle>,
         snapshot: PersistedSession,
+        cancel: &CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
         let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
         {
@@ -754,6 +930,12 @@ impl SessionEngine {
         };
         let command = prepared.pty_command();
 
+        if launch_is_cancelled(&handle, cancel) {
+            return self
+                .record_unspawned_failure(handle, "session launch cancelled".into())
+                .await;
+        }
+
         let child = match pair.slave.spawn_command(command) {
             Ok(child) => {
                 prepared.spawned();
@@ -773,45 +955,61 @@ impl SessionEngine {
         let mut child = crate::execution::PtyLaunchGuard::new(child);
         let projection = tokio::select! {
             biased;
+            _ = cancel.cancelled() => Err(std::io::Error::other("environment launch cancelled")),
             _ = wait_for_launch_cancellation(&handle) => Err(std::io::Error::other("environment launch cancelled")),
             result = prepared.project_spawned(child.process_id()) => result,
         };
         if projection.is_err() {
-            child.terminate().await;
+            let confirmed = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
             return self
-                .record_startup_failure(handle, "environment launch denied or expired".into())
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    "environment launch denied or expired".into(),
+                )
                 .await;
         }
 
         let reader = match pair.master.try_clone_reader() {
             Ok(reader) => reader,
             Err(error) => {
-                child.terminate().await;
+                let confirmed = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
                 return self
-                    .record_startup_failure(handle, format!("clone session PTY reader: {error}"))
+                    .record_launch_cleanup(
+                        handle,
+                        confirmed,
+                        format!("clone session PTY reader: {error}"),
+                    )
                     .await;
             }
         };
         let writer = match pair.master.take_writer() {
             Ok(writer) => writer,
             Err(error) => {
-                child.terminate().await;
+                let confirmed = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
                 return self
-                    .record_startup_failure(handle, format!("take session PTY writer: {error}"))
+                    .record_launch_cleanup(
+                        handle,
+                        confirmed,
+                        format!("take session PTY writer: {error}"),
+                    )
                     .await;
             }
         };
 
-        let record = {
-            let mut metadata = handle.metadata.lock().await;
-            metadata.state = v1::SessionLifecycleState::Running as i32;
-            metadata.started_at = Some(PersistedTimestamp::now());
-            metadata.finished_at = None;
-            metadata.exit_code = None;
-            metadata.status_message = "session running".into();
-            persist_metadata(&self.inner.root, &metadata).await?;
-            metadata.to_record()
-        };
+        let running = self.record_starting_running(&handle).await;
+        if running.is_err() || launch_is_cancelled(&handle, cancel) {
+            let confirmed = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
+            return self
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    "session launch cancelled or could not be recorded".into(),
+                )
+                .await;
+        }
+        let record = running?;
+        let monitor_handle = handle.clone();
 
         let (output_tx, output_rx) = mpsc::channel(32);
         let reader_thread = tokio::task::spawn_blocking(move || copy_pty_output(reader, output_tx));
@@ -846,7 +1044,7 @@ impl SessionEngine {
                 inner,
                 session_id,
                 token,
-                handle,
+                handle: monitor_handle,
                 killer: PtyKillerGuard::new(killer),
                 wait_task,
                 control: control_rx,
@@ -864,8 +1062,60 @@ impl SessionEngine {
                 task,
             },
         );
-        let _ = start_tx.send(());
+        self.complete_handoff(handle, start_tx, record).await
+    }
+
+    async fn record_starting_running(
+        &self,
+        handle: &SessionHandle,
+    ) -> Result<v1::SessionRecord, SessionError> {
+        let mut metadata = handle.metadata.lock().await;
+        metadata.state = v1::SessionLifecycleState::Running as i32;
+        metadata.started_at = Some(PersistedTimestamp::now());
+        metadata.finished_at = None;
+        metadata.exit_code = None;
+        metadata.status_message = "session running".into();
+        persist_metadata(&self.inner.root, &metadata).await?;
+        Ok(metadata.to_record())
+    }
+
+    async fn complete_handoff(
+        &self,
+        handle: Arc<SessionHandle>,
+        start: oneshot::Sender<()>,
+        record: v1::SessionRecord,
+    ) -> Result<v1::SessionRecord, SessionError> {
+        // The active monitor now owns the child. Caller loss must not stop it.
+        let result = {
+            let mut metadata = handle.metadata.lock().await;
+            metadata.cleanup_unknown = false;
+            metadata.cleanup_confirmed = false;
+            persist_metadata(&self.inner.root, &metadata).await
+        };
+        let _ = start.send(());
+        result?;
         Ok(record)
+    }
+
+    async fn record_launch_cleanup(
+        &self,
+        handle: Arc<SessionHandle>,
+        confirmed: bool,
+        message: String,
+    ) -> Result<v1::SessionRecord, SessionError> {
+        if confirmed {
+            return self.record_unspawned_failure(handle, message).await;
+        }
+        let mut metadata = handle.metadata.lock().await;
+        metadata.state = v1::SessionLifecycleState::Interrupted as i32;
+        metadata.cleanup_unknown = true;
+        metadata.cleanup_confirmed = false;
+        metadata.finished_at = Some(PersistedTimestamp::now());
+        metadata.exit_code = None;
+        metadata.status_message =
+            "session launch cleanup could not be confirmed; restart is unavailable".into();
+        persist_metadata(&self.inner.root, &metadata).await?;
+        Ok(metadata.to_record())
     }
 
     async fn record_unspawned_failure(
@@ -884,6 +1134,8 @@ impl SessionEngine {
     ) -> Result<v1::SessionRecord, SessionError> {
         let mut metadata = handle.metadata.lock().await;
         metadata.state = v1::SessionLifecycleState::Failed as i32;
+        metadata.cleanup_unknown = false;
+        metadata.started_at = None;
         metadata.finished_at = Some(PersistedTimestamp::now());
         metadata.exit_code = None;
         metadata.status_message = message;
@@ -1041,6 +1293,7 @@ async fn prune_session_records(
             state,
             v1::SessionLifecycleState::Exited | v1::SessionLifecycleState::Stopped
         ) || (state == v1::SessionLifecycleState::Failed && metadata.cleanup_confirmed))
+            && !metadata.cleanup_unknown
             && !lock(&inner.active).contains_key(&metadata.session_id)
         {
             candidates.push((
@@ -1078,6 +1331,27 @@ async fn prune_session_records(
 async fn wait_for_launch_cancellation(handle: &SessionHandle) {
     let mut cancellation = handle.launch_cancellation.subscribe();
     let _ = cancellation.wait_for(|cancelled| *cancelled).await;
+}
+
+fn launch_cancelled_error() -> SessionError {
+    SessionError::FailedPrecondition("session launch cancelled before completion".into())
+}
+
+fn launch_is_cancelled(handle: &SessionHandle, cancel: &CancellationToken) -> bool {
+    cancel.is_cancelled() || *handle.launch_cancellation.borrow()
+}
+
+async fn terminate_native_launch(child: &mut Child) -> bool {
+    let _ = child.start_kill();
+    let deadline = tokio::time::Instant::now() + LAUNCH_CLEANUP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Err(_) => return false,
+            Ok(None) if tokio::time::Instant::now() >= deadline => return false,
+            Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
 }
 
 async fn monitor_process(monitor: ProcessMonitor) {
@@ -2053,6 +2327,430 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
 
+    async fn cancellation_engine() -> (tempfile::TempDir, SessionEngine) {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: temp.path().to_owned(),
+            home_root: temp.path().to_owned(),
+            auth_token: crate::DaemonAuthToken::new("synthetic-cancellation-test").unwrap(),
+            process_execution: ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
+        };
+        let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+        engine.ensure_initialized().await.unwrap();
+        (temp, engine)
+    }
+
+    fn marker_request(marker: &Path) -> v1::LaunchSessionRequest {
+        v1::LaunchSessionRequest {
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf spawned > \"$1\"".into(),
+                "sh".into(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    async fn pending_handle(engine: &SessionEngine, marker: &Path) -> Arc<SessionHandle> {
+        let session_id = engine.create_session_id().await.unwrap();
+        let metadata = PersistedSession {
+            session_id: session_id.clone(),
+            state: v1::SessionLifecycleState::Starting as i32,
+            command: marker_request(marker).command,
+            working_dir: engine.inner.config.home_root.to_string_lossy().into_owned(),
+            env: Vec::new(),
+            pty: false,
+            term: String::new(),
+            width: 80,
+            height: 24,
+            created_at: PersistedTimestamp::now(),
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            output_end_offset: 0,
+            output_start_offset: 0,
+            cleanup_confirmed: false,
+            status_message: "session starting".into(),
+            cleanup_unknown: true,
+        };
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+        let handle = Arc::new(SessionHandle {
+            metadata: AsyncMutex::new(metadata),
+            operation: AsyncMutex::new(()),
+            output_index: Mutex::new(Vec::new()),
+            launch_cancellation: watch::channel(false).0,
+        });
+        lock(&engine.inner.sessions).insert(session_id, handle.clone());
+        handle
+    }
+
+    #[tokio::test]
+    async fn cancelled_owned_launch_before_persistence_creates_no_session() {
+        let (temp, engine) = cancellation_engine().await;
+        let request = marker_request(&temp.path().join("must-not-spawn"));
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (settled_tx, settled_rx) = oneshot::channel();
+        let owner = engine.clone();
+        let worker = engine.clone();
+        let caller = tokio::spawn(async move {
+            owner
+                .own_launch(move |cancel| async move {
+                    let _ = entered_tx.send(());
+                    cancel.cancelled().await;
+                    let result = worker.launch_inner(request, cancel).await;
+                    let _ = settled_tx.send(());
+                    result
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        caller.abort();
+        tokio::time::timeout(Duration::from_secs(1), settled_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(engine.list().await.unwrap().is_empty());
+        assert!(!temp.path().join("must-not-spawn").exists());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_persisted_launch_settles_failed_before_spawn() {
+        let (temp, engine) = cancellation_engine().await;
+        let marker = temp.path().join("must-not-spawn");
+        let handle = pending_handle(&engine, &marker).await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let _operation = handle.operation.lock().await;
+        let record = engine.start_process(handle.clone(), &cancel).await.unwrap();
+        assert_eq!(record.state, v1::SessionLifecycleState::Failed as i32);
+        assert!(record.started_at.is_none());
+        assert!(record.finished_at.is_some());
+        assert!(!handle.metadata.lock().await.cleanup_unknown);
+        assert!(!marker.exists());
+        let persisted: PersistedSession = serde_json::from_slice(
+            &tokio::fs::read(
+                engine
+                    .inner
+                    .root
+                    .join(&record.session_id)
+                    .join(METADATA_FILE),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.state, record.state);
+        assert!(!persisted.cleanup_unknown);
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_cleanup_blocks_restart_and_survives_reload() {
+        let (temp, engine) = cancellation_engine().await;
+        let marker = temp.path().join("must-not-spawn");
+        let handle = pending_handle(&engine, &marker).await;
+        let record = engine
+            .record_launch_cleanup(handle, false, "not rendered".into())
+            .await
+            .unwrap();
+        assert_eq!(record.state, v1::SessionLifecycleState::Interrupted as i32);
+        assert!(!record.status_message.contains("not rendered"));
+        assert!(matches!(
+            engine.restart(&record.session_id).await,
+            Err(SessionError::FailedPrecondition(_))
+        ));
+        assert_eq!(
+            engine.stop(&record.session_id).await.unwrap().state,
+            v1::SessionLifecycleState::Interrupted as i32
+        );
+        let config = engine.inner.config.clone();
+        assert!(engine.shutdown().await.is_err());
+        drop(engine);
+        let recovered = SessionEngine::new(&config, CredentialBridge::new(None));
+        assert!(matches!(
+            recovered.restart(&record.session_id).await,
+            Err(SessionError::FailedPrecondition(_))
+        ));
+        assert!(!marker.exists());
+        assert!(recovered.shutdown().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn caller_loss_holds_operation_lock_until_cleanup_settles() {
+        let (temp, engine) = cancellation_engine().await;
+        let marker = temp.path().join("must-not-spawn");
+        let handle = pending_handle(&engine, &marker).await;
+        let session_id = handle.metadata.lock().await.session_id.clone();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (cancelled_tx, cancelled_rx) = oneshot::channel();
+        let (settle_tx, settle_rx) = oneshot::channel();
+        let owner = engine.clone();
+        let worker = engine.clone();
+        let pending = handle.clone();
+        let caller = tokio::spawn(async move {
+            owner
+                .own_launch(move |cancel| async move {
+                    let _operation = pending.operation.lock().await;
+                    let _ = entered_tx.send(());
+                    cancel.cancelled().await;
+                    let _ = cancelled_tx.send(());
+                    let _ = settle_rx.await;
+                    worker
+                        .record_startup_failure(pending.clone(), "session launch cancelled".into())
+                        .await
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        caller.abort();
+        cancelled_rx.await.unwrap();
+        assert!(handle.operation.try_lock().is_err());
+        assert!(
+            !*handle.launch_cancellation.borrow(),
+            "request-local cancellation must not cancel another attempt"
+        );
+        let stop_engine = engine.clone();
+        let stop_id = session_id.clone();
+        let stopping = tokio::spawn(async move { stop_engine.stop(&stop_id).await });
+        tokio::task::yield_now().await;
+        assert!(!stopping.is_finished());
+        settle_tx.send(()).unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(1), stopping)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.state, v1::SessionLifecycleState::Failed as i32);
+        assert!(!handle.metadata.lock().await.cleanup_unknown);
+        assert!(!marker.exists());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_restart_retains_serial_ownership_until_dispatched_stop_settles() {
+        let (temp, engine) = cancellation_engine().await;
+        let marker = temp.path().join("next-attempt");
+        let handle = pending_handle(&engine, &marker).await;
+        let id = {
+            let mut metadata = handle.metadata.lock().await;
+            metadata.state = v1::SessionLifecycleState::Running as i32;
+            metadata.cleanup_unknown = false;
+            metadata.session_id.clone()
+        };
+        let (control, mut commands) = mpsc::channel(1);
+        let (entered, dispatched) = oneshot::channel();
+        let (release, settled) = oneshot::channel();
+        let monitor_engine = engine.clone();
+        let monitor_handle = handle.clone();
+        let monitor_id = id.clone();
+        let monitor = tokio::spawn(async move {
+            let Some(SessionControl::Stop { reply }) = commands.recv().await else {
+                panic!("expected Stop from first Restart");
+            };
+            entered.send(()).unwrap();
+            settled.await.unwrap();
+            {
+                let mut metadata = monitor_handle.metadata.lock().await;
+                metadata.state = v1::SessionLifecycleState::Stopped as i32;
+                persist_metadata(&monitor_engine.inner.root, &metadata)
+                    .await
+                    .unwrap();
+            }
+            lock(&monitor_engine.inner.active).remove(&monitor_id);
+            reply.send(()).unwrap();
+        });
+        lock(&engine.inner.active).insert(
+            id.clone(),
+            ActiveSession {
+                token: Uuid::new_v4(),
+                control,
+                task: monitor,
+            },
+        );
+        let first_engine = engine.clone();
+        let first_id = id.clone();
+        let first = tokio::spawn(async move { first_engine.restart(&first_id).await });
+        tokio::time::timeout(Duration::from_secs(1), dispatched)
+            .await
+            .unwrap()
+            .unwrap();
+        first.abort();
+        let _ = first.await;
+        let second_engine = engine.clone();
+        let second_id = id.clone();
+        let second = tokio::spawn(async move { second_engine.restart(&second_id).await });
+        tokio::task::yield_now().await;
+        assert!(
+            handle.operation.try_lock().is_err(),
+            "caller loss must not drop the Stop owner"
+        );
+        assert!(!second.is_finished());
+        assert!(!marker.exists());
+        release.send(()).unwrap();
+        let next = tokio::time::timeout(Duration::from_secs(3), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.session_id, id);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        engine.stop(&id).await.unwrap();
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_and_drains_launch_owner_and_closes_admission() {
+        let (temp, engine) = cancellation_engine().await;
+        let marker = temp.path().join("must-not-spawn");
+        let handle = pending_handle(&engine, &marker).await;
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let owner = engine.clone();
+        let worker = engine.clone();
+        let caller = tokio::spawn(async move {
+            owner
+                .own_launch(move |cancel| async move {
+                    let _operation = handle.operation.lock().await;
+                    let _ = entered_tx.send(());
+                    cancel.cancelled().await;
+                    worker
+                        .record_startup_failure(handle.clone(), "session launch cancelled".into())
+                        .await
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        engine.shutdown().await.unwrap();
+        assert_eq!(
+            caller.await.unwrap().unwrap().state,
+            v1::SessionLifecycleState::Failed as i32
+        );
+        assert!(engine.inner.launches.is_empty());
+        assert!(matches!(
+            engine.launch(marker_request(&marker)).await,
+            Err(SessionError::FailedPrecondition(_))
+        ));
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_cleanup_fence_overrides_retirable_state_and_confirmation() {
+        let (temp, engine) = cancellation_engine().await;
+        let handle = pending_handle(&engine, &temp.path().join("must-not-spawn")).await;
+        let id = {
+            let mut metadata = handle.metadata.lock().await;
+            metadata.state = v1::SessionLifecycleState::Stopped as i32;
+            metadata.cleanup_confirmed = true;
+            metadata.session_id.clone()
+        };
+        assert!(matches!(
+            prune_session_records(&engine.inner, 0, true).await,
+            Err(SessionError::ResourceExhausted(_))
+        ));
+        assert!(engine.inner.root.join(&id).exists());
+        assert!(matches!(
+            engine.restart(&id).await,
+            Err(SessionError::FailedPrecondition(_))
+        ));
+        assert!(engine.shutdown().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn completed_handoff_keeps_shell_alive_after_original_launch_caller_loss() {
+        let (temp, engine) = cancellation_engine().await;
+        let marker = temp.path().join("same-shell-input");
+        let request = v1::LaunchSessionRequest {
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "IFS= read -r line; printf '%s' \"$line\" > \"$1\"; exec sleep 30".into(),
+                "sh".into(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            ..Default::default()
+        };
+        let (handed_off, observed) = oneshot::channel();
+        let (settled, finished) = oneshot::channel();
+        let owner = engine.clone();
+        let worker = engine.clone();
+        let caller = tokio::spawn(async move {
+            owner
+                .own_launch(move |cancel| async move {
+                    let record = worker.launch_inner(request, cancel.clone()).await?;
+                    handed_off.send(record.clone()).unwrap();
+                    cancel.cancelled().await;
+                    settled.send(()).unwrap();
+                    Ok(record)
+                })
+                .await
+        });
+        let record = tokio::time::timeout(Duration::from_secs(3), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        let _ = caller.await;
+        tokio::time::timeout(Duration::from_secs(1), finished)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            engine.get(&record.session_id).await.unwrap().state,
+            v1::SessionLifecycleState::Running as i32
+        );
+        engine
+            .input(&record.session_id, b"still-alive\n".to_vec())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !std::fs::read_to_string(&marker).is_ok_and(|value| value == "still-alive") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        engine.stop(&record.session_id).await.unwrap();
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovered_starting_retains_cleanup_fence_and_legacy_default_is_false() {
+        let (temp, engine) = cancellation_engine().await;
+        let handle = pending_handle(&engine, &temp.path().join("must-not-spawn")).await;
+        let metadata = handle.metadata.lock().await.clone();
+        let mut legacy = serde_json::to_value(&metadata).unwrap();
+        legacy.as_object_mut().unwrap().remove("cleanup_unknown");
+        assert!(
+            !serde_json::from_value::<PersistedSession>(legacy)
+                .unwrap()
+                .cleanup_unknown
+        );
+        let config = engine.inner.config.clone();
+        drop(engine);
+        let recovered = SessionEngine::new(&config, CredentialBridge::new(None));
+        assert_eq!(
+            recovered.get(&metadata.session_id).await.unwrap().state,
+            v1::SessionLifecycleState::Interrupted as i32
+        );
+        assert!(matches!(
+            recovered.restart(&metadata.session_id).await,
+            Err(SessionError::FailedPrecondition(_))
+        ));
+    }
+
     #[tokio::test]
     async fn durable_restart_rejects_explicit_selected_client_collision_before_spawn() {
         let temp = tempfile::tempdir().unwrap();
@@ -2191,6 +2889,7 @@ mod tests {
             output_end_offset: (frames * size) as u64,
             output_start_offset: 0,
             cleanup_confirmed: false,
+            cleanup_unknown: false,
             status_message: "session running".into(),
         };
         persist_metadata(root, &metadata).await.unwrap();
@@ -2571,6 +3270,7 @@ mod tests {
             output_end_offset: 0,
             output_start_offset: 0,
             cleanup_confirmed: false,
+            cleanup_unknown: false,
             status_message: "session exited with status 0".into(),
         };
 

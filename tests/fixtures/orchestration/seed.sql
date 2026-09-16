@@ -791,15 +791,15 @@ VALUES
         '2026-07-10 10:35:01'
     );
 
-INSERT INTO sandbox_environment_backend (environment_id, namespace, pod_name, pod_ip)
+INSERT INTO sandbox_environment_backend (environment_id, namespace, pod_name, pod_ip, setup_complete)
 VALUES
     (
         'env_exec_contract_backend', 'exec-contract',
-        'exec-contract-pod', '10.244.0.21'
+        'exec-contract-pod', '10.244.0.21', TRUE
     ),
     (
         'env_exec_contract_unavailable', 'exec-contract',
-        'exec-contract-unavailable-pod', '10.244.0.22'
+        'exec-contract-unavailable-pod', '10.244.0.22', TRUE
     );
 
 -- Deterministic state for REST/Connect anti-divergence. The hash is never

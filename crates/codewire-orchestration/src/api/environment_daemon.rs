@@ -44,6 +44,28 @@ use crate::worker::gatewayauth::{SCOPE_DAEMON, issue_token};
 mod session_mutation;
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+// Projection authorization already expires after 30 seconds. Launch/Restart
+// must allow that bounded rendezvous plus cleanup; a connect-sized unary
+// deadline otherwise cancels valid work while its durable record is Starting.
+// This stays below the existing 60-second runtime-dispatch owner. Control RPCs
+// and TCP connection establishment retain their five-second bounds.
+const DAEMON_LAUNCH_TIMEOUT: Duration = Duration::from_secs(40);
+
+#[derive(Clone, Copy)]
+enum DaemonRequestBudget {
+    Control,
+    Launch,
+}
+
+impl DaemonRequestBudget {
+    fn timeout(self) -> Duration {
+        match self {
+            Self::Control => DAEMON_CONTROL_TIMEOUT,
+            Self::Launch => DAEMON_LAUNCH_TIMEOUT,
+        }
+    }
+}
 const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(120);
 const DAEMON_STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DAEMON_LOG_TAIL_LINES: i64 = 500;
@@ -177,6 +199,7 @@ pub async fn launch_environment_daemon_session_core(
         org_id,
         environment_id,
         &[DAEMON_CAPABILITY_SESSIONS],
+        DaemonRequestBudget::Launch,
     )
     .await?;
     let request = authorize(request, &token)?;
@@ -207,6 +230,7 @@ pub async fn list_environment_daemon_sessions_core(
         org_id,
         environment_id,
         &[DAEMON_CAPABILITY_SESSIONS],
+        DaemonRequestBudget::Control,
     )
     .await?;
     Ok(client
@@ -274,6 +298,7 @@ pub async fn get_environment_daemon_session_core(
         org_id,
         environment_id,
         &[DAEMON_CAPABILITY_SESSIONS],
+        DaemonRequestBudget::Control,
     )
     .await?;
     get_daemon_session(&mut client, &token, session_id).await
@@ -292,6 +317,7 @@ pub async fn stop_environment_daemon_session_core(
         org_id,
         environment_id,
         &[DAEMON_CAPABILITY_SESSIONS],
+        DaemonRequestBudget::Control,
     )
     .await?;
     let request = authorize(
@@ -328,6 +354,7 @@ pub async fn restart_environment_daemon_session_core(
         org_id,
         environment_id,
         &[DAEMON_CAPABILITY_SESSIONS],
+        DaemonRequestBudget::Launch,
     )
     .await?;
     let request = authorize(
@@ -364,6 +391,7 @@ pub async fn read_environment_daemon_session_output_core(
         org_id,
         environment_id,
         &[DAEMON_CAPABILITY_SESSIONS],
+        DaemonRequestBudget::Control,
     )
     .await?;
     client
@@ -387,6 +415,7 @@ pub async fn attach_environment_daemon_session_core(
         org_id,
         environment_id,
         &[DAEMON_CAPABILITY_SESSIONS, DAEMON_CAPABILITY_ATTACH],
+        DaemonRequestBudget::Control,
     )
     .await?;
     let (input, rx) = mpsc::channel(32);
@@ -415,6 +444,17 @@ pub async fn attach_environment_daemon_session_core(
 }
 
 impl EnvironmentDaemonSessionAttachment {
+    /// Both transport halves remain inside orchestration. Dropping them
+    /// releases the attachment, never dispatching StopSession.
+    pub(crate) fn into_stream_parts(
+        self,
+    ) -> (
+        mpsc::Sender<v1::SessionAttachMessage>,
+        Streaming<v1::SessionAttachMessage>,
+    ) {
+        (self.input, self.output)
+    }
+
     pub async fn send_input(&self, message: v1::SessionAttachMessage) -> AppResult<()> {
         self.input
             .send(message)
@@ -851,15 +891,30 @@ async fn session_client_for_target(
     org_id: &str,
     environment_id: &str,
     required_capabilities: &[&str],
+    budget: DaemonRequestBudget,
 ) -> AppResult<(
     v1::daemon_service_client::DaemonServiceClient<Channel>,
     String,
 )> {
     let target = resolve_target(state, user, org_id, environment_id).await?;
-    let (channel, token) =
-        daemon_channel_for_target(state, &target.namespace, &target.environment_id).await?;
+    let (channel, token) = daemon_channel_for_endpoint(
+        &state.session_secret,
+        &target.environment_id,
+        state
+            .environment_daemon_endpoints
+            .endpoint(&target.namespace, &target.environment_id),
+        budget,
+    )
+    .await?;
     let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
-    require_ready_daemon(&mut client, &token, required_capabilities).await?;
+    // Even a launch-budget channel must prove readiness promptly. Do not let
+    // this pre-dispatch probe inherit the longer process-start deadline.
+    tokio::time::timeout(
+        DAEMON_CONTROL_TIMEOUT,
+        require_ready_daemon(&mut client, &token, required_capabilities),
+    )
+    .await
+    .map_err(|_| AppError::Upstream("environment daemon is unavailable".into()))??;
     Ok((client, token))
 }
 
@@ -893,6 +948,7 @@ async fn daemon_channel_for_target(
         state
             .environment_daemon_endpoints
             .endpoint(namespace, environment_id),
+        DaemonRequestBudget::Control,
     )
     .await
 }
@@ -906,6 +962,7 @@ async fn daemon_channel_for_runtime(
         session_secret,
         environment_id,
         cluster_daemon_endpoint(namespace, environment_id),
+        DaemonRequestBudget::Control,
     )
     .await
 }
@@ -923,6 +980,7 @@ async fn daemon_channel_for_endpoint(
     session_secret: &str,
     environment_id: &str,
     endpoint: String,
+    budget: DaemonRequestBudget,
 ) -> AppResult<(Channel, String)> {
     let token = issue_token(session_secret, environment_id, SCOPE_DAEMON).map_err(|error| {
         tracing::error!(environment_id, %error, "issue environment daemon token failed");
@@ -934,7 +992,7 @@ async fn daemon_channel_for_endpoint(
             AppError::InternalMsg("failed to resolve environment daemon".into())
         })?
         .connect_timeout(DAEMON_CONNECT_TIMEOUT)
-        .timeout(DAEMON_CONNECT_TIMEOUT)
+        .timeout(budget.timeout())
         .connect()
         .await
         .map_err(|error| {
@@ -1119,6 +1177,20 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
+
+    #[test]
+    fn launch_deadline_accounts_for_projection_without_relaxing_control_or_connect() {
+        assert_eq!(DAEMON_CONNECT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(
+            DaemonRequestBudget::Control.timeout(),
+            Duration::from_secs(5)
+        );
+        let projection =
+            Duration::from_millis(codewire_workload_secrets::MAX_PROJECTION_LIFETIME_MS);
+        assert_eq!(projection, Duration::from_secs(30));
+        assert!(DaemonRequestBudget::Launch.timeout() >= projection + Duration::from_secs(10));
+        assert!(DaemonRequestBudget::Launch.timeout() < Duration::from_secs(60));
+    }
 
     #[test]
     fn daemon_repair_requires_completed_idle_setup() {
