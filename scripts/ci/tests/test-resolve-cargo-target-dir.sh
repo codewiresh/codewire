@@ -31,6 +31,8 @@ mkdir -p "$repo"
 git -C "$repo" init -q
 git -C "$repo" config user.name 'Cargo Target Fixture'
 git -C "$repo" config user.email 'cargo-target-fixture@codewire.test'
+# Keep disposable fixture commits independent of a developer's signing policy.
+git -C "$repo" config commit.gpgsign false
 printf 'fixture\n' > "$repo/fixture.txt"
 git -C "$repo" add fixture.txt
 git -C "$repo" commit -q -m fixture

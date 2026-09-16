@@ -15,6 +15,7 @@ pub(crate) struct AppState {
     pub(crate) confidential_storage_enabled: bool,
     pub(crate) confidential_admin_only: bool,
     pub(crate) turnstile_site_key: String,
+    pub(crate) github_app_slug: String,
     pub(crate) http: reqwest::Client,
     pub(crate) credential_http: reqwest::Client,
 }
@@ -33,6 +34,7 @@ impl AppState {
             confidential_storage_enabled: config.confidential_storage_enabled,
             confidential_admin_only: config.confidential_admin_only,
             turnstile_site_key: config.turnstile_site_key,
+            github_app_slug: config.github_app_slug,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()

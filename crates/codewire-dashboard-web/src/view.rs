@@ -535,6 +535,20 @@ pub(crate) struct CredentialOAuthSubmission {
     pub(crate) confirm_reconnect: String,
 }
 
+// Deliberately not Debug: although this form has no provider material, it
+// starts an authorization redirect and carries a session-bound CSRF token.
+#[derive(Deserialize)]
+pub(crate) struct GitHubAppAuthorizationSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    #[serde(default)]
+    pub(crate) credential_id: String,
+    #[serde(default)]
+    pub(crate) expected_revocation_generation: Option<u64>,
+    #[serde(default)]
+    pub(crate) confirm_reconnect: String,
+}
+
 #[derive(Debug)]
 pub(crate) struct DashboardView {
     pub(crate) user_name: String,

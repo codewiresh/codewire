@@ -46,6 +46,25 @@ fn packet(body: &str) -> Vec<u8> {
 fn fixed_routes_require_exact_authority_identity_and_fetch_semantics() {
     let good = headers(false);
     assert!(validate(&Method::GET, &ADVERTISEMENT.parse().unwrap(), &good, &[]).is_ok());
+    let mut github_app = good.clone();
+    github_app.insert(
+        "authorization",
+        HeaderValue::from_str(&format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD
+                .encode(format!("x-access-token:{GITHUB_APP_USER_TOKEN}"))
+        ))
+        .unwrap(),
+    );
+    assert!(
+        validate(
+            &Method::GET,
+            &ADVERTISEMENT.parse().unwrap(),
+            &github_app,
+            &[]
+        )
+        .is_ok()
+    );
     for target in [
         "http://github.com/synthetic-user/repository-01.git/info/refs?service=git-upload-pack",
         "https://github.com:444/synthetic-user/repository-01.git/info/refs?service=git-upload-pack",

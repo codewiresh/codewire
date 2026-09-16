@@ -26,6 +26,7 @@ connectrpc = { workspace = true, features = ["client"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
 reqwest = { workspace = true }
+sha2 = { workspace = true }
 rand = { workspace = true }
 qrcode = { workspace = true }
 serde = { workspace = true }

@@ -143,6 +143,9 @@ class FixtureRepository:
         run(["git", "init", "-q"], root)
         run(["git", "config", "user.name", "CI fixture"], root)
         run(["git", "config", "user.email", "ci-fixture@codewire.invalid"], root)
+        # Fixture commits are planner inputs, not a signing-path test.  Keep
+        # them hermetic when a developer workstation enables commit signing.
+        run(["git", "config", "commit.gpgsign", "false"], root)
         self.base = self.commit("fixture baseline")
 
     def write(self, relative: str, content: str, mode: int | None = None) -> None:

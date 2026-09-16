@@ -228,6 +228,10 @@ pub enum HttpProvider {
     CodexOAuth,
     AnthropicApiKey,
     GitHubOAuth,
+    /// Isolated GitHub App user-to-server authorization only. This is never
+    /// selected by a Sandbox profile or exposed as a managed client route.
+    #[serde(skip)]
+    GitHubAppAuthorization,
 }
 
 impl HttpProvider {
@@ -251,6 +255,7 @@ impl HttpProvider {
                 "GH_ENTERPRISE_TOKEN",
                 "GITHUB_ENTERPRISE_TOKEN",
             ],
+            Self::GitHubAppAuthorization => &[],
         }
     }
 
@@ -261,10 +266,14 @@ impl HttpProvider {
             Self::CodexOAuth => "codex-oauth",
             Self::AnthropicApiKey => "anthropic-api-key",
             Self::GitHubOAuth => "github-oauth",
+            Self::GitHubAppAuthorization => "github-app-authorization",
         }
     }
 
-    /// Decode only a supported private launch token.
+    /// Decode only a supported profile-selected private launch token. The
+    /// GitHub App callback transport is constructed directly by the isolated
+    /// credential-service and is intentionally not an externally selectable
+    /// broker destination.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "openai-api-key" => Some(Self::OpenAiApiKey),

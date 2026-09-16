@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use codewire_access::{HttpProvider, builtin_provider_catalog};
+use codewire_credential_broker::GitHubAppAuthorizationOwner;
 use codewire_credential_broker::codex_enrollment::{CodexEnrollmentConfig, CodexEnrollmentOwner};
 use codewire_credential_broker::github_enrollment::{
     GitHubEnrollmentConfig, GitHubEnrollmentOwner,
@@ -150,6 +151,22 @@ async fn run_connected(
     ]))
     .await
     .map_err(|_| RuntimeError::Provider)?;
+    // Browser App authorization has a separate fixed transport family. It is
+    // never passed to the Sandbox bridge, so guest requests cannot reach the
+    // OAuth exchange or account-discovery endpoints.
+    let github_app_authorization = match config.github_app_authorization {
+        Some(config) => Some(GitHubAppAuthorizationOwner::new(
+            config,
+            Arc::new(
+                ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
+                    HttpProvider::GitHubAppAuthorization,
+                ]))
+                .await
+                .map_err(|_| RuntimeError::Provider)?,
+            ),
+        )),
+        None => None,
+    };
     let enrollment = enrollment_config(config.codex_executable, config.runtime_directory.clone())?;
     let github = github_enrollment_config(config.github_executable, &config.runtime_directory)?;
     let store = authorities.credential_store(pool.clone());
@@ -170,6 +187,7 @@ async fn run_connected(
         store,
         CodexEnrollmentOwner::new(enrollment),
         GitHubEnrollmentOwner::new(github),
+        github_app_authorization,
     ));
     serve_owned(
         Listeners {

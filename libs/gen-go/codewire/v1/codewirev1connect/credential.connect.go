@@ -53,6 +53,9 @@ const (
 	// CredentialMutationServiceEnrollGithubProcedure is the fully-qualified name of the
 	// CredentialMutationService's EnrollGithub RPC.
 	CredentialMutationServiceEnrollGithubProcedure = "/codewire.v1.CredentialMutationService/EnrollGithub"
+	// CredentialMutationServiceCompleteGithubAppAuthorizationProcedure is the fully-qualified name of
+	// the CredentialMutationService's CompleteGithubAppAuthorization RPC.
+	CredentialMutationServiceCompleteGithubAppAuthorizationProcedure = "/codewire.v1.CredentialMutationService/CompleteGithubAppAuthorization"
 	// CredentialMutationServiceAddApiKeyCredentialProcedure is the fully-qualified name of the
 	// CredentialMutationService's AddApiKeyCredential RPC.
 	CredentialMutationServiceAddApiKeyCredentialProcedure = "/codewire.v1.CredentialMutationService/AddApiKeyCredential"
@@ -258,7 +261,15 @@ type CredentialMutationServiceClient interface {
 	// GetCredential, never automatically reenroll or revoke the provider login.
 	EnrollCodex(context.Context, *connect.Request[v1.EnrollCodexRequest]) (*connect.ServerStreamForClient[v1.EnrollCodexResponse], error)
 	// Same owned challenge/publication protocol, using the pinned GitHub CLI.
+	// This remains the device-code path used by the `cw` CLI.
 	EnrollGithub(context.Context, *connect.Request[v1.EnrollGithubRequest]) (*connect.ServerStreamForClient[v1.EnrollGithubResponse], error)
+	// Browser GitHub connections use the configured GitHub App installation and
+	// user-to-server callback flow. The authorization code is write-only and is
+	// exchanged only by the isolated credential authority that holds the App
+	// client secret; it never reaches a Sandbox or dashboard response. This
+	// method requires the original browser session authority; the `cw` CLI uses
+	// EnrollGithub's device-code path instead.
+	CompleteGithubAppAuthorization(context.Context, *connect.Request[v1.CompleteGithubAppAuthorizationRequest]) (*connect.Response[v1.CompleteGithubAppAuthorizationResponse], error)
 	AddApiKeyCredential(context.Context, *connect.Request[v1.AddApiKeyCredentialRequest]) (*connect.Response[v1.AddApiKeyCredentialResponse], error)
 	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
 	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
@@ -289,6 +300,12 @@ func NewCredentialMutationServiceClient(httpClient connect.HTTPClient, baseURL s
 			httpClient,
 			baseURL+CredentialMutationServiceEnrollGithubProcedure,
 			connect.WithSchema(credentialMutationServiceMethods.ByName("EnrollGithub")),
+			connect.WithClientOptions(opts...),
+		),
+		completeGithubAppAuthorization: connect.NewClient[v1.CompleteGithubAppAuthorizationRequest, v1.CompleteGithubAppAuthorizationResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceCompleteGithubAppAuthorizationProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteGithubAppAuthorization")),
 			connect.WithClientOptions(opts...),
 		),
 		addApiKeyCredential: connect.NewClient[v1.AddApiKeyCredentialRequest, v1.AddApiKeyCredentialResponse](
@@ -338,15 +355,16 @@ func NewCredentialMutationServiceClient(httpClient connect.HTTPClient, baseURL s
 
 // credentialMutationServiceClient implements CredentialMutationServiceClient.
 type credentialMutationServiceClient struct {
-	enrollCodex            *connect.Client[v1.EnrollCodexRequest, v1.EnrollCodexResponse]
-	enrollGithub           *connect.Client[v1.EnrollGithubRequest, v1.EnrollGithubResponse]
-	addApiKeyCredential    *connect.Client[v1.AddApiKeyCredentialRequest, v1.AddApiKeyCredentialResponse]
-	renameCredential       *connect.Client[v1.RenameCredentialRequest, v1.RenameCredentialResponse]
-	rotateApiKeyCredential *connect.Client[v1.RotateApiKeyCredentialRequest, v1.RotateApiKeyCredentialResponse]
-	generateSshCredential  *connect.Client[v1.GenerateSshCredentialRequest, v1.GenerateSshCredentialResponse]
-	addSshCredential       *connect.Client[v1.AddSshCredentialRequest, v1.AddSshCredentialResponse]
-	revokeCredential       *connect.Client[v1.RevokeCredentialRequest, v1.RevokeCredentialResponse]
-	deleteCredential       *connect.Client[v1.DeleteCredentialRequest, v1.DeleteCredentialResponse]
+	enrollCodex                    *connect.Client[v1.EnrollCodexRequest, v1.EnrollCodexResponse]
+	enrollGithub                   *connect.Client[v1.EnrollGithubRequest, v1.EnrollGithubResponse]
+	completeGithubAppAuthorization *connect.Client[v1.CompleteGithubAppAuthorizationRequest, v1.CompleteGithubAppAuthorizationResponse]
+	addApiKeyCredential            *connect.Client[v1.AddApiKeyCredentialRequest, v1.AddApiKeyCredentialResponse]
+	renameCredential               *connect.Client[v1.RenameCredentialRequest, v1.RenameCredentialResponse]
+	rotateApiKeyCredential         *connect.Client[v1.RotateApiKeyCredentialRequest, v1.RotateApiKeyCredentialResponse]
+	generateSshCredential          *connect.Client[v1.GenerateSshCredentialRequest, v1.GenerateSshCredentialResponse]
+	addSshCredential               *connect.Client[v1.AddSshCredentialRequest, v1.AddSshCredentialResponse]
+	revokeCredential               *connect.Client[v1.RevokeCredentialRequest, v1.RevokeCredentialResponse]
+	deleteCredential               *connect.Client[v1.DeleteCredentialRequest, v1.DeleteCredentialResponse]
 }
 
 // EnrollCodex calls codewire.v1.CredentialMutationService.EnrollCodex.
@@ -357,6 +375,12 @@ func (c *credentialMutationServiceClient) EnrollCodex(ctx context.Context, req *
 // EnrollGithub calls codewire.v1.CredentialMutationService.EnrollGithub.
 func (c *credentialMutationServiceClient) EnrollGithub(ctx context.Context, req *connect.Request[v1.EnrollGithubRequest]) (*connect.ServerStreamForClient[v1.EnrollGithubResponse], error) {
 	return c.enrollGithub.CallServerStream(ctx, req)
+}
+
+// CompleteGithubAppAuthorization calls
+// codewire.v1.CredentialMutationService.CompleteGithubAppAuthorization.
+func (c *credentialMutationServiceClient) CompleteGithubAppAuthorization(ctx context.Context, req *connect.Request[v1.CompleteGithubAppAuthorizationRequest]) (*connect.Response[v1.CompleteGithubAppAuthorizationResponse], error) {
+	return c.completeGithubAppAuthorization.CallUnary(ctx, req)
 }
 
 // AddApiKeyCredential calls codewire.v1.CredentialMutationService.AddApiKeyCredential.
@@ -403,7 +427,15 @@ type CredentialMutationServiceHandler interface {
 	// GetCredential, never automatically reenroll or revoke the provider login.
 	EnrollCodex(context.Context, *connect.Request[v1.EnrollCodexRequest], *connect.ServerStream[v1.EnrollCodexResponse]) error
 	// Same owned challenge/publication protocol, using the pinned GitHub CLI.
+	// This remains the device-code path used by the `cw` CLI.
 	EnrollGithub(context.Context, *connect.Request[v1.EnrollGithubRequest], *connect.ServerStream[v1.EnrollGithubResponse]) error
+	// Browser GitHub connections use the configured GitHub App installation and
+	// user-to-server callback flow. The authorization code is write-only and is
+	// exchanged only by the isolated credential authority that holds the App
+	// client secret; it never reaches a Sandbox or dashboard response. This
+	// method requires the original browser session authority; the `cw` CLI uses
+	// EnrollGithub's device-code path instead.
+	CompleteGithubAppAuthorization(context.Context, *connect.Request[v1.CompleteGithubAppAuthorizationRequest]) (*connect.Response[v1.CompleteGithubAppAuthorizationResponse], error)
 	AddApiKeyCredential(context.Context, *connect.Request[v1.AddApiKeyCredentialRequest]) (*connect.Response[v1.AddApiKeyCredentialResponse], error)
 	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
 	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
@@ -430,6 +462,12 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 		CredentialMutationServiceEnrollGithubProcedure,
 		svc.EnrollGithub,
 		connect.WithSchema(credentialMutationServiceMethods.ByName("EnrollGithub")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceCompleteGithubAppAuthorizationHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceCompleteGithubAppAuthorizationProcedure,
+		svc.CompleteGithubAppAuthorization,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteGithubAppAuthorization")),
 		connect.WithHandlerOptions(opts...),
 	)
 	credentialMutationServiceAddApiKeyCredentialHandler := connect.NewUnaryHandler(
@@ -480,6 +518,8 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 			credentialMutationServiceEnrollCodexHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceEnrollGithubProcedure:
 			credentialMutationServiceEnrollGithubHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceCompleteGithubAppAuthorizationProcedure:
+			credentialMutationServiceCompleteGithubAppAuthorizationHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceAddApiKeyCredentialProcedure:
 			credentialMutationServiceAddApiKeyCredentialHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceRenameCredentialProcedure:
@@ -509,6 +549,10 @@ func (UnimplementedCredentialMutationServiceHandler) EnrollCodex(context.Context
 
 func (UnimplementedCredentialMutationServiceHandler) EnrollGithub(context.Context, *connect.Request[v1.EnrollGithubRequest], *connect.ServerStream[v1.EnrollGithubResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.EnrollGithub is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) CompleteGithubAppAuthorization(context.Context, *connect.Request[v1.CompleteGithubAppAuthorizationRequest]) (*connect.Response[v1.CompleteGithubAppAuthorizationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.CompleteGithubAppAuthorization is not implemented"))
 }
 
 func (UnimplementedCredentialMutationServiceHandler) AddApiKeyCredential(context.Context, *connect.Request[v1.AddApiKeyCredentialRequest]) (*connect.Response[v1.AddApiKeyCredentialResponse], error) {

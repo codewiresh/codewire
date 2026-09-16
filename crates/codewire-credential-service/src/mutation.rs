@@ -8,6 +8,7 @@
 
 mod enrollment;
 mod github;
+mod github_app;
 mod keys;
 mod publication;
 mod ssh;
@@ -21,6 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, Owner, OwnerId, ProviderId,
 };
+use codewire_credential_broker::GitHubAppAuthorizationOwner;
 use codewire_credential_broker::codex_enrollment::{CodexEnrollmentError, CodexEnrollmentOwner};
 use codewire_credential_broker::github_enrollment::GitHubEnrollmentOwner;
 use codewire_platform_credentials::{
@@ -65,6 +67,7 @@ struct Shared {
     store: Arc<PlatformCredentialStore>,
     enrollment: Arc<CodexEnrollmentOwner>,
     github_enrollment: Arc<GitHubEnrollmentOwner>,
+    github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
 }
 
 /// Bounded owner of request drivers as well as the shared enrollment workers.
@@ -85,6 +88,7 @@ impl CredentialMutationOwner {
         store: Arc<PlatformCredentialStore>,
         enrollment: CodexEnrollmentOwner,
         github_enrollment: GitHubEnrollmentOwner,
+        github_app_authorization: Option<GitHubAppAuthorizationOwner>,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
@@ -92,6 +96,7 @@ impl CredentialMutationOwner {
                 store,
                 enrollment: Arc::new(enrollment),
                 github_enrollment: Arc::new(github_enrollment),
+                github_app_authorization: github_app_authorization.map(Arc::new),
             }),
             accepting: Mutex::new(true),
             capacity: Arc::new(Semaphore::new(MAX_OPERATIONS)),

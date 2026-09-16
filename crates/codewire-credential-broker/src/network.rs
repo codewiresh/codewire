@@ -136,6 +136,7 @@ fn selected_hosts(
             HttpProvider::CodexOAuth => &[CHATGPT_HOST, OPENAI_AUTH_HOST][..],
             HttpProvider::AnthropicApiKey => &[ANTHROPIC_HOST][..],
             HttpProvider::GitHubOAuth => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
+            HttpProvider::GitHubAppAuthorization => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
         })
         .copied()
         .collect())
@@ -172,24 +173,32 @@ fn validate_target(
                 && matches!(target.query(), None | Some("beta=true"))
         }
         Some(GITHUB_API_HOST) => {
-            selected.contains(&HttpProvider::GitHubOAuth)
+            (selected.contains(&HttpProvider::GitHubOAuth)
                 && crate::github::classify_request(
                     "github-api",
                     method,
                     target.path(),
                     target.query(),
                 )
-                .is_ok()
+                .is_ok())
+                || (selected.contains(&HttpProvider::GitHubAppAuthorization)
+                    && method == Method::GET
+                    && matches!(target.path(), "/user" | "/user/installations")
+                    && github_app_query(target.path(), target.query()))
         }
         Some(GITHUB_GIT_HOST) => {
-            selected.contains(&HttpProvider::GitHubOAuth)
+            (selected.contains(&HttpProvider::GitHubOAuth)
                 && crate::github::classify_request(
                     "github-https",
                     method,
                     target.path(),
                     target.query(),
                 )
-                .is_ok()
+                .is_ok())
+                || (selected.contains(&HttpProvider::GitHubAppAuthorization)
+                    && method == Method::POST
+                    && target.path() == "/login/oauth/access_token"
+                    && target.query().is_none())
         }
         _ => false,
     };
@@ -203,6 +212,24 @@ fn validate_target(
         return Err(BrokerUpstreamError::DestinationDenied);
     }
     Ok(())
+}
+
+fn github_app_query(path: &str, query: Option<&str>) -> bool {
+    match path {
+        "/user" => query.is_none(),
+        "/user/installations" => query.is_some_and(|query| {
+            let mut pairs = url::form_urlencoded::parse(query.as_bytes());
+            matches!(
+                (pairs.next(), pairs.next(), pairs.next()),
+                (Some((per_page, size)), Some((page, number)), None)
+                    if per_page == "per_page"
+                        && size == "100"
+                        && page == "page"
+                        && number.parse::<u32>().is_ok_and(|page| (1..=10).contains(&page))
+            )
+        }),
+        _ => false,
+    }
 }
 
 fn admit_resolved_addresses(
@@ -407,6 +434,56 @@ mod tests {
             (Method::GET, "https://user:password@api.github.com/user"),
             (Method::GET, "https://api.github.com:444/user"),
             (Method::GET, "http://api.github.com/user"),
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_app_authorization_transport_has_only_exchange_and_identity_routes() {
+        let selected = BTreeSet::from([HttpProvider::GitHubAppAuthorization]);
+        for (method, target) in [
+            (Method::POST, "https://github.com/login/oauth/access_token"),
+            (Method::GET, "https://api.github.com/user"),
+            (
+                Method::GET,
+                "https://api.github.com/user/installations?per_page=100&page=1",
+            ),
+            (
+                Method::GET,
+                "https://api.github.com/user/installations?per_page=100&page=10",
+            ),
+        ] {
+            assert!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected).is_ok(),
+                "{target}"
+            );
+        }
+        for (method, target) in [
+            (Method::GET, "https://github.com/login/oauth/access_token"),
+            (Method::POST, "https://api.github.com/user"),
+            (
+                Method::GET,
+                "https://api.github.com/user/installations?page=1&per_page=100",
+            ),
+            (
+                Method::GET,
+                "https://api.github.com/user/installations?per_page=99&page=1",
+            ),
+            (
+                Method::GET,
+                "https://api.github.com/user/installations?per_page=100&page=11",
+            ),
+            (Method::GET, "https://api.github.com/user/repos"),
+            (Method::GET, "https://api.github.com/repos/owner/repo"),
+            (
+                Method::GET,
+                "https://github.com/owner/repo.git/info/refs?service=git-upload-pack",
+            ),
         ] {
             assert_eq!(
                 validate_target(&url::Url::parse(target).unwrap(), &method, &selected),

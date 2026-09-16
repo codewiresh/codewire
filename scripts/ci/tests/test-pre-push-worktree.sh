@@ -190,6 +190,9 @@ git init -q -b main "$repo"
 git init -q --bare "$remote"
 git -C "$repo" config user.name 'Preflight Fixture'
 git -C "$repo" config user.email preflight-fixture@codewire.invalid
+# Tags created below are synthetic pre-push inputs. Do not inherit a
+# workstation's automatic GPG-tag signing policy into this hermetic fixture.
+git -C "$repo" config tag.gpgSign false
 write_stub_tree "$repo"
 printf 'base\n' > "$repo/docs/base.md"
 commit_all "$repo" 'test: seed checkout fixture'

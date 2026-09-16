@@ -25,6 +25,19 @@ const RETRY_MARKER: &[u8] = b"CW_KIND_BROKER_RETRY_ONCE";
 const EXHAUSTED_MARKER: &[u8] = b"CW_KIND_BROKER_RETRY_EXHAUSTED";
 const LEGACY_REREAD_MARKER: &[u8] = b"CW_KIND_NATIVE_REREAD";
 
+// Fixed, non-secret identities for the checked-in Kind fixture.  They are
+// deliberately accepted only by this in-process provider, never a network
+// listener or production configuration path.
+pub(super) const GITHUB_DEVICE_TOKEN: &str = "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+pub(super) const GITHUB_APP_CLIENT_ID: &str = "Iv1.kindsynthetic";
+pub(super) const GITHUB_APP_CLIENT_SECRET: &str = "kind-synthetic-secret";
+pub(super) const GITHUB_APP_SLUG: &str = "codewire-synthetic";
+pub(super) const GITHUB_APP_CALLBACK_URL: &str =
+    "http://127.0.0.1:8090/settings/credentials/github/callback";
+pub(super) const GITHUB_APP_USER_TOKEN: &str = "ghu_kind_synthetic_user_token_1234567890";
+const GITHUB_APP_AUTHORIZATION_CODES: [&str; 2] =
+    ["kind-synthetic-code-one", "kind-synthetic-code-two"];
+
 // Same minimal stock-Codex-compatible Responses SSE shape as the checked-in
 // local-vmm Codex bridge smoke. All text is fixed, public and synthetic.
 const SSE: &[u8] = concat!(
@@ -165,6 +178,58 @@ impl SyntheticProvider {
         ))
     }
 
+    fn github_app_exchange(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if !exact_headers(
+            headers,
+            &[
+                ("accept", "application/json"),
+                ("content-type", "application/x-www-form-urlencoded"),
+                ("user-agent", "Codewire-Credential-Service"),
+            ],
+        ) || !GITHUB_APP_AUTHORIZATION_CODES
+            .iter()
+            .any(|code| body == github_app_exchange_body(code).as_bytes())
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        json_response(json!({
+            "access_token": GITHUB_APP_USER_TOKEN,
+            "token_type": "bearer",
+        }))
+    }
+
+    fn github_app_user(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if !body.is_empty() || !github_app_api_headers(headers) {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        json_response(json!({"login": "synthetic-user"}))
+    }
+
+    fn github_app_installations(
+        &self,
+        target: &url::Url,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if !body.is_empty()
+            || target.as_str() != "https://api.github.com/user/installations?per_page=100&page=1"
+            || !github_app_api_headers(headers)
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        json_response(json!({
+            "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG}],
+        }))
+    }
+
     fn github_repositories(
         &self,
         target: &url::Url,
@@ -190,10 +255,7 @@ impl SyntheticProvider {
                     "https://api.github.com/user/repos?per_page={size}&page={page}&sort=full_name&direction=asc"
                 )
             || headers.get_all("authorization").iter().count() != 1
-            || headers.get("authorization")
-                != Some(&HeaderValue::from_static(
-                    "Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-                ))
+            || !github_bearer_authorization(headers)
         {
             return Err(BrokerUpstreamError::Protocol);
         }
@@ -341,14 +403,23 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         if headers.contains_key("proxy-authorization") || headers.contains_key("cookie") {
             return Err(BrokerUpstreamError::Protocol);
         }
+        if method == Method::POST
+            && target.as_str() == "https://github.com/login/oauth/access_token"
+        {
+            return self.github_app_exchange(&headers, &body);
+        }
         if target.host_str() == Some("github.com") {
             return self.github_git(&method, &target, &headers, &body).await;
         }
         if method == Method::GET
             && target.origin().ascii_serialization() == "https://api.github.com"
-            && target.path() == "/user/repos"
         {
-            return self.github_repositories(&target, &headers, &body);
+            return match target.path() {
+                "/user" => self.github_app_user(&headers, &body),
+                "/user/installations" => self.github_app_installations(&target, &headers, &body),
+                "/user/repos" => self.github_repositories(&target, &headers, &body),
+                _ => Err(BrokerUpstreamError::Protocol),
+            };
         }
         if method != Method::POST {
             return Err(BrokerUpstreamError::Protocol);
@@ -359,6 +430,61 @@ impl BrokerUpstreamTransport for SyntheticProvider {
             _ => Err(BrokerUpstreamError::Protocol),
         }
     }
+}
+
+fn github_app_exchange_body(code: &str) -> String {
+    format!(
+        "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code={code}&redirect_uri=http%3A%2F%2F127.0.0.1%3A8090%2Fsettings%2Fcredentials%2Fgithub%2Fcallback"
+    )
+}
+
+fn exact_headers(headers: &HeaderMap, expected: &[(&str, &str)]) -> bool {
+    headers.keys().all(|name| {
+        expected
+            .iter()
+            .any(|(expected_name, _)| name.as_str() == *expected_name)
+    }) && expected.iter().all(|(name, value)| {
+        headers.get_all(*name).iter().count() == 1
+            && HeaderValue::from_str(value)
+                .is_ok_and(|expected| headers.get(*name) == Some(&expected))
+    })
+}
+
+fn github_app_api_headers(headers: &HeaderMap) -> bool {
+    exact_headers(
+        headers,
+        &[
+            (
+                "authorization",
+                "Bearer ghu_kind_synthetic_user_token_1234567890",
+            ),
+            ("accept", "application/vnd.github+json"),
+            ("user-agent", "Codewire-Credential-Service"),
+        ],
+    )
+}
+
+fn github_bearer_authorization(headers: &HeaderMap) -> bool {
+    let Some(value) = headers.get("authorization") else {
+        return false;
+    };
+    [GITHUB_DEVICE_TOKEN, GITHUB_APP_USER_TOKEN]
+        .iter()
+        .any(|token| {
+            value == &HeaderValue::from_str(&format!("Bearer {token}")).expect("synthetic token")
+        })
+}
+
+fn json_response(value: Value) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let bytes = serde_json::to_vec(&value).map_err(|_| BrokerUpstreamError::Protocol)?;
+    Ok(BrokerUpstreamResponse::new(
+        StatusCode::OK,
+        HeaderMap::from_iter([(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )]),
+        Box::pin(futures::stream::once(async move { Ok(bytes.into()) })),
+    ))
 }
 
 fn github_repository_values(page: usize, size: usize) -> Vec<Value> {
@@ -527,18 +653,20 @@ mod tests {
     #[test]
     fn repository_fixture_is_bounded_paginated_and_requires_its_synthetic_identity() {
         let provider = SyntheticProvider::new();
-        let headers = HeaderMap::from_iter([(
-            http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
-        )]);
-        for (page, count) in [(1, 50), (2, 1), (3, 0)] {
-            let url = format!("https://api.github.com/user/repos?per_page=50&page={page}&sort=full_name&direction=asc").parse().unwrap();
-            assert!(provider.github_repositories(&url, &headers, &[]).is_ok());
-            let values = github_repository_values(page, 50);
-            assert_eq!(values.len(), count);
-            if page == 1 {
-                assert_eq!(values[0]["full_name"], "synthetic-user/repository-01");
-                assert_eq!(values[49]["disabled"], true);
+        for token in [GITHUB_DEVICE_TOKEN, GITHUB_APP_USER_TOKEN] {
+            let headers = HeaderMap::from_iter([(
+                http::header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            )]);
+            for (page, count) in [(1, 50), (2, 1), (3, 0)] {
+                let url = format!("https://api.github.com/user/repos?per_page=50&page={page}&sort=full_name&direction=asc").parse().unwrap();
+                assert!(provider.github_repositories(&url, &headers, &[]).is_ok());
+                let values = github_repository_values(page, 50);
+                assert_eq!(values.len(), count);
+                if page == 1 {
+                    assert_eq!(values[0]["full_name"], "synthetic-user/repository-01");
+                    assert_eq!(values[49]["disabled"], true);
+                }
             }
         }
         let url =
@@ -550,6 +678,77 @@ mod tests {
                 .github_repositories(&url, &HeaderMap::new(), &[])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn github_app_fixture_requires_the_registered_exchange_and_identity_contract() {
+        let provider = SyntheticProvider::new();
+        let exchange_headers = HeaderMap::from_iter([
+            (
+                http::header::ACCEPT,
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-www-form-urlencoded"),
+            ),
+            (
+                http::header::USER_AGENT,
+                HeaderValue::from_static("Codewire-Credential-Service"),
+            ),
+        ]);
+        assert!(
+            provider
+                .github_app_exchange(
+                    &exchange_headers,
+                    github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0]).as_bytes(),
+                )
+                .is_ok()
+        );
+        assert!(
+            provider
+                .github_app_exchange(&exchange_headers, b"client_id=wrong")
+                .is_err()
+        );
+
+        let api_headers = HeaderMap::from_iter([
+            (
+                http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer ghu_kind_synthetic_user_token_1234567890"),
+            ),
+            (
+                http::header::ACCEPT,
+                HeaderValue::from_static("application/vnd.github+json"),
+            ),
+            (
+                http::header::USER_AGENT,
+                HeaderValue::from_static("Codewire-Credential-Service"),
+            ),
+        ]);
+        assert!(provider.github_app_user(&api_headers, &[]).is_ok());
+        let installations = "https://api.github.com/user/installations?per_page=100&page=1"
+            .parse()
+            .unwrap();
+        assert!(
+            provider
+                .github_app_installations(&installations, &api_headers, &[])
+                .is_ok()
+        );
+        let wrong_installations = "https://api.github.com/user/installations?per_page=99&page=1"
+            .parse()
+            .unwrap();
+        assert!(
+            provider
+                .github_app_installations(&wrong_installations, &api_headers, &[])
+                .is_err()
+        );
+
+        let mut wrong_token = api_headers.clone();
+        wrong_token.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+        );
+        assert!(provider.github_app_user(&wrong_token, &[]).is_err());
     }
 
     fn body(marker: &str) -> Vec<u8> {

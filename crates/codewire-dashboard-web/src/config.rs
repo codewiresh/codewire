@@ -46,6 +46,9 @@ pub struct Config {
     pub(crate) confidential_storage_enabled: bool,
     pub(crate) confidential_admin_only: bool,
     pub(crate) turnstile_site_key: String,
+    /// Public GitHub App slug used only to construct the browser installation
+    /// redirect. The App client secret is held solely by credential-service.
+    pub(crate) github_app_slug: String,
 }
 
 impl Config {
@@ -92,6 +95,11 @@ impl Config {
             .unwrap_or_default()
             .trim()
             .to_owned();
+        let github_app_slug = match env::var("GITHUB_APP_SLUG") {
+            Ok(value) => parse_github_app_slug(value)?,
+            Err(env::VarError::NotPresent) => String::new(),
+            Err(env::VarError::NotUnicode(_)) => bail!("GITHUB_APP_SLUG must be valid UTF-8"),
+        };
 
         Ok(Self {
             listen_addr,
@@ -106,8 +114,26 @@ impl Config {
             confidential_storage_enabled,
             confidential_admin_only,
             turnstile_site_key,
+            github_app_slug,
         })
     }
+}
+
+fn parse_github_app_slug(value: String) -> anyhow::Result<String> {
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Ok(value);
+    }
+    if value.len() > 100
+        || value.starts_with('-')
+        || value.ends_with('-')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        bail!("GITHUB_APP_SLUG must be an exact GitHub App slug")
+    }
+    Ok(value)
 }
 
 fn parse_bool_env(name: &str, default: bool) -> anyhow::Result<bool> {
@@ -181,5 +207,20 @@ mod tests {
         assert!(parse_bool_value("flag", Some("true"), false).unwrap());
         assert!(!parse_bool_value("flag", Some("false"), true).unwrap());
         assert!(parse_bool_value("flag", Some("yes"), false).is_err());
+    }
+
+    #[test]
+    fn github_app_slug_is_optional_but_never_a_path_or_host_fragment() {
+        assert_eq!(parse_github_app_slug(String::new()).unwrap(), "");
+        assert_eq!(
+            parse_github_app_slug("codewire-app".into()).unwrap(),
+            "codewire-app"
+        );
+        for value in ["Codewire", "codewire/app", "codewire?next=bad", "-codewire"] {
+            assert!(
+                parse_github_app_slug(value.into()).is_err(),
+                "accepted {value}"
+            );
+        }
     }
 }

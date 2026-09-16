@@ -16,6 +16,55 @@ async function openGithubConnection(page: Page) {
   await expect(page.getByRole("dialog", { name: "Connect GitHub", exact: true })).toBeVisible();
 }
 
+async function completeGithubAppConnection(page: Page, code: string) {
+  const form = page.getByRole("form", { name: "GitHub App", exact: true });
+  const installation = /^https:\/\/github\.com\/apps\/codewire-synthetic\/installations\/new\?/;
+  // The production handoff navigates to GitHub. The Kind journey preserves
+  // that redirect and state boundary, then uses its checked-in synthetic
+  // provider callback without granting the browser external network access.
+  await page.route(installation, (route) => route.fulfill({
+    status: 200,
+    contentType: "text/html",
+    body: "<!doctype html><title>Kind GitHub App fixture</title>",
+  }));
+  let state = "";
+  try {
+    const authorization = page.waitForResponse((response) => (
+      response.url().includes("/settings/credentials/_actions/github/authorize")
+      && response.request().method() === "POST"
+    ));
+    await form.getByRole("button", { name: "Continue to GitHub", exact: true }).click();
+    const response = await authorization;
+    expect(response.status()).toBe(303);
+    expect(response.headers()["cache-control"]).toBe("no-store");
+    const location = response.headers().location;
+    if (!location) throw new Error("GitHub App authorization omitted its installation redirect");
+    const target = new URL(location);
+    expect(target.origin).toBe("https://github.com");
+    expect(target.pathname).toBe("/apps/codewire-synthetic/installations/new");
+    state = target.searchParams.get("state") || "";
+    if (!state) throw new Error("GitHub App authorization omitted its state fence");
+    const cookie = response.headers()["set-cookie"] || "";
+    expect(cookie).toContain("codewire_github_app_authorization=");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).toContain("Path=/settings/credentials/github/");
+  } finally {
+    await page.unroute(installation);
+  }
+
+  const callback = page.waitForResponse((response) => (
+    response.url().includes("/settings/credentials/github/callback?")
+    && response.request().method() === "GET"
+  ));
+  await page.goto(`/settings/credentials/github/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
+  const response = await callback;
+  expect(response.status()).toBe(303);
+  expect(response.headers()["cache-control"]).toBe("no-store, max-age=0");
+  expect(response.headers()["referrer-policy"]).toBe("no-referrer");
+  expect(response.headers()["set-cookie"] || "").toContain("Max-Age=0");
+}
+
 test.describe("managed provider credential browser journey", () => {
   test.skip(
     process.env.PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE !== "1",
@@ -50,37 +99,20 @@ test.describe("managed provider credential browser journey", () => {
       expect(settings?.status()).toBe(200);
       await expect(page.locator("dialog[open]")).toHaveCount(0);
       await openGithubConnection(page);
-      const form = page.getByRole("form", { name: "GitHub", exact: true });
+      const form = page.getByRole("form", { name: "GitHub App", exact: true });
       await expect(form.locator('[name="name"]')).toHaveCount(0);
-      await expect(form.getByRole("button", { name: "Connect GitHub", exact: true }).locator("svg use"))
+      await expect(form.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
         .toHaveAttribute("href", "/assets/codewire/icons-v2.svg#icon-github");
-
-      const enrollmentResponse = page.waitForResponse((response) => (
-        response.url().includes("/settings/credentials/_actions/credentials/oauth/enroll")
-        && response.request().method() === "POST"
-      ));
-      await form.getByRole("button", { name: "Connect GitHub", exact: true }).click();
-      const response = await enrollmentResponse;
-      expect(response.status()).toBe(200);
-      expect(response.headers()["cache-control"]).toBe("no-store, no-cache, must-revalidate");
-      expect(response.headers()["x-accel-buffering"]).toBeUndefined();
-      const responseBody = await response.text();
-      const challenge = responseBody.indexOf("ABCD-EFGH");
-      const committed = responseBody.indexOf("Credential connected.");
-      expect(challenge).toBeGreaterThan(-1);
-      expect(committed).toBeGreaterThan(challenge);
-
-      await expect(page.getByRole("heading", { name: "Authorize GitHub", exact: true })).toBeVisible();
-      await expect(page.getByText("ABCD-EFGH", { exact: true })).toBeVisible();
-      await expect(page.getByRole("link", { name: "Open GitHub authorization", exact: true }))
-        .toHaveAttribute("href", "https://github.com/login/device");
-      await expect(page.getByRole("status")).toHaveText("Credential connected.");
+      await expect(form).toContainText("Your verified GitHub username names this connection");
+      await expect(form).not.toContainText("one-time code");
+      await completeGithubAppConnection(page, "kind-synthetic-code-one");
+      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=github-app-connected`);
+      await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
       let rendered = await page.locator("body").textContent();
       expect(rendered?.includes("gho_")).toBe(false);
+      expect(rendered?.includes("ghu_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
-      await page.getByRole("link", { name: "Return to credentials", exact: true }).click();
-      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/`);
       let row = page.locator(".cw-credential-row", { hasText: name });
       await expect(row).toHaveCount(1);
       await expect(row).toContainText("GitHub · OAuth");
@@ -91,13 +123,14 @@ test.describe("managed provider credential browser journey", () => {
       await expect(row.getByText("Rename", { exact: true })).toHaveCount(0);
       rendered = await page.locator("body").textContent();
       expect(rendered?.includes("gho_")).toBe(false);
+      expect(rendered?.includes("ghu_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
       await openGithubConnection(page);
-      await page.getByRole("form", { name: "GitHub", exact: true })
-        .getByRole("button", { name: "Connect GitHub", exact: true }).click();
-      await expect(page.getByRole("alert")).toContainText("No credential was overwritten");
-      await page.getByRole("link", { name: "Return to credentials", exact: true }).click();
+      await completeGithubAppConnection(page, "kind-synthetic-code-two");
+      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-app-already-connected&dialog=connect-github`);
+      await expect(page.getByRole("alert")).toContainText("This GitHub account is already connected");
+      await page.goto("/settings/credentials/");
       await expect(row).toHaveCount(1);
       await expect(row).toContainText("Generation 1");
 
@@ -151,6 +184,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("github-repository-draft");
       rendered = await page.locator("body").textContent();
       expect(rendered?.includes("gho_")).toBe(false);
+      expect(rendered?.includes("ghu_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
       await source.getByRole("textbox", { name: "Branch", exact: true }).fill("main");

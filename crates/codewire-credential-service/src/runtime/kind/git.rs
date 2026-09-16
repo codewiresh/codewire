@@ -22,6 +22,7 @@ use tempfile::TempDir;
 use tokio::sync::Semaphore;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+use super::provider::{GITHUB_APP_USER_TOKEN, GITHUB_DEVICE_TOKEN};
 use process::{IO_LIMIT, command, run};
 
 pub(super) const REVISION: &str = "78e440926ea15ee9644a69199694e39f6f06e3ce";
@@ -79,12 +80,7 @@ fn validate(
         (&Method::POST, UPLOAD_PACK) => Operation::UploadPack,
         _ => return Err(Error::Protocol),
     };
-    let authorization = format!(
-        "Basic {}",
-        base64::engine::general_purpose::STANDARD
-            .encode("x-access-token:gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    );
-    if single(headers, "authorization")? != Some(authorization.as_bytes())
+    if !github_authorization_is_synthetic(single(headers, "authorization")?)
         || single(headers, "user-agent")? != Some(b"Codewire-Credential-Broker")
         || single(headers, "accept-encoding")? != Some(b"identity")
         || headers.keys().any(|name| {
@@ -164,6 +160,18 @@ fn validate(
         protocol,
         body,
     })
+}
+
+fn github_authorization_is_synthetic(value: Option<&[u8]>) -> bool {
+    [GITHUB_DEVICE_TOKEN, GITHUB_APP_USER_TOKEN]
+        .iter()
+        .any(|token| {
+            let authorization = format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
+            );
+            value == Some(authorization.as_bytes())
+        })
 }
 
 struct Lifecycle {

@@ -275,6 +275,22 @@ class EnrollGithubResponse(_message.Message):
     credential: Credential
     def __init__(self, challenge: _Optional[_Union[GithubDeviceChallenge, _Mapping]] = ..., credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
 
+class CompleteGithubAppAuthorizationRequest(_message.Message):
+    __slots__ = ("code", "credential_id", "expected_revocation_generation")
+    CODE_FIELD_NUMBER: _ClassVar[int]
+    CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_REVOCATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    code: bytes
+    credential_id: str
+    expected_revocation_generation: int
+    def __init__(self, code: _Optional[bytes] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
+
+class CompleteGithubAppAuthorizationResponse(_message.Message):
+    __slots__ = ("credential",)
+    CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    credential: Credential
+    def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
+
 class RevokeCredentialRequest(_message.Message):
     __slots__ = ("credential_id", "expected_revocation_generation")
     CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]

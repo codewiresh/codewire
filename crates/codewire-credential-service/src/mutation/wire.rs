@@ -106,6 +106,30 @@ impl CredentialMutationService for Service {
         connectrpc::Response::stream_ok(stream)
     }
 
+    async fn complete_github_app_authorization(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::CompleteGithubAppAuthorizationRequest>,
+    ) -> ServiceResult<proto::CompleteGithubAppAuthorizationResponse> {
+        let authority = authority(&ctx)?;
+        let mut request = request.to_owned_message();
+        let code = zeroize::Zeroizing::new(std::mem::take(&mut request.code));
+        let metadata = self
+            .owner
+            .complete_github_app_authorization(
+                authority,
+                code,
+                request.credential_id,
+                request.expected_revocation_generation,
+            )
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::CompleteGithubAppAuthorizationResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
+    }
+
     async fn generate_ssh_credential(
         &self,
         ctx: RequestContext,

@@ -35,6 +35,9 @@ git -C "$fixture" init -q
 git -C "$fixture" config user.name 'Release Guard Test'
 git -C "$fixture" config user.email release-guard@example.invalid
 git -C "$fixture" config commit.gpgsign false
+# The fixture explicitly signs the cases that require a generated fixture key.
+# Keep its deliberately unsigned annotated case independent of host defaults.
+git -C "$fixture" config tag.gpgSign false
 git -C "$fixture" commit -q --allow-empty -m base
 git -C "$fixture" branch -M main
 git -C "$fixture" commit -q --allow-empty -m release

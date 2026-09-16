@@ -39,6 +39,12 @@ spec:
                   name: codewire-dashboard-public-config
                   key: TURNSTILE_SITE_KEY
                   optional: true
+            - name: GITHUB_APP_SLUG
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-dashboard-public-config
+                  key: GITHUB_APP_SLUG
+                  optional: true
           ports:
             - containerPort: 5173
           securityContext:

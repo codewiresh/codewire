@@ -206,8 +206,17 @@ grep -Fq 'page.waitForURL(`${ssrUrl}${bucketPath}?message=secret-deleted`)' \
   "$SECRETS_PRESETS" || fail 'secret deletion does not wait for redirect completion'
 grep -Fq 'PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE !== "1"' "$CREDENTIALS" ||
   fail 'managed credential browser journey is not fixture-only'
-grep -Fq 'responseBody.indexOf("ABCD-EFGH")' "$CREDENTIALS" ||
-  fail 'managed credential browser journey does not prove challenge-before-commit ordering'
+grep -Fq 'completeGithubAppConnection' "$CREDENTIALS" ||
+  fail 'managed credential browser journey does not drive the GitHub App callback'
+grep -Fq '/settings/credentials/_actions/github/authorize' "$CREDENTIALS" ||
+  fail 'managed credential browser journey does not preserve the GitHub App installation redirect'
+grep -Fq '/apps/codewire-synthetic/installations/new' "$CREDENTIALS" ||
+  fail 'managed credential browser journey does not bind the synthetic GitHub App slug'
+grep -Fq 'response.headers()["referrer-policy"]' "$CREDENTIALS" ||
+  fail 'managed credential browser journey does not verify callback referrer protection'
+if grep -Fq 'responseBody.indexOf("ABCD-EFGH")' "$CREDENTIALS"; then
+  fail 'managed credential browser journey still models GitHub device authorization'
+fi
 grep -Fq 'PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture"' "$COMMON" ||
   fail 'Kind browser wrapper does not overwrite the credential fixture selection'
 grep -Fq 'runtime::kind::serve_kind_credential_fixture' "$COMMON" ||
