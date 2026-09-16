@@ -602,7 +602,7 @@ impl BrokerUpstreamTransport for AppAuthorizationUpstream {
                 return Err(BrokerUpstreamError::Protocol);
             }
             if form.get("code").map(|value| value.as_ref()) == Some("synthetic-code-123")
-                && form.get("grant_type").is_none()
+                && !form.contains_key("grant_type")
             {
                 return Ok(json_upstream_response(serde_json::json!({
                     "access_token": APP_INITIAL_ACCESS_TOKEN,
