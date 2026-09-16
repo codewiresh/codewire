@@ -6,6 +6,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use codewire_proto::codewire::v1::DesiredState;
 use connectrpc::ErrorCode;
 use serde::Serialize;
 
@@ -17,14 +18,75 @@ struct Readiness {
     environment_id: String,
     running: bool,
     setup_complete: bool,
+    detail: Detail,
+}
+
+/// Lifecycle eligibility is presentation, never mutation authorization. Each
+/// submitted action still independently enforces its backend actor/policy gate.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Detail {
+    state: &'static str,
+    desired_state: &'static str,
+    tone: &'static str,
+    last_event: String,
+    resources: String,
+    cpu_millicores: i32,
+    memory_mib: i32,
+    disk_gib: i32,
+    start_eligible: bool,
+    stop_eligible: bool,
+    delete_eligible: bool,
+    actions_allowed: bool,
+    pending: bool,
+}
+
+fn desired_state_name(value: i32) -> &'static str {
+    match value {
+        value if value == DesiredState::Started as i32 => "started",
+        value if value == DesiredState::Stopped as i32 => "stopped",
+        value if value == DesiredState::Destroyed as i32 => "destroyed",
+        value if value == DesiredState::Archived as i32 => "archived",
+        value if value == DesiredState::Resized as i32 => "resized",
+        _ => "unknown",
+    }
+}
+
+fn lifecycle_pending(state: &str, desired: &str) -> bool {
+    match state {
+        "running" => !matches!(desired, "started" | "resized"),
+        "stopped" => desired != "stopped",
+        "destroyed" => desired != "destroyed",
+        "archived" => desired != "archived",
+        "error" | "build failed" => false,
+        _ => true,
+    }
 }
 
 impl Readiness {
-    fn new(row: EnvironmentRow, setup_complete: bool) -> Self {
+    fn new(row: EnvironmentRow, setup_complete: bool, desired_state: i32) -> Self {
+        let desired_state = desired_state_name(desired_state);
+        let pending = lifecycle_pending(row.state, desired_state);
+        let allowed = row.confidential_actions_allowed;
         Self {
             environment_id: row.id,
             running: row.state == "running" && row.confidential_actions_allowed,
             setup_complete,
+            detail: Detail {
+                state: row.state,
+                desired_state,
+                tone: row.state_tone,
+                last_event: row.last_event,
+                resources: row.resources,
+                cpu_millicores: row.cpu_millicores,
+                memory_mib: row.memory_mb,
+                disk_gib: row.disk_gb,
+                start_eligible: allowed && !pending && row.can_start,
+                stop_eligible: allowed && !pending && row.can_stop,
+                delete_eligible: !pending && row.can_destroy,
+                actions_allowed: allowed,
+                pending,
+            },
         }
     }
 }
@@ -99,9 +161,13 @@ pub(super) async fn get(
         }
     };
     let setup_complete = source.setup_complete;
+    let desired_state = source.desired_state.to_i32();
     let mut row = environment_connect::environment_row(source);
     super::environments::apply_confidential_visibility(&state, dashboard.is_admin, &mut row);
-    json(StatusCode::OK, Readiness::new(row, setup_complete))
+    json(
+        StatusCode::OK,
+        Readiness::new(row, setup_complete, desired_state),
+    )
 }
 
 #[cfg(test)]
@@ -120,11 +186,35 @@ mod tests {
         };
         let mut row = environment_connect::environment_row(source);
         row.confidential_actions_allowed = false;
-        let value = serde_json::to_value(Readiness::new(row, false)).unwrap();
+        let value =
+            serde_json::to_value(Readiness::new(row, false, DesiredState::Started as i32)).unwrap();
         assert_eq!(value["running"], false);
         assert_eq!(value["setupComplete"], false);
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value.as_object().unwrap().len(), 4);
         assert!(!value.to_string().contains("canary"));
+    }
+
+    #[test]
+    fn accepted_desired_transition_stays_pending_before_observed_state_changes() {
+        assert!(lifecycle_pending("running", "stopped"));
+        assert!(lifecycle_pending("stopped", "started"));
+        assert!(lifecycle_pending("running", "destroyed"));
+        assert!(lifecycle_pending("running", "unknown"));
+        assert!(!lifecycle_pending("running", "started"));
+        assert!(!lifecycle_pending("running", "resized"));
+        assert!(!lifecycle_pending("stopped", "stopped"));
+        assert!(!lifecycle_pending("error", "started"));
+        for state in [
+            "pending",
+            "creating",
+            "starting",
+            "stopping",
+            "resizing",
+            "destroying",
+            "unknown",
+        ] {
+            assert!(lifecycle_pending(state, "started"));
+        }
     }
 
     #[test]
