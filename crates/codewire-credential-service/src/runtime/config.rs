@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use codewire_credential_broker::GitHubAppAuthorizationConfig;
 use codewire_protected_store::secret_envelope::OpenBaoTransitConfig;
 use codewire_tls::ServerTlsFiles;
 use url::Url;
@@ -53,6 +54,7 @@ pub struct CredentialServiceConfig {
     pub(super) private_tls: ServerTlsFiles,
     pub(super) codex_executable: PathBuf,
     pub(super) github_executable: PathBuf,
+    pub(super) github_app_authorization: Option<GitHubAppAuthorizationConfig>,
     pub(super) runtime_directory: PathBuf,
     pub(super) credential_openbao: OpenBaoTransitConfig,
     pub(super) application_openbao: OpenBaoTransitConfig,
@@ -98,6 +100,7 @@ impl CredentialServiceConfig {
             return Err(RuntimeError::Configuration("credential listener ports"));
         }
         let public_origin = parse_public_origin(&required("CREDENTIAL_PUBLIC_ORIGIN")?)?;
+        let github_app_authorization = github_app_authorization_config(&lookup, &public_origin)?;
         let private_tls = ServerTlsFiles::new(
             path("CREDENTIAL_BROKER_TLS_CERT_FILE")?,
             path("CREDENTIAL_BROKER_TLS_KEY_FILE")?,
@@ -145,10 +148,46 @@ impl CredentialServiceConfig {
             private_tls,
             codex_executable: path("CREDENTIAL_CODEX_EXECUTABLE")?,
             github_executable: path("CREDENTIAL_GITHUB_EXECUTABLE")?,
+            github_app_authorization,
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
             credential_openbao,
             application_openbao,
         })
+    }
+}
+
+fn github_app_authorization_config(
+    lookup: &impl Fn(&str) -> Option<OsString>,
+    public_origin: &http::HeaderValue,
+) -> Result<Option<GitHubAppAuthorizationConfig>, RuntimeError> {
+    let value = |name: &'static str| {
+        lookup(name)
+            .and_then(|value| value.into_string().ok())
+            .filter(|value| !value.is_empty() && value.len() <= 16 * 1024)
+    };
+    let (client_id, client_secret, app_slug) = (
+        value("CREDENTIAL_GITHUB_APP_CLIENT_ID"),
+        value("CREDENTIAL_GITHUB_APP_CLIENT_SECRET"),
+        value("CREDENTIAL_GITHUB_APP_SLUG"),
+    );
+    let invalid = RuntimeError::Configuration("GitHub App authorization configuration");
+    match (client_id, client_secret, app_slug) {
+        (None, None, None) => Ok(None),
+        (Some(client_id), Some(client_secret), Some(app_slug)) => {
+            let callback = format!(
+                "{}/settings/credentials/github/callback",
+                public_origin.to_str().map_err(|_| invalid)?
+            );
+            GitHubAppAuthorizationConfig::new(
+                client_id,
+                Zeroizing::new(client_secret),
+                app_slug,
+                callback,
+            )
+            .map(Some)
+            .map_err(|_| invalid)
+        }
+        _ => Err(invalid),
     }
 }
 
@@ -308,6 +347,43 @@ mod tests {
                 .unwrap(),
             RuntimeError::Configuration("distinct credential and application OpenBao authorities")
         );
+    }
+
+    #[test]
+    fn github_app_authorization_is_optional_but_must_be_complete_and_exact() {
+        let values = inputs();
+        let public = parse_public_origin("https://codewire.example").unwrap();
+        assert!(
+            github_app_authorization_config(&|name| values.get(name).cloned(), &public)
+                .unwrap()
+                .is_none()
+        );
+        let mut complete = inputs();
+        complete.insert("CREDENTIAL_GITHUB_APP_CLIENT_ID", "Iv1.synthetic".into());
+        complete.insert(
+            "CREDENTIAL_GITHUB_APP_CLIENT_SECRET",
+            "synthetic-client-secret".into(),
+        );
+        complete.insert("CREDENTIAL_GITHUB_APP_SLUG", "codewire".into());
+        assert!(
+            github_app_authorization_config(&|name| complete.get(name).cloned(), &public)
+                .unwrap()
+                .is_some()
+        );
+        for name in [
+            "CREDENTIAL_GITHUB_APP_CLIENT_ID",
+            "CREDENTIAL_GITHUB_APP_CLIENT_SECRET",
+            "CREDENTIAL_GITHUB_APP_SLUG",
+        ] {
+            let mut partial = complete.clone();
+            partial.remove(name);
+            assert!(matches!(
+                github_app_authorization_config(&|key| partial.get(key).cloned(), &public),
+                Err(RuntimeError::Configuration(
+                    "GitHub App authorization configuration"
+                ))
+            ));
+        }
     }
 
     #[test]

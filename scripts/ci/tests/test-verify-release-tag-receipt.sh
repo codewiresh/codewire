@@ -18,6 +18,9 @@ mkdir -p "$repo" "$mock_bin"
 git init -q -b main "$repo"
 git -C "$repo" config user.name 'Release Receipt Test'
 git -C "$repo" config user.email receipt@test.invalid
+# This fixture verifies tag provenance paths; it does not exercise a local
+# signing agent, so make its disposable annotated tag hermetic.
+git -C "$repo" config tag.gpgSign false
 printf 'release\n' >"$repo/product.txt"
 git -C "$repo" add product.txt
 git -C "$repo" -c commit.gpgsign=false commit -q -m release

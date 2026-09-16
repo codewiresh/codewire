@@ -2,6 +2,7 @@
 
 use std::future::Future;
 
+use codewire_credential_broker::GitHubAppAuthorizationImport;
 use codewire_credential_broker::codex_enrollment::{
     CodexPublicationOutcome, CompletedCodexEnrollment,
 };
@@ -15,6 +16,7 @@ use super::{Error, enrollment_error};
 pub(super) enum Completed {
     Codex(CompletedCodexEnrollment),
     Github(CompletedGitHubEnrollment),
+    GithubApp(GitHubAppAuthorizationImport),
 }
 
 #[derive(Clone, Copy)]
@@ -29,6 +31,7 @@ impl Completed {
         match self {
             Self::Codex(_) => "openai",
             Self::Github(_) => "github",
+            Self::GithubApp(_) => "github",
         }
     }
 
@@ -36,6 +39,7 @@ impl Completed {
         match self {
             Self::Codex(value) => value.check_active().map_err(enrollment_error),
             Self::Github(value) => value.check_active().map_err(github_error),
+            Self::GithubApp(_) => Ok(()),
         }
     }
 
@@ -46,6 +50,9 @@ impl Completed {
                 (bundle.into_bytes(), hint)
             }
             Self::Github(value) => value.take_import().map_err(github_error)?.into_parts(),
+            Self::GithubApp(value) => value
+                .take_import()
+                .map_err(super::github_app::github_app_error)?,
         };
         let material = ProtectedValue::new(std::mem::take(&mut *bytes))
             .map_err(|_| Error::EnrollmentFailed)?;
@@ -65,6 +72,7 @@ impl Completed {
                 .wait_for_publication(future)
                 .await
                 .map_err(github_error),
+            Self::GithubApp(_) => Ok(future.await),
         }
     }
 
@@ -86,6 +94,7 @@ impl Completed {
                 })
                 .await
                 .map_err(github_error),
+            Self::GithubApp(_) => Ok(()),
         }
     }
 }

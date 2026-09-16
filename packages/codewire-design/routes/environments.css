@@ -27,7 +27,7 @@
 .cw-environment-facts strong { color: var(--fg-primary); }
 .cw-environment-facts a { color: var(--accent); }
 .cw-port-panel { scroll-margin-top: var(--space-4); }
-.cw-port-list { display: grid; margin-bottom: var(--space-4); }
+.cw-port-list { display: grid; list-style: none; margin: 0 0 var(--space-4); padding: 0; }
 .cw-port-row { display: grid; grid-template-columns: minmax(8rem, 1fr) auto auto; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: 1px solid var(--border-subtle); }
 .cw-port-row strong, .cw-port-row small { display: block; }
 .cw-port-row small { margin-top: .2rem; color: var(--fg-tertiary); }
@@ -235,3 +235,5 @@
 .cw-github-repository-list button:hover { background: var(--bg-surface-hover); }
 .cw-github-repository-list button:disabled { opacity: 0.5; cursor: not-allowed; }
 .cw-github-repository-list small { color: var(--fg-secondary); }
+.cw-port-preview-url { display: block; overflow-wrap: anywhere; font-size: 0.75rem; }
+.cw-port-dialog { width: min(42rem, calc(100% - 2rem)); }

@@ -309,6 +309,14 @@ pub(crate) fn router() -> Router<AppState> {
             post(credentials::enroll_oauth_action).layer(DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
+            "/settings/credentials/_actions/github/authorize",
+            post(credentials::github_app_authorize_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/github/callback",
+            get(credentials::github_app_callback),
+        )
+        .route(
             "/settings/credentials/_actions/profiles/create",
             post(credentials::create_profile_action),
         )
@@ -340,6 +348,10 @@ pub(crate) fn router() -> Router<AppState> {
             get(sandbox_detail_slash_redirect),
         )
         .route("/{slug}/{environment_id}/", get(terminal::page))
+        .route(
+            "/{slug}/{environment_id}/ports/",
+            get(environments::port_fragment),
+        )
         .route("/{slug}", get(organization_slash_redirect))
         .route("/{slug}/", get(environments::page))
 }

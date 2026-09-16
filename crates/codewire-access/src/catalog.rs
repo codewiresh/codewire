@@ -172,6 +172,7 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<HttpProvider>("\"unknown\"").is_err());
+        assert!(HttpProvider::parse("github-app-authorization").is_none());
     }
 
     #[test]

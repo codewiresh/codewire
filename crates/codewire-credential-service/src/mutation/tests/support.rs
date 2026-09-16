@@ -415,7 +415,7 @@ impl Harness {
                 .map_err(|_|anyhow::anyhow!("synthetic GitHub enrollment configuration"))?);
             let provider = Arc::new(SyntheticKek::default());
             let store = Arc::new(PlatformCredentialStore::new(pool.clone(),provider.clone(),builtin_provider_catalog()));
-            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),enrollment,github));
+            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),enrollment,github,None));
             let rpc = Rpc {client:Client::builder().no_proxy().timeout(TIMEOUT).build()?,url:format!("http://{address}")};
             let server = listener.map(|listener| {
                 let app = connect_router_with_auth(owner.router(),ConnectAuthLayer::credential_mutation(AuthState{pool:pool.clone()},http::HeaderValue::from_static("https://codewire.example")));

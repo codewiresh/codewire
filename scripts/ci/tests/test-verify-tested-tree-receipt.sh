@@ -14,6 +14,8 @@ mkdir -p "$repo" "$mock_bin"
 git init -q "$repo"
 git -C "$repo" config user.name 'Receipt Test'
 git -C "$repo" config user.email 'receipt@test.invalid'
+# The fixture exercises receipt topology, not signing-agent availability.
+git -C "$repo" config commit.gpgsign false
 
 printf 'base\n' > "$repo/product.txt"
 git -C "$repo" add product.txt

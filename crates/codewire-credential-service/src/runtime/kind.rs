@@ -13,8 +13,10 @@ mod git;
 mod provider;
 
 use super::*;
+use codewire_credential_broker::GitHubAppAuthorizationConfig;
 use codewire_platform_credentials::PlatformCredentialStore;
 use codewire_protected_store::secret_envelope::TestKekProvider;
+use zeroize::Zeroizing;
 
 const TARGET: &str = "codewire_kind_credential_fixture";
 
@@ -64,6 +66,13 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         let git = git::Fixture::create(&config.runtime_directory).await
             .map_err(|_| RuntimeError::Configuration("Kind Git fixture"))?;
         let provider = provider::SyntheticProvider::with_git(git.clone());
+        let github_app = GitHubAppAuthorizationConfig::new(
+            provider::GITHUB_APP_CLIENT_ID.into(),
+            Zeroizing::new(provider::GITHUB_APP_CLIENT_SECRET.into()),
+            provider::GITHUB_APP_SLUG.into(),
+            provider::GITHUB_APP_CALLBACK_URL.into(),
+        )
+        .map_err(|_| RuntimeError::Configuration("Kind GitHub App fixture"))?;
         // Keep the private tmpfs fixture alive through both owner drains.
         let (fixture, enrollment, github) = enrollment::Fixture::create(&config.runtime_directory)?;
         let store = Arc::new(PlatformCredentialStore::new(
@@ -90,6 +99,10 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             store.clone(),
             CodexEnrollmentOwner::new(enrollment),
             GitHubEnrollmentOwner::new(github),
+            Some(codewire_credential_broker::GitHubAppAuthorizationOwner::new(
+                github_app,
+                Arc::new(provider.clone()),
+            )),
         ));
         let repositories = Arc::new(GithubRepositoryOwner::new(
             pool.clone(),

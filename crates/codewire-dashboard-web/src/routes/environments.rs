@@ -83,6 +83,8 @@ pub(super) struct EnvironmentIdSubmission {
     #[serde(rename = "_csrf")]
     csrf: String,
     environment_id: String,
+    #[serde(default)]
+    return_to: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +95,8 @@ pub(super) struct PortCreateSubmission {
     port: String,
     label: String,
     access: String,
+    #[serde(default)]
+    dialog: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +105,8 @@ pub(super) struct PortDeleteSubmission {
     csrf: String,
     environment_id: String,
     port_id: String,
+    #[serde(default)]
+    dialog: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -631,15 +637,19 @@ pub(super) async fn list_fragment(
     headers: HeaderMap,
 ) -> Response {
     let continuation = environments_path(&slug);
-    let (_, organization, cookie) = match get_context(&state, &headers, &slug, &continuation).await
-    {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
-    let environments = match filtered_environments(&state, cookie, &organization.id, &query).await {
-        Ok(environments) => environments,
-        Err(error) => return connect_page_error(error, &continuation, &headers),
-    };
+    let (dashboard, organization, cookie) =
+        match get_context(&state, &headers, &slug, &continuation).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let mut environments =
+        match filtered_environments(&state, cookie, &organization.id, &query).await {
+            Ok(environments) => environments,
+            Err(error) => return connect_page_error(error, &continuation, &headers),
+        };
+    for environment in &mut environments {
+        apply_confidential_visibility(&state, dashboard.is_admin, environment);
+    }
     let token = csrf_cookie_value(&headers).unwrap_or_default().to_owned();
     let page = EnvironmentsPageView {
         environments,
@@ -1107,7 +1117,7 @@ pub(super) async fn create_port(
     headers: HeaderMap,
     Form(submission): Form<PortCreateSubmission>,
 ) -> Response {
-    let (_, organization, cookie) = match action_context(
+    let (dashboard, organization, cookie) = match action_context(
         &state,
         &headers,
         &slug,
@@ -1120,58 +1130,55 @@ pub(super) async fn create_port(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.environment_id) {
+        if submission.dialog && headers.contains_key(HTMX_REQUEST) {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
         return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
     }
-    let Ok(port) = submission.port.parse::<i32>() else {
-        return ports_redirect(
+    let port = submission
+        .port
+        .parse::<i32>()
+        .ok()
+        .filter(|port| (1..=65_535).contains(port));
+    let result = if let Some(port) = port.filter(|_| valid_port_label(&submission.label)) {
+        match environment_connect::create_port(
             &state,
-            &headers,
-            &slug,
-            &submission.environment_id,
-            "invalid-port",
-        );
+            cookie.clone(),
+            CreatePortRequest {
+                org_id: organization.id.clone(),
+                environment_id: submission.environment_id.clone(),
+                port,
+                label: submission.label.clone(),
+                access: port_access(&submission.access).into(),
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            Ok(()) => "port-created",
+            Err(error) if error.code == ErrorCode::Unauthenticated => {
+                return login_redirect(&environments_path(&slug), &headers);
+            }
+            Err(error) if error.code == ErrorCode::PermissionDenied => "not-authorized",
+            Err(_) => "port-unavailable",
+        }
+    } else {
+        "invalid-port"
     };
-    if !(1..=65_535).contains(&port) || !valid_port_label(&submission.label) {
-        return ports_redirect(
-            &state,
-            &headers,
-            &slug,
-            &submission.environment_id,
-            "invalid-port",
-        );
-    }
-    let result = environment_connect::create_port(
+    port_response(
         &state,
+        &headers,
+        &organization,
         cookie,
-        CreatePortRequest {
-            org_id: organization.id,
-            environment_id: submission.environment_id.clone(),
-            port,
-            label: submission.label,
-            access: port_access(&submission.access).into(),
-            ..Default::default()
+        dashboard.is_admin,
+        PortActionView {
+            environment_id: &submission.environment_id,
+            modal: submission.dialog,
+            result,
+            draft: Some((&submission.port, &submission.label, &submission.access)),
         },
     )
-    .await;
-    match result {
-        Ok(()) => ports_redirect(
-            &state,
-            &headers,
-            &slug,
-            &submission.environment_id,
-            "port-created",
-        ),
-        Err(error) if error.code == ErrorCode::Unauthenticated => {
-            login_redirect(&environments_path(&slug), &headers)
-        }
-        Err(_) => ports_redirect(
-            &state,
-            &headers,
-            &slug,
-            &submission.environment_id,
-            "port-unavailable",
-        ),
-    }
+    .await
 }
 
 pub(super) async fn delete_port(
@@ -1180,7 +1187,7 @@ pub(super) async fn delete_port(
     headers: HeaderMap,
     Form(submission): Form<PortDeleteSubmission>,
 ) -> Response {
-    let (_, organization, cookie) = match action_context(
+    let (dashboard, organization, cookie) = match action_context(
         &state,
         &headers,
         &slug,
@@ -1193,38 +1200,185 @@ pub(super) async fn delete_port(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.environment_id) || !valid_identifier(&submission.port_id) {
+        if submission.dialog && headers.contains_key(HTMX_REQUEST) {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
         return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
     }
-    let result = environment_connect::delete_port(
+    let result = match environment_connect::delete_port(
         &state,
-        cookie,
+        cookie.clone(),
         DeletePortRequest {
-            org_id: organization.id,
+            org_id: organization.id.clone(),
             environment_id: submission.environment_id.clone(),
             port_id: submission.port_id,
             ..Default::default()
         },
     )
-    .await;
-    match result {
-        Ok(()) => ports_redirect(
-            &state,
-            &headers,
-            &slug,
-            &submission.environment_id,
-            "port-deleted",
-        ),
+    .await
+    {
+        Ok(()) => "port-deleted",
         Err(error) if error.code == ErrorCode::Unauthenticated => {
-            login_redirect(&environments_path(&slug), &headers)
+            return login_redirect(&environments_path(&slug), &headers);
         }
-        Err(_) => ports_redirect(
-            &state,
-            &headers,
-            &slug,
-            &submission.environment_id,
-            "port-unavailable",
-        ),
+        Err(error) if error.code == ErrorCode::PermissionDenied => "not-authorized",
+        Err(_) => "port-unavailable",
+    };
+    port_response(
+        &state,
+        &headers,
+        &organization,
+        cookie,
+        dashboard.is_admin,
+        PortActionView {
+            environment_id: &submission.environment_id,
+            modal: submission.dialog,
+            result,
+            draft: None,
+        },
+    )
+    .await
+}
+
+pub(super) async fn port_fragment(
+    State(state): State<AppState>,
+    Path((slug, environment_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if !super::terminal::canonical_environment_id(&environment_id)
+        || !codewire_server_core::organization_slug::valid_organization_slug(&slug)
+    {
+        return error_page(WebError::NotFound);
     }
+    let continuation = super::terminal::terminal_path(&slug, &environment_id);
+    let (dashboard, organization, cookie) =
+        match get_context(&state, &headers, &slug, &continuation).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    render_port_dialog(
+        &state,
+        &headers,
+        &organization,
+        cookie,
+        dashboard.is_admin,
+        PortActionView {
+            environment_id: &environment_id,
+            modal: true,
+            result: "",
+            draft: None,
+        },
+    )
+    .await
+}
+
+struct PortActionView<'a> {
+    environment_id: &'a str,
+    modal: bool,
+    result: &'a str,
+    draft: Option<(&'a str, &'a str, &'a str)>,
+}
+
+async fn port_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    organization: &OrganizationContext,
+    cookie: HeaderValue,
+    is_admin: bool,
+    action: PortActionView<'_>,
+) -> Response {
+    if action.modal && headers.contains_key(HTMX_REQUEST) {
+        render_port_dialog(state, headers, organization, cookie, is_admin, action).await
+    } else {
+        ports_redirect(
+            state,
+            headers,
+            &organization.slug,
+            action.environment_id,
+            action.result,
+        )
+    }
+}
+
+async fn render_port_dialog(
+    state: &AppState,
+    headers: &HeaderMap,
+    organization: &OrganizationContext,
+    cookie: HeaderValue,
+    is_admin: bool,
+    action: PortActionView<'_>,
+) -> Response {
+    if !super::terminal::canonical_environment_id(action.environment_id) {
+        return error_page(WebError::NotFound);
+    }
+    let continuation = super::terminal::terminal_path(&organization.slug, action.environment_id);
+    let mut environment = match environment_connect::environment(
+        state,
+        cookie.clone(),
+        &organization.id,
+        action.environment_id,
+    )
+    .await
+    {
+        Ok(environment) => environment,
+        Err(error) => return connect_page_error(error, &continuation, headers),
+    };
+    apply_confidential_visibility(state, is_admin, &mut environment);
+    if !environment.confidential_actions_allowed {
+        return error_page(WebError::Forbidden);
+    }
+    let ports =
+        match environment_connect::ports(state, cookie, &organization.id, action.environment_id)
+            .await
+        {
+            Ok(ports) => ports,
+            Err(error) => return connect_page_error(error, &continuation, headers),
+        };
+    let error = port_error(action.result);
+    let (port, label, access) = if error.is_empty() {
+        ("", "", "creator")
+    } else {
+        action.draft.unwrap_or(("", "", "creator"))
+    };
+    let panel = EnvironmentPortPanelView {
+        environment_id: environment.id,
+        environment_name: environment.name,
+        ports,
+        port: port.chars().take(16).collect(),
+        label: label.chars().take(128).collect(),
+        access: allowlisted_access(access).to_owned(),
+        form_error: error.to_owned(),
+    };
+    // A partial response must not rotate the page's CSRF cookie or navigate
+    // away: the terminal and every unswapped form still belong to that page.
+    render_port_panel(
+        organization,
+        &panel,
+        csrf_cookie_value(headers).unwrap_or_default(),
+        page_message(action.result),
+    )
+}
+
+fn render_port_panel(
+    organization: &OrganizationContext,
+    panel: &EnvironmentPortPanelView,
+    csrf_token: &str,
+    message: &str,
+) -> Response {
+    render_template(
+        if panel.form_error.is_empty() {
+            StatusCode::OK
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        },
+        crate::templates::EnvironmentPortsTemplate {
+            organization,
+            panel,
+            csrf_token,
+            in_dialog: true,
+            message,
+        },
+    )
 }
 
 type LifecycleFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ConnectError>> + Send + 'a>>;
@@ -1240,34 +1394,63 @@ async fn lifecycle_action<F>(
 where
     F: for<'a> FnOnce(&'a AppState, HeaderValue, String, String) -> LifecycleFuture<'a>,
 {
-    let (_, organization, cookie) = match action_context(
-        state,
-        headers,
-        slug,
-        &submission.csrf,
-        environments_path(slug),
-    )
-    .await
-    {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
+    let continuation =
+        lifecycle_return_path(slug, &submission.environment_id, &submission.return_to);
+    let (_, organization, cookie) =
+        match action_context(state, headers, slug, &submission.csrf, continuation.clone()).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
     if !valid_identifier(&submission.environment_id) {
         return mutation_redirect(state, environments_path(slug), "", "invalid", headers);
     }
     match operation(state, cookie, organization.id, submission.environment_id).await {
-        Ok(()) => mutation_redirect(state, environments_path(slug), message, "", headers),
-        Err(error) if error.code == ErrorCode::Unauthenticated => {
-            login_redirect(&environments_path(slug), headers)
-        }
-        Err(error) => mutation_redirect(
+        Ok(()) => mutation_redirect(
             state,
-            environments_path(slug),
+            if message == "environment-destroying" {
+                environments_path(slug)
+            } else {
+                continuation
+            },
+            message,
             "",
-            mutation_error(&error),
             headers,
         ),
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&continuation, headers)
+        }
+        Err(error) => mutation_redirect(state, continuation, "", mutation_error(&error), headers),
     }
+}
+
+fn lifecycle_return_path(slug: &str, environment_id: &str, return_to: &str) -> String {
+    if return_to == "detail" && super::terminal::canonical_environment_id(environment_id) {
+        super::terminal::terminal_path(slug, environment_id)
+    } else {
+        environments_path(slug)
+    }
+}
+
+pub(super) fn apply_confidential_visibility(
+    state: &AppState,
+    is_admin: bool,
+    environment: &mut crate::view::EnvironmentRow,
+) {
+    environment.confidential_actions_allowed = confidential_interaction_visible(
+        environment.isolation_tier,
+        state.confidential_storage_enabled,
+        state.confidential_admin_only,
+        is_admin,
+    );
+}
+
+fn confidential_interaction_visible(
+    tier: &str,
+    enabled: bool,
+    admin_only: bool,
+    is_admin: bool,
+) -> bool {
+    tier != "confidential" || (enabled && (!admin_only || is_admin))
 }
 
 async fn build_page(
@@ -1283,9 +1466,7 @@ async fn build_page(
     let confidential_actions_allowed =
         state.confidential_storage_enabled && (!state.confidential_admin_only || is_admin);
     for environment in &mut environments {
-        if environment.isolation_tier == "confidential" {
-            environment.confidential_actions_allowed = confidential_actions_allowed;
-        }
+        apply_confidential_visibility(state, is_admin, environment);
     }
     hydrate_options(
         &mut form,
@@ -1791,7 +1972,7 @@ fn mutation_error(error: &ConnectError) -> &'static str {
     }
 }
 
-fn page_message(value: &str) -> &'static str {
+pub(super) fn page_message(value: &str) -> &'static str {
     match value {
         "environment-created" => "Sandbox creation started.",
         "environment-started" => "Sandbox start requested.",
@@ -1865,7 +2046,7 @@ fn resize_operation_redirect(
     mutation_redirect(state, target, "", "", headers)
 }
 
-fn page_error(value: &str) -> &'static str {
+pub(super) fn page_error(value: &str) -> &'static str {
     match value {
         "invalid" => "The Sandbox request was invalid for its current state.",
         "not-authorized" => "You do not have permission to change that Sandbox.",
@@ -1877,8 +2058,11 @@ fn page_error(value: &str) -> &'static str {
 
 fn port_error(value: &str) -> &'static str {
     match value {
+        "not-authorized" => "You do not have permission to change this preview.",
         "invalid-port" => "Port must be 1–65535 with a lowercase 2–22 character label.",
-        "port-unavailable" => "The port service is temporarily unavailable.",
+        "port-unavailable" => {
+            "The port change could not be confirmed. Check the current list before trying again."
+        }
         _ => "",
     }
 }
@@ -1912,6 +2096,135 @@ mod tests {
 
     use super::*;
     use crate::templates::EnvironmentCreateFormTemplate;
+
+    #[tokio::test]
+    async fn port_fragments_preserve_the_existing_csrf_token_and_terminal_document() {
+        let panel = EnvironmentPortPanelView {
+            environment_id: "5d1db799-4300-4ab3-b957-efb980760542".into(),
+            environment_name: "Example".into(),
+            ports: vec![crate::view::EnvironmentPortRow {
+                id: "port-id".into(),
+                port: 3000,
+                label: "web".into(),
+                access: "Creator",
+                preview_url: "https://web-5d1db-test.preview.example".into(),
+                has_preview: true,
+            }],
+            port: "8080".into(),
+            label: "<invalid>".into(),
+            access: "creator".into(),
+            form_error: "Check the preview label.".into(),
+        };
+        let response =
+            render_port_panel(&test_organization(), &panel, "existing-synthetic-csrf", "");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        for absent in [
+            "set-cookie",
+            "hx-redirect",
+            "hx-location",
+            "hx-refresh",
+            "location",
+        ] {
+            assert!(
+                !response.headers().contains_key(absent),
+                "unexpected {absent}"
+            );
+        }
+        let body = axum::body::to_bytes(response.into_body(), 1_048_576)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert_eq!(
+            html.matches("name=\"_csrf\" value=\"existing-synthetic-csrf\"")
+                .count(),
+            2
+        );
+        assert!(html.contains("hx-target=\"#sandbox-ports-content\""));
+        assert!(html.contains("Internal 3000"));
+        assert!(html.contains("https://web-5d1db-test.preview.example"));
+        assert!(html.contains("name=\"port\" type=\"number\""));
+        assert!(html.contains("value=\"8080\""));
+        assert!(html.contains("Check the preview label."));
+        assert!(!html.contains("<invalid>"));
+        assert!(html.contains("Sandbox creator"));
+        for forbidden in [
+            "<html",
+            "<script",
+            "data-terminal-root",
+            "Only me",
+            "External port",
+        ] {
+            assert!(!html.contains(forbidden), "unexpected {forbidden}");
+        }
+        let plain = crate::templates::EnvironmentPortsTemplate {
+            organization: &test_organization(),
+            panel: &panel,
+            csrf_token: "synthetic",
+            in_dialog: false,
+            message: "",
+        }
+        .render()
+        .unwrap();
+        assert!(!plain.contains("hx-post="));
+        assert!(plain.contains("method=\"post\""));
+    }
+
+    #[test]
+    fn lifecycle_returns_only_to_the_validated_current_sandbox() {
+        let id = "5d1db799-4300-4ab3-b957-efb980760542";
+        assert_eq!(
+            lifecycle_return_path("my-org", id, "detail"),
+            format!("/my-org/{id}/")
+        );
+        for target in [
+            "",
+            "list",
+            "//evil.test",
+            "https://evil.test/",
+            "/other-org/",
+            "Detail",
+        ] {
+            assert_eq!(lifecycle_return_path("my-org", id, target), "/my-org/");
+        }
+        for invalid in [
+            "",
+            "other-env",
+            "../other",
+            "5D1DB799-4300-4AB3-B957-EFB980760542",
+        ] {
+            assert_eq!(
+                lifecycle_return_path("my-org", invalid, "detail"),
+                "/my-org/"
+            );
+        }
+        let legacy: EnvironmentIdSubmission = serde_json::from_value(serde_json::json!({
+            "_csrf": "synthetic", "environment_id": id,
+        }))
+        .unwrap();
+        assert_eq!(legacy.return_to, "");
+    }
+
+    #[test]
+    fn confidential_visibility_is_identical_for_pages_and_fragments() {
+        for enabled in [false, true] {
+            for admin_only in [false, true] {
+                for is_admin in [false, true] {
+                    assert!(confidential_interaction_visible(
+                        "standard", enabled, admin_only, is_admin
+                    ));
+                    assert_eq!(
+                        confidential_interaction_visible(
+                            "confidential",
+                            enabled,
+                            admin_only,
+                            is_admin
+                        ),
+                        enabled && (!admin_only || is_admin),
+                    );
+                }
+            }
+        }
+    }
 
     fn test_organization() -> OrganizationContext {
         OrganizationContext {

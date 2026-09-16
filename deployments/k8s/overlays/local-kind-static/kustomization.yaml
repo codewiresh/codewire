@@ -18,6 +18,14 @@ resources:
   - dashboard.yaml
   - storage-class.yaml
 
+# Keep the static Kind renderer on the same synthetic browser App contract as
+# the managed fixture; the secret-bearing configuration remains test-only.
+configMapGenerator:
+  - name: codewire-dashboard-public-config
+    behavior: merge
+    literals:
+      - GITHUB_APP_SLUG=codewire-synthetic
+
 images:
   - name: git.example.com/codewire/derp
     newName: codewire-derp

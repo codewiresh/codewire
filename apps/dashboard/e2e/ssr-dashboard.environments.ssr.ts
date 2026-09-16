@@ -81,14 +81,16 @@ async function issueTerminalTicket(page: Page): Promise<string> {
 }
 
 async function expectTerminalLeaseDrained() {
-  const [lease] = await sql`
-    SELECT COUNT(*)::int AS count
-    FROM organization_mutation_leases
-    WHERE organization_id = ${orgId}
-      AND mutation_class = 'environment_runtime_dispatch'
-      AND state IN ('active', 'resolution_required')
-  `;
-  expect(lease.count).toBe(0);
+  await expect.poll(async () => {
+    const [lease] = await sql`
+      SELECT COUNT(*)::int AS count
+      FROM organization_mutation_leases
+      WHERE organization_id = ${orgId}
+        AND mutation_class = 'environment_runtime_dispatch'
+        AND state IN ('active', 'resolution_required')
+    `;
+    return lease.count;
+  }, { timeout: 15_000 }).toBe(0);
 }
 
 async function closeTicketBeforeAttachment(page: Page, ticket: string) {
@@ -619,6 +621,38 @@ test.describe.serial("server-rendered environments", () => {
       maskColor: "#080808",
     });
     await page.setViewportSize({ width: 1440, height: 900 });
+
+    const detailUrlBeforePorts = page.url();
+    const terminalBeforePorts = await terminalRoot.elementHandle();
+    const csrfBeforePorts = (await page.context().cookies()).find((cookie) => cookie.name === "codewire_ssr_csrf")?.value;
+    await page.getByRole("button", { name: "Ports", exact: true }).click();
+    const portPanel = page.getByRole("dialog", { name: `Ports · ${environmentName}`, exact: true });
+    await expect(portPanel).toBeVisible();
+    const configuredPort = portPanel.locator(".cw-port-row", {
+      has: page.getByText("web", { exact: true }),
+    });
+    await expect(configuredPort).toHaveCount(1);
+    await expect(configuredPort).toContainText("3000 · Creator");
+    await portPanel.getByRole("spinbutton", { name: "Internal port", exact: true }).fill("8080");
+    await portPanel.getByLabel("Preview label", { exact: true }).fill("manual-http");
+    await portPanel.getByRole("button", { name: "Add port", exact: true }).click();
+    await expect(portPanel.getByRole("status")).toContainText("Port created");
+    const port = portPanel.locator(".cw-port-row", {
+      has: page.getByText("manual-http", { exact: true }),
+    });
+    await expect(port).toContainText("8080");
+    await port.getByRole("button", { name: "Remove manual-http preview", exact: true }).click();
+    await expect(portPanel.getByRole("status")).toContainText("Port deleted");
+    await expect(port).toHaveCount(0);
+    await expect(configuredPort).toHaveCount(1);
+    await expect(configuredPort).toContainText("3000 · Creator");
+
+    await portPanel.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(portPanel).not.toBeVisible();
+    expect(page.url()).toBe(detailUrlBeforePorts);
+    expect(await terminalBeforePorts!.evaluate((element) => element === document.querySelector("[data-terminal-root]"))).toBe(true);
+    const csrfAfterPorts = (await page.context().cookies()).find((cookie) => cookie.name === "codewire_ssr_csrf")?.value;
+    expect(Boolean(csrfBeforePorts) && csrfBeforePorts === csrfAfterPorts).toBe(true);
     await page.getByRole("button", { name: "Disconnect" }).click();
     await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "true");
     await expectTerminalLeaseDrained();
@@ -642,34 +676,23 @@ test.describe.serial("server-rendered environments", () => {
     await closeTicketBeforeAttachment(page, ticket);
     await expectTerminalLeaseDrained();
     expect(disallowedBrowserCalls).toEqual([]);
-
-    await openRowActions(row);
-    await row.getByRole("link", { name: "Ports" }).click();
-    const portPanel = page.locator(".cw-port-panel");
-    const configuredPort = portPanel.locator(".cw-port-row", {
-      has: page.getByText("web", { exact: true }),
-    });
-    await expect(configuredPort).toHaveCount(1);
-    await expect(configuredPort).toContainText("3000 · Creator");
-    await portPanel.getByRole("spinbutton", { name: "Port" }).fill("8080");
-    await portPanel.getByLabel("Label", { exact: true }).fill("manual-http");
-    await portPanel.getByRole("button", { name: "Add port", exact: true }).click();
-    await expect(page.getByRole("status")).toContainText("Port created");
-    const port = portPanel.locator(".cw-port-row", {
-      has: page.getByText("manual-http", { exact: true }),
-    });
-    await expect(port).toContainText("8080");
-    await port.getByRole("button", { name: "Delete" }).click();
-    await expect(page.getByRole("status")).toContainText("Port deleted");
-    await expect(port).toHaveCount(0);
-    await expect(configuredPort).toHaveCount(1);
-    await expect(configuredPort).toContainText("3000 · Creator");
-
-    row = page.locator("tr", { hasText: environmentName }).first();
-    await openRowActions(row);
-    await row.getByRole("button", { name: "Stop" }).click();
+    await page.goto(`/${slug}/${environmentId}/`);
+    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "true");
+    await expectTerminalLeaseDrained();
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    const stopDialog = page.getByRole("dialog", { name: `Stop ${environmentName}?`, exact: true });
+    await expect(stopDialog).toBeVisible();
+    await expect(stopDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+    await stopDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(stopDialog).not.toBeVisible();
+    const [notStopped] = await sql`SELECT state FROM environments WHERE id = ${environmentId}`;
+    expect(notStopped.state).toBe("running");
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    await stopDialog.getByRole("button", { name: "Stop Sandbox", exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/${slug}/${environmentId}/\\?message=`));
     await waitForEnvironmentState(environmentId, ["stopped"], 120_000);
-    await page.reload();
+    await page.goto(`/${slug}/`);
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("stopped");
 
@@ -692,16 +715,20 @@ test.describe.serial("server-rendered environments", () => {
     expect(cleared.project_spec).not.toHaveProperty("secrets");
     expect(cleared.state).toBe("stopped");
 
-    await openRowActions(row);
-    await row.getByRole("button", { name: "Start" }).click();
+    await page.goto(`/${slug}/${environmentId}/`);
+    await page.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/${slug}/${environmentId}/\\?message=`));
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await page.reload();
-    row = page.locator("tr", { hasText: environmentName }).first();
-    await expect(row.locator(".cw-status")).toContainText("running");
-
-    await openRowActions(row);
-    await row.locator("summary", { hasText: "Destroy" }).click();
-    await row.getByRole("button", { name: "Destroy permanently" }).click();
+    await expect(page.locator(".cw-sandbox-heading .cw-status")).toContainText(/running/i);
+    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "true");
+    await expectTerminalLeaseDrained();
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
+    const deleteDialog = page.getByRole("dialog", { name: `Delete ${environmentName}?`, exact: true });
+    await expect(deleteDialog).toBeVisible();
+    await expect(deleteDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+    await deleteDialog.getByRole("button", { name: "Delete Sandbox", exact: true }).click();
     await waitForEnvironmentState(environmentId, ["destroyed"], 120_000);
     await page.goto(`/${slug}/?state=destroyed`);
     row = page.locator("tr", { hasText: environmentName }).first();

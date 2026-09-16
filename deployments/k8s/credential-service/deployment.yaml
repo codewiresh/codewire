@@ -54,7 +54,9 @@ spec:
             - name: broker-tls
               containerPort: 9443
           # No shared app Secret/config envFrom, signing secret, DB owner,
-          # saved login, or generic OpenBao token enters this process.
+          # saved login, or generic OpenBao token enters this process. The
+          # one optional GitHub App authorization Secret is dedicated to this
+          # service; it is never a mirror credential, PAT, or deploy key.
           env:
             - name: CREDENTIAL_DATABASE_URL
               valueFrom:
@@ -75,6 +77,24 @@ spec:
               value: /usr/local/bin/codex
             - name: CREDENTIAL_GITHUB_EXECUTABLE
               value: /usr/local/bin/gh
+            - name: CREDENTIAL_GITHUB_APP_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-github-app-authorization
+                  key: client-id
+                  optional: true
+            - name: CREDENTIAL_GITHUB_APP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-github-app-authorization
+                  key: client-secret
+                  optional: true
+            - name: CREDENTIAL_GITHUB_APP_SLUG
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-github-app-authorization
+                  key: slug
+                  optional: true
             - name: CREDENTIAL_RUNTIME_DIR
               value: /run/codewire-credentials
             - name: CREDENTIAL_BAO_ADDR

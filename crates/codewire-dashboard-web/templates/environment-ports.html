@@ -1,0 +1,23 @@
+<p class="cw-card-description">An HTTPS preview forwards requests to an internal Sandbox port. There is no separate external port number. Access controls who may open the preview, not whether a process is listening inside the Sandbox. Organization access also requires access to this Sandbox.</p>
+{% if !message.is_empty() %}<p class="cw-alert" role="status">{{ message }}</p>{% endif %}
+{% if !panel.form_error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ panel.form_error }}</p>{% endif %}
+{% if panel.ports.is_empty() %}<p>No preview ports yet. Add the port your application listens on.</p>{% endif %}
+<ul class="cw-port-list">
+  {% for port in panel.ports %}
+  <li class="cw-port-row">
+    <div><strong>{{ port.label }}</strong><small>Internal {{ port.port }} · {{ port.access }}</small>{% if port.has_preview %}<a class="cw-port-preview-url" href="{{ port.preview_url }}" target="_blank" rel="noopener noreferrer">{{ port.preview_url }}</a>{% else %}<small>Preview URL unavailable on this deployment.</small>{% endif %}</div>
+    {% if port.has_preview %}<a href="{{ port.preview_url }}" target="_blank" rel="noopener noreferrer">Open preview</a>{% endif %}
+    <form method="post" action="/{{ organization.slug }}/_actions/sandboxes/ports/delete"{% if in_dialog %} hx-post="/{{ organization.slug }}/_actions/sandboxes/ports/delete" hx-target="#sandbox-ports-content"{% endif %}>
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="environment_id" value="{{ panel.environment_id }}"><input type="hidden" name="port_id" value="{{ port.id }}"><input type="hidden" name="dialog" value="{{ in_dialog }}">
+      <button class="cw-button cw-button--outline cw-button--small cw-danger-button" type="submit" aria-label="Remove {{ port.label }} preview">Remove</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+<form class="cw-port-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/ports/create"{% if in_dialog %} hx-post="/{{ organization.slug }}/_actions/sandboxes/ports/create" hx-target="#sandbox-ports-content"{% endif %}>
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="environment_id" value="{{ panel.environment_id }}"><input type="hidden" name="dialog" value="{{ in_dialog }}">
+  <div class="cw-field"><label class="cw-label" for="managed-port">Internal port</label><input class="cw-input" id="managed-port" name="port" type="number" min="1" max="65535" value="{{ panel.port }}" required></div>
+  <div class="cw-field"><label class="cw-label" for="managed-label">Preview label</label><input class="cw-input" id="managed-label" name="label" value="{{ panel.label }}" pattern="[a-z][a-z0-9-]{0,20}[a-z0-9]" maxlength="22" required></div>
+  <div class="cw-field"><label class="cw-label" for="managed-access">Who can open the preview?</label><select class="cw-select" id="managed-access" name="access"><option value="creator"{% if panel.access_selected("creator") %} selected{% endif %}>Sandbox creator</option><option value="org_members"{% if panel.access_selected("org_members") %} selected{% endif %}>Organization members</option><option value="public"{% if panel.access_selected("public") %} selected{% endif %}>Anyone with the URL (public)</option></select></div>
+  <button class="cw-button cw-button--small" type="submit">Add port</button>
+</form>

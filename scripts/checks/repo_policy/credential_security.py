@@ -68,6 +68,9 @@ def assert_credential_service(
             "name: CREDENTIAL_DATABASE_URL valueFrom: secretKeyRef: key: url name: codewire-credential-database",
             "name: CREDENTIAL_CODEX_EXECUTABLE value: /usr/local/bin/codex",
             "name: CREDENTIAL_GITHUB_EXECUTABLE value: /usr/local/bin/gh",
+            "name: CREDENTIAL_GITHUB_APP_CLIENT_ID valueFrom: secretKeyRef: key: client-id name: codewire-github-app-authorization optional: true",
+            "name: CREDENTIAL_GITHUB_APP_CLIENT_SECRET valueFrom: secretKeyRef: key: client-secret name: codewire-github-app-authorization optional: true",
+            "name: CREDENTIAL_GITHUB_APP_SLUG valueFrom: secretKeyRef: key: slug name: codewire-github-app-authorization optional: true",
             "name: CREDENTIAL_RUNTIME_DIR value: /run/codewire-credentials",
             "name: broker-tls secret: defaultMode: 288 secretName: codewire-credential-broker-tls",
             "emptyDir: medium: Memory sizeLimit: 64Mi name: enrollment-runtime",
@@ -80,7 +83,7 @@ def assert_credential_service(
         for forbidden in ["envFrom:", "hostPath:", "hostNetwork: true", "privileged: true", "subPath:"]:
             if forbidden in shape:
                 failures.append(f"{label}: isolated credential Deployment contains {forbidden}")
-        if (shape.count("secretKeyRef:") != 1 or shape.count("secretName:") != 1
+        if (shape.count("secretKeyRef:") != 4 or shape.count("secretName:") != 1
                 or "SESSION_SECRET" in shape or "PGPASSWORD" in shape):
             failures.append(f"{label}: isolated credential Deployment has an unexpected secret input")
     if service and compact(top_level_block(service, "spec")) != (
@@ -139,6 +142,10 @@ def credential_service_self_test(resources: list[str], target: dict[str, str]) -
          "MISSING_GITHUB_EXECUTABLE", "CREDENTIAL_GITHUB_EXECUTABLE"),
         ("Deployment", "codewire-credential-service", "/usr/local/bin/gh",
          "/untrusted/bin/gh", "CREDENTIAL_GITHUB_EXECUTABLE"),
+        ("Deployment", "codewire-credential-service", "key: client-secret",
+         "key: deploy-key", "CREDENTIAL_GITHUB_APP_CLIENT_SECRET"),
+        ("Deployment", "codewire-credential-service", "name: codewire-github-app-authorization",
+         "name: codewire-secrets", "CREDENTIAL_GITHUB_APP_CLIENT_ID"),
         ("Deployment", "codewire-credential-service", "startupProbe:", "missingProbe:", "startupProbe"),
         ("Certificate", "codewire-credential-broker", "isCA: false", "isCA: true", "exact DNS"),
         ("Certificate", "codewire-credential-broker",

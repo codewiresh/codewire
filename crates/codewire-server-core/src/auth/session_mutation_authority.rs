@@ -150,6 +150,12 @@ impl CredentialMutationAuthority {
         Self(CredentialMutationAuthorityKind::Session(authority))
     }
 
+    /// Browser-only credential flows use the original exact-origin session;
+    /// terminal clients retain their separate OAuth-bearer authority.
+    pub fn is_browser_session(&self) -> bool {
+        matches!(&self.0, CredentialMutationAuthorityKind::Session(_))
+    }
+
     pub fn user_id(&self) -> &str {
         match &self.0 {
             CredentialMutationAuthorityKind::Session(authority) => &authority.user_id,
@@ -245,5 +251,6 @@ mod tests {
             authority.remaining_at(monotonic, wall + chrono::Duration::seconds(60)),
             Err(CredentialMutationAuthorityError::Denied)
         );
+        assert!(CredentialMutationAuthority::from_session(authority).is_browser_session());
     }
 }

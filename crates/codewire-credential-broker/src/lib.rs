@@ -14,6 +14,7 @@ mod bridge;
 pub mod codex_enrollment;
 mod codex_oauth;
 pub mod github;
+pub mod github_app;
 #[cfg(feature = "codex-enrollment")]
 pub mod github_enrollment;
 #[cfg(test)]
@@ -33,6 +34,10 @@ pub mod ssh_agent;
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
 pub use codex_oauth::{
     CanonicalCodexOAuthBundle, CodexOAuthImport, CodexOAuthMaterialError, import_codex_auth_json,
+};
+pub use github_app::{
+    GitHubAppAuthorizationConfig, GitHubAppAuthorizationError, GitHubAppAuthorizationImport,
+    GitHubAppAuthorizationOwner,
 };
 pub use network::ProviderHttpsTransport;
 pub use openai::{

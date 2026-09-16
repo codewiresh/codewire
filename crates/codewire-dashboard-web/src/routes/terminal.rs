@@ -1,8 +1,9 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     response::Response,
 };
+use serde::Deserialize;
 use url::Url;
 
 use crate::{
@@ -16,9 +17,18 @@ use crate::{
     view::TerminalPageView,
 };
 
+#[derive(Default, Deserialize)]
+pub(super) struct TerminalQuery {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    error: String,
+}
+
 pub(super) async fn page(
     State(state): State<AppState>,
     Path((slug, environment_id)): Path<(String, String)>,
+    Query(query): Query<TerminalQuery>,
     headers: HeaderMap,
 ) -> Response {
     let continuation = terminal_path(&slug, &environment_id);
@@ -32,13 +42,18 @@ pub(super) async fn page(
             Ok(context) => context,
             Err(response) => return response,
         };
-    let environment =
+    let mut environment =
         match environment_connect::environment(&state, cookie, &organization.id, &environment_id)
             .await
         {
             Ok(environment) => environment,
             Err(error) => return connect_page_error(error, &continuation, &headers),
         };
+    super::environments::apply_confidential_visibility(
+        &state,
+        dashboard.is_admin,
+        &mut environment,
+    );
     let websocket_origin =
         match browser_websocket_origin(&state.public_origin, &state.browser_api_origin) {
             Some(origin) => origin,
@@ -50,6 +65,8 @@ pub(super) async fn page(
         organization_id: organization.id.clone(),
         environment,
         websocket_origin,
+        message: super::environments::page_message(&query.message).into(),
+        error: super::environments::page_error(&query.error).into(),
     };
     let token = new_csrf_token();
     let style_nonce = TerminalStyleNonce::new();
@@ -88,7 +105,7 @@ pub(crate) fn browser_websocket_origin(public_origin: &str, api_origin: &str) ->
     Some(api.as_str().trim_end_matches('/').to_owned())
 }
 
-fn terminal_path(slug: &str, environment_id: &str) -> String {
+pub(super) fn terminal_path(slug: &str, environment_id: &str) -> String {
     let mut url = Url::parse("https://codewire.invalid").expect("static base URL");
     url.path_segments_mut()
         .expect("base URL can have path segments")
@@ -99,6 +116,29 @@ fn terminal_path(slug: &str, environment_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disruptive_controls_use_native_dialogs_and_keep_the_detail_context() {
+        let template = include_str!("../../templates/terminal.html");
+        for name in ["stop", "delete"] {
+            assert!(template.contains(&format!("data-dialog-open=\"sandbox-{name}\"")));
+            assert!(template.contains(&format!("data-dialog id=\"sandbox-{name}\"")));
+        }
+        assert_eq!(
+            template
+                .matches("data-dialog-close autofocus>Cancel")
+                .count(),
+            2
+        );
+        assert_eq!(
+            template
+                .matches("name=\"return_to\" value=\"detail\"")
+                .count(),
+            3
+        );
+        assert!(!template.contains("cw-action-menu--danger"));
+        assert_eq!(template.matches("data-terminal-root ").count(), 1);
+    }
 
     #[test]
     fn terminal_htmx_uses_external_indicator_styles_under_strict_csp() {

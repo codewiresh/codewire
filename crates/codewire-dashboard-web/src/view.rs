@@ -388,6 +388,7 @@ pub(crate) struct CredentialProfileRowView {
 }
 
 pub(crate) struct CredentialSettingsView {
+    pub(crate) active_dialog: String,
     pub(crate) credentials: Vec<CredentialRowView>,
     pub(crate) profiles: Vec<CredentialProfileRowView>,
     pub(crate) choices: CredentialChoicesView,
@@ -526,6 +527,20 @@ pub(crate) struct CredentialOAuthSubmission {
     pub(crate) provider: String,
     #[serde(default)]
     pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) credential_id: String,
+    #[serde(default)]
+    pub(crate) expected_revocation_generation: Option<u64>,
+    #[serde(default)]
+    pub(crate) confirm_reconnect: String,
+}
+
+// Deliberately not Debug: although this form has no provider material, it
+// starts an authorization redirect and carries a session-bound CSRF token.
+#[derive(Deserialize)]
+pub(crate) struct GitHubAppAuthorizationSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
     #[serde(default)]
     pub(crate) credential_id: String,
     #[serde(default)]
@@ -756,6 +771,8 @@ pub(crate) struct TerminalPageView {
     pub(crate) organization_id: String,
     pub(crate) environment: EnvironmentRow,
     pub(crate) websocket_origin: String,
+    pub(crate) message: String,
+    pub(crate) error: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1598,6 +1615,7 @@ mod secret_debug_tests {
     #[test]
     fn credential_settings_debug_redacts_csrf_capability() {
         let page = CredentialSettingsView {
+            active_dialog: String::new(),
             credentials: Vec::new(),
             profiles: Vec::new(),
             choices: CredentialChoicesView::default(),

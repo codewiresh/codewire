@@ -18,6 +18,15 @@ resources:
   - dashboard.yaml
   - storage-class.yaml
 
+# The non-promotable Kind credential fixture provides this fixed synthetic App
+# itself. Production and Dev continue to receive only their deployment-owned
+# public App slug through the shared ConfigMap.
+configMapGenerator:
+  - name: codewire-dashboard-public-config
+    behavior: merge
+    literals:
+      - GITHUB_APP_SLUG=codewire-synthetic
+
 images:
   - name: git.example.com/codewire/derp
     newName: codewire-derp

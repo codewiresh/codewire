@@ -4,7 +4,7 @@ use axum::{
     Form,
     body::{Body, Bytes},
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
 };
 use chrono::{NaiveDateTime, Utc};
@@ -13,13 +13,18 @@ use codewire_proto::codewire::v1::AccessProfileEntry;
 use connectrpc::ErrorCode;
 use serde::Deserialize;
 use tokio_stream::{StreamExt as _, wrappers::ReceiverStream};
+use url::Url;
 
 use crate::{
     credentials_connect,
     environment_source_forms::exact_id,
     error::WebError,
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
-    security::{canonical_cookie, csrf_cookie, new_csrf_token, with_csrf_cookie},
+    security::{
+        canonical_cookie, clear_github_app_authorization_cookie, csrf_cookie,
+        github_app_authorization_continuation, github_app_authorization_cookie, new_csrf_token,
+        with_csrf_cookie, with_response_cookie,
+    },
     state::AppState,
     templates::CredentialSettingsTemplate,
     view::{
@@ -27,6 +32,7 @@ use crate::{
         CredentialProfileDeleteSubmission, CredentialProfileUpdateSubmission,
         CredentialRenameSubmission, CredentialRevisionSubmission, CredentialRotateSubmission,
         CredentialSettingsView, CredentialSshGenerateSubmission, CredentialSshImportSubmission,
+        GitHubAppAuthorizationSubmission,
     },
 };
 
@@ -38,6 +44,20 @@ pub(super) struct QueryParameters {
     org: String,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
+    dialog: String,
+}
+
+// Do not derive Debug: a callback code is short-lived authorization material
+// and must not enter route diagnostics or a query rejection report.
+#[derive(Default, Deserialize)]
+pub(super) struct GitHubAppCallbackQuery {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    state: String,
     #[serde(default)]
     error: String,
 }
@@ -77,6 +97,7 @@ pub(super) async fn page(
     };
     let csrf = new_csrf_token();
     let page = CredentialSettingsView {
+        active_dialog: approved_dialog(&query.dialog, &data),
         credentials: data.credentials,
         profiles: data.profiles,
         choices: data.choices,
@@ -99,6 +120,7 @@ pub(super) async fn create_profile_action(
     headers: HeaderMap,
     Form(form): Form<CredentialProfileCreateSubmission>,
 ) -> Response {
+    let dialog = "create-profile";
     let cookie = match super::settings::mutation_cookie(
         &state, &headers, &form.csrf, &query.org, PATH,
     )
@@ -109,7 +131,7 @@ pub(super) async fn create_profile_action(
     };
     let name = form.name.trim();
     if !valid_name(name) {
-        return page_redirect("profile-invalid", true, &query.org, &headers);
+        return page_error_redirect("profile-invalid", dialog, &query.org, &headers);
     }
     let entries = match entries(
         form.codex,
@@ -119,11 +141,11 @@ pub(super) async fn create_profile_action(
         form.ssh,
     ) {
         Ok(entries) => entries,
-        Err(()) => return page_redirect("profile-invalid", true, &query.org, &headers),
+        Err(()) => return page_error_redirect("profile-invalid", dialog, &query.org, &headers),
     };
     match credentials_connect::create_profile(&state, cookie, name.into(), entries).await {
         Ok(()) => page_redirect("profile-created", false, &query.org, &headers),
-        Err(error) => mutation_error(error.code, false, &query.org, &headers),
+        Err(error) => mutation_error(error.code, false, dialog, &query.org, &headers),
     }
 }
 
@@ -133,6 +155,7 @@ pub(super) async fn update_profile_action(
     headers: HeaderMap,
     Form(form): Form<CredentialProfileUpdateSubmission>,
 ) -> Response {
+    let dialog = row_dialog("profile", &form.profile_id);
     let cookie = match super::settings::mutation_cookie(
         &state, &headers, &form.csrf, &query.org, PATH,
     )
@@ -142,7 +165,7 @@ pub(super) async fn update_profile_action(
         Err(response) => return response,
     };
     if exact_id(&form.profile_id).is_err() || !valid_revision(form.expected_revision) {
-        return page_redirect("profile-invalid", true, &query.org, &headers);
+        return page_error_redirect("profile-invalid", &dialog, &query.org, &headers);
     }
     let entries = match entries(
         form.codex,
@@ -152,7 +175,7 @@ pub(super) async fn update_profile_action(
         form.ssh,
     ) {
         Ok(entries) => entries,
-        Err(()) => return page_redirect("profile-invalid", true, &query.org, &headers),
+        Err(()) => return page_error_redirect("profile-invalid", &dialog, &query.org, &headers),
     };
     match credentials_connect::update_profile(
         &state,
@@ -164,7 +187,7 @@ pub(super) async fn update_profile_action(
     .await
     {
         Ok(()) => page_redirect("profile-updated", false, &query.org, &headers),
-        Err(error) => mutation_error(error.code, false, &query.org, &headers),
+        Err(error) => mutation_error(error.code, false, &dialog, &query.org, &headers),
     }
 }
 
@@ -174,6 +197,7 @@ pub(super) async fn delete_profile_action(
     headers: HeaderMap,
     Form(form): Form<CredentialProfileDeleteSubmission>,
 ) -> Response {
+    let dialog = row_dialog("profile", &form.profile_id);
     let cookie = match super::settings::mutation_cookie(
         &state, &headers, &form.csrf, &query.org, PATH,
     )
@@ -183,7 +207,7 @@ pub(super) async fn delete_profile_action(
         Err(response) => return response,
     };
     if exact_id(&form.profile_id).is_err() || !valid_revision(form.expected_revision) {
-        return page_redirect("profile-invalid", true, &query.org, &headers);
+        return page_error_redirect("profile-invalid", &dialog, &query.org, &headers);
     }
     match credentials_connect::delete_profile(
         &state,
@@ -194,7 +218,7 @@ pub(super) async fn delete_profile_action(
     .await
     {
         Ok(()) => page_redirect("profile-deleted", false, &query.org, &headers),
-        Err(error) => mutation_error(error.code, true, &query.org, &headers),
+        Err(error) => mutation_error(error.code, true, &dialog, &query.org, &headers),
     }
 }
 
@@ -204,6 +228,7 @@ pub(super) async fn add_api_key_action(
     headers: HeaderMap,
     Form(form): Form<CredentialApiKeySubmission>,
 ) -> Response {
+    let dialog = "add-api-key";
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -217,7 +242,7 @@ pub(super) async fn add_api_key_action(
         || value.len() > 1024
         || expiry.is_err()
     {
-        return page_redirect("credential-invalid", true, &query.org, &headers);
+        return page_error_redirect("credential-invalid", dialog, &query.org, &headers);
     }
     match credentials_connect::add_api_key(
         &state,
@@ -230,7 +255,7 @@ pub(super) async fn add_api_key_action(
     .await
     {
         Ok(()) => page_redirect("credential-added", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, &query.org, &headers),
+        Err(error) => credential_mutation_error(error.code, false, dialog, &query.org, &headers),
     }
 }
 
@@ -240,6 +265,7 @@ pub(super) async fn generate_ssh_action(
     headers: HeaderMap,
     Form(form): Form<CredentialSshGenerateSubmission>,
 ) -> Response {
+    let dialog = "add-ssh";
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -247,7 +273,7 @@ pub(super) async fn generate_ssh_action(
     let name = form.name.trim();
     let expiry = parse_expiration_utc(&form.expiration_utc);
     if !valid_credential_name(name) || expiry.is_err() {
-        return page_redirect("credential-invalid", true, &query.org, &headers);
+        return page_error_redirect("credential-invalid", dialog, &query.org, &headers);
     }
     match credentials_connect::generate_ssh(
         &state,
@@ -258,7 +284,7 @@ pub(super) async fn generate_ssh_action(
     .await
     {
         Ok(()) => page_redirect("credential-generated", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, &query.org, &headers),
+        Err(error) => credential_mutation_error(error.code, false, dialog, &query.org, &headers),
     }
 }
 
@@ -268,6 +294,7 @@ pub(super) async fn import_ssh_action(
     headers: HeaderMap,
     Form(form): Form<CredentialSshImportSubmission>,
 ) -> Response {
+    let dialog = "add-ssh";
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -288,7 +315,7 @@ pub(super) async fn import_ssh_action(
         })
         || expiry.is_err()
     {
-        return page_redirect("credential-invalid", true, &query.org, &headers);
+        return page_error_redirect("credential-invalid", dialog, &query.org, &headers);
     }
     match credentials_connect::import_ssh(
         &state,
@@ -301,7 +328,7 @@ pub(super) async fn import_ssh_action(
     .await
     {
         Ok(()) => page_redirect("credential-imported", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, &query.org, &headers),
+        Err(error) => credential_mutation_error(error.code, false, dialog, &query.org, &headers),
     }
 }
 
@@ -311,6 +338,7 @@ pub(super) async fn rename_credential_action(
     headers: HeaderMap,
     Form(form): Form<CredentialRenameSubmission>,
 ) -> Response {
+    let dialog = row_dialog("credential", &form.credential_id);
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -321,7 +349,7 @@ pub(super) async fn rename_credential_action(
         || !valid_credential_name(&form.expected_name)
         || !valid_credential_name(name)
     {
-        return page_redirect("credential-invalid", true, &query.org, &headers);
+        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
     }
     match credentials_connect::rename_credential(
         &state,
@@ -334,7 +362,7 @@ pub(super) async fn rename_credential_action(
     .await
     {
         Ok(()) => page_redirect("credential-renamed", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, &query.org, &headers),
+        Err(error) => credential_mutation_error(error.code, false, &dialog, &query.org, &headers),
     }
 }
 
@@ -344,6 +372,7 @@ pub(super) async fn rotate_api_key_action(
     headers: HeaderMap,
     Form(form): Form<CredentialRotateSubmission>,
 ) -> Response {
+    let dialog = row_dialog("credential", &form.credential_id);
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -356,7 +385,7 @@ pub(super) async fn rotate_api_key_action(
         || value.len() > 1024
         || expiry.is_err()
     {
-        return page_redirect("credential-invalid", true, &query.org, &headers);
+        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
     }
     match credentials_connect::rotate_api_key(
         &state,
@@ -369,7 +398,7 @@ pub(super) async fn rotate_api_key_action(
     .await
     {
         Ok(()) => page_redirect("credential-rotated", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, &query.org, &headers),
+        Err(error) => credential_mutation_error(error.code, false, &dialog, &query.org, &headers),
     }
 }
 
@@ -391,20 +420,194 @@ pub(super) async fn delete_credential_action(
     credential_revision_action(state, query, headers, form, true).await
 }
 
+/// Start the browser-only GitHub App installation flow.  This is deliberately
+/// not the device-code endpoint used by `cw`: the App's registered callback
+/// returns here after GitHub has let the user choose its repositories.
+pub(super) async fn github_app_authorize_action(
+    State(state): State<AppState>,
+    Query(query): Query<QueryParameters>,
+    headers: HeaderMap,
+    Form(form): Form<GitHubAppAuthorizationSubmission>,
+) -> Response {
+    let dialog = if form.credential_id.is_empty() {
+        "connect-github".to_owned()
+    } else {
+        row_dialog("credential", &form.credential_id)
+    };
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+        Ok(cookie) => cookie,
+        Err(response) => return response,
+    };
+    if state.github_app_slug.is_empty() {
+        return page_error_redirect("github-app-unavailable", &dialog, &query.org, &headers);
+    }
+    let reconnect = match (
+        form.credential_id.is_empty(),
+        form.expected_revocation_generation,
+    ) {
+        (true, None) => (None, None),
+        (false, Some(generation))
+            if exact_id(&form.credential_id).is_ok()
+                && valid_generation(generation, true)
+                && form.confirm_reconnect == "yes" =>
+        {
+            (Some(form.credential_id), Some(generation))
+        }
+        _ => return page_error_redirect("credential-invalid", &dialog, &query.org, &headers),
+    };
+    if let (Some(credential_id), Some(generation)) = (&reconnect.0, reconnect.1)
+        && let Err(error) = credentials_connect::validate_github_app_reconnect(
+            &state,
+            cookie.clone(),
+            credential_id,
+            generation,
+        )
+        .await
+    {
+        return credential_mutation_error(error.code, false, &dialog, &query.org, &headers);
+    }
+    let callback_state = new_csrf_token();
+    let callback_cookie = match github_app_authorization_cookie(
+        &state.public_origin,
+        &callback_state,
+        &cookie,
+        reconnect.0.as_deref(),
+        reconnect.1,
+    ) {
+        Some(cookie) => cookie,
+        None => return page_error_redirect("credential-invalid", &dialog, &query.org, &headers),
+    };
+    with_response_cookie(
+        redirect(
+            github_app_installation_url(&state.github_app_slug, &callback_state),
+            &headers,
+        ),
+        callback_cookie,
+    )
+}
+
+/// Finish a GitHub App installation callback.  The authenticated session and
+/// one-use browser state fence this cross-site GET; it intentionally does not
+/// require same-origin form CSRF because GitHub performs the redirect.
+pub(super) async fn github_app_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GitHubAppCallbackQuery>,
+) -> Response {
+    let continuation = page_path("");
+    let clear = clear_github_app_authorization_cookie(&state.public_origin);
+    match super::dashboard::dashboard_shell_view(&state, &headers).await {
+        Ok(_) => {}
+        Err(WebError::Unauthorized) => {
+            return github_app_callback_response(login_redirect(&continuation, &headers), clear);
+        }
+        Err(WebError::TwoFactorRequired) => {
+            return github_app_callback_response(
+                two_factor_redirect(&continuation, &headers),
+                clear,
+            );
+        }
+        Err(error) => return github_app_callback_response(error_page(error), clear),
+    };
+    let cookie = match canonical_cookie(&headers) {
+        Ok(cookie) => cookie,
+        Err(()) => {
+            return github_app_callback_response(login_redirect(&continuation, &headers), clear);
+        }
+    };
+    // The shell lookup above is the current session/2FA authorization check;
+    // no organization context is accepted or restored from GitHub.
+    let callback = match github_app_authorization_continuation(&headers, &query.state, &cookie) {
+        Some(callback) => callback,
+        None => {
+            return github_app_callback_response(
+                page_error_redirect("github-app-failed", "connect-github", "", &headers),
+                clear,
+            );
+        }
+    };
+    let dialog = callback
+        .credential_id
+        .as_deref()
+        .map(|id| row_dialog("credential", id))
+        .filter(|dialog| !dialog.is_empty())
+        .unwrap_or_else(|| "connect-github".to_owned());
+    let response = if !query.error.is_empty() {
+        page_error_redirect("github-app-cancelled", &dialog, "", &headers)
+    } else if !valid_github_app_callback_code(&query.code) {
+        page_error_redirect("github-app-failed", &dialog, "", &headers)
+    } else {
+        match credentials_connect::complete_github_app_authorization(
+            &state,
+            cookie,
+            query.code.into_bytes(),
+            callback.credential_id,
+            callback.expected_generation,
+        )
+        .await
+        {
+            Ok(()) => page_redirect("github-app-connected", false, "", &headers),
+            Err(error) if error.code == ErrorCode::AlreadyExists => {
+                page_error_redirect("github-app-already-connected", &dialog, "", &headers)
+            }
+            Err(error) => credential_mutation_error(error.code, false, &dialog, "", &headers),
+        }
+    };
+    github_app_callback_response(response, clear)
+}
+
+fn github_app_installation_url(app_slug: &str, callback_state: &str) -> String {
+    let mut target = Url::parse("https://github.com").expect("static GitHub origin");
+    target.set_path(&format!("/apps/{app_slug}/installations/new"));
+    // The GitHub App registration owns the callback URL. The installation URL
+    // carries only opaque state; `redirect_uri` belongs to the server-side
+    // authorization-code exchange and is never a browser-controlled target.
+    target
+        .query_pairs_mut()
+        .append_pair("state", callback_state);
+    target.into()
+}
+
+fn valid_github_app_callback_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1024
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+}
+
+fn github_app_callback_response(mut response: Response, clear_cookie: String) -> Response {
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    with_response_cookie(response, clear_cookie)
+}
+
 pub(super) async fn enroll_oauth_action(
     State(state): State<AppState>,
     Query(query): Query<QueryParameters>,
     headers: HeaderMap,
     Form(form): Form<CredentialOAuthSubmission>,
 ) -> Response {
+    let dialog = if form.credential_id.is_empty() {
+        match form.provider.as_str() {
+            "codex" => "connect-codex".to_owned(),
+            _ => String::new(),
+        }
+    } else {
+        row_dialog("credential", &form.credential_id)
+    };
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
-    let provider = match form.provider.as_str() {
-        "codex" => credentials_connect::OAuthProvider::Codex,
-        "github" => credentials_connect::OAuthProvider::Github,
-        _ => return page_redirect("credential-invalid", true, &query.org, &headers),
+    let Some(provider) = web_device_oauth_provider(&form.provider) else {
+        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
     };
     let name = form.name.trim();
     let reconnect = match (
@@ -419,10 +622,10 @@ pub(super) async fn enroll_oauth_action(
         {
             (Some(form.credential_id), Some(generation))
         }
-        _ => return page_redirect("credential-invalid", true, &query.org, &headers),
+        _ => return page_error_redirect("credential-invalid", &dialog, &query.org, &headers),
     };
-    if !valid_oauth_name(&provider, name, reconnect.0.is_some()) {
-        return page_redirect("credential-invalid", true, &query.org, &headers);
+    if !valid_oauth_name(name) {
+        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
     }
 
     let (events, receiver) = tokio::sync::mpsc::channel(2);
@@ -545,13 +748,15 @@ fn render_enrollment_event(
     }
 }
 
-fn valid_oauth_name(
-    provider: &credentials_connect::OAuthProvider,
-    name: &str,
-    reconnect: bool,
-) -> bool {
-    matches!(provider, credentials_connect::OAuthProvider::Github) && !reconnect && name.is_empty()
-        || valid_credential_name(name)
+fn valid_oauth_name(name: &str) -> bool {
+    valid_credential_name(name)
+}
+
+// Device authorization is intentionally browser-only for Codex. GitHub's
+// browser path is the dedicated GitHub App installation route above; `cw`
+// keeps its separate GitHub device-code RPC in credential-service.
+fn web_device_oauth_provider(value: &str) -> Option<credentials_connect::OAuthProvider> {
+    (value == "codex").then_some(credentials_connect::OAuthProvider::Codex)
 }
 
 fn escape_html(value: &str) -> String {
@@ -576,6 +781,7 @@ async fn credential_revision_action(
     form: CredentialRevisionSubmission,
     delete: bool,
 ) -> Response {
+    let dialog = row_dialog("credential", &form.credential_id);
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -583,7 +789,7 @@ async fn credential_revision_action(
     if exact_id(&form.credential_id).is_err()
         || !valid_generation(form.expected_revocation_generation, !delete)
     {
-        return page_redirect("credential-invalid", true, &query.org, &headers);
+        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
     }
     let result = if delete {
         credentials_connect::delete_credential(
@@ -613,7 +819,7 @@ async fn credential_revision_action(
             &query.org,
             &headers,
         ),
-        Err(error) => credential_mutation_error(error.code, delete, &query.org, &headers),
+        Err(error) => credential_mutation_error(error.code, delete, &dialog, &query.org, &headers),
     }
 }
 
@@ -690,16 +896,23 @@ fn valid_generation(generation: u64, increments: bool) -> bool {
         }
 }
 
-fn mutation_error(code: ErrorCode, delete: bool, org: &str, headers: &HeaderMap) -> Response {
+fn mutation_error(
+    code: ErrorCode,
+    delete: bool,
+    dialog: &str,
+    org: &str,
+    headers: &HeaderMap,
+) -> Response {
     if code == ErrorCode::Unauthenticated {
         return login_redirect(&page_path(org), headers);
     }
-    page_redirect(mutation_error_code(code, delete), true, org, headers)
+    page_error_redirect(mutation_error_code(code, delete), dialog, org, headers)
 }
 
 fn credential_mutation_error(
     code: ErrorCode,
     delete: bool,
+    dialog: &str,
     org: &str,
     headers: &HeaderMap,
 ) -> Response {
@@ -723,7 +936,7 @@ fn credential_mutation_error(
         // acknowledgement. Never encourage an automatic or blind retry.
         "credential-uncertain"
     };
-    page_redirect(error, true, org, headers)
+    page_error_redirect(error, dialog, org, headers)
 }
 
 fn mutation_error_code(code: ErrorCode, delete: bool) -> &'static str {
@@ -757,6 +970,54 @@ fn page_redirect(code: &str, error: bool, org: &str, headers: &HeaderMap) -> Res
     redirect(format!("{PATH}?{}", query.finish()), headers)
 }
 
+// Dialog destinations are presentation state, not selectors or return URLs.
+// Row dialogs must resolve against the freshly authenticated, owner-scoped
+// catalog. A stale/deleted identity leaves its static error on the page.
+fn row_dialog(kind: &str, id: &str) -> String {
+    if matches!(kind, "credential" | "profile") && exact_id(id).is_ok() {
+        format!("{kind}-{id}")
+    } else {
+        String::new()
+    }
+}
+
+fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettingsData) -> String {
+    let allowed = matches!(
+        requested,
+        "add-credential"
+            | "connect-github"
+            | "connect-codex"
+            | "add-api-key"
+            | "add-ssh"
+            | "create-profile"
+    ) || requested.strip_prefix("credential-").is_some_and(|id| {
+        exact_id(id).is_ok()
+            && data
+                .credentials
+                .iter()
+                .any(|credential| credential.id == id)
+    }) || requested.strip_prefix("profile-").is_some_and(|id| {
+        exact_id(id).is_ok() && data.profiles.iter().any(|profile| profile.id == id)
+    });
+    if allowed {
+        requested.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn page_error_redirect(code: &str, dialog: &str, org: &str, headers: &HeaderMap) -> Response {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if !org.is_empty() {
+        query.append_pair("org", org);
+    }
+    query.append_pair("error", code);
+    if !dialog.is_empty() {
+        query.append_pair("dialog", dialog);
+    }
+    redirect(format!("{PATH}?{}", query.finish()), headers)
+}
+
 fn approved_message(code: &str) -> &'static str {
     match code {
         "credential-added" => "API key credential added.",
@@ -766,6 +1027,7 @@ fn approved_message(code: &str) -> &'static str {
         "credential-rotated" => "API key credential rotated.",
         "credential-revoked" => "Credential revoked.",
         "credential-deleted" => "Credential deleted.",
+        "github-app-connected" => "GitHub connected through the GitHub App.",
         "profile-created" => "Credential profile created.",
         "profile-updated" => "Credential profile updated.",
         "profile-deleted" => "Credential profile deleted.",
@@ -784,6 +1046,18 @@ fn approved_error(code: &str) -> &'static str {
             "The credential operation may have completed. Reload and inspect it before retrying."
         }
         "credential-request-failed" => "The credential change could not be completed. Try again.",
+        "github-app-unavailable" => {
+            "GitHub App authorization is not configured yet. Ask an administrator to finish the GitHub App setup."
+        }
+        "github-app-cancelled" => {
+            "GitHub App authorization was cancelled. No credential was changed."
+        }
+        "github-app-failed" => {
+            "GitHub App authorization could not be completed. Start again from credentials."
+        }
+        "github-app-already-connected" => {
+            "This GitHub account is already connected. Use its Reconnect action to update repository access."
+        }
         "profile-invalid" => {
             "Check the profile name and selected credentials. Use 1–128 lowercase letters, numbers, hyphens, underscores or dots; start and end with a letter or number."
         }
@@ -797,6 +1071,205 @@ fn approved_error(code: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::{
+        CredentialChoicesView, CredentialProfileEntryView, CredentialProfileRowView,
+        CredentialRowView, DashboardView,
+    };
+    use askama::Template as _;
+
+    fn dialog_data() -> credentials_connect::CredentialSettingsData {
+        credentials_connect::CredentialSettingsData {
+            credentials: vec![CredentialRowView {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                name: "legacy-github".into(),
+                provider: "GitHub",
+                authentication: "OAuth",
+                account_hint: "verified-user".into(),
+                status: "Active",
+                status_tone: "success",
+                expires: String::new(),
+                generation: 7,
+                ssh_public_key: String::new(),
+                ssh_fingerprint: String::new(),
+                public_key_id: "public-key-1".into(),
+                api_key: false,
+                oauth: true,
+                revoked: false,
+                oauth_provider: "github",
+            }],
+            profiles: vec![CredentialProfileRowView {
+                id: "00000000-0000-4000-8000-000000000002".into(),
+                name: "work".into(),
+                revision: 9,
+                entries: vec![CredentialProfileEntryView {
+                    slot: "GitHub",
+                    credential: "verified-user".into(),
+                }],
+                codex: String::new(),
+                openai: String::new(),
+                github: "00000000-0000-4000-8000-000000000001".into(),
+                anthropic: String::new(),
+                ssh: String::new(),
+            }],
+            choices: CredentialChoicesView::default(),
+        }
+    }
+
+    fn rendered_dialogs(active_dialog: &str, error: &str) -> String {
+        let view = DashboardView {
+            user_name: "Dashboard User".into(),
+            is_admin: false,
+            organizations: Vec::new(),
+            has_organizations: false,
+            show_checklist: false,
+            new_organization_url: "/organizations/new/".into(),
+            settings_url: PATH.into(),
+            global_context_query: "?org=sample-org".into(),
+            has_selected_organization: false,
+            selected_organization_name: String::new(),
+            selected_organization_slug: String::new(),
+            selected_organization_url: String::new(),
+            sandboxes: Vec::new(),
+            recent_sandboxes: Vec::new(),
+            sandbox_rail_available: false,
+            sandbox_total: 0,
+            sandbox_running: 0,
+            sandbox_stopped: 0,
+            sandbox_attention: 0,
+            provisioned_cpu_millicores: 0,
+            provisioned_memory_mb: 0,
+            provisioned_disk_gb: 0,
+        };
+        let data = dialog_data();
+        let page = CredentialSettingsView {
+            active_dialog: approved_dialog(active_dialog, &data),
+            credentials: data.credentials,
+            profiles: data.profiles,
+            choices: data.choices,
+            csrf_token: "synthetic-csrf".into(),
+            message: String::new(),
+            error: error.into(),
+        };
+        CredentialSettingsTemplate {
+            view: &view,
+            page: &page,
+        }
+        .render()
+        .unwrap()
+    }
+
+    #[test]
+    fn dialog_destinations_are_finite_or_present_owned_rows() {
+        let data = dialog_data();
+        for id in [
+            "add-credential",
+            "connect-github",
+            "connect-codex",
+            "add-api-key",
+            "add-ssh",
+            "create-profile",
+            "credential-00000000-0000-4000-8000-000000000001",
+            "profile-00000000-0000-4000-8000-000000000002",
+        ] {
+            assert_eq!(approved_dialog(id, &data), id);
+        }
+        for id in [
+            "",
+            "#connect-github",
+            "dialog[open]",
+            "//attacker.example",
+            "connect-github\" autofocus",
+            "credential-00000000-0000-4000-8000-000000000099",
+            "profile-00000000-0000-4000-8000-000000000001",
+        ] {
+            assert!(approved_dialog(id, &data).is_empty(), "{id}");
+        }
+        assert!(row_dialog("unknown", &data.credentials[0].id).is_empty());
+        assert!(row_dialog("credential", "<private-marker>").is_empty());
+    }
+
+    #[test]
+    fn list_first_dialogs_preserve_profile_and_credential_fences() {
+        let html = rendered_dialogs("", "");
+        assert!(!html.contains("Credential inventory"));
+        assert!(
+            html.find("id=\"credentials-title\"").unwrap()
+                < html.find("id=\"add-credential\"").unwrap()
+        );
+        assert!(
+            html.find("id=\"profiles-title\"").unwrap()
+                < html.find("id=\"create-profile\"").unwrap()
+        );
+        assert_eq!(html.matches("data-dialog id=").count(), 8);
+        assert!(!html.contains("data-dialog-auto-open"));
+        assert!(!html.contains("<dialog open"));
+        assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));
+        assert!(html.contains("name=\"expected_revision\" value=\"9\""));
+        assert!(!html.contains("name=\"name\" value=\"legacy-github\""));
+        assert!(html.contains("name=\"confirm_reconnect\" value=\"yes\" required"));
+        assert!(
+            html.contains("Editing a profile")
+                || html.contains("existing Sandboxes keep their bound revision")
+        );
+        assert!(html.contains("/settings/credentials/_actions/profiles/update?org=sample-org"));
+        assert!(html.contains("name=\"private_key\" data-dialog-private"));
+        assert!(html.contains("type=\"password\" data-dialog-private"));
+        let github = html
+            .split("aria-labelledby=\"connect-github-title\"")
+            .nth(1)
+            .unwrap()
+            .split("</form>")
+            .next()
+            .unwrap();
+        assert!(!github.contains("name=\"name\""));
+        assert!(!github.contains("name=\"provider\""));
+        assert!(html.contains("/settings/credentials/_actions/github/authorize?org=sample-org"));
+        assert!(github.contains("GitHub App"));
+        assert!(github.contains("Continue to GitHub"));
+        assert!(!github.contains("one-time code"));
+        assert!(github.contains("icons-v2.svg#icon-github"));
+    }
+
+    #[test]
+    fn validation_reopens_only_the_relevant_dialog_with_escaped_static_error() {
+        let html = rendered_dialogs("add-api-key", approved_error("credential-invalid"));
+        assert_eq!(html.matches("data-dialog-auto-open").count(), 1);
+        assert_eq!(html.matches("role=\"alert\"").count(), 1);
+        assert!(html.contains(
+            "id=\"add-api-key\" aria-labelledby=\"add-api-key-title\" data-dialog-auto-open"
+        ));
+        assert!(html.contains("The credential submission is invalid."));
+        assert!(!html.contains("name=\"value\" value="));
+        let html = rendered_dialogs("profile-00000000-0000-4000-8000-000000000002", "<unsafe>");
+        assert_eq!(html.matches("data-dialog-auto-open").count(), 1);
+        assert!(!html.contains("<unsafe>"));
+        assert!(html.contains("&lt;unsafe&gt;") || html.contains("&#60;unsafe&#62;"));
+    }
+
+    #[test]
+    fn dialog_error_redirect_carries_only_static_error_and_context() {
+        let response = page_error_redirect(
+            "credential-invalid",
+            "add-api-key",
+            "sample-org",
+            &HeaderMap::new(),
+        );
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/settings/credentials/?org=sample-org&error=credential-invalid&dialog=add-api-key"
+        );
+        let response = credential_mutation_error(
+            ErrorCode::Unavailable,
+            false,
+            "add-api-key",
+            "",
+            &HeaderMap::new(),
+        );
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/settings/credentials/?error=credential-uncertain&dialog=add-api-key"
+        );
+    }
 
     #[test]
     fn profile_names_match_the_shared_identifier_contract() {
@@ -851,18 +1324,42 @@ mod tests {
     }
 
     #[test]
-    fn github_create_can_omit_name_but_reconnect_and_codex_cannot() {
-        use credentials_connect::OAuthProvider::{Codex, Github};
-        let submission: CredentialOAuthSubmission = serde_json::from_value(serde_json::json!({
-            "_csrf": "synthetic-csrf", "provider": "github"
-        }))
-        .unwrap();
-        assert!(submission.name.is_empty());
-        assert!(valid_oauth_name(&Github, "", false));
-        assert!(!valid_oauth_name(&Github, "", true));
-        assert!(!valid_oauth_name(&Codex, "", false));
-        assert!(valid_oauth_name(&Github, "legacy-name", true));
-        assert!(valid_oauth_name(&Github, "legacy-name", false));
+    fn github_browser_authorization_is_an_app_redirect_not_device_enrollment() {
+        let submission: GitHubAppAuthorizationSubmission =
+            serde_json::from_value(serde_json::json!({"_csrf": "synthetic-csrf"})).unwrap();
+        assert!(submission.credential_id.is_empty());
+        assert!(submission.expected_revocation_generation.is_none());
+        assert!(web_device_oauth_provider("codex").is_some());
+        assert!(web_device_oauth_provider("github").is_none());
+        assert!(valid_oauth_name("Codex work"));
+        assert!(!valid_oauth_name(""));
+
+        let installation = github_app_installation_url("codewire", "opaque-state");
+        let url = Url::parse(&installation).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://github.com/apps/codewire/installations/new?state=opaque-state"
+        );
+        assert!(!installation.contains("device"));
+        assert!(!installation.contains("redirect_uri"));
+        assert!(valid_github_app_callback_code("a-b_c.d~9"));
+        assert!(!valid_github_app_callback_code("invalid?code"));
+    }
+
+    #[test]
+    fn github_callback_response_drops_authorization_code_referrers_and_cache_entries() {
+        let response = github_app_callback_response(
+            Response::new(Body::empty()),
+            "codewire_github_app_authorization=deleted".into(),
+        );
+        assert_eq!(
+            response.headers()[header::REFERRER_POLICY],
+            HeaderValue::from_static("no-referrer")
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            HeaderValue::from_static("no-store, max-age=0")
+        );
     }
 
     #[test]
@@ -922,6 +1419,10 @@ mod tests {
         assert_eq!(
             approved_error("credential-uncertain"),
             "The credential operation may have completed. Reload and inspect it before retrying."
+        );
+        assert_eq!(
+            approved_error("github-app-already-connected"),
+            "This GitHub account is already connected. Use its Reconnect action to update repository access."
         );
     }
 

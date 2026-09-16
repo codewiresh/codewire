@@ -11,13 +11,13 @@ use base64::{
 use buffa::Message as _;
 use codewire_proto::codewire::v1::{
     AccessProfile, AccessProfileEntry, AccessProfileServiceClient, AddApiKeyCredentialRequest,
-    AddSshCredentialRequest, CreateAccessProfileRequest, Credential, CredentialAuthenticationKind,
-    CredentialMutationServiceClient, CredentialServiceClient, CredentialStatus,
-    DeleteAccessProfileRequest, DeleteCredentialRequest, EnrollCodexRequest, EnrollCodexResponse,
-    EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GetCredentialRequest,
+    AddSshCredentialRequest, CompleteGithubAppAuthorizationRequest, CreateAccessProfileRequest,
+    Credential, CredentialAuthenticationKind, CredentialMutationServiceClient,
+    CredentialServiceClient, CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest,
+    EnrollCodexRequest, EnrollCodexResponse, GenerateSshCredentialRequest, GetCredentialRequest,
     ListAccessProfilesRequest, ListCredentialsRequest, RenameCredentialRequest,
     RevokeCredentialRequest, RotateApiKeyCredentialRequest, UpdateAccessProfileRequest,
-    enroll_codex_response, enroll_github_response, get_credential_request,
+    enroll_codex_response, get_credential_request,
 };
 use connectrpc::{
     ConnectError, ErrorCode,
@@ -43,7 +43,6 @@ const MAX_MUTATION_RESPONSE_BYTES: usize = 16 * 1024;
 #[derive(Clone, Copy)]
 pub(crate) enum OAuthProvider {
     Codex,
-    Github,
 }
 
 pub(crate) struct OAuthEnrollmentRequest {
@@ -314,91 +313,6 @@ pub(crate) async fn run_oauth_enrollment(
                 }
             }
         }
-        OAuthProvider::Github => {
-            let rpc = EnrollGithubRequest {
-                name: request.name,
-                credential_id: request.credential_id,
-                expected_revocation_generation: request.expected_generation,
-                ..Default::default()
-            };
-            let stream = tokio::select! {
-                _ = events.closed() => return,
-                result = client.enroll_github_with_options(rpc, options) => result,
-            };
-            let mut stream = match stream {
-                Ok(stream) => stream,
-                Err(error) => {
-                    let _ = events.send(failed_error(&error, false)).await;
-                    return;
-                }
-            };
-            let mut challenged = false;
-            loop {
-                let message = tokio::select! {
-                    _ = events.closed() => return,
-                    result = stream.message::<EnrollGithubResponse>() => result,
-                };
-                match message {
-                    Ok(Some(message)) => match message.to_owned_message().event {
-                        Some(enroll_github_response::Event::Challenge(challenge))
-                            if !challenged && valid_github_challenge(&challenge) =>
-                        {
-                            challenged = true;
-                            if events
-                                .send(OAuthEnrollmentEvent::Challenge {
-                                    provider: "GitHub",
-                                    verification_url: challenge.verification_url,
-                                    user_code: challenge.user_code,
-                                    expires_utc: challenge_expiry(challenge.expires_at_unix),
-                                })
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        Some(enroll_github_response::Event::Credential(credential))
-                            if challenged
-                                && validate_oauth_ack(
-                                    &credential,
-                                    "github",
-                                    &expected_name,
-                                    &expected,
-                                )
-                                .is_ok() =>
-                        {
-                            let terminal = tokio::select! {
-                                _ = events.closed() => return,
-                                result = stream.message::<EnrollGithubResponse>() => result,
-                            };
-                            let event = if matches!(terminal, Ok(None)) {
-                                OAuthEnrollmentEvent::Committed
-                            } else {
-                                failed(true)
-                            };
-                            let _ = events.send(event).await;
-                            return;
-                        }
-                        Some(enroll_github_response::Event::Credential(_)) => {
-                            let _ = events.send(failed(true)).await;
-                            return;
-                        }
-                        _ => {
-                            let _ = events.send(failed(challenged)).await;
-                            return;
-                        }
-                    },
-                    Ok(None) => {
-                        let _ = events.send(failed(challenged)).await;
-                        return;
-                    }
-                    Err(error) => {
-                        let _ = events.send(failed_error(&error, challenged)).await;
-                        return;
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -413,7 +327,6 @@ async fn enrollment_expected(
             let current = get_exact_credential(state, cookie, id).await?;
             let expected_slot = match request.provider {
                 OAuthProvider::Codex => "codex",
-                OAuthProvider::Github => "github",
             };
             if current.name != request.name
                 || current.revocation_generation != generation
@@ -437,11 +350,7 @@ fn validate_oauth_ack(
     if credential.provider != provider
         || credential.authentication_kind != CredentialAuthenticationKind::Oauth
         || credential.status != CredentialStatus::Active
-        || if provider == "github" && expected.is_none() && expected_name.is_empty() {
-            credential.account_hint.as_deref() != Some(credential.name.as_str())
-        } else {
-            credential.name != expected_name
-        }
+        || credential.name != expected_name
     {
         return Err(invalid_metadata());
     }
@@ -467,24 +376,6 @@ fn valid_codex_challenge(challenge: &codewire_proto::codewire::v1::CodexDeviceCh
             .user_code
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        && challenge.expires_at_unix > 0
-        && challenge.expires_at_unix <= i64::MAX as u64
-}
-
-fn valid_github_challenge(challenge: &codewire_proto::codewire::v1::GithubDeviceChallenge) -> bool {
-    challenge.verification_url == "https://github.com/login/device"
-        && challenge.user_code.len() == 9
-        && challenge
-            .user_code
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| {
-                if index == 4 {
-                    byte == b'-'
-                } else {
-                    byte.is_ascii_uppercase() || byte.is_ascii_digit()
-                }
-            })
         && challenge.expires_at_unix > 0
         && challenge.expires_at_unix <= i64::MAX as u64
 }
@@ -525,6 +416,62 @@ pub(crate) async fn add_api_key(
         CredentialAuthenticationKind::ApiKey,
         expires_at_unix,
     )
+}
+
+/// Complete the server-side GitHub App callback. The callback code is sent
+/// only to credential-service over the authenticated mutation connection; the
+/// browser receives no token, provider response, or installation metadata.
+pub(crate) async fn complete_github_app_authorization(
+    state: &AppState,
+    cookie: HeaderValue,
+    code: Vec<u8>,
+    credential_id: Option<String>,
+    expected_generation: Option<u64>,
+) -> Result<(), ConnectError> {
+    let current = match (&credential_id, expected_generation) {
+        (None, None) => None,
+        (Some(id), Some(generation)) => {
+            let current = get_exact_credential(state, cookie.clone(), id).await?;
+            if current.provider != "github"
+                || current.authentication_kind != CredentialAuthenticationKind::Oauth
+                || current.revocation_generation != generation
+            {
+                return Err(ConnectError::aborted("credential metadata changed"));
+            }
+            Some(current)
+        }
+        _ => return Err(invalid_metadata()),
+    };
+    let response = mutation_client(state, cookie)
+        .complete_github_app_authorization(CompleteGithubAppAuthorizationRequest {
+            code,
+            credential_id,
+            expected_revocation_generation: expected_generation,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    let credential = response
+        .credential
+        .into_option()
+        .ok_or_else(invalid_metadata)?;
+    validate_github_app_authorization_ack(&credential, current.as_ref())
+}
+
+pub(crate) async fn validate_github_app_reconnect(
+    state: &AppState,
+    cookie: HeaderValue,
+    credential_id: &str,
+    expected_generation: u64,
+) -> Result<(), ConnectError> {
+    let current = get_exact_credential(state, cookie, credential_id).await?;
+    if current.provider != "github"
+        || current.authentication_kind != CredentialAuthenticationKind::Oauth
+        || current.revocation_generation != expected_generation
+    {
+        return Err(ConnectError::aborted("credential metadata changed"));
+    }
+    Ok(())
 }
 
 pub(crate) async fn generate_ssh(
@@ -1094,6 +1041,46 @@ fn validate_created_ack(
     Ok(())
 }
 
+fn validate_github_app_authorization_ack(
+    credential: &Credential,
+    current: Option<&Credential>,
+) -> Result<(), ConnectError> {
+    validate_credential_metadata(credential)?;
+    if credential.provider != "github"
+        || credential.authentication_kind != CredentialAuthenticationKind::Oauth
+        || credential.status != CredentialStatus::Active
+    {
+        return Err(invalid_metadata());
+    }
+    match current {
+        None if credential.account_hint.as_deref() == Some(credential.name.as_str())
+            && credential.revocation_generation == 1
+            && credential.expires_at_unix.is_none() =>
+        {
+            Ok(())
+        }
+        Some(current)
+            if credential.id == current.id
+                && credential.name == current.name
+                && credential.account_hint.is_some()
+                && current
+                    .account_hint
+                    .as_ref()
+                    .is_none_or(|expected| credential.account_hint.as_ref() == Some(expected))
+                && credential.expires_at_unix == current.expires_at_unix
+                && credential.revocation_generation
+                    == current
+                        .revocation_generation
+                        .checked_add(1)
+                        .filter(|generation| *generation <= i64::MAX as u64)
+                        .ok_or_else(invalid_metadata)? =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid_metadata()),
+    }
+}
+
 fn validate_exact_credential_ack(
     credential: Option<Credential>,
     expected: &Credential,
@@ -1437,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_challenges_and_reconnect_acknowledgements_are_closed() {
+    fn codex_challenges_and_github_app_reconnect_acknowledgements_are_closed() {
         let codex = codewire_proto::codewire::v1::CodexDeviceChallenge {
             verification_url: "https://auth.openai.com/codex/device".into(),
             user_code: "ABCD-1234".into(),
@@ -1449,14 +1436,6 @@ mod tests {
         wrong_url.verification_url = "https://attacker.test/device".into();
         assert!(!valid_codex_challenge(&wrong_url));
 
-        let github = codewire_proto::codewire::v1::GithubDeviceChallenge {
-            verification_url: "https://github.com/login/device".into(),
-            user_code: "ABCD-1234".into(),
-            expires_at_unix: 4_102_444_800,
-            ..Default::default()
-        };
-        assert!(valid_github_challenge(&github));
-
         let mut automatic = credential(
             "00000000-0000-4000-8000-000000000002",
             "verified-account",
@@ -1464,36 +1443,42 @@ mod tests {
             CredentialAuthenticationKind::Oauth,
         );
         automatic.account_hint = Some("verified-account".into());
-        validate_oauth_ack(&automatic, "github", "", &None).unwrap();
+        validate_github_app_authorization_ack(&automatic, None).unwrap();
         automatic.account_hint = Some("different-account".into());
-        assert!(validate_oauth_ack(&automatic, "github", "", &None).is_err());
+        assert!(validate_github_app_authorization_ack(&automatic, None).is_err());
         automatic.account_hint = None;
-        assert!(validate_oauth_ack(&automatic, "github", "", &None).is_err());
-        assert!(validate_oauth_ack(&automatic, "openai", "", &None).is_err());
+        assert!(validate_github_app_authorization_ack(&automatic, None).is_err());
+        automatic.provider = "openai".into();
+        assert!(validate_github_app_authorization_ack(&automatic, None).is_err());
 
         let mut current = credential(
             "00000000-0000-4000-8000-000000000001",
-            "Work GitHub",
+            "old-account",
             "github",
             CredentialAuthenticationKind::Oauth,
         );
-        current.status = CredentialStatus::Revoked.into();
-        current.expires_at_unix = Some(4_102_444_800);
+        current.status = CredentialStatus::Active.into();
         current.account_hint = Some("old-account".into());
         assert_eq!(credential_display_name(&current), "old-account");
         let mut replacement = current.clone();
-        replacement.status = CredentialStatus::Active.into();
         replacement.revocation_generation = 2;
-        replacement.account_hint = Some("verified-account".into());
-        validate_oauth_ack(
-            &replacement,
-            "github",
-            "Work GitHub",
-            &Some(current.clone()),
-        )
-        .unwrap();
-        replacement.expires_at_unix = None;
-        assert!(validate_oauth_ack(&replacement, "github", "Work GitHub", &Some(current)).is_err());
+        validate_github_app_authorization_ack(&replacement, Some(&current)).unwrap();
+        replacement.account_hint = Some("different-account".into());
+        assert!(validate_github_app_authorization_ack(&replacement, Some(&current)).is_err());
+
+        let mut legacy = current.clone();
+        legacy.name = "legacy-reference".into();
+        legacy.account_hint = Some("old-account".into());
+        let mut legacy_replacement = legacy.clone();
+        legacy_replacement.revocation_generation = 2;
+        validate_github_app_authorization_ack(&legacy_replacement, Some(&legacy)).unwrap();
+
+        let mut unknown_legacy = legacy.clone();
+        unknown_legacy.account_hint = None;
+        let mut discovered_identity = unknown_legacy.clone();
+        discovered_identity.account_hint = Some("old-account".into());
+        discovered_identity.revocation_generation = 2;
+        validate_github_app_authorization_ack(&discovered_identity, Some(&unknown_legacy)).unwrap();
     }
 
     #[test]

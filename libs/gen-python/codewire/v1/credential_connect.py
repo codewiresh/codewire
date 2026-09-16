@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
+from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -456,6 +456,9 @@ class CredentialMutationService(Protocol):
     def enroll_github(self, request: EnrollGithubRequest, ctx: RequestContext[EnrollGithubRequest, EnrollGithubResponse]) -> AsyncIterator[EnrollGithubResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    async def complete_github_app_authorization(self, request: CompleteGithubAppAuthorizationRequest, ctx: RequestContext[CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse]) -> CompleteGithubAppAuthorizationResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     async def add_api_key_credential(self, request: AddApiKeyCredentialRequest, ctx: RequestContext[AddApiKeyCredentialRequest, AddApiKeyCredentialResponse]) -> AddApiKeyCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -510,6 +513,16 @@ class CredentialMutationServiceASGIApplication(ConnectASGIApplication[Credential
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.enroll_github,
+                ),
+                "/codewire.v1.CredentialMutationService/CompleteGithubAppAuthorization": Endpoint.unary(
+                    method=MethodInfo(
+                        name="CompleteGithubAppAuthorization",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=CompleteGithubAppAuthorizationRequest,
+                        output=CompleteGithubAppAuthorizationResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.complete_github_app_authorization,
                 ),
                 "/codewire.v1.CredentialMutationService/AddApiKeyCredential": Endpoint.unary(
                     method=MethodInfo(
@@ -653,6 +666,26 @@ class CredentialMutationServiceClient(ConnectClient):
                 service_name="codewire.v1.CredentialMutationService",
                 input=EnrollGithubRequest,
                 output=EnrollGithubResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def complete_github_app_authorization(
+        self,
+        request: CompleteGithubAppAuthorizationRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> CompleteGithubAppAuthorizationResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="CompleteGithubAppAuthorization",
+                service_name="codewire.v1.CredentialMutationService",
+                input=CompleteGithubAppAuthorizationRequest,
+                output=CompleteGithubAppAuthorizationResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,
@@ -806,6 +839,9 @@ class CredentialMutationServiceSync(Protocol):
     def enroll_github(self, request: EnrollGithubRequest, ctx: RequestContext[EnrollGithubRequest, EnrollGithubResponse]) -> Iterator[EnrollGithubResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def complete_github_app_authorization(self, request: CompleteGithubAppAuthorizationRequest, ctx: RequestContext[CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse]) -> CompleteGithubAppAuthorizationResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def add_api_key_credential(self, request: AddApiKeyCredentialRequest, ctx: RequestContext[AddApiKeyCredentialRequest, AddApiKeyCredentialResponse]) -> AddApiKeyCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -858,6 +894,16 @@ class CredentialMutationServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.enroll_github,
+                ),
+                "/codewire.v1.CredentialMutationService/CompleteGithubAppAuthorization": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="CompleteGithubAppAuthorization",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=CompleteGithubAppAuthorizationRequest,
+                        output=CompleteGithubAppAuthorizationResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.complete_github_app_authorization,
                 ),
                 "/codewire.v1.CredentialMutationService/AddApiKeyCredential": EndpointSync.unary(
                     method=MethodInfo(
@@ -1000,6 +1046,25 @@ class CredentialMutationServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.CredentialMutationService",
                 input=EnrollGithubRequest,
                 output=EnrollGithubResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def complete_github_app_authorization(
+        self,
+        request: CompleteGithubAppAuthorizationRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> CompleteGithubAppAuthorizationResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="CompleteGithubAppAuthorization",
+                service_name="codewire.v1.CredentialMutationService",
+                input=CompleteGithubAppAuthorizationRequest,
+                output=CompleteGithubAppAuthorizationResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,
