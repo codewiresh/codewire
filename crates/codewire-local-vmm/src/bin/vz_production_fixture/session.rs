@@ -120,6 +120,7 @@ async fn read_output(
         session_id: session_id.to_owned(),
         offset: 0,
         limit: MAX_OUTPUT_BYTES as u64,
+        allow_history_gap: false,
     }))
     .await?;
     validate_output(response, expected)

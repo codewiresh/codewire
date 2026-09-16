@@ -826,6 +826,7 @@ async fn output_reads_split_binary_frames_without_gaps_or_duplicates() {
                 session_id: session_id.clone(),
                 offset,
                 limit: 2,
+                allow_history_gap: false,
             })
             .await
             .expect("read binary output")
@@ -855,6 +856,7 @@ async fn output_reads_split_binary_frames_without_gaps_or_duplicates() {
             session_id: session_id.clone(),
             offset: 2,
             limit: 3,
+            allow_history_gap: false,
         })
         .await
         .expect("resume from an interior frame offset")
@@ -875,6 +877,7 @@ async fn output_reads_split_binary_frames_without_gaps_or_duplicates() {
             session_id,
             offset: 7,
             limit: 1,
+            allow_history_gap: false,
         })
         .await
         .expect_err("offset beyond durable output is rejected");
@@ -1021,6 +1024,126 @@ async fn silent_attachment_emits_periodic_status_heartbeat() {
         .stop_session(v1::StopSessionRequest { session_id })
         .await
         .expect("stop silent session");
+}
+
+#[tokio::test]
+async fn retained_history_gap_precedes_replay_and_resuming_keeps_the_same_live_shell() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let output_bytes = 8 * 1024 * 1024 + 1024;
+    let tail = "retained-tail";
+    let session_id = client.launch_session(v1::LaunchSessionRequest {
+        command: vec!["sh".into(), "-c".into(), format!(
+            "head -c {output_bytes} /dev/zero; printf '{tail}'; read line; printf 'same-shell:%s' \"$line\"; read next"
+        )],
+        ..Default::default()
+    }).await.unwrap().into_inner().session.unwrap().session_id;
+    let record = wait_for_output(&mut client, &session_id, output_bytes + tail.len() as u64).await;
+    assert_eq!(record.state, v1::SessionLifecycleState::Running as i32);
+    assert!(record.output_start_offset > 0);
+    assert_eq!(record.output_end_offset, output_bytes + tail.len() as u64);
+
+    let denied = client
+        .read_session_output(v1::ReadSessionOutputRequest {
+            session_id: session_id.clone(),
+            offset: 0,
+            limit: 1,
+            allow_history_gap: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        denied
+            .message()
+            .contains(&record.output_start_offset.to_string())
+    );
+    let replay = client
+        .read_session_output(v1::ReadSessionOutputRequest {
+            session_id: session_id.clone(),
+            offset: 0,
+            limit: 1,
+            allow_history_gap: true,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(replay.history_gap);
+    assert_eq!(replay.retained_start_offset, record.output_start_offset);
+    assert_eq!(replay.chunks[0].offset, record.output_start_offset);
+
+    let (tx, rx) = mpsc::channel(4);
+    tx.send(attach_message(&session_id, 0)).await.unwrap();
+    let mut attached = client
+        .attach_session(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let first = tokio::time::timeout(Duration::from_secs(5), attached.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Some(v1::session_attach_message::Payload::HistoryGap(gap)) = first.payload else {
+        panic!("gap must precede replay");
+    };
+    assert_eq!(gap.requested_offset, 0);
+    assert_eq!(gap.retained_start_offset, record.output_start_offset);
+    let next = attached.message().await.unwrap().unwrap();
+    let Some(v1::session_attach_message::Payload::Output(chunk)) = next.payload else {
+        panic!("replay follows gap");
+    };
+    assert_eq!(chunk.offset, record.output_start_offset);
+    drop(attached);
+    drop(tx);
+    assert_eq!(
+        get_session(&mut client, &session_id).await.state,
+        v1::SessionLifecycleState::Running as i32
+    );
+
+    let (tx, rx) = mpsc::channel(4);
+    tx.send(attach_message(&session_id, record.output_end_offset))
+        .await
+        .unwrap();
+    let mut resumed = client
+        .attach_session(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let initial = resumed.message().await.unwrap().unwrap();
+    assert!(matches!(
+        initial.payload,
+        Some(v1::session_attach_message::Payload::Status(_))
+    ));
+    tx.send(v1::SessionAttachMessage {
+        payload: Some(v1::session_attach_message::Payload::Input(
+            v1::SessionInput {
+                data: b"okay\n".to_vec(),
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = resumed.message().await.unwrap().unwrap();
+            match message.payload {
+                Some(v1::session_attach_message::Payload::HistoryGap(_)) => {
+                    panic!("retained cursor must not emit a gap")
+                }
+                Some(v1::session_attach_message::Payload::Output(chunk)) => break chunk,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(message.offset, record.output_end_offset);
+    assert_eq!(message.data, b"same-shell:okay");
+    client
+        .stop_session(v1::StopSessionRequest { session_id })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1291,6 +1414,7 @@ async fn daemon_restart_marks_unrecoverable_live_session_interrupted() {
             session_id: session_id.clone(),
             offset: 0,
             limit: 0,
+            allow_history_gap: false,
         })
         .await
         .expect("read indexed output after daemon restart")

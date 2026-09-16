@@ -356,9 +356,7 @@ pub async fn read_environment_daemon_session_output_core(
     user: &AuthUser,
     org_id: &str,
     environment_id: &str,
-    session_id: &str,
-    offset: u64,
-    limit: u64,
+    request: v1::ReadSessionOutputRequest,
 ) -> AppResult<v1::ReadSessionOutputResponse> {
     let (mut client, token) = session_client_for_target(
         state,
@@ -369,14 +367,7 @@ pub async fn read_environment_daemon_session_output_core(
     )
     .await?;
     client
-        .read_session_output(authorize(
-            v1::ReadSessionOutputRequest {
-                session_id: session_id.to_string(),
-                offset,
-                limit,
-            },
-            &token,
-        )?)
+        .read_session_output(authorize(request, &token)?)
         .await
         .map_err(daemon_session_error)
         .map(tonic::Response::into_inner)

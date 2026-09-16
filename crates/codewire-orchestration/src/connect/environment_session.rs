@@ -160,9 +160,7 @@ impl EnvironmentSessionBackend for PlatformSessionBackend {
             &user,
             org_id,
             environment_id,
-            &request.session_id,
-            request.offset,
-            request.limit,
+            request,
         )
         .await
         .map_err(|error| workspace_rpc_error(&error, ctx))

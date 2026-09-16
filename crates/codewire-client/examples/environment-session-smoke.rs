@@ -83,6 +83,9 @@ async fn prove_terminal_session(
                 .await?
                 .context("attachment ended without terminal status")?;
             match response.event {
+                Some(attach_session_response::Event::HistoryGap(_)) => {
+                    anyhow::bail!("smoke session unexpectedly lost recent output history");
+                }
                 Some(attach_session_response::Event::Output(chunk)) => {
                     output.extend(chunk.data);
                 }
