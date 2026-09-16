@@ -38,6 +38,9 @@ pub struct IdpConfig {
     /// An absent value leaves production signup fail-closed until it is
     /// delivered through the approved secret path.
     pub turnstile_secret_key: String,
+    /// Exact development test-account email that may skip only the Turnstile
+    /// check. An absent value leaves every signup on normal verification.
+    pub turnstile_bypass_email: String,
     /// Signup invite policy. An absent/blank hash list routes signup through
     /// access review; configured hashes permit immediate access.
     pub signup_invite_policy: SignupInvitePolicy,
@@ -54,6 +57,10 @@ impl fmt::Debug for IdpConfig {
             .field(
                 "turnstile_secret_key_configured",
                 &!self.turnstile_secret_key.is_empty(),
+            )
+            .field(
+                "turnstile_bypass_email_configured",
+                &!self.turnstile_bypass_email.is_empty(),
             )
             .field("signup_invite_policy", &self.signup_invite_policy)
             .field("scopes_supported", &self.scopes_supported)
@@ -95,6 +102,8 @@ impl IdpConfig {
         let frontend_url = pick(&["FRONTEND_URL", "CODEWIRE_API_URL"], &mut value)
             .unwrap_or_else(|| issuer.clone());
         let turnstile_secret_key = pick(&["TURNSTILE_SECRET_KEY"], &mut value).unwrap_or_default();
+        let turnstile_bypass_email =
+            pick(&["IDP_TURNSTILE_BYPASS_EMAIL"], &mut value).unwrap_or_default();
         let signup_invite_policy = SignupInvitePolicy::from_sha256_hashes(
             value("IDP_SIGNUP_INVITE_CODE_HASHES").as_deref(),
         )?;
@@ -102,6 +111,7 @@ impl IdpConfig {
             issuer,
             frontend_url,
             turnstile_secret_key,
+            turnstile_bypass_email,
             signup_invite_policy,
             scopes_supported: vec![
                 "openid".into(),
@@ -239,13 +249,16 @@ mod tests {
             issuer: "https://issuer.example".into(),
             frontend_url: "https://app.example".into(),
             turnstile_secret_key: "turnstile-secret-marker".into(),
+            turnstile_bypass_email: "e2e@example.test".into(),
             signup_invite_policy: SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
 
         let diagnostic = format!("{cfg:?}");
         assert!(!diagnostic.contains("turnstile-secret-marker"));
+        assert!(!diagnostic.contains("e2e@example.test"));
         assert!(diagnostic.contains("turnstile_secret_key_configured: true"));
+        assert!(diagnostic.contains("turnstile_bypass_email_configured: true"));
     }
 
     #[test]
@@ -268,6 +281,7 @@ mod tests {
         assert_eq!(cfg.issuer, "http://127.0.0.1:8080");
         assert_eq!(cfg.frontend_url, "http://frontend.example");
         assert_eq!(cfg.turnstile_secret_key, "");
+        assert_eq!(cfg.turnstile_bypass_email, "");
         assert!(!cfg.signup_invite_policy.is_configured());
         assert!(
             cfg.scopes_supported
@@ -294,7 +308,26 @@ mod tests {
         assert_eq!(cfg.issuer, "http://codewire-server:8080");
         assert_eq!(cfg.frontend_url, "http://codewire-server:8080");
         assert_eq!(cfg.turnstile_secret_key, "");
+        assert_eq!(cfg.turnstile_bypass_email, "");
         assert!(!cfg.signup_invite_policy.is_configured());
+    }
+
+    #[test]
+    fn turnstile_bypass_email_is_explicit_and_trimmed() {
+        let values = [
+            ("PUBLIC_OIDC_ISSUER_URL", "https://idp.example"),
+            ("IDP_TURNSTILE_BYPASS_EMAIL", " e2e@example.test "),
+        ];
+
+        let cfg = IdpConfig::from_values(|key| {
+            values
+                .iter()
+                .find(|(candidate, _)| *candidate == key)
+                .map(|(_, value)| (*value).to_string())
+        })
+        .expect("configured bypass email resolves");
+
+        assert_eq!(cfg.turnstile_bypass_email, "e2e@example.test");
     }
 
     #[test]

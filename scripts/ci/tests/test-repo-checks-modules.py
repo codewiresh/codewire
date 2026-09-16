@@ -193,6 +193,15 @@ def assert_turnstile_negative_fixtures() -> None:
         "  TURNSTILE_SITE_KEY: 0x4AAAAAAE2ghrxixpYKpljB\n",
         "must contain an empty value",
     )
+    assert_rejected(
+        "production-bypass-email",
+        production,
+        '        - name: IDP_PORT\n          value: "8091"\n',
+        "        - name: IDP_TURNSTILE_BYPASS_EMAIL\n"
+        "          value: hello@codewire.sh\n"
+        '        - name: IDP_PORT\n          value: "8091"\n',
+        "production IdP must not receive the Turnstile bypass email",
+    )
 
 
 def main() -> None:
