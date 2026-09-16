@@ -2201,6 +2201,37 @@ mod tests {
     }
 
     #[test]
+    fn advanced_creation_disclosures_open_for_errors_and_preserve_exact_values() {
+        let organization = test_organization();
+        let render = |form: &EnvironmentCreateFormView| {
+            EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form,
+            }
+            .render()
+            .unwrap()
+        };
+        let mut form = default_create_form("synthetic-csrf".into(), true);
+        let html = render(&form);
+        assert!(html.contains("data-create-resources>"));
+        assert!(html.contains("data-create-runtime>"));
+        assert!(html.contains("1 vCPU</option>"));
+        assert!(html.contains("2 GiB</option>"));
+        assert!(html.contains("not an idle timeout"));
+        assert!(!html.contains("cw-snapshot-meter"));
+        assert!(!html.contains("Use 0 for infinity"));
+        form.cpu = "750".into();
+        form.cpu_error = "Choose a valid resource value".into();
+        form.install_command = "printf '<preserved-command>'".into();
+        let html = render(&form);
+        assert!(html.contains("data-create-resources open>"));
+        assert!(html.contains("data-create-runtime open>"));
+        assert!(html.contains("value=\"750\" selected>750 millicores"));
+        assert!(!html.contains("<preserved-command>"));
+        assert!(html.contains("preserved-command"));
+    }
+
+    #[test]
     fn configured_preview_pattern_is_provisional_and_never_a_fallback_address() {
         let mut form = default_create_form("synthetic-csrf".into(), true);
         let organization = test_organization();

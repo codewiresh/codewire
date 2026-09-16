@@ -192,6 +192,8 @@ test.describe("managed provider credential browser journey", () => {
 
       await source.getByRole("textbox", { name: "Branch", exact: true }).fill("main");
       await page.getByLabel("Workspace image").fill(githubCheckoutImage);
+      await page.locator("[data-create-runtime] > summary").click();
+      await page.locator("[data-create-resources] > summary").click();
       await page.getByLabel("Install Command").fill(githubCheckoutInstall);
       await expect(page.getByLabel("Install Command")).toHaveValue(githubCheckoutInstall);
       await page.getByLabel("TTL").fill("3600s");

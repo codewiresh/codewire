@@ -170,6 +170,8 @@ async function seedPinnedPreset() {
 async function openConfiguredImageForm(page: Page) {
   await page.goto(`/${slug}/new/`);
   await page.getByLabel("Workspace image").fill(workspaceRuntimeImage);
+  await page.locator("[data-create-runtime] > summary").click();
+  await page.locator("[data-create-resources] > summary").click();
   await page.getByLabel("Install Command").fill("printf 'configured-explicitly\\n'");
   await page.getByLabel("Startup Script").fill("printf 'started-explicitly\\n'");
   await page.getByLabel("TTL").fill("3600s");
@@ -243,12 +245,12 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("#environment-name")).toBeFocused();
     const ttl = page.getByLabel("TTL");
     await expect(ttl).toHaveValue("infinity");
+    await page.locator("[data-create-resources] > summary").click();
     await ttl.fill("0");
     await ttl.press("Tab");
     await expect(ttl).toHaveValue("infinity");
     await page.locator("#environment-name").focus();
-    await expect(page.locator("#environment-snapshot")).toBeDisabled();
-    await expect(page.locator('#environment-snapshot[name]')).toHaveCount(0);
+    await expect(page.locator("#environment-snapshot, .cw-snapshot-meter")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await expect(page.locator('[action$="/_actions/sandboxes/prepare"]')).toHaveCount(0);
     await expect(page.locator('[data-event-action$="/_events/sandboxes/prepare"]')).toHaveCount(0);
@@ -324,6 +326,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByRole("button", { name: "Add", exact: true }).click();
     await page.getByLabel("Internal port", { exact: true }).fill("3000");
     await page.getByLabel("Preview label", { exact: true }).fill("web");
+    await page.locator("[data-create-runtime] > summary").click();
     await page.getByLabel("Install Command").fill("bun install");
     await page.getByLabel("Startup Script").fill("bun run dev");
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
@@ -403,7 +406,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByLabel("Repository URL", { exact: true }).fill(repositoryUrl);
     await page.getByLabel("Branch", { exact: true }).fill("main");
     await page.getByLabel("Mount path", { exact: true }).fill("codewire");
-    await expect(page.getByRole("heading", { name: "Runtime", exact: true })).toBeVisible();
+    await expect(page.locator("[data-create-runtime] > summary")).toHaveText("Runtime commands");
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue(repositoryUrl);
     await expect(page.getByLabel("Branch", { exact: true })).toHaveValue("main");
     await expect(page.getByLabel("Mount path", { exact: true })).toHaveValue("codewire");
