@@ -22,23 +22,30 @@ async function completeGithubAppConnection(page: Page, code: string) {
   // The production handoff navigates to GitHub. The Kind journey preserves
   // that redirect and state boundary, then uses its checked-in synthetic
   // provider callback without granting the browser external network access.
-  await page.route(installation, (route) => route.fulfill({
-    status: 200,
-    contentType: "text/html",
-    body: "<!doctype html><title>Kind GitHub App fixture</title>",
-  }));
+  let resolveGithubLanding: (() => void) | undefined;
+  const githubLanding = new Promise<void>((resolve) => { resolveGithubLanding = resolve; });
+  await page.route(installation, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>Kind GitHub App fixture</title>",
+    });
+    resolveGithubLanding?.();
+  });
   let state = "";
   try {
     // Keep the checked-in route in place until the browser has actually
     // followed the authorization redirect. Waiting only for the 303 response
     // races its Location navigation and can send the test browser to GitHub.
-    const githubLanding = page.waitForURL(installation);
+    // Do not wait for the synthetic page to finish loading: the next step
+    // deliberately replaces it with GitHub's registered callback, which is a
+    // valid aborted provider-page navigation in Chromium.
     const authorization = page.waitForResponse((response) => (
       response.url().includes("/settings/credentials/_actions/github/authorize")
       && response.request().method() === "POST"
     ));
     await form.getByRole("button", { name: "Continue to GitHub", exact: true }).click();
-    const [response] = await Promise.all([authorization, githubLanding]);
+    const response = await authorization;
     expect(response.status()).toBe(303);
     expect(response.headers()["cache-control"]).toBe("no-store");
     const location = response.headers().location;
@@ -53,7 +60,7 @@ async function completeGithubAppConnection(page: Page, code: string) {
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Lax");
     expect(cookie).toContain("Path=/settings/credentials/github/");
-    await expect(page).toHaveTitle("Kind GitHub App fixture");
+    await githubLanding;
   } finally {
     await page.unroute(installation);
   }
