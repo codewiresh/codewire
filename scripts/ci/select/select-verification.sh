@@ -13,7 +13,8 @@ Writes one versioned classification, capability token set, and required local
 mode to stdout and to $GITHUB_OUTPUT. A failed discovery or malformed input
 emits no machine-readable output. Use
 --diagnostic-changed-files to append the classified path set to stdout.
-Pull requests run Kind only for a Kind-relevant path with explicit opt-in.
+Pull requests run Kind for a Kind-relevant path with explicit opt-in. Changes
+to direct in-cluster fixture owners select their mandatory Kind proof directly.
 Set VERIFICATION_REQUEST for product workflow_dispatch to a family token or
 all. The separate Manual diagnostics workflow uses rust-stack or go-tailnet.
 EOF
@@ -1041,6 +1042,15 @@ if [ "$event_selected" = false ]; then
         # least-privilege metadata access or deletion races in PostgreSQL.
         select_token database
         select_token rust_pkg_codewire_credential_broker
+        ;;
+      crates/codewire-credential-service/src/runtime/kind/*)
+        # This is the real in-cluster credential-service fixture, rather than
+        # a unit-only helper. Like the direct Kind smoke owners, its changes
+        # must always exercise their canonical in-cluster proof.
+        select_token database
+        select_token edge_kind
+        select_token kind
+        kind_relevant=true
         ;;
       crates/codewire-credential-service/*)
         # Runtime identity and consent admission need the restricted PostgreSQL
