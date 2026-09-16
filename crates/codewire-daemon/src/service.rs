@@ -1,4 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
@@ -11,6 +13,7 @@ use codewire_gateway_proto::{
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::credential_bridge::CredentialBridge;
@@ -18,6 +21,9 @@ use crate::durable_session::{SessionEngine, status_from_session_error};
 use crate::{Config, files, session};
 
 const ATTACH_SESSION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const ATTACH_SESSION_READ_BYTES: u64 = 32 * 1024;
+const ATTACH_SESSION_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const ATTACH_SESSION_FINAL_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub struct DaemonServiceImpl {
@@ -53,6 +59,10 @@ impl DaemonRuntimeState {
 }
 
 impl DaemonServiceImpl {
+    pub(crate) fn session_engine(&self) -> SessionEngine {
+        self.session_engine.clone()
+    }
+
     pub fn new(config: Config) -> Self {
         Self::with_runtime_state(config, DaemonRuntimeState::ready())
     }
@@ -430,15 +440,75 @@ impl DaemonService for DaemonServiceImpl {
     }
 }
 
-async fn run_attach_session(
+type AttachRead = Pin<
+    Box<
+        dyn Future<Output = Result<(v1::ReadSessionOutputResponse, v1::SessionRecord), Status>>
+            + Send,
+    >,
+>;
+
+fn read_attach_batch(engine: SessionEngine, session_id: String, cursor: u64) -> AttachRead {
+    Box::pin(async move {
+        let output = engine
+            .read_output(v1::ReadSessionOutputRequest {
+                session_id: session_id.clone(),
+                offset: cursor,
+                limit: ATTACH_SESSION_READ_BYTES,
+                allow_history_gap: true,
+            })
+            .await
+            .map_err(status_from_session_error)?;
+        let record = engine
+            .get(&session_id)
+            .await
+            .map_err(status_from_session_error)?;
+        Ok((output, record))
+    })
+}
+
+async fn finish_attach(
+    tx: &mpsc::Sender<Result<v1::SessionAttachMessage, Status>>,
+    message: Result<v1::SessionAttachMessage, Status>,
+) {
+    // A reader that has stopped accepting output cannot prevent detach or an
+    // invalid stream from releasing this attachment. The durable process is
+    // never stopped here; its retained output remains available for replay.
+    let _ = tokio::time::timeout(ATTACH_SESSION_FINAL_SEND_TIMEOUT, tx.send(message)).await;
+}
+
+async fn attach_control<T>(
+    tx: &mpsc::Sender<Result<v1::SessionAttachMessage, Status>>,
+    operation: impl Future<Output = Result<T, crate::durable_session::SessionError>>,
+) -> Result<T, Status> {
+    tokio::select! {
+        () = tx.closed() => Err(Status::cancelled("attachment closed")),
+        result = tokio::time::timeout(ATTACH_SESSION_CONTROL_TIMEOUT, operation) => {
+            result.map_err(|_| Status::deadline_exceeded("session control timed out"))?
+                .map_err(status_from_session_error)
+        }
+    }
+}
+
+async fn run_attach_session<S>(
     engine: SessionEngine,
-    mut incoming: Streaming<v1::SessionAttachMessage>,
+    mut incoming: S,
     attach: v1::AttachSessionRequest,
     tx: mpsc::Sender<Result<v1::SessionAttachMessage, Status>>,
-) {
+) where
+    S: Stream<Item = Result<v1::SessionAttachMessage, Status>> + Unpin,
+{
     let session_id = attach.session_id;
     let mut cursor = attach.output_offset;
     let mut last_status = None;
+    let mut record: Option<v1::SessionRecord> = None;
+    let mut chunks: VecDeque<v1::SessionOutputChunk> = VecDeque::new();
+    let mut pending_status = None;
+    let mut pending_gap: Option<v1::SessionOutputGap> = None;
+    let mut terminal_status: Option<v1::SessionStatus> = None;
+    let mut read = None;
+    let mut refresh_due = true;
+    let mut refresh = tokio::time::interval(Duration::from_millis(10));
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + ATTACH_SESSION_HEARTBEAT_INTERVAL,
         ATTACH_SESSION_HEARTBEAT_INTERVAL,
@@ -446,180 +516,179 @@ async fn run_attach_session(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        let output = match engine
-            .read_output(v1::ReadSessionOutputRequest {
-                session_id: session_id.clone(),
-                offset: cursor,
-                limit: 0,
-                allow_history_gap: true,
-            })
-            .await
+        let terminal_ready = terminal_status.as_ref().is_some_and(|status| {
+            pending_gap.is_none() && chunks.is_empty() && cursor >= status.output_end_offset
+        });
+        if read.is_none()
+            && chunks.is_empty()
+            && pending_gap.is_none()
+            && pending_status.is_none()
+            && refresh_due
+            && !terminal_ready
         {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = tx.send(Err(status_from_session_error(error))).await;
-                return;
-            }
-        };
-        if output.history_gap
-            && tx
-                .send(Ok(v1::SessionAttachMessage {
-                    payload: Some(v1::session_attach_message::Payload::HistoryGap(
-                        v1::SessionOutputGap {
-                            requested_offset: cursor,
-                            retained_start_offset: output.retained_start_offset,
-                        },
-                    )),
-                }))
-                .await
-                .is_err()
-        {
-            return;
-        }
-        for chunk in output.chunks {
-            if tx
-                .send(Ok(v1::SessionAttachMessage {
-                    payload: Some(v1::session_attach_message::Payload::Output(chunk)),
-                }))
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        cursor = output.next_offset;
-
-        let record = match engine.get(&session_id).await {
-            Ok(record) => record,
-            Err(error) => {
-                let _ = tx.send(Err(status_from_session_error(error))).await;
-                return;
-            }
-        };
-        if cursor < record.output_end_offset {
-            continue;
-        }
-        let status = session_status(&record, None);
-        if last_status.as_ref() != Some(&status) {
-            if tx
-                .send(Ok(v1::SessionAttachMessage {
-                    payload: Some(v1::session_attach_message::Payload::Status(status.clone())),
-                }))
-                .await
-                .is_err()
-            {
-                return;
-            }
-            last_status = Some(status);
-            heartbeat.reset();
-        }
-        if !is_attached_session_live(record.state) {
-            return;
+            read = Some(read_attach_batch(
+                engine.clone(),
+                session_id.clone(),
+                cursor,
+            ));
+            refresh_due = false;
         }
 
+        // One owner retains the pending batch while capacity is unavailable.
+        // Every iteration still polls input and disconnect, even when output
+        // never catches up with a continuous producer. No detached writer can
+        // reorder chunks or advance the replay cursor ahead of an enqueue.
         tokio::select! {
-            message = incoming.message() => {
+            () = tx.closed() => return,
+            message = incoming.next() => {
                 match message {
-                    Ok(Some(message)) => match message.payload {
+                    Some(Ok(message)) => match message.payload {
                         Some(v1::session_attach_message::Payload::Input(input)) => {
-                            if let Err(error) = engine.input(&session_id, input.data).await {
-                                let _ = tx.send(Err(status_from_session_error(error))).await;
+                            if let Err(error) = attach_control(&tx, engine.input(&session_id, input.data)).await {
+                                finish_attach(&tx, Err(error)).await;
                                 return;
                             }
                         }
                         Some(v1::session_attach_message::Payload::Resize(resize)) => {
-                            match engine.resize(&session_id, resize.width, resize.height).await {
-                                Ok(record) => {
-                                    let status = session_status(&record, None);
-                                    if tx
-                                        .send(Ok(v1::SessionAttachMessage {
-                                            payload: Some(
-                                                v1::session_attach_message::Payload::Status(
-                                                    status.clone(),
-                                                ),
-                                            ),
-                                        }))
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
+                            match attach_control(&tx, engine.resize(&session_id, resize.width, resize.height)).await {
+                                Ok(updated) => {
+                                    // Apply first, then coalesce the informational
+                                    // acknowledgement. Output capacity never holds
+                                    // up another input or detach request.
+                                    // Discard any read-only refresh begun before
+                                    // this resize. Its cursor never advanced, so
+                                    // replay is safe and it cannot replace this
+                                    // acknowledged state with an older clone.
+                                    read = None;
+                                    refresh_due = true;
+                                    if is_attached_session_live(updated.state) {
+                                        terminal_status = None;
+                                        pending_status = Some(session_status(&updated, None));
+                                    } else {
+                                        pending_status = None;
+                                        terminal_status = Some(session_status(&updated, None));
                                     }
-                                    last_status = Some(status);
+                                    record = Some(updated);
                                 }
                                 Err(error) => {
-                                    let _ = tx.send(Err(status_from_session_error(error))).await;
+                                    finish_attach(&tx, Err(error)).await;
                                     return;
                                 }
                             }
                         }
                         Some(v1::session_attach_message::Payload::Detach(detach)) => {
                             if detach.session_id != session_id {
-                                let _ = tx
-                                    .send(Err(Status::invalid_argument(
+                                finish_attach(&tx, Err(Status::invalid_argument(
                                         "detach session identifier does not match attached session",
-                                    )))
-                                    .await;
+                                    ))).await;
                                 return;
                             }
-                            match engine.get(&session_id).await {
+                            match attach_control(&tx, engine.get(&session_id)).await {
                                 Ok(record) => {
-                                    let status = session_status(
-                                        &record,
-                                        Some("client detached; session remains running"),
-                                    );
-                                    let _ = tx
-                                        .send(Ok(v1::SessionAttachMessage {
-                                            payload: Some(
-                                                v1::session_attach_message::Payload::Status(status),
-                                            ),
-                                        }))
-                                        .await;
+                                    // Never announce terminal completion before
+                                    // pending output, even on explicit detach.
+                                    if is_attached_session_live(record.state) || cursor >= record.output_end_offset {
+                                        let status = session_status(
+                                            &record,
+                                            Some("client detached; session remains running"),
+                                        );
+                                        finish_attach(&tx, Ok(v1::SessionAttachMessage {
+                                            payload: Some(v1::session_attach_message::Payload::Status(status)),
+                                        })).await;
+                                    }
                                 }
                                 Err(error) => {
-                                    let _ = tx.send(Err(status_from_session_error(error))).await;
+                                    finish_attach(&tx, Err(error)).await;
                                 }
                             }
                             return;
                         }
                         Some(v1::session_attach_message::Payload::Attach(_)) => {
-                            let _ = tx
-                                .send(Err(Status::invalid_argument(
+                            finish_attach(&tx, Err(Status::invalid_argument(
                                     "attach stream already has a session",
-                                )))
-                                .await;
+                                ))).await;
                             return;
                         }
                         Some(v1::session_attach_message::Payload::Output(_))
                         | Some(v1::session_attach_message::Payload::Status(_))
                         | Some(v1::session_attach_message::Payload::HistoryGap(_))
                         | None => {
-                            let _ = tx
-                                .send(Err(Status::invalid_argument(
+                            finish_attach(&tx, Err(Status::invalid_argument(
                                     "attach stream contains a server-only or empty message",
-                                )))
-                                .await;
+                                ))).await;
                             return;
                         }
                     },
-                    Ok(None) | Err(_) => return,
+                    None | Some(Err(_)) => return,
                 }
+            }
+            permit = tx.reserve(), if pending_gap.is_some() || !chunks.is_empty() || pending_status.is_some() || terminal_ready => {
+                let Ok(permit) = permit else { return };
+                if let Some(gap) = pending_gap.take() {
+                    cursor = gap.retained_start_offset;
+                    permit.send(Ok(v1::SessionAttachMessage {
+                        payload: Some(v1::session_attach_message::Payload::HistoryGap(gap)),
+                    }));
+                } else if let Some(chunk) = chunks.pop_front() {
+                    let next_offset = chunk.next_offset;
+                    permit.send(Ok(v1::SessionAttachMessage {
+                        payload: Some(v1::session_attach_message::Payload::Output(chunk)),
+                    }));
+                    cursor = next_offset;
+                } else if terminal_ready {
+                    permit.send(Ok(v1::SessionAttachMessage {
+                        payload: Some(v1::session_attach_message::Payload::Status(
+                            terminal_status.take().expect("terminal status is ready"),
+                        )),
+                    }));
+                    return;
+                } else if let Some(status) = pending_status.take() {
+                    permit.send(Ok(v1::SessionAttachMessage {
+                        payload: Some(v1::session_attach_message::Payload::Status(status.clone())),
+                    }));
+                    last_status = Some(status);
+                    heartbeat.reset();
+                }
+            }
+            result = async { read.as_mut().expect("pending read").await }, if read.is_some() => {
+                read = None;
+                let (output, updated) = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        finish_attach(&tx, Err(error)).await;
+                        return;
+                    }
+                };
+                refresh_due = output.next_offset < updated.output_end_offset;
+                if output.history_gap {
+                    pending_gap = Some(v1::SessionOutputGap {
+                        requested_offset: cursor,
+                        retained_start_offset: output.retained_start_offset,
+                    });
+                }
+                chunks = output.chunks.into();
+                let status = session_status(&updated, None);
+                if !is_attached_session_live(updated.state) {
+                    terminal_status = Some(status);
+                    pending_status = None;
+                } else {
+                    // Restart retains a session ID. A fresh live record can
+                    // supersede a terminal observation while replay is pending.
+                    terminal_status = None;
+                    if !refresh_due && pending_status.is_none() && last_status.as_ref() != Some(&status) {
+                        pending_status = Some(status);
+                    }
+                }
+                record = Some(updated);
             }
             _ = heartbeat.tick() => {
-                let status = session_status(&record, None);
-                if tx
-                    .send(Ok(v1::SessionAttachMessage {
-                        payload: Some(v1::session_attach_message::Payload::Status(
-                            status.clone(),
-                        )),
-                    }))
-                    .await
-                    .is_err()
+                if pending_status.is_none() && terminal_status.is_none()
+                    && let Some(record) = &record
                 {
-                    return;
+                    pending_status = Some(session_status(record, None));
                 }
-                last_status = Some(status);
             }
-            () = tokio::time::sleep(Duration::from_millis(10)) => {}
+            _ = refresh.tick(), if pending_gap.is_none() && chunks.is_empty() && read.is_none() && pending_status.is_none() && !terminal_ready => refresh_due = true,
         }
     }
 }
@@ -1210,6 +1279,347 @@ mod tests {
 
     async fn spawn_daemon() -> (tempfile::TempDir, SocketAddr, oneshot::Sender<()>) {
         spawn_daemon_with_auth(TEST_AUTH_TOKEN).await
+    }
+
+    fn attach_engine() -> (tempfile::TempDir, SessionEngine) {
+        let temp = tempfile::tempdir().expect("attach engine root");
+        let workspace_root = temp.path().join("workspace");
+        let home_root = temp.path().join("home");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        std::fs::create_dir_all(&home_root).unwrap();
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root,
+            home_root,
+            auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
+            process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
+        };
+        (
+            temp,
+            SessionEngine::new(&config, CredentialBridge::new(None)),
+        )
+    }
+
+    async fn wait_attach_fixture_ready(temp: &tempfile::TempDir) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !std::fs::read_to_string(temp.path().join("home/attach-ready"))
+                .as_deref()
+                .is_ok_and(|value| value == "ready")
+            {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("quiet PTY fixture is ready with echo disabled");
+    }
+
+    #[tokio::test]
+    async fn attach_saturated_reader_keeps_input_resize_and_detach_responsive() {
+        saturated_attach_controls(2 * 1024 * 1024, false).await;
+    }
+
+    #[tokio::test]
+    async fn attach_saturated_gap_replay_keeps_controls_responsive() {
+        saturated_attach_controls(9 * 1024 * 1024, true).await;
+    }
+
+    async fn saturated_attach_controls(output_bytes: u64, expect_gap: bool) {
+        let (temp, engine) = attach_engine();
+        let session = engine.launch(v1::LaunchSessionRequest {
+            command: vec!["sh".into(), "-c".into(),
+                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > attach-input; stty size > attach-size; exec sleep 30".into()],
+            pty: true,
+            term: "xterm-256color".into(),
+            width: 80,
+            height: 24,
+            ..Default::default()
+        }).await.unwrap();
+        wait_attach_fixture_ready(&temp).await;
+        // Prepare the full production-sized transcript deterministically. This
+        // is disk setup, not the separately asserted 3s control/1s detach gate.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.append_test_output(&session.session_id, &vec![0; output_bytes as usize]),
+        )
+        .await
+        .expect("bounded transcript preparation")
+        .unwrap();
+        assert_eq!(
+            engine
+                .get(&session.session_id)
+                .await
+                .unwrap()
+                .output_end_offset,
+            output_bytes
+        );
+        let (input, incoming) = mpsc::channel(8);
+        let (output, mut unread) = mpsc::channel(32);
+        let capacity = output.clone();
+        let owner = tokio::spawn(run_attach_session(
+            engine.clone(),
+            ReceiverStream::new(incoming),
+            v1::AttachSessionRequest {
+                session_id: session.session_id.clone(),
+                output_offset: 0,
+            },
+            output,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while capacity.capacity() != 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("all 32 response slots are saturated");
+        input
+            .send(Ok(v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Resize(
+                    v1::ResizeRequest {
+                        width: 132,
+                        height: 43,
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+        input
+            .send(Ok(v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Input(
+                    v1::SessionInput {
+                        data: b"fair-input\n".to_vec(),
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let input = std::fs::read_to_string(temp.path().join("home/attach-input"));
+                let size = std::fs::read_to_string(temp.path().join("home/attach-size"));
+                if input.as_deref().is_ok_and(|input| input == "fair-input")
+                    && size.as_deref().is_ok_and(|size| size.trim() == "43 132")
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resize and input complete without reading response frames");
+        assert_eq!(capacity.capacity(), 0);
+        input
+            .send(Ok(v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Detach(
+                    v1::DetachSessionRequest {
+                        session_id: session.session_id.clone(),
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), owner)
+            .await
+            .expect("detach does not wait for the saturated reader")
+            .unwrap();
+        assert_eq!(
+            engine.get(&session.session_id).await.unwrap().state,
+            v1::SessionLifecycleState::Running as i32
+        );
+        let first = unread.recv().await.unwrap().unwrap().payload.unwrap();
+        let replay_start = if expect_gap {
+            let v1::session_attach_message::Payload::HistoryGap(gap) = first else {
+                panic!("retained replay must begin with a history gap");
+            };
+            assert_eq!(gap.requested_offset, 0);
+            assert!(gap.retained_start_offset > 0);
+            gap.retained_start_offset
+        } else {
+            let v1::session_attach_message::Payload::Output(chunk) = first else {
+                panic!("complete replay must begin with output");
+            };
+            assert_eq!(chunk.offset, 0);
+            chunk.next_offset
+        };
+        let mut cursor = replay_start;
+        while let Ok(message) = unread.try_recv() {
+            if let Some(v1::session_attach_message::Payload::Output(chunk)) =
+                message.unwrap().payload
+            {
+                assert_eq!(chunk.offset, cursor);
+                assert_eq!(chunk.next_offset, cursor + chunk.data.len() as u64);
+                cursor = chunk.next_offset;
+            }
+        }
+        assert!(cursor > replay_start);
+        engine.stop(&session.session_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn attach_reports_later_retention_gap_after_already_queued_output() {
+        let (temp, engine) = attach_engine();
+        let session = engine.launch(v1::LaunchSessionRequest {
+            command: vec!["sh".into(), "-c".into(),
+                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > later-gap-input; exec sleep 60".into()],
+            pty: true,
+            term: "xterm-256color".into(),
+            width: 80,
+            height: 24,
+            ..Default::default()
+        }).await.unwrap();
+        wait_attach_fixture_ready(&temp).await;
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.append_test_output(&session.session_id, &vec![0; 262144]),
+        )
+        .await
+        .expect("initial transcript preparation")
+        .unwrap();
+        let (input, incoming) = mpsc::channel(8);
+        let (output, mut receiver) = mpsc::channel(1);
+        let capacity = output.clone();
+        let owner = tokio::spawn(run_attach_session(
+            engine.clone(),
+            ReceiverStream::new(incoming),
+            v1::AttachSessionRequest {
+                session_id: session.session_id.clone(),
+                output_offset: 0,
+            },
+            output,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while capacity.capacity() != 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial replay saturated");
+        input
+            .send(Ok(v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Input(
+                    v1::SessionInput {
+                        data: b"produce\n".to_vec(),
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !std::fs::read_to_string(temp.path().join("home/later-gap-input"))
+                .as_deref()
+                .is_ok_and(|value| value == "produce")
+            {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("input is consumed while replay is blocked");
+        assert_eq!(capacity.capacity(), 0);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.append_test_output(&session.session_id, &vec![0; 9437184]),
+        )
+        .await
+        .expect("transcript compacted while attachment was blocked")
+        .unwrap();
+        let record = engine.get(&session.session_id).await.unwrap();
+        assert_eq!(record.output_end_offset, 262144 + 9437184);
+        assert!(record.output_start_offset > 0);
+        let end = record.output_end_offset;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut cursor = 0;
+            let mut gap_seen = false;
+            while cursor < end {
+                match receiver.recv().await.unwrap().unwrap().payload.unwrap() {
+                    v1::session_attach_message::Payload::Output(chunk) => {
+                        assert_eq!(chunk.offset, cursor);
+                        assert!(chunk.data.iter().all(|byte| *byte == 0));
+                        cursor += chunk.data.len() as u64;
+                        assert_eq!(chunk.next_offset, cursor);
+                    }
+                    v1::session_attach_message::Payload::HistoryGap(gap) => {
+                        assert!(cursor > 0, "older queued output must precede the gap");
+                        assert!(!gap_seen);
+                        assert_eq!(gap.requested_offset, cursor);
+                        assert!(gap.retained_start_offset > cursor);
+                        cursor = gap.retained_start_offset;
+                        gap_seen = true;
+                    }
+                    v1::session_attach_message::Payload::Status(status) => {
+                        assert!(is_attached_session_live(status.state));
+                    }
+                    other => panic!("unexpected server frame {other:?}"),
+                }
+            }
+            assert!(gap_seen);
+            assert_eq!(cursor, end);
+        })
+        .await
+        .expect("gap-aware ordered replay finishes");
+        drop(receiver);
+        tokio::time::timeout(Duration::from_secs(1), owner)
+            .await
+            .expect("closed reader releases attachment")
+            .unwrap();
+        assert_eq!(
+            engine.get(&session.session_id).await.unwrap().state,
+            v1::SessionLifecycleState::Running as i32
+        );
+        engine.stop(&session.session_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn attach_pending_output_is_contiguous_before_terminal_status() {
+        let (_temp, engine) = attach_engine();
+        let session = engine
+            .launch(v1::LaunchSessionRequest {
+                command: vec!["sh".into(), "-c".into(), "head -c 262144 /dev/zero".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (_input, incoming) = mpsc::channel(8);
+        let (output, mut receiver) = mpsc::channel(1);
+        let owner = tokio::spawn(run_attach_session(
+            engine,
+            ReceiverStream::new(incoming),
+            v1::AttachSessionRequest {
+                session_id: session.session_id,
+                output_offset: 0,
+            },
+            output,
+        ));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut cursor = 0;
+            let mut terminal_seen = false;
+            while let Some(message) = receiver.recv().await {
+                match message.unwrap().payload.unwrap() {
+                    v1::session_attach_message::Payload::Output(chunk) => {
+                        assert!(!terminal_seen);
+                        assert_eq!(chunk.offset, cursor);
+                        assert!(chunk.data.iter().all(|byte| *byte == 0));
+                        cursor += chunk.data.len() as u64;
+                        assert_eq!(chunk.next_offset, cursor);
+                    }
+                    v1::session_attach_message::Payload::Status(status) => {
+                        if !is_attached_session_live(status.state) {
+                            assert_eq!(status.state, v1::SessionLifecycleState::Exited as i32);
+                            assert_eq!(status.output_end_offset, cursor);
+                            terminal_seen = true;
+                        }
+                    }
+                    other => panic!("unexpected server frame {other:?}"),
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(terminal_seen);
+            assert_eq!(cursor, 262144);
+        })
+        .await
+        .expect("bounded ordered replay");
+        owner.await.unwrap();
     }
 
     async fn spawn_daemon_with_auth(
