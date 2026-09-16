@@ -375,6 +375,7 @@ workspace_calls="$fixture/workspace-calls"
   }
   kubectl() {
     printf '%s\n' "$*" >>"$workspace_calls"
+    [[ "$*" == *'{.data.compatibility_version}'* ]] || return 91
     printf '1\ncodewire-e2e-ci\n%s\n' "$workspace_alias"
   }
   [ "$(prepared_terminal_workspace_image isolated-config)" = "$workspace_alias" ]

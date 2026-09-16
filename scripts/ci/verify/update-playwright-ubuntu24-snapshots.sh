@@ -480,7 +480,7 @@ prepared_terminal_workspace_image() {
     }
   marker="$(kubectl --context "$PREPARED_KIND_CONTEXT" \
     -n "$PREPARED_KIND_NAMESPACE" get configmap/codewire-kind-e2e-prepared \
-    -o 'jsonpath={.data.compatibility-version}{"\n"}{.data.cluster-name}{"\n"}{.data.workspace-image}')" || {
+    -o 'jsonpath={.data.compatibility_version}{"\n"}{.data.cluster-name}{"\n"}{.data.workspace-image}')" || {
       fail 'could not read the prepared terminal workspace identity'
       return 1
     }
