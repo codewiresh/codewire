@@ -11,7 +11,9 @@ path or wildcard raw control-plane exception.
 `GET /api/auth/sessions?account_id=<expected-account>&cursor=<optional-id>`
 returns `account_id`, `current_session` (`id`, `expires_at`), `sessions`
 (`id`, nullable `created_at`, `expires_at`), and nullable `next_cursor`.
-Pages contain at most 50 active sessions, ordered by session ID. Follow every
+Pages contain at most 50 active sessions, ordered by session ID using bytewise
+`COLLATE "C"` in both the cursor predicate and ordering. The ordering is
+independent of the database or column's default collation. Follow every
 cursor to enumerate the inventory; the current session is reported separately
 even if it is outside the current page. The inventory can change between pages.
 Session IDs identify rows; they are not authentication capabilities.
@@ -38,8 +40,12 @@ already-established streams, stop sandbox shells, revoke OAuth grants or revoke
 API keys. These are distinct lifetimes and controls.
 
 Focused proof is `cargo test -p codewire-idp --lib session_inventory` and the
-six synthetic PostgreSQL tests in `tests/session_inventory.rs`. The checked-in
-service verification requires all six tests and rejects missing-database skips.
+seven synthetic PostgreSQL tests in `tests/session_inventory.rs`. The checked-in
+service verification requires all seven tests and rejects missing-database skips.
+The collation regression uses a test-owned copy of the migrated session table
+with ICU collation and60 mixed-case/punctuation IDs across the50-row boundary;
+public/migrated tables are unchanged. Its old query fails byte-order equality,
+and the explicit C-collation query preserves both ordering and cursor progress.
 
 ## Dashboard Account screen
 

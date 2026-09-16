@@ -229,6 +229,104 @@ async fn inventory_pages_all_active_sessions_without_capabilities() {
 }
 
 #[tokio::test]
+async fn inventory_keyset_is_byte_ordered_even_when_session_ids_have_icu_collation() {
+    let Some(pool) = pool().await else { return };
+    let owner = "inventory_collation_owner";
+    user(&pool, owner).await;
+    // A test-owned table with the exact migrated shape but a non-byte column
+    // collation. Public/migrated tables and concurrent fixtures are untouched.
+    sqlx::query("CREATE SCHEMA idp_inventory_collation_regression")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE idp_inventory_collation_regression.sessions (LIKE public.sessions INCLUDING ALL)").execute(&pool).await.unwrap();
+    sqlx::query("ALTER TABLE idp_inventory_collation_regression.sessions ALTER COLUMN id TYPE TEXT COLLATE \"en-x-icu\"").execute(&pool).await.unwrap();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let scoped = PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path TO idp_inventory_collation_regression, public")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&url)
+        .await
+        .unwrap();
+    let mut expected = Vec::new();
+    for prefix in ["A", "a", "-", "_", "0", "9"] {
+        for i in 0..10 {
+            let id = format!("{prefix}_collation_{i:02}");
+            session(
+                &scoped,
+                owner,
+                &id,
+                &format!("collation-token-{prefix}-{i}"),
+                true,
+            )
+            .await;
+            expected.push(id);
+        }
+    }
+    expected.sort();
+    let default_order: Vec<String> = sqlx::query_scalar("SELECT id FROM sessions ORDER BY id")
+        .fetch_all(&scoped)
+        .await
+        .unwrap();
+    assert_ne!(
+        default_order, expected,
+        "fixture must actually distinguish ICU from byte order"
+    );
+    let router = app(scoped.clone());
+    let mut cursor = None;
+    let mut actual = Vec::new();
+    let mut page_sizes = Vec::new();
+    loop {
+        let path = format!(
+            "/api/auth/sessions?account_id={owner}{}",
+            cursor
+                .as_ref()
+                .map(|cursor| format!("&cursor={cursor}"))
+                .unwrap_or_default()
+        );
+        let (status, body, _) = request(
+            &router,
+            "GET",
+            &path,
+            Some("collation-token-A-0"),
+            Value::Null,
+            &[],
+            false,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let rows = body["sessions"].as_array().unwrap();
+        page_sizes.push(rows.len());
+        actual.extend(
+            rows.iter()
+                .map(|row| row["id"].as_str().unwrap().to_owned()),
+        );
+        cursor = body["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+        assert!(page_sizes.len() < 3, "keyset must advance");
+    }
+    scoped.close().await;
+    sqlx::query("DROP SCHEMA idp_inventory_collation_regression CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(page_sizes, [50, 10]);
+    assert_eq!(
+        actual, expected,
+        "IdP pages must preserve the BFF byte-order contract across the cursor boundary"
+    );
+}
+
+#[tokio::test]
 async fn authority_and_target_scope_are_closed_and_revocation_is_acknowledged() {
     let Some(pool) = pool().await else { return };
     let owner = "inventory_auth_owner";

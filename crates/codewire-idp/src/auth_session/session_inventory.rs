@@ -156,8 +156,8 @@ async fn list(
             actor(&mut tx, &digest, &query.account_id, false).await?;
         let mut sessions: Vec<SessionMetadata> = sqlx::query_as(
             "SELECT id,created_at,expires_at FROM sessions WHERE user_id=$1 \
-             AND expires_at > clock_timestamp() AND ($2::text IS NULL OR id > $2) \
-             ORDER BY id LIMIT $3",
+             AND expires_at > clock_timestamp() AND ($2::text IS NULL OR id COLLATE \"C\" > $2 COLLATE \"C\") \
+             ORDER BY id COLLATE \"C\" LIMIT $3",
         )
         .bind(&account_id)
         .bind(&query.cursor)
