@@ -1,6 +1,7 @@
 package codewire
 
 import (
+	"encoding/json"
 	"math"
 	"reflect"
 	"testing"
@@ -242,6 +243,27 @@ func TestEnvironmentConvertersGolden(t *testing.T) {
 
 	if result := fromProtoExecResult(&codewirev1.ExecResponse{ExitCode: 7, Stdout: []byte("out"), Stderr: []byte("err")}); result != (ExecResult{ExitCode: 7, Stdout: "out", Stderr: "err"}) {
 		t.Errorf("converted exec result = %#v", result)
+	}
+}
+
+func TestCreateEnvironmentPreviewOmissionIsExplicitAndBoolean(t *testing.T) {
+	for _, omit := range []bool{false, true} {
+		request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{OmitApplicationPreviews: omit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.GetOmitApplicationPreviews() != omit {
+			t.Fatalf("preview omission changed: got %v, want %v", request.GetOmitApplicationPreviews(), omit)
+		}
+	}
+	var body CreateEnvironmentBody
+	if err := json.Unmarshal([]byte(`{"project_spec":{}}`), &body); err != nil || body.OmitApplicationPreviews {
+		t.Fatalf("omitted flag must default false: %v", err)
+	}
+	for _, input := range []string{`{"omit_application_previews":1}`, `{"omit_application_previews":"true"}`} {
+		if err := json.Unmarshal([]byte(input), &body); err == nil {
+			t.Error("preview omission accepted a nonboolean")
+		}
 	}
 }
 

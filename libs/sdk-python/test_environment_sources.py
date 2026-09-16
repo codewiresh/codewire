@@ -139,6 +139,18 @@ class EnvironmentSourcesTestCase(unittest.TestCase):
         self.assertEqual(environment.source_selection, SELECTION)
         self.assertEqual(self.paths, ["/codewire.v1.EnvironmentService/CreateEnvironment"])
 
+    def test_create_preview_omission_is_explicit_and_boolean(self):
+        self.cw.environments.create(project_spec={})
+        self.assertFalse(self.fixture.calls[-1][1].omit_application_previews)
+        for omit in (True, False):
+            self.cw.environments.create(project_spec={}, omit_application_previews=omit)
+            self.assertEqual(self.fixture.calls[-1][1].omit_application_previews, omit)
+        count = len(self.fixture.calls)
+        for invalid in (1, 0, "true", None):
+            with self.assertRaisesRegex(ValueError, "explicit boolean"):
+                self.cw.environments.create(project_spec={}, omit_application_previews=invalid)
+        self.assertEqual(len(self.fixture.calls), count)
+
     def test_create_never_infers_personal_consent_or_a_revision(self):
         self.cw.environments.create(project_spec={})
         request = self.fixture.calls[-1][1]

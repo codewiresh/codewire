@@ -132,10 +132,10 @@ async function seedPinnedPreset() {
   presetId = crypto.randomUUID();
   await sql`
     INSERT INTO environment_presets
-      (id, org_id, name, slug, description, build_status, default_ttl_seconds, project_spec)
+      (id, org_id, name, slug, description, build_status, default_ttl_seconds, auto_image_ref, project_spec)
     VALUES
       (${presetId}, ${orgId}, ${presetName}, ${presetName},
-       'Pinned SSR environment lifecycle preset', 'ready', 3600,
+       'Pinned SSR environment lifecycle preset', 'ready', 3600, ${workspaceRuntimeImage},
        ${sql.json({
          schema_version: 1,
          image: workspaceRuntimeImage,
@@ -170,13 +170,15 @@ async function seedPinnedPreset() {
 async function openConfiguredImageForm(page: Page) {
   await page.goto(`/${slug}/new/`);
   await page.getByLabel("Workspace image").fill(workspaceRuntimeImage);
+  await page.locator("[data-create-runtime] > summary").click();
+  await page.locator("[data-create-resources] > summary").click();
   await page.getByLabel("Install Command").fill("printf 'configured-explicitly\\n'");
   await page.getByLabel("Startup Script").fill("printf 'started-explicitly\\n'");
   await page.getByLabel("TTL").fill("3600s");
   await page.locator('input[name="agent"][value="codex"]').check();
   await page.getByRole("button", { name: "Add", exact: true }).click();
-  await page.getByLabel("Container port").fill("3000");
-  await page.getByLabel("Port label").fill("web");
+  await page.getByLabel("Internal port", { exact: true }).fill("3000");
+  await page.getByLabel("Preview label", { exact: true }).fill("web");
 }
 
 test.describe.serial("server-rendered environments", () => {
@@ -243,12 +245,12 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("#environment-name")).toBeFocused();
     const ttl = page.getByLabel("TTL");
     await expect(ttl).toHaveValue("infinity");
+    await page.locator("[data-create-resources] > summary").click();
     await ttl.fill("0");
     await ttl.press("Tab");
     await expect(ttl).toHaveValue("infinity");
     await page.locator("#environment-name").focus();
-    await expect(page.locator("#environment-snapshot")).toBeDisabled();
-    await expect(page.locator('#environment-snapshot[name]')).toHaveCount(0);
+    await expect(page.locator("#environment-snapshot, .cw-snapshot-meter")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await expect(page.locator('[action$="/_actions/sandboxes/prepare"]')).toHaveCount(0);
     await expect(page.locator('[data-event-action$="/_events/sandboxes/prepare"]')).toHaveCount(0);
@@ -322,13 +324,14 @@ test.describe.serial("server-rendered environments", () => {
 
     await page.locator('input[name="agent"][value="codex"]').check();
     await page.getByRole("button", { name: "Add", exact: true }).click();
-    await page.getByLabel("Container port").fill("3000");
-    await page.getByLabel("Port label").fill("web");
+    await page.getByLabel("Internal port", { exact: true }).fill("3000");
+    await page.getByLabel("Preview label", { exact: true }).fill("web");
+    await page.locator("[data-create-runtime] > summary").click();
     await page.getByLabel("Install Command").fill("bun install");
     await page.getByLabel("Startup Script").fill("bun run dev");
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
-    await expect(page.getByLabel("Container port")).toHaveValue("3000");
-    await expect(page.getByLabel("Port label")).toHaveValue("web");
+    await expect(page.getByLabel("Internal port", { exact: true })).toHaveValue("3000");
+    await expect(page.getByLabel("Preview label", { exact: true })).toHaveValue("web");
     await expect(page.getByRole("heading", { name: "Application secrets", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Provider credentials", exact: true })).toBeVisible();
     await expect(page.getByLabel("Personal secrets", { exact: false })).toBeEnabled();
@@ -403,7 +406,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByLabel("Repository URL", { exact: true }).fill(repositoryUrl);
     await page.getByLabel("Branch", { exact: true }).fill("main");
     await page.getByLabel("Mount path", { exact: true }).fill("codewire");
-    await expect(page.getByRole("heading", { name: "Runtime", exact: true })).toBeVisible();
+    await expect(page.locator("[data-create-runtime] > summary")).toHaveText("Runtime commands");
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue(repositoryUrl);
     await expect(page.getByLabel("Branch", { exact: true })).toHaveValue("main");
     await expect(page.getByLabel("Mount path", { exact: true })).toHaveValue("codewire");
@@ -442,6 +445,49 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
     await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/`);
     await expect(page.locator(`a[href="/settings/credentials/?org=${slug}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
+  });
+
+  test("removing all preview rows suppresses inherited preset routes through real Kind", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop backend preview-selection contract");
+    test.setTimeout(600_000);
+    const name = "ssr-no-preview-workspace";
+    await openConfiguredImageForm(page);
+    await page.getByLabel("Name").fill(name);
+    await page.getByRole("button", { name: "Remove preview port", exact: true }).click();
+    await expect(page.locator("[data-app-port-row]")).toHaveCount(0);
+    await expect(page.locator('[name="application_previews_explicit"]')).toHaveValue("true");
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/?message=environment-created`);
+    const [created] = await sql`
+      SELECT id, preset_id, project_spec FROM environments
+      WHERE org_id = ${orgId} AND name = ${name}
+    `;
+    expect(created?.id).toBeTruthy();
+    expect(created.preset_id).toBe(presetId);
+    expect(created.project_spec.application_ports ?? []).toEqual([]);
+    await waitForEnvironmentState(created.id as string, ["running"], 300_000);
+    // Running precedes setup's preview registration phase. Assert only after
+    // the actual setup owner has finished, not against a transient empty list.
+    await expect.poll(async () => {
+      const [backend] = await sql`
+        SELECT setup_complete FROM sandbox_environment_backend
+        WHERE environment_id = ${created.id as string}
+      `;
+      return backend?.setup_complete === true;
+    }, { timeout: 120_000 }).toBe(true);
+    const [routes] = await sql`
+      SELECT COUNT(*)::int AS count FROM environment_ports
+      WHERE environment_id = ${created.id as string}
+    `;
+    expect(routes.count).toBe(0);
+    // Restore the live rail and release resources before the following
+    // lifecycle/visual fixture; afterAll remains the failure-path cleanup.
+    await page.reload();
+    const row = page.locator("tr", { hasText: name }).first();
+    await openRowActions(row);
+    await row.getByText("Destroy", { exact: true }).click();
+    await row.getByRole("button", { name: "Destroy permanently", exact: true }).click();
+    await waitForEnvironmentState(created.id as string, ["destroyed"], 120_000);
   });
 
   test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile }) => {
@@ -636,13 +682,21 @@ test.describe.serial("server-rendered environments", () => {
     await portPanel.getByRole("spinbutton", { name: "Internal port", exact: true }).fill("8080");
     await portPanel.getByLabel("Preview label", { exact: true }).fill("manual-http");
     await portPanel.getByRole("button", { name: "Add port", exact: true }).click();
-    await expect(portPanel.getByRole("status")).toContainText("Port created");
+    await expect(portPanel.getByRole("status").filter({ hasText: "Port created" })).toBeVisible();
     const port = portPanel.locator(".cw-port-row", {
       has: page.getByText("manual-http", { exact: true }),
     });
     await expect(port).toContainText("8080");
+    const previewUrl = await port.getByRole("link", { name: "Open preview", exact: true }).getAttribute("href");
+    expect(previewUrl).toBeTruthy();
+    const parsedPreview = new URL(previewUrl!);
+    expect(parsedPreview.protocol).toBe("https:");
+    expect(parsedPreview.hostname).toContain(`manual-http-${environmentId.slice(0, 5)}-${slug}.`);
+    await port.getByRole("button", { name: "Copy URL", exact: true }).click();
+    await expect(port.locator("[data-preview-copy-status]")).toHaveText("Preview URL copied.");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(previewUrl);
     await port.getByRole("button", { name: "Remove manual-http preview", exact: true }).click();
-    await expect(portPanel.getByRole("status")).toContainText("Port deleted");
+    await expect(portPanel.getByRole("status").filter({ hasText: "Port deleted" })).toBeVisible();
     await expect(port).toHaveCount(0);
     await expect(configuredPort).toHaveCount(1);
     await expect(configuredPort).toContainText("3000 · Creator");

@@ -807,12 +807,15 @@ impl EnvironmentRepositoryFormRow {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct EnvironmentAppPortFormRow {
     pub(crate) index: usize,
     pub(crate) port: String,
     pub(crate) label: String,
     pub(crate) access: String,
+    pub(crate) port_error: String,
+    pub(crate) label_error: String,
+    pub(crate) access_error: String,
 }
 
 impl EnvironmentAppPortFormRow {
@@ -881,6 +884,7 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) confidential_available: bool,
     pub(crate) show_confidential_controls: bool,
     pub(crate) confidential_price: String,
+    pub(crate) preview_base_domain: String,
     pub(crate) selected_agents: Vec<String>,
     pub(crate) app_ports: Vec<EnvironmentAppPortFormRow>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
@@ -928,6 +932,11 @@ impl EnvironmentCreateFormView {
             || !self.form_error.is_empty()
             || !self.sources.project_error.is_empty()
             || !self.sources.profile_error.is_empty()
+            || self.app_ports.iter().any(|row| {
+                !row.port_error.is_empty()
+                    || !row.label_error.is_empty()
+                    || !row.access_error.is_empty()
+            })
     }
 }
 
@@ -951,6 +960,9 @@ pub(crate) struct EnvironmentPortPanelView {
     pub(crate) label: String,
     pub(crate) access: String,
     pub(crate) form_error: String,
+    pub(crate) port_error: String,
+    pub(crate) label_error: String,
+    pub(crate) access_error: String,
 }
 
 #[derive(Clone, Debug)]

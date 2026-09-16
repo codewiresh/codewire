@@ -87,6 +87,7 @@ class Environments:
         expected_profile_revision: int | None = None,
         confirm_personal_credentials: bool = False,
         confirm_personal_secrets: bool = False,
+        omit_application_previews: bool = False,
         wait: bool = False,
         wait_timeout: float = 300,
     ) -> Environment:
@@ -100,6 +101,9 @@ class Environments:
             ),
             confirm_personal_secrets=explicit_bool(
                 confirm_personal_secrets, "confirm_personal_secrets"
+            ),
+            omit_application_previews=explicit_bool(
+                omit_application_previews, "omit_application_previews"
             ),
         )
         if expected_profile_revision is not None:

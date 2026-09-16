@@ -151,6 +151,7 @@ struct EnvironmentSubmission {
     repositories: Vec<(String, String, String)>,
     agents: Vec<String>,
     app_ports: Vec<(String, String, String)>,
+    application_previews_explicit: bool,
     agent_secret_supplied: bool,
     sources: Result<crate::environment_source_forms::SourceSubmission, ()>,
 }
@@ -230,6 +231,8 @@ impl EnvironmentSubmission {
             repositories: repositories.into_values().collect(),
             agents,
             app_ports: app_ports.into_values().collect(),
+            application_previews_explicit: take(&mut values, "application_previews_explicit")
+                == "true",
             agent_secret_supplied,
             sources: crate::environment_source_forms::SourceSubmission::parse(bytes),
         })
@@ -257,6 +260,7 @@ impl EnvironmentSubmission {
             confidential_available: false,
             show_confidential_controls: false,
             confidential_price: String::new(),
+            preview_base_domain: String::new(),
             selected_agents: self.agents.clone(),
             app_ports: app_port_rows(&self.app_ports),
             presets: Vec::new(),
@@ -313,7 +317,7 @@ impl EnvironmentSubmission {
         if self.agents.is_empty() {
             self.agents = preset.default_agents.clone();
         }
-        if self.app_ports.is_empty() {
+        if self.app_ports.is_empty() && !self.application_previews_explicit {
             self.app_ports = preset
                 .default_app_ports
                 .iter()
@@ -404,21 +408,41 @@ impl EnvironmentSubmission {
         };
 
         let mut ports = Vec::new();
-        for (port, label, access) in &self.app_ports {
+        let mut seen_ports = std::collections::HashSet::new();
+        let mut seen_labels = std::collections::HashSet::new();
+        for (index, (port, label, access)) in self.app_ports.iter().enumerate() {
             if port.trim().is_empty() && label.trim().is_empty() {
                 continue;
             }
-            let Ok(port_number) = port.trim().parse::<i32>() else {
-                form.form_error = "Application ports must be between 1 and 65535.".to_owned();
+            let row = &mut form.app_ports[index];
+            let port_number = port.trim().parse::<u16>().ok().filter(|port| *port != 0);
+            match port_number {
+                None => row.port_error = "Enter an internal port from 1 to 65535.".into(),
+                Some(2222 | 2223) => {
+                    row.port_error =
+                        "Ports 2222 and 2223 are reserved for the Sandbox runtime.".into()
+                }
+                Some(port) if !seen_ports.insert(port) => {
+                    row.port_error = "This internal port is already used in another row.".into()
+                }
+                Some(_) => {}
+            }
+            if !valid_port_label(label.trim()) {
+                row.label_error = "Use 2–22 lowercase letters, digits or hyphens; start and end with a letter or digit.".into();
+            } else if !seen_labels.insert(label.trim()) {
+                row.label_error = "This preview label is already used in another row.".into();
+            }
+            if !matches!(access.as_str(), "" | "creator" | "org_members" | "public") {
+                row.access_error = "Choose who can open this HTTPS preview.".into();
+            }
+            if !row.port_error.is_empty()
+                || !row.label_error.is_empty()
+                || !row.access_error.is_empty()
+            {
                 continue;
             };
-            if !(1..=65_535).contains(&port_number) || !valid_port_label(label.trim()) {
-                form.form_error =
-                    "Application ports need a valid port and lowercase label.".to_owned();
-                continue;
-            }
             ports.push(ApplicationPort {
-                port: port_number as u16,
+                port: port_number.expect("validated internal port"),
                 label: label.trim().to_owned(),
                 access: allowlisted_access(access).to_owned(),
             });
@@ -435,6 +459,7 @@ impl EnvironmentSubmission {
             [repository] => repository.destination.clone(),
             _ => "/workspace".to_owned(),
         };
+        let omit_application_previews = self.application_previews_explicit && ports.is_empty();
         let project_spec = ProjectSpec {
             schema_version: PROJECT_SCHEMA_VERSION,
             image: self.image.trim().to_owned(),
@@ -464,6 +489,7 @@ impl EnvironmentSubmission {
             name: nonempty(self.name.trim()),
             ttl_seconds: ttl,
             isolation_tier: isolation_tier.into(),
+            omit_application_previews,
             project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
             ..Default::default()
         };
@@ -1140,8 +1166,19 @@ pub(super) async fn create_port(
         .parse::<i32>()
         .ok()
         .filter(|port| (1..=65_535).contains(port));
-    let result = if let Some(port) = port.filter(|_| valid_port_label(&submission.label)) {
-        match environment_connect::create_port(
+    let result = match port {
+        None => "invalid-port",
+        Some(2222 | 2223) => "reserved-port",
+        Some(_) if !valid_port_label(&submission.label) => "invalid-port-label",
+        Some(_)
+            if !matches!(
+                submission.access.as_str(),
+                "creator" | "org_members" | "public"
+            ) =>
+        {
+            "invalid-port-access"
+        }
+        Some(port) => match environment_connect::create_port(
             &state,
             cookie.clone(),
             CreatePortRequest {
@@ -1160,10 +1197,9 @@ pub(super) async fn create_port(
                 return login_redirect(&environments_path(&slug), &headers);
             }
             Err(error) if error.code == ErrorCode::PermissionDenied => "not-authorized",
+            Err(error) if error.code == ErrorCode::AlreadyExists => "port-conflict",
             Err(_) => "port-unavailable",
-        }
-    } else {
-        "invalid-port"
+        },
     };
     port_response(
         &state,
@@ -1348,6 +1384,24 @@ async fn render_port_dialog(
         label: label.chars().take(128).collect(),
         access: allowlisted_access(access).to_owned(),
         form_error: error.to_owned(),
+        port_error: if matches!(
+            action.result,
+            "invalid-port" | "reserved-port" | "port-conflict"
+        ) {
+            error.into()
+        } else {
+            String::new()
+        },
+        label_error: if matches!(action.result, "invalid-port-label" | "port-conflict") {
+            error.into()
+        } else {
+            String::new()
+        },
+        access_error: if action.result == "invalid-port-access" {
+            error.into()
+        } else {
+            String::new()
+        },
     };
     // A partial response must not rotate the page's CSRF cookie or navigate
     // away: the terminal and every unswapped form still belong to that page.
@@ -1524,6 +1578,9 @@ async fn build_page(
             label: String::new(),
             access: "creator".to_owned(),
             form_error: port_error(&query.error).to_owned(),
+            port_error: String::new(),
+            label_error: String::new(),
+            access_error: String::new(),
         }),
         None => None,
     };
@@ -1715,6 +1772,7 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         confidential_available: false,
         show_confidential_controls: false,
         confidential_price: String::new(),
+        preview_base_domain: String::new(),
         selected_agents: Vec::new(),
         app_ports: Vec::new(),
         presets: Vec::new(),
@@ -1732,6 +1790,7 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
 }
 
 fn hydrate_options(form: &mut EnvironmentCreateFormView, options: EnvironmentCreateOptions) {
+    form.preview_base_domain = options.preview_base_domain;
     form.presets = options.presets;
     form.agents = options.agents;
     form.confidential_available = options.confidential_available;
@@ -1821,6 +1880,7 @@ fn app_port_rows(values: &[(String, String, String)]) -> Vec<EnvironmentAppPortF
             port: port.clone(),
             label: label.clone(),
             access: allowlisted_access(access).to_owned(),
+            ..Default::default()
         })
         .collect()
 }
@@ -1916,7 +1976,9 @@ fn allowlisted_agents(values: &[String]) -> Vec<String> {
 fn valid_port_label(value: &str) -> bool {
     let bytes = value.as_bytes();
     (2..=22).contains(&bytes.len())
-        && bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
         && bytes
             .last()
             .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
@@ -2059,7 +2121,15 @@ pub(super) fn page_error(value: &str) -> &'static str {
 fn port_error(value: &str) -> &'static str {
     match value {
         "not-authorized" => "You do not have permission to change this preview.",
-        "invalid-port" => "Port must be 1–65535 with a lowercase 2–22 character label.",
+        "invalid-port" => "Enter an internal port from 1 to 65535.",
+        "reserved-port" => "Ports 2222 and 2223 are reserved for the Sandbox runtime.",
+        "invalid-port-label" => {
+            "Use a 2–22 character lowercase preview label, starting and ending with a letter or digit."
+        }
+        "invalid-port-access" => "Choose who can open the HTTPS preview.",
+        "port-conflict" => {
+            "This internal port or preview label is already registered. Choose a different port or label."
+        }
         "port-unavailable" => {
             "The port change could not be confirmed. Check the current list before trying again."
         }
@@ -2097,6 +2167,111 @@ mod tests {
     use super::*;
     use crate::templates::EnvironmentCreateFormTemplate;
 
+    #[test]
+    fn preview_row_errors_preserve_all_inputs_and_are_field_associated() {
+        let submission = EnvironmentSubmission::parse(b"image=example.test/workspace&app_port_0=3000&app_label_0=web&app_access_0=creator&app_port_1=8080&app_label_1=web&app_access_1=public&app_port_2=3000&app_label_2=api&app_access_2=org_members&app_port_3=2222&app_label_3=ssh&app_access_3=creator&app_port_4=65536&app_label_4=Bad&app_access_4=private").unwrap();
+        let mut form = submission.form_view("synthetic-csrf".into());
+        assert!(
+            submission
+                .validate_and_draft("org-test", &mut form)
+                .is_none()
+        );
+        assert_eq!(form.app_ports.len(), 5);
+        assert!(form.app_ports[0].port_error.is_empty());
+        assert!(form.app_ports[1].label_error.contains("already used"));
+        assert!(form.app_ports[2].port_error.contains("already used"));
+        assert!(form.app_ports[3].port_error.contains("reserved"));
+        assert!(!form.app_ports[4].port_error.is_empty());
+        assert!(!form.app_ports[4].label_error.is_empty());
+        assert!(!form.app_ports[4].access_error.is_empty());
+        assert_eq!(form.app_ports[4].port, "65536");
+        assert_eq!(form.app_ports[4].label, "Bad");
+        let organization = test_organization();
+        let html = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        }
+        .render()
+        .unwrap();
+        assert!(html.contains("aria-describedby=\"app-label-error-1\""));
+        assert!(html.contains("aria-describedby=\"app-port-error-2\""));
+        assert!(html.contains("aria-describedby=\"app-access-error-4\""));
+        assert!(html.contains("name=\"app_port_4\" type=\"number\""));
+        assert!(html.contains("value=\"65536\""));
+    }
+
+    #[test]
+    fn advanced_creation_disclosures_open_for_errors_and_preserve_exact_values() {
+        let organization = test_organization();
+        let render = |form: &EnvironmentCreateFormView| {
+            EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form,
+            }
+            .render()
+            .unwrap()
+        };
+        let mut form = default_create_form("synthetic-csrf".into(), true);
+        let html = render(&form);
+        assert!(html.contains("data-create-resources>"));
+        assert!(html.contains("data-create-runtime>"));
+        assert!(html.contains("1 vCPU</option>"));
+        assert!(html.contains("2 GiB</option>"));
+        assert!(html.contains("not an idle timeout"));
+        assert!(!html.contains("cw-snapshot-meter"));
+        assert!(!html.contains("Use 0 for infinity"));
+        form.cpu = "750".into();
+        form.cpu_error = "Choose a valid resource value".into();
+        form.install_command = "printf '<preserved-command>'".into();
+        let html = render(&form);
+        assert!(html.contains("data-create-resources open>"));
+        assert!(html.contains("data-create-runtime open>"));
+        assert!(html.contains("value=\"750\" selected>750 millicores"));
+        assert!(!html.contains("<preserved-command>"));
+        assert!(html.contains("preserved-command"));
+    }
+
+    #[test]
+    fn configured_preview_pattern_is_provisional_and_never_a_fallback_address() {
+        let mut form = default_create_form("synthetic-csrf".into(), true);
+        let organization = test_organization();
+        let render = |form: &EnvironmentCreateFormView| {
+            EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form,
+            }
+            .render()
+            .unwrap()
+        };
+        let missing = render(&form);
+        assert!(missing.contains("Preview URLs are unavailable on this deployment."));
+        assert!(!missing.contains("cwpreview.sh"));
+        form.preview_base_domain = "preview.example.test".into();
+        let configured = render(&form);
+        assert!(
+            configured.contains("https://{label}-{sandbox-id-prefix}-test.preview.example.test")
+        );
+        assert!(configured.contains("not an assigned URL"));
+        assert!(!configured.contains("href=\"https://{label}"));
+        assert!(configured.contains("does not block every other form of network access"));
+    }
+
+    #[test]
+    fn digit_first_preview_labels_and_default_creator_access_are_preserved() {
+        let submission = EnvironmentSubmission::parse(
+            b"image=example.test/workspace&app_port_0=3000&app_label_0=9web&app_access_0=",
+        )
+        .unwrap();
+        let mut form = submission.form_view("synthetic-csrf".into());
+        let request = submission
+            .validate_and_draft("org-test", &mut form)
+            .unwrap();
+        let spec = codewire_project_proto::from_proto(request.project_spec.into_option().unwrap())
+            .unwrap();
+        assert_eq!(spec.application_ports[0].label, "9web");
+        assert_eq!(spec.application_ports[0].access, "creator");
+    }
+
     #[tokio::test]
     async fn port_fragments_preserve_the_existing_csrf_token_and_terminal_document() {
         let panel = EnvironmentPortPanelView {
@@ -2114,6 +2289,9 @@ mod tests {
             label: "<invalid>".into(),
             access: "creator".into(),
             form_error: "Check the preview label.".into(),
+            port_error: String::new(),
+            label_error: "Check the preview label.".into(),
+            access_error: String::new(),
         };
         let response =
             render_port_panel(&test_organization(), &panel, "existing-synthetic-csrf", "");
@@ -2450,6 +2628,7 @@ mod tests {
         let mut form = submission.form_view("token".into());
         let options = || EnvironmentCreateOptions {
             presets: vec![],
+            preview_base_domain: String::new(),
             agents: vec![],
             confidential_available: false,
             confidential_price: String::new(),
@@ -2662,6 +2841,7 @@ mod tests {
         let mut submission =
             EnvironmentSubmission::parse(b"preset_id=preset-id&cpu=750").expect("submission");
         let options = EnvironmentCreateOptions {
+            preview_base_domain: String::new(),
             confidential_available: false,
             confidential_price: String::new(),
             presets: vec![crate::view::EnvironmentPresetOption {
@@ -2681,6 +2861,7 @@ mod tests {
                     port: "3000".to_owned(),
                     label: "web".to_owned(),
                     access: "creator".to_owned(),
+                    ..Default::default()
                 }],
                 uses_protected_secret_bindings: true,
                 official: false,
@@ -2706,6 +2887,28 @@ mod tests {
             &codewire_proto::codewire::v1::ProjectSecretBindings::default()
         );
         assert_eq!(submission.app_ports[0].0, "3000");
+        assert!(!submission.application_previews_explicit);
+
+        let mut explicit = EnvironmentSubmission::parse(
+            b"preset_id=preset-id&cpu=750&application_previews_explicit=true",
+        )
+        .unwrap();
+        explicit.apply_selected_preset_defaults(&options);
+        assert!(explicit.app_ports.is_empty());
+        assert_eq!(explicit.memory, "1024");
+        let mut explicit_form = explicit.form_view("token".into());
+        let explicit_draft = explicit
+            .validate_and_draft("org-test", &mut explicit_form)
+            .unwrap();
+        assert!(explicit_draft.omit_application_previews);
+        assert!(
+            explicit_draft
+                .project_spec
+                .as_option()
+                .unwrap()
+                .application_ports
+                .is_empty()
+        );
 
         let mut form = submission.form_view("token".to_owned());
         form.presets = options.presets;

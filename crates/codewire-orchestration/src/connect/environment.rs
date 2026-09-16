@@ -688,6 +688,7 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvi
         expected_profile_revision: request.expected_profile_revision,
         confirm_personal_credentials: request.confirm_personal_credentials,
         confirm_personal_secrets: request.confirm_personal_secrets,
+        omit_application_previews: request.omit_application_previews,
     })
 }
 
@@ -928,6 +929,7 @@ fn proto_create_request(
         expected_profile_revision: body.expected_profile_revision,
         confirm_personal_credentials: body.confirm_personal_credentials,
         confirm_personal_secrets: body.confirm_personal_secrets,
+        omit_application_previews: body.omit_application_previews,
         ..Default::default()
     }
 }
@@ -1512,14 +1514,17 @@ mod tests {
             expected_profile_revision: Some(3),
             confirm_personal_credentials: true,
             confirm_personal_secrets: false,
+            omit_application_previews: true,
             ..Default::default()
         };
         let body = create_body(request).unwrap();
         assert_eq!(body.expected_profile_revision, Some(3));
         assert!(body.confirm_personal_credentials && !body.confirm_personal_secrets);
+        assert!(body.omit_application_previews);
         let wire = proto_create_request(body, "organization");
         assert_eq!(wire.expected_profile_revision, Some(3));
         assert!(wire.confirm_personal_credentials && !wire.confirm_personal_secrets);
+        assert!(wire.omit_application_previews);
     }
 
     #[test]
