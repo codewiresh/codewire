@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'nonce-codewire-terminal-design-preview'; style-src-attr 'none'">
+  <title>Durable terminal controls fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/terminal.css"><link rel="stylesheet" href="terminal.css">
+  <link rel="stylesheet" href="/assets/codewire/xterm-6.0.0.css">
+  <script src="/assets/codewire/xterm-6.0.0.js" defer></script>
+  <script src="/assets/codewire/addon-fit-0.11.0.js" defer></script>
+  <script src="/assets/codewire/addon-web-links-0.12.0.js" defer></script>
+  <script src="../../dashboard.js" defer></script>
+  <script src="../../terminal-renderer.js" defer></script>
+  <script src="../../terminal-presentation.js" defer></script>
+  <script src="../../terminal-protocol.js" defer></script>
+  <script src="../../durable-terminal.js" nonce="codewire-terminal-design-preview" defer></script>
+  <script src="../../terminal-readiness.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app data-durable-terminal-page>
+  <main class="terminal-fixture">
+    <header><a href="index.html">Design fixtures</a><h1>Durable terminal controls</h1><p>Browser control fixture. Session responses in its tests are synthetic; this page does not launch a real shell.</p></header>
+    <section class="cw-sandbox-heading" aria-label="Sandbox status and actions" data-sandbox-observation data-sandbox-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+      <div><h2>Fixture Sandbox</h2><dl><div><dt>State</dt><dd><span class="cw-status" data-sandbox-state data-tone="success">running</span></dd></div><div><dt>Last event</dt><dd data-sandbox-last-event>just now</dd></div><div><dt>Resources</dt><dd data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</dd></div></dl><p class="cw-field-help" data-sandbox-observation-status role="status" hidden></p></div>
+      <a class="cw-field-help" href="terminal-tabs.html" data-sandbox-observation-reload hidden>Reload Sandbox status</a>
+      <div class="cw-sandbox-actions">
+        <form method="post" action="/fixture-org/_actions/sandboxes/start"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="return_to" value="detail"><button class="cw-button" type="submit" data-sandbox-action="start" hidden>Start</button></form>
+        <button class="cw-button" type="button" data-dialog-open="sandbox-stop" data-sandbox-action="stop">Stop</button>
+        <button class="cw-button" type="button" data-dialog-open="sandbox-delete" data-sandbox-action="delete">Delete</button>
+        <details class="cw-action-menu" data-sandbox-resize><summary>Resize</summary><form method="post" action="/fixture-org/_actions/sandboxes/resize/plan"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><label>CPU (millicores)<input class="cw-input" name="cpu_millicores" type="number" value="1000"></label><label>Memory (MiB)<input class="cw-input" name="memory_mb" type="number" value="2048"></label><label>Disk (GiB)<input class="cw-input" name="disk_gb" type="number" value="10"></label><button class="cw-button" type="submit" data-sandbox-action="resize" data-sandbox-confirm>Review resize</button></form></details>
+      </div>
+    </section>
+    <dialog class="cw-dialog" data-dialog id="sandbox-stop" aria-labelledby="sandbox-stop-title"><header class="cw-dialog-header"><h2 id="sandbox-stop-title">Stop Fixture Sandbox?</h2></header><p class="cw-dialog-body">Running processes and terminal sessions will end. Workspace files are kept.</p><form class="cw-dialog-actions" method="post" action="/fixture-org/_actions/sandboxes/stop"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="return_to" value="detail"><button class="cw-button" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit" data-sandbox-action="stop" data-sandbox-confirm>Stop Sandbox</button></form></dialog>
+    <dialog class="cw-dialog" data-dialog id="sandbox-delete" aria-labelledby="sandbox-delete-title"><header class="cw-dialog-header"><h2 id="sandbox-delete-title">Delete Fixture Sandbox?</h2></header><p class="cw-dialog-body">This permanently deletes the Sandbox and its workspace files.</p><form class="cw-dialog-actions" method="post" action="/fixture-org/_actions/sandboxes/delete"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="return_to" value="detail"><button class="cw-button" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit" data-sandbox-action="delete" data-sandbox-confirm>Delete Sandbox</button></form></dialog>
+<section class="cw-sandbox-terminal cw-durable-terminal" aria-label="Sandbox terminal" data-durable-terminal data-terminal-readiness data-terminal-org-id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" data-terminal-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-terminal-org-slug="fixture-org" data-terminal-running="true">
+          <input type="hidden" name="_csrf" value="synthetic-fixture-csrf">
+          <header class="cw-terminal-tabs-bar"><nav aria-label="Terminal tabs"><ul role="tablist" aria-label="Terminal tabs" data-terminal-tabs></ul></nav><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-new disabled>New terminal</button></header>
+          <div class="cw-terminal-session-tools"><form data-terminal-existing-form><label for="existing-terminal">Existing terminal</label><select class="cw-select" id="existing-terminal" data-terminal-existing disabled><option value="">Choose an existing terminal</option></select><button class="cw-button cw-button--outline cw-button--small" type="submit" disabled>Open terminal</button></form><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-refresh>Refresh sessions</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-readiness-refresh>Refresh sandbox status</button></div>
+          <p class="cw-terminal-session-message" role="status" data-terminal-message>Loading terminal sessions…</p><a class="cw-terminal-reload" href="/fixture-org/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/" data-terminal-reload hidden>Reload page</a>
+          <p class="cw-terminal-empty" data-terminal-empty>Choose New terminal to start a shell. Leaving this page disconnects the browser; the shell keeps running until you close it or stop the Sandbox.</p>
+          <div class="cw-terminal-panels" data-terminal-panels hidden></div>
+          <template data-terminal-tab-template><section class="cw-terminal-tab-panel" data-terminal-tab-panel role="tabpanel"><header class="cw-terminal-toolbar"><h2 class="cw-sr-only">Terminal</h2><p class="cw-terminal-connection" data-terminal-connection role="status">Connecting…</p><p class="cw-terminal-copy-status" data-terminal-copy-status role="status"></p><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-copy disabled>Copy selection</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-toggle>Disconnect</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-replay>Replay recent output</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-close-session>Close terminal</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-remove-tab hidden>Remove tab</button></header><p class="cw-terminal-session-message" data-terminal-history-gap role="status" hidden>Older terminal output is unavailable. Showing recent history.</p><div class="cw-terminal-panel cw-terminal-panel--fullscreen" data-terminal-root aria-label="Interactive terminal"></div></section></template>
+          <dialog class="cw-terminal-close-dialog" data-terminal-close-dialog aria-labelledby="close-terminal-title"><h2 id="close-terminal-title">Close terminal?</h2><p>This stops this terminal’s shell and its processes. Leaving the page or disconnecting keeps the shell running.</p><footer><button class="cw-button cw-button--outline" type="button" data-terminal-cancel-close>Cancel</button><button class="cw-button" type="button" data-terminal-confirm-close>Close terminal</button></footer></dialog>
+        </section>
+    <footer class="cw-terminal-footer"><span data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</span></footer>
+  </main>
+</body>
+</html>

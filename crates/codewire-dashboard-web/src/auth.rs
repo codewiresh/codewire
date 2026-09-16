@@ -12,6 +12,7 @@ struct IdentityEnvelope {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct IdentityUser {
+    pub(crate) id: String,
     email: String,
     name: Option<String>,
     #[serde(default)]
@@ -82,8 +83,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_storage_identity_uses_the_immutable_idp_id() {
+        let user: IdentityUser = serde_json::from_value(serde_json::json!({
+            "id": "immutable-account-id", "name": "Changeable name",
+            "email": "changeable@example.test"
+        }))
+        .unwrap();
+        assert_eq!(user.id, "immutable-account-id");
+        assert!(
+            serde_json::from_value::<IdentityUser>(serde_json::json!({
+                "name": "Changeable name", "email": "changeable@example.test"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn two_factor_gate_preserves_the_identity_opt_out() {
         let mut user = IdentityUser {
+            id: "synthetic-account".into(),
             email: "user@example.test".into(),
             name: None,
             is_admin: false,

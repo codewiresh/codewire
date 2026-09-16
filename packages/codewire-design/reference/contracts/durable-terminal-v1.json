@@ -1,0 +1,73 @@
+{
+  "protocol": "codewire.durable-terminal.v1",
+  "limits": {
+    "frameBytes": 65536,
+    "inputBytes": 16384,
+    "outputChunkBytes": 32768,
+    "unacknowledgedOutputBytes": 262144,
+    "unacknowledgedOutputFrames": 64,
+    "pendingInputFrames": 64,
+    "pendingInputBytes": 262144
+  },
+  "client": [
+    {
+      "type": "input",
+      "data": "printf 'hello\\n'\r"
+    },
+    {
+      "type": "resize",
+      "columns": 120,
+      "rows": 40
+    },
+    {
+      "type": "ack",
+      "offset": "6"
+    },
+    {
+      "type": "ack",
+      "offset": "18446744073709551615"
+    }
+  ],
+  "server": [
+    {
+      "type": "output",
+      "offset": "0",
+      "nextOffset": "6",
+      "data": "aGVsbG8K"
+    },
+    {
+      "type": "status",
+      "state": "running"
+    },
+    {
+      "type": "status",
+      "state": "exited",
+      "exitCode": 0
+    },
+    {
+      "type": "historyGap",
+      "requestedOffset": "6",
+      "retainedStartOffset": "4096"
+    }
+  ],
+  "invalidOffsets": [
+    "",
+    "-1",
+    "+1",
+    "01",
+    "1.0",
+    "1e3",
+    " 1",
+    "1 ",
+    "18446744073709551616"
+  ],
+  "states": [
+    "starting",
+    "running",
+    "stopping",
+    "exited",
+    "stopped",
+    "failed",
+    "interrupted"
+  ]
+}

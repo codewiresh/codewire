@@ -89,12 +89,27 @@ file_fixture="$(sed -n '/^file_service_smoke() (/,/^platform_run_connect_smoke()
   fail 'terminal smoke must run exactly once against the bound environment'
 awk '
   /if \[ "\$ready" != "True" \]/ { ready = 1 }
-  /setup_owner_pod_uid = EXCLUDED.setup_owner_pod_uid;/ { bound = ready }
+  /setup_owner_pod_uid = NULL;/ { bound = ready }
   /environment_daemon_proxy_smoke "\$environment_id"/ { daemon = bound }
   /environment_setup_terminal_smoke "\$environment_id"/ { terminal = daemon }
   /DELETE FROM sandbox_environment_backend/ { cleaned = terminal }
   END { exit !(terminal && cleaned) }
 ' <<<"$file_fixture" || fail 'terminal smoke must follow authenticated binding and precede cleanup'
+# A manually prepared Ready workspace is not an active setup owner. Preserve
+# the production readiness guard and seed/upsert coherent completed metadata.
+for binding in \
+    '       true, NULL, NULL, NULL, NULL, NULL, NULL' \
+    '    setup_complete = true,' \
+    '    setup_owner_generation = NULL,' \
+    '    setup_owner_activity_id = NULL,' \
+    '    setup_owner_attempt = NULL,' \
+    '    setup_owner_phase = NULL,' \
+    '    setup_owner_status = NULL,' \
+    '    setup_owner_pod_uid = NULL;' \
+    "RAISE EXCEPTION 'prepared FileService fixture is not ready and idle';"; do
+  grep -Fq "$binding" <<<"$file_fixture" ||
+    fail "prepared workspace readiness binding missing: $binding"
+done
 workspace_fixture="$(sed -n '/^workspace_service_smokes() {/,/^environment_resize_smoke() (/p' "$COMMON")"
 if grep -Fq 'environment_setup_terminal_smoke' <<<"$workspace_fixture"; then
   fail 'workspace suite runs terminal smoke outside the authenticated binding'

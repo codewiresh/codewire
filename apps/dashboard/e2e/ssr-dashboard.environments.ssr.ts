@@ -41,6 +41,9 @@ let orgId = "";
 let presetId = "";
 let environmentId = "";
 let secretProjectId = "";
+type TerminalClientFrame = { type: "input"; data: string }
+  | { type: "resize"; columns: number; rows: number }
+  | { type: "ack"; offset: string };
 
 function watchDisallowedBrowserCalls(page: Page) {
   const calls: string[] = [];
@@ -449,8 +452,8 @@ test.describe.serial("server-rendered environments", () => {
     test.setTimeout(900_000);
     const disallowedBrowserCalls = watchDisallowedBrowserCalls(page);
     await page.addInitScript(() => {
-      const frames: number[][] = [];
-      (window as Window & { __terminalFrames?: number[][] }).__terminalFrames = frames;
+      const frames: TerminalClientFrame[] = [];
+      (window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames = frames;
       const styleViolations: string[] = [];
       (window as Window & { __terminalStyleViolations?: string[] }).__terminalStyleViolations = styleViolations;
       document.addEventListener("securitypolicyviolation", (event) => {
@@ -458,10 +461,7 @@ test.describe.serial("server-rendered environments", () => {
       });
       const nativeSend = WebSocket.prototype.send;
       WebSocket.prototype.send = function(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
-        if (data instanceof ArrayBuffer) frames.push([...new Uint8Array(data)]);
-        else if (ArrayBuffer.isView(data)) {
-          frames.push([...new Uint8Array(data.buffer, data.byteOffset, data.byteLength)]);
-        }
+        if (typeof data === "string" && this.protocol === "codewire.durable-terminal.v1") frames.push(JSON.parse(data));
         return (nativeSend as (
           this: WebSocket,
           payload: typeof data,
@@ -554,30 +554,68 @@ test.describe.serial("server-rendered environments", () => {
     const terminalLink = row.getByRole("link", { name: "Terminal", exact: true });
     await terminalLink.click();
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/${environmentId}/`);
-    const terminalRoot = page.locator(".cw-terminal-page [data-terminal-root]");
+    // Runtime Running precedes setup completion; projection and workspace
+    // replacement still belong to setup until this authenticated status arrives.
+    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
+    await expect(page.getByRole("tab")).toHaveCount(0);
+    let launchRequests = 0;
+    let stopRequests = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.endsWith("/_actions/terminal-sessions/launch")) launchRequests += 1;
+      if (new URL(request.url()).pathname.endsWith("/_actions/terminal-sessions/stop")) stopRequests += 1;
+    });
+    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    // The bounded private RPC may time out after creating the shell. Inspect
+    // inventory once, as the UI advises, without repeating a non-idempotent New.
+    await expect.poll(async () => (await page.getByRole("tab").count()) === 1
+      || (await page.locator("[data-terminal-message]").innerText()).includes("change could not be confirmed"), { timeout: 90_000 }).toBe(true);
+    const recoveredLaunch = await page.getByRole("tab").count() === 0;
+    if (recoveredLaunch) {
+      await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
+      const existing = page.getByLabel("Existing terminal", { exact: true });
+      const recovered = existing.locator('option:not([value=""])');
+      await expect(recovered).toHaveCount(1);
+      await expect(recovered).toContainText(/ · (starting|running)$/);
+      await existing.selectOption((await recovered.getAttribute("value"))!);
+      await page.getByRole("button", { name: "Open terminal", exact: true }).click();
+    }
+    await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 15_000 });
+    expect(launchRequests).toBe(1);
+    expect(stopRequests).toBe(0);
+    test.info().annotations.push({ type: "terminal-launch", description: recoveredLaunch ? "Recovered by one read-only refresh after unknown outcome" : "Directly acknowledged" });
+    const terminalRoot = page.locator(".cw-terminal-page [data-terminal-tab-panel]:not([hidden]) [data-terminal-root]");
     await expect(terminalRoot.locator(".xterm")).toBeVisible({ timeout: 15_000 });
-    await expect(terminalRoot.locator("[data-terminal-status]")).toBeHidden({ timeout: 15_000 });
+    const firstSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
+    expect(firstSessionId).toMatch(/^session-[0-9a-f-]{36}$/);
+    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled({ timeout: 15_000 });
+    expect((await terminalRoot.boundingBox())!.height).toBeGreaterThan(180);
+    expect((await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).boundingBox())!.height).toBeLessThan(60);
+    await expect.poll(() => page.evaluate(() => (
+      ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || [])
+        .filter((frame) => frame.type === "resize" && frame.columns > 0 && frame.rows > 0).length
+    ))).toBeGreaterThan(0);
     const initialResizeCount = await page.evaluate(() => (
-      ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || [])
-        .filter((frame) => frame[0] === 0x01 && frame.length === 5).length
+      ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || [])
+        .filter((frame) => frame.type === "resize" && frame.columns > 0 && frame.rows > 0).length
     ));
     expect(initialResizeCount).toBeGreaterThan(0);
     await page.setViewportSize({ width: 1180, height: 760 });
     await expect.poll(() => page.evaluate(() => (
-      ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || [])
-        .filter((frame) => frame[0] === 0x01 && frame.length === 5).length
+      ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || [])
+        .filter((frame) => frame.type === "resize" && frame.columns > 0 && frame.rows > 0).length
     ))).toBeGreaterThan(initialResizeCount);
 
     // The idle interval is the behavior under test, not a fixture delay: the
     // same attached browser socket must still carry the later command.
     await page.evaluate(() => new Promise((resolve) => window.setTimeout(resolve, 35_000)));
+    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
     await terminalRoot.locator(".xterm").click();
     await page.keyboard.type("printf '__SSR_TERM_IDLE__%d__\\n' $RANDOM");
     await page.keyboard.press("Enter");
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(/__SSR_TERM_IDLE__\d+__/);
     const sentInput = await page.evaluate(() => (
-      ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || [])
-        .some((frame) => frame[0] === 0x00 && frame.length > 1)
+      ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || [])
+        .some((frame) => frame.type === "input" && frame.data.length > 0)
     ));
     expect(sentInput).toBe(true);
     // Assert actual output under the production response CSP. The chrome-only
@@ -600,14 +638,45 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByRole("button", { name: "Copy selection", exact: true }).click();
     await expect(page.locator("[data-terminal-copy-status]")).toHaveText("Selection copied.");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("__SSR_COPY_234__");
-    const inputBeforeCopy = await page.evaluate(() => ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || []).filter((frame) => frame[0] === 0).length);
+    const inputBeforeCopy = await page.evaluate(() => ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || []).filter((frame) => frame.type === "input").length);
     await terminalRoot.locator("textarea").focus();
     await page.keyboard.press("Control+Shift+C");
-    expect(await page.evaluate(() => ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || []).filter((frame) => frame[0] === 0).length)).toBe(inputBeforeCopy);
+    expect(await page.evaluate(() => ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || []).filter((frame) => frame.type === "input").length)).toBe(inputBeforeCopy);
     // Clicking clears selection. Plain Ctrl+C must retain its PTY interrupt.
     await terminalRoot.locator(".xterm").click();
     await page.keyboard.press("Control+C");
-    await expect.poll(() => page.evaluate(() => ((window as Window & { __terminalFrames?: number[][] }).__terminalFrames || []).filter((frame) => frame[0] === 0).at(-1))).toEqual([0, 3]);
+    await expect.poll(() => page.evaluate(() => ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || []).filter((frame) => frame.type === "input").at(-1))).toEqual({ type: "input", data: "\u0003" });
+
+    await page.keyboard.type("cd /tmp; export CW_DURABLE_BROWSER=preserved-session; printf '__DURABLE_PID__%s__\\n' \"$$\"");
+    await page.keyboard.press("Enter");
+    await expect(terminalRows).toContainText(/__DURABLE_PID__\d+__/);
+    const firstPid = /__DURABLE_PID__(\d+)__/.exec(await terminalRows.innerText())![1];
+    await page.goto(`/${slug}/`);
+    await openRowActions(row);
+    await row.getByRole("link", { name: "Terminal", exact: true }).click();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(`__DURABLE_PID__${firstPid}__`);
+    await terminalRoot.locator(".xterm").click();
+    await page.keyboard.type("printf '__DURABLE_RESUME__%s__%s__%s__\\n' \"$CW_DURABLE_BROWSER\" \"$PWD\" \"$$\"");
+    await page.keyboard.press("Enter");
+    const resumed = `__DURABLE_RESUME__preserved-session__/tmp__${firstPid}__`;
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(resumed);
+
+    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(2);
+    const secondSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
+    expect(secondSessionId).not.toBe(firstSessionId);
+    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+    await terminalRoot.locator(".xterm").click();
+    await page.keyboard.type("printf '__SECOND_TERMINAL__%s__%s__\\n' \"${CW_DURABLE_BROWSER-unset}\" \"$$\"");
+    await page.keyboard.press("Enter");
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(/__SECOND_TERMINAL__unset__\d+__/);
+    expect(/__SECOND_TERMINAL__unset__(\d+)__/.exec(await terminalRoot.locator(".xterm-rows").innerText())![1]).not.toBe(firstPid);
+    await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+    await page.getByRole("dialog", { name: "Close terminal?" }).getByRole("button", { name: "Close terminal", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(1);
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(resumed);
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(page.locator(".cw-sandbox-terminal")).toHaveScreenshot("terminal-drawer-desktop.png", {
       mask: [terminalRoot.locator(".xterm-rows")],
@@ -650,11 +719,24 @@ test.describe.serial("server-rendered environments", () => {
     await portPanel.getByRole("button", { name: "Close", exact: true }).click();
     await expect(portPanel).not.toBeVisible();
     expect(page.url()).toBe(detailUrlBeforePorts);
-    expect(await terminalBeforePorts!.evaluate((element) => element === document.querySelector("[data-terminal-root]"))).toBe(true);
+    expect(await terminalBeforePorts!.evaluate((element) => element === document.querySelector("[data-terminal-tab-panel]:not([hidden]) [data-terminal-root]"))).toBe(true);
     const csrfAfterPorts = (await page.context().cookies()).find((cookie) => cookie.name === "codewire_ssr_csrf")?.value;
     expect(Boolean(csrfBeforePorts) && csrfBeforePorts === csrfAfterPorts).toBe(true);
     await page.getByRole("button", { name: "Disconnect" }).click();
-    await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "true");
+    await expect(terminalRoot).toHaveAttribute("data-terminal-settled", "true");
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(resumed);
+    await page.getByRole("button", { name: "Reconnect", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
+    await terminalRoot.locator(".xterm").click();
+    await page.keyboard.type("printf '__DURABLE_RECONNECT__%s__%s__\\n' \"$CW_DURABLE_BROWSER\" \"$$\"");
+    await page.keyboard.press("Enter");
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(`__DURABLE_RECONNECT__preserved-session__${firstPid}__`);
+    expect(launchRequests).toBe(2);
+    expect(stopRequests).toBe(1);
+    await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+    await page.getByRole("dialog", { name: "Close terminal?" }).getByRole("button", { name: "Close terminal", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
 
     const noJavaScriptContext = await page.context().browser()!.newContext({
@@ -677,8 +759,8 @@ test.describe.serial("server-rendered environments", () => {
     await expectTerminalLeaseDrained();
     expect(disallowedBrowserCalls).toEqual([]);
     await page.goto(`/${slug}/${environmentId}/`);
-    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "true");
+    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+    await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     const stopDialog = page.getByRole("dialog", { name: `Stop ${environmentName}?`, exact: true });
@@ -721,8 +803,8 @@ test.describe.serial("server-rendered environments", () => {
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await page.reload();
     await expect(page.locator(".cw-sandbox-heading .cw-status")).toContainText(/running/i);
-    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "true");
+    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
+    await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
     await page.getByRole("button", { name: "Delete", exact: true }).click();
     const deleteDialog = page.getByRole("dialog", { name: `Delete ${environmentName}?`, exact: true });
