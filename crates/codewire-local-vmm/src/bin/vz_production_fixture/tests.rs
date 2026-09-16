@@ -676,6 +676,7 @@ fn durable_output_rejects_malformed_oversize_and_trailing_frames() {
         ],
         next_offset: 14,
         eof: true,
+        ..Default::default()
     };
     assert_eq!(
         workload::output_response(valid).unwrap(),
@@ -691,6 +692,7 @@ fn durable_output_rejects_malformed_oversize_and_trailing_frames() {
             )],
             next_offset: 15,
             eof: true,
+            ..Default::default()
         },
         v1::ReadSessionOutputResponse {
             chunks: vec![output_chunk(
@@ -700,6 +702,7 @@ fn durable_output_rejects_malformed_oversize_and_trailing_frames() {
             )],
             next_offset: 14,
             eof: true,
+            ..Default::default()
         },
         v1::ReadSessionOutputResponse {
             chunks: vec![output_chunk(
@@ -709,6 +712,7 @@ fn durable_output_rejects_malformed_oversize_and_trailing_frames() {
             )],
             next_offset: 257,
             eof: true,
+            ..Default::default()
         },
         v1::ReadSessionOutputResponse {
             chunks: vec![output_chunk(
@@ -718,6 +722,7 @@ fn durable_output_rejects_malformed_oversize_and_trailing_frames() {
             )],
             next_offset: 22,
             eof: true,
+            ..Default::default()
         },
     ] {
         assert!(workload::output_response(invalid).is_err());

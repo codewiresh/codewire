@@ -254,6 +254,7 @@ impl DaemonService for DaemonServiceImpl {
                 session_id: attach.session_id.clone(),
                 offset: attach.output_offset,
                 limit: 1,
+                allow_history_gap: true,
             })
             .await
             .map_err(status_from_session_error)?;
@@ -450,6 +451,7 @@ async fn run_attach_session(
                 session_id: session_id.clone(),
                 offset: cursor,
                 limit: 0,
+                allow_history_gap: true,
             })
             .await
         {
@@ -459,6 +461,21 @@ async fn run_attach_session(
                 return;
             }
         };
+        if output.history_gap
+            && tx
+                .send(Ok(v1::SessionAttachMessage {
+                    payload: Some(v1::session_attach_message::Payload::HistoryGap(
+                        v1::SessionOutputGap {
+                            requested_offset: cursor,
+                            retained_start_offset: output.retained_start_offset,
+                        },
+                    )),
+                }))
+                .await
+                .is_err()
+        {
+            return;
+        }
         for chunk in output.chunks {
             if tx
                 .send(Ok(v1::SessionAttachMessage {
@@ -574,6 +591,7 @@ async fn run_attach_session(
                         }
                         Some(v1::session_attach_message::Payload::Output(_))
                         | Some(v1::session_attach_message::Payload::Status(_))
+                        | Some(v1::session_attach_message::Payload::HistoryGap(_))
                         | None => {
                             let _ = tx
                                 .send(Err(Status::invalid_argument(
@@ -612,6 +630,7 @@ fn session_status(record: &v1::SessionRecord, message: Option<&str>) -> v1::Sess
         state: record.state,
         exit_code: record.exit_code,
         output_end_offset: record.output_end_offset,
+        output_start_offset: record.output_start_offset,
         message: message.unwrap_or(&record.status_message).into(),
     }
 }

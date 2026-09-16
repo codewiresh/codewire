@@ -24,10 +24,16 @@ const SESSION_DIRECTORY: &str = ".codewire/daemon/sessions";
 const METADATA_FILE: &str = "session.json";
 const METADATA_TEMP_FILE: &str = ".session.json.tmp";
 const OUTPUT_FILE: &str = "output.bin";
+const OUTPUT_TEMP_FILE: &str = ".output.bin.tmp";
 const OUTPUT_BUFFER_SIZE: usize = 32 * 1024;
 const OUTPUT_FRAME_HEADER_SIZE: usize = 17;
 const DEFAULT_OUTPUT_READ_LIMIT: u64 = 256 * 1024;
 const MAX_OUTPUT_READ_LIMIT: u64 = 4 * 1024 * 1024;
+// Compact at twice the retained byte/frame budget, amortizing disk rewrites.
+const RETAINED_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
+const RETAINED_OUTPUT_FRAMES: usize = 2048;
+const MAX_SESSION_RECORDS: usize = 128;
+const RETIRED_SESSION_PREFIX: &str = ".retired-";
 
 #[derive(Clone)]
 pub struct SessionEngine {
@@ -50,6 +56,7 @@ struct SessionEngineInner {
     initialized: OnceCell<Result<(), String>>,
     sessions: Mutex<BTreeMap<String, Arc<SessionHandle>>>,
     active: Mutex<HashMap<String, ActiveSession>>,
+    retention_admission: AsyncMutex<()>,
 }
 
 struct SessionHandle {
@@ -177,6 +184,12 @@ struct PersistedSession {
     finished_at: Option<PersistedTimestamp>,
     exit_code: Option<i32>,
     output_end_offset: u64,
+    #[serde(default)]
+    output_start_offset: u64,
+    // Only failures before any process was spawned are automatically safe to
+    // retire. Older/ambiguous failures keep their cleanup obligation.
+    #[serde(default)]
+    cleanup_confirmed: bool,
     status_message: String,
 }
 
@@ -195,6 +208,8 @@ pub enum SessionError {
     #[error("{0}")]
     FailedPrecondition(String),
     #[error("{0}")]
+    ResourceExhausted(String),
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -208,6 +223,7 @@ impl SessionEngine {
                 initialized: OnceCell::new(),
                 sessions: Mutex::new(BTreeMap::new()),
                 active: Mutex::new(HashMap::new()),
+                retention_admission: AsyncMutex::new(()),
             }),
         }
     }
@@ -242,6 +258,8 @@ impl SessionEngine {
             )));
         }
 
+        let admission = self.inner.retention_admission.lock().await;
+        self.make_record_room().await?;
         let session_id = self.create_session_id().await?;
         let persisted = PersistedSession {
             session_id: session_id.clone(),
@@ -258,6 +276,8 @@ impl SessionEngine {
             finished_at: None,
             exit_code: None,
             output_end_offset: 0,
+            output_start_offset: 0,
+            cleanup_confirmed: false,
             status_message: "session starting".into(),
         };
         let handle = Arc::new(SessionHandle {
@@ -272,7 +292,13 @@ impl SessionEngine {
             persist_metadata(&self.inner.root, &metadata).await?;
         }
         lock(&self.inner.sessions).insert(session_id, handle.clone());
+        drop(admission);
         self.start_process(handle.clone()).await
+    }
+
+    async fn make_record_room(&self) -> Result<(), SessionError> {
+        drain_retired_records(&self.inner.root).await?;
+        prune_session_records(&self.inner, MAX_SESSION_RECORDS - 1, true).await
     }
 
     pub async fn list(&self) -> Result<Vec<v1::SessionRecord>, SessionError> {
@@ -346,6 +372,7 @@ impl SessionEngine {
 
     pub async fn restart(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
         self.ensure_initialized().await?;
+        let admission = self.inner.retention_admission.lock().await;
         validate_session_id(session_id)?;
         let handle = self.handle(session_id)?;
         handle.launch_cancellation.send_replace(true);
@@ -361,9 +388,11 @@ impl SessionEngine {
             metadata.started_at = None;
             metadata.finished_at = None;
             metadata.exit_code = None;
+            metadata.cleanup_confirmed = false;
             metadata.status_message = "session restarting".into();
             persist_metadata(&self.inner.root, &metadata).await?;
         }
+        drop(admission);
         self.start_process(handle.clone()).await
     }
 
@@ -373,7 +402,14 @@ impl SessionEngine {
     ) -> Result<v1::ReadSessionOutputResponse, SessionError> {
         self.ensure_initialized().await?;
         let handle = self.handle(&request.session_id)?;
-        read_output(&self.inner.root, &handle, request.offset, request.limit).await
+        let output = read_output(&self.inner.root, &handle, request.offset, request.limit).await?;
+        if output.history_gap && !request.allow_history_gap {
+            return Err(SessionError::FailedPrecondition(format!(
+                "older terminal output is unavailable; retained history starts at {}; opt in to history gaps or resume from that cursor",
+                output.retained_start_offset,
+            )));
+        }
+        Ok(output)
     }
 
     pub async fn input(&self, session_id: &str, data: Vec<u8>) -> Result<(), SessionError> {
@@ -548,7 +584,10 @@ impl SessionEngine {
             Ok(environment) => environment,
             Err(error) => {
                 return self
-                    .record_startup_failure(handle, format!("prepare session environment: {error}"))
+                    .record_unspawned_failure(
+                        handle,
+                        format!("prepare session environment: {error}"),
+                    )
                     .await;
             }
         };
@@ -564,7 +603,7 @@ impl SessionEngine {
             Ok(prepared) => prepared,
             Err(error) => {
                 return self
-                    .record_startup_failure(handle, format!("prepare session process: {error}"))
+                    .record_unspawned_failure(handle, format!("prepare session process: {error}"))
                     .await;
             }
         };
@@ -577,7 +616,7 @@ impl SessionEngine {
             }
             Err(error) => {
                 return self
-                    .record_startup_failure(handle, format!("launch session process: {error}"))
+                    .record_unspawned_failure(handle, format!("launch session process: {error}"))
                     .await;
             }
         };
@@ -677,7 +716,7 @@ impl SessionEngine {
             Ok(environment) => environment,
             Err(error) => {
                 return self
-                    .record_startup_failure(
+                    .record_unspawned_failure(
                         handle,
                         format!("prepare session PTY environment: {error}"),
                     )
@@ -685,9 +724,14 @@ impl SessionEngine {
             }
         };
         let size = pty_size(snapshot.width, snapshot.height);
-        let pair = native_pty_system()
-            .openpty(size)
-            .map_err(|error| SessionError::Internal(format!("open session PTY: {error}")))?;
+        let pair = match native_pty_system().openpty(size) {
+            Ok(pair) => pair,
+            Err(error) => {
+                return self
+                    .record_unspawned_failure(handle, format!("open session PTY: {error}"))
+                    .await;
+            }
+        };
 
         let mut prepared = match PreparedProcess::prepare_configured(
             (&self.inner.config, &self.inner.credential_bridge),
@@ -701,7 +745,10 @@ impl SessionEngine {
             Ok(prepared) => prepared,
             Err(error) => {
                 return self
-                    .record_startup_failure(handle, format!("prepare session PTY process: {error}"))
+                    .record_unspawned_failure(
+                        handle,
+                        format!("prepare session PTY process: {error}"),
+                    )
                     .await;
             }
         };
@@ -714,7 +761,10 @@ impl SessionEngine {
             }
             Err(error) => {
                 return self
-                    .record_startup_failure(handle, format!("launch session PTY process: {error}"))
+                    .record_unspawned_failure(
+                        handle,
+                        format!("launch session PTY process: {error}"),
+                    )
                     .await;
             }
         };
@@ -818,6 +868,15 @@ impl SessionEngine {
         Ok(record)
     }
 
+    async fn record_unspawned_failure(
+        &self,
+        handle: Arc<SessionHandle>,
+        message: String,
+    ) -> Result<v1::SessionRecord, SessionError> {
+        handle.metadata.lock().await.cleanup_confirmed = true;
+        self.record_startup_failure(handle, message).await
+    }
+
     async fn record_startup_failure(
         &self,
         handle: Arc<SessionHandle>,
@@ -844,6 +903,7 @@ impl SessionEngineInner {
                 ))
             })?;
         set_private_directory_permissions(&self.root).await?;
+        drain_retired_records(&self.root).await?;
 
         let mut entries = tokio::fs::read_dir(&self.root).await.map_err(|error| {
             SessionError::Internal(format!(
@@ -872,6 +932,15 @@ impl SessionEngineInner {
                 continue;
             }
             let session_id = entry.file_name().to_string_lossy().into_owned();
+            if let Some(retired_id) = session_id.strip_prefix(RETIRED_SESSION_PREFIX) {
+                validate_session_id(retired_id)?;
+                tokio::fs::remove_dir_all(entry.path())
+                    .await
+                    .map_err(|error| {
+                        SessionError::Internal(format!("clean retired session record: {error}"))
+                    })?;
+                continue;
+            }
             validate_session_id(&session_id)?;
             let path = entry.path().join(METADATA_FILE);
             let bytes = tokio::fs::read(&path).await.map_err(|error| {
@@ -903,18 +972,20 @@ impl SessionEngineInner {
             if metadata_changed {
                 persist_metadata(&self.root, &metadata).await?;
             }
-            loaded.insert(
-                session_id,
-                Arc::new(SessionHandle {
-                    metadata: AsyncMutex::new(metadata),
-                    output_index: Mutex::new(output_index),
-                    operation: AsyncMutex::new(()),
-                    launch_cancellation: watch::channel(false).0,
-                }),
-            );
+            let handle = Arc::new(SessionHandle {
+                metadata: AsyncMutex::new(metadata),
+                output_index: Mutex::new(output_index),
+                operation: AsyncMutex::new(()),
+                launch_cancellation: watch::channel(false).0,
+            });
+            compact_output(&self.root, &handle, &mut *handle.metadata.lock().await).await?;
+            loaded.insert(session_id, handle);
         }
         *lock(&self.sessions) = loaded;
-        Ok(())
+        // Grandfather unresolved records from older unbounded stores rather
+        // than deleting a possible live process's recovery obligation. New
+        // admission remains blocked until enough safe records are available.
+        prune_session_records(self, MAX_SESSION_RECORDS, false).await
     }
 }
 
@@ -928,6 +999,80 @@ impl Drop for SessionEngineInner {
             active.task.abort();
         }
     }
+}
+
+async fn drain_retired_records(root: &Path) -> Result<(), SessionError> {
+    let mut entries = tokio::fs::read_dir(root).await.map_err(|error| {
+        SessionError::Internal(format!("read retired session records: {error}"))
+    })?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| SessionError::Internal(format!("read retired session entry: {error}")))?
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(session_id) = name.strip_prefix(RETIRED_SESSION_PREFIX) {
+            validate_session_id(session_id)?;
+            tokio::fs::remove_dir_all(entry.path())
+                .await
+                .map_err(|error| {
+                    SessionError::Internal(format!("remove retired session record: {error}"))
+                })?;
+        }
+    }
+    Ok(())
+}
+
+async fn prune_session_records(
+    inner: &SessionEngineInner,
+    maximum: usize,
+    require_room: bool,
+) -> Result<(), SessionError> {
+    let handles = lock(&inner.sessions).values().cloned().collect::<Vec<_>>();
+    let needed = handles.len().saturating_sub(maximum);
+    if needed == 0 {
+        return Ok(());
+    }
+    let mut candidates = Vec::new();
+    for handle in handles {
+        let metadata = handle.metadata.lock().await;
+        let state = lifecycle_state(metadata.state);
+        if (matches!(
+            state,
+            v1::SessionLifecycleState::Exited | v1::SessionLifecycleState::Stopped
+        ) || (state == v1::SessionLifecycleState::Failed && metadata.cleanup_confirmed))
+            && !lock(&inner.active).contains_key(&metadata.session_id)
+        {
+            candidates.push((
+                timestamp_key(metadata.finished_at.map(Into::into).as_ref()),
+                metadata.session_id.clone(),
+                handle.clone(),
+            ));
+        }
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    if require_room && candidates.len() < needed {
+        return Err(SessionError::ResourceExhausted(
+            "terminal session limit reached; live or unresolved sessions cannot be removed automatically".into(),
+        ));
+    }
+    for (_, session_id, handle) in candidates.into_iter().take(needed) {
+        let _operation = handle.operation.lock().await;
+        let path = session_directory(&inner.root, &session_id)?;
+        let retired = inner
+            .root
+            .join(format!("{RETIRED_SESSION_PREFIX}{session_id}"));
+        // Admission and restart share the retention lock. Retire atomically
+        // before deleting files so incomplete cleanup is never a visible record.
+        tokio::fs::rename(&path, &retired).await.map_err(|error| {
+            SessionError::Internal(format!("retire expired session record: {error}"))
+        })?;
+        lock(&inner.sessions).remove(&session_id);
+        tokio::fs::remove_dir_all(&retired).await.map_err(|error| {
+            SessionError::Internal(format!("remove retired session record: {error}"))
+        })?;
+    }
+    Ok(())
 }
 
 async fn wait_for_launch_cancellation(handle: &SessionHandle) {
@@ -1282,6 +1427,8 @@ async fn read_output(
 ) -> Result<v1::ReadSessionOutputResponse, SessionError> {
     let metadata = handle.metadata.lock().await;
     let output_end_offset = metadata.output_end_offset;
+    let retained_start_offset = metadata.output_start_offset;
+    let history_gap = offset < retained_start_offset;
     if offset > output_end_offset {
         return Err(SessionError::InvalidArgument(format!(
             "session output offset {offset} exceeds current end offset {output_end_offset}"
@@ -1296,23 +1443,27 @@ async fn read_output(
     } else {
         requested_limit
     };
+    let offset = offset.max(retained_start_offset);
     if offset == output_end_offset {
         return Ok(v1::ReadSessionOutputResponse {
             chunks: Vec::new(),
             next_offset: offset,
             eof: true,
+            retained_start_offset,
+            history_gap,
         });
     }
 
     let path = session_directory(root, &metadata.session_id)?.join(OUTPUT_FILE);
     let output_index = lock(&handle.output_index).clone();
-    drop(metadata);
     let mut file = tokio::fs::File::open(&path).await.map_err(|error| {
         SessionError::Internal(format!(
             "open session output {} for read: {error}",
             path.display()
         ))
     })?;
+    // Pin the inode and matching index before allowing atomic compaction.
+    drop(metadata);
     let mut next_offset = offset;
     let mut remaining = limit;
     let mut chunks = Vec::new();
@@ -1393,6 +1544,8 @@ async fn read_output(
         chunks,
         next_offset,
         eof: next_offset == output_end_offset,
+        retained_start_offset,
+        history_gap,
     })
 }
 
@@ -1402,6 +1555,14 @@ async fn append_output(
     stream: v1::SessionOutputStream,
     data: &[u8],
 ) -> Result<(), SessionError> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if data.len() > OUTPUT_BUFFER_SIZE {
+        return Err(SessionError::Internal(
+            "session capture frame exceeds its buffer".into(),
+        ));
+    }
     let mut metadata = handle.metadata.lock().await;
     let path = session_directory(root, &metadata.session_id)?.join(OUTPUT_FILE);
     let offset = metadata.output_end_offset;
@@ -1449,7 +1610,101 @@ async fn append_output(
     metadata.output_end_offset = offset
         .checked_add(length)
         .ok_or_else(|| SessionError::Internal("session output offset overflow".into()))?;
-    persist_metadata(root, &metadata).await
+    persist_metadata(root, &metadata).await?;
+    drop(file);
+    compact_output(root, handle, &mut metadata).await
+}
+
+async fn compact_output(
+    root: &Path,
+    handle: &SessionHandle,
+    metadata: &mut PersistedSession,
+) -> Result<(), SessionError> {
+    let index = lock(&handle.output_index).clone();
+    if metadata.output_end_offset - metadata.output_start_offset <= RETAINED_OUTPUT_BYTES * 2
+        && index.len() <= RETAINED_OUTPUT_FRAMES * 2
+    {
+        return Ok(());
+    }
+    let minimum = metadata
+        .output_end_offset
+        .saturating_sub(RETAINED_OUTPUT_BYTES);
+    let first = index
+        .partition_point(|frame| frame.offset.saturating_add(frame.length) <= minimum)
+        .max(index.len().saturating_sub(RETAINED_OUTPUT_FRAMES));
+    let retained = &index[first..];
+    let start = retained
+        .first()
+        .map_or(metadata.output_end_offset, |frame| frame.offset);
+    let directory = session_directory(root, &metadata.session_id)?;
+    let path = directory.join(OUTPUT_FILE);
+    let temporary = directory.join(OUTPUT_TEMP_FILE);
+    let mut source = tokio::fs::File::open(&path)
+        .await
+        .map_err(|error| SessionError::Internal(format!("open retained output: {error}")))?;
+    let mut target = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
+        .await
+        .map_err(|error| SessionError::Internal(format!("create retained output: {error}")))?;
+    set_private_file_permissions(&temporary).await?;
+    let mut physical = 0;
+    let mut replacement = Vec::with_capacity(retained.len());
+    for frame in retained {
+        // Keep complete capture frames: at most one 32 KiB frame over the byte
+        // budget. Absolute output cursors remain unchanged after compaction.
+        source
+            .seek(SeekFrom::Start(frame.physical_data_offset))
+            .await
+            .map_err(|error| SessionError::Internal(format!("seek retained output: {error}")))?;
+        let mut header = [0_u8; OUTPUT_FRAME_HEADER_SIZE];
+        header[0..8].copy_from_slice(&frame.offset.to_le_bytes());
+        header[8] = frame.stream as u8;
+        header[9..17].copy_from_slice(&frame.length.to_le_bytes());
+        target
+            .write_all(&header)
+            .await
+            .map_err(|error| SessionError::Internal(format!("write retained header: {error}")))?;
+        let copied = tokio::io::copy(&mut (&mut source).take(frame.length), &mut target)
+            .await
+            .map_err(|error| SessionError::Internal(format!("copy retained output: {error}")))?;
+        if copied != frame.length {
+            return Err(SessionError::Internal(
+                "incomplete retained output frame".into(),
+            ));
+        }
+        replacement.push(OutputFrameIndex {
+            physical_data_offset: physical + OUTPUT_FRAME_HEADER_SIZE as u64,
+            ..frame.clone()
+        });
+        physical += OUTPUT_FRAME_HEADER_SIZE as u64 + frame.length;
+    }
+    target
+        .sync_all()
+        .await
+        .map_err(|error| SessionError::Internal(format!("sync retained output: {error}")))?;
+    drop(target);
+    tokio::fs::rename(&temporary, &path)
+        .await
+        .map_err(|error| SessionError::Internal(format!("publish retained output: {error}")))?;
+    // Publish the matching in-memory cursor/index immediately after rename.
+    // Recovery derives the first cursor from the replacement file if the
+    // process exits before the metadata rename completes.
+    metadata.output_start_offset = start;
+    *lock(&handle.output_index) = replacement;
+    tokio::fs::File::open(&directory)
+        .await
+        .map_err(|error| {
+            SessionError::Internal(format!("open retained output directory: {error}"))
+        })?
+        .sync_all()
+        .await
+        .map_err(|error| {
+            SessionError::Internal(format!("sync retained output directory: {error}"))
+        })?;
+    persist_metadata(root, metadata).await
 }
 
 async fn reconcile_output_cursor(
@@ -1476,7 +1731,8 @@ async fn reconcile_output_cursor(
         })?
         .len();
     let mut physical_offset = 0_u64;
-    let mut logical_offset = 0_u64;
+    let mut logical_offset = metadata.output_start_offset;
+    let mut retained_start = metadata.output_start_offset;
     let mut output_index = Vec::new();
 
     while physical_offset < file_length {
@@ -1498,6 +1754,13 @@ async fn reconcile_output_cursor(
                 .try_into()
                 .expect("session output offset header width"),
         );
+        if physical_offset == 0
+            && frame_offset >= metadata.output_start_offset
+            && frame_offset <= metadata.output_end_offset
+        {
+            logical_offset = frame_offset;
+            retained_start = frame_offset;
+        }
         if frame_offset != logical_offset {
             return Err(SessionError::Internal(format!(
                 "session output {} has non-contiguous cursor {frame_offset}, expected {logical_offset}",
@@ -1522,6 +1785,11 @@ async fn reconcile_output_cursor(
                 .try_into()
                 .expect("session output length header width"),
         );
+        if length == 0 || length > OUTPUT_BUFFER_SIZE as u64 {
+            return Err(SessionError::Internal(
+                "invalid session capture frame length".into(),
+            ));
+        }
         let frame_end = physical_offset
             .checked_add(OUTPUT_FRAME_HEADER_SIZE as u64)
             .and_then(|offset| offset.checked_add(length))
@@ -1573,10 +1841,13 @@ async fn reconcile_output_cursor(
             path.display()
         )));
     }
-    if metadata.output_end_offset == logical_offset {
+    if metadata.output_end_offset == logical_offset
+        && metadata.output_start_offset == retained_start
+    {
         return Ok((false, output_index));
     }
     metadata.output_end_offset = logical_offset;
+    metadata.output_start_offset = retained_start;
     Ok((true, output_index))
 }
 
@@ -1704,6 +1975,7 @@ impl PersistedSession {
             finished_at: self.finished_at.map(Into::into),
             exit_code: self.exit_code,
             output_end_offset: self.output_end_offset,
+            output_start_offset: self.output_start_offset,
             status_message: self.status_message.clone(),
         }
     }
@@ -1771,6 +2043,7 @@ pub fn status_from_session_error(error: SessionError) -> Status {
         SessionError::InvalidArgument(message) => Status::invalid_argument(message),
         SessionError::NotFound(message) => Status::not_found(message),
         SessionError::FailedPrecondition(message) => Status::failed_precondition(message),
+        SessionError::ResourceExhausted(message) => Status::resource_exhausted(message),
         SessionError::Internal(message) => Status::internal(message),
     }
 }
@@ -1873,6 +2146,390 @@ mod tests {
         assert!(validate_session_id("session-00000000-0000-4000-8000-000000000001").is_ok());
     }
 
+    async fn retained_fixture(root: &Path, frames: usize, size: usize) -> SessionHandle {
+        let session_id = "session-00000000-0000-4000-8000-000000000001";
+        let directory = root.join(session_id);
+        tokio::fs::create_dir(&directory).await.unwrap();
+        let mut file = tokio::fs::File::create(directory.join(OUTPUT_FILE))
+            .await
+            .unwrap();
+        let mut index = Vec::new();
+        let mut physical = 0;
+        for number in 0..frames {
+            let offset = (number * size) as u64;
+            file.write_all(&offset.to_le_bytes()).await.unwrap();
+            file.write_all(&[v1::SessionOutputStream::Pty as u8])
+                .await
+                .unwrap();
+            file.write_all(&(size as u64).to_le_bytes()).await.unwrap();
+            file.write_all(&vec![(number % 251) as u8; size])
+                .await
+                .unwrap();
+            index.push(OutputFrameIndex {
+                offset,
+                physical_data_offset: physical + OUTPUT_FRAME_HEADER_SIZE as u64,
+                length: size as u64,
+                stream: v1::SessionOutputStream::Pty,
+            });
+            physical += OUTPUT_FRAME_HEADER_SIZE as u64 + size as u64;
+        }
+        file.sync_all().await.unwrap();
+        let metadata = PersistedSession {
+            session_id: session_id.into(),
+            state: v1::SessionLifecycleState::Running as i32,
+            command: vec!["sh".into()],
+            working_dir: root.to_string_lossy().into_owned(),
+            env: Vec::new(),
+            pty: true,
+            term: "xterm-256color".into(),
+            width: 80,
+            height: 24,
+            created_at: PersistedTimestamp::now(),
+            started_at: Some(PersistedTimestamp::now()),
+            finished_at: None,
+            exit_code: None,
+            output_end_offset: (frames * size) as u64,
+            output_start_offset: 0,
+            cleanup_confirmed: false,
+            status_message: "session running".into(),
+        };
+        persist_metadata(root, &metadata).await.unwrap();
+        SessionHandle {
+            metadata: AsyncMutex::new(metadata),
+            output_index: Mutex::new(index),
+            operation: AsyncMutex::new(()),
+            launch_cancellation: watch::channel(false).0,
+        }
+    }
+
+    fn test_engine(root: &Path) -> SessionEngine {
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: root.join("workspace"),
+            home_root: root.join("home"),
+            auth_token: crate::DaemonAuthToken::new("synthetic-retention-test").unwrap(),
+            process_execution: ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
+        };
+        SessionEngine::new(&config, CredentialBridge::new(None))
+    }
+
+    async fn record_fixture(
+        engine: &SessionEngine,
+        number: u128,
+        state: v1::SessionLifecycleState,
+    ) -> String {
+        tokio::fs::create_dir_all(&engine.inner.root).await.unwrap();
+        let handle = Arc::new(retained_fixture(&engine.inner.root, 0, 1).await);
+        let mut metadata = handle.metadata.lock().await;
+        let session_id = format!("session-{}", Uuid::from_u128(number));
+        tokio::fs::rename(
+            engine.inner.root.join(&metadata.session_id),
+            engine.inner.root.join(&session_id),
+        )
+        .await
+        .unwrap();
+        metadata.session_id = session_id.clone();
+        metadata.state = state as i32;
+        metadata.finished_at = Some(PersistedTimestamp {
+            seconds: number as i64,
+            nanos: 0,
+        });
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+        drop(metadata);
+        lock(&engine.inner.sessions).insert(session_id.clone(), handle);
+        session_id
+    }
+
+    #[tokio::test]
+    async fn record_retention_prunes_oldest_confirmed_end_and_keeps_live_or_unresolved() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        let live = record_fixture(&engine, 1, v1::SessionLifecycleState::Running).await;
+        let unknown = record_fixture(&engine, 2, v1::SessionLifecycleState::Interrupted).await;
+        let oldest = record_fixture(&engine, 3, v1::SessionLifecycleState::Exited).await;
+        for number in 4..=MAX_SESSION_RECORDS as u128 {
+            record_fixture(&engine, number, v1::SessionLifecycleState::Stopped).await;
+        }
+        engine.make_record_room().await.unwrap();
+        assert_eq!(lock(&engine.inner.sessions).len(), MAX_SESSION_RECORDS - 1);
+        assert!(engine.handle(&live).is_ok());
+        assert!(engine.handle(&unknown).is_ok());
+        assert!(matches!(
+            engine.handle(&oldest),
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(!engine.inner.root.join(oldest).exists());
+        assert!(engine.inner.root.join(live).exists());
+        assert!(engine.inner.root.join(unknown).exists());
+    }
+
+    #[tokio::test]
+    async fn record_retention_rejects_admission_instead_of_deleting_live_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        for number in 1..=MAX_SESSION_RECORDS as u128 {
+            record_fixture(&engine, number, v1::SessionLifecycleState::Running).await;
+        }
+        assert!(matches!(
+            engine.make_record_room().await,
+            Err(SessionError::ResourceExhausted(_))
+        ));
+        assert_eq!(lock(&engine.inner.sessions).len(), MAX_SESSION_RECORDS);
+        let mut entries = tokio::fs::read_dir(&engine.inner.root).await.unwrap();
+        let mut count = 0;
+        while entries.next_entry().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, MAX_SESSION_RECORDS);
+    }
+
+    #[tokio::test]
+    async fn startup_cleans_interrupted_retirement_without_loading_partial_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        let retired_id = record_fixture(&engine, 2, v1::SessionLifecycleState::Exited).await;
+        let retained_id = record_fixture(&engine, 3, v1::SessionLifecycleState::Stopped).await;
+        let retired_path = engine
+            .inner
+            .root
+            .join(format!("{RETIRED_SESSION_PREFIX}{retired_id}"));
+        tokio::fs::rename(engine.inner.root.join(&retired_id), &retired_path)
+            .await
+            .unwrap();
+        tokio::fs::remove_file(retired_path.join(METADATA_FILE))
+            .await
+            .unwrap();
+        let recovered = test_engine(temp.path());
+        let sessions = recovered.list().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, retained_id);
+        assert!(!retired_path.exists());
+    }
+
+    #[tokio::test]
+    async fn startup_prunes_inherited_over_limit_confirmed_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        for number in 1..=(MAX_SESSION_RECORDS + 2) as u128 {
+            record_fixture(&engine, number, v1::SessionLifecycleState::Exited).await;
+        }
+        let recovered = test_engine(temp.path());
+        let sessions = recovered.list().await.unwrap();
+        assert_eq!(sessions.len(), MAX_SESSION_RECORDS);
+        assert!(
+            !engine
+                .inner
+                .root
+                .join(format!("session-{}", Uuid::from_u128(1)))
+                .exists()
+        );
+        assert!(
+            !engine
+                .inner
+                .root
+                .join(format!("session-{}", Uuid::from_u128(2)))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_compacts_inherited_output_without_renumbering_or_deleting_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        tokio::fs::create_dir_all(&engine.inner.root).await.unwrap();
+        let frames = (RETAINED_OUTPUT_BYTES * 2 / OUTPUT_BUFFER_SIZE as u64) as usize + 1;
+        let handle = retained_fixture(&engine.inner.root, frames, OUTPUT_BUFFER_SIZE).await;
+        let before = handle.metadata.lock().await.to_record();
+        let sessions = engine.list().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, before.session_id);
+        assert_eq!(sessions[0].output_end_offset, before.output_end_offset);
+        assert!(sessions[0].output_start_offset > 0);
+        assert_eq!(
+            sessions[0].state,
+            v1::SessionLifecycleState::Interrupted as i32
+        );
+        let output = engine
+            .read_output(v1::ReadSessionOutputRequest {
+                session_id: before.session_id,
+                offset: 0,
+                limit: 1,
+                allow_history_gap: true,
+            })
+            .await
+            .unwrap();
+        assert!(output.history_gap);
+        assert_eq!(output.chunks[0].offset, sessions[0].output_start_offset);
+    }
+
+    #[tokio::test]
+    async fn failed_retirement_cleanup_blocks_admission_until_recovered() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        let id = record_fixture(&engine, 2, v1::SessionLifecycleState::Exited).await;
+        let retired_path = engine
+            .inner
+            .root
+            .join(format!("{RETIRED_SESSION_PREFIX}{id}"));
+        // A non-directory tombstone produces a deterministic cleanup failure
+        // even on privileged test runners. No replacement record is admitted.
+        tokio::fs::write(&retired_path, b"incomplete cleanup")
+            .await
+            .unwrap();
+        assert!(matches!(
+            engine.make_record_room().await,
+            Err(SessionError::Internal(_))
+        ));
+        assert_eq!(lock(&engine.inner.sessions).len(), 1);
+        assert!(engine.inner.root.join(&id).exists());
+        tokio::fs::remove_file(&retired_path).await.unwrap();
+        tokio::fs::create_dir(&retired_path).await.unwrap();
+        tokio::fs::write(retired_path.join(OUTPUT_FILE), b"old output")
+            .await
+            .unwrap();
+        engine.make_record_room().await.unwrap();
+        assert!(!retired_path.exists());
+        assert_eq!(lock(&engine.inner.sessions).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_confirmed_unspawned_failures_are_eligible_for_retirement() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        let ambiguous = record_fixture(&engine, 1, v1::SessionLifecycleState::Failed).await;
+        let safe = record_fixture(&engine, 2, v1::SessionLifecycleState::Starting).await;
+        let handle = engine.handle(&safe).unwrap();
+        engine
+            .record_unspawned_failure(handle, "synthetic spawn failure".into())
+            .await
+            .unwrap();
+        prune_session_records(&engine.inner, 1, true).await.unwrap();
+        assert!(engine.handle(&ambiguous).is_ok());
+        assert!(matches!(
+            engine.handle(&safe),
+            Err(SessionError::NotFound(_))
+        ));
+        let recovered = test_engine(temp.path());
+        assert_eq!(recovered.list().await.unwrap().len(), 1);
+        assert!(recovered.handle(&ambiguous).is_ok());
+    }
+
+    #[tokio::test]
+    async fn restart_waiting_for_retention_cannot_resurrect_a_pruned_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        let oldest = record_fixture(&engine, 1, v1::SessionLifecycleState::Exited).await;
+        for number in 2..=MAX_SESSION_RECORDS as u128 {
+            record_fixture(&engine, number, v1::SessionLifecycleState::Stopped).await;
+        }
+        engine.ensure_initialized().await.unwrap();
+        let admission = engine.inner.retention_admission.lock().await;
+        let restarting = engine.clone();
+        let restarting_id = oldest.clone();
+        let task = tokio::spawn(async move { restarting.restart(&restarting_id).await });
+        engine.make_record_room().await.unwrap();
+        drop(admission);
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(!engine.inner.root.join(&oldest).exists());
+        assert!(!lock(&engine.inner.active).contains_key(&oldest));
+    }
+
+    #[tokio::test]
+    async fn retention_preserves_live_identity_absolute_cursors_and_recent_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let frames = (RETAINED_OUTPUT_BYTES * 2 / OUTPUT_BUFFER_SIZE as u64) as usize + 1;
+        let handle = retained_fixture(temp.path(), frames, OUTPUT_BUFFER_SIZE).await;
+        let before = handle.metadata.lock().await.clone();
+        compact_output(temp.path(), &handle, &mut *handle.metadata.lock().await)
+            .await
+            .unwrap();
+        let record = handle.metadata.lock().await.clone();
+        assert_eq!(record.session_id, before.session_id);
+        assert_eq!(record.state, before.state);
+        assert_eq!(record.output_end_offset, before.output_end_offset);
+        assert!(record.output_start_offset > 0);
+        assert!(
+            record.output_end_offset - record.output_start_offset
+                <= RETAINED_OUTPUT_BYTES + OUTPUT_BUFFER_SIZE as u64
+        );
+        let replay = read_output(temp.path(), &handle, 0, 1).await.unwrap();
+        assert!(replay.history_gap);
+        assert_eq!(replay.retained_start_offset, record.output_start_offset);
+        assert_eq!(replay.chunks[0].offset, record.output_start_offset);
+        let number = record.output_start_offset / OUTPUT_BUFFER_SIZE as u64;
+        assert_eq!(replay.chunks[0].data, vec![(number % 251) as u8]);
+        let resumed = read_output(temp.path(), &handle, replay.next_offset, 1)
+            .await
+            .unwrap();
+        assert!(!resumed.history_gap);
+        assert_eq!(resumed.chunks[0].offset, replay.next_offset);
+        assert!(matches!(
+            read_output(temp.path(), &handle, record.output_end_offset + 1, 1).await,
+            Err(SessionError::InvalidArgument(_))
+        ));
+        let mut recovered = before;
+        let (changed, index) = reconcile_output_cursor(temp.path(), &mut recovered)
+            .await
+            .unwrap();
+        assert!(
+            changed,
+            "recover compaction published before metadata update"
+        );
+        assert_eq!(recovered.output_start_offset, record.output_start_offset);
+        assert_eq!(recovered.output_end_offset, record.output_end_offset);
+        assert_eq!(index.len(), lock(&handle.output_index).len());
+        append_output(
+            temp.path(),
+            &handle,
+            v1::SessionOutputStream::Pty,
+            b"still-live",
+        )
+        .await
+        .unwrap();
+        let tail = read_output(temp.path(), &handle, record.output_end_offset, 10)
+            .await
+            .unwrap();
+        assert_eq!(tail.chunks[0].data, b"still-live");
+        assert!(!tail.history_gap);
+    }
+
+    #[tokio::test]
+    async fn retention_bounds_index_for_tiny_writes_and_pins_existing_reader_inode() {
+        let temp = tempfile::tempdir().unwrap();
+        let frames = RETAINED_OUTPUT_FRAMES * 2 + 1;
+        let handle = retained_fixture(temp.path(), frames, 1).await;
+        let path = session_directory(temp.path(), &handle.metadata.lock().await.session_id)
+            .unwrap()
+            .join(OUTPUT_FILE);
+        let mut existing_reader = tokio::fs::File::open(&path).await.unwrap();
+        compact_output(temp.path(), &handle, &mut *handle.metadata.lock().await)
+            .await
+            .unwrap();
+        assert_eq!(lock(&handle.output_index).len(), RETAINED_OUTPUT_FRAMES);
+        assert_eq!(
+            tokio::fs::metadata(&path).await.unwrap().len(),
+            (RETAINED_OUTPUT_FRAMES * (OUTPUT_FRAME_HEADER_SIZE + 1)) as u64
+        );
+        let mut first = [0; OUTPUT_FRAME_HEADER_SIZE + 1];
+        existing_reader.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first[..8], &0_u64.to_le_bytes());
+        assert_eq!(first[OUTPUT_FRAME_HEADER_SIZE], 0);
+        assert!(
+            read_output(temp.path(), &handle, 0, 1)
+                .await
+                .unwrap()
+                .history_gap
+        );
+    }
+
     #[tokio::test]
     async fn output_reconciliation_advances_stale_cursor_and_trims_partial_tail() {
         let temp = tempfile::tempdir().expect("session store");
@@ -1912,6 +2569,8 @@ mod tests {
             finished_at: Some(PersistedTimestamp::now()),
             exit_code: Some(0),
             output_end_offset: 0,
+            output_start_offset: 0,
+            cleanup_confirmed: false,
             status_message: "session exited with status 0".into(),
         };
 

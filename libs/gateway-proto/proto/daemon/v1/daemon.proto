@@ -117,6 +117,8 @@ message SessionRecord {
   optional int32 exit_code = 9;
   uint64 output_end_offset = 10;
   string status_message = 11;
+  // Absolute byte cursor of the oldest retained output. Earlier output is unavailable.
+  uint64 output_start_offset = 12;
 }
 
 message LaunchSessionRequest {
@@ -167,6 +169,7 @@ message ReadSessionOutputRequest {
   string session_id = 1;
   uint64 offset = 2;
   uint64 limit = 3;
+  bool allow_history_gap = 4;
 }
 
 message SessionOutputChunk {
@@ -180,6 +183,9 @@ message ReadSessionOutputResponse {
   repeated SessionOutputChunk chunks = 1;
   uint64 next_offset = 2;
   bool eof = 3;
+  uint64 retained_start_offset = 4;
+  // True when the requested cursor precedes retained_start_offset.
+  bool history_gap = 5;
 }
 
 message AttachSessionRequest {
@@ -201,6 +207,12 @@ message SessionStatus {
   optional int32 exit_code = 3;
   uint64 output_end_offset = 4;
   string message = 5;
+  uint64 output_start_offset = 6;
+}
+
+message SessionOutputGap {
+  uint64 requested_offset = 1;
+  uint64 retained_start_offset = 2;
 }
 
 message SessionAttachMessage {
@@ -211,6 +223,7 @@ message SessionAttachMessage {
     DetachSessionRequest detach = 4;
     SessionOutputChunk output = 5;
     SessionStatus status = 6;
+    SessionOutputGap history_gap = 7;
   }
 }
 
