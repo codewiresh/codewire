@@ -111,6 +111,7 @@ async fn serve() -> anyhow::Result<()> {
         idp_cfg.frontend_url.clone(),
         email.clone(),
         idp_cfg.turnstile_secret_key.clone(),
+        idp_cfg.turnstile_bypass_email.clone(),
     );
     let email_password = codewire_idp::email_password::router(
         pool.clone(),

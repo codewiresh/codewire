@@ -213,6 +213,7 @@ pub struct SessionAuthState {
     frontend_url: String,
     email: EmailClient,
     human_verification: HumanVerification,
+    turnstile_bypass_email: String,
     http: reqwest::Client,
 }
 
@@ -732,7 +733,14 @@ pub(crate) fn user_response(r: UserAuthRow) -> UserResponse {
     }
 }
 
-async fn validate_turnstile(state: &SessionAuthState, token: &str) -> Result<(), AppError> {
+async fn validate_turnstile(
+    state: &SessionAuthState,
+    email: &str,
+    token: &str,
+) -> Result<(), AppError> {
+    if turnstile_bypassed_for_email(&state.turnstile_bypass_email, email) {
+        return Ok(());
+    }
     let HumanVerification::Configured { secret, hostname } = &state.human_verification else {
         return match &state.human_verification {
             HumanVerification::TrustedTest => Ok(()),
@@ -784,6 +792,10 @@ async fn validate_turnstile(state: &SessionAuthState, token: &str) -> Result<(),
         ));
     }
     Ok(())
+}
+
+fn turnstile_bypassed_for_email(configured_email: &str, requested_email: &str) -> bool {
+    !configured_email.is_empty() && configured_email == requested_email
 }
 
 fn turnstile_validation_matches(
@@ -923,7 +935,7 @@ async fn sign_up(
     if let Err(msg) = validate_password(&req.password) {
         return Err(AppError::BadRequest(msg.into()));
     }
-    validate_turnstile(&state, &req.turnstile_token).await?;
+    validate_turnstile(&state, &req.email, &req.turnstile_token).await?;
 
     let enabled = state.signup_invite_policy.accepts(&req.invite_code);
     let access_reason = req.reason.trim();
@@ -1448,6 +1460,7 @@ pub fn router(pool: PgPool, secure: bool, signup_invite_policy: SignupInvitePoli
         String::new(),
         EmailClient::disabled(),
         HumanVerification::TrustedTest,
+        String::new(),
     )
 }
 
@@ -1458,6 +1471,7 @@ pub fn router_with_signup_delivery(
     frontend_url: String,
     email: EmailClient,
     turnstile_secret_key: String,
+    turnstile_bypass_email: String,
 ) -> Router {
     let hostname = reqwest::Url::parse(&frontend_url)
         .ok()
@@ -1476,6 +1490,7 @@ pub fn router_with_signup_delivery(
         frontend_url,
         email,
         human_verification,
+        turnstile_bypass_email,
     )
 }
 
@@ -1486,6 +1501,7 @@ fn router_with_state(
     frontend_url: String,
     email: EmailClient,
     human_verification: HumanVerification,
+    turnstile_bypass_email: String,
 ) -> Router {
     let state = SessionAuthState {
         pool,
@@ -1494,6 +1510,7 @@ fn router_with_state(
         frontend_url,
         email,
         human_verification,
+        turnstile_bypass_email,
         http: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -1589,6 +1606,45 @@ mod tests {
             assert!(!turnstile_validation_matches(&candidate, "codewire.sh"));
         }
         assert!(!turnstile_validation_matches(&valid, ""));
+    }
+
+    #[test]
+    fn turnstile_bypass_is_exactly_one_configured_email() {
+        assert!(turnstile_bypassed_for_email(
+            "codewire-e2e@example.test",
+            "codewire-e2e@example.test"
+        ));
+        assert!(!turnstile_bypassed_for_email(
+            "codewire-e2e@example.test",
+            "other@example.test"
+        ));
+        assert!(!turnstile_bypassed_for_email("", ""));
+        assert!(!turnstile_bypassed_for_email("", "other@example.test"));
+    }
+
+    #[tokio::test]
+    async fn configured_e2e_email_bypasses_only_turnstile() {
+        let pool = PgPool::connect_lazy("postgres://localhost/none").unwrap();
+        let state = SessionAuthState {
+            pool,
+            secure: false,
+            signup_invite_policy: SignupInvitePolicy::open(),
+            frontend_url: String::new(),
+            email: EmailClient::disabled(),
+            human_verification: HumanVerification::Unavailable,
+            turnstile_bypass_email: "codewire-e2e@example.test".into(),
+            http: reqwest::Client::new(),
+        };
+
+        assert!(
+            validate_turnstile(&state, "codewire-e2e@example.test", "")
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_turnstile(&state, "other@example.test", "").await,
+            Err(AppError::ServiceUnavailable(_))
+        ));
     }
 
     #[test]
@@ -1808,6 +1864,7 @@ mod tests {
             frontend_url: String::new(),
             email: EmailClient::disabled(),
             human_verification: HumanVerification::TrustedTest,
+            turnstile_bypass_email: String::new(),
             http: reqwest::Client::new(),
         };
         let mut headers = HeaderMap::new();

@@ -321,6 +321,7 @@ async fn native_clients_full_flow_against_postgres() {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
         turnstile_secret_key: String::new(),
+        turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
@@ -759,6 +760,7 @@ async fn oidc_access_token_authenticates_product_api_against_postgres() {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
         turnstile_secret_key: String::new(),
+        turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
@@ -1092,6 +1094,7 @@ async fn provider_startup_publishes_jwks_before_token_issuance() {
             issuer: "https://idp.codewire.test".into(),
             frontend_url: "https://app.codewire.test".into(),
             turnstile_secret_key: String::new(),
+            turnstile_bypass_email: String::new(),
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
@@ -1703,6 +1706,7 @@ async fn jwk_final_schema_uses_only_envelopes_and_fails_closed() {
             issuer: "https://idp.codewire.test".into(),
             frontend_url: "https://app.codewire.test".into(),
             turnstile_secret_key: String::new(),
+            turnstile_bypass_email: String::new(),
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
@@ -1895,6 +1899,7 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
         turnstile_secret_key: String::new(),
+        turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
