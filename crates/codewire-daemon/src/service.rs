@@ -1303,6 +1303,19 @@ mod tests {
         )
     }
 
+    async fn wait_attach_fixture_ready(temp: &tempfile::TempDir) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !std::fs::read_to_string(temp.path().join("home/attach-ready"))
+                .as_deref()
+                .is_ok_and(|value| value == "ready")
+            {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("quiet PTY fixture is ready with echo disabled");
+    }
+
     #[tokio::test]
     async fn attach_saturated_reader_keeps_input_resize_and_detach_responsive() {
         saturated_attach_controls(2 * 1024 * 1024, false).await;
@@ -1317,26 +1330,31 @@ mod tests {
         let (temp, engine) = attach_engine();
         let session = engine.launch(v1::LaunchSessionRequest {
             command: vec!["sh".into(), "-c".into(),
-                format!("stty -echo; head -c {output_bytes} /dev/zero; IFS= read -r line; printf '%s' \"$line\" > attach-input; stty size > attach-size; exec sleep 30")],
+                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > attach-input; stty size > attach-size; exec sleep 30".into()],
             pty: true,
             term: "xterm-256color".into(),
             width: 80,
             height: 24,
             ..Default::default()
         }).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while engine
+        wait_attach_fixture_ready(&temp).await;
+        // Prepare the full production-sized transcript deterministically. This
+        // is disk setup, not the separately asserted 3s control/1s detach gate.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.append_test_output(&session.session_id, &vec![0; output_bytes as usize]),
+        )
+        .await
+        .expect("bounded transcript preparation")
+        .unwrap();
+        assert_eq!(
+            engine
                 .get(&session.session_id)
                 .await
                 .unwrap()
-                .output_end_offset
-                < output_bytes
-            {
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("bounded producer persisted its output");
+                .output_end_offset,
+            output_bytes
+        );
         let (input, incoming) = mpsc::channel(8);
         let (output, mut unread) = mpsc::channel(32);
         let capacity = output.clone();
@@ -1441,16 +1459,24 @@ mod tests {
 
     #[tokio::test]
     async fn attach_reports_later_retention_gap_after_already_queued_output() {
-        let (_temp, engine) = attach_engine();
+        let (temp, engine) = attach_engine();
         let session = engine.launch(v1::LaunchSessionRequest {
             command: vec!["sh".into(), "-c".into(),
-                "stty -echo; head -c 262144 /dev/zero; IFS= read -r line; head -c 9437184 /dev/zero; exec sleep 30".into()],
+                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > later-gap-input; exec sleep 60".into()],
             pty: true,
             term: "xterm-256color".into(),
             width: 80,
             height: 24,
             ..Default::default()
         }).await.unwrap();
+        wait_attach_fixture_ready(&temp).await;
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.append_test_output(&session.session_id, &vec![0; 262144]),
+        )
+        .await
+        .expect("initial transcript preparation")
+        .unwrap();
         let (input, incoming) = mpsc::channel(8);
         let (output, mut receiver) = mpsc::channel(1);
         let capacity = output.clone();
@@ -1480,17 +1506,28 @@ mod tests {
             }))
             .await
             .unwrap();
-        let end = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let record = engine.get(&session.session_id).await.unwrap();
-                if record.output_end_offset == 262144 + 9437184 && record.output_start_offset > 0 {
-                    break record.output_end_offset;
-                }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !std::fs::read_to_string(temp.path().join("home/later-gap-input"))
+                .as_deref()
+                .is_ok_and(|value| value == "produce")
+            {
                 sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("producer compacted while attachment was blocked");
+        .expect("input is consumed while replay is blocked");
+        assert_eq!(capacity.capacity(), 0);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            engine.append_test_output(&session.session_id, &vec![0; 9437184]),
+        )
+        .await
+        .expect("transcript compacted while attachment was blocked")
+        .unwrap();
+        let record = engine.get(&session.session_id).await.unwrap();
+        assert_eq!(record.output_end_offset, 262144 + 9437184);
+        assert!(record.output_start_offset > 0);
+        let end = record.output_end_offset;
         tokio::time::timeout(Duration::from_secs(10), async {
             let mut cursor = 0;
             let mut gap_seen = false;
