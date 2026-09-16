@@ -85,12 +85,20 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             pool.clone(),
             Arc::new(TestKekProvider),
         );
+        let github_app_authorization = Arc::new(
+            codewire_credential_broker::GitHubAppAuthorizationOwner::new(
+                github_app,
+                Arc::new(provider.clone()),
+            ),
+        );
         let bridge = PlatformCredentialBridgeService::new(
             Arc::new(authentication::KindBridgeAuthenticator::new(authenticator)),
             store.clone(),
             PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
             provider.clone(),
-        );
+        )
+        .with_github_app_authorization_owner(github_app_authorization.clone())
+        .map_err(|_| RuntimeError::Configuration("Kind GitHub App broker owner"))?;
         // Use the production SSH owner and packaged tools; only provider login,
         // HTTP and envelope authority are synthetic in this fixture.
         let bridge = ssh::configure(bridge, &config.runtime_directory)?;
@@ -99,15 +107,13 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             store.clone(),
             CodexEnrollmentOwner::new(enrollment),
             GitHubEnrollmentOwner::new(github),
-            Some(codewire_credential_broker::GitHubAppAuthorizationOwner::new(
-                github_app,
-                Arc::new(provider.clone()),
-            )),
+            Some(github_app_authorization.clone()),
         ));
         let repositories = Arc::new(GithubRepositoryOwner::new(
             pool.clone(),
             store,
             Arc::new(provider.clone()),
+            Some(github_app_authorization),
         ));
         tracing::info!(target: TARGET, event = "fixture_starting", "fixture_starting");
         let result = serve_owned(

@@ -116,9 +116,9 @@ async fn reconnect_target(
 
 pub(super) fn github_app_error(error: GitHubAppAuthorizationError) -> Error {
     match error {
-        GitHubAppAuthorizationError::Configuration
-        | GitHubAppAuthorizationError::Unavailable
-        | GitHubAppAuthorizationError::ExpiringTokensUnsupported => Error::Unavailable,
+        GitHubAppAuthorizationError::Configuration | GitHubAppAuthorizationError::Unavailable => {
+            Error::Unavailable
+        }
         GitHubAppAuthorizationError::InvalidAuthorizationCode => Error::InvalidInput,
         GitHubAppAuthorizationError::Denied => Error::EnrollmentFailed,
         GitHubAppAuthorizationError::InvalidResponse => Error::EnrollmentUnsupported,
@@ -145,10 +145,6 @@ mod tests {
         );
         assert_eq!(
             github_app_error(GitHubAppAuthorizationError::Unavailable),
-            Error::Unavailable
-        );
-        assert_eq!(
-            github_app_error(GitHubAppAuthorizationError::ExpiringTokensUnsupported),
             Error::Unavailable
         );
     }
