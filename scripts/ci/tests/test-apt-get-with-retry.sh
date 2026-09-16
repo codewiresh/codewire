@@ -152,7 +152,12 @@ run_case() {
       for pid_file in "$case_dir/apt.argv.$attempt.apt-pid" "$case_dir/apt.argv.$attempt.child-pid"; do
         pid="$(<"$pid_file")"
         state="$(ps -o stat= -p "$pid" || true)"
-        [[ -z "$state" ]] || fail "$name left its TERM-responsive fixture process $pid ($state)"
+        # A Z-state process has exited and cannot continue an APT transaction.
+        # In CI containers, PID 1 may defer reaping it after the real timeout
+        # has already reaped its direct child, so only a live process is a
+        # cleanup failure here.
+        state="${state//[[:space:]]/}"
+        [[ -z "$state" || "$state" == Z* ]] || fail "$name left its TERM-responsive fixture process $pid ($state)"
       done
       timed_out_transactions=$((timed_out_transactions + 1))
     fi
