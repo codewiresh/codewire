@@ -266,6 +266,19 @@ pub(crate) fn ensure_current_platform_runtime_support(
 ) -> AppResult<()> {
     let spec = &body.project_spec;
     super::ports::validate_application_previews(spec)?;
+    for repository in &spec.repositories {
+        if codewire_project::parse_repository_ssh_host(&repository.source)
+            .map_err(invalid_project_spec)?
+            .is_some()
+            && spec.credentials.is_none()
+        {
+            return Err(coded(
+                StatusCode::BAD_REQUEST,
+                "repository_credentials_required",
+                "SSH repository checkout requires an explicitly selected credential profile containing an SSH identity",
+            ));
+        }
+    }
     let pending = if spec
         .repositories
         .iter()
@@ -933,6 +946,9 @@ pub(crate) async fn create_environment_core(
                                 return Err(repository_analysis_pending());
                             }
                             None => {
+                                // Saved workload defaults must be executable
+                                // before image resolution can write a preset.
+                                ensure_current_platform_runtime_support(&body)?;
                                 resolve_project_preset(pool, org_id, &body.project_spec).await?
                             }
                         }
@@ -1319,6 +1335,101 @@ credentials: {profile: user/work}
             ..Default::default()
         })
         .unwrap();
+    }
+
+    fn ssh_project(source: &str) -> codewire_project::ProjectSpec {
+        let host = codewire_project::parse_repository_ssh_host(source)
+            .unwrap()
+            .unwrap();
+        codewire_project::ProjectSpec {
+            repositories: vec![codewire_project::RepositorySpec {
+                source: source.into(),
+                destination: "/workspace/app".into(),
+                known_hosts: vec![format!(
+                    "{} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx",
+                    host.known_hosts_name()
+                )],
+                ..Default::default()
+            }],
+            working_directory: "/workspace/app".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ssh_checkout_requires_an_explicit_profile_without_echoing_repository_data() {
+        for source in [
+            "git@example.test:private-canary/app.git",
+            "ssh://git@example.test:2222/private-canary/app.git",
+        ] {
+            let mut body = CreateEnvironmentBody {
+                project_spec: ssh_project(source),
+                ..Default::default()
+            };
+            apply_project_spec_defaults(&mut body).unwrap();
+            let AppError::Coded {
+                status,
+                code,
+                detail,
+            } = ensure_current_platform_runtime_support(&body).unwrap_err()
+            else {
+                panic!("SSH without a profile was not rejected with a typed error");
+            };
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(code, "repository_credentials_required");
+            assert!(detail.contains("SSH identity"));
+            assert!(!detail.contains("private-canary"));
+            assert!(!detail.contains(source));
+            body.project_spec.credentials = Some(codewire_project::CredentialBinding {
+                profile: "platform:user/work".into(),
+            });
+            // Profile ownership/revision and the actual SSH slot remain the
+            // existing source-admission and worker checks, not this presence check.
+            ensure_current_platform_runtime_support(&body).unwrap();
+        }
+        let body = CreateEnvironmentBody {
+            project_spec: codewire_project::parse_project_yaml(
+                "repositories: [{source: https://example.test/org/app.git}]\n",
+            )
+            .unwrap()
+            .spec,
+            ..Default::default()
+        };
+        ensure_current_platform_runtime_support(&body).unwrap();
+    }
+
+    #[test]
+    fn inherited_ssh_repositories_cannot_inherit_profile_authority() {
+        let mut defaults = ssh_project("git@example.test:org/app.git");
+        defaults.credentials = Some(codewire_project::CredentialBinding {
+            profile: "platform:user/default-must-not-grant".into(),
+        });
+        let mut body = CreateEnvironmentBody::default();
+        merge_environment_defaults(&mut body, &defaults).unwrap();
+        assert!(body.project_spec.credentials.is_none());
+        assert!(matches!(
+            ensure_current_platform_runtime_support(&body),
+            Err(AppError::Coded {
+                code: "repository_credentials_required",
+                ..
+            })
+        ));
+        body.project_spec.application_ports =
+            codewire_project::parse_project_yaml("ports: [{port: 2222, label: ssh}]\n")
+                .unwrap()
+                .spec
+                .application_ports;
+        let error = ensure_current_platform_runtime_support(&body).unwrap_err();
+        assert!(
+            !matches!(
+                error,
+                AppError::Coded {
+                    code: "repository_credentials_required",
+                    ..
+                }
+            ),
+            "preview validation must retain priority over SSH profile presence"
+        );
     }
 
     #[test]
