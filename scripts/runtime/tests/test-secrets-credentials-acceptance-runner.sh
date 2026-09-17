@@ -50,6 +50,7 @@ case "$0" in
       *) exit 91 ;;
     esac
     ;;
+  */smoke-dev-initial-private-checkout.sh) label=dev-initial-private-checkout ;;
   *) exit 92 ;;
 esac
 case "$label" in
@@ -110,6 +111,17 @@ case "$label" in
       [[ "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR:-}" == "${XDG_RUNTIME_DIR:-}/provider-login" ]] || exit 96
     fi
     ;;
+  dev-initial-private-checkout)
+    [[ "$*" == "--cw-bin $fixtures/normal-cw" &&
+       "$DEV_CHECKOUT_WORKSPACE_IMAGE" == registry.example/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &&
+       "$EXPECTED_CODEWIRE_ADMIN_EMAIL" == hello@codewire.sh &&
+       "$EXPECTED_CODEWIRE_ADMIN_USER_ID" == aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &&
+       "$EXPECTED_CODEWIRE_ORGANIZATION_ID" == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb &&
+       -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" &&
+       "$KUBE_CONTEXT" == codewire-dev && "$SANDBOX_NAMESPACE" == dev-sandboxes &&
+       -z "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR+x}" && -z "${EXPECTED_NODE+x}" &&
+       -z "${LOCAL_PLATFORM_IMAGE+x}" ]] || exit 105
+    ;;
 esac
 for forbidden in CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY CW_CONFIG_DIR \
     ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE OPENAI_API_KEY CODEX_HOME \
@@ -137,6 +149,7 @@ STUB
 chmod 0755 "$FAKE_ROOT/child-stub"
 for child in \
     "$FAKE_ROOT/scripts/runtime/dev/smoke-local-platform-sources.sh" \
+    "$FAKE_ROOT/scripts/runtime/dev/smoke-dev-initial-private-checkout.sh" \
     "$FAKE_ROOT/scripts/ci/verify/runtime-dev-commodity-smoke.sh" \
     "$FAKE_ROOT/scripts/ci/verify/smoke-native-local-environment.sh"; do
   cp "$FAKE_ROOT/child-stub" "$child"
@@ -275,8 +288,8 @@ grep -Eq 'live-anthropic +PASS' "$TEST_ROOT/default.out" || fail 'live Anthropic
 grep -Eq 'live-github +NOT RUN \(no checked-in live-github journey\)' \
   "$TEST_ROOT/default.out" || fail 'provider success concealed the missing GitHub journey'
 grep -Eq 'initial-private-checkout +PASS' "$TEST_ROOT/default.out" || fail 'local private checkout did not run'
-grep -Fq 'dev-initial-private-checkout   NOT RUN (no checked-in hosted initial private-checkout journey)' \
-  "$TEST_ROOT/default.out" || fail 'missing hosted private checkout was not reported honestly'
+grep -Fq 'dev-initial-private-checkout   NOT RUN (explicit normal CLI/dedicated Dev checkout inputs unavailable)' \
+  "$TEST_ROOT/default.out" || fail 'unconfigured hosted checkout was not reported honestly'
 grep -Fq 'aggregate result: INCOMPLETE; full acceptance: NOT CLAIMED' "$TEST_ROOT/default.out" ||
   fail 'default matrix claimed completion'
 pass
@@ -407,6 +420,51 @@ expect_status 1 "$TEST_ROOT/provider-browser-saved.out" "$RUNNER" --only dev-pro
 unset DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE DEV_SMOKE_BROWSER_AUTH_BUN_BIN DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN
 pass
 
+: >"$CALLS"
+: >"$SIGNAL_MARKER"
+mkdir -p "$FAKE_ROOT/scripts/runtime/dev/testdata"
+cp "$REPO_ROOT/scripts/runtime/dev/testdata/acceptance-identity.json" \
+  "$FAKE_ROOT/scripts/runtime/dev/testdata/acceptance-identity.json"
+printf '{}\n' >"$FAKE_ROOT/fixtures/browser-input.json"
+chmod 0600 "$FAKE_ROOT/fixtures/browser-input.json"
+for executable in synthetic-bun synthetic-chromium; do
+  cp "$FAKE_ROOT/fixtures/normal-cw" "$FAKE_ROOT/fixtures/$executable"
+done
+export DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE="$FAKE_ROOT/fixtures/browser-input.json"
+export DEV_SMOKE_BROWSER_AUTH_BUN_BIN="$FAKE_ROOT/fixtures/synthetic-bun"
+export DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN="$FAKE_ROOT/fixtures/synthetic-chromium"
+export DEV_CHECKOUT_WORKSPACE_IMAGE=registry.example/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export EXPECTED_CODEWIRE_ADMIN_EMAIL=hello@codewire.sh
+expect_status 1 "$TEST_ROOT/hosted-unadmitted.out" "$RUNNER" --only dev-initial-private-checkout
+[[ ! -s "$CALLS" ]] || fail 'unadmitted hosted identity reached a child'
+grep -Fq 'dedicated Dev checkout identity is not source-admitted' "$TEST_ROOT/hosted-unadmitted.out" ||
+  fail 'hosted identity source admission was not enforced'
+pass
+jq '.status="enrolled" | .userId="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+    .organizationId="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
+  "$FAKE_ROOT/scripts/runtime/dev/testdata/acceptance-identity.json" >"$TEST_ROOT/admitted.json"
+mv "$TEST_ROOT/admitted.json" "$FAKE_ROOT/scripts/runtime/dev/testdata/acceptance-identity.json"
+expect_status 0 "$TEST_ROOT/hosted.out" "$RUNNER" --only dev-initial-private-checkout
+[[ "$(cat "$CALLS")" == dev-initial-private-checkout ]] || fail 'hosted selection dispatched another child'
+grep -Fq 'selected result: PASS; full acceptance: NOT CLAIMED' "$TEST_ROOT/hosted.out" ||
+  fail 'hosted selection claimed full acceptance'
+pass
+for invalid in identity image browser; do
+  : >"$CALLS"
+  case "$invalid" in
+    identity) export EXPECTED_CODEWIRE_ORGANIZATION_ID=cccccccccccccccccccccccccccccccc ;;
+    image) export DEV_CHECKOUT_WORKSPACE_IMAGE=registry.example/workspace:latest ;;
+    browser) export DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE='' ;;
+  esac
+  expect_status 1 "$TEST_ROOT/hosted-$invalid.out" "$RUNNER" --only dev-initial-private-checkout
+  [[ ! -s "$CALLS" ]] || fail "invalid hosted $invalid reached a child"
+  export EXPECTED_CODEWIRE_ORGANIZATION_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  export DEV_CHECKOUT_WORKSPACE_IMAGE=registry.example/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE="$FAKE_ROOT/fixtures/browser-input.json"
+  pass
+done
+unset DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE DEV_SMOKE_BROWSER_AUTH_BUN_BIN DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN DEV_CHECKOUT_WORKSPACE_IMAGE
+export EXPECTED_CODEWIRE_ADMIN_EMAIL=owner@example.test
 : >"$CALLS"
 : >"$SIGNAL_MARKER"
 printf 'owner-approval\n' | {

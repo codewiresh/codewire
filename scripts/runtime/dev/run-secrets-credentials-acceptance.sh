@@ -61,7 +61,7 @@ individual journey with --only. Available journeys:
   live-openai               (Linux local VM; fresh API key and explicit model required)
   live-anthropic            (Linux local VM; fresh Anthropic API key input required)
   initial-private-checkout   (Linux local VM with generated platform SSH)
-  dev-initial-private-checkout (NOT RUN: no checked-in hosted checkout journey)
+  dev-initial-private-checkout (Dev; dedicated enrolled automated account only)
 
 Required input names:
   ACCEPTANCE_NORMAL_CW_BIN
@@ -84,6 +84,7 @@ Required input names:
   LOCAL_PLATFORM_IMAGE
   LOCAL_PLATFORM_MESH_PROBE_BIN
   LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN
+  DEV_CHECKOUT_WORKSPACE_IMAGE  Existing immutable workspace registry@sha256:digest
   CODEWIRE_SERVER_URL
   EXPECTED_CODEWIRE_DEV_SERVER_URL
   EXPECTED_CODEWIRE_ADMIN_EMAIL
@@ -222,6 +223,33 @@ dev_application_all_scopes_ready() {
     [[ -n "${CODEWIRE_SERVER_URL:-}" && -n "${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" ]]
 }
 
+dev_initial_checkout_ready() {
+  normal_cli_ready && owner_runtime_ready && canonical_file "${KUBECONFIG:-}" &&
+    canonical_file "${DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE:-}" &&
+    canonical_executable "${DEV_SMOKE_BROWSER_AUTH_BUN_BIN:-}" &&
+    canonical_executable "${DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN:-}" &&
+    [[ "${CODEWIRE_SERVER_URL:-}" == https://codewire-dev.sh &&
+       "${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" == https://codewire-dev.sh &&
+       -n "${KUBE_CONTEXT:-}" && -n "${SANDBOX_NAMESPACE:-}" &&
+       "${DEV_CHECKOUT_WORKSPACE_IMAGE:-}" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+}
+
+dev_checkout_identity_ready() {
+  # This is public source admission, not a caller-selected expected tuple.
+  # The child separately proves the freshly authenticated principal/ownership.
+  jq -es --arg user "${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}" \
+    --arg org "${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}" \
+    --arg email "${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" '
+      length == 1 and (.[0] |
+        keys == ["email","organizationId","status","userId","version"] and
+        .version == 1 and .status == "enrolled" and
+        .email == "hello@codewire.sh" and .email == $email and
+        .userId == $user and .organizationId == $org and
+        ([.userId,.organizationId] | all(type == "string" and
+          test("^[0-9a-f]{32}$") and . != "00000000000000000000000000000000")))
+    ' "$ROOT/scripts/runtime/dev/testdata/acceptance-identity.json" >/dev/null 2>&1
+}
+
 provider_oauth_config_ready() {
   local config_dir="$ACCEPTANCE_PROVIDER_SSH_FRESH_OAUTH_CONFIG_DIR"
   local runtime_parent="${XDG_RUNTIME_DIR:-}"
@@ -280,12 +308,17 @@ readiness_reason() {
       printf '%s' "no checked-in $journey journey"; return 1
       ;;
     initial-private-checkout)
-      local_platform_ready && canonical_executable "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}" || {
+      if ! { local_platform_ready && canonical_executable "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}"; }; then
         printf '%s' 'explicit normal CLI/local platform/checkout fixture inputs unavailable'; return 1;
-      }
+      fi
       ;;
     dev-initial-private-checkout)
-      printf '%s' 'no checked-in hosted initial private-checkout journey'; return 1
+      dev_initial_checkout_ready || {
+        printf '%s' 'explicit normal CLI/dedicated Dev checkout inputs unavailable'; return 1;
+      }
+      dev_checkout_identity_ready || {
+        printf '%s' 'dedicated Dev checkout identity is not source-admitted'; return 1;
+      }
       ;;
   esac
   return 0
@@ -397,6 +430,20 @@ start_fixed_child() {
         CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$ACCEPTANCE_PROVIDER_SSH_FRESH_OAUTH_CONFIG_DIR" \
         "$ROOT/scripts/ci/verify/runtime-dev-commodity-smoke.sh" \
           --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN" --only provider-ssh
+      ;;
+    dev-initial-private-checkout)
+      start_isolated_child "${browser_auth_env[@]}" \
+        CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-}" \
+        EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-}" \
+        EXPECTED_CODEWIRE_ADMIN_EMAIL="${EXPECTED_CODEWIRE_ADMIN_EMAIL:-}" \
+        EXPECTED_CODEWIRE_ADMIN_USER_ID="${EXPECTED_CODEWIRE_ADMIN_USER_ID:-}" \
+        EXPECTED_CODEWIRE_ORGANIZATION_ID="${EXPECTED_CODEWIRE_ORGANIZATION_ID:-}" \
+        KUBECONFIG="${KUBECONFIG:-}" KUBE_CONTEXT="${KUBE_CONTEXT:-}" \
+        SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}" \
+        DEV_CHECKOUT_WORKSPACE_IMAGE="${DEV_CHECKOUT_WORKSPACE_IMAGE:-}" \
+        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" SMOKE_TMP_PARENT="${SMOKE_TMP_PARENT:-}" \
+        "$ROOT/scripts/runtime/dev/smoke-dev-initial-private-checkout.sh" \
+          --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN"
       ;;
     local-platform-mesh)
       start_isolated_child "${browser_auth_env[@]}" \
