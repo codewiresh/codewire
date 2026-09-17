@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use codewire_server_core::config::database_url_from_parts;
+use codewire_server_core::organization_slug::valid_organization_slug;
 use reqwest::{Client, StatusCode};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -90,6 +91,7 @@ fn validate_database_url(raw: &str) -> anyhow::Result<()> {
 
 struct Fixture {
     org: String,
+    slug: String,
     member: String,
     customer: String,
     invoice: String,
@@ -101,6 +103,7 @@ impl Fixture {
         let suffix = attempt.simple();
         Self {
             org: format!("org_dev_receipt_{suffix}"),
+            slug: format!("dev-receipt-{suffix}"),
             member: format!("member_dev_receipt_{suffix}"),
             customer: format!("cus_dev_receipt_{suffix}"),
             invoice: format!("in_dev_receipt_{suffix}"),
@@ -149,6 +152,10 @@ pub(super) async fn run() -> anyhow::Result<()> {
         std::env::var_os("DATABASE_URL").is_some_and(|value| !value.is_empty());
     let config = Config::from_reader(required_env, database_url_override_present)?;
     let fixture = Fixture::new(config.attempt);
+    ensure!(
+        valid_organization_slug(&fixture.slug),
+        "fixture slug is invalid"
+    );
     let http = http_client()?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
@@ -253,9 +260,10 @@ async fn seed(pool: &PgPool, config: &Config, fixture: &Fixture) -> anyhow::Resu
     // Plain INSERTs, no upsert: a retained or concurrent attempt must fail.
     sqlx::query(
         "INSERT INTO organizations (id, name, slug, created_by, stripe_customer_id)
-         VALUES ($1, 'Dev receipt verification', $1, $2, $3)",
+         VALUES ($1, 'Dev receipt verification', $2, $3, $4)",
     )
     .bind(&fixture.org)
+    .bind(&fixture.slug)
     .bind(&config.user_id)
     .bind(&fixture.customer)
     .execute(&mut *tx)
@@ -284,6 +292,23 @@ async fn seed(pool: &PgPool, config: &Config, fixture: &Fixture) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipt_slug_is_valid_and_deterministic_without_changing_attempt_identities() {
+        let attempt = Uuid::parse_str("877b1810-bcb7-4e68-97df-cda73287ee3d").unwrap();
+        let fixture = Fixture::new(attempt);
+        let suffix = "877b1810bcb74e6897dfcda73287ee3d";
+        assert_eq!(fixture.org, format!("org_dev_receipt_{suffix}"));
+        assert!(!valid_organization_slug(&fixture.org));
+        assert_eq!(fixture.slug, format!("dev-receipt-{suffix}"));
+        assert_eq!(fixture.slug.len(), 44);
+        assert!(valid_organization_slug(&fixture.slug));
+        assert_eq!(fixture.slug, Fixture::new(attempt).slug);
+        assert_eq!(fixture.member, format!("member_dev_receipt_{suffix}"));
+        assert_eq!(fixture.customer, format!("cus_dev_receipt_{suffix}"));
+        assert_eq!(fixture.invoice, format!("in_dev_receipt_{suffix}"));
+        assert_eq!(fixture.event, format!("evt_dev_receipt_{suffix}"));
+    }
 
     #[test]
     fn live_mode_requires_all_explicit_bindings_without_defaults() {
