@@ -65,7 +65,7 @@
     <li><a class="cw-nav-link" href="{{ view.settings_url }}#sign-out"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-right"/></svg>Sign Out</a></li>
   </ul>
 
-  <dialog class="cw-command" data-quick-search>
+  <dialog class="cw-command" data-quick-search aria-label="Search Codewire">
     <form method="dialog" class="cw-command-shell">
       <div class="cw-command-input-row"><span aria-hidden="true">⌕</span><input data-quick-search-input aria-label="Search Codewire" autocomplete="off" placeholder="Search navigation, organizations, and Sandboxes"><button value="cancel" aria-label="Close search">Esc</button></div>
       <ul class="cw-command-results" data-quick-search-results>
@@ -73,10 +73,14 @@
         {% for organization in view.organizations %}<li><a href="/dashboard/?org={{ organization.slug }}" data-search-item data-search-text="organization {{ organization.name }} {{ organization.slug }}">Organization · {{ organization.name }}</a></li>{% endfor %}
         {% if view.has_selected_organization %}
         <li><a href="{{ view.selected_organization_url }}" data-search-item data-search-text="sandboxes environments all">All Sandboxes</a></li>
-        <li><a href="/{{ view.selected_organization_slug }}/snapshots/" data-search-item data-search-text="snapshots storage">Snapshots</a></li>
+        <li><a href="/{{ view.selected_organization_slug }}/secrets/" data-search-item data-search-text="application secrets projects organization">Application-secret projects</a></li>
+        <li><a href="/{{ view.selected_organization_slug }}/secrets/user/" data-search-item data-search-text="personal application secrets">Personal application secrets</a></li>
+        <li><a href="/{{ view.selected_organization_slug }}/secrets/organization/" data-search-item data-search-text="organization application secrets">Organization application secrets</a></li>
         {% for sandbox in view.sandboxes %}<li><a href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/" data-search-item data-search-text="sandbox {{ sandbox.name }} {{ sandbox.id }} {{ sandbox.state }}">Sandbox · {{ sandbox.name }}</a></li>{% endfor %}
         {% endif %}
         <li><a href="{{ view.settings_url }}" data-search-item data-search-text="settings account security sessions">Settings</a></li>
+        <li><a href="/settings/{{ view.global_context_query }}" data-search-item data-search-text="personal account details security active sessions">Account</a></li>
+        <li><a href="/settings/credentials/{{ view.global_context_query }}" data-search-item data-search-text="personal credentials provider accounts github profiles git commit identity">Credentials</a></li>
       </ul>
       <p class="cw-command-empty" data-quick-search-empty hidden>No matching destination.</p>
     </form>

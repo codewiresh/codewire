@@ -9,15 +9,22 @@ const prefix = "codewire:terminal:v1:";
 const sessionId = (index: number) => `session-00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
 type Session = { sessionId: string; state: string };
 type Connection = { route: WebSocketRoute; url: URL; frames: Array<Record<string, unknown>>; closed: boolean };
+type Detail = { state: string; desiredState: string; tone: string; lastEvent: string; resources: string;
+  cpuMillicores: number; memoryMib: number; diskGib: number; startEligible: boolean; stopEligible: boolean;
+  deleteEligible: boolean; actionsAllowed: boolean; pending: boolean; deletionState: string; shutdownAt: string | null };
 
 async function transport(page: Page) {
   const state = { accountId: "account-a", sessions: [] as Session[], connections: [] as Connection[],
     launches: 0, stops: 0, lists: 0, launchFailure: "", stopFailure: "", listStatus: 200, listGate: Promise.resolve(),
-    statusGate: Promise.resolve(), statusAvailable: true, running: true, setupComplete: true };
+    statusGate: Promise.resolve(), statusAvailable: true, running: true, setupComplete: true, detail: null as Detail | null };
   await page.route("**/_fragments/terminal-readiness", async (route) => {
     await state.statusGate;
     await route.fulfill({ status: state.statusAvailable ? 200 : 503, json: {
       environmentId: environment, running: state.running, setupComplete: state.setupComplete,
+      detail: state.detail ?? { state: state.running ? "running" : "stopped", desiredState: state.running ? "started" : "stopped",
+        tone: state.running ? "success" : "neutral", lastEvent: "just now", resources: "1 vCPU · 2 GiB · 10 GiB",
+        cpuMillicores: 1000, memoryMib: 2048, diskGib: 10, startEligible: !state.running, stopEligible: state.running,
+        deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false },
     } });
   });
   await page.route("**/_fragments/terminal-sessions", async (route) => {
@@ -91,12 +98,14 @@ test("detail layout keeps usable output and compact footer with alerts and short
         const output = main.querySelector("[data-terminal-root]")!.getBoundingClientRect();
         const footer = main.querySelector(".cw-terminal-footer")!.getBoundingClientRect();
         return { overlap: output.bottom > footer.top, horizontalOverflow: main.scrollWidth > main.clientWidth,
-          verticalOverflow: main.scrollHeight - main.clientHeight };
+          verticalOverflow: main.scrollHeight - main.clientHeight,
+          sections: [...main.children].map((node) => ({ name: node.tagName, class: node.className,
+            height: Math.round(node.getBoundingClientRect().height) })) };
       });
       expect(bounds.overlap).toBe(false);
       expect(bounds.horizontalOverflow).toBe(false);
       if (viewport.height >= 844) expect(bounds.verticalOverflow,
-        `${viewport.width}×${viewport.height}, lifecycle alert ${showAlert ? "visible" : "hidden"}`).toBeLessThanOrEqual(1);
+        `${viewport.width}×${viewport.height}, lifecycle alert ${showAlert ? "visible" : "hidden"}: ${JSON.stringify(bounds.sections)}`).toBeLessThanOrEqual(1);
       // A short screen retains output instead of hiding it to avoid scrolling.
       await page.locator(".cw-terminal-footer").scrollIntoViewIfNeeded();
       await expect(page.locator(".cw-terminal-footer")).toBeInViewport();
@@ -644,6 +653,9 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
     const panel = page.getByRole("tabpanel");
     const copy = panel.getByRole("button", { name: "Copy selection", exact: true });
     await expect(copy).toBeDisabled();
+    // Keep the empty live region in the accessibility tree, without reserving
+    // a blank mobile toolbar row before its first clipboard announcement.
+    await expect(panel.locator("[data-terminal-copy-status]")).not.toHaveCSS("display", "none");
     const renderedOutput = panel.locator(".xterm-rows").getByText(text, { exact: true });
     // Switching tabs can schedule a fit/repaint. Copy the visible rendered
     // output, not stale row text while that presentation is still hidden.
@@ -1022,6 +1034,372 @@ test("Sandbox lifecycle changes pause terminal controls without automatic launch
   expect(state.stops).toBe(0);
   await page.getByRole("button", { name: "Reconnect", exact: true }).click();
   await expect.poll(() => state.connections.length).toBe(2);
+});
+
+test("inventory keeps scheduled and protected deletion metadata visible on mobile", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  await expect(page.locator("#quiet-mesa .cw-sandbox-lifetime")).toBeVisible();
+  await expect(page.locator("#quiet-mesa time")).toHaveAttribute("datetime", "2026-09-17T00:26:00.123456789Z");
+  await expect(page.locator("#dry-harbor .cw-sandbox-lifetime")).toBeVisible();
+  await expect(page.locator("#dry-harbor .cw-sandbox-lifetime")).toContainText("Protected from automatic deletion");
+});
+
+test("inventory retains usable Actions at each responsive breakpoint and quick search offers supported destinations", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  const table = page.getByRole("table");
+  await expect(table.locator("thead th")).toHaveCount(6);
+  await expect(table.locator('thead th:not([scope="col"])')).toHaveCount(0);
+  await expect(table.getByText("Snapshot", { exact: true })).toHaveCount(0);
+  await expect(table.getByText("Region", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".cw-quota-stub")).toHaveCount(0);
+  for (const width of [1280, 900, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect(table.getByRole("columnheader", { name: "Actions" })).toBeVisible();
+    await expect(page.locator("#quiet-mesa .cw-action-cell")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  await page.keyboard.press("/");
+  const search = page.getByRole("dialog", { name: "Search Codewire" });
+  await expect(search).toBeVisible();
+  await search.getByRole("textbox", { name: "Search Codewire" }).fill("credentials");
+  await expect(search.getByRole("link", { name: "Credentials", exact: true })).toBeVisible();
+  await expect(search.getByRole("link", { name: "Account", exact: true })).toBeHidden();
+  await search.getByRole("textbox", { name: "Search Codewire" }).fill("application secrets");
+  await expect(search.getByRole("link", { name: "Personal application secrets", exact: true })).toBeVisible();
+  await expect(search.getByRole("link", { name: "Organization application secrets", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(search).not.toBeVisible();
+});
+
+test("inventory Resize dismisses innermost menus with focus return and retains edited values without mutation", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  let mutations = 0;
+  page.on("request", (request) => { if (request.method() === "POST") mutations += 1; });
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  const row = page.locator("#quiet-mesa");
+  const actions = row.locator(".cw-row-menu");
+  const resize = row.locator(".cw-menu-resize");
+  await actions.locator(":scope > summary").click();
+  await resize.locator(":scope > summary").click();
+  await resize.getByLabel("CPU (millicores)", { exact: true }).fill("3000");
+  await page.keyboard.press("Escape");
+  await expect(resize).toHaveJSProperty("open", false);
+  await expect(actions).toHaveJSProperty("open", true);
+  await expect(resize.locator(":scope > summary")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(actions).toHaveJSProperty("open", false);
+  await expect(actions.locator(":scope > summary")).toBeFocused();
+  await actions.locator(":scope > summary").click();
+  await resize.locator(":scope > summary").click();
+  await expect(resize.getByLabel("CPU (millicores)", { exact: true })).toHaveValue("3000");
+  await page.getByRole("heading", { name: "Sandboxes", exact: true }).click();
+  await expect(resize).toHaveJSProperty("open", false);
+  await expect(actions).toHaveJSProperty("open", false);
+  await actions.locator(":scope > summary").click();
+  await resize.locator(":scope > summary").click();
+  await expect(resize.getByLabel("CPU (millicores)", { exact: true })).toHaveValue("3000");
+  expect(mutations).toBe(0);
+});
+
+test("inventory Stop keeps its selected payload across refresh and submits only after confirmation", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  const posts: URLSearchParams[] = [];
+  await page.route("**/example-org/_actions/sandboxes/stop", async (route) => {
+    posts.push(new URLSearchParams(route.request().postData() || ""));
+    await route.fulfill({ status: 200, contentType: "text/html", body: "<h1>Stopped</h1>" });
+  });
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  const actions = page.locator("#quiet-mesa .cw-row-menu");
+  await actions.locator(":scope > summary").click();
+  const opener = page.locator("#quiet-mesa [data-inventory-stop]");
+  await opener.click();
+  const dialog = page.getByRole("dialog", { name: "Stop quiet-mesa?" });
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(opener).toBeFocused();
+  await opener.click();
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+  await expect(opener).toBeFocused();
+  await opener.click();
+  await page.mouse.click(1, 1);
+  await expect(dialog).not.toBeVisible();
+  expect(posts).toHaveLength(0);
+  await opener.click();
+  await page.evaluate(() => {
+    const row = document.querySelector("#quiet-mesa")!;
+    const replacement = row.cloneNode(true) as HTMLElement;
+    const trigger = replacement.querySelector<HTMLButtonElement>("[data-inventory-stop]")!;
+    trigger.hidden = true;
+    trigger.dataset.environmentId = "00000000-0000-0000-0000-000000000002";
+    trigger.dataset.environmentName = "another-sandbox";
+    row.replaceWith(replacement);
+    replacement.parentElement!.dispatchEvent(new Event("htmx:afterSwap", { bubbles: true }));
+    trigger.click();
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('input[name="environment_id"]')).toHaveValue("00000000-0000-0000-0000-000000000001");
+  await expect(page.locator("#quiet-mesa [data-inventory-stop]")).not.toHaveAttribute("hidden");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(posts).toHaveLength(0);
+  await page.locator("#quiet-mesa [data-inventory-stop]").click();
+  const replacementDialog = page.getByRole("dialog", { name: "Stop another-sandbox?" });
+  await page.locator("#quiet-mesa").evaluate((row) => row.remove());
+  await replacementDialog.getByRole("button", { name: "Stop Sandbox", exact: true }).click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(Object.fromEntries(posts[0])).toEqual({ _csrf: "fixture-csrf", environment_id: "00000000-0000-0000-0000-000000000002", list_search: "quiet-mesa", list_state: "running" });
+});
+
+test("inventory Stop has an explicit no-JavaScript confirmation", async ({ browser }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  try {
+    const page = await context.newPage();
+    let posts = 0;
+    page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
+    await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+    await page.locator("#quiet-mesa .cw-row-menu > summary").click();
+    const fallback = page.locator("#quiet-mesa [data-inventory-stop-fallback]");
+    await fallback.locator(":scope > summary").click();
+    await expect(fallback).toContainText("terminal sessions will end");
+    await expect(fallback.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeVisible();
+    await expect(fallback.locator("form")).toHaveAttribute("action", "/example-org/_actions/sandboxes/stop");
+    await fallback.locator(":scope > summary").click();
+    expect(posts).toBe(0);
+  } finally { await context.close(); }
+});
+
+test("inventory Stop retains its native fallback when refreshed metadata is invalid", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  await page.evaluate(() => {
+    const row = document.querySelector("#quiet-mesa")!;
+    const replacement = row.cloneNode(true) as HTMLElement;
+    const trigger = replacement.querySelector<HTMLButtonElement>("[data-inventory-stop]")!;
+    trigger.hidden = true;
+    trigger.dataset.environmentId = "invalid-id";
+    replacement.querySelector<HTMLElement>("[data-inventory-stop-fallback]")!.hidden = false;
+    row.replaceWith(replacement);
+    replacement.parentElement!.dispatchEvent(new Event("htmx:afterSwap", { bubbles: true }));
+  });
+  await page.locator("#quiet-mesa .cw-row-menu > summary").click();
+  await expect(page.locator("#quiet-mesa [data-inventory-stop]")).toBeHidden();
+  const fallback = page.locator("#quiet-mesa [data-inventory-stop-fallback]");
+  await expect(fallback).toBeVisible();
+  await fallback.locator(":scope > summary").click();
+  await expect(fallback.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeVisible();
+  await expect(page.locator("[data-inventory-stop-dialog]")).not.toBeVisible();
+});
+
+test("live deletion metadata preserves nanoseconds, terminal and open confirmation without inferring expiry", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
+    resources: "0.75 vCPU · 1536 MiB · 10 GiB", cpuMillicores: 750, memoryMib: 1536, diskGib: 10,
+    startEligible: false, stopEligible: true, deleteEligible: true, actionsAllowed: true, pending: false,
+    deletionState: "scheduled", shutdownAt: "1970-01-01T00:00:00.123456789Z" };
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "deadline-preserved-output\r\n");
+  const terminal = await page.locator("[data-terminal-root]").elementHandle();
+  const lifetime = page.locator("[data-sandbox-lifetime]");
+  await expect(lifetime.locator("time")).toHaveAttribute("datetime", state.detail.shutdownAt!);
+  await expect(lifetime).toHaveText("01 Jan 1970, 00:00 UTC");
+  await expect(page.locator("[data-sandbox-state]")).toHaveText("running");
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Stop Fixture Sandbox?" });
+  state.detail = { ...state.detail, shutdownAt: "2026-09-17T00:26:00.987654321Z" };
+  await page.locator("[data-terminal-readiness-refresh]").evaluate((button: HTMLButtonElement) => button.click());
+  await expect(lifetime.locator("time")).toHaveAttribute("datetime", state.detail.shutdownAt!);
+  await expect(lifetime).toHaveText("17 Sep 2026, 00:26 UTC");
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeEnabled();
+  state.detail = { ...state.detail, deletionState: "protected", shutdownAt: null };
+  await page.locator("[data-terminal-readiness-refresh]").evaluate((button: HTMLButtonElement) => button.click());
+  await expect(lifetime).toHaveText("Protected from automatic deletion");
+  await expect(lifetime.locator("time")).toHaveCount(0);
+  const geometry = await page.locator(".cw-sandbox-detail-main").evaluate((main) => ({
+    overflow: main.scrollHeight - main.clientHeight,
+    output: main.querySelector("[data-terminal-root]")!.getBoundingClientRect().height,
+  }));
+  expect(geometry.output).toBeGreaterThanOrEqual(180);
+  expect(geometry.overflow).toBeLessThanOrEqual(1);
+  state.detail = { ...state.detail, deletionState: "unavailable" };
+  await page.locator("[data-terminal-readiness-refresh]").evaluate((button: HTMLButtonElement) => button.click());
+  await expect(lifetime).toHaveText("Deletion deadline unavailable");
+  await expect(dialog.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeEnabled();
+  expect(await terminal!.evaluate((node) => node.isConnected)).toBe(true);
+  await expect(page.getByRole("tabpanel")).toContainText("deadline-preserved-output");
+  expect(state.connections.length).toBe(1);
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("malformed or contradictory deletion metadata fails closed and retains last known deadline", async ({ page }) => {
+  const state = await transport(page);
+  state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
+    resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
+    startEligible: false, stopEligible: true, deleteEligible: true, actionsAllowed: true, pending: false,
+    deletionState: "scheduled", shutdownAt: "2026-09-17T00:26:00.123456789Z" };
+  await openFixture(page);
+  const lifetime = page.locator("[data-sandbox-lifetime]");
+  await expect(lifetime).toHaveText("17 Sep 2026, 00:26 UTC");
+  for (const [deletionState, shutdownAt] of [
+    ["scheduled", null], ["scheduled", "2026-02-30T00:26:00.123456789Z"],
+    ["scheduled", "0000-01-01T00:00:00.000000000Z"], ["scheduled", "2026-09-17T00:26:00.12345678Z"],
+    ["scheduled", "2026-09-17T00:26:00.123456789+00:00"], ["protected", "2026-09-17T00:26:00.123456789Z"],
+    ["unexpected", null],
+  ] as Array<[string, string | null]>) {
+    state.detail = { ...state.detail, deletionState, shutdownAt };
+    await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+    await expect(page.locator("[data-sandbox-observation-status]")).toContainText("unavailable");
+    await expect(lifetime).toHaveText("17 Sep 2026, 00:26 UTC");
+    await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeDisabled();
+    // Re-establish a valid observation so every invalid case proves a fresh
+    // transition, rather than merely inheriting the first unavailable result.
+    state.detail = { ...state.detail, deletionState: "scheduled", shutdownAt: "2026-09-17T00:26:00.123456789Z" };
+    await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  }
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("live detail distinguishes pending desired state and preserves terminal and confirmation nodes", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "live-status-preserved-output\r\n");
+  await expect(page.getByRole("tabpanel")).toContainText("live-status-preserved-output");
+  const terminal = await page.locator("[data-terminal-root]").elementHandle();
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Stop Fixture Sandbox?" });
+  await expect(dialog).toBeVisible();
+  state.detail = { state: "running", desiredState: "stopped", tone: "success", lastEvent: "a moment ago",
+    resources: "2 vCPU · 4 GiB · 20 GiB", cpuMillicores: 2000, memoryMib: 4096, diskGib: 20,
+    startEligible: false, stopEligible: false, deleteEligible: false, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: true };
+  // Request from outside the modal without disturbing its focused Cancel.
+  await page.locator("[data-terminal-readiness-refresh]").evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.locator("[data-sandbox-observation-status]")).toContainText("operation is pending");
+  await expect(page.locator("[data-sandbox-state]")).toHaveText("running");
+  await expect(dialog.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await expect(dialog).toBeVisible();
+  expect(await terminal!.evaluate((node) => node.isConnected)).toBe(true);
+  await expect(page.getByRole("tabpanel")).toContainText("live-status-preserved-output");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  state.running = false;
+  state.setupComplete = false;
+  state.detail = { ...state.detail, state: "stopped", tone: "neutral", startEligible: true,
+    stopEligible: false, deleteEligible: true, pending: false };
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(page.locator("[data-sandbox-state]")).toHaveText("stopped");
+  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeHidden();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  expect(await terminal!.evaluate((node) => node.isConnected)).toBe(true);
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("live detail pauses stale actions and leaves open Resize drafts unchanged", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  const resize = page.locator("[data-sandbox-resize]");
+  await resize.getByText("Resize", { exact: true }).click();
+  await resize.getByLabel("CPU (millicores)").fill("3000");
+  state.statusAvailable = false;
+  // Let the real periodic poll refresh without a deliberate outside click,
+  // which correctly dismisses the native action menu.
+  await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable", { timeout: 7500 });
+  await expect(resize.getByRole("button", { name: "Review resize" })).toBeDisabled();
+  await expect(resize).toHaveAttribute("open", "");
+  await expect(resize.getByLabel("CPU (millicores)")).toHaveValue("3000");
+  state.statusAvailable = true;
+  state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "a moment ago",
+    resources: "2 vCPU · 4 GiB · 20 GiB", cpuMillicores: 2000, memoryMib: 4096, diskGib: 20,
+    startEligible: false, stopEligible: true, deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false };
+  await expect(page.locator("[data-sandbox-resources]")).toHaveText([state.detail.resources, state.detail.resources], { timeout: 7500 });
+  await expect(resize.getByLabel("CPU (millicores)")).toHaveValue("3000");
+  await expect(resize.getByRole("button", { name: "Review resize" })).toBeEnabled();
+  await resize.locator("summary").click();
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(resize.getByLabel("CPU (millicores)")).toHaveValue("2000");
+  expect(state.launches).toBe(0);
+});
+
+test("displayed lifecycle state is not inferred from policy-gated terminal readiness", async ({ page }) => {
+  const state = await transport(page);
+  state.running = false;
+  state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
+    resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
+    startEligible: false, stopEligible: false, deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: false, pending: false };
+  await openFixture(page);
+  await expect(page.locator("[data-sandbox-state]")).toHaveText("running");
+  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeHidden();
+  await expect(page.locator("[data-sandbox-resize]")).toBeHidden();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  expect(state.launches).toBe(0);
+});
+
+test("a lifecycle submit remains locked across fresh polling and a cached return until explicit reload", async ({ page }) => {
+  const state = await transport(page);
+  state.running = false;
+  state.setupComplete = false;
+  let submitted = 0;
+  await page.route("**/_actions/sandboxes/start", async (route) => {
+    submitted += 1;
+    const form = new URLSearchParams(route.request().postData() || "");
+    expect([...form.keys()].sort()).toEqual(["_csrf", "environment_id", "list_search", "list_state", "return_to"]);
+    expect(form.get("environment_id")).toBe(environment);
+    expect(form.get("return_to")).toBe("detail");
+    expect(form.get("list_search")).toBe("quiet-mesa");
+    expect(form.get("list_state")).toBe("running");
+    // Synthetic unacknowledged native navigation: 204 keeps this document.
+    await route.fulfill({ status: 204, body: "" });
+  });
+  await openFixture(page);
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await expect.poll(() => submitted).toBe(1);
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(page.locator("[data-sandbox-observation-status]")).toContainText("Action submitted");
+  await expect(page.locator('[data-sandbox-action="start"]')).toBeDisabled();
+  await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  await expect(page.locator("[data-sandbox-observation-status]")).toContainText("outcome is not confirmed");
+  await expect(page.getByRole("link", { name: "Reload Sandbox status", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Reload Sandbox status", exact: true })).toHaveAttribute("href", "terminal-tabs.html?list_search=quiet-mesa&list_state=running");
+  await expect(page.getByRole("link", { name: "Back to Sandboxes", exact: true })).toHaveAttribute("href", "sandboxes.html?search=quiet-mesa&state=running");
+  await expect(page.locator("[data-terminal-reload]")).toHaveAttribute("href", "terminal-tabs.html?list_search=quiet-mesa&list_state=running");
+  await page.locator('[data-sandbox-action="start"]').evaluate((button: HTMLButtonElement) => button.form!.requestSubmit(button));
+  await expect(page.locator('[data-sandbox-action="start"]')).toBeDisabled();
+  expect(submitted).toBe(1);
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("a prevented native lifecycle submit does not leave the submission lock latched", async ({ page }) => {
+  const state = await transport(page);
+  state.running = false;
+  state.setupComplete = false;
+  await openFixture(page);
+  await page.evaluate(() => document.addEventListener("submit", (event) => event.preventDefault(), { once: true }));
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable");
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
+  await expect(page.getByRole("link", { name: "Reload Sandbox status", exact: true })).toBeHidden();
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
 });
 
 test("foreground account revalidation hides old output until fresh identity is known", async ({ page }) => {

@@ -1,6 +1,17 @@
 .cw-terminal-page { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 100vh; overflow: hidden; background: #0a0a0a; }
 .cw-terminal-header { display: flex; min-height: 2.75rem; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-4); border-bottom: 1px solid #27272a; background: #111113; color: #e4e4e7; }
 .cw-terminal-page-header { border-bottom-color: #27272a; }
+[data-sandbox-action][hidden], [data-sandbox-resize][hidden], [data-sandbox-observation-status][hidden], [data-sandbox-observation-reload][hidden] { display: none; }
+[data-resize-open][hidden], dialog[data-sandbox-resize] [hidden] { display: none; }
+dialog[data-sandbox-resize][open] { display: flex; flex-direction: column; width: min(32rem, calc(100vw - 2rem)); overflow: hidden; }
+dialog[data-sandbox-resize] > header, dialog[data-sandbox-resize] > footer { flex: none; }
+dialog[data-sandbox-resize] > .cw-dialog-body { min-height: 0; overflow-y: auto; }
+dialog[data-sandbox-resize] fieldset { display: grid; gap: var(--space-2); min-width: 0; margin: 0; padding: 0; border: 0; }
+dialog[data-sandbox-resize] legend { margin-bottom: var(--space-3); font-weight: 600; }
+dialog[data-sandbox-resize] .cw-field-help { margin: 0; }
+dialog[data-sandbox-resize] fieldset > button { justify-self: start; }
+dialog[data-sandbox-resize] [data-resize-consents] > label:not([hidden]) { display: flex; align-items: baseline; gap: var(--space-2); }
+dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
 .cw-terminal-heading, .cw-terminal-actions { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .cw-terminal-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cw-terminal-back { color: #a1a1aa; font-size: 1.125rem; text-decoration: none; }
@@ -76,6 +87,9 @@
   .cw-terminal-heading .cw-status { display: none; }
   .cw-terminal-footer { gap: var(--space-3); }
   .cw-terminal-session-tools select { width: 100%; max-width: 100%; }
-  .cw-terminal-session-tools form { width: 100%; }
+  .cw-terminal-session-tools form { display: grid; grid-template-columns: minmax(0, 1fr) auto; width: 100%; }
+  .cw-terminal-session-tools form > label { grid-column: 1 / -1; }
+  .cw-terminal-session-tools select { min-width: 0; }
   .cw-terminal-tab-panel .cw-terminal-copy-status { flex-basis: 100%; }
+  .cw-terminal-copy-status:empty { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }

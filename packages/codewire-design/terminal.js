@@ -197,7 +197,9 @@
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !document.querySelector("[data-terminal-drawer]")?.hidden) {
+    if (event.key !== "Escape" || event.defaultPrevented || document.querySelector("dialog:modal")) return;
+    const drawer = document.querySelector("[data-terminal-drawer]");
+    if (drawer instanceof HTMLElement && !drawer.hidden) {
       event.preventDefault();
       void closeDrawer();
     }
