@@ -899,6 +899,11 @@ test("incomplete setup blocks launch and attachment until an explicit action aft
   state.setupComplete = false;
   state.sessions = [{ sessionId: sessionId(9), state: "running" }];
   await openFixture(page);
+  await expect(page.locator("[data-terminal-empty]")).toContainText("setup is not complete");
+  expect(state.lists).toBe(0);
+  // An explicit inventory read still permits inspecting/stopping a shell
+  // during setup; only automatic initial restoration waits for completion.
+  await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
   await expect(page.getByRole("tab")).toHaveCount(1);
   await expect(page.locator("[data-terminal-connection]")).toContainText("setup is not complete");
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
@@ -915,6 +920,26 @@ test("incomplete setup blocks launch and attachment until an explicit action aft
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect.poll(() => state.launches).toBe(1);
   await expect.poll(() => state.connections.length).toBe(1);
+});
+
+test("initial terminal inventory waits until workspace setup finishes", async ({ page }) => {
+  const state = await transport(page);
+  state.setupComplete = false;
+  state.listStatus = 503;
+  await openFixture(page);
+  await expect(page.locator("[data-terminal-empty]")).toContainText("setup is not complete");
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  expect(state.lists).toBe(0);
+  expect(state.connections).toHaveLength(0);
+  expect(state.launches).toBe(0);
+  state.setupComplete = true;
+  state.listStatus = 200;
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  expect(state.lists).toBe(1);
+  expect(state.connections).toHaveLength(0);
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
 });
 
 test("starting a stopped Sandbox enables terminals after its first ready status without reload", async ({ page }) => {

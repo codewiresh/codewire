@@ -701,10 +701,11 @@
       root.querySelector("[data-terminal-empty]").textContent = !runtimeReady() ? readinessMessage()
         : "Choose New terminal to start a shell. Leaving this page disconnects the browser; the shell keeps running until you close it or stop the Sandbox.";
       updateControls();
-      if (runtimeControlReady() && !initialStatusReceived && !pending && !suspended && !document.hidden) {
+      if (runtimeReady() && !initialStatusReceived && !pending && !suspended && !document.hidden) {
         initialStatusReceived = true;
-        // Restore references only after the first fresh status. Later readiness
-        // transitions require explicit Reconnect; they must never start shells.
+        // Initial restoration must wait until setup stops owning workspace
+        // replacement. Explicit Refresh/Stop remain available during setup.
+        // Later readiness transitions require explicit Reconnect, never Launch.
         void refresh();
       }
     });
