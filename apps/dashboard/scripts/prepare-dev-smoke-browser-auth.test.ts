@@ -99,6 +99,7 @@ class FakePage {
       } else if (name.includes("approve device")) {
         this.respond("/device/_actions/approve", 200);
       } else if (name.includes("sign out")) {
+        if (redirectMode === "hostile-sign-out") throw new Error("hostile-password-token-body-canary");
         if (redirectMode === "sign-out-failure") {
           this.respond("/settings/_actions/sign-out", 500);
           return;
@@ -204,7 +205,7 @@ case " $* " in
   *" login --org "*) ${login} ;;
   *" whoami --output json "*) printf '%s\\n' '${whoami}' ;;
   *" org list --output json "*) printf '%s\\n' '[{"id":"${ORG}","role":"owner"}]' ;;
-  *" org current "*) printf 'ID: ${ORG}\\nRole: owner\\n' ;;
+  *" org current "*) printf 'ID: ${ORG}\\nRole: owner\\n'; ${mode === "cleanup-only" ? 'chmod 500 "$CW_CONFIG_DIR"' : ":"} ;;
   *" logout "*) rm -f -- "$CW_CONFIG_DIR/config.json" "$CW_CONFIG_DIR/credentials.json" ;;
   *) exit 92 ;;
 esac
@@ -317,10 +318,32 @@ test("signal handling remains active and idempotent through browser cleanup", as
 
 test("browser sign-out failure is reported after remaining local cleanup", async () => {
   const value = await fixture("sign-out-failure");
-  await expect(helper.main(value.args, 5_000)).rejects.toThrow("cleanup-incomplete");
+  const failure = await helper.main(value.args, 5_000).catch((error) => error);
+  expect(failure.stage).toBe("browser-sign-out");
+  expect(failure.cleanupFailures).toEqual(["browser-sign-out:failed"]);
   expect(activeContext.session).toBe(true);
   expect(await readdir(value.config)).toEqual([]);
   expect(JSON.parse(await readFile(value.credential, "utf8"))).toEqual(document());
+});
+
+test("opaque browser errors never enter original or cleanup diagnostics", async () => {
+  const value = await fixture("hostile-sign-out");
+  const failure = await helper.main(value.args, 5_000).catch((error) => error);
+  expect(failure.stage).toBe("browser-sign-out");
+  expect(failure.cleanupFailures).toEqual(["browser-sign-out:failed"]);
+  expect(JSON.stringify(failure)).not.toContain("hostile-password-token-body-canary");
+  expect(await readdir(value.config)).toEqual([]);
+});
+
+test("successful body with failed owned-directory cleanup is still nonzero", async () => {
+  const value = await fixture("cleanup-only");
+  try {
+    const failure = await helper.main(value.args, 5_000).catch((error) => error);
+    expect(failure.stage).toBe("cleanup-incomplete");
+    expect(failure.cleanupFailures).toContain("browser-profile-remove:failed");
+  } finally {
+    await chmod(value.config, 0o700);
+  }
 });
 
 test("wrong identity and challenge drift revoke the owned login and clear only config contents", async () => {

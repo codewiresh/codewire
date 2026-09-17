@@ -56,7 +56,11 @@ export type CredentialDocument = {
 
 export type DeviceChallenge = { verificationUrl: string; userCode: string };
 
+type CleanupOperation = "browser-sign-out" | "browser-context-close" | "browser-profile-remove"
+  | "browser-temp-remove" | "runtime-remove" | "home-remove" | "config-clear";
+
 export class FixedStageError extends Error {
+  cleanupFailures: string[] = [];
   constructor(readonly stage: string) {
     super(stage);
     this.name = "FixedStageError";
@@ -459,6 +463,7 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
   let context: BrowserContext | undefined;
   let page: Page | undefined;
   let success = false;
+  let originalFailure: FixedStageError | undefined;
   let signalStage = "";
   const signals = ["SIGHUP", "SIGINT", "SIGTERM"] as NodeJS.Signals[];
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
@@ -523,20 +528,20 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
     assertIdentityResponses(whoami, organizations, current, options);
     success = true;
   } catch (error) {
-    if (signalStage) fail(signalStage);
-    throw error;
+    originalFailure = error instanceof FixedStageError ? error : new FixedStageError("unexpected-failure");
+    throw originalFailure;
   } finally {
-    let cleanupIncomplete = false;
-    const cleanupAttempt = async (operation: () => Promise<void>) => {
-      try { await operation(); } catch { cleanupIncomplete = true; }
+    const cleanupFailures: string[] = [];
+    const cleanupAttempt = async (label: CleanupOperation, operation: () => Promise<void>) => {
+      try { await operation(); } catch { cleanupFailures.push(`${label}:failed`); }
     };
     try {
-      if (login && !await stopProcessGroup(login)) cleanupIncomplete = true;
+      if (login && !await stopProcessGroup(login)) cleanupFailures.push("login-process:unreaped");
       const cleanupDeadline = Date.now() + 30_000;
-      if (page) await cleanupAttempt(() => withinDeadline(
+      if (page) await cleanupAttempt("browser-sign-out", () => withinDeadline(
         () => signOut(page!), Math.min(cleanupDeadline, Date.now() + 5000),
       ));
-      if (context) await cleanupAttempt(() => withinDeadline(
+      if (context) await cleanupAttempt("browser-context-close", () => withinDeadline(
         () => context!.close(), Math.min(cleanupDeadline, Date.now() + 5000),
       ));
       if (!success) {
@@ -545,18 +550,19 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
         });
         let logoutExit = 1;
         try { logoutExit = await childExit(logout, cleanupDeadline); }
-        catch { if (!await stopProcessGroup(logout)) cleanupIncomplete = true; }
-        if (logoutExit !== 0) cleanupIncomplete = true;
+        catch { if (!await stopProcessGroup(logout)) cleanupFailures.push("logout-process:unreaped"); }
+        if (logoutExit !== 0) cleanupFailures.push("cli-logout:nonzero-or-timeout");
       }
-      await cleanupAttempt(() => rm(browserProfile, { recursive: true, force: true }));
-      await cleanupAttempt(() => rm(browserTemp, { recursive: true, force: true }));
-      await cleanupAttempt(() => rm(runtime, { recursive: true, force: true }));
-      await cleanupAttempt(() => rm(home, { recursive: true, force: true }));
-      if (!success) await cleanupAttempt(() => clearDirectory(options.configDir));
+      await cleanupAttempt("browser-profile-remove", () => rm(browserProfile, { recursive: true, force: true }));
+      await cleanupAttempt("browser-temp-remove", () => rm(browserTemp, { recursive: true, force: true }));
+      await cleanupAttempt("runtime-remove", () => rm(runtime, { recursive: true, force: true }));
+      await cleanupAttempt("home-remove", () => rm(home, { recursive: true, force: true }));
+      if (!success) await cleanupAttempt("config-clear", () => clearDirectory(options.configDir));
     } finally {
       for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
-      if (signalStage) fail(signalStage);
-      if (cleanupIncomplete) fail("cleanup-incomplete");
+      const failure = signalStage ? new FixedStageError(signalStage) : originalFailure
+        ?? (cleanupFailures.length ? new FixedStageError("cleanup-incomplete") : undefined);
+      if (failure) { failure.cleanupFailures = cleanupFailures; throw failure; }
     }
   }
   console.error("[dev-smoke-browser-auth] fresh dedicated CLI OAuth login prepared");
@@ -567,6 +573,9 @@ if ((import.meta as ImportMeta & { main?: boolean }).main) {
   main(process.argv.slice(2)).catch((error) => {
     const stage = error instanceof FixedStageError ? error.stage : "unexpected-failure";
     console.error(`[dev-smoke-browser-auth] ERROR: ${stage}`);
+    if (error instanceof FixedStageError && error.cleanupFailures.length) {
+      console.error(`[dev-smoke-browser-auth] CLEANUP: ${error.cleanupFailures.join(",")}`);
+    }
     process.exitCode = stage === "signal-sigint" ? 130 : stage === "signal-sigterm" ? 143 : stage === "signal-sighup" ? 129 : 1;
   });
 }
