@@ -621,8 +621,18 @@ local_platform_application_phase() {
     clear) [[ -z "$2" && "$3" == absent ]] ;;
     *) return 1 ;;
   esac || fail 'wrong source selection'
+  [[ "$FAILURE" != "projection-$1" ]] || return 1
+  printf '%s\n' "$1" >>"$TMPDIR_SMOKE/application-phases"
 }
-local_platform_ssh_prove() { printf '%s\n' "$(cat "$TMPDIR_SMOKE/phase")" >>"$TMPDIR_SMOKE/ssh-phases"; }
+local_platform_ssh_prove() {
+  if [[ "$(cat "$TMPDIR_SMOKE/phase")" == clear ]]; then
+    [[ "$(cat "$TMPDIR_SMOKE/ssh-target-actions")" == $'cleanup\ninstall\nstartup' ]] ||
+      fail 'repeated positive proof did not use a fresh owned target'
+  else
+    [[ ! -e "$TMPDIR_SMOKE/ssh-target-actions" ]] || fail 'initial target was reset'
+  fi
+  printf '%s\n' "$(cat "$TMPDIR_SMOKE/phase")" >>"$TMPDIR_SMOKE/ssh-phases"
+}
 local_platform_ssh_revoke() {
   [[ "$(cat "$TMPDIR_SMOKE/ssh-phases")" == $'a\nclear' ]] || fail 'SSH not proved with both selected and cleared app sources'
 }
@@ -647,6 +657,19 @@ cw_with_timeout() {
       [[ "$4" == "$VM_ID" ]] || fail 'wrong clear target'
       [[ "$FAILURE" != clear ]] || return 1
       printf 'clear\n' >"$TMPDIR_SMOKE/phase" ;;
+    'run --no-tty -- /bin/bash '* )
+      [[ "$(cat "$TMPDIR_SMOKE/application-phases")" == $'a\nb\nclear' && "$(cat "$TMPDIR_SMOKE/ssh-phases")" == a ]] ||
+        fail 'target lifecycle was not between clear projection proof and repeated SSH proof'
+      [[ "$5" == "$PROVIDER_SSH_SCRIPT" ]] || fail 'wrong target fixture'
+      case "$6" in
+        cleanup) [[ $# == 6 && ! -e "$TMPDIR_SMOKE/ssh-target-actions" ]] ;;
+        install) [[ $# == 7 && "$7" == /workspace/.cw-provider-ssh/selected.pub &&
+          "$(cat "$TMPDIR_SMOKE/ssh-target-actions")" == cleanup ]] ;;
+        startup) [[ $# == 6 && "$(cat "$TMPDIR_SMOKE/ssh-target-actions")" == $'cleanup\ninstall' ]] ;;
+        *) fail 'unexpected target lifecycle action' ;;
+      esac || fail 'target lifecycle order or preserved public authorization drifted'
+      printf '%s\n' "$6" >>"$TMPDIR_SMOKE/ssh-target-actions"
+      [[ "$FAILURE" != "target-$6" ]] || return 1 ;;
     *) fail "unexpected journey command: $*" ;;
   esac
 }
@@ -654,9 +677,17 @@ fixture
 LP_WORKSPACE="$TMPDIR_SMOKE"
 local_platform_journey
 pass
-for invalid in create update clear; do
-  invalid_journey() { fixture; LP_WORKSPACE="$TMPDIR_SMOKE"; FAILURE="$invalid"; local_platform_journey; }
+for invalid in create update clear projection-clear target-cleanup target-install target-startup; do
+  fixture
+  invalid_journey() { LP_WORKSPACE="$TMPDIR_SMOKE"; FAILURE="$invalid"; local_platform_journey; }
   expect_failure "$invalid" invalid_journey
+  if [[ "$invalid" == projection-clear ]]; then
+    [[ ! -e "$TMPDIR_SMOKE/ssh-target-actions" ]] || fail 'failed clear projection still reset the SSH target'
+    ! grep -qx clear "$TMPDIR_SMOKE/ssh-phases" || fail 'failed clear projection still ran positive SSH proof'
+  fi
+  if [[ "$invalid" == target-* ]]; then
+    ! grep -qx clear "$TMPDIR_SMOKE/ssh-phases" || fail 'failed target reset still ran positive SSH proof'
+  fi
 done
 
 # Each live provider owns a public create/use/run flow, not the application/SSH

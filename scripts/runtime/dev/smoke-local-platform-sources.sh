@@ -461,6 +461,21 @@ local_platform_ssh_prove() {
   grep -qx stock-ssh-workload-proved "$TMPDIR_SMOKE/local-ssh.out" || die 'stock SSH receipt is missing'
 }
 
+local_platform_ssh_reset_target() {
+  local action
+  local -a arguments
+  # The positive proof is deliberately a fresh-target proof. Preserve the
+  # selected provider identity, but retire its owned synthetic target/client
+  # history before repeating exact-five authentication after VM relaunch.
+  for action in cleanup install startup; do
+    arguments=("$action")
+    [[ "$action" != install ]] || arguments+=(/workspace/.cw-provider-ssh/selected.pub)
+    cw_with_timeout 60 run --no-tty -- /bin/bash "$PROVIDER_SSH_SCRIPT" "${arguments[@]}" \
+      >"$TMPDIR_SMOKE/local-ssh-reset-$action.out" 2>"$TMPDIR_SMOKE/local-ssh-reset-$action.err" ||
+      die "local synthetic SSH target $action failed"
+  done
+}
+
 local_platform_ssh_revoke() {
   local host_key session_id
   host_key="$(cat "$TMPDIR_SMOKE/local-host-key")"
@@ -813,6 +828,7 @@ local_platform_journey() {
   cw_with_timeout 300 env update --local "$ENV_ID" --clear-secrets --yes --output json \
     >"$TMPDIR_SMOKE/local-clear.json" 2>"$TMPDIR_SMOKE/local-clear.err" || die 'local platform-source clear failed'
   local_platform_application_phase clear '' absent
+  local_platform_ssh_reset_target
   local_platform_ssh_prove
   local_platform_ssh_revoke
 }
