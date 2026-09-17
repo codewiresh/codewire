@@ -84,7 +84,10 @@ async function submitAndCapture(page: Page, path: string, button: RegExp) {
     new URL(candidate.url()).pathname === path
       && candidate.request().method() === "POST"
   ), { timeout: 15_000 });
-  await page.getByRole("button", { name: button }).click();
+  const owner = path === "/settings/_actions/sign-out"
+    ? page.locator('form[action^="/settings/_actions/sign-out"]')
+    : page;
+  await owner.getByRole("button", { name: button }).click();
   return response;
 }
 

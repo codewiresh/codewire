@@ -12,15 +12,110 @@ const app = document.querySelector("[data-dashboard-app]");
   const currentDialogRequest = (request) => request?.dialog.open
     && dialogVersions.get(request.dialog) === request.version
     && dialogRequestSequences.get(request.target) === request.sequence;
+  const guardedControls = (dialog) => Array.from(dialog.querySelectorAll("form[data-dirty-guard] input, form[data-dirty-guard] textarea, form[data-dirty-guard] select"))
+    .filter((control) => !control.disabled && !control.readOnly
+      && !["hidden", "submit", "button", "reset"].includes(control.type));
+  // Reset only a detached select, never the owner's form or authority fields.
+  // Native reset handles implicit first options, optgroups and single/multiple.
+  const defaultSelect = (control) => {
+    const copy = control.cloneNode(true);
+    const form = document.createElement("form");
+    form.append(copy);
+    form.reset();
+    return copy;
+  };
+  const isDirty = (dialog) => guardedControls(dialog).some((control) => {
+    if (control instanceof HTMLSelectElement) {
+      const baseline = defaultSelect(control);
+      return Array.from(control.options).some((option, index) => option.selected !== baseline.options[index].selected);
+    }
+    if (["checkbox", "radio"].includes(control.type)) return control.checked !== control.defaultChecked;
+    return control.value !== control.defaultValue;
+  });
+  const discardEdits = (dialog) => guardedControls(dialog).forEach((control) => {
+    if (control instanceof HTMLSelectElement) {
+      const baseline = defaultSelect(control);
+      Array.from(control.options).forEach((option, index) => { option.selected = baseline.options[index].selected; });
+    } else if (["checkbox", "radio"].includes(control.type)) control.checked = control.defaultChecked;
+    else control.value = control.defaultValue;
+  });
+  let discardPrompt;
+  let pendingDiscard;
+  const guardClose = (owner, perform) => {
+    if (!isDirty(owner)) { perform(); return; }
+    if (pendingDiscard) return;
+    if (!discardPrompt) {
+      discardPrompt = document.createElement("dialog");
+      discardPrompt.className = "cw-dialog";
+      discardPrompt.setAttribute("aria-label", "Discard changes?");
+      const header = document.createElement("header");
+      header.className = "cw-dialog-header";
+      const title = document.createElement("h2");
+      title.textContent = "Discard changes?";
+      header.append(title);
+      const description = document.createElement("p");
+      description.className = "cw-dialog-body";
+      description.textContent = "Your unsaved changes will be lost. Keep editing to return to the form.";
+      const actions = document.createElement("footer");
+      actions.className = "cw-dialog-actions";
+      const keep = document.createElement("button");
+      keep.type = "button";
+      keep.className = "cw-button cw-button--outline";
+      keep.textContent = "Keep editing";
+      keep.autofocus = true;
+      const discard = document.createElement("button");
+      discard.type = "button";
+      discard.className = "cw-button cw-danger-button";
+      discard.textContent = "Discard changes";
+      const keepEditing = () => {
+        const pending = pendingDiscard;
+        pendingDiscard = null;
+        discardPrompt.close();
+        if (pending?.focus instanceof HTMLElement && pending.focus.isConnected) pending.focus.focus({ preventScroll: true });
+      };
+      keep.addEventListener("click", keepEditing);
+      discardPrompt.addEventListener("cancel", (event) => { event.preventDefault(); keepEditing(); });
+      let backdropPress = false;
+      const outside = (event) => {
+        const bounds = discardPrompt.getBoundingClientRect();
+        return event.target === discardPrompt && (event.clientX < bounds.left || event.clientX > bounds.right
+          || event.clientY < bounds.top || event.clientY > bounds.bottom);
+      };
+      discardPrompt.addEventListener("pointerdown", (event) => { backdropPress = outside(event); });
+      discardPrompt.addEventListener("click", (event) => {
+        if (backdropPress && outside(event)) keepEditing();
+        backdropPress = false;
+      });
+      discard.addEventListener("click", () => {
+        const pending = pendingDiscard;
+        pendingDiscard = null;
+        discardPrompt.close();
+        if (pending?.owner.isConnected && pending.owner.open) {
+          discardEdits(pending.owner);
+          pending.perform();
+        }
+      });
+      actions.append(keep, discard);
+      discardPrompt.append(header, description, actions);
+      document.body.append(discardPrompt);
+    }
+    pendingDiscard = { owner, perform, focus: document.activeElement };
+    discardPrompt.showModal();
+  };
+  const closeDialog = (dialog) => guardClose(dialog, () => dialog.close());
   const openDialog = (dialog, opener = document.activeElement) => {
     if (!(dialog instanceof HTMLDialogElement) || dialog.open) return;
     const previous = opener instanceof Element ? opener.closest("dialog[data-dialog]") : null;
     const originalOpener = previous ? dialogOpeners.get(previous) : opener;
-    if (previous?.open) previous.close();
-    dialogOpeners.set(dialog, originalOpener);
-    dialogVersions.set(dialog, (dialogVersions.get(dialog) || 0) + 1);
-    dialog.showModal();
-    dialog.dispatchEvent(new Event("codewire:dialog-open", { bubbles: true }));
+    const show = () => {
+      if (previous?.open) previous.close();
+      dialogOpeners.set(dialog, originalOpener);
+      dialogVersions.set(dialog, (dialogVersions.get(dialog) || 0) + 1);
+      dialog.showModal();
+      dialog.dispatchEvent(new Event("codewire:dialog-open", { bubbles: true }));
+    };
+    if (previous?.open) guardClose(previous, show);
+    else show();
   };
 
   const initializeDialogs = (root = document) => {
@@ -38,9 +133,10 @@ const app = document.querySelector("[data-dashboard-app]");
       dialog.addEventListener("pointerdown", (event) => { backdropPress = outside(event); });
       dialog.addEventListener("click", (event) => {
         // Dragging from a form field onto the backdrop must not discard a form.
-        if (backdropPress && outside(event)) dialog.close();
+        if (backdropPress && outside(event)) closeDialog(dialog);
         backdropPress = false;
       });
+      dialog.addEventListener("cancel", (event) => { event.preventDefault(); closeDialog(dialog); });
       dialog.addEventListener("close", () => {
         if (dialog.open) return;
         dialogVersions.set(dialog, (dialogVersions.get(dialog) || 0) + 1);
@@ -153,7 +249,7 @@ const app = document.querySelector("[data-dashboard-app]");
       const dialog = target.closest("dialog[data-dialog]");
       if (dialog instanceof HTMLDialogElement) {
         event.preventDefault();
-        dialog.close();
+        closeDialog(dialog);
       }
     }
   });

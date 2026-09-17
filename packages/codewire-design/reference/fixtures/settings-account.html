@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Account settings fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/settings.css">
+  <script src="../../dashboard.js" defer></script><script src="../../organizations.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+<main class="cw-main"><div class="cw-main-inner"><div class="cw-page cw-settings-page"><div class="cw-settings-layout">
+  <aside class="cw-settings-subnav"><header class="cw-settings-subnav-heading"><h2>Settings</h2><span>owner@example.test</span></header><nav aria-label="Settings"><h3 class="cw-context-nav-label">Personal</h3><ul><li><a href="settings-account.html" aria-current="page">Account</a></li><li><a href="settings-credentials.html">Credentials</a></li></ul></nav></aside>
+  <div class="cw-settings-content">
+    <header class="cw-page-header"><div><p class="cw-eyebrow">Personal</p><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, security and browser sessions.</p></div></header>
+    <section id="account-details" class="cw-card cw-settings-card" aria-labelledby="account-title">
+      <header class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account details</h2><p class="cw-card-description">Your Codewire account identity. GitHub connections do not change it.</p></header>
+      <div class="cw-card-content"><dl class="cw-settings-details"><div><dt>Name</dt><dd>Codewire Owner</dd></div><div><dt>Email</dt><dd>owner@example.test · Verified</dd></div><div><dt>Created</dt><dd>Sep 9, 2026, 17:00 UTC</dd></div></dl></div>
+    </section>
+    <section id="security" class="cw-card cw-settings-card" aria-labelledby="security-title">
+      <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>
+      <div class="cw-card-content"><p class="cw-settings-muted">Two-factor authentication: <strong>Enabled</strong>.</p><p class="cw-settings-muted">Two-factor authentication protects your account and is required to manage browser sessions.</p><p><a href="/forgot-password">Request a password reset</a></p><p class="cw-settings-muted">If email delivery is available for your account, the reset flow will send instructions. This page cannot confirm delivery.</p></div>
+    </section>
+    <section id="sessions" class="cw-card cw-settings-card" aria-labelledby="sessions-title">
+      <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2><p class="cw-card-description">Browser sign-ins for this account. Signing out a session blocks subsequent requests; it does not stop Sandbox terminals, existing connections, provider credentials or API keys.</p></header>
+      <div class="cw-card-content">
+        <p class="cw-settings-muted">This browser: <code>session-current</code>. Expires Sep 17, 2026, 00:00 UTC. Expiry may extend with activity.</p>
+        <ul class="cw-account-sessions">
+          <li class="cw-account-session"><header><h3>This browser</h3><code>session-current</code></header><dl class="cw-settings-details"><div><dt>Created</dt><dd>Sep 16, 2026, 10:00 UTC</dd></div><div><dt>Expires</dt><dd>Sep 17, 2026, 00:00 UTC</dd></div></dl><button class="cw-button cw-button--outline" type="button" data-dialog-open="revoke-session-current" aria-haspopup="dialog" aria-controls="revoke-session-current">Sign out this browser</button></li>
+          <li class="cw-account-session"><header><h3>Browser session</h3><code>session-other</code></header><dl class="cw-settings-details"><div><dt>Created</dt><dd>Sep 15, 2026, 08:30 UTC</dd></div><div><dt>Expires</dt><dd>Sep 17, 2026, 00:00 UTC</dd></div></dl><button class="cw-button cw-button--outline" type="button" data-dialog-open="revoke-session-other" aria-haspopup="dialog" aria-controls="revoke-session-other">Sign out session</button></li>
+        </ul>
+        <nav class="cw-session-pagination" aria-label="Session pages"><a href="settings-account.html#sessions">First page</a><a href="settings-account.html#sessions">Next page</a></nav>
+        <form id="sign-out"><button class="cw-button cw-button--outline" type="button">Sign out of this browser</button></form>
+      </div>
+    </section>
+    <dialog class="cw-dialog" data-dialog id="revoke-session-current" aria-labelledby="revoke-title-current"><header class="cw-dialog-header"><h2 id="revoke-title-current">Sign out this browser?</h2></header><div class="cw-dialog-body"><p>Sign out <code>session-current</code>, the browser you are using now? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div><form method="post" action="/settings/_actions/sessions/revoke"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="session_id" value="session-current"><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out this browser</button></footer></form></dialog>
+    <dialog class="cw-dialog" data-dialog id="revoke-session-other" aria-labelledby="revoke-title-other"><header class="cw-dialog-header"><h2 id="revoke-title-other">Sign out session?</h2></header><div class="cw-dialog-body"><p>Sign out <code>session-other</code>? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div><form method="post" action="/settings/_actions/sessions/revoke"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="session_id" value="session-other"><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out session</button></footer></form></dialog>
+  </div>
+</div></div></div></main>
+</body>
+</html>

@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/settings-v1.css">
     <script src="/assets/codewire/dashboard-v1.js" defer></script>
+    <script src="/assets/codewire/organizations-v1.js" defer></script>
   </head>
   <body class="cw-body" data-route="dashboard-settings">
     <div class="cw-app" data-dashboard-app data-mobile-open="false">
@@ -20,28 +21,52 @@
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
       <main class="cw-main">{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-settings-page">
         <div class="cw-settings-layout">
-          <aside class="cw-settings-subnav">
-            <div class="cw-settings-subnav-heading"><strong>Settings</strong><span>{{ view.user_name }}</span></div>
-            <nav aria-label="Account settings"><p class="cw-context-nav-label">Personal</p><ul><li><a href="/settings/{{ view.global_context_query }}" aria-current="page">Account</a></li><li><a href="/settings/credentials/{{ view.global_context_query }}">Credentials</a></li><li><a href="/settings/security/{{ view.global_context_query }}">Security</a></li><li><a href="/settings/sessions/{{ view.global_context_query }}">Sessions</a></li></ul>{% if view.has_selected_organization %}<p class="cw-context-nav-label">Organization</p><ul><li><a href="{{ view.selected_organization_url }}">Sandboxes</a></li><li><a href="/{{ view.selected_organization_slug }}/snapshots/">Snapshots <small>Soon</small></a></li><li><a href="/{{ view.selected_organization_slug }}/presets/">Presets</a></li><li><a href="/{{ view.selected_organization_slug }}/secrets/">Secrets</a></li><li><a href="/{{ view.selected_organization_slug }}/api-keys/">API Keys</a></li><li><a href="/{{ view.selected_organization_slug }}/members/">Members</a></li><li><a href="/{{ view.selected_organization_slug }}/billing/">Billing</a></li></ul>{% endif %}{% if view.is_admin %}<p class="cw-context-nav-label">Admin</p><ul><li><a href="/admin/{{ view.global_context_query }}">Overview</a></li><li><a href="/admin/billing/{{ view.global_context_query }}">Billing catalog</a></li><li><a href="/admin/audit/{{ view.global_context_query }}">Audit log</a></li></ul>{% endif %}</nav>
-          </aside>
+          {% let settings_section = "account" %}{% include "settings-nav.html" %}
           <div class="cw-settings-content">
-        <header class="cw-page-header"><div><p class="cw-eyebrow">Personal</p><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Manage your Sandbox Git identity and account session.</p></div></header>
-        {% if !settings.message.is_empty() %}<div class="cw-alert cw-alert--success" role="status">{{ settings.message }}</div>{% endif %}
-        {% if !settings.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ settings.error }}</div>{% endif %}
-
-        <section class="cw-card cw-settings-card" aria-labelledby="identity-title">
-          <div class="cw-card-header"><h2 id="identity-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-user"/></svg> Git identity</h2><p class="cw-card-description">Used for commits in Sandboxes. Empty fields fall back to your account identity.</p></div>
-          <div class="cw-card-content">{% if settings.data.git_identity_available %}<form class="cw-form cw-settings-form" method="post" action="/settings/_actions/git-identity{{ view.global_context_query }}">
-            <input type="hidden" name="_csrf" value="{{ settings.csrf_token }}">
-            <div class="cw-field"><label class="cw-label" for="git-name">Name</label><input class="cw-input" id="git-name" name="git_name" value="{{ settings.data.git_name }}" autocomplete="name"></div>
-            <div class="cw-field"><label class="cw-label" for="git-email">Email</label><input class="cw-input" id="git-email" name="git_email" value="{{ settings.data.git_email }}" type="email" autocomplete="email"></div>
-            <button class="cw-button" type="submit">Save identity</button>
-          </form>{% else %}<div class="cw-alert cw-alert--warning" role="status">Git identity is temporarily unavailable. Reload before changing it.</div>{% endif %}</div>
+        <header class="cw-page-header"><div><p class="cw-eyebrow">Personal</p><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, security and browser sessions.</p></div></header>
+        <section id="account-details" class="cw-card cw-settings-card" aria-labelledby="account-title">
+          <header class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account details</h2><p class="cw-card-description">Your Codewire account identity. GitHub connections do not change it.</p></header>
+          <div class="cw-card-content"><dl class="cw-settings-details">
+            <div><dt>Name</dt><dd>{{ settings.account_name }}</dd></div>
+            <div><dt>Email</dt><dd>{{ settings.account_email }} · {% if settings.email_verified %}Verified{% else %}Not verified{% endif %}</dd></div>
+            <div><dt>Created</dt><dd>{{ settings.account_created }}</dd></div>
+          </dl></div>
         </section>
-
-        <section id="sign-out" class="cw-card cw-settings-card" aria-labelledby="account-title">
-          <div class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account</h2><p class="cw-card-description">Review the account, security, and session pages currently supported by the identity service.</p></div>
-          <div class="cw-card-content cw-settings-account-links"><a href="/settings/{{ view.global_context_query }}">Account details</a><a href="/settings/security/{{ view.global_context_query }}">Security</a><a href="/settings/sessions/{{ view.global_context_query }}">Active sessions</a><form method="post" action="/settings/_actions/sign-out{{ view.global_context_query }}"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out</button></form></div>
+        <section id="security" class="cw-card cw-settings-card" aria-labelledby="security-title">
+          <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>
+          <div class="cw-card-content">
+            <p class="cw-settings-muted">Two-factor authentication: <strong>{% if settings.two_factor_enabled %}Enabled{% else %}Not enabled{% endif %}</strong>.</p>
+            <p class="cw-settings-muted">Two-factor authentication protects your account and is required to manage browser sessions.</p>
+            <p><a href="/forgot-password">Request a password reset</a></p>
+            <p class="cw-settings-muted">If email delivery is available for your account, the reset flow will send instructions. This page cannot confirm delivery.</p>
+          </div>
+        </section>
+        <section id="sessions" class="cw-card cw-settings-card" aria-labelledby="sessions-title">
+          <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2><p class="cw-card-description">Browser sign-ins for this account. Signing out a session blocks subsequent requests; it does not stop Sandbox terminals, existing connections, provider credentials or API keys.</p></header>
+          <div class="cw-card-content">
+            {% if !settings.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ settings.message }}</p>{% endif %}
+            {% if !settings.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ settings.error }}</p>{% endif %}
+            {% if settings.sessions_available %}
+            <p class="cw-settings-muted">This browser: <code>{{ settings.current_session_id }}</code>. Expires {{ settings.current_session_expiry }}. Expiry may extend with activity.</p>
+            <ul class="cw-account-sessions">
+              {% for session in settings.sessions %}<li class="cw-account-session">
+                <header><h3>{% if session.current %}This browser{% else %}Browser session{% endif %}</h3><code>{{ session.id }}</code></header>
+                <dl class="cw-settings-details"><div><dt>Created</dt><dd>{{ session.created }}</dd></div><div><dt>Expires</dt><dd>{{ session.expires }}</dd></div></dl>
+                <button class="cw-button cw-button--outline" type="button" data-dialog-open="revoke-session-{{ session.id }}" aria-haspopup="dialog" aria-controls="revoke-session-{{ session.id }}">Sign out {% if session.current %}this browser{% else %}session{% endif %}</button>
+                <dialog class="cw-dialog" data-dialog id="revoke-session-{{ session.id }}" aria-labelledby="revoke-title-{{ session.id }}">
+                  <header class="cw-dialog-header"><h2 id="revoke-title-{{ session.id }}">Sign out {% if session.current %}this browser{% else %}session{% endif %}?</h2></header>
+                  <div class="cw-dialog-body"><p>Sign out <code>{{ session.id }}</code>{% if session.current %}, the browser you are using now{% endif %}? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div>
+                  <form method="post" action="/settings/_actions/sessions/revoke{{ view.global_context_query }}">
+                    <input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="account_id" value="{{ settings.account_id }}"><input type="hidden" name="session_id" value="{{ session.id }}">
+                    <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out {% if session.current %}this browser{% else %}session{% endif %}</button></footer>
+                  </form>
+                </dialog>
+              </li>{% endfor %}
+            </ul>
+            <nav class="cw-session-pagination" aria-label="Session pages"><a href="{{ settings.first_sessions_url }}">First page</a>{% if !settings.next_sessions_url.is_empty() %}<a href="{{ settings.next_sessions_url }}">Next page</a>{% endif %}</nav>
+            {% else %}<p class="cw-alert cw-alert--warning" role="status">Session controls are unavailable. Reload to try again. Two-factor authentication must be enabled; no unknown sessions can be signed out here.</p>{% endif %}
+            <form id="sign-out" method="post" action="/settings/_actions/sign-out{{ view.global_context_query }}"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out of this browser</button></form>
+          </div>
         </section>
           </div>
         </div>

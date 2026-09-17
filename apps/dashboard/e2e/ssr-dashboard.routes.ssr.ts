@@ -202,7 +202,10 @@ test.describe("server-rendered public, auth, and account routes", () => {
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Account", exact: true }).first()).toBeVisible();
     await expect(page.getByRole("heading", { name: "GitHub", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Git identity" })).toBeVisible();
+    for (const name of ["Account details", "Security", "Active sessions"]) {
+      await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+    }
+    await expect(page.getByRole("heading", { name: /Git (commit )?identity/i })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Git authentication" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "SSH key" })).toHaveCount(0);
     await expect(page.locator('form[action^="/settings/_actions/credentials/"]')).toHaveCount(0);
@@ -219,6 +222,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Profiles", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Git commit identity", exact: true })).toBeVisible();
     await expect(page.locator("dialog[open]")).toHaveCount(0);
     await expect(page.locator('form[action="/settings/credentials/_actions/profiles/create"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
@@ -300,17 +304,21 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.getByText("No snapshots yet", { exact: true })).toBeVisible();
   });
 
-  test("account placeholders preserve the current authenticated product behavior", async ({ page, isMobile }) => {
+  test("Account and Credentials preserve authenticated navigation with consolidated sections", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop account contract");
     for (const [route, heading] of [
       ["/settings/", "Account"],
       ["/settings/credentials/", "Credentials"],
-      ["/settings/security/", "Security settings"],
+      ["/settings/security/", "Security"],
       ["/settings/sessions/", "Active sessions"],
     ] as const) {
       const response = await page.goto(route);
       expect(response?.status()).toBe(200);
       await expect(page.getByRole("heading", { name: heading, exact: true }).first()).toBeVisible();
+      if (route.includes("security") || route.includes("sessions")) {
+        await expect(page).toHaveURL(`/settings/#${route.includes("security") ? "security" : "sessions"}`);
+        await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
+      }
     }
   });
 

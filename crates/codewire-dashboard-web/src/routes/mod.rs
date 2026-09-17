@@ -333,7 +333,15 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route(
             "/settings/_actions/git-identity",
-            post(settings::update_identity_action),
+            post(credentials::update_identity_action),
+        )
+        .route(
+            "/settings/credentials/_actions/git-identity",
+            post(credentials::update_identity_action),
+        )
+        .route(
+            "/settings/_actions/sessions/revoke",
+            post(settings::revoke_session_action).layer(DefaultBodyLimit::max(2048)),
         )
         .route(
             "/settings/_actions/sign-out",
