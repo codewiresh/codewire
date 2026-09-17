@@ -78,7 +78,7 @@ fixture() {
   LOCAL_PLATFORM_DISPOSABLE_NETWORK=0
   LOCAL_PLATFORM_MESH_PROBE_BIN=''
   LP_NETWORK_CREATE_ATTEMPTED=0
-  LP_LIVE_CODEX=0; LP_LIVE_ANTHROPIC=0; LP_LIVE_OPENAI=0
+  LP_LIVE_GITHUB=0; LP_LIVE_CODEX=0; LP_LIVE_ANTHROPIC=0; LP_LIVE_OPENAI=0
   LP_APPLICATION_ONLY=0
   FIXTURE_EMPTY_SOURCE=0
   LOCAL_PLATFORM_OPENAI_MODEL=fixture-model-v1
@@ -96,15 +96,24 @@ fixture() {
 fixture
 validate_local_platform_options
 pass
+invalid_artifact_pair() {
+  fixture
+  mkdir -m 700 "$TMPDIR_SMOKE/other"
+  LOCAL_PLATFORM_ARTIFACT_ROOT="$TMPDIR_SMOKE/other/artifacts"
+  mkdir -m 700 "$LOCAL_PLATFORM_ARTIFACT_ROOT"
+  validate_local_platform_options
+}
+expect_failure mismatched-native-artifact-pair invalid_artifact_pair
 local_platform_parse --application-only
 [[ "$LP_APPLICATION_ONLY" == 1 ]] || fail 'application-only option was not parsed'
 validate_local_platform_options
 pass
-for invalid in codex anthropic openai checkout; do
+for invalid in github codex anthropic openai checkout; do
   invalid_application_only_options() {
     fixture
     LP_APPLICATION_ONLY=1
     case "$invalid" in
+      github) LP_LIVE_GITHUB=1 ;;
       codex) LP_LIVE_CODEX=1 ;;
       anthropic) LP_LIVE_ANTHROPIC=1 ;;
       openai) LP_LIVE_OPENAI=1 ;;
@@ -186,6 +195,29 @@ for invalid in codex anthropic checkout fixture network disposable probe model; 
     validate_local_platform_options
   }
   expect_failure "openai-$invalid" invalid_openai_options
+done
+fixture
+local_platform_parse --live-github
+[[ "$LP_LIVE_GITHUB" == 1 ]] || fail 'GitHub option was not parsed'
+validate_local_platform_options
+pass
+for invalid in codex anthropic openai checkout fixture network disposable probe; do
+  invalid_github_options() {
+    fixture
+    LP_LIVE_GITHUB=1
+    case "$invalid" in
+      codex) LP_LIVE_CODEX=1 ;;
+      anthropic) LP_LIVE_ANTHROPIC=1 ;;
+      openai) LP_LIVE_OPENAI=1 ;;
+      checkout) LP_INITIAL_PRIVATE_CHECKOUT=1 ;;
+      fixture) LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=/usr/bin/true ;;
+      network) LOCAL_PLATFORM_NETWORK_ID=shared ;;
+      disposable) LOCAL_PLATFORM_DISPOSABLE_NETWORK=1 ;;
+      probe) LOCAL_PLATFORM_MESH_PROBE_BIN=/usr/bin/true ;;
+    esac
+    validate_local_platform_options
+  }
+  expect_failure "github-$invalid" invalid_github_options
 done
 fixture
 local_platform_validate_socket_paths /short/.cwl.XXXXXX/h /run/user/1000/.cwlp-XXXXXX
@@ -814,7 +846,7 @@ pass
 
 # Each live provider owns a public create/use/run flow, not the application/SSH
 # journey. Keep typed dispatch and parent ownership when a reply is lost.
-for live_provider in codex anthropic openai; do
+for live_provider in codex anthropic openai github; do
 (
   fixture
   LP_WORKSPACE="$TMPDIR_SMOKE"
@@ -837,6 +869,11 @@ for live_provider in codex anthropic openai; do
     prepare_live_provider_fixture
     PROVIDER_OPENAI_DOCUMENT="$PROVIDER_CODEX_DOCUMENT"
   }
+  prepare_provider_github() {
+    [[ "$live_provider" == github ]] || fail 'another provider prepared GitHub'
+    prepare_live_provider_fixture
+    PROVIDER_GITHUB_DOCUMENT="$PROVIDER_CODEX_DOCUMENT"
+  }
   prepare_provider_ssh() { fail 'Codex prepared SSH'; }
   prepare_application_secrets() { fail 'Codex prepared application secrets'; }
   run_live_provider_fixture() {
@@ -854,6 +891,10 @@ for live_provider in codex anthropic openai; do
   }
   run_provider_openai_smoke() {
     [[ "$live_provider" == openai ]] || fail 'another provider ran OpenAI'
+    run_live_provider_fixture
+  }
+  run_provider_github_smoke() {
+    [[ "$live_provider" == github ]] || fail 'another provider ran GitHub'
     run_live_provider_fixture
   }
   cw_with_timeout() {
@@ -879,6 +920,7 @@ for live_provider in codex anthropic openai; do
   journey_function=local_platform_codex_journey
   if [[ "$live_provider" == anthropic ]]; then journey_function=local_platform_anthropic_journey; fi
   if [[ "$live_provider" == openai ]]; then journey_function=local_platform_openai_journey; fi
+  if [[ "$live_provider" == github ]]; then journey_function=local_platform_github_journey; fi
   "$journey_function"
   [[ "$LP_CREATE_ATTEMPTED" == 1 && "$(cat "$TMPDIR_SMOKE/codex-order")" == $'prepare\ncreate\nuse\nrun' ]] ||
     fail 'Codex journey did not preserve ownership or complete its proof'
@@ -917,6 +959,14 @@ cleanup_provider_openai_profile() {
 cleanup_provider_openai_credential() {
   [[ "$LP_LIVE_OPENAI" == 1 ]] || return 0
   printf 'openai-credential\n' >>"$TMPDIR_SMOKE/cleanup-calls"; [[ "$FAILURE" != openai-credential ]]
+}
+cleanup_provider_github_profile() {
+  [[ "$LP_LIVE_GITHUB" == 1 ]] || return 0
+  printf 'github-profile\n' >>"$TMPDIR_SMOKE/cleanup-calls"; [[ "$FAILURE" != github-profile ]]
+}
+cleanup_provider_github_credential() {
+  [[ "$LP_LIVE_GITHUB" == 1 ]] || return 0
+  printf 'github-credential\n' >>"$TMPDIR_SMOKE/cleanup-calls"; [[ "$FAILURE" != github-credential ]]
 }
 cleanup_application_secrets() {
   [[ -z "$ENV_ID" ]] || fail 'local ID sent to platform environment cleanup'
@@ -1136,5 +1186,21 @@ for invalid in openai-profile openai-credential rm logout; do
     grep -qx "$surface" "$TMPDIR_SMOKE/cleanup-calls" || fail 'failed OpenAI cleanup skipped another surface'
   done
   if grep -Fq 'PASS:' "$TEST_ROOT/failure.out"; then fail 'OpenAI passed before successful cleanup'; fi
+done
+cleanup_fixture
+LP_LIVE_GITHUB=1
+run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
+grep -Fq 'PASS: stock gh read-only account request' "$TMPDIR_SMOKE/cleanup-result.out" || fail 'GitHub cleanup omitted named PASS'
+[[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nprofile\ncredential\ngithub-profile\ngithub-credential\nprojects\nowners\nlogout' ]] ||
+  fail 'GitHub cleanup skipped an owned surface'
+pass
+for invalid in github-profile github-credential rm logout leakage; do
+  cleanup_fixture
+  LP_LIVE_GITHUB=1; FAILURE="$invalid"
+  expect_failure "$invalid GitHub cleanup" run_cleanup
+  for surface in github-profile github-credential logout; do
+    grep -qx "$surface" "$TMPDIR_SMOKE/cleanup-calls" || fail 'failed GitHub cleanup skipped another surface'
+  done
+  if grep -Fq 'PASS:' "$TEST_ROOT/failure.out"; then fail 'GitHub passed before cleanup'; fi
 done
 printf 'Local/platform smoke fixtures passed (%s cases)\n' "$COUNT"

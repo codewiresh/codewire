@@ -85,7 +85,7 @@ run_provider_codex_smoke() {
       >"$TMPDIR_SMOKE/provider-codex-proof.out" 2>"$TMPDIR_SMOKE/provider-codex-proof.err"; then
     die 'bounded live Codex workload failed; raw provider output remains private inside the disposable VM'
   fi
-  [[ ! -s "$TMPDIR_SMOKE/provider-codex-proof.err" ]] || die 'live Codex workload returned a public error receipt'
+  assert_managed_run_stderr "$TMPDIR_SMOKE/provider-codex-proof.err" || die 'live Codex workload returned unexpected stderr'
   cmp -s "$TMPDIR_SMOKE/provider-codex-proof.out" <(printf 'CW_LIVE_CODEX_OK\n') ||
     die 'live Codex workload omitted its exact public receipt'
   log 'live platform Codex OAuth request validated in the local 2-vCPU/16-GiB VM; parent cleanup remains pending and other providers are not implied'

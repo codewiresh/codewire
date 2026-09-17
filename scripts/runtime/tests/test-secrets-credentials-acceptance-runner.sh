@@ -31,6 +31,8 @@ case "$0" in
   */smoke-local-platform-sources.sh)
     if [[ " $* " == *' --initial-private-checkout '* ]]; then
       label=initial-private-checkout
+    elif [[ " $* " == *' --live-github '* ]]; then
+      label=live-github
     elif [[ " $* " == *' --live-codex '* ]]; then
       label=live-codex
     elif [[ " $* " == *' --live-anthropic '* ]]; then
@@ -72,7 +74,7 @@ case "$label" in
        -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
        -z "${LOCAL_PLATFORM_MESH_PROBE_BIN+x}" ]] || exit 102
     ;;
-  live-codex|live-anthropic|live-openai)
+  live-codex|live-anthropic|live-openai|live-github)
     [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --$label" &&
        "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 0 &&
        -z "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN+x}" &&
@@ -125,7 +127,7 @@ case "$label" in
 esac
 for forbidden in CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY CW_CONFIG_DIR \
     ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE OPENAI_API_KEY CODEX_HOME \
-    SSH_AUTH_SOCK BAO_TOKEN HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY; do
+    SSH_AUTH_SOCK BAO_TOKEN GH_TOKEN GITHUB_TOKEN GH_CONFIG_DIR GH_HOST HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY; do
   [[ -z "${!forbidden+x}" ]] || exit 97
 done
 [[ "$HOME" == /nonexistent && "$PATH" == /usr/bin:/bin ]] || exit 99
@@ -235,6 +237,7 @@ export OPENAI_API_KEY=must-not-reach-child
 export CODEX_HOME=/must/not/reach/child
 export SSH_AUTH_SOCK=/must/not/reach/child
 export BAO_TOKEN=must-not-reach-child
+export GH_TOKEN=must-not-reach-child GITHUB_TOKEN=must-not-reach-child GH_CONFIG_DIR=/must/not/reach/child GH_HOST=must-not-reach-child
 unset DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE DEV_SMOKE_BROWSER_AUTH_BUN_BIN DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN
 export HTTPS_PROXY=http://must-not-reach-child
 export HTTP_PROXY=http://must-not-reach-child
@@ -281,12 +284,11 @@ pass
 
 : >"$CALLS"
 expect_status 1 "$TEST_ROOT/default.out" "$RUNNER"
-printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh live-codex live-openai live-anthropic initial-private-checkout \
+printf '%s\n' native-local local-platform dev-application-all-scopes dev-provider-ssh local-platform-mesh live-codex live-github live-openai live-anthropic initial-private-checkout \
   | cmp -s - "$CALLS" || fail 'default matrix did not invoke each available fixed child once'
 grep -Eq 'live-codex +PASS' "$TEST_ROOT/default.out" || fail 'live Codex did not run'
 grep -Eq 'live-anthropic +PASS' "$TEST_ROOT/default.out" || fail 'live Anthropic did not run'
-grep -Eq 'live-github +NOT RUN \(no checked-in live-github journey\)' \
-  "$TEST_ROOT/default.out" || fail 'provider success concealed the missing GitHub journey'
+grep -Eq 'live-github +PASS' "$TEST_ROOT/default.out" || fail 'live GitHub did not run'
 grep -Eq 'initial-private-checkout +PASS' "$TEST_ROOT/default.out" || fail 'local private checkout did not run'
 grep -Fq 'dev-initial-private-checkout   NOT RUN (explicit normal CLI/dedicated Dev checkout inputs unavailable)' \
   "$TEST_ROOT/default.out" || fail 'unconfigured hosted checkout was not reported honestly'
@@ -315,6 +317,27 @@ rm "$FAKE_ROOT/fixtures/fail-live-codex"
 grep -Eq 'live-codex +FAIL' "$TEST_ROOT/codex-failure.out" || fail 'Codex failure was lost'
 if grep -qx initial-private-checkout "$CALLS"; then fail 'matrix continued after Codex cleanup failure'; fi
 pass
+
+for github_case in success wrong-cli failure; do
+  : >"$CALLS"
+  case "$github_case" in
+    wrong-cli) export ACCEPTANCE_NORMAL_CW_BIN="$ACCEPTANCE_SYNTHETIC_CW_BIN" ;;
+    failure) touch "$FAKE_ROOT/fixtures/fail-live-github" ;;
+  esac
+  expected=0; [[ "$github_case" == success ]] || expected=1
+  expect_status "$expected" "$TEST_ROOT/github-$github_case.out" "$RUNNER" --only live-github
+  export ACCEPTANCE_NORMAL_CW_BIN="$saved_normal_cw"
+  rm -f "$FAKE_ROOT/fixtures/fail-live-github"
+  if [[ "$github_case" == wrong-cli ]]; then
+    [[ ! -s "$CALLS" ]] || fail 'GitHub accepted synthetic cw'
+  else
+    [[ "$(cat "$CALLS")" == live-github ]] || fail 'GitHub dispatched another journey'
+  fi
+  if [[ "$github_case" != success ]] && grep -Eq 'live-github +PASS' "$TEST_ROOT/github-$github_case.out"; then
+    fail 'GitHub failure emitted PASS'
+  fi
+  pass
+done
 
 : >"$CALLS"
 expect_status 0 "$TEST_ROOT/anthropic.out" "$RUNNER" --only live-anthropic
