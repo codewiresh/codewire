@@ -38,6 +38,7 @@ use crate::{
 };
 
 const PATH: &str = "/settings/credentials/";
+pub(super) const GITHUB_APP_CALLBACK_PATH: &str = "/api/v1/github/oauth/callback";
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct QueryParameters {
@@ -112,6 +113,7 @@ pub(super) async fn page(
                 "identity-invalid" | "identity-request-failed"
             ),
         active_dialog: approved_dialog(&query.dialog, &data),
+        github_install_url: github_app_installation_url(&state.github_app_slug),
         credentials: data.credentials,
         profiles: data.profiles,
         choices: data.choices,
@@ -214,7 +216,7 @@ pub(super) async fn update_profile_action(
     headers: HeaderMap,
     Form(form): Form<CredentialProfileUpdateSubmission>,
 ) -> Response {
-    let dialog = row_dialog("profile", &form.profile_id);
+    let dialog = row_action_dialog("profile", &form.profile_id, "edit");
     let cookie = match super::settings::mutation_cookie(
         &state, &headers, &form.csrf, &query.org, PATH,
     )
@@ -256,7 +258,7 @@ pub(super) async fn delete_profile_action(
     headers: HeaderMap,
     Form(form): Form<CredentialProfileDeleteSubmission>,
 ) -> Response {
-    let dialog = row_dialog("profile", &form.profile_id);
+    let dialog = row_action_dialog("profile", &form.profile_id, "delete");
     let cookie = match super::settings::mutation_cookie(
         &state, &headers, &form.csrf, &query.org, PATH,
     )
@@ -287,7 +289,11 @@ pub(super) async fn add_api_key_action(
     headers: HeaderMap,
     Form(form): Form<CredentialApiKeySubmission>,
 ) -> Response {
-    let dialog = "add-api-key";
+    let dialog = match form.provider.as_str() {
+        "openai" => "add-openai-api-key",
+        "anthropic" => "add-anthropic-api-key",
+        _ => "add-credential",
+    };
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -324,7 +330,7 @@ pub(super) async fn generate_ssh_action(
     headers: HeaderMap,
     Form(form): Form<CredentialSshGenerateSubmission>,
 ) -> Response {
-    let dialog = "add-ssh";
+    let dialog = "generate-ssh";
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -353,7 +359,7 @@ pub(super) async fn import_ssh_action(
     headers: HeaderMap,
     Form(form): Form<CredentialSshImportSubmission>,
 ) -> Response {
-    let dialog = "add-ssh";
+    let dialog = "import-ssh";
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -397,7 +403,7 @@ pub(super) async fn rename_credential_action(
     headers: HeaderMap,
     Form(form): Form<CredentialRenameSubmission>,
 ) -> Response {
-    let dialog = row_dialog("credential", &form.credential_id);
+    let dialog = row_action_dialog("credential", &form.credential_id, "rename");
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -431,7 +437,7 @@ pub(super) async fn rotate_api_key_action(
     headers: HeaderMap,
     Form(form): Form<CredentialRotateSubmission>,
 ) -> Response {
-    let dialog = row_dialog("credential", &form.credential_id);
+    let dialog = row_action_dialog("credential", &form.credential_id, "rotate");
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -479,9 +485,9 @@ pub(super) async fn delete_credential_action(
     credential_revision_action(state, query, headers, form, true).await
 }
 
-/// Start the browser-only GitHub App installation flow.  This is deliberately
-/// not the device-code endpoint used by `cw`: the App's registered callback
-/// returns here after GitHub has let the user choose its repositories.
+/// Start browser-only GitHub App authorization, not the device-code flow used
+/// by `cw`. An explicit configured callback selects this dashboard even when
+/// the App registration has several callbacks for local and hosted instances.
 pub(super) async fn github_app_authorize_action(
     State(state): State<AppState>,
     Query(query): Query<QueryParameters>,
@@ -491,13 +497,13 @@ pub(super) async fn github_app_authorize_action(
     let dialog = if form.credential_id.is_empty() {
         "connect-github".to_owned()
     } else {
-        row_dialog("credential", &form.credential_id)
+        row_action_dialog("credential", &form.credential_id, "reconnect")
     };
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
-    if state.github_app_slug.is_empty() {
+    if state.github_app_slug.is_empty() || state.github_app_client_id.is_empty() {
         return page_error_redirect("github-app-unavailable", &dialog, &query.org, &headers);
     }
     let reconnect = match (
@@ -538,20 +544,24 @@ pub(super) async fn github_app_authorize_action(
     };
     with_response_cookie(
         redirect(
-            github_app_installation_url(&state.github_app_slug, &callback_state),
+            github_app_authorization_url(
+                &state.github_app_client_id,
+                &state.public_origin,
+                &callback_state,
+            ),
             &headers,
         ),
         callback_cookie,
     )
 }
 
-/// Finish a GitHub App installation callback.  The authenticated session and
+/// Finish a GitHub App authorization callback. The authenticated session and
 /// one-use browser state fence this cross-site GET; it intentionally does not
 /// require same-origin form CSRF because GitHub performs the redirect.
 pub(super) async fn github_app_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<GitHubAppCallbackQuery>,
+    query: Result<Query<GitHubAppCallbackQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     let continuation = page_path("");
     let clear = clear_github_app_authorization_cookie(&state.public_origin);
@@ -574,6 +584,12 @@ pub(super) async fn github_app_callback(
             return github_app_callback_response(login_redirect(&continuation, &headers), clear);
         }
     };
+    let Ok(Query(query)) = query else {
+        return github_app_callback_response(
+            page_error_redirect("github-app-failed", "connect-github", "", &headers),
+            clear,
+        );
+    };
     // The shell lookup above is the current session/2FA authorization check;
     // no organization context is accepted or restored from GitHub.
     let callback = match github_app_authorization_continuation(&headers, &query.state, &cookie) {
@@ -588,7 +604,7 @@ pub(super) async fn github_app_callback(
     let dialog = callback
         .credential_id
         .as_deref()
-        .map(|id| row_dialog("credential", id))
+        .map(|id| row_action_dialog("credential", id, "reconnect"))
         .filter(|dialog| !dialog.is_empty())
         .unwrap_or_else(|| "connect-github".to_owned());
     let response = if !query.error.is_empty() {
@@ -609,20 +625,44 @@ pub(super) async fn github_app_callback(
             Err(error) if error.code == ErrorCode::AlreadyExists => {
                 page_error_redirect("github-app-already-connected", &dialog, "", &headers)
             }
-            Err(error) => credential_mutation_error(error.code, false, &dialog, "", &headers),
+            Err(error) => {
+                if let Some(feedback) = credentials_connect::github_authorization_feedback(&error) {
+                    page_error_redirect(feedback, &dialog, "", &headers)
+                } else {
+                    credential_mutation_error(error.code, false, &dialog, "", &headers)
+                }
+            }
         }
     };
     github_app_callback_response(response, clear)
 }
 
-fn github_app_installation_url(app_slug: &str, callback_state: &str) -> String {
+fn github_app_installation_url(app_slug: &str) -> String {
+    if app_slug.is_empty() {
+        return String::new();
+    }
     let mut target = Url::parse("https://github.com").expect("static GitHub origin");
     target.set_path(&format!("/apps/{app_slug}/installations/new"));
-    // The GitHub App registration owns the callback URL. The installation URL
-    // carries only opaque state; `redirect_uri` belongs to the server-side
-    // authorization-code exchange and is never a browser-controlled target.
+    target.into()
+}
+
+fn github_app_authorization_url(
+    client_id: &str,
+    public_origin: &str,
+    callback_state: &str,
+) -> String {
+    let mut target = Url::parse("https://github.com/login/oauth/authorize")
+        .expect("static GitHub authorization URL");
+    // Both values come from validated server configuration, never Host,
+    // Forwarded headers, query parameters or the submitted form. The broker
+    // must exchange the code using this same registered callback URL.
     target
         .query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair(
+            "redirect_uri",
+            &format!("{public_origin}{GITHUB_APP_CALLBACK_PATH}"),
+        )
         .append_pair("state", callback_state);
     target.into()
 }
@@ -659,7 +699,7 @@ pub(super) async fn enroll_oauth_action(
             _ => String::new(),
         }
     } else {
-        row_dialog("credential", &form.credential_id)
+        row_action_dialog("credential", &form.credential_id, "reconnect")
     };
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
@@ -812,7 +852,7 @@ fn valid_oauth_name(name: &str) -> bool {
 }
 
 // Device authorization is intentionally browser-only for Codex. GitHub's
-// browser path is the dedicated GitHub App installation route above; `cw`
+// browser path is the dedicated GitHub App authorization route above; `cw`
 // keeps its separate GitHub device-code RPC in credential-service.
 fn web_device_oauth_provider(value: &str) -> Option<credentials_connect::OAuthProvider> {
     (value == "codex").then_some(credentials_connect::OAuthProvider::Codex)
@@ -840,7 +880,11 @@ async fn credential_revision_action(
     form: CredentialRevisionSubmission,
     delete: bool,
 ) -> Response {
-    let dialog = row_dialog("credential", &form.credential_id);
+    let dialog = row_action_dialog(
+        "credential",
+        &form.credential_id,
+        if delete { "delete" } else { "revoke" },
+    );
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
@@ -1040,24 +1084,64 @@ fn row_dialog(kind: &str, id: &str) -> String {
     }
 }
 
+fn row_action_dialog(kind: &str, id: &str, action: &str) -> String {
+    let row = row_dialog(kind, id);
+    if row.is_empty() || !valid_row_action(kind, action) {
+        String::new()
+    } else {
+        format!("{row}-{action}")
+    }
+}
+
+fn valid_row_action(kind: &str, action: &str) -> bool {
+    match kind {
+        "credential" => matches!(
+            action,
+            "rename" | "reconnect" | "rotate" | "revoke" | "delete"
+        ),
+        "profile" => matches!(action, "edit" | "delete"),
+        _ => false,
+    }
+}
+
+fn requested_row_id<'a>(requested: &'a str, kind: &str) -> Option<&'a str> {
+    let row = requested.strip_prefix(kind)?.strip_prefix('-')?;
+    if exact_id(row).is_ok() {
+        return Some(row);
+    }
+    let (id, action) = row.rsplit_once('-')?;
+    (exact_id(id).is_ok() && valid_row_action(kind, action)).then_some(id)
+}
+
 fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettingsData) -> String {
     let allowed = matches!(
         requested,
         "add-credential"
             | "connect-github"
             | "connect-codex"
-            | "add-api-key"
+            | "add-openai-api-key"
+            | "add-anthropic-api-key"
             | "add-ssh"
+            | "generate-ssh"
+            | "import-ssh"
             | "create-profile"
-    ) || requested.strip_prefix("credential-").is_some_and(|id| {
-        exact_id(id).is_ok()
-            && data
-                .credentials
-                .iter()
-                .any(|credential| credential.id == id)
-    }) || requested.strip_prefix("profile-").is_some_and(|id| {
-        exact_id(id).is_ok() && data.profiles.iter().any(|profile| profile.id == id)
-    });
+    ) || requested_row_id(requested, "credential").is_some_and(|id| {
+        data.credentials.iter().any(|credential| {
+            credential.id == id
+                && (requested == row_dialog("credential", id)
+                    || requested == row_action_dialog("credential", id, "rename")
+                        && credential.oauth_provider != "github"
+                    || requested == row_action_dialog("credential", id, "reconnect")
+                        && credential.oauth
+                    || requested == row_action_dialog("credential", id, "rotate")
+                        && credential.api_key
+                    || requested == row_action_dialog("credential", id, "revoke")
+                        && !credential.revoked
+                    || requested == row_action_dialog("credential", id, "delete")
+                        && credential.revoked)
+        })
+    }) || requested_row_id(requested, "profile")
+        .is_some_and(|id| data.profiles.iter().any(|profile| profile.id == id));
     if allowed {
         requested.to_owned()
     } else {
@@ -1117,10 +1201,16 @@ fn approved_error(code: &str) -> &'static str {
             "GitHub App authorization was cancelled. No credential was changed."
         }
         "github-app-failed" => {
-            "GitHub App authorization could not be completed. Start again from credentials."
+            "This GitHub connection attempt expired or could not be verified. Continue to GitHub to start a new attempt."
+        }
+        "github-app-response-invalid" => {
+            "Codewire could not verify GitHub's response. Try again; if this continues, ask an administrator to check the GitHub App setup. No credential was changed."
         }
         "github-app-already-connected" => {
             "This GitHub account is already connected. Use its Reconnect action to update repository access."
+        }
+        "github-installation-required" => {
+            "Install the Codewire GitHub App for your account or organization and choose its repositories. Then return here and continue with GitHub. No credential was changed."
         }
         "profile-invalid" => {
             "Check the profile name and selected credentials. Use 1–128 lowercase letters, numbers, hyphens, underscores or dots; start and end with a letter or number."
@@ -1168,6 +1258,8 @@ mod tests {
                 entries: vec![CredentialProfileEntryView {
                     slot: "GitHub",
                     credential: "verified-user".into(),
+                    status: "Active",
+                    status_tone: "success",
                 }],
                 codex: String::new(),
                 openai: String::new(),
@@ -1209,6 +1301,7 @@ mod tests {
             git_identity: Default::default(),
             git_identity_feedback: false,
             active_dialog: approved_dialog(active_dialog, &data),
+            github_install_url: github_app_installation_url("codewire-synthetic"),
             credentials: data.credentials,
             profiles: data.profiles,
             choices: data.choices,
@@ -1231,11 +1324,18 @@ mod tests {
             "add-credential",
             "connect-github",
             "connect-codex",
-            "add-api-key",
+            "add-openai-api-key",
+            "add-anthropic-api-key",
             "add-ssh",
+            "generate-ssh",
+            "import-ssh",
             "create-profile",
             "credential-00000000-0000-4000-8000-000000000001",
             "profile-00000000-0000-4000-8000-000000000002",
+            "credential-00000000-0000-4000-8000-000000000001-reconnect",
+            "credential-00000000-0000-4000-8000-000000000001-revoke",
+            "profile-00000000-0000-4000-8000-000000000002-edit",
+            "profile-00000000-0000-4000-8000-000000000002-delete",
         ] {
             assert_eq!(approved_dialog(id, &data), id);
         }
@@ -1247,6 +1347,14 @@ mod tests {
             "connect-github\" autofocus",
             "credential-00000000-0000-4000-8000-000000000099",
             "profile-00000000-0000-4000-8000-000000000001",
+            "credential-00000000-0000-4000-8000-000000000099-reconnect",
+            "credential-00000000-0000-4000-8000-000000000001-edit",
+            "credential-00000000-0000-4000-8000-000000000001-rename",
+            "credential-00000000-0000-4000-8000-000000000001-rotate",
+            "credential-00000000-0000-4000-8000-000000000001-delete",
+            "profile-00000000-0000-4000-8000-000000000002-reconnect",
+            "profile-00000000-0000-4000-8000-000000000002-edit-delete",
+            "add-api-key",
         ] {
             assert!(approved_dialog(id, &data).is_empty(), "{id}");
         }
@@ -1266,7 +1374,7 @@ mod tests {
             html.find("id=\"profiles-title\"").unwrap()
                 < html.find("id=\"create-profile\"").unwrap()
         );
-        assert_eq!(html.matches("data-dialog id=").count(), 8);
+        assert_eq!(html.matches("data-dialog id=").count(), 15);
         assert!(!html.contains("data-dialog-auto-open"));
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));
@@ -1307,7 +1415,9 @@ mod tests {
             if opening.contains("cw-settings-form") {
                 assert_eq!(
                     opening.contains("data-dirty-guard"),
-                    !opening.contains("_actions/git-identity"),
+                    !opening.contains("_actions/git-identity")
+                        && !opening.contains("/delete")
+                        && !opening.contains("/revoke"),
                     "only editable credential/profile dialogs opt into close protection"
                 );
             }
@@ -1324,13 +1434,14 @@ mod tests {
             .split("aria-labelledby=\"connect-github-title\"")
             .nth(1)
             .unwrap()
-            .split("</form>")
+            .split("</dialog>")
             .next()
             .unwrap();
         assert!(!github.contains("name=\"name\""));
         assert!(!github.contains("name=\"provider\""));
         assert!(html.contains("/settings/credentials/_actions/github/authorize?org=sample-org"));
-        assert!(github.contains("GitHub App"));
+        assert!(github.contains("Your verified GitHub username names this connection"));
+        assert!(github.contains("https://github.com/apps/codewire-synthetic/installations/new"));
         assert!(github.contains("Continue to GitHub"));
         assert!(!github.contains("one-time code"));
         assert!(github.contains("icons-v2.svg#icon-github"));
@@ -1338,15 +1449,18 @@ mod tests {
 
     #[test]
     fn validation_reopens_only_the_relevant_dialog_with_escaped_static_error() {
-        let html = rendered_dialogs("add-api-key", approved_error("credential-invalid"));
+        let html = rendered_dialogs("add-openai-api-key", approved_error("credential-invalid"));
         assert_eq!(html.matches("data-dialog-auto-open").count(), 1);
         assert_eq!(html.matches("role=\"alert\"").count(), 1);
         assert!(html.contains(
-            "id=\"add-api-key\" aria-labelledby=\"add-api-key-title\" data-dialog-auto-open"
+            "id=\"add-openai-api-key\" aria-labelledby=\"add-openai-api-key-title\" data-dialog-auto-open"
         ));
         assert!(html.contains("The credential submission is invalid."));
         assert!(!html.contains("name=\"value\" value="));
-        let html = rendered_dialogs("profile-00000000-0000-4000-8000-000000000002", "<unsafe>");
+        let html = rendered_dialogs(
+            "profile-00000000-0000-4000-8000-000000000002-edit",
+            "<unsafe>",
+        );
         assert_eq!(html.matches("data-dialog-auto-open").count(), 1);
         assert!(!html.contains("<unsafe>"));
         assert!(html.contains("&lt;unsafe&gt;") || html.contains("&#60;unsafe&#62;"));
@@ -1356,24 +1470,24 @@ mod tests {
     fn dialog_error_redirect_carries_only_static_error_and_context() {
         let response = page_error_redirect(
             "credential-invalid",
-            "add-api-key",
+            "add-openai-api-key",
             "sample-org",
             &HeaderMap::new(),
         );
         assert_eq!(
             response.headers()[header::LOCATION],
-            "/settings/credentials/?org=sample-org&error=credential-invalid&dialog=add-api-key"
+            "/settings/credentials/?org=sample-org&error=credential-invalid&dialog=add-openai-api-key"
         );
         let response = credential_mutation_error(
             ErrorCode::Unavailable,
             false,
-            "add-api-key",
+            "add-openai-api-key",
             "",
             &HeaderMap::new(),
         );
         assert_eq!(
             response.headers()[header::LOCATION],
-            "/settings/credentials/?error=credential-uncertain&dialog=add-api-key"
+            "/settings/credentials/?error=credential-uncertain&dialog=add-openai-api-key"
         );
     }
 
@@ -1440,14 +1554,42 @@ mod tests {
         assert!(valid_oauth_name("Codex work"));
         assert!(!valid_oauth_name(""));
 
-        let installation = github_app_installation_url("codewire", "opaque-state");
+        let installation = github_app_installation_url("codewire");
         let url = Url::parse(&installation).unwrap();
         assert_eq!(
             url.as_str(),
-            "https://github.com/apps/codewire/installations/new?state=opaque-state"
+            "https://github.com/apps/codewire/installations/new"
         );
         assert!(!installation.contains("device"));
         assert!(!installation.contains("redirect_uri"));
+        assert!(github_app_installation_url("").is_empty());
+        for origin in [
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:8090",
+            "https://codewire-dev.sh",
+        ] {
+            let authorization = Url::parse(&github_app_authorization_url(
+                "Iv1.syntheticclient",
+                origin,
+                "opaque-state",
+            ))
+            .unwrap();
+            assert_eq!(
+                authorization.origin().ascii_serialization(),
+                "https://github.com"
+            );
+            assert_eq!(authorization.path(), "/login/oauth/authorize");
+            let parameters: std::collections::BTreeMap<_, _> =
+                authorization.query_pairs().collect();
+            assert_eq!(parameters.len(), 3);
+            assert_eq!(parameters["client_id"], "Iv1.syntheticclient");
+            assert_eq!(parameters["state"], "opaque-state");
+            assert_eq!(
+                parameters["redirect_uri"],
+                format!("{origin}/api/v1/github/oauth/callback")
+            );
+            assert!(!authorization.as_str().contains("device"));
+        }
         assert!(valid_github_app_callback_code("a-b_c.d~9"));
         assert!(!valid_github_app_callback_code("invalid?code"));
     }
@@ -1466,6 +1608,24 @@ mod tests {
             response.headers()[header::CACHE_CONTROL],
             HeaderValue::from_static("no-store, max-age=0")
         );
+    }
+
+    #[test]
+    fn github_callback_query_rejects_duplicate_security_fields() {
+        for query in [
+            "code=first&code=second&state=state",
+            "code=code&state=first&state=second",
+            "code=code&state=state&error=first&error=second",
+        ] {
+            let uri = format!("{GITHUB_APP_CALLBACK_PATH}?{query}")
+                .parse()
+                .unwrap();
+            assert!(Query::<GitHubAppCallbackQuery>::try_from_uri(&uri).is_err());
+        }
+        let uri = format!("{GITHUB_APP_CALLBACK_PATH}?code=code&state=state")
+            .parse()
+            .unwrap();
+        assert!(Query::<GitHubAppCallbackQuery>::try_from_uri(&uri).is_ok());
     }
 
     #[test]

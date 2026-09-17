@@ -316,7 +316,7 @@ pub(crate) fn router() -> Router<AppState> {
             post(credentials::github_app_authorize_action).layer(DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
-            "/settings/credentials/github/callback",
+            credentials::GITHUB_APP_CALLBACK_PATH,
             get(credentials::github_app_callback),
         )
         .route(

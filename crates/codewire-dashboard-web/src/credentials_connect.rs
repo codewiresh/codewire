@@ -159,6 +159,18 @@ fn enrollment_error_reason(error: &ConnectError) -> Result<Option<String>, ()> {
     Ok(Some(info.reason))
 }
 
+pub(crate) fn github_authorization_feedback(error: &ConnectError) -> Option<&'static str> {
+    if error.code != ErrorCode::FailedPrecondition {
+        return None;
+    }
+    match enrollment_error_reason(error).ok()?.as_deref()? {
+        "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED" => Some("github-installation-required"),
+        "CREDENTIAL_ENROLLMENT_FAILED" => Some("github-app-failed"),
+        "CREDENTIAL_ENROLLMENT_UNSUPPORTED" => Some("github-app-response-invalid"),
+        _ => None,
+    }
+}
+
 pub(crate) struct CredentialSettingsData {
     pub(crate) credentials: Vec<CredentialRowView>,
     pub(crate) profiles: Vec<CredentialProfileRowView>,
@@ -887,7 +899,12 @@ fn build_settings_data(
         }
         credential_index.insert(
             credential.id.clone(),
-            (credential_display_name(&credential).to_owned(), slot),
+            (
+                credential_display_name(&credential).to_owned(),
+                slot,
+                status,
+                status_tone,
+            ),
         );
         rows.push(CredentialRowView {
             id: credential.id,
@@ -929,7 +946,7 @@ fn build_settings_data(
         let mut selected = BTreeMap::new();
         let mut entries = Vec::with_capacity(profile.entries.len());
         for entry in profile.entries {
-            let Some((credential_name, credential_slot)) =
+            let Some((credential_name, credential_slot, status, status_tone)) =
                 credential_index.get(&entry.credential_id)
             else {
                 return Err(invalid_metadata());
@@ -944,6 +961,8 @@ fn build_settings_data(
             entries.push(CredentialProfileEntryView {
                 slot: slot_label(&entry.capability_slot).ok_or_else(invalid_metadata)?,
                 credential: credential_name.clone(),
+                status,
+                status_tone,
             });
         }
         entries.sort_by(|a, b| a.slot.cmp(b.slot));
@@ -1297,6 +1316,14 @@ mod tests {
         assert_eq!(data.credentials[0].name, "legacy-reference");
         assert_eq!(data.choices.github[0].name, "verified-user");
         assert_eq!(data.profiles[0].entries[0].credential, "verified-user");
+        assert_eq!(
+            data.profiles[0].entries[0].status,
+            data.credentials[0].status
+        );
+        assert_eq!(
+            data.profiles[0].entries[0].status_tone,
+            data.credentials[0].status_tone
+        );
         assert_eq!(data.profiles[0].github, id);
     }
 
@@ -1330,6 +1357,72 @@ mod tests {
         })
         .into();
         assert!(build_settings_data(vec![unexpected_key], Vec::new()).is_err());
+    }
+
+    #[test]
+    fn github_installation_recovery_requires_one_closed_domain_bound_reason() {
+        for (domain, code, duplicate, expected) in [
+            ("codewire.sh", ErrorCode::FailedPrecondition, false, true),
+            (
+                "foreign.example",
+                ErrorCode::FailedPrecondition,
+                false,
+                false,
+            ),
+            ("codewire.sh", ErrorCode::Unavailable, false, false),
+            ("codewire.sh", ErrorCode::FailedPrecondition, true, false),
+        ] {
+            let info = codewire_proto::google::rpc::ErrorInfo {
+                domain: domain.into(),
+                reason: "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED".into(),
+                ..Default::default()
+            };
+            let mut error = ConnectError::new(code, "ignored-upstream-private-marker");
+            error.details.push(connectrpc::ErrorDetail::from_message(
+                "google.rpc.ErrorInfo",
+                &info,
+            ));
+            if duplicate {
+                error.details.push(error.details[0].clone());
+            }
+            assert_eq!(github_authorization_feedback(&error).is_some(), expected);
+            if expected {
+                assert_eq!(
+                    github_authorization_feedback(&error),
+                    Some("github-installation-required")
+                );
+                error.details[0].value = Some("malformed-base64".into());
+                assert_eq!(github_authorization_feedback(&error), None);
+            }
+        }
+        assert!(
+            github_authorization_feedback(&ConnectError::new(
+                ErrorCode::FailedPrecondition,
+                "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED"
+            ))
+            .is_none()
+        );
+        for (reason, feedback) in [
+            ("CREDENTIAL_ENROLLMENT_FAILED", Some("github-app-failed")),
+            (
+                "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
+                Some("github-app-response-invalid"),
+            ),
+            ("CREDENTIAL_REVISION_CHANGED", None),
+            ("unknown", None),
+        ] {
+            let info = codewire_proto::google::rpc::ErrorInfo {
+                domain: "codewire.sh".into(),
+                reason: reason.into(),
+                ..Default::default()
+            };
+            let mut error = ConnectError::new(ErrorCode::FailedPrecondition, "ignored");
+            error.details.push(connectrpc::ErrorDetail::from_message(
+                "google.rpc.ErrorInfo",
+                &info,
+            ));
+            assert_eq!(github_authorization_feedback(&error), feedback);
+        }
     }
 
     #[test]

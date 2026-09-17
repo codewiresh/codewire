@@ -503,10 +503,11 @@ impl GitHubAppAuthorizationOwner {
                 return Ok(installation.id);
             }
             if response.installations.len() < 100 {
-                break;
+                return Err(GitHubAppAuthorizationError::InstallationRequired);
             }
         }
-        Err(GitHubAppAuthorizationError::Denied)
+        // Exhausting the bounded listing is not proof that the App is absent.
+        Err(GitHubAppAuthorizationError::Unavailable)
     }
 
     async fn request(
@@ -532,6 +533,8 @@ pub enum GitHubAppAuthorizationError {
     InvalidAuthorizationCode,
     #[error("GitHub App authorization was denied")]
     Denied,
+    #[error("GitHub App repository access is not installed for this account")]
+    InstallationRequired,
     #[error("GitHub App authorization is unavailable")]
     Unavailable,
     #[error("GitHub App authorization response is invalid")]
@@ -557,6 +560,7 @@ impl GitHubAppRefreshError {
             GitHubAppAuthorizationError::Configuration
             | GitHubAppAuthorizationError::InvalidAuthorizationCode
             | GitHubAppAuthorizationError::Denied
+            | GitHubAppAuthorizationError::InstallationRequired
             | GitHubAppAuthorizationError::InvalidResponse => Self::Permanent,
         }
     }
@@ -819,7 +823,7 @@ fn valid_callback_url(value: &str) -> bool {
             && url.host_str().is_some()
             && url.username().is_empty()
             && url.password().is_none()
-            && url.path() == "/settings/credentials/github/callback"
+            && url.path() == "/api/v1/github/oauth/callback"
             && url.query().is_none()
             && url.fragment().is_none()
     })
@@ -864,7 +868,10 @@ fn valid_login(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -878,6 +885,8 @@ mod tests {
     #[derive(Default)]
     struct Provider {
         requests: Mutex<Vec<RecordedRequest>>,
+        missing_installation: AtomicBool,
+        full_installation_pages: bool,
     }
 
     #[async_trait]
@@ -898,6 +907,13 @@ mod tests {
                     "token_type": "bearer"
                 }),
                 1 => serde_json::json!({"id": 73, "login": "octo-user", "private": "ignored"}),
+                2.. if self.missing_installation.load(Ordering::SeqCst) => serde_json::json!({
+                    "installations": if self.full_installation_pages {
+                        vec![serde_json::json!({"id": 42, "app_slug": "another-app"}); 100]
+                    } else {
+                        Vec::new()
+                    }
+                }),
                 2 => serde_json::json!({
                     "installations": [{"id": 41, "app_slug": "codewire"}]
                 }),
@@ -914,6 +930,51 @@ mod tests {
                 })),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn missing_installation_returns_no_import_and_allows_a_fresh_attempt() {
+        let provider = Arc::new(Provider {
+            missing_installation: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let owner = GitHubAppAuthorizationOwner::new(config(), provider.clone());
+        assert!(matches!(
+            owner.complete(Zeroizing::new(b"first-code".to_vec())).await,
+            Err(GitHubAppAuthorizationError::InstallationRequired)
+        ));
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        // Installation is a separate provider action. A fresh authorization
+        // code must pass the complete exchange and identity checks again.
+        provider.missing_installation.store(false, Ordering::SeqCst);
+        provider.requests.lock().unwrap().clear();
+        assert!(
+            owner
+                .complete(Zeroizing::new(b"fresh-code".to_vec()))
+                .await
+                .is_ok()
+        );
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn bounded_installation_listing_does_not_claim_absence() {
+        let provider = Arc::new(Provider {
+            missing_installation: AtomicBool::new(true),
+            full_installation_pages: true,
+            ..Default::default()
+        });
+        let owner = GitHubAppAuthorizationOwner::new(config(), provider.clone());
+        assert!(matches!(
+            owner
+                .complete(Zeroizing::new(b"synthetic-code".to_vec()))
+                .await,
+            Err(GitHubAppAuthorizationError::Unavailable)
+        ));
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            2 + MAX_INSTALLATION_PAGES as usize
+        );
     }
 
     struct ExpiringProvider {
@@ -991,7 +1052,7 @@ mod tests {
             "Iv1.syntheticclient".into(),
             Zeroizing::new("synthetic-client-secret".into()),
             "codewire".into(),
-            "https://codewire.example/settings/credentials/github/callback".into(),
+            "https://codewire.example/api/v1/github/oauth/callback".into(),
         )
         .unwrap()
     }
@@ -1013,7 +1074,7 @@ mod tests {
         assert_eq!(requests[0].1, TOKEN_EXCHANGE_URL);
         assert_eq!(
             std::str::from_utf8(&requests[0].3).unwrap(),
-            "client_id=Iv1.syntheticclient&client_secret=synthetic-client-secret&code=synthetic-code-123&redirect_uri=https%3A%2F%2Fcodewire.example%2Fsettings%2Fcredentials%2Fgithub%2Fcallback"
+            "client_id=Iv1.syntheticclient&client_secret=synthetic-client-secret&code=synthetic-code-123&redirect_uri=https%3A%2F%2Fcodewire.example%2Fapi%2Fv1%2Fgithub%2Foauth%2Fcallback"
         );
         assert_eq!(requests[1].1, USER_URL);
         assert_eq!(
@@ -1110,13 +1171,17 @@ mod tests {
     #[test]
     fn configuration_and_callback_inputs_are_closed() {
         assert!(valid_callback_url(
-            "https://codewire.example/settings/credentials/github/callback"
+            "https://codewire.example/api/v1/github/oauth/callback"
+        ));
+        assert!(valid_callback_url(
+            "http://127.0.0.1:5173/api/v1/github/oauth/callback"
         ));
         for value in [
-            "https://codewire.example/settings/credentials/github/callback?next=bad",
-            "https://user@example.test/settings/credentials/github/callback",
+            "https://codewire.example/settings/credentials/github/callback",
+            "https://codewire.example/api/v1/github/oauth/callback?next=bad",
+            "https://user@example.test/api/v1/github/oauth/callback",
             "https://codewire.example/other",
-            "file:///settings/credentials/github/callback",
+            "file:///api/v1/github/oauth/callback",
         ] {
             assert!(!valid_callback_url(value), "accepted {value}");
         }

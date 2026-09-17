@@ -94,8 +94,13 @@ codewire.localhost {
 		reverse_proxy 127.0.0.1:8084
 	}
 
-	# All remaining API traffic is Rust orchestration. IdP, coordinator, and
-	# billing have narrower matchers above.
+	# Browser GitHub App authorization returns to the dashboard, not the API.
+	handle /api/v1/github/oauth/callback {
+		reverse_proxy 127.0.0.1:5173
+	}
+
+	# All remaining API traffic is Rust orchestration. IdP, coordinator,
+	# billing, and the browser GitHub callback have narrower matchers above.
 	handle /api/* {
 		reverse_proxy 127.0.0.1:8084
 	}

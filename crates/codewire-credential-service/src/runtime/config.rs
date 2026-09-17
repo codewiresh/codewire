@@ -175,7 +175,7 @@ fn github_app_authorization_config(
         (None, None, None) => Ok(None),
         (Some(client_id), Some(client_secret), Some(app_slug)) => {
             let callback = format!(
-                "{}/settings/credentials/github/callback",
+                "{}/api/v1/github/oauth/callback",
                 public_origin.to_str().map_err(|_| invalid)?
             );
             GitHubAppAuthorizationConfig::new(

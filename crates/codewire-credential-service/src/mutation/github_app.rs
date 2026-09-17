@@ -121,6 +121,7 @@ pub(super) fn github_app_error(error: GitHubAppAuthorizationError) -> Error {
         }
         GitHubAppAuthorizationError::InvalidAuthorizationCode => Error::InvalidInput,
         GitHubAppAuthorizationError::Denied => Error::EnrollmentFailed,
+        GitHubAppAuthorizationError::InstallationRequired => Error::GitHubInstallationRequired,
         GitHubAppAuthorizationError::InvalidResponse => Error::EnrollmentUnsupported,
     }
 }
@@ -138,6 +139,10 @@ mod tests {
         assert_eq!(
             github_app_error(GitHubAppAuthorizationError::Denied),
             Error::EnrollmentFailed
+        );
+        assert_eq!(
+            github_app_error(GitHubAppAuthorizationError::InstallationRequired),
+            Error::GitHubInstallationRequired
         );
         assert_eq!(
             github_app_error(GitHubAppAuthorizationError::InvalidResponse),

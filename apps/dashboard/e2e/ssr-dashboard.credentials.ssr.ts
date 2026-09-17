@@ -16,10 +16,9 @@ async function openGithubConnection(page: Page) {
   await expect(page.getByRole("dialog", { name: "Connect GitHub", exact: true })).toBeVisible();
 }
 
-async function completeGithubAppConnection(page: Page, code: string) {
-  const form = page.getByRole("form", { name: "GitHub App", exact: true });
+async function completeGithubAppConnection(page: Page, code: string, alterCallback?: (url: URL) => void) {
+  const form = page.locator('dialog[open] form[action^="/settings/credentials/_actions/github/authorize"]');
   const githubAuthorizePath = "/settings/credentials/_actions/github/authorize";
-  const githubInstallationPath = "/apps/codewire-synthetic/installations/new";
   // The native form hands the browser to GitHub after this 303. The Kind
   // fixture must not load a provider-controlled page, so submit the exact
   // form action through this browser context's request client instead. It
@@ -42,29 +41,34 @@ async function completeGithubAppConnection(page: Page, code: string) {
   expect(authorization.status()).toBe(303);
   expect(authorization.headers()["cache-control"]).toBe("no-store");
   const location = authorization.headers().location;
-  if (!location) throw new Error("GitHub App authorization omitted its installation redirect");
+  if (!location) throw new Error("GitHub App authorization omitted its authorization redirect");
   const target = new URL(location);
   expect(target.origin).toBe("https://github.com");
-  expect(target.pathname).toBe(githubInstallationPath);
+  expect(target.pathname).toBe("/login/oauth/authorize");
+  expect(target.searchParams.get("client_id")).toBe("Iv1.kindsynthetic");
+  expect(target.searchParams.get("redirect_uri")).toBe(`${ssrUrl}/api/v1/github/oauth/callback`);
+  expect([...target.searchParams.keys()].sort()).toEqual(["client_id", "redirect_uri", "state"]);
   state = target.searchParams.get("state") || "";
   if (!state) throw new Error("GitHub App authorization omitted its state fence");
   const cookie = authorization.headers()["set-cookie"] || "";
   expect(cookie).toContain("codewire_github_app_authorization=");
   expect(cookie).toContain("HttpOnly");
   expect(cookie).toContain("SameSite=Lax");
-  expect(cookie).toContain("Path=/settings/credentials/github/");
+  expect(cookie).toContain("Path=/api/v1/github/oauth/");
 
   const callbackUrl = new URL(
-    `/settings/credentials/github/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    `/api/v1/github/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
     ssrUrl,
-  ).toString();
-  const response = await page.context().request.get(callbackUrl, { maxRedirects: 0 });
+  );
+  alterCallback?.(callbackUrl);
+  const response = await page.context().request.get(callbackUrl.toString(), { maxRedirects: 0 });
   expect(response.status()).toBe(303);
   expect(response.headers()["cache-control"]).toBe("no-store, max-age=0");
   expect(response.headers()["referrer-policy"]).toBe("no-referrer");
   expect(response.headers()["set-cookie"] || "").toContain("Max-Age=0");
   const completion = response.headers().location;
   if (!completion) throw new Error("GitHub App callback omitted its completion redirect");
+  expect(completion).not.toContain(code);
   await page.goto(new URL(completion, ssrUrl).toString());
 }
 
@@ -102,12 +106,33 @@ test.describe("managed provider credential browser journey", () => {
       expect(settings?.status()).toBe(200);
       await expect(page.locator("dialog[open]")).toHaveCount(0);
       await openGithubConnection(page);
-      const form = page.getByRole("form", { name: "GitHub App", exact: true });
+      const connection = page.getByRole("dialog", { name: "Connect GitHub", exact: true });
+      const form = connection.locator("form");
       await expect(form.locator('[name="name"]')).toHaveCount(0);
-      await expect(form.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
+      await expect(connection.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
         .toHaveAttribute("href", "/assets/codewire/icons-v2.svg#icon-github");
-      await expect(form).toContainText("Your verified GitHub username names this connection");
-      await expect(form).not.toContainText("one-time code");
+      await expect(connection).toContainText("Your verified GitHub username names this connection");
+      await expect(connection).not.toContainText("one-time code");
+      await expect(connection.getByRole("link", { name: "Install/manage repository access" }))
+        .toHaveAttribute("href", "https://github.com/apps/codewire-synthetic/installations/new");
+      // These returns never reach provider exchange or publish a credential.
+      // Each retry starts from the newly rendered form and a fresh state cookie.
+      for (const alter of [
+        (url: URL) => url.searchParams.append("code", "duplicate-code"),
+        (url: URL) => url.searchParams.append("state", "duplicate-state"),
+        (url: URL) => url.searchParams.set("state", "wrong-state"),
+        (url: URL) => url.searchParams.set("code", "invalid?code"),
+      ]) {
+        await completeGithubAppConnection(page, "kind-synthetic-code-one", alter);
+        await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-app-failed&dialog=connect-github`);
+        await expect(connection).toBeVisible();
+        await expect(page.locator(".cw-credential-row")).toHaveCount(0);
+      }
+      await completeGithubAppConnection(page, "kind-synthetic-code-uninstalled");
+      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-installation-required&dialog=connect-github`);
+      await expect(connection.getByRole("alert")).toContainText("No credential was changed");
+      await expect(page.locator(".cw-credential-row")).toHaveCount(0);
+      // A newly authorized, now-installed account can complete normally.
       await completeGithubAppConnection(page, "kind-synthetic-code-one");
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=github-app-connected`);
       await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
@@ -147,7 +172,8 @@ test.describe("managed provider credential browser journey", () => {
       const credentialId = await githubChoice.locator("option", { hasText: name }).getAttribute("value");
       if (!credentialId) throw new Error("Verified GitHub connection was not selectable");
       await githubChoice.selectOption(credentialId);
-      await createProfile.getByRole("button", { name: "Create profile", exact: true }).click();
+      await page.getByRole("dialog", { name: "Create profile", exact: true })
+        .getByRole("button", { name: "Create profile", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=profile-created`);
       await expect(page.getByRole("status")).toHaveText("Credential profile created.");
       let profileRow = page.locator(".cw-profile-row", { hasText: profileName });
@@ -207,17 +233,21 @@ test.describe("managed provider credential browser journey", () => {
       // The normal destroy finished before removing its selected profile.
       await page.goto("/settings/credentials/");
       profileRow = page.locator(".cw-profile-row", { hasText: profileName });
-      await profileRow.getByRole("button", { name: "Edit profile", exact: true }).click();
-      await profileRow.getByText("Delete profile", { exact: true }).click();
-      await profileRow.getByRole("button", { name: `Delete ${profileName}`, exact: true }).click();
+      await profileRow.getByRole("button", { name: "Manage profile", exact: true }).click();
+      await page.getByRole("dialog", { name: profileName, exact: true })
+        .getByRole("button", { name: "Delete profile", exact: true }).click();
+      await page.getByRole("dialog", { name: `Delete ${profileName}?`, exact: true })
+        .getByRole("button", { name: "Delete profile", exact: true }).click();
       await expect(profileRow).toHaveCount(0);
       row = page.locator(".cw-credential-row", { hasText: name });
 
       await expect(row).toContainText("Active");
       await expect(row).toContainText("Generation 2");
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
-      await row.getByText("Revoke", { exact: true }).click();
-      await row.getByRole("button", { name: `Revoke ${name}`, exact: true }).click();
+      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
+        .getByRole("button", { name: "Revoke credential", exact: true }).click();
+      await page.getByRole("dialog", { name: `Revoke ${name}?`, exact: true })
+        .getByRole("button", { name: "Revoke credential", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-revoked`);
       await expect(page.getByRole("status")).toHaveText("Credential revoked.");
       row = page.locator(".cw-credential-row", { hasText: name });
@@ -225,8 +255,10 @@ test.describe("managed provider credential browser journey", () => {
       await expect(row).toContainText("Generation 3");
 
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
-      await row.getByText("Delete", { exact: true }).click();
-      await row.getByRole("button", { name: `Delete ${name}`, exact: true }).click();
+      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
+        .getByRole("button", { name: "Delete credential", exact: true }).click();
+      await page.getByRole("dialog", { name: `Delete ${name}?`, exact: true })
+        .getByRole("button", { name: "Delete credential", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-deleted`);
       await expect(page.getByRole("status")).toHaveText("Credential deleted.");
       await expect(page.locator(".cw-credential-row", { hasText: name })).toHaveCount(0);

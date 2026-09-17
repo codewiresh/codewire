@@ -33,8 +33,9 @@ pub(super) const GITHUB_APP_CLIENT_ID: &str = "Iv1.kindsynthetic";
 pub(super) const GITHUB_APP_CLIENT_SECRET: &str = "kind-synthetic-secret";
 pub(super) const GITHUB_APP_SLUG: &str = "codewire-synthetic";
 pub(super) const GITHUB_APP_CALLBACK_URL: &str =
-    "http://127.0.0.1:8090/settings/credentials/github/callback";
+    "http://127.0.0.1:8090/api/v1/github/oauth/callback";
 pub(super) const GITHUB_APP_USER_TOKEN: &str = "ghu_kind_synthetic_user_token_1234567890";
+const GITHUB_APP_UNINSTALLED_USER_TOKEN: &str = "ghu_kind_synthetic_uninstalled_user_1234567890";
 pub(super) const GITHUB_APP_REFRESHED_USER_TOKEN: &str =
     "ghu_kind_synthetic_refreshed_user_token_1234567890";
 const GITHUB_APP_INITIAL_REFRESH_TOKEN: &str =
@@ -235,6 +236,12 @@ impl SyntheticProvider {
                 "token_type": "bearer",
             }));
         }
+        if body == github_app_exchange_body("kind-synthetic-code-uninstalled").as_bytes() {
+            return json_response(json!({
+                "access_token": GITHUB_APP_UNINSTALLED_USER_TOKEN,
+                "token_type": "bearer",
+            }));
+        }
         if body != github_app_refresh_body().as_bytes() {
             return Err(BrokerUpstreamError::Protocol);
         }
@@ -279,6 +286,11 @@ impl SyntheticProvider {
             || !github_app_api_headers(headers)
         {
             return Err(BrokerUpstreamError::Protocol);
+        }
+        if headers.get("authorization").is_some_and(|value| {
+            value == format!("Bearer {GITHUB_APP_UNINSTALLED_USER_TOKEN}").as_str()
+        }) {
+            return json_response(json!({"installations": []}));
         }
         json_response(json!({
             "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG}],
@@ -492,7 +504,7 @@ impl BrokerUpstreamTransport for SyntheticProvider {
 
 fn github_app_exchange_body(code: &str) -> String {
     format!(
-        "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code={code}&redirect_uri=http%3A%2F%2F127.0.0.1%3A8090%2Fsettings%2Fcredentials%2Fgithub%2Fcallback"
+        "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code={code}&redirect_uri=http%3A%2F%2F127.0.0.1%3A8090%2Fapi%2Fv1%2Fgithub%2Foauth%2Fcallback"
     )
 }
 
@@ -515,19 +527,23 @@ fn exact_headers(headers: &HeaderMap, expected: &[(&str, &str)]) -> bool {
 }
 
 fn github_app_api_headers(headers: &HeaderMap) -> bool {
-    [GITHUB_APP_USER_TOKEN, GITHUB_APP_REFRESHED_USER_TOKEN]
-        .iter()
-        .any(|token| {
-            let authorization = format!("Bearer {token}");
-            exact_headers(
-                headers,
-                &[
-                    ("authorization", &authorization),
-                    ("accept", "application/vnd.github+json"),
-                    ("user-agent", "Codewire-Credential-Service"),
-                ],
-            )
-        })
+    [
+        GITHUB_APP_USER_TOKEN,
+        GITHUB_APP_REFRESHED_USER_TOKEN,
+        GITHUB_APP_UNINSTALLED_USER_TOKEN,
+    ]
+    .iter()
+    .any(|token| {
+        let authorization = format!("Bearer {token}");
+        exact_headers(
+            headers,
+            &[
+                ("authorization", &authorization),
+                ("accept", "application/vnd.github+json"),
+                ("user-agent", "Codewire-Credential-Service"),
+            ],
+        )
+    })
 }
 
 fn github_bearer_authorization(headers: &HeaderMap) -> bool {
@@ -882,6 +898,43 @@ mod tests {
             HeaderValue::from_static("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
         );
         assert!(provider.github_app_user(&wrong_token, &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn github_app_fixture_distinguishes_installation_recovery_without_repository_access() {
+        use codewire_credential_broker::{
+            GitHubAppAuthorizationConfig, GitHubAppAuthorizationError, GitHubAppAuthorizationOwner,
+        };
+        let provider = SyntheticProvider::new();
+        let config = GitHubAppAuthorizationConfig::new(
+            GITHUB_APP_CLIENT_ID.into(),
+            zeroize::Zeroizing::new(GITHUB_APP_CLIENT_SECRET.into()),
+            GITHUB_APP_SLUG.into(),
+            GITHUB_APP_CALLBACK_URL.into(),
+        )
+        .unwrap();
+        let owner = GitHubAppAuthorizationOwner::new(config, std::sync::Arc::new(provider));
+        assert!(matches!(
+            owner
+                .complete(zeroize::Zeroizing::new(
+                    b"kind-synthetic-code-uninstalled".to_vec()
+                ))
+                .await,
+            Err(GitHubAppAuthorizationError::InstallationRequired)
+        ));
+        assert!(
+            owner
+                .complete(zeroize::Zeroizing::new(
+                    GITHUB_APP_AUTHORIZATION_CODES[0].as_bytes().to_vec()
+                ))
+                .await
+                .is_ok()
+        );
+        let uninstalled = HeaderMap::from_iter([(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {GITHUB_APP_UNINSTALLED_USER_TOKEN}")).unwrap(),
+        )]);
+        assert!(!github_bearer_authorization(&uninstalled));
     }
 
     fn body(marker: &str) -> Vec<u8> {
