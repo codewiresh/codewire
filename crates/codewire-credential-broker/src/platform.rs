@@ -37,8 +37,9 @@ use codewire_protected_store::ProtectedValue;
 use uuid::Uuid;
 
 use crate::{
-    BrokerCredentialLease, BrokerCredentialRefreshRequest, BrokerLeaseError, BrokerLeaseProvider,
-    BrokerRefreshAdmission, BrokerRefreshError, CanonicalCodexOAuthBundle,
+    BrokerCredentialLease, BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest,
+    BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
+    CanonicalCodexOAuthBundle, GitHubAppUserOAuthBundle,
 };
 
 /// Exact Pod identity established by a trusted runtime authenticator.
@@ -457,7 +458,18 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             )
             .await
             .map_err(refresh_lease_error)?;
-        if admission.record.metadata.authentication_kind != CredentialAuthKind::OAuth
+        let expected_form = match request.kind {
+            BrokerCredentialRefreshKind::CodexOAuth => {
+                admission.record.metadata.provider.as_str() == "openai"
+                    && request.grant.capability_slot.as_str() == "codex"
+            }
+            BrokerCredentialRefreshKind::GitHubAppUserOAuth => {
+                admission.record.metadata.provider.as_str() == "github"
+                    && request.grant.capability_slot.as_str() == "github"
+            }
+        };
+        if !expected_form
+            || admission.record.metadata.authentication_kind != CredentialAuthKind::OAuth
             || !same_grant_binding(&admission.grant, &request.grant)
         {
             return Err(BrokerRefreshError::Denied);
@@ -519,6 +531,48 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             .await
             .map(|_| ())
             .map_err(refresh_store_error)
+    }
+
+    async fn commit_refresh_value(
+        &self,
+        permit: PlatformStartedRefresh,
+        value: ProtectedValue,
+    ) -> Result<(), BrokerRefreshError> {
+        if permit.instance_id != self.instance_id {
+            return Err(BrokerRefreshError::Denied);
+        }
+        let result = permit
+            .started
+            .prepare_result(&value)
+            .map_err(refresh_store_error)?;
+        drop(value);
+        if let Err(error) = self.credentials.stage_oauth_refresh(&result).await {
+            // A stage ACK can be lost. Discover only this exact immutable result's
+            // attempt; absence of staged output never permits another exchange.
+            let current = self
+                .credentials
+                .current_oauth_refresh_attempt(
+                    &self.session.credential_owner,
+                    &permit.request.grant.credential_id,
+                )
+                .await
+                .map_err(refresh_store_error)?;
+            if !current.is_some_and(|attempt| {
+                attempt.attempt_id == permit.request.refresh_id
+                    && attempt.expected == expected(&permit.request)
+                    && matches!(
+                        attempt.state,
+                        OAuthRefreshState::Staged | OAuthRefreshState::Committed
+                    )
+            }) {
+                return Err(refresh_store_error(error));
+            }
+        }
+        // Do not discard rotated output merely because a guest disconnected or
+        // its grant expired. Publication preserves storage's hard deadline; the
+        // shared runtime separately obtains fresh authority before consuming it.
+        self.promote(&permit.request, permit.request.refresh_id)
+            .await
     }
 }
 
@@ -782,44 +836,27 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         permit: Self::StartedRefresh,
         material: CanonicalCodexOAuthBundle,
     ) -> Result<(), BrokerRefreshError> {
-        if permit.instance_id != self.instance_id {
+        if permit.request.kind != BrokerCredentialRefreshKind::CodexOAuth {
             return Err(BrokerRefreshError::Denied);
         }
         let value = ProtectedValue::from_slice(material.as_bytes())
             .map_err(|_| BrokerRefreshError::InvalidResponse)?;
-        let result = permit
-            .started
-            .prepare_result(&value)
-            .map_err(refresh_store_error)?;
-        drop(value);
         drop(material);
-        if let Err(error) = self.credentials.stage_oauth_refresh(&result).await {
-            // A stage ACK can be lost. Discover only this exact immutable result's
-            // attempt; absence of staged output never permits another exchange.
-            let current = self
-                .credentials
-                .current_oauth_refresh_attempt(
-                    &self.session.credential_owner,
-                    &permit.request.grant.credential_id,
-                )
-                .await
-                .map_err(refresh_store_error)?;
-            if !current.is_some_and(|attempt| {
-                attempt.attempt_id == permit.request.refresh_id
-                    && attempt.expected == expected(&permit.request)
-                    && matches!(
-                        attempt.state,
-                        OAuthRefreshState::Staged | OAuthRefreshState::Committed
-                    )
-            }) {
-                return Err(refresh_store_error(error));
-            }
+        self.commit_refresh_value(permit, value).await
+    }
+
+    async fn commit_github_app_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        material: GitHubAppUserOAuthBundle,
+    ) -> Result<(), BrokerRefreshError> {
+        if permit.request.kind != BrokerCredentialRefreshKind::GitHubAppUserOAuth {
+            return Err(BrokerRefreshError::Denied);
         }
-        // Do not discard rotated output merely because a guest disconnected or
-        // its grant expired. Publication preserves storage's hard deadline; the
-        // shared runtime separately obtains fresh authority before consuming it.
-        self.promote(&permit.request, permit.request.refresh_id)
-            .await
+        let mut bytes = material.into_bytes();
+        let value = ProtectedValue::new(std::mem::take(&mut *bytes))
+            .map_err(|_| BrokerRefreshError::InvalidResponse)?;
+        self.commit_refresh_value(permit, value).await
     }
 
     async fn abort_credential_refresh(

@@ -830,6 +830,203 @@ mod tests {
         response
     }
 
+    /// Explicit configuration proves stock-client transport, not automatic
+    /// selected-profile bootstrap or provider authorization. The binary must
+    /// come from the checksum-verified Codewire image toolchain.
+    #[tokio::test]
+    #[ignore = "requires the explicitly supplied, verified stock gh 2.97.0 binary"]
+    async fn stock_gh_rest_and_graphql_use_authenticated_unix_ingress() {
+        use std::process::{Output, Stdio};
+
+        use anyhow::{Context as _, ensure};
+
+        const LIMIT: Duration = Duration::from_secs(5);
+
+        async fn capture(child: &mut tokio::process::Child) -> anyhow::Result<Output> {
+            let stdout = child.stdout.take().context("stock gh stdout")?;
+            let stderr = child.stderr.take().context("stock gh stderr")?;
+            let read = |stream: Box<dyn tokio::io::AsyncRead + Unpin + Send>| async move {
+                let mut bytes = Vec::new();
+                stream.take(16_385).read_to_end(&mut bytes).await?;
+                anyhow::ensure!(bytes.len() <= 16_384, "stock gh output exceeded the bound");
+                Ok::<_, anyhow::Error>(bytes)
+            };
+            let (status, stdout, stderr) = tokio::try_join!(
+                async { Ok::<_, anyhow::Error>(child.wait().await?) },
+                read(Box::new(stdout)),
+                read(Box::new(stderr)),
+            )?;
+            Ok(Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+
+        fn command(binary: &Path, root: &Path) -> tokio::process::Command {
+            let mut command = tokio::process::Command::new(binary);
+            command
+                .env_clear()
+                .env("HOME", root)
+                .env("XDG_CONFIG_HOME", root)
+                .env("XDG_CACHE_HOME", root)
+                .env("GH_CONFIG_DIR", root)
+                .env("TMPDIR", root)
+                .env("GH_HOST", "github.com")
+                .env("GH_TOKEN", "codewire-managed")
+                .env("GH_NO_UPDATE_NOTIFIER", "1")
+                .env("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1")
+                .current_dir(root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            command
+        }
+
+        let binary = PathBuf::from(
+            std::env::var_os("CODEWIRE_TEST_GH_BIN").expect("CODEWIRE_TEST_GH_BIN is required"),
+        );
+        assert!(
+            binary.is_absolute() && binary.is_file(),
+            "verified gh must be an absolute file"
+        );
+        let root = tempfile::tempdir().expect("isolated stock gh config");
+        let mut version = command(&binary, root.path())
+            .arg("--version")
+            .spawn()
+            .unwrap();
+        let result = tokio::time::timeout(LIMIT, capture(&mut version)).await;
+        if !matches!(&result, Ok(Ok(_))) {
+            version.kill().await.ok();
+            version.wait().await.ok();
+        }
+        let version = result
+            .expect("stock gh version deadline")
+            .expect("stock gh version");
+        assert!(version.status.success());
+        assert!(
+            version.stdout.starts_with(b"gh version 2.97.0 ("),
+            "stock gh version mismatch"
+        );
+
+        let harness = Harness::start().await;
+        // The pinned client's current public schema avoids its legacy-config
+        // migration; keep the unchanged-config assertion below meaningful.
+        let config = format!(
+            "version: 1\nhttp_unix_socket: {}\n",
+            harness.socket.display()
+        );
+        std::fs::write(root.path().join("config.yml"), &config).unwrap();
+        let client = harness.client(TEST_TOKEN).await;
+        let mut bridge = tokio::time::timeout(
+            LIMIT,
+            client.open_credential_bridge(harness.environment_id, harness.generation),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(LIMIT, bridge.receive())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .payload,
+            Some(GuestPayload::Ready(_))
+        ));
+
+        let proof = async {
+            for (args, method, path, response, expected) in [
+                (
+                    vec!["api", "user", "--jq", ".login"],
+                    "GET",
+                    "/user",
+                    br#"{"login":"transport-fixture"}"#.as_slice(),
+                    b"transport-fixture\n".as_slice(),
+                ),
+                (
+                    vec![
+                        "api",
+                        "graphql",
+                        "-f",
+                        "query=query { viewer { login } }",
+                        "--jq",
+                        ".data.viewer.login",
+                    ],
+                    "POST",
+                    "/graphql",
+                    br#"{"data":{"viewer":{"login":"transport-fixture"}}}"#.as_slice(),
+                    b"transport-fixture\n".as_slice(),
+                ),
+            ] {
+                let mut child = command(&binary, root.path()).args(args).spawn()?;
+                let result = tokio::time::timeout(LIMIT, async {
+                    let message = bridge.receive().await?.context("stock gh request frame")?;
+                    let Some(GuestPayload::Request(request)) = message.payload else {
+                        anyhow::bail!("stock gh did not send a provider request");
+                    };
+                    ensure!(request.capability_slot == "github" && request.route == "github-api");
+                    ensure!(
+                        request.method == method
+                            && request.path == path
+                            && request.query.is_empty()
+                    );
+                    if method == "POST" {
+                        let body: serde_json::Value = serde_json::from_slice(&request.body)?;
+                        ensure!(body == serde_json::json!({"query": "query { viewer { login } }"}));
+                    } else {
+                        ensure!(request.body.is_empty());
+                    }
+                    bridge
+                        .send_response_start(v1::CredentialBridgeResponseStart {
+                            request_id: request.request_id.clone(),
+                            status_code: 200,
+                            headers: vec![v1::CredentialHttpHeader {
+                                name: "content-type".into(),
+                                value: b"application/json".to_vec(),
+                            }],
+                        })
+                        .await?;
+                    bridge
+                        .send_response_body(v1::CredentialBridgeResponseBody {
+                            request_id: request.request_id.clone(),
+                            data: response.to_vec(),
+                        })
+                        .await?;
+                    bridge
+                        .send_response_end(v1::CredentialBridgeResponseEnd {
+                            request_id: request.request_id,
+                        })
+                        .await?;
+                    let output = capture(&mut child).await?;
+                    ensure!(output.status.success(), "stock gh returned a failure");
+                    ensure!(
+                        output.stdout == expected && output.stderr.is_empty(),
+                        "unexpected stock gh output"
+                    );
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+                if !matches!(&result, Ok(Ok(_))) {
+                    child.kill().await.ok();
+                    child.wait().await.ok();
+                }
+                result.context("stock gh transport deadline")??;
+            }
+            ensure!(std::fs::read_to_string(root.path().join("config.yml"))? == config);
+            ensure!(
+                !root.path().join("hosts.yml").exists(),
+                "stock gh saved authentication"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        drop(bridge);
+        harness.stop().await;
+        proof.expect("explicitly configured stock gh transport proof");
+    }
+
     #[tokio::test]
     async fn authenticated_unix_ingress_routes_stock_clients_and_rejects_unknown_destinations() {
         let harness = Harness::start().await;

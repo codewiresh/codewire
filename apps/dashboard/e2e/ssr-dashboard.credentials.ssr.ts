@@ -75,7 +75,7 @@ test.describe("managed provider credential browser journey", () => {
   );
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("connects GitHub, checks out a selected repository, then revokes and deletes it", async ({ page, isMobile }) => {
+  test("refreshes GitHub App authorization before a protected repository checkout, then revokes and deletes it", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop credential lifecycle contract");
     test.setTimeout(600_000);
     const name = "synthetic-user";
@@ -136,6 +136,7 @@ test.describe("managed provider credential browser journey", () => {
       await completeGithubAppConnection(page, "kind-synthetic-code-one");
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=github-app-connected`);
       await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
+      const beforePicker = await githubGitCounters();
       let rendered = await page.locator("body").textContent();
       expect(rendered?.includes("gho_")).toBe(false);
       expect(rendered?.includes("ghu_")).toBe(false);
@@ -227,6 +228,8 @@ test.describe("managed provider credential browser journey", () => {
       await picker.getByRole("combobox", { name: "GitHub credential profile" }).selectOption(`${profileId}@1`);
       const choices = picker.locator("[data-select-github-repository]");
       await expect(choices).toHaveCount(50);
+      const afterPicker = await githubGitCounters();
+      expect(afterPicker.appRefresh).toBe(beforePicker.appRefresh + 1);
       await expect(picker.getByRole("button", { name: /synthetic-user\/repository-50/ })).toBeDisabled();
       await picker.getByRole("searchbox", { name: "Filter this page" }).fill("repository-01");
       await expect(picker.locator("[data-select-github-repository]:visible")).toHaveCount(1);
@@ -281,6 +284,8 @@ test.describe("managed provider credential browser journey", () => {
       await expect(profileRow).toHaveCount(0);
       row = page.locator(".cw-credential-row", { hasText: name });
 
+      await expect(row).toContainText("Active");
+      await expect(row).toContainText("Generation 2");
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
       await row.getByText("Revoke", { exact: true }).click();
       await row.getByRole("button", { name: `Revoke ${name}`, exact: true }).click();
@@ -288,7 +293,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page.getByRole("status")).toHaveText("Credential revoked.");
       row = page.locator(".cw-credential-row", { hasText: name });
       await expect(row).toContainText("Revoked");
-      await expect(row).toContainText("Generation 2");
+      await expect(row).toContainText("Generation 3");
 
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
       await row.getByText("Delete", { exact: true }).click();

@@ -151,11 +151,12 @@ async fn run_connected(
     ]))
     .await
     .map_err(|_| RuntimeError::Provider)?;
-    // Browser App authorization has a separate fixed transport family. It is
-    // never passed to the Sandbox bridge, so guest requests cannot reach the
-    // OAuth exchange or account-discovery endpoints.
+    // Browser App authorization has a separate fixed transport family. Its
+    // owner is composed privately into the credential broker solely for
+    // durable refresh; guest requests still cannot reach its OAuth exchange
+    // or account-discovery endpoints.
     let github_app_authorization = match config.github_app_authorization {
-        Some(config) => Some(GitHubAppAuthorizationOwner::new(
+        Some(config) => Some(Arc::new(GitHubAppAuthorizationOwner::new(
             config,
             Arc::new(
                 ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
@@ -164,7 +165,7 @@ async fn run_connected(
                 .await
                 .map_err(|_| RuntimeError::Provider)?,
             ),
-        )),
+        ))),
         None => None,
     };
     let enrollment = enrollment_config(config.codex_executable, config.runtime_directory.clone())?;
@@ -174,6 +175,7 @@ async fn run_connected(
         pool.clone(),
         store.clone(),
         Arc::new(upstream.clone()),
+        github_app_authorization.clone(),
     ));
     let bridge = PlatformCredentialBridgeService::new(
         Arc::new(authorities.kubernetes_authenticator(client, pool.clone())),
@@ -181,6 +183,12 @@ async fn run_connected(
         PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
         upstream,
     );
+    let bridge = match &github_app_authorization {
+        Some(owner) => bridge
+            .with_github_app_authorization_owner(owner.clone())
+            .map_err(|_| RuntimeError::Configuration("GitHub App authorization owner"))?,
+        None => bridge,
+    };
     let bridge = ssh::configure(bridge, &config.runtime_directory)?;
     let mutation = Arc::new(CredentialMutationOwner::new(
         pool.clone(),
@@ -359,8 +367,11 @@ where
     repositories.start_shutdown();
     bridge.start_shutdown();
     stop.cancel();
-    let (mutation_result, bridge_result, ()) =
-        tokio::join!(mutation.shutdown(), bridge.shutdown(), async {
+    let (mutation_result, (), bridge_result, ()) = tokio::join!(
+        mutation.shutdown(),
+        repositories.shutdown(),
+        bridge.shutdown(),
+        async {
             if tokio::time::timeout(TRANSPORT_GRACE, async {
                 while servers.join_next().await.is_some() {}
             })
@@ -369,7 +380,8 @@ where
             {
                 servers.shutdown().await;
             }
-        });
+        }
+    );
     result
         .and(mutation_result.map_err(|_| RuntimeError::Cleanup))
         .and(bridge_result.map_err(|_| RuntimeError::Cleanup))

@@ -26,7 +26,13 @@ export const githubCheckoutInstall = [
   "printf 'checkout-before-install-ok\\n' > /workspace/github-checkout-proof",
 ].join("; ");
 
-type GitCounters = { advertisement: number; uploadPack: number };
+type GitCounters = {
+  advertisement: number;
+  uploadPack: number;
+  appRefresh: number;
+  refreshedAdvertisement: number;
+  refreshedUploadPack: number;
+};
 
 async function waitForGithubCheckoutSetup(environmentId: string) {
   // Running makes Exec available, but setup continues asynchronously. Read
@@ -62,19 +68,39 @@ export async function githubGitCounters(): Promise<GitCounters> {
     "--context", context, "-n", "codewire-e2e", "logs",
     "deployment/codewire-credential-service", "-c", "credential-service", "--tail=1000",
   ], { timeout: 15_000, maxBuffer: 1024 * 1024 });
-  const counters: GitCounters = { advertisement: 0, uploadPack: 0 };
+  const counters: GitCounters = {
+    advertisement: 0, uploadPack: 0, appRefresh: 0,
+    refreshedAdvertisement: 0, refreshedUploadPack: 0,
+  };
   for (const line of stdout.split("\n")) {
     if (!line.startsWith("{")) continue;
     const event = JSON.parse(line);
-    if (event.target !== "codewire_kind_credential_fixture"
-      || event.fields?.event !== "github_git_response") continue;
-    const { github_advertisement_calls: advertisement, github_upload_pack_calls: uploadPack } = event.fields;
+    if (event.target !== "codewire_kind_credential_fixture") continue;
+    if (event.fields?.event === "github_app_refresh") {
+      const { github_app_refresh_calls: appRefresh } = event.fields;
+      if (!Number.isSafeInteger(appRefresh) || appRefresh < 0) {
+        throw new Error("Invalid synthetic GitHub App refresh counter");
+      }
+      counters.appRefresh = Math.max(counters.appRefresh, appRefresh);
+      continue;
+    }
+    if (event.fields?.event !== "github_git_response") continue;
+    const {
+      github_advertisement_calls: advertisement,
+      github_upload_pack_calls: uploadPack,
+      github_refreshed_advertisement_calls: refreshedAdvertisement,
+      github_refreshed_upload_pack_calls: refreshedUploadPack,
+    } = event.fields;
     if (!Number.isSafeInteger(advertisement) || advertisement < 0
-      || !Number.isSafeInteger(uploadPack) || uploadPack < 0) {
+      || !Number.isSafeInteger(uploadPack) || uploadPack < 0
+      || !Number.isSafeInteger(refreshedAdvertisement) || refreshedAdvertisement < 0
+      || !Number.isSafeInteger(refreshedUploadPack) || refreshedUploadPack < 0) {
       throw new Error("Invalid synthetic Git response counters");
     }
     counters.advertisement = Math.max(counters.advertisement, advertisement);
     counters.uploadPack = Math.max(counters.uploadPack, uploadPack);
+    counters.refreshedAdvertisement = Math.max(counters.refreshedAdvertisement, refreshedAdvertisement);
+    counters.refreshedUploadPack = Math.max(counters.refreshedUploadPack, refreshedUploadPack);
   }
   return counters;
 }
@@ -98,6 +124,9 @@ export async function verifyGithubCheckout(page: Page, orgId: string, profileId:
   const after = await githubGitCounters();
   expect(after.advertisement).toBeGreaterThan(before.advertisement);
   expect(after.uploadPack).toBeGreaterThan(before.uploadPack);
+  expect(after.appRefresh).toBe(before.appRefresh);
+  expect(after.refreshedAdvertisement).toBeGreaterThan(before.refreshedAdvertisement);
+  expect(after.refreshedUploadPack).toBeGreaterThan(before.refreshedUploadPack);
 
   const response = await page.request.post(`${serverUrl}/codewire.v1.ExecService/Exec`, {
     timeout: 45_000,
