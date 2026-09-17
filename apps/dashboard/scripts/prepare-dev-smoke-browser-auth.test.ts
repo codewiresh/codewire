@@ -1,6 +1,17 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import * as fsPromises from "node:fs/promises";
+
+const realFsPromises = { ...fsPromises };
+let rejectedRemovalPath = "";
+mock.module("node:fs/promises", () => ({
+  ...realFsPromises,
+  rm: async (...args: Parameters<typeof rm>) => {
+    if (args[0] === rejectedRemovalPath) throw new Error("hostile-owned-remove-error-canary");
+    return realFsPromises.rm(...args);
+  },
+}));
 
 let activeContext: FakeContext;
 let launchEnvironment: Record<string, string> = {};
@@ -10,6 +21,8 @@ let redirectMode = "";
 let rejectAction = false;
 let cleanupSignalEmitted = false;
 let credentialFills = 0;
+const settingsSignOutButtons = ["Sign out", "Sign out", "Sign out of this browser"];
+let matchedSignOutButtons: string[] = [];
 
 class FakeResponse {
   constructor(private readonly path: string, private readonly code: number) {}
@@ -99,6 +112,10 @@ class FakePage {
       } else if (name.includes("approve device")) {
         this.respond("/device/_actions/approve", 200);
       } else if (name.includes("sign out")) {
+        matchedSignOutButtons = settingsSignOutButtons.filter((label) => options!.name instanceof RegExp
+          && options.name.test(label));
+        if (matchedSignOutButtons.length !== 1) throw new Error("synthetic strict locator ambiguity");
+        if (redirectMode === "hostile-sign-out") throw new Error("hostile-password-token-body-canary");
         if (redirectMode === "sign-out-failure") {
           this.respond("/settings/_actions/sign-out", 500);
           return;
@@ -174,6 +191,7 @@ async function fixture(mode = "success") {
   rejectAction = mode === "action-rejection" || mode === "cleanup-signal";
   cleanupSignalEmitted = false;
   credentialFills = 0;
+  matchedSignOutButtons = [];
   const directory = await mkdtemp(`${root}/case.`);
   const config = join(directory, "login");
   const credential = join(directory, "dedicated.json");
@@ -315,12 +333,45 @@ test("signal handling remains active and idempotent through browser cleanup", as
   expect(await readdir(value.config)).toEqual([]);
 });
 
+test("multiple session revoke controls select only sign out of this browser", async () => {
+  expect(settingsSignOutButtons.filter((label) => /sign out/i.test(label))).toHaveLength(3);
+  const value = await fixture();
+  await helper.main(value.args, 5_000);
+  expect(matchedSignOutButtons).toEqual(["Sign out of this browser"]);
+  expect(activeContext.signOuts).toBe(1);
+  expect(activeContext.session).toBe(false);
+});
+
 test("browser sign-out failure is reported after remaining local cleanup", async () => {
   const value = await fixture("sign-out-failure");
-  await expect(helper.main(value.args, 5_000)).rejects.toThrow("cleanup-incomplete");
+  const failure = await helper.main(value.args, 5_000).catch((error) => error);
+  expect(failure.stage).toBe("browser-sign-out");
+  expect(failure.cleanupFailures).toEqual(["browser-sign-out:failed"]);
   expect(activeContext.session).toBe(true);
   expect(await readdir(value.config)).toEqual([]);
   expect(JSON.parse(await readFile(value.credential, "utf8"))).toEqual(document());
+});
+
+test("opaque browser errors never enter original or cleanup diagnostics", async () => {
+  const value = await fixture("hostile-sign-out");
+  const failure = await helper.main(value.args, 5_000).catch((error) => error);
+  expect(failure.stage).toBe("browser-sign-out");
+  expect(failure.cleanupFailures).toEqual(["browser-sign-out:failed"]);
+  expect(JSON.stringify(failure)).not.toContain("hostile-password-token-body-canary");
+  expect(await readdir(value.config)).toEqual([]);
+});
+
+test("successful body with failed owned-directory cleanup is still nonzero", async () => {
+  const value = await fixture();
+  rejectedRemovalPath = join(value.config, ".browser-profile");
+  try {
+    const failure = await helper.main(value.args, 5_000).catch((error) => error);
+    expect(failure.stage).toBe("cleanup-incomplete");
+    expect(failure.cleanupFailures).toContain("browser-profile-remove:failed");
+    expect(JSON.stringify(failure)).not.toContain("hostile-owned-remove-error-canary");
+  } finally {
+    rejectedRemovalPath = "";
+  }
 });
 
 test("wrong identity and challenge drift revoke the owned login and clear only config contents", async () => {
