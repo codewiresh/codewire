@@ -7,14 +7,21 @@ use crate::view::EnvironmentCreateFormView;
 use crate::view::{
     AccountAccessView, ApiKeysPageView, AuthFormView, CredentialSettingsView, DashboardView,
     DevicePageView, EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
-    OrganizationFormView, OrganizationRow, PresetsPageView, SecretBucketPageView,
-    SecretProjectsPageView, SettingsPageView, SetupTwoFactorView, TerminalPageView,
-    TwoFactorRecoveryView,
+    OrganizationFormView, OrganizationRow, PersonalSecretsPageView, PresetsPageView,
+    SecretBucketPageView, SecretProjectsPageView, SettingsPageView, SetupTwoFactorView,
+    TerminalPageView, TwoFactorRecoveryView,
 };
 
 #[derive(Template)]
 #[template(path = "home.html")]
 pub(crate) struct HomeTemplate;
+
+#[derive(Template)]
+#[template(path = "settings-secrets.html")]
+pub(crate) struct SettingsSecretsTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) page: &'a PersonalSecretsPageView,
+}
 
 #[derive(Template)]
 #[template(path = "admin-overview.html")]

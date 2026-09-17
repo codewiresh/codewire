@@ -16,6 +16,7 @@ mod github_repositories;
 mod invitations;
 mod organization_governance;
 mod organizations;
+mod personal_secrets;
 mod public;
 mod sandbox_resize;
 mod secrets_presets;
@@ -187,6 +188,21 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/{slug}/billing/_actions/setup", post(billing::setup))
         .route("/{slug}/secrets", get(slash_redirect))
         .route("/{slug}/secrets/", get(secrets_presets::secrets_page))
+        // Legacy personal URLs keep no organization authority. Static user
+        // aliases use the exact same typed, bounded handlers as Settings.
+        .route("/{slug}/secrets/user/", get(personal_secrets::legacy_page))
+        .route(
+            "/{slug}/secrets/user/_actions/set",
+            post(personal_secrets::set_action).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/{slug}/secrets/user/_actions/rename",
+            post(personal_secrets::rename_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/{slug}/secrets/user/_actions/delete",
+            post(personal_secrets::delete_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
         .route(
             "/{slug}/secrets/_actions/projects/create",
             post(secrets_presets::create_secret_project),
@@ -279,6 +295,20 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/settings/", get(settings::settings))
         .route("/settings/credentials", get(slash_redirect))
         .route("/settings/credentials/", get(credentials::page))
+        .route("/settings/secrets", get(slash_redirect))
+        .route("/settings/secrets/", get(personal_secrets::page))
+        .route(
+            "/settings/secrets/_actions/set",
+            post(personal_secrets::set_action).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/settings/secrets/_actions/rename",
+            post(personal_secrets::rename_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/secrets/_actions/delete",
+            post(personal_secrets::delete_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
         .route(
             "/settings/credentials/_actions/credentials/api-key/add",
             post(credentials::add_api_key_action).layer(DefaultBodyLimit::max(8 * 1024)),

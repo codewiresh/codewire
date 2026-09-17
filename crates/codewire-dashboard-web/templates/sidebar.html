@@ -11,7 +11,7 @@
     <details class="cw-org-switcher">
       <summary>
         <span class="cw-org-initial" aria-hidden="true">P</span>
-        <span class="cw-org-switcher-label">{% if view.has_selected_organization %}{{ view.selected_organization_name }}{% else %}Choose organization{% endif %}</span>
+        <span class="cw-org-switcher-label">{% if view.has_selected_organization %}{{ view.selected_organization_name }}{% else if view.organization_navigation_unavailable %}Organizations unavailable{% else %}Choose organization{% endif %}</span>
         <svg class="cw-icon cw-org-chevron" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-down"/></svg>
       </summary>
       <section class="cw-org-menu">
@@ -40,6 +40,10 @@
       {% include "sandbox-rail.html" %}
     </div>
   </section>
+  {% else if view.organization_navigation_unavailable %}
+  <section class="cw-console-empty-org" aria-label="Sandboxes"><h2 class="cw-sr-only">Sandboxes</h2><p>Organization navigation is temporarily unavailable. Personal settings still work.</p></section>
+  {% else if view.has_organizations %}
+  <section class="cw-console-empty-org" aria-label="Sandboxes"><h2 class="cw-sr-only">Sandboxes</h2><p>Choose an organization above to view its Sandboxes.</p></section>
   {% else %}
   <section class="cw-console-empty-org" aria-label="Sandboxes"><h2 class="cw-sr-only">Sandboxes</h2><p>Create an organization to start a Sandbox.</p><a href="{{ view.new_organization_url }}">New organization</a></section>
   {% endif %}
@@ -74,13 +78,13 @@
         {% if view.has_selected_organization %}
         <li><a href="{{ view.selected_organization_url }}" data-search-item data-search-text="sandboxes environments all">All Sandboxes</a></li>
         <li><a href="/{{ view.selected_organization_slug }}/secrets/" data-search-item data-search-text="application secrets projects organization">Application-secret projects</a></li>
-        <li><a href="/{{ view.selected_organization_slug }}/secrets/user/" data-search-item data-search-text="personal application secrets">Personal application secrets</a></li>
         <li><a href="/{{ view.selected_organization_slug }}/secrets/organization/" data-search-item data-search-text="organization application secrets">Organization application secrets</a></li>
         {% for sandbox in view.sandboxes %}<li><a href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/" data-search-item data-search-text="sandbox {{ sandbox.name }} {{ sandbox.id }} {{ sandbox.state }}">Sandbox · {{ sandbox.name }}</a></li>{% endfor %}
         {% endif %}
         <li><a href="{{ view.settings_url }}" data-search-item data-search-text="settings account security sessions">Settings</a></li>
         <li><a href="/settings/{{ view.global_context_query }}" data-search-item data-search-text="personal account details security active sessions">Account</a></li>
         <li><a href="/settings/credentials/{{ view.global_context_query }}" data-search-item data-search-text="personal credentials provider accounts github profiles git commit identity">Credentials</a></li>
+        <li><a href="/settings/secrets/{{ view.global_context_query }}" data-search-item data-search-text="personal application secrets">Personal application secrets</a></li>
       </ul>
       <p class="cw-command-empty" data-quick-search-empty hidden>No matching destination.</p>
     </form>
