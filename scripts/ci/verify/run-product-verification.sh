@@ -786,6 +786,7 @@ run_deploy() {
 
   install_helm
   scripts/ci/tests/test-deploy-prod-render.sh
+  scripts/ci/tests/test-mesh-ingress-protocol.sh
   local default_mesh_render
   default_mesh_render="$(helm template test apps/cli/charts/codewire-mesh \
     --set mesh.baseURL=https://mesh.test)"

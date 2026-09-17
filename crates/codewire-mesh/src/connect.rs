@@ -1015,6 +1015,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mesh_json_unary_http10_closes_without_keepalive_and_preserves_authorization() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (addr, task) = start(MemoryStore::new()).await;
+        for (organization, credential, status, error_code) in [
+            (ORG, Some(API_KEY), 200, None),
+            (ORG, None, 401, Some("unauthenticated")),
+            ("foreign-org", Some(API_KEY), 403, Some("permission_denied")),
+        ] {
+            let body = serde_json::json!({"orgId": organization}).to_string();
+            let authorization = credential
+                .map(|token| format!("Authorization: Bearer {token}\r\n"))
+                .unwrap_or_default();
+            // No Connection: close or write-half shutdown: HTTP/1.0 itself must close.
+            let request = format!(
+                "POST /codewire.v1.MeshNetworkService/ListMeshNetworks HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nConnect-Protocol-Version: 1\r\nContent-Length: {}\r\n{authorization}\r\n{body}",
+                body.len()
+            );
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(StdDuration::from_secs(5), stream.read_to_end(&mut response))
+                .await
+                .expect("HTTP/1.0 unary response must reach EOF without client-forced close")
+                .unwrap();
+            let response = String::from_utf8(response).unwrap();
+            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(
+                headers.starts_with(&format!("HTTP/1.0 {status} ")),
+                "{headers}"
+            );
+            let headers = headers.to_ascii_lowercase();
+            assert!(!headers.contains("keep-alive"), "{headers}");
+            assert!(!headers.contains("transfer-encoding: chunked"), "{headers}");
+            if let Some(code) = error_code {
+                let error: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(error["code"], code);
+            } else {
+                let response: ListMeshNetworksResponse = serde_json::from_str(body).unwrap();
+                assert!(response.networks.is_empty());
+            }
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn network_deletion_requires_owner_and_empty_nodes_and_retires_name() {
         let store = MemoryStore::new();
         store
