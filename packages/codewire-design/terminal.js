@@ -207,6 +207,6 @@
     activeSession?.socket.close(1000, "page closed");
   });
 
-  const standalone = document.querySelector(".cw-terminal-page [data-terminal-root]");
+  const standalone = document.querySelector(".cw-terminal-page:not([data-durable-terminal-page]) [data-terminal-root]");
   if (standalone) activeSession = openTerminal(standalone);
 })();

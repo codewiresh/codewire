@@ -12,7 +12,7 @@
 
     const document = root.ownerDocument;
     const view = document.defaultView;
-    const section = root.closest(".cw-sandbox-terminal");
+    const section = root.closest("[data-terminal-tab-panel]") || root.closest(".cw-sandbox-terminal");
     const copyButton = section?.querySelector("[data-terminal-copy]");
     const feedback = section?.querySelector("[data-terminal-copy-status]");
     const fontFamily = view.getComputedStyle(root).getPropertyValue("--font-mono").trim() || "monospace";
