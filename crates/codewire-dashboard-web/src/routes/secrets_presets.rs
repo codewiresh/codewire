@@ -1,6 +1,6 @@
 use axum::{
     Form,
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
@@ -11,6 +11,7 @@ use connectrpc::{ConnectError, ErrorCode};
 use serde::Deserialize;
 
 use crate::{
+    environment_drafts::DraftReturn,
     response::{HTMX_REQUEST, error_page, login_redirect, render_page, render_template},
     routes::organization_governance::{
         action_context, connect_page_error, get_context, mutation_redirect, valid_identifier,
@@ -43,9 +44,11 @@ pub(super) async fn secrets_page(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     Query(query): Query<FeedbackQuery>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = secrets_path(&slug);
+    let draft = secret_draft(raw.as_deref());
+    let continuation = secret_navigation_path(secrets_path(&slug), &draft);
     let (dashboard, organization, cookie) =
         match get_context(&state, &headers, &slug, &continuation).await {
             Ok(context) => context,
@@ -58,6 +61,8 @@ pub(super) async fn secrets_page(
         };
     let token = new_csrf_token();
     let page = SecretProjectsPageView {
+        creation_draft_query: draft.query(),
+        creation_return_url: secret_creation_return(&organization.slug, &draft),
         projects,
         form: SecretProjectFormView::default(),
         csrf_token: token.clone(),
@@ -79,9 +84,11 @@ pub(super) async fn secret_bucket_page(
     State(state): State<AppState>,
     Path((slug, bucket)): Path<(String, String)>,
     Query(query): Query<FeedbackQuery>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = secret_bucket_path(&slug, &bucket);
+    let draft = secret_draft(raw.as_deref());
+    let continuation = secret_navigation_path(secret_bucket_path(&slug, &bucket), &draft);
     let (dashboard, organization, cookie) =
         match get_context(&state, &headers, &slug, &continuation).await {
             Ok(context) => context,
@@ -93,8 +100,8 @@ pub(super) async fn secret_bucket_page(
         &organization,
         &bucket,
         SecretFormView::default(),
-        secrets_message(&query.message),
-        secrets_error(&query.error),
+        (secrets_message(&query.message), secrets_error(&query.error)),
+        &draft,
     )
     .await
     {
@@ -116,15 +123,18 @@ pub(super) async fn secret_bucket_page(
 pub(super) async fn create_secret_project(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
     Form(submission): Form<SecretProjectCreateSubmission>,
 ) -> Response {
+    let draft = secret_draft(raw.as_deref());
+    let continuation = secret_navigation_path(secrets_path(&slug), &draft);
     let (dashboard, organization, cookie) = match action_context(
         &state,
         &headers,
         &slug,
         &submission.csrf,
-        secrets_path(&slug),
+        continuation.clone(),
     )
     .await
     {
@@ -132,7 +142,14 @@ pub(super) async fn create_secret_project(
         Err(response) => return response,
     };
     if !organization.can_admin {
-        return mutation_redirect(&state, secrets_path(&slug), "", "not-authorized", &headers);
+        return secret_mutation_redirect(
+            &state,
+            secrets_path(&organization.slug),
+            &draft,
+            "",
+            "not-authorized",
+            &headers,
+        );
     }
     let mut form = SecretProjectFormView {
         name: submission.name.trim().to_owned(),
@@ -146,11 +163,10 @@ pub(super) async fn create_secret_project(
         return render_project_form_error(
             &state,
             &headers,
-            dashboard,
-            organization,
-            cookie,
+            (dashboard, organization, cookie),
             form,
             &submission.csrf,
+            &draft,
         )
         .await;
     }
@@ -162,20 +178,26 @@ pub(super) async fn create_secret_project(
     )
     .await
     {
-        Ok(()) => mutation_redirect(&state, secrets_path(&slug), "project-created", "", &headers),
+        Ok(()) => secret_mutation_redirect(
+            &state,
+            secrets_path(&organization.slug),
+            &draft,
+            "project-created",
+            "",
+            &headers,
+        ),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
-            login_redirect(&secrets_path(&slug), &headers)
+            login_redirect(&continuation, &headers)
         }
         Err(error) => {
             apply_project_error(&mut form, &error);
             render_project_form_error(
                 &state,
                 &headers,
-                dashboard,
-                organization,
-                cookie,
+                (dashboard, organization, cookie),
                 form,
                 &submission.csrf,
+                &draft,
             )
             .await
         }
@@ -185,15 +207,17 @@ pub(super) async fn create_secret_project(
 pub(super) async fn delete_secret_project(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
     Form(submission): Form<SecretProjectDeleteSubmission>,
 ) -> Response {
+    let draft = secret_draft(raw.as_deref());
     let (_, organization, cookie) = match action_context(
         &state,
         &headers,
         &slug,
         &submission.csrf,
-        secrets_path(&slug),
+        secret_navigation_path(secrets_path(&slug), &draft),
     )
     .await
     {
@@ -201,8 +225,16 @@ pub(super) async fn delete_secret_project(
         Err(response) => return response,
     };
     if !organization.can_admin || !valid_identifier(&submission.project_id) {
-        return mutation_redirect(&state, secrets_path(&slug), "", "not-authorized", &headers);
+        return secret_mutation_redirect(
+            &state,
+            secrets_path(&organization.slug),
+            &draft,
+            "",
+            "not-authorized",
+            &headers,
+        );
     }
+    let path = secrets_path(&organization.slug);
     let result = secrets_presets_connect::delete_secret_project(
         &state,
         cookie,
@@ -210,22 +242,18 @@ pub(super) async fn delete_secret_project(
         submission.project_id,
     )
     .await;
-    secret_mutation_result(
-        &state,
-        &headers,
-        secrets_path(&slug),
-        result,
-        "project-deleted",
-    )
+    secret_mutation_result(&state, &headers, path, &draft, result, "project-deleted")
 }
 
 pub(super) async fn set_secret(
     State(state): State<AppState>,
     Path((slug, bucket)): Path<(String, String)>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
     Form(submission): Form<SecretSetSubmission>,
 ) -> Response {
-    let continuation = secret_bucket_path(&slug, &bucket);
+    let draft = secret_draft(raw.as_deref());
+    let continuation = secret_navigation_path(secret_bucket_path(&slug, &bucket), &draft);
     let (dashboard, organization, cookie) = match action_context(
         &state,
         &headers,
@@ -239,7 +267,14 @@ pub(super) async fn set_secret(
         Err(response) => return response,
     };
     if !bucket_can_manage(&organization, &bucket) {
-        return mutation_redirect(&state, continuation, "", "not-authorized", &headers);
+        return secret_mutation_redirect(
+            &state,
+            secret_bucket_path(&organization.slug, &bucket),
+            &draft,
+            "",
+            "not-authorized",
+            &headers,
+        );
     }
     let mut form = SecretFormView {
         key: submission.key.trim().to_owned(),
@@ -255,6 +290,7 @@ pub(super) async fn set_secret(
             &bucket,
             form,
             &submission.csrf,
+            &draft,
         )
         .await;
     }
@@ -269,7 +305,14 @@ pub(super) async fn set_secret(
     )
     .await;
     match result {
-        Ok(()) => mutation_redirect(&state, continuation, "secret-saved", "", &headers),
+        Ok(()) => secret_mutation_redirect(
+            &state,
+            secret_bucket_path(&organization.slug, &bucket),
+            &draft,
+            "secret-saved",
+            "",
+            &headers,
+        ),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&continuation, &headers)
         }
@@ -282,6 +325,7 @@ pub(super) async fn set_secret(
                 &bucket,
                 form,
                 &submission.csrf,
+                &draft,
             )
             .await
         }
@@ -291,10 +335,12 @@ pub(super) async fn set_secret(
 pub(super) async fn delete_secret(
     State(state): State<AppState>,
     Path((slug, bucket)): Path<(String, String)>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
     Form(submission): Form<SecretKeySubmission>,
 ) -> Response {
-    let continuation = secret_bucket_path(&slug, &bucket);
+    let draft = secret_draft(raw.as_deref());
+    let continuation = secret_navigation_path(secret_bucket_path(&slug, &bucket), &draft);
     let (_, organization, cookie) = match action_context(
         &state,
         &headers,
@@ -308,8 +354,16 @@ pub(super) async fn delete_secret(
         Err(response) => return response,
     };
     if !bucket_can_manage(&organization, &bucket) || !valid_secret_key(&submission.key) {
-        return mutation_redirect(&state, continuation, "", "not-authorized", &headers);
+        return secret_mutation_redirect(
+            &state,
+            secret_bucket_path(&organization.slug, &bucket),
+            &draft,
+            "",
+            "not-authorized",
+            &headers,
+        );
     }
+    let path = secret_bucket_path(&organization.slug, &bucket);
     let result = secrets_presets_connect::delete_secret(
         &state,
         cookie,
@@ -318,16 +372,18 @@ pub(super) async fn delete_secret(
         submission.key,
     )
     .await;
-    secret_mutation_result(&state, &headers, continuation, result, "secret-deleted")
+    secret_mutation_result(&state, &headers, path, &draft, result, "secret-deleted")
 }
 
 pub(super) async fn rename_secret(
     State(state): State<AppState>,
     Path((slug, bucket)): Path<(String, String)>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
     Form(submission): Form<SecretRenameSubmission>,
 ) -> Response {
-    let continuation = secret_bucket_path(&slug, &bucket);
+    let draft = secret_draft(raw.as_deref());
+    let continuation = secret_navigation_path(secret_bucket_path(&slug, &bucket), &draft);
     let (_, organization, cookie) = match action_context(
         &state,
         &headers,
@@ -345,8 +401,16 @@ pub(super) async fn rename_secret(
         || !valid_secret_key(&submission.new_key)
         || submission.key == submission.new_key
     {
-        return mutation_redirect(&state, continuation, "", "invalid", &headers);
+        return secret_mutation_redirect(
+            &state,
+            secret_bucket_path(&organization.slug, &bucket),
+            &draft,
+            "",
+            "invalid",
+            &headers,
+        );
     }
+    let path = secret_bucket_path(&organization.slug, &bucket);
     let result = secrets_presets_connect::rename_secret(
         &state,
         cookie,
@@ -356,7 +420,7 @@ pub(super) async fn rename_secret(
         submission.new_key,
     )
     .await;
-    secret_mutation_result(&state, &headers, continuation, result, "secret-renamed")
+    secret_mutation_result(&state, &headers, path, &draft, result, "secret-renamed")
 }
 
 pub(super) async fn presets_page(
@@ -559,9 +623,10 @@ async fn bucket_page(
     organization: &crate::view::OrganizationContext,
     bucket: &str,
     form: SecretFormView,
-    message: &str,
-    error: &str,
+    feedback: (&str, &str),
+    draft: &DraftReturn,
 ) -> Result<SecretBucketPageView, ConnectError> {
+    let (message, error) = feedback;
     let (title, description, can_manage) = match bucket {
         "organization" => (
             "Organization Secrets".to_owned(),
@@ -594,6 +659,8 @@ async fn bucket_page(
         secrets_presets_connect::secrets(state, cookie, &organization.id, bucket_scope(bucket))
             .await?;
     Ok(SecretBucketPageView {
+        creation_draft_query: draft.query(),
+        creation_return_url: secret_creation_return(&organization.slug, draft),
         title,
         description,
         bucket: bucket.to_owned(),
@@ -609,18 +676,30 @@ async fn bucket_page(
 async fn render_project_form_error(
     state: &AppState,
     headers: &HeaderMap,
-    dashboard: crate::view::DashboardView,
-    organization: crate::view::OrganizationContext,
-    cookie: HeaderValue,
+    context: (
+        crate::view::DashboardView,
+        crate::view::OrganizationContext,
+        HeaderValue,
+    ),
     form: SecretProjectFormView,
     csrf: &str,
+    draft: &DraftReturn,
 ) -> Response {
+    let (dashboard, organization, cookie) = context;
     let projects =
         match secrets_presets_connect::secret_projects(state, cookie, &organization.id).await {
             Ok(projects) => projects,
-            Err(error) => return connect_page_error(error, &organization.secrets_url, headers),
+            Err(error) => {
+                return connect_page_error(
+                    error,
+                    &secret_navigation_path(secrets_path(&organization.slug), draft),
+                    headers,
+                );
+            }
         };
     let page = SecretProjectsPageView {
+        creation_draft_query: draft.query(),
+        creation_return_url: secret_creation_return(&organization.slug, draft),
         projects,
         form,
         csrf_token: csrf.to_owned(),
@@ -659,18 +738,20 @@ async fn render_secret_form_error(
     bucket: &str,
     form: SecretFormView,
     csrf: &str,
+    draft: &DraftReturn,
 ) -> Response {
     let (dashboard, organization, cookie) = context;
-    let mut page = match bucket_page(state, cookie, &organization, bucket, form, "", "").await {
-        Ok(page) => page,
-        Err(error) => {
-            return connect_page_error(
-                error,
-                &secret_bucket_path(&organization.slug, bucket),
-                headers,
-            );
-        }
-    };
+    let mut page =
+        match bucket_page(state, cookie, &organization, bucket, form, ("", ""), draft).await {
+            Ok(page) => page,
+            Err(error) => {
+                return connect_page_error(
+                    error,
+                    &secret_navigation_path(secret_bucket_path(&organization.slug, bucket), draft),
+                    headers,
+                );
+            }
+        };
     page.csrf_token = csrf.to_owned();
     if headers.contains_key(HTMX_REQUEST) {
         render_template(
@@ -881,14 +962,77 @@ fn secret_mutation_result(
     state: &AppState,
     headers: &HeaderMap,
     path: String,
+    draft: &DraftReturn,
     result: Result<(), ConnectError>,
     message: &str,
 ) -> Response {
     match result {
-        Ok(()) => mutation_redirect(state, path, message, "", headers),
-        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, headers),
-        Err(error) => mutation_redirect(state, path, "", mutation_error_code(&error), headers),
+        Ok(()) => secret_mutation_redirect(state, path, draft, message, "", headers),
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&secret_navigation_path(path, draft), headers)
+        }
+        Err(error) => {
+            secret_mutation_redirect(state, path, draft, "", mutation_error_code(&error), headers)
+        }
     }
+}
+
+// Presentation-only navigation is parsed separately from mutation authority.
+// Bad handles drop navigation, not a valid secret operation or its CSRF fence.
+fn secret_draft(raw: Option<&str>) -> DraftReturn {
+    match DraftReturn::parse(raw) {
+        exact @ DraftReturn::Exact(_) => exact,
+        _ => DraftReturn::NoRequest,
+    }
+}
+
+fn secret_navigation_path(path: String, draft: &DraftReturn) -> String {
+    format!("{path}{}", draft.query())
+}
+
+fn secret_creation_return(slug: &str, draft: &DraftReturn) -> String {
+    if matches!(draft, DraftReturn::Exact(_)) {
+        secret_navigation_path(format!("/{slug}/new/"), draft)
+    } else {
+        String::new()
+    }
+}
+
+fn secret_feedback_target(path: String, draft: &DraftReturn, message: &str, error: &str) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if let DraftReturn::Exact(id) = draft {
+        query.append_pair("creation_draft", id);
+    }
+    if !message.is_empty() {
+        query.append_pair("message", message);
+    } else if !error.is_empty() {
+        query.append_pair("error", error);
+    }
+    let query = query.finish();
+    if query.is_empty() {
+        path
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
+fn secret_mutation_redirect(
+    state: &AppState,
+    path: String,
+    draft: &DraftReturn,
+    message: &str,
+    error: &str,
+    headers: &HeaderMap,
+) -> Response {
+    // Preserve the existing token rotation and response behavior, without
+    // handing a query-bearing path to its feedback-appending API.
+    mutation_redirect(
+        state,
+        secret_feedback_target(path, draft, message, error),
+        "",
+        "",
+        headers,
+    )
 }
 
 fn mutation_error_code(error: &ConnectError) -> &'static str {
@@ -954,6 +1098,10 @@ fn presets_error(value: &str) -> &'static str {
         _ => "",
     }
 }
+
+#[cfg(test)]
+#[path = "secrets_presets_navigation_tests.rs"]
+mod navigation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1103,6 +1251,8 @@ mod tests {
             billing_url: "/billing".into(),
         };
         let secret_page = SecretBucketPageView {
+            creation_draft_query: String::new(),
+            creation_return_url: String::new(),
             title: "Organization Secrets".into(),
             description: "Write-only application secrets.",
             bucket: "organization".into(),

@@ -1321,6 +1321,8 @@ pub(crate) struct SecretProjectFormView {
 
 #[derive(Debug)]
 pub(crate) struct SecretProjectsPageView {
+    pub(crate) creation_draft_query: String,
+    pub(crate) creation_return_url: String,
     pub(crate) projects: Vec<SecretProjectRow>,
     pub(crate) form: SecretProjectFormView,
     pub(crate) csrf_token: String,
@@ -1341,6 +1343,8 @@ pub(crate) struct SecretFormView {
 
 #[derive(Debug)]
 pub(crate) struct SecretBucketPageView {
+    pub(crate) creation_draft_query: String,
+    pub(crate) creation_return_url: String,
     pub(crate) title: String,
     pub(crate) description: &'static str,
     pub(crate) bucket: String,

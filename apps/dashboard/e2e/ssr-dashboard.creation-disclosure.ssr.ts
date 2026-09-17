@@ -58,6 +58,22 @@ const fixtureUrl = () => {
   return `${origin}/reference/fixtures/create-sandbox.html`;
 };
 
+test("secret settings fixture provides an explicit metadata-only Return link", async ({ page }) => {
+  await page.goto(fixtureUrl().replace("create-sandbox.html", `application-secrets.html?creation_draft=${draftId}`));
+  const returnLink = page.getByRole("link", { name: "Return to Sandbox creation", exact: true });
+  await expect(returnLink).toBeVisible();
+  await expect(returnLink).toHaveAttribute("href", `create-sandbox.html?creation_draft=${draftId}`);
+  const marker = "synthetic-private-input-not-navigation";
+  await page.getByLabel("Key", { exact: true }).fill("SYNTHETIC_KEY");
+  await page.getByLabel("Value", { exact: true }).fill(marker);
+  await expect(page.getByLabel("Value", { exact: true })).toHaveAttribute("type", "password");
+  const destination = new URL(await returnLink.getAttribute("href") || "", page.url());
+  expect([...destination.searchParams.entries()]).toEqual([["creation_draft", draftId]]);
+  expect(destination.href).not.toContain(marker);
+  // This fixture proves native presentation only. Real registered-route tests
+  // own mutation/422/auth behavior; the later managed flow owns exact recovery.
+});
+
 // Controlled HTML response exercises only the browser controller. Rust DTO/
 // route checks and managed journeys separately own authentication/catalog proof.
 async function restoredCard(page: Page, draft: Draft): Promise<string> {

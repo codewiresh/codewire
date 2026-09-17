@@ -131,6 +131,38 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(page.locator("[data-drawer]")).toBeVisible();
     await page.reload();
     await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+    // Exercise the actual native Settings detour, not a direct fabricated
+    // return URL: validation, mutation, and explicit Return retain this exact
+    // older draft while the new source remains available but unattached.
+    await page.getByRole("link", { name: "Manage secret projects", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/secrets/?creation_draft=${requestedDraft}`);
+    const returnLink = page.getByRole("link", { name: "Return to Sandbox creation", exact: true });
+    await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
+    await page.getByText("New Project", { exact: true }).click();
+    const secretCsrf = await page.locator('input[name="_csrf"]').first().inputValue();
+    await page.getByLabel("Project name", { exact: true }).fill(" ");
+    const validationResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().includes("/secrets/_actions/projects/create"));
+    await page.getByRole("button", { name: "Create Project", exact: true }).click();
+    expect((await validationResponse).status()).toBe(422);
+    await expect(page.getByRole("alert")).toContainText("Name is required");
+    await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(page.locator('input[name="_csrf"]').first()).toHaveValue(secretCsrf);
+    const detourProjectName = `return-project-${crypto.randomUUID()}`;
+    await page.getByLabel("Project name", { exact: true }).fill(detourProjectName);
+    await Promise.all([
+      page.waitForURL(`${ssrUrl}/${slug}/secrets/?creation_draft=${requestedDraft}&message=project-created`),
+      page.getByRole("button", { name: "Create Project", exact: true }).click(),
+    ]);
+    const [createdProject] = await sql`SELECT id FROM secret_projects WHERE org_id = ${orgId} AND name = ${detourProjectName}`;
+    expect(createdProject?.id).toBeTruthy();
+    await returnLink.click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
+    await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+    await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
+    await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
     await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
     const csrf = await page.locator('[name="_csrf"]').inputValue();
@@ -144,6 +176,8 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(form).toHaveAttribute("data-create-draft-restored", "true");
     await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
     await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
+    await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
     await expect(page.locator('[name="_csrf"]')).toHaveValue(csrf);
