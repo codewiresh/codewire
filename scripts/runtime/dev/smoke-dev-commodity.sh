@@ -1776,9 +1776,36 @@ assert_application_source_update() {
   ' "$file" >/dev/null || die 'application source update acknowledgement did not match the exact submitted operation and selection'
 }
 
+run_application_secret_exec() {
+  local guest_script="$1" phase="$2" deadline="$3" remaining timeout_seconds
+  local output="$TMPDIR_SMOKE/app-exec-$phase.out" error="$TMPDIR_SMOKE/app-exec-$phase.err"
+  while :; do
+    remaining=$((deadline - $(seconds_now)))
+    ((remaining > 0)) || die 'timed out waiting for managed application startup projection; output suppressed'
+    timeout_seconds="$SMOKE_EXEC_TIMEOUT"
+    ((timeout_seconds <= remaining)) || timeout_seconds="$remaining"
+    if cw_with_timeout "$timeout_seconds" run --no-tty "$ENV_ID" -- /bin/sh -c "$guest_script" \
+        >"$output" 2>"$error"; then
+      grep -qx application-secret-check-ok "$output" || die 'managed exec omitted application receipt'
+      return 0
+    fi
+    # Running/setup-complete precedes post-start configuration. Retry only its
+    # exact fixed guest failure, never projection, preservation or transport errors.
+    if ! { [[ ! -s "$error" && "$(wc -c <"$output")" == 45 ]] &&
+           grep -qx 'application check failed: startup-projection' "$output"; } &&
+       ! { [[ ! -s "$output" && "$(wc -c <"$error")" == 45 ]] &&
+           grep -qx 'application check failed: startup-projection' "$error"; }; then
+      die 'managed application-secret exec failed; output suppressed'
+    fi
+    (( $(seconds_now) < deadline )) || die 'timed out waiting for managed application startup projection; output suppressed'
+    sleep 5
+  done
+}
+
 run_application_secrets_smoke() {
-  local phase expected project generation=0 previous_uid='' guest_script hashes_name=''
+  local phase expected project generation=0 previous_uid='' guest_script hashes_name='' phase_deadline
   for phase in a b clear; do
+    phase_deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
     case "$phase" in
       a)
         project="platform:id:${APP_SECRET_IDS[0]}"; expected="${APP_SECRET_HASHES[0]:-}"
@@ -1823,7 +1850,7 @@ run_application_secrets_smoke() {
     fi
     # Generation fences the owning Temporal workflow, not each source edit.
     # Restart completion additionally requires a new exact Pod UID below.
-    wait_until 'current application source, workflow authority and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
+    wait_until 'current application source, workflow authority and completed setup' "$phase_deadline" \
       application_environment_ready "$project" "$generation"
     # The all-scope journey stays on the public API/data plane: setup readiness
     # plus its child-visible marker prove restart completion and workspace
@@ -1850,9 +1877,7 @@ run_application_secrets_smoke() {
     else
       guest_script="$(application_guest_check "$expected")"
     fi
-    cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- /bin/sh -c "$guest_script" \
-      >"$TMPDIR_SMOKE/app-exec-$phase.out" 2>"$TMPDIR_SMOKE/app-exec-$phase.err" || die 'managed application-secret exec failed; output suppressed'
-    grep -qx application-secret-check-ok "$TMPDIR_SMOKE/app-exec-$phase.out" || die 'managed exec omitted application receipt'
+    run_application_secret_exec "$guest_script" "$phase" "$phase_deadline"
     run_application_secret_pty "$guest_script" "$phase"
     cw_with_timeout 30 list "$ENV_ID" --output json >"$TMPDIR_SMOKE/app-sessions-$phase.json" || die 'session metadata inspection failed'
     assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-*.json "$TMPDIR_SMOKE"/app-*.out "$TMPDIR_SMOKE"/app-*.err "$TMPDIR_SMOKE"/app-pty-*.log "$TMPDIR_SMOKE/create.out"
@@ -1882,11 +1907,15 @@ application_environment_destroyed() {
 cleanup_application_shared_scope() {
   local scope="$1" attempts_name="$2"
   local -n attempts="$attempts_name"
-  local key index rc=0 metadata="$TMPDIR_SMOKE/app-cleanup-$scope.json"
+  local key index status rc=0 metadata="$TMPDIR_SMOKE/app-cleanup-$scope.json"
+  local classification="$TMPDIR_SMOKE/app-cleanup-$scope-commands.tsv"
   local -a scope_args=("--$scope")
   for index in "${!attempts[@]}"; do
     key="${attempts[$index]}"
-    if ! cw_with_timeout 30 secrets --platform "${scope_args[@]}" list --output json >"$metadata" 2>/dev/null; then
+    if cw_with_timeout 30 secrets --platform "${scope_args[@]}" list --output json >"$metadata" \
+        2>"$TMPDIR_SMOKE/app-cleanup-$scope-list-$index.err"; then status=0; else status=$?; fi
+    printf 'list\t%s\t%s\n' "$index" "$status" >>"$classification"
+    if [[ "$status" != 0 ]]; then
       rc=1
       continue
     fi
@@ -1894,17 +1923,22 @@ cleanup_application_shared_scope() {
         length == 1 and (.[0] | type == "array" and
           all(.[]; type == "object" and (.key | type) == "string") and
           ([.[] | select(.key == $key)] | length) <= 1)
-      ' "$metadata" >/dev/null; then
+      ' "$metadata" >/dev/null 2>"$TMPDIR_SMOKE/app-cleanup-$scope-metadata-$index.err"; then
       rc=1
       continue
     fi
-    if jq -es --arg key "$key" '.[0] | any(.[]; .key == $key)' "$metadata" >/dev/null; then
-      cw_with_timeout 30 secrets --platform "${scope_args[@]}" delete "$key" \
+    if jq -es --arg key "$key" '.[0] | any(.[]; .key == $key)' "$metadata" >/dev/null \
+        2>>"$TMPDIR_SMOKE/app-cleanup-$scope-metadata-$index.err"; then
+      if cw_with_timeout 30 secrets --platform "${scope_args[@]}" delete "$key" \
         >"$TMPDIR_SMOKE/app-cleanup-$scope-$index.out" \
-        2>"$TMPDIR_SMOKE/app-cleanup-$scope-$index.err" || rc=1
+        2>"$TMPDIR_SMOKE/app-cleanup-$scope-$index.err"; then status=0; else status=$?; rc=1; fi
+      printf 'delete\t%s\t%s\n' "$index" "$status" >>"$classification"
     fi
   done
-  if ! cw_with_timeout 30 secrets --platform "${scope_args[@]}" list --output json >"$metadata" 2>/dev/null; then
+  if cw_with_timeout 30 secrets --platform "${scope_args[@]}" list --output json >"$metadata" \
+      2>"$TMPDIR_SMOKE/app-cleanup-$scope-list-final.err"; then status=0; else status=$?; fi
+  printf 'list\tfinal\t%s\n' "$status" >>"$classification"
+  if [[ "$status" != 0 ]]; then
     return 1
   fi
   local attempted_json
@@ -1913,7 +1947,7 @@ cleanup_application_shared_scope() {
     length == 1 and (.[0] | type == "array" and
       all(.[]; type == "object" and (.key | type) == "string") and
       all(.[]; (.key as $key | $attempted | index($key) | not)) and length == 0)
-  ' "$metadata" >/dev/null || rc=1
+  ' "$metadata" >/dev/null 2>"$TMPDIR_SMOKE/app-cleanup-$scope-metadata-final.err" || rc=1
   return "$rc"
 }
 
