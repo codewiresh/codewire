@@ -278,6 +278,62 @@ class FixtureTests(unittest.TestCase):
             FIXTURE.start(self.args)
         self.assertEqual(self.kube.objects, {})
 
+    def test_failure_receipt_has_only_closed_stage_and_code_before_cleanup(self):
+        for failure, stage, code in (("create", "create", "operation-failed"),
+                                     ("wait", "readiness", "operation-failed"),
+                                     ("endpoint", "observe", "endpoint-identity"),
+                                     ("exec", "observe", "operation-failed")):
+            with self.subTest(failure=failure):
+                self.kube.failure = failure
+                self.args.state_dir = self.parent / ("receipt-" + failure)
+                original_stop = FIXTURE.stop
+
+                def inspect_then_stop(kube, state, directory):
+                    self.assertEqual(json.loads((directory / "failure.json").read_text()),
+                                     {"version": 1, "stage": stage, "code": code})
+                    return original_stop(kube, state, directory)
+
+                with patch.object(FIXTURE, "stop", side_effect=inspect_then_stop):
+                    with self.assertRaises(FIXTURE.Failure):
+                        FIXTURE.start(self.args)
+                self.assertFalse((self.args.state_dir / "ready.json").exists())
+                self.assertNotIn("private mock provider error", (self.args.state_dir / "failure.json").read_text())
+                self.assertEqual(self.kube.objects, {})
+
+    def test_observation_failure_allowlist_and_hostile_default(self):
+        for index, (message, code) in enumerate([
+            *FIXTURE.OBSERVATION_FAILURE_CODES.items(),
+            ("private-provider-key-status-event-canary", "operation-failed"),
+        ]):
+            with self.subTest(code=code, index=index):
+                self.args.state_dir = self.parent / ("observe-" + str(index))
+                with patch.object(FIXTURE, "observe", side_effect=FIXTURE.Failure(message)):
+                    with self.assertRaisesRegex(FIXTURE.Failure, "owned objects cleaned"):
+                        FIXTURE.start(self.args)
+                receipt = (self.args.state_dir / "failure.json").read_text()
+                self.assertEqual(json.loads(receipt), {"version": 1, "stage": "observe", "code": code})
+                self.assertNotIn(message, receipt)
+                self.assertFalse((self.args.state_dir / "ready.json").exists())
+                self.assertEqual(json.loads((self.args.state_dir / "finish.json").read_text()),
+                                 {"version": 1, "deleted": True})
+                self.assertEqual(self.kube.objects, {})
+
+    def test_failure_receipt_write_error_still_cleans_owned_objects(self):
+        self.kube.failure = "wait"
+        original_write = FIXTURE.write_json
+
+        def reject_failure_receipt(path, value):
+            if path.name == "failure.json":
+                raise OSError("private-filesystem-canary")
+            return original_write(path, value)
+
+        with patch.object(FIXTURE, "write_json", side_effect=reject_failure_receipt):
+            with self.assertRaises(OSError):
+                FIXTURE.start(self.args)
+        self.assertEqual(self.kube.objects, {})
+        self.assertFalse((self.args.state_dir / "ready.json").exists())
+        self.assertTrue((self.args.state_dir / "finish.json").exists())
+
     def test_ambiguous_create_never_adopts_or_deletes_unknown_uid(self):
         self.kube.failure = "create"
         with self.assertRaisesRegex(FIXTURE.Failure, "cleanup is incomplete"):

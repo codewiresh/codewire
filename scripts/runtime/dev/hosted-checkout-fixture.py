@@ -31,6 +31,24 @@ LABEL = "codewire.sh/acceptance-checkout-nonce"
 MAX_OUTPUT = 1024 * 1024
 READINESS_SECONDS = 240
 READINESS_PROCESS_SECONDS = READINESS_SECONDS + 5
+# Closed observation discriminators: never persist exception text or provider data.
+OBSERVATION_FAILURE_CODES = {
+    "fixture lifetime expired": "lifetime-expired",
+    "fixture object identity changed": "object-identity",
+    "fixture object UID changed": "object-identity",
+    "invalid fixture Pod shape": "pod-shape",
+    "fixture is not ready": "pod-not-ready",
+    "fixture image changed": "pod-image",
+    "invalid fixture container status": "runtime-image",
+    "fixture runtime image changed": "runtime-image",
+    "invalid fixture Service shape": "service-shape",
+    "fixture service changed": "service-shape",
+    "invalid fixture service address": "service-address",
+    "invalid fixture endpoint shape": "endpoint-shape",
+    "fixture endpoint identity changed": "endpoint-identity",
+    "invalid fixture ready metadata": "ready-metadata",
+    "invalid public key": "ready-metadata",
+}
 IMAGE = re.compile(r"(?:ghcr\.io/codewiresh/workspace|nexus\.example\.invalid/oci-approved/codewire/workspace)@sha256:[0-9a-f]{64}")
 # Public route/trust binding from owning Infra clusters/kubernetes-access.json
 # main a7cb24de1ed865e44cc728530d4f47f64c33202c, dev-cluster. No alternatives.
@@ -375,6 +393,7 @@ def start(args):
              "deadline": time.time() + 1800, "resources": []}
     write_json(args.state_dir / "state.json", state)
     kube = Kube(args.context, args.namespace, args.state_dir)
+    stage = "create"
     try:
         for manifest in manifests(state, key):
             resource = {"kind": manifest["kind"], "name": manifest["metadata"]["name"], "uid": None}
@@ -383,14 +402,22 @@ def start(args):
             created = kube.run(["create", "-f", "-", "-o", "json"], manifest)
             resource["uid"] = check_object(created, state, resource)
             write_json(args.state_dir / "state.json", state)
+        stage = "readiness"
         kube.wait_ready(state["name"])
+        stage = "observe"
         ready = observe(kube, state)
         write_json(args.state_dir / "ready.json", ready)
-    except (Failure, OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (Failure, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        code = (OBSERVATION_FAILURE_CODES.get(str(error), "operation-failed")
+                if stage == "observe" and isinstance(error, Failure) else "operation-failed")
         try:
-            stop(kube, state, args.state_dir)
-        except Failure:
-            raise Failure("fixture startup failed and cleanup is incomplete; preserve state") from None
+            write_json(args.state_dir / "failure.json", {"version": 1, "stage": stage, "code": code})
+        finally:
+            # Receipt I/O failure must not skip independently owned cleanup.
+            try:
+                stop(kube, state, args.state_dir)
+            except Failure:
+                raise Failure("fixture startup failed and cleanup is incomplete; preserve state") from None
         raise Failure("fixture startup failed; owned objects cleaned") from None
 
 
