@@ -203,6 +203,16 @@ validate_local_platform_options() {
     die 'normal CLI or matching native artifacts are unavailable'
 }
 
+local_platform_prepare_mesh_owner() {
+  [[ -n "$LOCAL_PLATFORM_NETWORK_ID" || "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 1 ]] || return 0
+  # Browser-assisted OAuth owns a separate temporary HOME. Select the already
+  # authenticated organization through the public CLI in this VM's HOME too,
+  # so native Mesh metadata is created here without copying any credential.
+  cw_with_timeout 30 org set "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
+    >"$TMPDIR_SMOKE/local-mesh-owner.out" 2>"$TMPDIR_SMOKE/local-mesh-owner.err" ||
+    die 'isolated hosted Mesh organization selection failed'
+}
+
 local_platform_read_networks() {
   local destination="$1"
   cw_with_timeout 30 network list --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" --output json \
@@ -814,6 +824,7 @@ local_platform_journey() {
   cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
+  local_platform_prepare_mesh_owner
   local_platform_prepare_network
   local_platform_validate_network
   if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then prepare_provider_ssh; fi

@@ -316,6 +316,10 @@ cw_with_timeout() {
     'network revoke --network '*)
       [[ "$4" == shared-dev-network && "$6" == "$ORG_ID" && "$7" == "$SMOKE_NAME" ]] || fail 'wrong owned network-node revocation'
       touch "$TMPDIR_SMOKE/network-node-revoked" ;;
+    'org set '*)
+      [[ $# == 3 && "$3" == "$ORG_ID" ]] || fail 'Mesh owner selection changed the authenticated organization'
+      [[ "$FAILURE" != mesh-owner ]] || return 1
+      touch "$TMPDIR_SMOKE/mesh-owner-selected" ;;
     'env info --local '*" --output json")
       jq -n --arg id "$ENV_ID" --arg project "platform:id:$PROJECT_ID" --arg profile "platform:id:$PROFILE_ID" \
         --arg server "$CODEWIRE_SERVER_URL" --arg user "$LP_USER_ID" --arg org "$ORG_ID" --arg failure "$FAILURE" \
@@ -377,6 +381,21 @@ cw_with_timeout() {
   esac
 }
 wait_until() { shift 2; "$@" || die 'fixture wait failed'; }
+fixture
+local_platform_prepare_mesh_owner
+[[ ! -e "$TMPDIR_SMOKE/mesh-owner-selected" ]] || fail 'network-free journey changed Mesh owner selection'
+pass
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+local_platform_prepare_mesh_owner
+[[ -e "$TMPDIR_SMOKE/mesh-owner-selected" ]] || fail 'named-network journey did not configure its isolated Mesh owner'
+pass
+fixture
+LOCAL_PLATFORM_DISPOSABLE_NETWORK=1
+local_platform_prepare_mesh_owner
+[[ -e "$TMPDIR_SMOKE/mesh-owner-selected" ]] || fail 'disposable network did not configure its isolated Mesh owner'
+pass
+invalid_mesh_owner() { fixture; LOCAL_PLATFORM_DISPOSABLE_NETWORK=1; FAILURE=mesh-owner; local_platform_prepare_mesh_owner; }
+expect_failure mesh-owner invalid_mesh_owner
 fixture
 LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
 local_platform_validate_network
