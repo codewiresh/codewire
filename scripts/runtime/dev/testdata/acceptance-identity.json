@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "status": "not-enrolled",
+  "status": "enrolled",
   "email": "hello@codewire.sh",
-  "userId": null,
-  "organizationId": null
+  "userId": "d8bab82c243675e4a9b75aa1750da72c",
+  "organizationId": "cf4bc133bbc34f65a88b6f7d23bfc6cc"
 }
