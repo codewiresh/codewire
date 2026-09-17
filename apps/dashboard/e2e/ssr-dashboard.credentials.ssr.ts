@@ -98,8 +98,33 @@ test.describe("managed provider credential browser journey", () => {
         httpOnly: true, sameSite: "Lax",
       }]);
 
-      const settings = await page.goto("/settings/credentials/");
-      expect(settings?.status()).toBe(200);
+      // Begin in the real Create form and take its native setup link. The
+      // Settings detour must retain this draft, not invent a fresh one after
+      // provider authorization or implicitly attach the newly added profile.
+      const setupDispatches: string[] = [];
+      const observeSetup = (request: import("@playwright/test").Request) => {
+        if (/PrepareEnvironment|\/_actions\/sandboxes\/(?:create|prepare)/.test(request.url())) setupDispatches.push(request.url());
+      };
+      page.on("request", observeSetup);
+      const create = await page.goto(`/${slug}/new/`);
+      expect(create?.status()).toBe(200);
+      const draftForm = page.locator("[data-environment-form]");
+      await expect(draftForm).toHaveAttribute("data-create-draft-actor", owner);
+      await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
+      const draft = await draftForm.getAttribute("data-create-draft-id");
+      expect(draft).toMatch(/^[0-9a-f-]{36}$/);
+      await page.locator("[data-create-resources] > summary").click();
+      await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+      await page.getByLabel("TTL", { exact: true }).fill("3600s");
+      await page.getByRole("textbox", { name: "Name", exact: true }).fill("setup-name-not-persisted");
+      await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+      const settingsPath = `/settings/credentials/?org=${slug}&creation_draft=${draft}`;
+      const setupLink = page.getByRole("link", { name: "Connect GitHub", exact: true });
+      await expect(setupLink).toHaveAttribute("href", settingsPath);
+      await setupLink.click();
+      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}`);
+      const returnLink = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
+      await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
       await expect(page.locator("dialog[open]")).toHaveCount(0);
       await openGithubConnection(page);
       const form = page.getByRole("form", { name: "GitHub App", exact: true });
@@ -109,7 +134,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(form).toContainText("Your verified GitHub username names this connection");
       await expect(form).not.toContainText("one-time code");
       await completeGithubAppConnection(page, "kind-synthetic-code-one");
-      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=github-app-connected`);
+      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=github-app-connected`);
       await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
       let rendered = await page.locator("body").textContent();
       expect(rendered?.includes("gho_")).toBe(false);
@@ -131,9 +156,9 @@ test.describe("managed provider credential browser journey", () => {
 
       await openGithubConnection(page);
       await completeGithubAppConnection(page, "kind-synthetic-code-two");
-      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-app-already-connected&dialog=connect-github`);
+      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&error=github-app-already-connected&dialog=connect-github`);
       await expect(page.getByRole("alert")).toContainText("This GitHub account is already connected");
-      await page.goto("/settings/credentials/");
+      await page.goto(settingsPath);
       await expect(row).toHaveCount(1);
       await expect(row).toContainText("Generation 1");
 
@@ -141,20 +166,60 @@ test.describe("managed provider credential browser journey", () => {
       await page.getByRole("button", { name: "Create profile", exact: true }).click();
       const createProfile = page.locator('form[action^="/settings/credentials/_actions/profiles/create"]');
       await expect(page.getByRole("dialog", { name: "Create profile", exact: true })).toBeVisible();
+      // The native pattern already blocks malformed names. Prove the server
+      // negative separately through this same browser cookie jar and the exact
+      // real form action, without changing the pattern or any auth guard.
+      const profileAction = await createProfile.getAttribute("action");
+      if (!profileAction) throw new Error("Create profile omitted its native action");
+      const profileCsrf = await createProfile.locator('[name="_csrf"]').inputValue();
+      const validation = await page.context().request.post(new URL(profileAction, ssrUrl).toString(), {
+        form: { _csrf: profileCsrf, name: " ", codex: "", openai: "", github: "", anthropic: "", ssh: "" },
+        headers: { Origin: ssrUrl, Referer: page.url() },
+        maxRedirects: 0,
+      });
+      expect(validation.status()).toBe(303);
+      expect(validation.headers().location).toBe(`${settingsPath}&error=profile-invalid&dialog=create-profile`);
+      await page.goto(new URL(validation.headers().location, ssrUrl).toString());
+      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&error=profile-invalid&dialog=create-profile`);
+      await expect(page.getByRole("dialog", { name: "Create profile", exact: true })).toBeVisible();
+      await expect(page.getByRole("alert")).toContainText("Check the profile name and selected credentials");
+      await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
       await createProfile.getByRole("textbox", { name: "Profile name", exact: true }).fill(profileName);
       const githubChoice = createProfile.getByRole("combobox", { name: "GitHub", exact: true });
       const credentialId = await githubChoice.locator("option", { hasText: name }).getAttribute("value");
       if (!credentialId) throw new Error("Verified GitHub connection was not selectable");
       await githubChoice.selectOption(credentialId);
       await createProfile.getByRole("button", { name: "Create profile", exact: true }).click();
-      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=profile-created`);
+      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=profile-created`);
       await expect(page.getByRole("status")).toHaveText("Credential profile created.");
       let profileRow = page.locator(".cw-profile-row", { hasText: profileName });
       await expect(profileRow).toHaveCount(1);
       await expect(profileRow).toBeVisible();
       const profileId = await profileRow.locator('[name="profile_id"]').first().inputValue();
 
-      await page.goto(`/${slug}/new/`);
+      await returnLink.click();
+      await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${draft}`);
+      await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
+      await expect(draftForm).toHaveAttribute("data-create-draft-actor", owner);
+      await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
+      await expect(page.getByRole("combobox", { name: "Credential profile", exact: true }).locator(`option[value="${profileId}@1"]`)).toContainText(profileName);
+      await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
+      await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("");
+      const currentCsrf = await draftForm.locator('[name="_csrf"]').inputValue();
+      const restored = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
+      await page.getByRole("button", { name: "Restore saved selections", exact: true }).click();
+      const restoreResponse = await restored;
+      expect(restoreResponse.status()).toBe(200);
+      expect(restoreResponse.headers()["cache-control"]).toBe("private, no-store");
+      await expect(draftForm.locator('[name="_csrf"]')).toHaveValue(currentCsrf);
+      await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
+      await expect(draftForm).toHaveAttribute("data-create-draft-actor", owner);
+      await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
+      await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("2000");
+      await expect(page.getByLabel("TTL", { exact: true })).toHaveValue("3600s");
+      await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
+      await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("");
+      expect(setupDispatches).toEqual([]);
       await page.getByRole("textbox", { name: "Name", exact: true }).fill(githubCheckoutName);
       const openPicker = page.getByRole("button", { name: "Choose from GitHub", exact: true });
       await openPicker.click();
@@ -193,11 +258,15 @@ test.describe("managed provider credential browser journey", () => {
       await source.getByRole("textbox", { name: "Branch", exact: true }).fill("main");
       await page.getByLabel("Workspace image").fill(githubCheckoutImage);
       await page.locator("[data-create-runtime] > summary").click();
-      await page.locator("[data-create-resources] > summary").click();
+      if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
+        await page.locator("[data-create-resources] > summary").click();
+      }
       await page.getByLabel("Install Command").fill(githubCheckoutInstall);
       await expect(page.getByLabel("Install Command")).toHaveValue(githubCheckoutInstall);
       await page.getByLabel("TTL").fill("3600s");
       const before = await githubGitCounters();
+      expect(setupDispatches).toEqual([]);
+      page.off("request", observeSetup);
       await page.getByRole("button", { name: "Create Sandbox", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/${slug}/?message=environment-created`);
       await verifyGithubCheckout(page, orgId, profileId, before);
