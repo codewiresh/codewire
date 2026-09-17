@@ -34,6 +34,9 @@ pub(crate) const PUBLIC_SCRIPT_PATH: &str = "/assets/codewire/public-v1.js";
 pub(crate) const ORGANIZATIONS_SCRIPT_PATH: &str = "/assets/codewire/organizations-v1.js";
 pub(crate) const ENVIRONMENTS_SCRIPT_PATH: &str = "/assets/codewire/environments-v2.js";
 pub(crate) const TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/terminal-v1.js";
+pub(crate) const DURABLE_TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/durable-terminal-v1.js";
+pub(crate) const TERMINAL_PROTOCOL_SCRIPT_PATH: &str = "/assets/codewire/terminal-protocol-v1.js";
+pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v1.js";
 pub(crate) const TERMINAL_RENDERER_SCRIPT_PATH: &str = "/assets/codewire/terminal-renderer-v1.js";
 pub(crate) const TERMINAL_PRESENTATION_SCRIPT_PATH: &str =
     "/assets/codewire/terminal-presentation-v1.js";
@@ -83,6 +86,12 @@ const ORGANIZATIONS_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/organizations.js");
 const ENVIRONMENTS_SCRIPT: &str = include_str!("../../../packages/codewire-design/environments.js");
 const TERMINAL_SCRIPT: &str = include_str!("../../../packages/codewire-design/terminal.js");
+const DURABLE_TERMINAL_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/durable-terminal.js");
+const TERMINAL_PROTOCOL_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/terminal-protocol.js");
+const TERMINAL_READINESS_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/terminal-readiness.js");
 const TERMINAL_RENDERER_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/terminal-renderer.js");
 const TERMINAL_PRESENTATION_SCRIPT: &str =
@@ -191,6 +200,27 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             TERMINAL_SCRIPT_PATH,
             static_asset("application/javascript; charset=utf-8", TERMINAL_SCRIPT),
+        )
+        .route(
+            DURABLE_TERMINAL_SCRIPT_PATH,
+            static_asset(
+                "application/javascript; charset=utf-8",
+                DURABLE_TERMINAL_SCRIPT,
+            ),
+        )
+        .route(
+            TERMINAL_PROTOCOL_SCRIPT_PATH,
+            static_asset(
+                "application/javascript; charset=utf-8",
+                TERMINAL_PROTOCOL_SCRIPT,
+            ),
+        )
+        .route(
+            TERMINAL_READINESS_SCRIPT_PATH,
+            static_asset(
+                "application/javascript; charset=utf-8",
+                TERMINAL_READINESS_SCRIPT,
+            ),
         )
         .route(
             TERMINAL_RENDERER_SCRIPT_PATH,
@@ -427,5 +457,55 @@ mod tests {
         assert!(ENVIRONMENTS_STYLES.contains(".cw-workspace-mount"));
         assert!(!ENVIRONMENTS_STYLES.contains(".cw-repository-picker"));
         assert!(!ENVIRONMENTS_STYLES.contains(".cw-github-banner"));
+    }
+
+    #[test]
+    fn durable_terminal_template_and_fixture_share_controls_and_presentation() {
+        let production = include_str!("../templates/terminal.html");
+        let fixture =
+            include_str!("../../../packages/codewire-design/reference/fixtures/terminal-tabs.html");
+        for html in [production, fixture] {
+            for marker in [
+                "data-durable-terminal-page",
+                "data-terminal-readiness",
+                "data-terminal-new",
+                "data-terminal-existing-form",
+                "data-terminal-tabs",
+                "data-terminal-panels",
+                "data-terminal-history-gap",
+                "data-terminal-close-dialog",
+            ] {
+                assert!(html.contains(marker), "missing {marker}");
+            }
+            assert!(html.contains("role=\"tablist\" aria-label=\"Terminal tabs\""));
+            assert!(html.contains("role=\"tabpanel\""));
+            assert!(
+                html.contains("Leaving this page disconnects the browser; the shell keeps running")
+            );
+        }
+        let panel = |html: &'static str| {
+            html.split("<template data-terminal-tab-template>")
+                .nth(1)
+                .unwrap()
+                .split("</template>")
+                .next()
+                .unwrap()
+        };
+        assert_eq!(panel(production), panel(fixture));
+        for path in [
+            TERMINAL_PROTOCOL_SCRIPT_PATH,
+            DURABLE_TERMINAL_SCRIPT_PATH,
+            TERMINAL_READINESS_SCRIPT_PATH,
+        ] {
+            assert!(production.contains(path));
+        }
+        assert!(
+            production.find(TERMINAL_PROTOCOL_SCRIPT_PATH)
+                < production.find(DURABLE_TERMINAL_SCRIPT_PATH)
+        );
+        assert!(
+            production.find(DURABLE_TERMINAL_SCRIPT_PATH)
+                < production.find(TERMINAL_READINESS_SCRIPT_PATH)
+        );
     }
 }
