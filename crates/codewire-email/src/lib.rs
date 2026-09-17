@@ -67,6 +67,7 @@ const RESEND_FROM: &str = "Codewire <ops@example.invalid>";
 const EMAIL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const EMAIL_READ_TIMEOUT: Duration = Duration::from_secs(4);
 const EMAIL_OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
+const SES_ERROR_BODY_LIMIT: usize = 8 * 1024;
 
 #[derive(Clone)]
 pub struct EmailClient {
@@ -209,7 +210,7 @@ impl EmailClient {
                     .execute(request)
                     .await
                     .context("send SES email")?;
-                ensure_ses_success(response.status())
+                ensure_ses_success(response).await
             }
         }
     }
@@ -574,11 +575,79 @@ fn signed_ses_request(
     Ok(request)
 }
 
-fn ensure_ses_success(status: reqwest::StatusCode) -> Result<()> {
+async fn ensure_ses_success(mut response: reqwest::Response) -> Result<()> {
+    let status = response.status();
     if status.is_success() {
-        Ok(())
+        return Ok(());
+    }
+
+    // AWS gives the header precedence over body code/__type. Even unknown
+    // values stay private: only the static allowlist result leaves this client.
+    let classification = if let Some(header) = response.headers().get("x-amzn-errortype") {
+        header
+            .to_str()
+            .ok()
+            .map(ses_error_class)
+            .unwrap_or("Unknown")
     } else {
-        bail!("SES email request failed with HTTP {}", status.as_u16())
+        bounded_ses_error_body(&mut response)
+            .await
+            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
+            .and_then(|body| {
+                body.get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| body.get("__type").and_then(serde_json::Value::as_str))
+                    .map(ses_error_class)
+            })
+            .unwrap_or("Unknown")
+    };
+    // Do not attach provider messages, unknown codes, headers, or read/parse
+    // errors: they may echo addresses, authorization, or other private data.
+    bail!(
+        "SES email request failed with HTTP {} ({classification})",
+        status.as_u16()
+    )
+}
+
+async fn bounded_ses_error_body(response: &mut reqwest::Response) -> Option<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > SES_ERROR_BODY_LIMIT as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if chunk.len() > SES_ERROR_BODY_LIMIT - body.len() {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
+}
+
+fn ses_error_class(code: &str) -> &'static str {
+    let code = code.split_once(':').map_or(code, |(code, _)| code);
+    let code = code.split_once('#').map_or(code, |(_, code)| code);
+    match code {
+        "AccessDenied" | "AccessDeniedException" => "AccessDenied",
+        "InvalidClientTokenId" | "UnrecognizedClientException" => "InvalidCredentials",
+        "SignatureDoesNotMatch" | "InvalidSignatureException" | "IncompleteSignature" => {
+            "InvalidSignature"
+        }
+        "RequestExpired" | "SignatureExpired" => "ExpiredSignature",
+        "MissingAuthenticationToken" | "MissingAuthenticationTokenException" => {
+            "MissingAuthentication"
+        }
+        "MessageRejected" => "MessageRejected",
+        "MailFromDomainNotVerifiedException" => "MailFromNotVerified",
+        "AccountSuspendedException" => "AccountSuspended",
+        "SendingPausedException" => "SendingPaused",
+        "BadRequestException" => "BadRequest",
+        "TooManyRequestsException" | "ThrottlingException" => "Throttled",
+        "LimitExceededException" => "LimitExceeded",
+        "NotFoundException" => "NotFound",
+        _ => "Unknown",
     }
 }
 
@@ -792,10 +861,119 @@ mod tests {
     }
 
     #[test]
-    fn ses_response_status_must_indicate_delivery_success() {
-        assert!(ensure_ses_success(reqwest::StatusCode::OK).is_ok());
-        let error = ensure_ses_success(reqwest::StatusCode::FORBIDDEN).unwrap_err();
-        assert_eq!(error.to_string(), "SES email request failed with HTTP 403");
+    fn ses_error_class_returns_only_static_allowlisted_labels() {
+        for code in [
+            "InvalidSignatureException",
+            "com.amazonaws#InvalidSignatureException",
+            "com.amazonaws#InvalidSignatureException:private-provider-detail",
+        ] {
+            assert_eq!(ses_error_class(code), "InvalidSignature");
+        }
+        assert_eq!(ses_error_class("AccessDeniedException"), "AccessDenied");
+        assert_eq!(
+            ses_error_class("InvalidClientTokenId"),
+            "InvalidCredentials"
+        );
+        assert_eq!(ses_error_class("RequestExpired"), "ExpiredSignature");
+        assert_eq!(ses_error_class("private-unknown-code"), "Unknown");
+    }
+
+    async fn synthetic_ses_response(response: Vec<u8>) -> reqwest::Response {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let size = stream.read(&mut chunk).unwrap();
+                assert_ne!(size, 0);
+                request.extend_from_slice(&chunk[..size]);
+            }
+            stream.write_all(&response).unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        server.join().unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn ses_error_header_wins_without_reading_the_broken_body() {
+        let response = synthetic_ses_response(
+            b"HTTP/1.1 403 Forbidden\r\nx-amzn-errortype: AccessDeniedException:private-header\r\nContent-Length: 1000\r\n\r\n{\"code\":\"InvalidSignatureException\",\"message\":\"private-body\"}".to_vec()
+        ).await;
+        let error = ensure_ses_success(response).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "SES email request failed with HTTP 403 (AccessDenied)"
+        );
+        assert!(!format!("{error:?}").contains("private-"));
+    }
+
+    #[tokio::test]
+    async fn ses_error_body_classifies_code_before_type_without_exposing_messages() {
+        let body = br#"{"code":"com.amazonaws#InvalidSignatureException","__type":"AccessDeniedException","message":"private-body"}"#;
+        let response = synthetic_ses_response(
+            [
+                format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+                body,
+            ]
+            .concat(),
+        )
+        .await;
+        let error = ensure_ses_success(response).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "SES email request failed with HTTP 403 (InvalidSignature)"
+        );
+        assert!(!format!("{error:?}").contains("private-"));
+    }
+
+    #[tokio::test]
+    async fn ses_unknown_invalid_oversized_and_interrupted_errors_preserve_http_status() {
+        let unknown = br#"{"__type":"private-unknown-code","message":"private-body"}"#;
+        let responses = [
+            [format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n", unknown.len()).as_bytes(), unknown].concat(),
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\noops".to_vec(),
+            format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n", SES_ERROR_BODY_LIMIT + 1).into_bytes(),
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 1000\r\n\r\nprivate-incomplete-body".to_vec(),
+            [format!("HTTP/1.1 403 Forbidden\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n", SES_ERROR_BODY_LIMIT + 1).into_bytes(), vec![b'x'; SES_ERROR_BODY_LIMIT + 1], b"\r\n0\r\n\r\n".to_vec()].concat(),
+            b"HTTP/1.1 403 Forbidden\r\nx-amzn-errortype: private-unknown-header\r\nContent-Length: 32\r\n\r\n{\"code\":\"AccessDeniedException\"}".to_vec(),
+        ];
+        for response in responses {
+            let error = ensure_ses_success(synthetic_ses_response(response).await)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "SES email request failed with HTTP 403 (Unknown)"
+            );
+            assert!(!format!("{error:?}").contains("private-"));
+        }
+    }
+
+    #[tokio::test]
+    async fn ses_success_does_not_read_an_incomplete_body() {
+        let response =
+            synthetic_ses_response(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n".to_vec())
+                .await;
+        assert!(ensure_ses_success(response).await.is_ok());
     }
 
     #[test]
