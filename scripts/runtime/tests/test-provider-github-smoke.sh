@@ -45,6 +45,9 @@ cw() {
       [[ "$FAILURE" != run ]] || return 1
       if [[ "$FAILURE" == nul ]]; then printf 'CW_LIVE_GITHUB_OK\0\n'
       elif [[ "$FAILURE" != empty ]]; then printf 'CW_LIVE_GITHUB_OK\n'; fi
+      printf 'Launched session session-6e3e8f6a-fa62-4128-9dad-bf1e42778613\n' >&2
+      if [[ "$FAILURE" == notice-nul ]]; then printf '\0' >&2; fi
+      if [[ "$FAILURE" == notice-duplicate ]]; then printf 'Launched session session-6e3e8f6a-fa62-4128-9dad-bf1e42778613\n' >&2; fi
       [[ "$FAILURE" != stderr ]] || printf 'CW_LIVE_GITHUB_ERROR\n' >&2 ;;
     *) fail "unexpected public command: $*" ;;
   esac
@@ -65,7 +68,7 @@ grep -qxF 'env info --local 33333333-3333-4333-8333-333333333333 --output json '
 grep -qxF 'run --no-tty -- /usr/bin/python3 /workspace/.cw-provider-github/provider-github-workload.py ' "$TMPDIR_SMOKE/calls" ||
   fail 'live workload used a positional platform environment'
 pass
-for failure in info wrong-id wrong-profile wrong-reference wrong-topology run empty nul stderr; do
+for failure in info wrong-id wrong-profile wrong-reference wrong-topology run empty nul stderr notice-nul notice-duplicate; do
   invalid_journey() { fixture; FAILURE="$failure"; run_provider_github_smoke; }
   expect_failure "$failure" invalid_journey
 done

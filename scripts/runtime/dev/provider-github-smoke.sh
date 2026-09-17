@@ -86,7 +86,16 @@ run_provider_github_smoke() {
       >"$TMPDIR_SMOKE/provider-github-proof.out" 2>"$TMPDIR_SMOKE/provider-github-proof.err"; then
     die 'bounded live GitHub workload failed; raw provider output remains private inside the disposable VM'
   fi
-  [[ ! -s "$TMPDIR_SMOKE/provider-github-proof.err" ]] || die 'live GitHub workload returned a public error receipt'
+  # cw prints its launch acknowledgement on stderr even for a successful
+  # workload. Admit only that exact line (or silence), never arbitrary stderr.
+  python3 - "$TMPDIR_SMOKE/provider-github-proof.err" <<'PY' || die 'live GitHub workload returned unexpected stderr'
+import pathlib
+import re
+import sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+pattern = rb"Launched session session-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n"
+sys.exit(0 if data == b"" or re.fullmatch(pattern, data) else 1)
+PY
   cmp -s "$TMPDIR_SMOKE/provider-github-proof.out" <(printf 'CW_LIVE_GITHUB_OK\n') ||
     die 'live GitHub workload omitted its exact public receipt'
   log 'stock gh read-only account request validated in the local 2-vCPU/16-GiB VM; parent cleanup remains pending and other providers, hosted placement and private checkout are not implied'
