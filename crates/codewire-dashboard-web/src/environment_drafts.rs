@@ -15,6 +15,72 @@ use crate::{
 pub(crate) const MAX_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_AGE_MS: u64 = 30 * 60 * 1000;
 
+/// A Create navigation convenience, never a source selector or authorization.
+/// Rejected input is replaced by a fixed marker, not retained or displayed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DraftReturn {
+    #[default]
+    NoRequest,
+    Exact(String),
+    Unavailable,
+}
+
+impl DraftReturn {
+    pub(crate) fn parse(raw: Option<&str>) -> Self {
+        let Some(raw) = raw else {
+            return Self::NoRequest;
+        };
+        if raw.len() > 1024 {
+            // Inspect only bounded keys, never decode oversized values. A
+            // handle beyond the budget is rejected, but ordinary inventory
+            // queries retain their existing parsing and rejection behavior.
+            let requested = raw.split('&').any(|field| {
+                let key = field.split_once('=').map_or(field, |(key, _)| key);
+                key.len() <= "creation_draft".len() * 3
+                    && url::form_urlencoded::parse(key.as_bytes())
+                        .next()
+                        .is_some_and(|(key, _)| key == "creation_draft")
+            });
+            return if requested {
+                Self::Unavailable
+            } else {
+                Self::NoRequest
+            };
+        }
+        let mut requested = None;
+        for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+            if key != "creation_draft" {
+                continue;
+            }
+            if requested.is_some() {
+                return Self::Unavailable;
+            }
+            requested = Some(value);
+        }
+        match requested {
+            None => Self::NoRequest,
+            Some(id) if canonical_id(&id) => Self::Exact(id.into_owned()),
+            Some(_) => Self::Unavailable,
+        }
+    }
+
+    pub(crate) fn requested(&self) -> bool {
+        !matches!(self, Self::NoRequest)
+    }
+
+    pub(crate) fn query(&self) -> String {
+        match self {
+            Self::NoRequest => String::new(),
+            Self::Exact(id) => format!("?creation_draft={id}"),
+            Self::Unavailable => "?creation_draft=unavailable".into(),
+        }
+    }
+
+    pub(crate) fn canonical_query(&self, raw: Option<&str>) -> bool {
+        raw.unwrap_or_default() == self.query().trim_start_matches('?')
+    }
+}
+
 // No Debug: rejected input must never become a diagnostic representation.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -262,6 +328,55 @@ mod tests {
     const ACTOR: &str = "11111111111140008000000000000001";
     const ORG: &str = "00000000-0000-4000-8000-000000000002";
     const DRAFT: &str = "00000000-0000-4000-8000-000000000003";
+
+    #[test]
+    fn exact_return_canonicalizes_without_echoing_other_navigation() {
+        let exact = DraftReturn::Exact(DRAFT.into());
+        let canonical = format!("creation_draft={DRAFT}");
+        assert_eq!(DraftReturn::parse(Some(&canonical)), exact);
+        assert!(exact.canonical_query(Some(&canonical)));
+        for raw in [
+            format!("sources={ORG}&{canonical}"),
+            format!("{canonical}&ports={ORG}"),
+            format!("destroyed=bogus&{canonical}"),
+            canonical.replace("creation_draft=0", "creation_draft=%30"),
+            canonical.replace("creation_draft", "%63reation_draft"),
+        ] {
+            assert_eq!(DraftReturn::parse(Some(&raw)), exact);
+            assert!(!exact.canonical_query(Some(&raw)));
+        }
+        assert_eq!(exact.query(), format!("?{canonical}"));
+    }
+
+    #[test]
+    fn invalid_duplicate_and_oversize_returns_keep_unavailable_intent() {
+        for raw in [
+            "creation_draft=".into(),
+            "creation_draft=https%3A%2F%2Fcanary.invalid".into(),
+            "creation_draft=00000000-0000-0000-0000-000000000000".into(),
+            format!("creation_draft={DRAFT}&creation_draft={DRAFT}"),
+            format!("creation_draft={DRAFT}&%63reation_draft={DRAFT}"),
+            format!("creation_draft={DRAFT}&ignored={}", "x".repeat(1024)),
+            format!("ignored={}&%63reation_draft={DRAFT}", "x".repeat(1024)),
+            "creation_draft=unavailable".into(),
+        ] {
+            let rejected = DraftReturn::parse(Some(&raw));
+            assert_eq!(rejected, DraftReturn::Unavailable);
+            assert!(rejected.requested());
+            assert_eq!(rejected.query(), "?creation_draft=unavailable");
+        }
+        assert!(DraftReturn::Unavailable.canonical_query(Some("creation_draft=unavailable")));
+        assert_eq!(
+            DraftReturn::parse(Some(&format!("search={}", "x".repeat(1024)))),
+            DraftReturn::NoRequest
+        );
+        for raw in [None, Some(""), Some("search=app&state=running")] {
+            let ordinary = DraftReturn::parse(raw);
+            assert_eq!(ordinary, DraftReturn::NoRequest);
+            assert!(!ordinary.requested());
+            assert!(ordinary.query().is_empty());
+        }
+    }
 
     fn metadata() -> serde_json::Value {
         serde_json::json!({

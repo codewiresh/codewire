@@ -89,6 +89,46 @@ async function assertExplicitCreateRecovery(page: Page) {
     await page.getByLabel("Name", { exact: true }).fill("draft-name-not-persisted");
     await page.getByLabel("Repository URL", { exact: true }).fill("https://draft-canary.invalid/private-repository");
     await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    const requestedDraft = await form.getAttribute("data-create-draft-id");
+    expect(requestedDraft).toMatch(/^[0-9a-f-]{36}$/);
+    // A second real Create draft is newer. Returning must not offer it in
+    // place of the original, or interpret discarded inventory selectors.
+    await page.goto(`/${slug}/new/`);
+    await expect(form).not.toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await page.locator("[data-create-resources] > summary").click();
+    await page.getByLabel("CPU", { exact: true }).selectOption("4000");
+    await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    for (const suffix of [
+      "creation_draft=unavailable",
+      `creation_draft=${requestedDraft}&%63reation_draft=${requestedDraft}`,
+      `ignored=${"x".repeat(1024)}&%63reation_draft=${requestedDraft}`,
+    ]) {
+      await page.goto(`/${slug}/new/?${suffix}`);
+      await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=unavailable`);
+      await expect(form).toHaveAttribute("data-create-draft-exact", "true");
+      await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
+      await expect(page.locator("[data-create-draft-status]")).toContainText("requested saved selections are unavailable");
+      await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+    }
+    await page.goto(`/${slug}/new/?destroyed=bogus&sources=first&sources=second&creation_draft=${requestedDraft}`);
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await expect(form).toHaveAttribute("data-create-draft-exact", "true");
+    await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
+    await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+    // The unchanged drawer controller must keep the explicit query open
+    // through ordinary inventory polling, Back, and a closed/reopened view.
+    await page.waitForResponse((response) => response.url().includes(`/${slug}/_fragments/sandboxes`) && response.ok());
+    await expect(page.locator("[data-drawer]")).toBeVisible();
+    await page.goto(`/${slug}/`);
+    await page.goBack();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(page.locator("[data-drawer]")).toBeVisible();
+    await page.locator("[data-drawer-panel]").getByRole("link", { name: "Close Create Sandbox" }).click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
+    await expect(page.locator("[data-drawer]")).toBeHidden();
+    await page.goto(`/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(page.locator("[data-drawer]")).toBeVisible();
     await page.reload();
     await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
     await expect(page.locator('[name="cpu"]')).toHaveValue("1000");

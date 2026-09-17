@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     Form,
-    extract::{Path, Query, RawForm, State},
+    extract::{Path, Query, RawForm, RawQuery, State, rejection::QueryRejection},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse as _, Response},
 };
@@ -24,8 +24,8 @@ use crate::{
     environment_connect::{self, EnvironmentCreateOptions},
     error::WebError,
     response::{
-        HTMX_REQUEST, error_page, login_redirect, render_page_with_connect_origin, render_template,
-        render_template_with_connect_origin,
+        HTMX_REQUEST, error_page, login_redirect, redirect, render_page_with_connect_origin,
+        render_template, render_template_with_connect_origin,
     },
     routes::organization_governance::{
         action_context, connect_page_error, get_context, mutation_redirect, valid_identifier,
@@ -248,6 +248,7 @@ impl EnvironmentSubmission {
             draft_actor: String::new(),
             draft_organization: String::new(),
             draft_id: uuid::Uuid::new_v4().to_string(),
+            draft_return: crate::environment_drafts::DraftReturn::default(),
             draft_restore_allowed: false,
             draft_restored: false,
             expanded: true,
@@ -597,16 +598,88 @@ pub(super) async fn page(
     Query(query): Query<EnvironmentsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    render_page(state, slug, query, headers, false).await
+    render_page(
+        state,
+        slug,
+        query,
+        headers,
+        false,
+        Default::default(),
+        false,
+    )
+    .await
 }
 
 pub(super) async fn new_page(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-    Query(query): Query<EnvironmentsQuery>,
+    query: Result<Query<EnvironmentsQuery>, QueryRejection>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    render_page(state, slug, query, headers, true).await
+    let draft_return = crate::environment_drafts::DraftReturn::parse(raw.as_deref());
+    // Explicit returns have no inventory/source-editor selectors. A malformed
+    // discarded selector must not reject navigation before authentication.
+    let query = match create_return_query(query, &draft_return) {
+        Ok(query) => query,
+        Err(error) => return error.into_response(),
+    };
+    let canonicalize = draft_return.requested() && !draft_return.canonical_query(raw.as_deref());
+    render_page(
+        state,
+        slug,
+        query,
+        headers,
+        true,
+        draft_return,
+        canonicalize,
+    )
+    .await
+}
+
+fn create_return_query(
+    query: Result<Query<EnvironmentsQuery>, QueryRejection>,
+    draft_return: &crate::environment_drafts::DraftReturn,
+) -> Result<EnvironmentsQuery, QueryRejection> {
+    if draft_return.requested() {
+        Ok(EnvironmentsQuery::default())
+    } else {
+        query.map(|Query(query)| query)
+    }
+}
+
+#[cfg(test)]
+mod draft_return_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_return_discards_invalid_and_conflicting_inventory_selectors() {
+        for uri in [
+            "/org/new/?creation_draft=00000000-0000-4000-8000-000000000003&destroyed=bogus",
+            "/org/new/?sources=first&sources=second&creation_draft=unavailable",
+            "/org/new/?creation_draft=unavailable&sources=editor&ports=other&resize_environment=another&search=private-canary",
+        ] {
+            let uri: axum::http::Uri = uri.parse().unwrap();
+            let navigation = crate::environment_drafts::DraftReturn::parse(uri.query());
+            assert!(navigation.requested());
+            let query = create_return_query(Query::try_from_uri(&uri), &navigation).unwrap();
+            assert!(query.sources.is_empty() && query.ports.is_empty());
+            assert!(query.resize_environment.is_empty() && query.search.is_empty());
+            assert!(!query.destroyed);
+        }
+    }
+
+    #[test]
+    fn ordinary_inventory_query_keeps_original_values_and_rejection() {
+        let uri = axum::http::Uri::from_static("/org/new/?search=app&state=running");
+        let query = create_return_query(Query::try_from_uri(&uri), &Default::default()).unwrap();
+        assert_eq!(query.search, "app");
+        assert_eq!(query.state, "running");
+        let invalid = axum::http::Uri::from_static("/org/new/?destroyed=bogus");
+        let response =
+            create_return_query(Query::try_from_uri(&invalid), &Default::default()).unwrap_err();
+        assert_eq!(response.into_response().status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 async fn render_page(
@@ -615,9 +688,11 @@ async fn render_page(
     query: EnvironmentsQuery,
     headers: HeaderMap,
     create_open: bool,
+    draft_return: crate::environment_drafts::DraftReturn,
+    canonicalize: bool,
 ) -> Response {
     let continuation = if create_open {
-        format!("/{slug}/new/")
+        format!("/{slug}/new/{}", draft_return.query())
     } else {
         environments_path(&slug)
     };
@@ -626,8 +701,18 @@ async fn render_page(
             Ok(context) => context,
             Err(response) => return response,
         };
+    if canonicalize {
+        return redirect(
+            format!("/{}/new/{}", organization.slug, draft_return.query()),
+            &headers,
+        );
+    }
     let token = new_csrf_token();
-    let form = default_create_form(token.clone(), create_open);
+    let mut form = default_create_form(token.clone(), create_open);
+    if let crate::environment_drafts::DraftReturn::Exact(id) = &draft_return {
+        form.draft_id.clone_from(id);
+    }
+    form.draft_return = draft_return;
     let page = match build_page(
         &state,
         cookie,
@@ -1762,6 +1847,7 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         draft_actor: String::new(),
         draft_organization: String::new(),
         draft_id: uuid::Uuid::new_v4().to_string(),
+        draft_return: crate::environment_drafts::DraftReturn::default(),
         draft_restore_allowed: true,
         draft_restored: false,
         expanded,
@@ -2181,6 +2267,55 @@ mod tests {
 
     use super::*;
     use crate::templates::EnvironmentCreateFormTemplate;
+
+    #[test]
+    fn explicit_return_template_keeps_drawer_url_and_requested_marker_together() {
+        use crate::environment_drafts::DraftReturn;
+        let organization = test_organization();
+        for navigation in [
+            DraftReturn::NoRequest,
+            DraftReturn::Exact("00000000-0000-4000-8000-000000000003".into()),
+            DraftReturn::Unavailable,
+        ] {
+            let mut form = default_create_form("current-csrf".into(), true);
+            if let DraftReturn::Exact(id) = &navigation {
+                form.draft_id.clone_from(id);
+            }
+            form.draft_return = navigation.clone();
+            let page = EnvironmentsPageView {
+                environments: Vec::new(),
+                create_form: form,
+                source_editor: None,
+                port_panel: None,
+                trust_summary: None,
+                resize_confirmation: None,
+                resize_operation: None,
+                search: String::new(),
+                state: "all".into(),
+                message: String::new(),
+                error: String::new(),
+            };
+            let html = OrganizationEnvironmentsContentTemplate {
+                organization: &organization,
+                page: &page,
+            }
+            .render()
+            .unwrap();
+            assert!(html.contains(&format!(
+                "data-create-url=\"{}new/{}\"",
+                organization.environments_url,
+                navigation.query()
+            )));
+            assert!(html.contains(&format!(
+                "data-create-draft-exact=\"{}\"",
+                navigation.requested()
+            )));
+            assert!(html.contains("name=\"_csrf\" value=\"current-csrf\""));
+            assert!(crate::environment_drafts::canonical_id(
+                &page.create_form.draft_id
+            ));
+        }
+    }
 
     #[test]
     fn preview_row_errors_preserve_all_inputs_and_are_field_associated() {

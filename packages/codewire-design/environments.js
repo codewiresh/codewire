@@ -187,9 +187,11 @@
       if (!actorId(form.dataset.createDraftActor) || ![form.dataset.createDraftOrganization, form.dataset.createDraftId].every(canonicalId)) return;
       try {
         const saved = storedDrafts(form);
-        state.saved = saved.find((draft) => draft.draft === form.dataset.createDraftId) || saved[0] || null;
+        const exactReturn = form.dataset.createDraftExact === "true";
+        state.saved = saved.find((draft) => draft.draft === form.dataset.createDraftId) || (!exactReturn && saved[0]) || null;
         const button = form.querySelector("[data-restore-create-draft]");
         if (button) button.hidden = !state.saved || form.dataset.createDraftFresh !== "true";
+        if (exactReturn && !state.saved) draftStatus(form, "The requested saved selections are unavailable in this tab. Re-enter them; no Sandbox was created.");
       } catch {
         state.storageFailed = true;
         draftStatus(form, "Selections cannot be saved in this browser. Keep this form open or re-enter them after returning.");

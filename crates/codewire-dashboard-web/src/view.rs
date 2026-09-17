@@ -876,6 +876,7 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) draft_actor: String,
     pub(crate) draft_organization: String,
     pub(crate) draft_id: String,
+    pub(crate) draft_return: crate::environment_drafts::DraftReturn,
     pub(crate) draft_restore_allowed: bool,
     pub(crate) draft_restored: bool,
     pub(crate) expanded: bool,

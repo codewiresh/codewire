@@ -86,6 +86,79 @@ async function restoredCard(page: Page, draft: Draft): Promise<string> {
   }, draft);
 }
 
+// The static fixture has no SSR query handler. Model only the server's closed
+// explicit-return attributes; real route/auth/canonicalization proof belongs
+// to the existing managed Create owner, not this controlled HTML response.
+async function exactReturnFixture(page: Page, requestedId = draftId) {
+  const url = fixtureUrl();
+  await page.route(url, async (route) => {
+    const response = await route.fetch();
+    const html = (await response.text())
+      .replace(`data-create-draft-id="${draftId}"`, `data-create-draft-id="${requestedId}"`)
+      .replace('data-create-draft-exact="false"', 'data-create-draft-exact="true"');
+    await route.fulfill({ response, body: html });
+  });
+  await page.goto(url);
+}
+
+test("explicit return offers the requested older draft, never the newer draft", async ({ page }) => {
+  const requested = { ...selectionsDraft(), saved_at: Date.now() - 1000 };
+  const newer = { ...selectionsDraft(), draft: "00000000-0000-4000-8000-000000000004", saved_at: Date.now() - 100 };
+  newer.selections.cpu = "1000";
+  await page.addInitScript((records) => records.forEach(({ key, bytes }) => sessionStorage.setItem(key, bytes)),
+    [requested, newer].map((draft) => ({ key: keyForDraft(draft), bytes: JSON.stringify(draft) })));
+  let restores = 0;
+  const creates: string[] = [];
+  page.on("request", (request) => { if (/PrepareEnvironment|\/_actions\/sandboxes\/create/.test(request.url())) creates.push(request.url()); });
+  await exactReturnFixture(page);
+  await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+  await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+  const html = await restoredCard(page, requested);
+  await page.route("**/fixture/_fragments/create-draft", async (route) => {
+    restores += 1;
+    const body = new URLSearchParams(route.request().postData()!);
+    expect(body.get("creation_draft")).toBe(requested.draft);
+    expect(JSON.parse(body.get("metadata")!).selections.cpu).toBe("2000");
+    await route.fulfill({ status: 200, contentType: "text/html", body: html });
+  });
+  expect(restores).toBe(0);
+  await page.getByRole("button", { name: "Restore saved selections" }).click();
+  await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+  expect(restores).toBe(1);
+  expect(creates).toEqual([]);
+});
+
+for (const unavailable of ["missing", "expired", "foreign actor", "foreign organization", "unavailable marker"] as const) {
+  test(`explicit ${unavailable} return does not substitute another saved draft`, async ({ page }) => {
+    const requested = { ...selectionsDraft(), saved_at: Date.now() - 1000 };
+    if (unavailable === "expired") requested.saved_at = Date.now() - 30 * 60 * 1000;
+    if (unavailable === "foreign actor") requested.actor = "22222222222240008000000000000002";
+    if (unavailable === "foreign organization") requested.organization = "00000000-0000-4000-8000-000000000005";
+    const newer = { ...selectionsDraft(), draft: "00000000-0000-4000-8000-000000000004", saved_at: Date.now() - 100 };
+    const records = unavailable === "missing" ? [newer] : [requested, newer];
+    await page.addInitScript((records) => records.forEach(({ key, bytes }) => sessionStorage.setItem(key, bytes)),
+      records.map((draft) => ({ key: keyForDraft(draft), bytes: JSON.stringify(draft) })));
+    let mutations = 0;
+    page.on("request", (request) => { if (/\/_fragments\/create-draft|PrepareEnvironment|\/_actions\/sandboxes\/create/.test(request.url())) mutations += 1; });
+    await exactReturnFixture(page, unavailable === "unavailable marker" ? "00000000-0000-4000-8000-000000000006" : draftId);
+    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
+    await expect(page.locator("[data-create-draft-status]")).toContainText("requested saved selections are unavailable");
+    await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+    await page.getByLabel("Name", { exact: true }).fill("still-editable");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("still-editable");
+    expect(mutations).toBe(0);
+  });
+}
+
+test("explicit return with unavailable storage keeps a usable native form", async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(window, "sessionStorage", { get() { throw new Error("synthetic storage refusal"); } }));
+  await exactReturnFixture(page);
+  await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
+  await expect(page.locator("[data-create-draft-status]")).toContainText("Selections cannot be saved");
+  await page.getByLabel("Name", { exact: true }).fill("still-editable");
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("still-editable");
+});
+
 test("Create drafts save only bounded selections and offer explicit recovery after reload", async ({ page }) => {
   await page.goto(fixtureUrl());
   await page.locator("[data-create-resources] summary").click();
