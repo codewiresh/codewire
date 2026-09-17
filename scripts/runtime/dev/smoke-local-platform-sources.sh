@@ -33,6 +33,7 @@ LP_NETWORK_CREATE_ATTEMPTED=0
 LP_MESH_PORT=28083
 LP_ENV=()
 LP_INITIAL_PRIVATE_CHECKOUT=0
+LP_LIVE_GITHUB=0
 LP_LIVE_CODEX=0
 LP_LIVE_ANTHROPIC=0
 LP_LIVE_OPENAI=0
@@ -45,6 +46,9 @@ source "$REPO_ROOT/scripts/runtime/dev/provider-codex-smoke.sh"
 source "$REPO_ROOT/scripts/runtime/dev/provider-anthropic-smoke.sh"
 # shellcheck source=scripts/runtime/dev/provider-openai-smoke.sh
 source "$REPO_ROOT/scripts/runtime/dev/provider-openai-smoke.sh"
+
+# shellcheck source=scripts/runtime/dev/provider-github-smoke.sh
+source "$REPO_ROOT/scripts/runtime/dev/provider-github-smoke.sh"
 
 local_platform_usage() {
   cat <<'USAGE'
@@ -62,6 +66,8 @@ tests a stock Codex request inside the VM. It needs a fresh Codex device approva
 after Codewire login; it cannot be combined with checkout or Mesh modes.
 --live-anthropic instead enrolls a fresh Anthropic API key through cw's protected
 input and tests pinned Claude. These live-provider modes cannot be combined.
+--live-github tests pinned stock gh api user through the managed Unix socket,
+with a fresh GitHub device approval; it proves neither private checkout nor hosted placement.
 --live-openai tests one plain Responses HTTP request with a fresh OpenAI API key.
 It requires LOCAL_PLATFORM_OPENAI_MODEL to name an explicit model snapshot.
 
@@ -133,6 +139,7 @@ local_platform_parse() {
     case "$1" in
       --admin-oidc) SMOKE_AUTH_MODE=admin-oidc; shift ;;
       --initial-private-checkout) LP_INITIAL_PRIVATE_CHECKOUT=1; shift ;;
+      --live-github) LP_LIVE_GITHUB=1; shift ;;
       --live-codex) LP_LIVE_CODEX=1; shift ;;
       --live-anthropic) LP_LIVE_ANTHROPIC=1; shift ;;
       --live-openai) LP_LIVE_OPENAI=1; shift ;;
@@ -147,11 +154,11 @@ local_platform_parse() {
 validate_local_platform_options() {
   validate_dev_smoke_browser_auth
   if [[ "$LP_APPLICATION_ONLY" == 1 ]]; then
-    [[ $((LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI + LP_INITIAL_PRIVATE_CHECKOUT)) == 0 ]] ||
+    [[ $((LP_LIVE_GITHUB + LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI + LP_INITIAL_PRIVATE_CHECKOUT)) == 0 ]] ||
       die 'application-only cannot select a provider or initial private checkout'
   fi
-  if (( LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI > 0 )); then
-    [[ $((LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI)) == 1 &&
+  if (( LP_LIVE_GITHUB + LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI > 0 )); then
+    [[ $((LP_LIVE_GITHUB + LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI)) == 1 &&
        "$LP_INITIAL_PRIVATE_CHECKOUT" == 0 && -z "$LOCAL_PLATFORM_NETWORK_ID" &&
        "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 0 && -z "$LOCAL_PLATFORM_MESH_PROBE_BIN" &&
        -z "$LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN" ]] ||
@@ -661,6 +668,8 @@ local_platform_cleanup() {
   local_platform_cleanup_network || rc=1
   cleanup_provider_ssh_profile || rc=1
   cleanup_provider_ssh_credential || rc=1
+  cleanup_provider_github_profile || rc=1
+  cleanup_provider_github_credential || rc=1
   cleanup_provider_codex_profile || rc=1
   cleanup_provider_codex_credential || rc=1
   cleanup_provider_anthropic_profile || rc=1
@@ -695,7 +704,9 @@ local_platform_cleanup() {
     [[ "$LP_HOME" == "$TMPDIR_SMOKE/h" && -d "$LP_HOME" && ! -L "$LP_HOME" &&
       "$(stat -c %u "$LP_HOME")" == "$(id -u)" ]] || exit 1
     rm -rf -- "$LP_HOME"
-    if [[ "$LP_LIVE_CODEX" == 1 ]]; then
+    if [[ "$LP_LIVE_GITHUB" == 1 ]]; then
+      log 'PASS: stock gh read-only account request in a Linux VM through freshly enrolled platform GitHub OAuth, with cleanup; private checkout, other providers and hosted placement are not implied'
+    elif [[ "$LP_LIVE_CODEX" == 1 ]]; then
       log 'PASS: stock Codex request in a Linux VM through freshly enrolled platform OAuth, with cleanup; other providers and hosted placement are not implied'
     elif [[ "$LP_LIVE_ANTHROPIC" == 1 ]]; then
       log 'PASS: stock Claude request in a Linux VM through a freshly enrolled platform Anthropic API key, with cleanup; other providers and hosted placement are not implied'
@@ -769,7 +780,9 @@ main() {
     die 'fresh OAuth login selected a different organization'
   [[ "$(awk '$1 == "Role:" {print $2}' "$TMPDIR_SMOKE/admin-current-organization.out")" == owner ]] ||
     die 'fresh OAuth login must own the selected disposable-test organization'
-  if [[ "$LP_LIVE_CODEX" == 1 ]]; then
+  if [[ "$LP_LIVE_GITHUB" == 1 ]]; then
+    local_platform_github_journey
+  elif [[ "$LP_LIVE_CODEX" == 1 ]]; then
     local_platform_codex_journey
   elif [[ "$LP_LIVE_ANTHROPIC" == 1 ]]; then
     local_platform_anthropic_journey
@@ -781,6 +794,27 @@ main() {
     local_platform_journey
   fi
 }
+
+local_platform_github_journey() {
+  SMOKE_NAME="local-github-$(tr -d '-' </proc/sys/kernel/random/uuid)"
+  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
+  jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
+    "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
+  prepare_provider_github
+  jq --arg image "$LOCAL_PLATFORM_IMAGE" '.image=$image' \
+    "$PROVIDER_GITHUB_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  # Bind ownership in the parent before creation, including an uncertain reply.
+  LP_CREATE_ATTEMPTED=1
+  cw_with_timeout 1500 env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
+    --path "$LP_WORKSPACE" --path-mode copy --file codewire.yaml --yes --output json \
+    >"$TMPDIR_SMOKE/local-create.json" 2>"$TMPDIR_SMOKE/local-create.err" || die 'local VM with platform GitHub failed to start'
+  ENV_ID="$(jq -er '.id | select(. != "00000000-0000-0000-0000-000000000000" and
+    test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))' "$TMPDIR_SMOKE/local-create.json")"
+  cw_with_timeout 30 use --local "$ENV_ID" >"$TMPDIR_SMOKE/local-use.out"
+  run_provider_github_smoke
+  # The EXIT handler owns final PASS, only after VM absence and all cleanup.
+}
+
 
 local_platform_codex_journey() {
   SMOKE_NAME="local-codex-$(tr -d '-' </proc/sys/kernel/random/uuid)"

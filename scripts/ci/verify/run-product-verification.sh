@@ -476,6 +476,8 @@ run_runtime_dev_smoke() {
   python3 -B scripts/runtime/tests/test-hosted-checkout-fixture.py
   scripts/runtime/tests/test-provider-codex-smoke.sh
   python3 -B scripts/runtime/tests/test-provider-codex-workload.py
+  scripts/runtime/tests/test-provider-github-smoke.sh
+  python3 -B scripts/runtime/tests/test-provider-github-workload.py
   scripts/runtime/tests/test-provider-anthropic-smoke.sh
   python3 -B scripts/runtime/tests/test-provider-anthropic-workload.py
   scripts/runtime/tests/test-provider-openai-smoke.sh
