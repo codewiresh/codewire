@@ -202,7 +202,10 @@ test.describe("server-rendered public, auth, and account routes", () => {
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Account", exact: true }).first()).toBeVisible();
     await expect(page.getByRole("heading", { name: "GitHub", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Git identity" })).toBeVisible();
+    for (const name of ["Account details", "Security", "Active sessions"]) {
+      await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+    }
+    await expect(page.getByRole("heading", { name: /Git (commit )?identity/i })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Git authentication" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "SSH key" })).toHaveCount(0);
     await expect(page.locator('form[action^="/settings/_actions/credentials/"]')).toHaveCount(0);
@@ -219,6 +222,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Profiles", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Git commit identity", exact: true })).toBeVisible();
     await expect(page.locator("dialog[open]")).toHaveCount(0);
     await expect(page.locator('form[action="/settings/credentials/_actions/profiles/create"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
