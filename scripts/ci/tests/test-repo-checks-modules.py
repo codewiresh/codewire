@@ -29,6 +29,7 @@ from repo_policy import (  # noqa: E402 - dispatcher directory is the import roo
     ses_security,
     turnstile_security,
 )
+from repo_policy.kubernetes import documents, resource_name, top_level_field
 
 
 COMMANDS = {
@@ -136,11 +137,34 @@ def assert_turnstile_negative_fixtures() -> None:
         old: str,
         new: str,
         expected: str,
+        *,
+        deployment_name: str | None = None,
     ) -> None:
         fixture = rendered.copy()
-        if fixture[overlay].count(old) != 1:
+        target = fixture[overlay]
+        if deployment_name is not None:
+            matches = [
+                document for document in documents(target)
+                if top_level_field(document, "kind") == "Deployment"
+                and resource_name(document) == deployment_name
+            ]
+            if len(matches) != 1:
+                raise AssertionError(f"{label}: fixture deployment target is not unique")
+            target = matches[0]
+        if target.count(old) != 1 or fixture[overlay].count(target) != 1:
             raise AssertionError(f"{label}: fixture mutation target is not unique")
-        fixture[overlay] = fixture[overlay].replace(old, new)
+        fixture[overlay] = fixture[overlay].replace(target, target.replace(old, new))
+        if deployment_name is not None:
+            original_others = [
+                document for document in documents(rendered[overlay]) if document != target
+            ]
+            changed_others = [
+                document for document in documents(fixture[overlay])
+                if not (top_level_field(document, "kind") == "Deployment"
+                        and resource_name(document) == deployment_name)
+            ]
+            if changed_others != original_others:
+                raise AssertionError(f"{label}: mutation changed unrelated resources")
 
         def fake_run(args: list[str], **_: object) -> SimpleNamespace:
             if args[:2] != ["kustomize", "build"] or args[2] not in fixture:
@@ -185,6 +209,7 @@ def assert_turnstile_negative_fixtures() -> None:
         "        - name: FRONTEND_URL\n          value: https://codewire-dev.sh\n",
         "        - name: FRONTEND_URL\n          value: https://wrong.invalid\n",
         "bind Turnstile verification to https://codewire-dev.sh",
+        deployment_name="codewire-idp",
     )
     assert_rejected(
         "active-production-widget",

@@ -30,7 +30,7 @@ SNAPSHOT_CLEANUP_PID="$$"
 
 usage() {
   cat <<'EOF'
-Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH [--prepared-kind-management-secrets-mobile | --prepared-kind-creation]
+Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH [--prepared-kind-management-secrets-mobile | --prepared-kind-creation | --prepared-kind-terminal]
 
 Regenerate the five affected dashboard snapshots whose checked-in suffix is
 ubuntu24-cft145. The local Kind stack must already be running through `make up`.
@@ -44,6 +44,11 @@ With --prepared-kind-creation, regenerate only the two existing desktop/mobile
 Create Sandbox goldens on that prepared topology. Synthetic authentication and
 renderer isolation remain required. This profile never creates, deploys, or
 forwards the topology and does not qualify sandbox runtime or source recovery.
+
+With --prepared-kind-terminal, regenerate only the existing desktop terminal
+drawer and mobile terminal page goldens, using the desktop real-Kind lifecycle
+test on that same prepared topology. Runtime assertions remain enabled. This
+profile also never creates, deploys, or forwards the topology.
 
 The Chromium archive must be chrome-linux64.zip for version 145.0.7632.6 with
 the checksum pinned by scripts/ci/install-pinned-playwright-chromium.sh.
@@ -97,6 +102,12 @@ EOF
       cat <<'EOF'
 ssr-dashboard.environments.ssr.ts-snapshots/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
 ssr-dashboard.environments.ssr.ts-snapshots/environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+      ;;
+    prepared-kind-terminal)
+      cat <<'EOF'
+ssr-dashboard.environments.ssr.ts-snapshots/terminal-drawer-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.environments.ssr.ts-snapshots/terminal-full-mobile-dashboard-ssr-desktop-ubuntu24-cft145.png
 EOF
       ;;
     *)
@@ -387,7 +398,7 @@ promote_snapshots() {
 snapshot_profile_context() {
   case "$1" in
     default) printf '%s\n' "$KUBE_CONTEXT" ;;
-    prepared-kind-management-secrets-mobile|prepared-kind-creation) printf '%s\n' "$PREPARED_KIND_CONTEXT" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal) printf '%s\n' "$PREPARED_KIND_CONTEXT" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -395,7 +406,7 @@ snapshot_profile_context() {
 snapshot_profile_namespace() {
   case "$1" in
     default) printf '%s\n' "$KUBE_NAMESPACE" ;;
-    prepared-kind-management-secrets-mobile|prepared-kind-creation) printf '%s\n' "$PREPARED_KIND_NAMESPACE" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal) printf '%s\n' "$PREPARED_KIND_NAMESPACE" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -403,7 +414,7 @@ snapshot_profile_namespace() {
 snapshot_profile_origin() {
   case "$1" in
     default) printf '%s\n' "$PLAYWRIGHT_BASE_URL" ;;
-    prepared-kind-management-secrets-mobile|prepared-kind-creation) printf '%s\n' "$PREPARED_KIND_PLAYWRIGHT_BASE_URL" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal) printf '%s\n' "$PREPARED_KIND_PLAYWRIGHT_BASE_URL" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -411,7 +422,7 @@ snapshot_profile_origin() {
 snapshot_profile_database_url() {
   case "$1" in
     default) printf '%s\n' "$DATABASE_URL" ;;
-    prepared-kind-management-secrets-mobile|prepared-kind-creation) printf '%s\n' "$PREPARED_KIND_DATABASE_URL" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal) printf '%s\n' "$PREPARED_KIND_DATABASE_URL" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -439,7 +450,7 @@ validate_snapshot_topology() {
         return 1
       }
   done
-  if [ "$profile" = prepared-kind-management-secrets-mobile ] || [ "$profile" = prepared-kind-creation ]; then
+  if [ "$profile" = prepared-kind-management-secrets-mobile ] || [ "$profile" = prepared-kind-creation ] || [ "$profile" = prepared-kind-terminal ]; then
     kubectl --context "$kube_context" -n "$namespace" rollout status \
       deployment/codewire-credential-service --timeout=120s || {
         fail 'required dashboard dependency is not Ready: deployment/codewire-credential-service'
@@ -466,6 +477,29 @@ validate_snapshot_topology() {
     fail "dashboard origin mismatch: expected $expected_origin, found ${actual_origin:-missing}"
     return 1
   }
+}
+
+prepared_terminal_workspace_image() {
+  local docker_config="$1" expected marker
+  # Use the same source/image/archive proof as Kind's browser gate. Never
+  # accept a caller-supplied image or a cluster marker without that proof.
+  expected="$(isolated_docker_client "$docker_config" python3 \
+    "$ROOT/scripts/ci/verify/workspace-image-artifact.py" reuse "$ROOT" \
+    "$ROOT/.tmp/codewire-workspace-image-verification.json")" || {
+      fail 'terminal renderer requires the source-verified workspace image'
+      return 1
+    }
+  marker="$(kubectl --context "$PREPARED_KIND_CONTEXT" \
+    -n "$PREPARED_KIND_NAMESPACE" get configmap/codewire-kind-e2e-prepared \
+    -o 'jsonpath={.data.compatibility_version}{"\n"}{.data.cluster-name}{"\n"}{.data.workspace-image}')" || {
+      fail 'could not read the prepared terminal workspace identity'
+      return 1
+    }
+  [ "$marker" = "$(printf '1\ncodewire-e2e-ci\n%s' "$expected")" ] || {
+    fail 'prepared terminal workspace does not match source-verified image'
+    return 1
+  }
+  printf '%s\n' "$expected"
 }
 
 assert_kubectl_not_invoked() {
@@ -602,7 +636,7 @@ main() {
   local tracked_paths current_tracked_paths source_fingerprint projection_fingerprint
   local renderer_log renderer_iid renderer_image_id container_cidfile container_id
   local snapshot_profile='default' kube_context namespace playwright_base_url database_url
-  local stale_count bun_bin
+  local stale_count bun_bin runtime_workspace_image=''
   local docker_status=0 relative
   local lock_fd=''
 
@@ -616,7 +650,7 @@ main() {
         chromium_archive="$2"
         shift 2
         ;;
-      --prepared-kind-management-secrets-mobile|--prepared-kind-creation)
+      --prepared-kind-management-secrets-mobile|--prepared-kind-creation|--prepared-kind-terminal)
         [ "$snapshot_profile" = default ] || {
           fail 'only one prepared Kind snapshot profile may be specified'
           return 2
@@ -644,7 +678,7 @@ main() {
   [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] ||
     fail 'the ubuntu24-cft145 renderer requires a Linux x86_64 host'
 
-  for tool in awk bun cmp curl docker find flock git grep head id install kind kubectl mv od psql \
+  for tool in awk bun cmp curl docker find flock git grep head id install kind kubectl mv od psql python3 \
       sha256sum sort stat tar tee tr; do
     require_tool "$tool"
   done
@@ -723,6 +757,9 @@ main() {
     fail 'isolated dependency installation modified tracked source content'
 
   validate_snapshot_topology "$snapshot_profile" "$docker_config"
+  if [ "$snapshot_profile" = prepared-kind-terminal ]; then
+    runtime_workspace_image="$(prepared_terminal_workspace_image "$docker_config")" || return $?
+  fi
 
   if [ "$snapshot_profile" = default ]; then
     env -u STATE_DIR KUBE_CONTEXT="$kube_context" NAMESPACE="$namespace" \
@@ -774,6 +811,7 @@ main() {
       --env DATABASE_URL="$database_url" \
       --env SERVER_URL="$playwright_base_url" \
       --env PLAYWRIGHT_BASE_URL="$playwright_base_url" \
+      --env PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$runtime_workspace_image" \
       --env PATH="$RENDERER_PATH" \
       --workdir /workspace --entrypoint /bin/bash "$renderer_image_id" \
       -euo pipefail -c '
@@ -822,6 +860,15 @@ main() {
               --project=dashboard-ssr-desktop --project=dashboard-ssr-mobile \
               apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
               --grep "renders server-owned create options and resources with no browser service caller|keeps environment create and inventory usable on mobile" \
+              --output /tmp/codewire-run/test-results \
+              --update-snapshots=changed --retries=0 --workers=1 --reporter=line
+            ;;
+          prepared-kind-terminal)
+            ./apps/dashboard/node_modules/.bin/playwright test \
+              --config apps/dashboard/playwright.config.ts \
+              --project=dashboard-ssr-desktop \
+              apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
+              --grep "selects a platform secret project and preserves it after a form error|creates, runs, exposes a port, stops, starts, and destroys through real Kind" \
               --output /tmp/codewire-run/test-results \
               --update-snapshots=changed --retries=0 --workers=1 --reporter=line
             ;;

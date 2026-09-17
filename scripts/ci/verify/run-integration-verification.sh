@@ -345,7 +345,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::environment_daemon::session_mutation::tests::db_' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment session admission matrix" "$logfile" 4
+  assert_passed_count "environment session admission matrix" "$logfile" 5
 
   logfile="$RUN_DIR/environment-destroy-template-hint.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -971,6 +971,8 @@ start_orchestration_process() {
 start_orchestration() {
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
     -f "$ROOT/tests/fixtures/orchestration/seed.sql"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+    -f "$ROOT/tests/fixtures/orchestration/runtime-ready.sql"
   start_temporal
   start_orchestration_kube_stub
   start_orchestration_daemon_fixture

@@ -444,6 +444,17 @@ pub async fn attach_environment_daemon_session_core(
 }
 
 impl EnvironmentDaemonSessionAttachment {
+    /// Both transport halves remain inside orchestration. Dropping them
+    /// releases the attachment, never dispatching StopSession.
+    pub(crate) fn into_stream_parts(
+        self,
+    ) -> (
+        mpsc::Sender<v1::SessionAttachMessage>,
+        Streaming<v1::SessionAttachMessage>,
+    ) {
+        (self.input, self.output)
+    }
+
     pub async fn send_input(&self, message: v1::SessionAttachMessage) -> AppResult<()> {
         self.input
             .send(message)

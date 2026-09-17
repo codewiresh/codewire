@@ -2461,24 +2461,42 @@ SET state = 'running', desired_state = 'started', error_reason = NULL,
 
 INSERT INTO sandbox_environment_backend (
   environment_id, namespace, pod_name, pod_ip,
+  setup_complete,
   setup_owner_generation, setup_owner_activity_id, setup_owner_attempt,
   setup_owner_phase, setup_owner_status, setup_owner_pod_uid
 )
 SELECT '$environment_id', '$SANDBOX_NS', '$daemon_pod', '$pod_ip',
-       environment_operation_generation, 'kind-file-service-smoke', 1,
-       0, 'claimed', NULL
+       true, NULL, NULL, NULL, NULL, NULL, NULL
 FROM environments
 WHERE id = '$environment_id'
 ON CONFLICT (environment_id) DO UPDATE
 SET namespace = EXCLUDED.namespace,
     pod_name = EXCLUDED.pod_name,
     pod_ip = EXCLUDED.pod_ip,
-    setup_owner_generation = EXCLUDED.setup_owner_generation,
-    setup_owner_activity_id = EXCLUDED.setup_owner_activity_id,
-    setup_owner_attempt = EXCLUDED.setup_owner_attempt,
-    setup_owner_phase = EXCLUDED.setup_owner_phase,
-    setup_owner_status = EXCLUDED.setup_owner_status,
-    setup_owner_pod_uid = EXCLUDED.setup_owner_pod_uid;
+    setup_complete = true,
+    setup_owner_generation = NULL,
+    setup_owner_activity_id = NULL,
+    setup_owner_attempt = NULL,
+    setup_owner_phase = NULL,
+    setup_owner_status = NULL,
+    setup_owner_pod_uid = NULL;
+
+-- This caller-owned fixture is already bootstrapped and Ready, not an active
+-- setup workflow. Its completed state must satisfy the production admission
+-- guard before exercising durable session mutations.
+DO \$fixture\$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM sandbox_environment_backend
+    WHERE environment_id = '$environment_id' AND setup_complete
+      AND setup_owner_generation IS NULL AND setup_owner_activity_id IS NULL
+      AND setup_owner_attempt IS NULL AND setup_owner_phase IS NULL
+      AND setup_owner_status IS NULL AND setup_owner_pod_uid IS NULL
+  ) THEN
+    RAISE EXCEPTION 'prepared FileService fixture is not ready and idle';
+  END IF;
+END
+\$fixture\$;
 SQL
 
   environment_daemon_proxy_smoke "$environment_id" "$daemon_pod"

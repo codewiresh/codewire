@@ -89,13 +89,57 @@ file_fixture="$(sed -n '/^file_service_smoke() (/,/^platform_run_connect_smoke()
   fail 'terminal smoke must run exactly once against the bound environment'
 awk '
   /if \[ "\$ready" != "True" \]/ { ready = 1 }
-  /setup_owner_pod_uid = EXCLUDED.setup_owner_pod_uid;/ { bound = ready }
+  /setup_owner_pod_uid = NULL;/ { bound = ready }
   /environment_daemon_proxy_smoke "\$environment_id"/ { daemon = bound }
   /environment_setup_terminal_smoke "\$environment_id"/ { terminal = daemon }
   /DELETE FROM sandbox_environment_backend/ { cleaned = terminal }
   END { exit !(terminal && cleaned) }
 ' <<<"$file_fixture" || fail 'terminal smoke must follow authenticated binding and precede cleanup'
+# A manually prepared Ready workspace is not an active setup owner. Preserve
+# the production readiness guard and seed/upsert coherent completed metadata.
+for binding in \
+    '       true, NULL, NULL, NULL, NULL, NULL, NULL' \
+    '    setup_complete = true,' \
+    '    setup_owner_generation = NULL,' \
+    '    setup_owner_activity_id = NULL,' \
+    '    setup_owner_attempt = NULL,' \
+    '    setup_owner_phase = NULL,' \
+    '    setup_owner_status = NULL,' \
+    '    setup_owner_pod_uid = NULL;' \
+    "RAISE EXCEPTION 'prepared FileService fixture is not ready and idle';"; do
+  grep -Fq "$binding" <<<"$file_fixture" ||
+    fail "prepared workspace readiness binding missing: $binding"
+done
 workspace_fixture="$(sed -n '/^workspace_service_smokes() {/,/^environment_resize_smoke() (/p' "$COMMON")"
+python3 - "$ROOT" <<'PY'
+import hashlib
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+seed = root / "tests/fixtures/orchestration/seed.sql"
+assert hashlib.sha256(seed.read_bytes()).hexdigest() == "6d45bddfa5ad285ea68acd9bd90c7f608bd558bd03b057cc11e3b326025dad64"
+adapter = root / "tests/fixtures/orchestration/runtime-ready.sql"
+sql = adapter.read_text()
+for field in ["generation", "activity_id", "attempt", "phase", "status", "pod_uid"]:
+    assert f"setup_owner_{field} = NULL" in sql
+assert "setup_complete = TRUE" in sql
+assert "<> 2 THEN" in sql
+assert "WHERE environment_id IN ('env_exec_contract_backend', 'env_exec_contract_unavailable')" in sql
+for relative, startup in [
+    ("scripts/ci/verify/run-integration-verification.sh", "start_orchestration_process configured"),
+    ("scripts/ci/verify/rust-stack-rehearsal.sh", 'start_proc orchestration "$ORCHESTRATION_PORT" env'),
+]:
+    source = (root / relative).read_text()
+    marker = '-f "$ROOT/tests/fixtures/orchestration/seed.sql"'
+    assert source.count(marker) == 1
+    tail = source.split(marker, 1)[1]
+    adapter_marker = '-f "$ROOT/tests/fixtures/orchestration/runtime-ready.sql"'
+    assert source.count(adapter_marker) == 1
+    assert 0 <= tail.find(adapter_marker) < tail.find(startup)
+    assert re.search(r'psql "\$DATABASE_URL" -v ON_ERROR_STOP=1 \\\n\s+-f "\$ROOT/tests/fixtures/orchestration/runtime-ready.sql"', source)
+PY
 if grep -Fq 'environment_setup_terminal_smoke' <<<"$workspace_fixture"; then
   fail 'workspace suite runs terminal smoke outside the authenticated binding'
 fi
