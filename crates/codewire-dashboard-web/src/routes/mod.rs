@@ -18,6 +18,7 @@ mod invitations;
 mod organization_governance;
 mod organizations;
 mod public;
+mod sandbox_resize;
 mod secrets_presets;
 mod settings;
 mod snapshots;
@@ -364,6 +365,18 @@ pub(crate) fn router() -> Router<AppState> {
             get(sandbox_detail_slash_redirect),
         )
         .route("/{slug}/{environment_id}/", get(terminal::page))
+        .route(
+            "/{slug}/{environment_id}/_actions/resize/plan",
+            post(sandbox_resize::plan).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/{slug}/{environment_id}/_actions/resize/apply",
+            post(sandbox_resize::apply).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/{slug}/{environment_id}/_fragments/resize-operation",
+            get(sandbox_resize::operation),
+        )
         .route(
             "/{slug}/{environment_id}/_fragments/terminal-readiness",
             get(terminal_readiness::get),

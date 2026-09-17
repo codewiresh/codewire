@@ -702,6 +702,9 @@ pub(crate) struct EnvironmentRow {
     pub(crate) isolation_tier: &'static str,
     pub(crate) last_event: String,
     pub(crate) created: String,
+    pub(crate) deletion_state: &'static str,
+    pub(crate) shutdown_at: Option<String>,
+    pub(crate) shutdown_at_label: String,
     pub(crate) cost: String,
     pub(crate) running_time: String,
     pub(crate) resources: String,
@@ -781,13 +784,219 @@ pub(crate) struct EnvironmentResizeOperationView {
     pub(crate) pod_replaced: bool,
 }
 
+fn resize_detail_url(slug: &str, environment_id: &str) -> Option<String> {
+    if !codewire_server_core::organization_slug::valid_organization_slug(slug)
+        || !uuid::Uuid::parse_str(environment_id).is_ok_and(|id| id.to_string() == environment_id)
+    {
+        return None;
+    }
+    Some(format!("/{slug}/{environment_id}/"))
+}
+
+impl EnvironmentResizeConfirmationView {
+    pub(crate) fn detail_url(&self, slug: &str) -> Option<String> {
+        resize_detail_url(slug, &self.environment_id)
+    }
+}
+
+impl EnvironmentResizeOperationView {
+    pub(crate) fn detail_url(&self, slug: &str) -> Option<String> {
+        resize_detail_url(slug, &self.environment_id)
+    }
+}
+
+#[cfg(test)]
+mod resize_detail_link_tests {
+    use super::resize_detail_url;
+
+    #[test]
+    fn native_resize_return_links_only_use_canonical_same_org_paths() {
+        let environment = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        assert_eq!(
+            resize_detail_url("example-org", environment),
+            Some(format!("/example-org/{environment}/"))
+        );
+        for slug in [
+            "../foreign",
+            "//foreign",
+            "https://foreign.test",
+            "",
+            "UPPERCASE",
+        ] {
+            assert!(resize_detail_url(slug, environment).is_none());
+        }
+        for environment in [
+            "../foreign",
+            "environment-id",
+            "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+            "",
+        ] {
+            assert!(resize_detail_url("example-org", environment).is_none());
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalPageView {
+    pub(crate) account_id: String,
     pub(crate) organization_id: String,
     pub(crate) environment: EnvironmentRow,
     pub(crate) websocket_origin: String,
+    pub(crate) list_context: SandboxListContext,
+    pub(crate) list_url: String,
     pub(crate) message: String,
     pub(crate) error: String,
+}
+
+/// Navigation metadata only: neither an organization authority nor a return URL.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct SandboxListContext {
+    #[serde(default)]
+    pub(crate) list_search: String,
+    #[serde(default)]
+    pub(crate) list_state: String,
+}
+
+impl SandboxListContext {
+    pub(crate) fn new(search: &str, state: &str) -> Self {
+        Self {
+            list_search: search
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(128)
+                .collect(),
+            list_state: Self::state(state).to_owned(),
+        }
+    }
+
+    pub(crate) fn normalized(&self) -> Self {
+        Self::new(&self.list_search, &self.list_state)
+    }
+
+    pub(crate) fn state(value: &str) -> &'static str {
+        match value {
+            "running" => "running",
+            "stopped" => "stopped",
+            "pending" => "pending",
+            "creating" => "creating",
+            "starting" => "starting",
+            "stopping" => "stopping",
+            "error" => "error",
+            "destroyed" => "destroyed",
+            _ => "all",
+        }
+    }
+
+    pub(crate) fn list_url(&self, slug: &str) -> String {
+        self.path(slug, None)
+    }
+
+    pub(crate) fn detail_url(&self, slug: &str, environment_id: &str) -> String {
+        self.path(slug, Some(environment_id))
+    }
+
+    fn path(&self, slug: &str, environment_id: Option<&str>) -> String {
+        if !codewire_server_core::organization_slug::valid_organization_slug(slug) {
+            return "/dashboard/".to_owned();
+        }
+        let detail = environment_id.and_then(|id| resize_detail_url(slug, id));
+        let mut path = detail.clone().unwrap_or_else(|| format!("/{slug}/"));
+        let context = self.normalized();
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        if !context.list_search.is_empty() {
+            query.append_pair(
+                if detail.is_some() {
+                    "list_search"
+                } else {
+                    "search"
+                },
+                &context.list_search,
+            );
+        }
+        if context.list_state != "all" {
+            query.append_pair(
+                if detail.is_some() {
+                    "list_state"
+                } else {
+                    "state"
+                },
+                &context.list_state,
+            );
+        }
+        let query = query.finish();
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query);
+        }
+        path
+    }
+}
+
+#[cfg(test)]
+mod sandbox_list_context_tests {
+    use super::SandboxListContext;
+
+    const ENVIRONMENT: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+    #[test]
+    fn navigation_context_is_bounded_metadata_not_a_return_url() {
+        let context = SandboxListContext::new(
+            &format!("\n{}\t", "界".repeat(129)),
+            "https://other.invalid/",
+        );
+        assert_eq!(context.list_search, "界".repeat(128));
+        assert_eq!(context.list_state, "all");
+        assert_eq!(SandboxListContext::default().list_url("my-org"), "/my-org/");
+        assert_eq!(
+            SandboxListContext::default().detail_url("my-org", ENVIRONMENT),
+            format!("/my-org/{ENVIRONMENT}/")
+        );
+        assert_eq!(
+            context.detail_url("../other-org", ENVIRONMENT),
+            "/dashboard/"
+        );
+        assert_eq!(
+            context.detail_url("//other.invalid", ENVIRONMENT),
+            "/dashboard/"
+        );
+        assert!(
+            context
+                .detail_url("my-org", "../other-org")
+                .starts_with("/my-org/?search=")
+        );
+    }
+
+    #[test]
+    fn list_and_detail_encode_search_without_changing_path_or_state() {
+        let search = "雪 &state=destroyed?return_to=https://other.invalid/#fragment";
+        let context = SandboxListContext::new(search, "running");
+        for (path, expected_path, search_key, state_key) in [
+            (
+                context.list_url("my-org"),
+                "/my-org/".to_owned(),
+                "search",
+                "state",
+            ),
+            (
+                context.detail_url("my-org", ENVIRONMENT),
+                format!("/my-org/{ENVIRONMENT}/"),
+                "list_search",
+                "list_state",
+            ),
+        ] {
+            let parsed = url::Url::parse(&format!("https://dashboard.invalid{path}")).unwrap();
+            assert_eq!(parsed.path(), expected_path);
+            assert_eq!(parsed.host_str(), Some("dashboard.invalid"));
+            assert_eq!(parsed.fragment(), None);
+            assert_eq!(
+                parsed.query_pairs().collect::<Vec<_>>(),
+                vec![
+                    (search_key.into(), search.into()),
+                    (state_key.into(), "running".into())
+                ]
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1033,6 +1242,10 @@ pub(crate) struct EnvironmentsPageView {
 }
 
 impl EnvironmentsPageView {
+    pub(crate) fn detail_url(&self, slug: &str, environment_id: &str) -> String {
+        SandboxListContext::new(&self.search, &self.state).detail_url(slug, environment_id)
+    }
+
     pub(crate) fn state_selected(&self, value: &str) -> bool {
         self.state == value
     }

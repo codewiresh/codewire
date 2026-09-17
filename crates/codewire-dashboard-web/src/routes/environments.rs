@@ -40,7 +40,7 @@ use crate::{
     view::{
         EnvironmentAppPortFormRow, EnvironmentCreateFormView, EnvironmentPortPanelView,
         EnvironmentRepositoryFormRow, EnvironmentsPageView, OrganizationContext,
-        bad_request_fields, connect_error_reason,
+        SandboxListContext, bad_request_fields, connect_error_reason,
     },
 };
 
@@ -85,6 +85,8 @@ pub(super) struct EnvironmentIdSubmission {
     environment_id: String,
     #[serde(default)]
     return_to: String,
+    #[serde(flatten)]
+    list_context: SandboxListContext,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1538,41 +1540,89 @@ async fn lifecycle_action<F>(
 where
     F: for<'a> FnOnce(&'a AppState, HeaderValue, String, String) -> LifecycleFuture<'a>,
 {
-    let continuation =
-        lifecycle_return_path(slug, &submission.environment_id, &submission.return_to);
+    let list_context = submission.list_context.normalized();
+    let continuation = lifecycle_return_path(
+        slug,
+        &submission.environment_id,
+        &submission.return_to,
+        &list_context,
+    );
     let (_, organization, cookie) =
         match action_context(state, headers, slug, &submission.csrf, continuation.clone()).await {
             Ok(context) => context,
             Err(response) => return response,
         };
     if !valid_identifier(&submission.environment_id) {
-        return mutation_redirect(state, environments_path(slug), "", "invalid", headers);
-    }
-    match operation(state, cookie, organization.id, submission.environment_id).await {
-        Ok(()) => mutation_redirect(
+        return mutation_redirect(
             state,
-            if message == "environment-destroying" {
-                environments_path(slug)
-            } else {
-                continuation
-            },
-            message,
+            lifecycle_feedback_path(&list_context.list_url(slug), "", "invalid"),
+            "",
             "",
             headers,
-        ),
+        );
+    }
+    match operation(state, cookie, organization.id, submission.environment_id).await {
+        Ok(()) => {
+            let destination = if message == "environment-destroying" {
+                list_context.list_url(slug)
+            } else {
+                continuation
+            };
+            mutation_redirect(
+                state,
+                lifecycle_feedback_path(&destination, message, ""),
+                "",
+                "",
+                headers,
+            )
+        }
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&continuation, headers)
         }
-        Err(error) => mutation_redirect(state, continuation, "", mutation_error(&error), headers),
+        Err(error) => mutation_redirect(
+            state,
+            lifecycle_feedback_path(&continuation, "", mutation_error(&error)),
+            "",
+            "",
+            headers,
+        ),
     }
 }
 
-fn lifecycle_return_path(slug: &str, environment_id: &str, return_to: &str) -> String {
+fn lifecycle_return_path(
+    slug: &str,
+    environment_id: &str,
+    return_to: &str,
+    context: &SandboxListContext,
+) -> String {
     if return_to == "detail" && super::terminal::canonical_environment_id(environment_id) {
-        super::terminal::terminal_path(slug, environment_id)
+        context.detail_url(slug, environment_id)
     } else {
-        environments_path(slug)
+        context.list_url(slug)
     }
+}
+
+fn lifecycle_feedback_path(path: &str, message: &str, error: &str) -> String {
+    // The path is constructed above, never supplied as a browser return URL.
+    let mut target = Url::parse(&format!("https://codewire.invalid{path}"))
+        .expect("server-owned lifecycle path");
+    if matches!(
+        message,
+        "environment-started" | "environment-stopping" | "environment-destroying"
+    ) {
+        target.query_pairs_mut().append_pair("message", message);
+    } else if matches!(
+        error,
+        "invalid" | "not-authorized" | "not-found" | "unavailable"
+    ) {
+        target.query_pairs_mut().append_pair("error", error);
+    }
+    let mut result = target.path().to_owned();
+    if let Some(query) = target.query() {
+        result.push('?');
+        result.push_str(query);
+    }
+    result
 }
 
 pub(super) fn apply_confidential_visibility(
@@ -2105,25 +2155,11 @@ fn port_access(value: &str) -> PortAccess {
 }
 
 fn bounded_query(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(128)
-        .collect()
+    SandboxListContext::new(value, "all").list_search
 }
 
 fn allowlisted_state(value: &str) -> &'static str {
-    match value {
-        "running" => "running",
-        "stopped" => "stopped",
-        "pending" => "pending",
-        "creating" => "creating",
-        "starting" => "starting",
-        "stopping" => "stopping",
-        "error" => "error",
-        "destroyed" => "destroyed",
-        _ => "all",
-    }
+    SandboxListContext::state(value)
 }
 
 fn mutation_error(error: &ConnectError) -> &'static str {
@@ -2631,8 +2667,9 @@ mod tests {
     #[test]
     fn lifecycle_returns_only_to_the_validated_current_sandbox() {
         let id = "5d1db799-4300-4ab3-b957-efb980760542";
+        let context = SandboxListContext::default();
         assert_eq!(
-            lifecycle_return_path("my-org", id, "detail"),
+            lifecycle_return_path("my-org", id, "detail", &context),
             format!("/my-org/{id}/")
         );
         for target in [
@@ -2643,7 +2680,10 @@ mod tests {
             "/other-org/",
             "Detail",
         ] {
-            assert_eq!(lifecycle_return_path("my-org", id, target), "/my-org/");
+            assert_eq!(
+                lifecycle_return_path("my-org", id, target, &context),
+                "/my-org/"
+            );
         }
         for invalid in [
             "",
@@ -2652,7 +2692,7 @@ mod tests {
             "5D1DB799-4300-4AB3-B957-EFB980760542",
         ] {
             assert_eq!(
-                lifecycle_return_path("my-org", invalid, "detail"),
+                lifecycle_return_path("my-org", invalid, "detail", &context),
                 "/my-org/"
             );
         }
@@ -2661,6 +2701,94 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.return_to, "");
+        assert_eq!(legacy.list_context.list_search, "");
+        assert_eq!(legacy.list_context.normalized().list_state, "all");
+    }
+
+    #[test]
+    fn lifecycle_feedback_preserves_encoded_same_org_list_context() {
+        let id = "5d1db799-4300-4ab3-b957-efb980760542";
+        let context = SandboxListContext::new("a&state=destroyed ☃", "running");
+        for (destination, message, error, expected_path, expected_search_key) in [
+            (
+                "detail",
+                "environment-started",
+                "",
+                format!("/my-org/{id}/"),
+                "list_search",
+            ),
+            (
+                "detail",
+                "environment-stopping",
+                "",
+                format!("/my-org/{id}/"),
+                "list_search",
+            ),
+            (
+                "list",
+                "environment-destroying",
+                "",
+                "/my-org/".to_owned(),
+                "search",
+            ),
+            (
+                "detail",
+                "",
+                "not-authorized",
+                format!("/my-org/{id}/"),
+                "list_search",
+            ),
+        ] {
+            let path = lifecycle_return_path("my-org", id, destination, &context);
+            let target = lifecycle_feedback_path(&path, message, error);
+            let url = Url::parse(&format!("https://codewire.invalid{target}")).unwrap();
+            assert_eq!(url.path(), expected_path);
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == expected_search_key)
+                    .unwrap()
+                    .1,
+                "a&state=destroyed ☃"
+            );
+            let feedback = if message.is_empty() {
+                ("error", error)
+            } else {
+                ("message", message)
+            };
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == feedback.0)
+                    .unwrap()
+                    .1,
+                feedback.1
+            );
+            assert_eq!(url.query_pairs().count(), 3);
+            assert_eq!(target.matches('?').count(), 1);
+        }
+        let path = lifecycle_return_path("my-org", id, "https://foreign.test/", &context);
+        assert!(path.starts_with("/my-org/?search="));
+        assert_eq!(
+            lifecycle_feedback_path(&path, "unknown", "token=forbidden"),
+            path
+        );
+    }
+
+    #[tokio::test]
+    async fn native_lifecycle_forms_decode_navigation_metadata_and_reject_duplicate_csrf() {
+        use axum::extract::FromRequest as _;
+        let request = |body: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(body.to_owned()))
+                .unwrap()
+        };
+        let Form(form) = Form::<EnvironmentIdSubmission>::from_request(request("_csrf=synthetic&environment_id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb&return_to=detail&list_search=a%26state%3Ddestroyed&list_state=running"), &()).await.unwrap();
+        assert_eq!(form.csrf, "synthetic");
+        assert_eq!(form.return_to, "detail");
+        assert_eq!(form.list_context.list_search, "a&state=destroyed");
+        assert_eq!(form.list_context.list_state, "running");
+        assert!(Form::<EnvironmentIdSubmission>::from_request(request("_csrf=first&_csrf=second&environment_id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb&list_search=test"), &()).await.is_err());
     }
 
     #[test]
@@ -2782,6 +2910,9 @@ mod tests {
                 isolation_tier: "confidential",
                 last_event: String::new(),
                 created: String::new(),
+                deletion_state: "unscheduled",
+                shutdown_at: None,
+                shutdown_at_label: "Not currently scheduled".into(),
                 cost: String::new(),
                 running_time: String::new(),
                 resources: String::new(),
@@ -2815,7 +2946,11 @@ mod tests {
         .render()
         .unwrap();
         assert!(rendered.contains(">Stop</button>"));
-        assert!(rendered.contains("Destroy permanently"));
+        assert!(rendered.contains("Delete permanently"));
+        assert_eq!(rendered.matches("scope=\"col\"").count(), 6);
+        assert!(!rendered.contains("<th>"));
+        assert!(!rendered.contains("Snapshots are coming soon"));
+        assert!(!rendered.contains("Region unavailable"));
         for hidden in [
             ">Start</button>",
             ">Resize</summary>",
@@ -2825,6 +2960,17 @@ mod tests {
         ] {
             assert!(!rendered.contains(hidden), "unexpected action {hidden}");
         }
+        let mut empty = page.clone();
+        empty.environments.clear();
+        let rendered = EnvironmentListTemplate {
+            organization: &organization,
+            page: &empty,
+        }
+        .render()
+        .unwrap();
+        assert_eq!(rendered.matches("scope=\"col\"").count(), 6);
+        assert!(rendered.contains("colspan=\"6\""));
+        assert!(!rendered.contains("Region unavailable"));
     }
 
     #[test]

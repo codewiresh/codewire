@@ -1,0 +1,1 @@
+{% if let Some(deadline) = lifetime.shutdown_at %}<time datetime="{{ deadline }}">{{ lifetime.shutdown_at_label }}</time>{% else %}{{ lifetime.shutdown_at_label }}{% endif %}

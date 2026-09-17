@@ -1899,6 +1899,29 @@ ports: [{port: 3000, label: web, access: public}]
         assert!(null_metadata.metadata.is_unset());
     }
 
+    #[test]
+    fn shutdown_deadline_round_trips_source_precision_through_environment_mapping() {
+        for (value, expected_nanos) in [
+            ("2026-09-17T00:43:17Z", 0),
+            ("2026-09-17T00:43:17.753549Z", 753_549_000),
+        ] {
+            let source = chrono::DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .naive_utc();
+            let mut environment = test_environment("running", true);
+            environment.shutdown_at =
+                crate::api::environments::shutdown_deadline_string(Some(source));
+            let mapped = proto_environment(environment).unwrap();
+            let timestamp = mapped.shutdown_at.as_option().unwrap();
+            assert_eq!(timestamp.seconds, source.and_utc().timestamp());
+            assert_eq!(timestamp.nanos, expected_nanos);
+            let json = serde_json::to_value(&mapped).unwrap();
+            assert_eq!(json["shutdownAt"], value);
+        }
+        let absent = proto_environment(test_environment("running", true)).unwrap();
+        assert!(absent.shutdown_at.as_option().is_none());
+    }
+
     fn test_environment(state: &str, setup_complete: bool) -> Environment {
         Environment {
             id: "env_1".into(),

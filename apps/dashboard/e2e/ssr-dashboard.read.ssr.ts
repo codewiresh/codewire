@@ -70,10 +70,12 @@ test.describe("server-rendered dashboard", () => {
 
     await expect(page.getByRole("heading", { name: "Recently created" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Resources" })).toBeVisible();
-    await expect(page.locator('[data-quick-search-results] a[data-search-text*="snapshots"]').first()).toHaveAttribute(
-      "href",
-      /\/snapshots\/$/,
-    );
+    await expect(page.locator('[data-quick-search-results] a[data-search-text*="snapshots"]')).toHaveCount(0);
+    const searchResults = page.locator(".cw-sidebar-slot [data-quick-search-results]");
+    await expect(searchResults.getByRole("link", { name: "Credentials", exact: true, includeHidden: true })).toHaveAttribute("href", /\/settings\/credentials\/\?org=[a-z0-9-]+$/);
+    await expect(searchResults.getByRole("link", { name: "Account", exact: true, includeHidden: true })).toHaveAttribute("href", /\/settings\/\?org=[a-z0-9-]+$/);
+    await expect(searchResults.getByRole("link", { name: "Personal application secrets", exact: true, includeHidden: true })).toHaveAttribute("href", /\/secrets\/user\/$/);
+    await expect(searchResults.getByRole("link", { name: "Organization application secrets", exact: true, includeHidden: true })).toHaveAttribute("href", /\/secrets\/organization\/$/);
     await page.keyboard.press("/");
     await expect(page.locator(".cw-sidebar-slot [data-quick-search]")).toBeVisible();
     await page.locator(".cw-sidebar-slot [data-quick-search-input]").fill("settings");

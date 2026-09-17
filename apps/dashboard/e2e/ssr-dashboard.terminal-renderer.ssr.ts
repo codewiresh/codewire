@@ -101,6 +101,40 @@ test("sandbox dialogs and resize dismiss without navigation or terminal replacem
   expect(await terminal!.evaluate((element) => element === document.querySelector("[data-terminal-root]"))).toBe(true);
 });
 
+test("legacy Escape does not consume a key without a drawer or interfere with native overlay dismissal", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system for the focused fixture check");
+  await page.goto(`${origin}/reference/fixtures/terminal.html`);
+  await expect(page.locator(".xterm")).toBeVisible();
+  const renderer = (await page.locator(".xterm").elementHandle())!;
+  await page.addScriptTag({ url: `${origin}/terminal.js` });
+  expect(await page.evaluate(() => {
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    document.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(false);
+  expect(await page.evaluate(async () => {
+    const drawer = document.createElement("aside");
+    drawer.dataset.terminalDrawer = "";
+    document.body.append(drawer);
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    event.preventDefault();
+    document.dispatchEvent(event);
+    await Promise.resolve();
+    await Promise.resolve();
+    return drawer.hidden;
+  })).toBe(false);
+  const stop = page.getByRole("button", { name: "Stop", exact: true });
+  await stop.click();
+  const dialog = page.getByRole("dialog", { name: "Stop Example Sandbox?", exact: true });
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+  await expect(stop).toBeFocused();
+  await expect(page.locator("[data-terminal-drawer]")).toHaveJSProperty("hidden", false);
+  expect(await renderer.evaluate((element) => element === document.querySelector(".xterm"))).toBe(true);
+});
+
 test("terminal presentation preserves colors, metrics, selection and strict CSP", async ({ page, context }) => {
   const designOrigin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!designOrigin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for the focused fixture check");
