@@ -32,7 +32,7 @@ export const BROWSER_CONTRACT = Object.freeze({
   deviceCodeGroup: "Device code",
   approve: /approve device/i,
   approvedStatus: /device approved/i,
-  signOut: /sign out/i,
+  signOut: /^sign out of this browser$/i,
 });
 
 type Options = {
