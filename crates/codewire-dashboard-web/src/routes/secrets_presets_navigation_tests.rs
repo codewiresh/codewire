@@ -66,9 +66,27 @@ fn mutation(path: &str) -> bool {
         "/RenameSecret",
         "/RenameUserSecret",
         "/RenameProjectSecret",
+        "/CreateAccessProfile",
+        "/CompleteGithubAppAuthorization",
     ]
     .iter()
     .any(|suffix| path.ends_with(suffix))
+}
+
+fn synthetic_github_credential(generation: u64) -> codewire_proto::codewire::v1::Credential {
+    use codewire_proto::codewire::v1::{
+        Credential, CredentialAuthenticationKind, CredentialStatus,
+    };
+    Credential {
+        id: PROJECT.into(),
+        name: "synthetic-user".into(),
+        provider: "github".into(),
+        authentication_kind: CredentialAuthenticationKind::Oauth.into(),
+        status: CredentialStatus::Active.into(),
+        account_hint: Some("synthetic-user".into()),
+        revocation_generation: generation,
+        ..Default::default()
+    }
 }
 
 async fn fixture(mode: &'static str) -> (TestServer, Calls) {
@@ -84,13 +102,16 @@ async fn fixture(mode: &'static str) -> (TestServer, Calls) {
             calls.lock().unwrap().push((path.clone(), body.to_vec()));
             if path == "/api/auth/get-session" {
                 if mode == "unauthenticated" { return StatusCode::UNAUTHORIZED.into_response(); }
+                if mode == "optional lookup fails" && calls.lock().unwrap().iter().filter(|(path, _)| path == "/api/auth/get-session").count() == 2 {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
                 return Json(serde_json::json!({"user": {"id": "synthetic-account", "email": "synthetic@example.test", "two_factor_enabled": mode != "two factor"}})).into_response();
             }
             let metadata = SecretMetadata { key: "SYNTHETIC_KEY".into(), ..Default::default() };
             let bytes = if path.ends_with("/ListOrganizations") {
                 ListOrganizationsResponse {
                     organizations: if mode == "no membership" { vec![] } else { vec![OrganizationMembership {
-                        organization: Some(Organization { id: ORG.into(), name: "Synthetic organization".into(), slug: "synthetic".into(), ..Default::default() }).into(),
+                        organization: Some(Organization { id: ORG.into(), name: "Synthetic organization".into(), slug: if mode == "renamed" { "renamed" } else { "synthetic" }.into(), ..Default::default() }).into(),
                         role: if mode == "member" { OrgRole::Member } else { OrgRole::Owner }.into(),
                         ..Default::default()
                     }] }, ..Default::default()
@@ -103,12 +124,30 @@ async fn fixture(mode: &'static str) -> (TestServer, Calls) {
                 ListUserSecretsResponse { secrets: vec![metadata], ..Default::default() }.encode_to_vec()
             } else if path.ends_with("/ListProjectSecrets") {
                 ListProjectSecretsResponse { secrets: vec![metadata], ..Default::default() }.encode_to_vec()
+            } else if path.ends_with("/ListCredentials") || path.ends_with("/ListAccessProfiles") || path.ends_with("/GetGitIdentity") {
+                // Empty, typed metadata responses for the same synthetic
+                // Settings-to-Create navigation contract.
+                Vec::new()
+            } else if path.ends_with("/GetCredential") {
+                codewire_proto::codewire::v1::GetCredentialResponse { credential: Some(synthetic_github_credential(7)).into(), ..Default::default() }.encode_to_vec()
             } else if mutation(&path) {
                 if mode == "mutation denied" || mode == "mutation unauthenticated" {
                     let (status, code) = if mode == "mutation denied" { (StatusCode::FORBIDDEN, "permission_denied") } else { (StatusCode::UNAUTHORIZED, "unauthenticated") };
                     return (status, Json(serde_json::json!({"code": code, "message": "synthetic failure"}))).into_response();
                 }
-                Vec::new()
+                if path.ends_with("/CreateAccessProfile") {
+                    use codewire_proto::codewire::v1::{AccessProfile, CreateAccessProfileRequest, CreateAccessProfileResponse};
+                    let mut input = body.as_ref();
+                    let request = CreateAccessProfileRequest::decode(&mut input).unwrap();
+                    CreateAccessProfileResponse { access_profile: Some(AccessProfile { id: PROJECT.into(), name: request.name, revision: 1, entries: request.entries, ..Default::default() }).into(), ..Default::default() }.encode_to_vec()
+                } else if path.ends_with("/CompleteGithubAppAuthorization") {
+                    use codewire_proto::codewire::v1::{CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse};
+                    let mut input = body.as_ref();
+                    let request = CompleteGithubAppAuthorizationRequest::decode(&mut input).unwrap();
+                    assert_eq!(request.code, b"synthetic-callback-code");
+                    assert_eq!(request.credential_id.as_deref(), request.expected_revocation_generation.map(|_| PROJECT));
+                    CompleteGithubAppAuthorizationResponse { credential: Some(synthetic_github_credential(request.expected_revocation_generation.map_or(1, |generation| generation + 1))).into(), ..Default::default() }.encode_to_vec()
+                } else { Vec::new() }
             } else {
                 // Rail unavailability is supported. Every unexpected write is
                 // separately rejected by the captured operation assertions.
@@ -139,6 +178,11 @@ fn client() -> reqwest::Client {
         .build()
         .unwrap()
 }
+
+// Reuse this bounded synthetic session/membership/Connect harness for the
+// credential consumer of the same navigation contract, without real material.
+#[path = "credentials_navigation_tests.rs"]
+mod credentials_navigation_tests;
 
 #[test]
 fn navigation_is_exact_and_feedback_has_one_query_without_private_input() {

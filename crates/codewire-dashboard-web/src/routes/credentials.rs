@@ -3,8 +3,8 @@ use std::convert::Infallible;
 use axum::{
     Form,
     body::{Body, Bytes},
-    extract::{Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    extract::{FromRequestParts, Query, RawQuery, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::Response,
 };
 use chrono::{NaiveDateTime, Utc};
@@ -18,11 +18,12 @@ use url::Url;
 use crate::{
     connect::{settings_data as git_identity_data, update_git_identity},
     credentials_connect,
+    environment_drafts::DraftReturn,
     environment_source_forms::exact_id,
     error::WebError,
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     security::{
-        canonical_cookie, clear_github_app_authorization_cookie, csrf_cookie,
+        GitHubAppNavigation, canonical_cookie, clear_github_app_authorization_cookie, csrf_cookie,
         github_app_authorization_continuation, github_app_authorization_cookie, new_csrf_token,
         with_csrf_cookie, with_response_cookie,
     },
@@ -41,6 +42,8 @@ const PATH: &str = "/settings/credentials/";
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct QueryParameters {
+    #[serde(skip)]
+    draft: DraftReturn,
     #[serde(default)]
     org: String,
     #[serde(default)]
@@ -49,6 +52,26 @@ pub(super) struct QueryParameters {
     error: String,
     #[serde(default)]
     dialog: String,
+}
+
+// Navigation is parsed independently of authority-bearing query fields. An
+// invalid or repeated draft handle must not reject an otherwise valid action.
+pub(super) struct CredentialQuery(QueryParameters);
+
+impl<S: Send + Sync> FromRequestParts<S> for CredentialQuery {
+    type Rejection = axum::extract::rejection::QueryRejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let RawQuery(raw) = RawQuery::from_request_parts(parts, state)
+            .await
+            .expect("RawQuery is infallible");
+        let Query(mut query) = Query::<QueryParameters>::from_request_parts(parts, state).await?;
+        query.draft = match DraftReturn::parse(raw.as_deref()) {
+            exact @ DraftReturn::Exact(_) => exact,
+            _ => DraftReturn::NoRequest,
+        };
+        Ok(Self(query))
+    }
 }
 
 // Do not derive Debug: a callback code is short-lived authorization material
@@ -66,9 +89,9 @@ pub(super) struct GitHubAppCallbackQuery {
 pub(super) async fn page(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
 ) -> Response {
-    let continuation = page_path(&query.org);
+    let continuation = page_path(&query);
     let mut dashboard = match super::dashboard::dashboard_shell_view(&state, &headers).await {
         Ok(view) => view,
         Err(WebError::Unauthorized) => return login_redirect(&continuation, &headers),
@@ -105,6 +128,19 @@ pub(super) async fn page(
     };
     let csrf = new_csrf_token();
     let page = CredentialSettingsView {
+        navigation_query: page_query(&query),
+        creation_return_url: if dashboard.has_selected_organization {
+            if let DraftReturn::Exact(id) = &query.draft {
+                format!(
+                    "/{}/new/?creation_draft={id}",
+                    dashboard.selected_organization_slug
+                )
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        },
         git_identity,
         git_identity_feedback: query.message == "identity-saved"
             || matches!(
@@ -130,23 +166,19 @@ pub(super) async fn page(
 
 pub(super) async fn update_identity_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     form: Result<Form<GitIdentitySubmission>, axum::extract::rejection::FormRejection>,
 ) -> Response {
     let Ok(Form(form)) = form else {
-        return git_identity_redirect("identity-invalid", true, &query.org, &headers);
+        return git_identity_redirect("identity-invalid", true, &query, &headers);
     };
-    let cookie = match super::settings::mutation_cookie(
-        &state, &headers, &form.csrf, &query.org, PATH,
-    )
-    .await
-    {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if form.git_name.len() > 256 || form.git_email.len() > 320 {
-        return git_identity_redirect("identity-invalid", true, &query.org, &headers);
+        return git_identity_redirect("identity-invalid", true, &query, &headers);
     }
     match update_git_identity(
         &state,
@@ -156,41 +188,38 @@ pub(super) async fn update_identity_action(
     )
     .await
     {
-        Ok(()) => git_identity_redirect("identity-saved", false, &query.org, &headers),
+        Ok(()) => git_identity_redirect("identity-saved", false, &query, &headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
-            login_redirect(&page_path(&query.org), &headers)
+            login_redirect(&page_path(&query), &headers)
         }
-        Err(_) => git_identity_redirect("identity-request-failed", true, &query.org, &headers),
+        Err(_) => git_identity_redirect("identity-request-failed", true, &query, &headers),
     }
 }
 
-fn git_identity_redirect(code: &str, error: bool, org: &str, headers: &HeaderMap) -> Response {
-    let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !org.is_empty() {
-        query.append_pair("org", org);
-    }
-    query.append_pair(if error { "error" } else { "message" }, code);
-    redirect(format!("{PATH}?{}#git-identity", query.finish()), headers)
+fn git_identity_redirect(
+    code: &str,
+    error: bool,
+    context: &QueryParameters,
+    headers: &HeaderMap,
+) -> Response {
+    let target = page_feedback_target(context, if error { "error" } else { "message" }, code, "");
+    redirect(format!("{target}#git-identity"), headers)
 }
 
 pub(super) async fn create_profile_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialProfileCreateSubmission>,
 ) -> Response {
     let dialog = "create-profile";
-    let cookie = match super::settings::mutation_cookie(
-        &state, &headers, &form.csrf, &query.org, PATH,
-    )
-    .await
-    {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     let name = form.name.trim();
     if !valid_name(name) {
-        return page_error_redirect("profile-invalid", dialog, &query.org, &headers);
+        return page_error_redirect("profile-invalid", dialog, &query, &headers);
     }
     let entries = match entries(
         form.codex,
@@ -200,31 +229,27 @@ pub(super) async fn create_profile_action(
         form.ssh,
     ) {
         Ok(entries) => entries,
-        Err(()) => return page_error_redirect("profile-invalid", dialog, &query.org, &headers),
+        Err(()) => return page_error_redirect("profile-invalid", dialog, &query, &headers),
     };
     match credentials_connect::create_profile(&state, cookie, name.into(), entries).await {
-        Ok(()) => page_redirect("profile-created", false, &query.org, &headers),
-        Err(error) => mutation_error(error.code, false, dialog, &query.org, &headers),
+        Ok(()) => page_redirect("profile-created", false, &query, &headers),
+        Err(error) => mutation_error(error.code, false, dialog, &query, &headers),
     }
 }
 
 pub(super) async fn update_profile_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialProfileUpdateSubmission>,
 ) -> Response {
     let dialog = row_dialog("profile", &form.profile_id);
-    let cookie = match super::settings::mutation_cookie(
-        &state, &headers, &form.csrf, &query.org, PATH,
-    )
-    .await
-    {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if exact_id(&form.profile_id).is_err() || !valid_revision(form.expected_revision) {
-        return page_error_redirect("profile-invalid", &dialog, &query.org, &headers);
+        return page_error_redirect("profile-invalid", &dialog, &query, &headers);
     }
     let entries = match entries(
         form.codex,
@@ -234,7 +259,7 @@ pub(super) async fn update_profile_action(
         form.ssh,
     ) {
         Ok(entries) => entries,
-        Err(()) => return page_error_redirect("profile-invalid", &dialog, &query.org, &headers),
+        Err(()) => return page_error_redirect("profile-invalid", &dialog, &query, &headers),
     };
     match credentials_connect::update_profile(
         &state,
@@ -245,28 +270,24 @@ pub(super) async fn update_profile_action(
     )
     .await
     {
-        Ok(()) => page_redirect("profile-updated", false, &query.org, &headers),
-        Err(error) => mutation_error(error.code, false, &dialog, &query.org, &headers),
+        Ok(()) => page_redirect("profile-updated", false, &query, &headers),
+        Err(error) => mutation_error(error.code, false, &dialog, &query, &headers),
     }
 }
 
 pub(super) async fn delete_profile_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialProfileDeleteSubmission>,
 ) -> Response {
     let dialog = row_dialog("profile", &form.profile_id);
-    let cookie = match super::settings::mutation_cookie(
-        &state, &headers, &form.csrf, &query.org, PATH,
-    )
-    .await
-    {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if exact_id(&form.profile_id).is_err() || !valid_revision(form.expected_revision) {
-        return page_error_redirect("profile-invalid", &dialog, &query.org, &headers);
+        return page_error_redirect("profile-invalid", &dialog, &query, &headers);
     }
     match credentials_connect::delete_profile(
         &state,
@@ -276,19 +297,19 @@ pub(super) async fn delete_profile_action(
     )
     .await
     {
-        Ok(()) => page_redirect("profile-deleted", false, &query.org, &headers),
-        Err(error) => mutation_error(error.code, true, &dialog, &query.org, &headers),
+        Ok(()) => page_redirect("profile-deleted", false, &query, &headers),
+        Err(error) => mutation_error(error.code, true, &dialog, &query, &headers),
     }
 }
 
 pub(super) async fn add_api_key_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialApiKeySubmission>,
 ) -> Response {
     let dialog = "add-api-key";
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
@@ -301,7 +322,7 @@ pub(super) async fn add_api_key_action(
         || value.len() > 1024
         || expiry.is_err()
     {
-        return page_error_redirect("credential-invalid", dialog, &query.org, &headers);
+        return page_error_redirect("credential-invalid", dialog, &query, &headers);
     }
     match credentials_connect::add_api_key(
         &state,
@@ -313,26 +334,26 @@ pub(super) async fn add_api_key_action(
     )
     .await
     {
-        Ok(()) => page_redirect("credential-added", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, dialog, &query.org, &headers),
+        Ok(()) => page_redirect("credential-added", false, &query, &headers),
+        Err(error) => credential_mutation_error(error.code, false, dialog, &query, &headers),
     }
 }
 
 pub(super) async fn generate_ssh_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialSshGenerateSubmission>,
 ) -> Response {
     let dialog = "add-ssh";
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     let name = form.name.trim();
     let expiry = parse_expiration_utc(&form.expiration_utc);
     if !valid_credential_name(name) || expiry.is_err() {
-        return page_error_redirect("credential-invalid", dialog, &query.org, &headers);
+        return page_error_redirect("credential-invalid", dialog, &query, &headers);
     }
     match credentials_connect::generate_ssh(
         &state,
@@ -342,19 +363,19 @@ pub(super) async fn generate_ssh_action(
     )
     .await
     {
-        Ok(()) => page_redirect("credential-generated", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, dialog, &query.org, &headers),
+        Ok(()) => page_redirect("credential-generated", false, &query, &headers),
+        Err(error) => credential_mutation_error(error.code, false, dialog, &query, &headers),
     }
 }
 
 pub(super) async fn import_ssh_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialSshImportSubmission>,
 ) -> Response {
     let dialog = "add-ssh";
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
@@ -374,7 +395,7 @@ pub(super) async fn import_ssh_action(
         })
         || expiry.is_err()
     {
-        return page_error_redirect("credential-invalid", dialog, &query.org, &headers);
+        return page_error_redirect("credential-invalid", dialog, &query, &headers);
     }
     match credentials_connect::import_ssh(
         &state,
@@ -386,19 +407,19 @@ pub(super) async fn import_ssh_action(
     )
     .await
     {
-        Ok(()) => page_redirect("credential-imported", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, dialog, &query.org, &headers),
+        Ok(()) => page_redirect("credential-imported", false, &query, &headers),
+        Err(error) => credential_mutation_error(error.code, false, dialog, &query, &headers),
     }
 }
 
 pub(super) async fn rename_credential_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialRenameSubmission>,
 ) -> Response {
     let dialog = row_dialog("credential", &form.credential_id);
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
@@ -408,7 +429,7 @@ pub(super) async fn rename_credential_action(
         || !valid_credential_name(&form.expected_name)
         || !valid_credential_name(name)
     {
-        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
+        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
     }
     match credentials_connect::rename_credential(
         &state,
@@ -420,19 +441,19 @@ pub(super) async fn rename_credential_action(
     )
     .await
     {
-        Ok(()) => page_redirect("credential-renamed", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, &dialog, &query.org, &headers),
+        Ok(()) => page_redirect("credential-renamed", false, &query, &headers),
+        Err(error) => credential_mutation_error(error.code, false, &dialog, &query, &headers),
     }
 }
 
 pub(super) async fn rotate_api_key_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialRotateSubmission>,
 ) -> Response {
     let dialog = row_dialog("credential", &form.credential_id);
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
@@ -444,7 +465,7 @@ pub(super) async fn rotate_api_key_action(
         || value.len() > 1024
         || expiry.is_err()
     {
-        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
+        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
     }
     match credentials_connect::rotate_api_key(
         &state,
@@ -456,14 +477,14 @@ pub(super) async fn rotate_api_key_action(
     )
     .await
     {
-        Ok(()) => page_redirect("credential-rotated", false, &query.org, &headers),
-        Err(error) => credential_mutation_error(error.code, false, &dialog, &query.org, &headers),
+        Ok(()) => page_redirect("credential-rotated", false, &query, &headers),
+        Err(error) => credential_mutation_error(error.code, false, &dialog, &query, &headers),
     }
 }
 
 pub(super) async fn revoke_credential_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialRevisionSubmission>,
 ) -> Response {
@@ -472,7 +493,7 @@ pub(super) async fn revoke_credential_action(
 
 pub(super) async fn delete_credential_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialRevisionSubmission>,
 ) -> Response {
@@ -484,7 +505,7 @@ pub(super) async fn delete_credential_action(
 /// returns here after GitHub has let the user choose its repositories.
 pub(super) async fn github_app_authorize_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<GitHubAppAuthorizationSubmission>,
 ) -> Response {
@@ -493,12 +514,12 @@ pub(super) async fn github_app_authorize_action(
     } else {
         row_dialog("credential", &form.credential_id)
     };
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if state.github_app_slug.is_empty() {
-        return page_error_redirect("github-app-unavailable", &dialog, &query.org, &headers);
+        return page_error_redirect("github-app-unavailable", &dialog, &query, &headers);
     }
     let reconnect = match (
         form.credential_id.is_empty(),
@@ -512,7 +533,7 @@ pub(super) async fn github_app_authorize_action(
         {
             (Some(form.credential_id), Some(generation))
         }
-        _ => return page_error_redirect("credential-invalid", &dialog, &query.org, &headers),
+        _ => return page_error_redirect("credential-invalid", &dialog, &query, &headers),
     };
     if let (Some(credential_id), Some(generation)) = (&reconnect.0, reconnect.1)
         && let Err(error) = credentials_connect::validate_github_app_reconnect(
@@ -523,8 +544,29 @@ pub(super) async fn github_app_authorize_action(
         )
         .await
     {
-        return credential_mutation_error(error.code, false, &dialog, &query.org, &headers);
+        return credential_mutation_error(error.code, false, &dialog, &query, &headers);
     }
+    // This is navigation for a personal provider connection, not a grant.
+    // A failed optional lookup must not prevent a valid connection/reconnect.
+    let navigation = if query.org.is_empty() {
+        None
+    } else {
+        super::dashboard::dashboard_shell_view(&state, &headers)
+            .await
+            .ok()
+            .and_then(|view| {
+                view.organizations
+                    .iter()
+                    .find(|org| org.slug == query.org)
+                    .map(|org| GitHubAppNavigation {
+                        organization_id: org.id.clone(),
+                        draft_id: match &query.draft {
+                            DraftReturn::Exact(id) => Some(id.clone()),
+                            _ => None,
+                        },
+                    })
+            })
+    };
     let callback_state = new_csrf_token();
     let callback_cookie = match github_app_authorization_cookie(
         &state.public_origin,
@@ -532,9 +574,10 @@ pub(super) async fn github_app_authorize_action(
         &cookie,
         reconnect.0.as_deref(),
         reconnect.1,
+        navigation.as_ref(),
     ) {
         Some(cookie) => cookie,
-        None => return page_error_redirect("credential-invalid", &dialog, &query.org, &headers),
+        None => return page_error_redirect("credential-invalid", &dialog, &query, &headers),
     };
     with_response_cookie(
         redirect(
@@ -553,10 +596,11 @@ pub(super) async fn github_app_callback(
     headers: HeaderMap,
     Query(query): Query<GitHubAppCallbackQuery>,
 ) -> Response {
-    let continuation = page_path("");
+    let context = QueryParameters::default();
+    let continuation = page_path(&context);
     let clear = clear_github_app_authorization_cookie(&state.public_origin);
-    match super::dashboard::dashboard_shell_view(&state, &headers).await {
-        Ok(_) => {}
+    let dashboard = match super::dashboard::dashboard_shell_view(&state, &headers).await {
+        Ok(view) => view,
         Err(WebError::Unauthorized) => {
             return github_app_callback_response(login_redirect(&continuation, &headers), clear);
         }
@@ -574,17 +618,35 @@ pub(super) async fn github_app_callback(
             return github_app_callback_response(login_redirect(&continuation, &headers), clear);
         }
     };
-    // The shell lookup above is the current session/2FA authorization check;
-    // no organization context is accepted or restored from GitHub.
+    // Validate the authorization core before optional navigation. Never accept
+    // an organization, slug, or return URL from callback query parameters.
     let callback = match github_app_authorization_continuation(&headers, &query.state, &cookie) {
         Some(callback) => callback,
         None => {
             return github_app_callback_response(
-                page_error_redirect("github-app-failed", "connect-github", "", &headers),
+                page_error_redirect("github-app-failed", "connect-github", &context, &headers),
                 clear,
             );
         }
     };
+    let context = callback
+        .navigation
+        .as_ref()
+        .and_then(|nav| {
+            dashboard
+                .organizations
+                .iter()
+                .find(|org| org.id == nav.organization_id)
+                .map(|org| QueryParameters {
+                    org: org.slug.clone(),
+                    draft: nav
+                        .draft_id
+                        .as_ref()
+                        .map_or(DraftReturn::NoRequest, |id| DraftReturn::Exact(id.clone())),
+                    ..Default::default()
+                })
+        })
+        .unwrap_or_default();
     let dialog = callback
         .credential_id
         .as_deref()
@@ -592,9 +654,9 @@ pub(super) async fn github_app_callback(
         .filter(|dialog| !dialog.is_empty())
         .unwrap_or_else(|| "connect-github".to_owned());
     let response = if !query.error.is_empty() {
-        page_error_redirect("github-app-cancelled", &dialog, "", &headers)
+        page_error_redirect("github-app-cancelled", &dialog, &context, &headers)
     } else if !valid_github_app_callback_code(&query.code) {
-        page_error_redirect("github-app-failed", &dialog, "", &headers)
+        page_error_redirect("github-app-failed", &dialog, &context, &headers)
     } else {
         match credentials_connect::complete_github_app_authorization(
             &state,
@@ -605,11 +667,11 @@ pub(super) async fn github_app_callback(
         )
         .await
         {
-            Ok(()) => page_redirect("github-app-connected", false, "", &headers),
+            Ok(()) => page_redirect("github-app-connected", false, &context, &headers),
             Err(error) if error.code == ErrorCode::AlreadyExists => {
-                page_error_redirect("github-app-already-connected", &dialog, "", &headers)
+                page_error_redirect("github-app-already-connected", &dialog, &context, &headers)
             }
-            Err(error) => credential_mutation_error(error.code, false, &dialog, "", &headers),
+            Err(error) => credential_mutation_error(error.code, false, &dialog, &context, &headers),
         }
     };
     github_app_callback_response(response, clear)
@@ -649,7 +711,7 @@ fn github_app_callback_response(mut response: Response, clear_cookie: String) ->
 
 pub(super) async fn enroll_oauth_action(
     State(state): State<AppState>,
-    Query(query): Query<QueryParameters>,
+    CredentialQuery(query): CredentialQuery,
     headers: HeaderMap,
     Form(form): Form<CredentialOAuthSubmission>,
 ) -> Response {
@@ -661,12 +723,12 @@ pub(super) async fn enroll_oauth_action(
     } else {
         row_dialog("credential", &form.credential_id)
     };
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     let Some(provider) = web_device_oauth_provider(&form.provider) else {
-        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
+        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
     };
     let name = form.name.trim();
     let reconnect = match (
@@ -681,10 +743,10 @@ pub(super) async fn enroll_oauth_action(
         {
             (Some(form.credential_id), Some(generation))
         }
-        _ => return page_error_redirect("credential-invalid", &dialog, &query.org, &headers),
+        _ => return page_error_redirect("credential-invalid", &dialog, &query, &headers),
     };
     if !valid_oauth_name(name) {
-        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
+        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
     }
 
     let (events, receiver) = tokio::sync::mpsc::channel(2);
@@ -697,12 +759,12 @@ pub(super) async fn enroll_oauth_action(
     tokio::spawn(credentials_connect::run_oauth_enrollment(
         state, cookie, request, events,
     ));
-    enrollment_response(receiver, &query.org)
+    enrollment_response(receiver, &query)
 }
 
 fn enrollment_response(
     receiver: tokio::sync::mpsc::Receiver<credentials_connect::OAuthEnrollmentEvent>,
-    org: &str,
+    context: &QueryParameters,
 ) -> Response {
     let prefix = concat!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
@@ -715,7 +777,7 @@ fn enrollment_response(
         "<p class=\"cw-card-description\">Keep this page open until Codewire confirms the credential.</p></div>",
         "<div class=\"cw-card-content\">"
     );
-    let return_path = escape_html(&page_path(org));
+    let return_path = escape_html(&page_path(context));
     let stream = tokio_stream::iter([Ok::<Bytes, Infallible>(Bytes::from_static(
         prefix.as_bytes(),
     ))])
@@ -841,14 +903,14 @@ async fn credential_revision_action(
     delete: bool,
 ) -> Response {
     let dialog = row_dialog("credential", &form.credential_id);
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
         Ok(cookie) => cookie,
         Err(response) => return response,
     };
     if exact_id(&form.credential_id).is_err()
         || !valid_generation(form.expected_revocation_generation, !delete)
     {
-        return page_error_redirect("credential-invalid", &dialog, &query.org, &headers);
+        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
     }
     let result = if delete {
         credentials_connect::delete_credential(
@@ -875,10 +937,10 @@ async fn credential_revision_action(
                 "credential-revoked"
             },
             false,
-            &query.org,
+            &query,
             &headers,
         ),
-        Err(error) => credential_mutation_error(error.code, delete, &dialog, &query.org, &headers),
+        Err(error) => credential_mutation_error(error.code, delete, &dialog, &query, &headers),
     }
 }
 
@@ -886,9 +948,16 @@ async fn mutation_cookie(
     state: &AppState,
     headers: &HeaderMap,
     csrf: &str,
-    org: &str,
+    context: &QueryParameters,
 ) -> Result<axum::http::HeaderValue, Response> {
-    super::settings::mutation_cookie(state, headers, csrf, org, PATH).await
+    super::settings::mutation_cookie_with_continuation(
+        state,
+        headers,
+        csrf,
+        &context.org,
+        &page_path(context),
+    )
+    .await
 }
 
 fn entries(
@@ -959,24 +1028,24 @@ fn mutation_error(
     code: ErrorCode,
     delete: bool,
     dialog: &str,
-    org: &str,
+    context: &QueryParameters,
     headers: &HeaderMap,
 ) -> Response {
     if code == ErrorCode::Unauthenticated {
-        return login_redirect(&page_path(org), headers);
+        return login_redirect(&page_path(context), headers);
     }
-    page_error_redirect(mutation_error_code(code, delete), dialog, org, headers)
+    page_error_redirect(mutation_error_code(code, delete), dialog, context, headers)
 }
 
 fn credential_mutation_error(
     code: ErrorCode,
     delete: bool,
     dialog: &str,
-    org: &str,
+    context: &QueryParameters,
     headers: &HeaderMap,
 ) -> Response {
     if code == ErrorCode::Unauthenticated {
-        return login_redirect(&page_path(org), headers);
+        return login_redirect(&page_path(context), headers);
     }
     let error = if matches!(
         code,
@@ -995,7 +1064,7 @@ fn credential_mutation_error(
         // acknowledgement. Never encourage an automatic or blind retry.
         "credential-uncertain"
     };
-    page_error_redirect(error, dialog, org, headers)
+    page_error_redirect(error, dialog, context, headers)
 }
 
 fn mutation_error_code(code: ErrorCode, delete: bool) -> &'static str {
@@ -1010,23 +1079,49 @@ fn mutation_error_code(code: ErrorCode, delete: bool) -> &'static str {
     }
 }
 
-fn page_path(org: &str) -> String {
-    if org.is_empty() {
-        PATH.into()
+fn navigation_query(context: &QueryParameters) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if !context.org.is_empty() {
+        query.append_pair("org", &context.org);
+    }
+    if let DraftReturn::Exact(id) = &context.draft {
+        query.append_pair("creation_draft", id);
+    }
+    query.finish()
+}
+
+fn page_query(context: &QueryParameters) -> String {
+    let query = navigation_query(context);
+    if query.is_empty() {
+        String::new()
     } else {
-        let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("org", org);
-        format!("{PATH}?{}", query.finish())
+        format!("?{query}")
     }
 }
 
-fn page_redirect(code: &str, error: bool, org: &str, headers: &HeaderMap) -> Response {
-    let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !org.is_empty() {
-        query.append_pair("org", org);
+fn page_path(context: &QueryParameters) -> String {
+    format!("{PATH}{}", page_query(context))
+}
+
+fn page_feedback_target(context: &QueryParameters, key: &str, code: &str, dialog: &str) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(navigation_query(context));
+    query.append_pair(key, code);
+    if !dialog.is_empty() {
+        query.append_pair("dialog", dialog);
     }
-    query.append_pair(if error { "error" } else { "message" }, code);
-    redirect(format!("{PATH}?{}", query.finish()), headers)
+    format!("{PATH}?{}", query.finish())
+}
+
+fn page_redirect(
+    code: &str,
+    error: bool,
+    context: &QueryParameters,
+    headers: &HeaderMap,
+) -> Response {
+    redirect(
+        page_feedback_target(context, if error { "error" } else { "message" }, code, ""),
+        headers,
+    )
 }
 
 // Dialog destinations are presentation state, not selectors or return URLs.
@@ -1065,16 +1160,16 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
     }
 }
 
-fn page_error_redirect(code: &str, dialog: &str, org: &str, headers: &HeaderMap) -> Response {
-    let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !org.is_empty() {
-        query.append_pair("org", org);
-    }
-    query.append_pair("error", code);
-    if !dialog.is_empty() {
-        query.append_pair("dialog", dialog);
-    }
-    redirect(format!("{PATH}?{}", query.finish()), headers)
+fn page_error_redirect(
+    code: &str,
+    dialog: &str,
+    context: &QueryParameters,
+    headers: &HeaderMap,
+) -> Response {
+    redirect(
+        page_feedback_target(context, "error", code, dialog),
+        headers,
+    )
 }
 
 fn approved_message(code: &str) -> &'static str {
@@ -1206,6 +1301,8 @@ mod tests {
         };
         let data = dialog_data();
         let page = CredentialSettingsView {
+            navigation_query: "?org=sample-org".into(),
+            creation_return_url: String::new(),
             git_identity: Default::default(),
             git_identity_feedback: false,
             active_dialog: approved_dialog(active_dialog, &data),
@@ -1357,7 +1454,10 @@ mod tests {
         let response = page_error_redirect(
             "credential-invalid",
             "add-api-key",
-            "sample-org",
+            &QueryParameters {
+                org: "sample-org".into(),
+                ..Default::default()
+            },
             &HeaderMap::new(),
         );
         assert_eq!(
@@ -1368,7 +1468,7 @@ mod tests {
             ErrorCode::Unavailable,
             false,
             "add-api-key",
-            "",
+            &QueryParameters::default(),
             &HeaderMap::new(),
         );
         assert_eq!(
@@ -1553,9 +1653,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_navigation_is_independent_of_existing_query_authority() {
+        use axum::http::Request;
+        const DRAFT: &str = "00000000-0000-4000-8000-000000000003";
+        for (raw, exact) in [
+            (format!("creation_draft={DRAFT}"), true),
+            (format!("%63reation_draft={DRAFT}"), true),
+            (
+                format!("creation_draft={DRAFT}&creation_draft={DRAFT}"),
+                false,
+            ),
+            (
+                format!("creation_draft={DRAFT}&%63reation_draft={DRAFT}"),
+                false,
+            ),
+            ("creation_draft=https%3A%2F%2Fforeign.invalid".into(), false),
+            (
+                "creation_draft=00000000-0000-0000-0000-000000000000".into(),
+                false,
+            ),
+            (
+                format!("creation_draft={DRAFT}&value={}", "x".repeat(1024)),
+                false,
+            ),
+            (String::new(), false),
+        ] {
+            let request = Request::builder()
+                .uri(format!(
+                    "{PATH}?org=synthetic&{raw}&message=profile-created&dialog=create-profile"
+                ))
+                .body(())
+                .unwrap();
+            let (mut parts, _) = request.into_parts();
+            let CredentialQuery(context) = CredentialQuery::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+            assert_eq!(context.org, "synthetic");
+            assert_eq!(context.message, "profile-created");
+            assert_eq!(context.dialog, "create-profile");
+            assert_eq!(matches!(context.draft, DraftReturn::Exact(_)), exact);
+            let target =
+                page_feedback_target(&context, "error", "credential-invalid", "add-api-key");
+            assert_eq!(target.contains("creation_draft="), exact);
+            assert_eq!(target.matches('?').count(), 1);
+            assert!(!target.contains("foreign.invalid") && !target.contains("value="));
+        }
+        // Preserve the original query extractor's duplicate-organization
+        // rejection instead of laundering an authority-bearing selector.
+        for raw in ["org=one&org=two", "org=one&org=two&creation_draft=bad"] {
+            let request = Request::builder()
+                .uri(format!("{PATH}?{raw}"))
+                .body(())
+                .unwrap();
+            let (mut original, _) = request.into_parts();
+            let mut current = original.clone();
+            assert!(
+                Query::<QueryParameters>::from_request_parts(&mut original, &())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                CredentialQuery::from_request_parts(&mut current, &())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_completion_and_failure_keep_only_closed_draft_navigation() {
+        const DRAFT: &str = "00000000-0000-4000-8000-000000000003";
+        let context = QueryParameters {
+            org: "synthetic".into(),
+            draft: DraftReturn::Exact(DRAFT.into()),
+            ..Default::default()
+        };
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        drop(sender);
+        let response = enrollment_response(receiver, &context);
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+        for event in [
+            credentials_connect::OAuthEnrollmentEvent::Committed,
+            credentials_connect::OAuthEnrollmentEvent::Failed {
+                reason: credentials_connect::OAuthEnrollmentFailure::Cancelled,
+                uncertain: false,
+            },
+        ] {
+            let html = render_enrollment_event(event, &escape_html(&page_path(&context)));
+            assert!(html.contains(&format!(
+                "href=\"/settings/credentials/?org=synthetic&amp;creation_draft={DRAFT}\""
+            )));
+            assert!(!html.contains("synthetic-session"));
+        }
+    }
+
+    #[tokio::test]
     async fn dropping_enrollment_response_closes_the_owned_event_stream() {
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
-        let response = enrollment_response(receiver, "");
+        let response = enrollment_response(receiver, &QueryParameters::default());
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store, no-cache, must-revalidate"

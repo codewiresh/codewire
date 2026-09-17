@@ -10,6 +10,18 @@ test.beforeEach(async ({ page }) => {
   await page.goto(`${origin}/reference/fixtures/settings-credentials.html`);
 });
 
+test("explicit Create return carries only its draft handle while credential inputs stay private", async ({ page }) => {
+  const returnLink = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
+  await expect(returnLink).toHaveAttribute("href", "/fixture-org/new/?creation_draft=00000000-0000-4000-8000-000000000003");
+  await page.getByRole("button", { name: "Add credential", exact: true }).click();
+  await page.getByRole("dialog", { name: "Add credential", exact: true }).getByRole("button", { name: "API key", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Add API key", exact: true });
+  const privateCanary = "synthetic-draft-return-write-only-canary";
+  await dialog.getByLabel("API key", { exact: true }).fill(privateCanary);
+  await expect(returnLink).toHaveAttribute("href", "/fixture-org/new/?creation_draft=00000000-0000-4000-8000-000000000003");
+  expect(await page.locator("a[href]").evaluateAll((links) => links.map((link) => link.getAttribute("href")).join("\n"))).not.toContain(privateCanary);
+});
+
 test("credential types switch native dialogs and cancellation restores focus without retaining private inputs", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

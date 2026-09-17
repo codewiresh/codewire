@@ -399,6 +399,8 @@ pub(crate) struct CredentialProfileRowView {
 }
 
 pub(crate) struct CredentialSettingsView {
+    pub(crate) navigation_query: String,
+    pub(crate) creation_return_url: String,
     pub(crate) git_identity: SettingsData,
     pub(crate) git_identity_feedback: bool,
     pub(crate) active_dialog: String,
@@ -1665,6 +1667,8 @@ mod secret_debug_tests {
     #[test]
     fn credential_settings_debug_redacts_csrf_capability() {
         let page = CredentialSettingsView {
+            navigation_query: String::new(),
+            creation_return_url: String::new(),
             git_identity: SettingsData::default(),
             git_identity_feedback: false,
             active_dialog: String::new(),

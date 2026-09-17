@@ -322,26 +322,38 @@ pub(super) async fn mutation_cookie(
     path: &str,
 ) -> Result<axum::http::HeaderValue, Response> {
     let continuation = global_settings_path(path, selected_slug);
+    mutation_cookie_with_continuation(state, headers, csrf, selected_slug, &continuation).await
+}
+
+// The caller supplies a closed, route-owned continuation. It changes only
+// login/2FA navigation, never organization selection or mutation authority.
+pub(super) async fn mutation_cookie_with_continuation(
+    state: &AppState,
+    headers: &HeaderMap,
+    csrf: &str,
+    selected_slug: &str,
+    continuation: &str,
+) -> Result<axum::http::HeaderValue, Response> {
     let identity = authenticated_identity(state, headers)
         .await
         .map_err(|error| match error {
-            WebError::Unauthorized => login_redirect(&continuation, headers),
+            WebError::Unauthorized => login_redirect(continuation, headers),
             error => error_page(error),
         })?;
     if enforce_two_factor(&identity).is_err() {
-        return Err(two_factor_redirect(&continuation, headers));
+        return Err(two_factor_redirect(continuation, headers));
     }
     if !request_has_same_origin(headers, &state.public_origin) || !valid_csrf_token(headers, csrf) {
         return Err(error_page(WebError::CsrfRejected));
     }
-    let cookie = canonical_cookie(headers).map_err(|()| login_redirect(&continuation, headers))?;
+    let cookie = canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))?;
     if !selected_slug.is_empty() {
         let mut dashboard =
             super::dashboard::dashboard_shell_view_from_identity(state, &identity, cookie.clone())
                 .await
                 .map_err(|error| match error {
-                    WebError::Unauthorized => login_redirect(&continuation, headers),
-                    WebError::TwoFactorRequired => two_factor_redirect(&continuation, headers),
+                    WebError::Unauthorized => login_redirect(continuation, headers),
+                    WebError::TwoFactorRequired => two_factor_redirect(continuation, headers),
                     error => error_page(error),
                 })?;
         super::dashboard::select_shell_organization(
