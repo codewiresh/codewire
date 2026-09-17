@@ -359,7 +359,7 @@ async fn prepare_authenticated_repository(
             access.platform.clone(),
         )
         .await
-        .map_err(|_| WorkspacePlanError::CredentialRepositoryUnavailable)?;
+        .map_err(credential_repository_rejection)?;
     if (!repository.branch.is_empty() && prepared.branch != repository.branch)
         || (!repository.revision.is_empty() && !prepared.branch.is_empty())
     {
@@ -445,6 +445,10 @@ async fn prepare_authenticated_repository(
         bundle_digest: digest,
         bundle_size: size,
     })
+}
+
+fn credential_repository_rejection(status: tonic::Status) -> WorkspacePlanError {
+    WorkspacePlanError::CredentialRepositoryRejected(status.code())
 }
 
 async fn resolve_default_branch(
@@ -725,6 +729,55 @@ mod tests {
     use crate::workspace::WorkspaceSourceMode;
 
     use super::*;
+
+    #[test]
+    fn credential_repository_rejection_preserves_only_status_code() {
+        use tonic::{Code, Status, metadata::MetadataMap};
+
+        const MESSAGE: &str = "hostile-provider-message-canary";
+        const DETAILS: &str = "hostile-provider-details-canary";
+        const METADATA: &str = "hostile-provider-metadata-canary";
+        for code in [
+            Code::Cancelled,
+            Code::Unknown,
+            Code::InvalidArgument,
+            Code::DeadlineExceeded,
+            Code::NotFound,
+            Code::AlreadyExists,
+            Code::PermissionDenied,
+            Code::ResourceExhausted,
+            Code::FailedPrecondition,
+            Code::Aborted,
+            Code::OutOfRange,
+            Code::Unimplemented,
+            Code::Internal,
+            Code::Unavailable,
+            Code::DataLoss,
+            Code::Unauthenticated,
+        ] {
+            let mut metadata = MetadataMap::new();
+            metadata.insert("provider-canary", METADATA.parse().unwrap());
+            let status = Status::with_details_and_metadata(
+                code,
+                MESSAGE,
+                bytes::Bytes::from_static(DETAILS.as_bytes()),
+                metadata,
+            );
+            let error = credential_repository_rejection(status);
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            assert_eq!(
+                display,
+                format!("protected repository preparation was rejected ({code:?})")
+            );
+            assert_eq!(debug, format!("CredentialRepositoryRejected({code:?})"));
+            for canary in [MESSAGE, DETAILS, METADATA] {
+                assert!(!display.contains(canary));
+                assert!(!debug.contains(canary));
+            }
+            assert!(std::error::Error::source(&error).is_none());
+        }
+    }
 
     #[test]
     fn pinned_ssh_checkout_trust_is_distinct_from_offline_bundle_metadata() {
