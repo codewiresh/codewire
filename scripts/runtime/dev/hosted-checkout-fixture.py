@@ -41,7 +41,9 @@ OBSERVATION_FAILURE_CODES = {
     "fixture image changed": "pod-image",
     "invalid fixture container status": "runtime-container-shape",
     "fixture runtime container changed": "runtime-container-identity",
-    "fixture runtime imageID changed": "runtime-image-id",
+    "fixture runtime imageID changed (approved-repository-digest)": "runtime-image-id-approved-repository-digest",
+    "fixture runtime imageID changed (digest-only)": "runtime-image-id-digest-only",
+    "fixture runtime imageID changed (unrecognized)": "runtime-image-id-unrecognized",
     "fixture runtime image name changed (approved-repository-tag)": "runtime-image-name-approved-repository-tag",
     "fixture runtime image name changed (approved-repository-digest)": "runtime-image-name-approved-repository-digest",
     "fixture runtime image name changed (digest-only)": "runtime-image-name-digest-only",
@@ -275,11 +277,21 @@ def observe(kube, state):
     # runtime repository/image and a real content-addressed imageID as well.
     require(container.get("name") == "target" and container.get("ready") is True,
             "fixture runtime container changed")
-    require(isinstance(container.get("image"), str) and IMAGE.fullmatch(container["image"])
-            and container["image"].split("@", 1)[0] == state["image"].split("@", 1)[0],
+    repository = state["image"].split("@", 1)[0]
+    digest_only = runtime_image_format(container.get("image")) == "digest-only"
+    require(digest_only or (isinstance(container.get("image"), str) and IMAGE.fullmatch(container["image"])
+            and container["image"].split("@", 1)[0] == repository),
             "fixture runtime image name changed (" + runtime_image_format(container.get("image")) + ")")
+    image_id = container.get("imageID")
+    normalized_id = image_id.removeprefix("docker-pullable://") if isinstance(image_id, str) else None
+    id_format = runtime_image_format(normalized_id)
+    if id_format == "approved-repository-tag":
+        id_format = "unrecognized"
     require(isinstance(container.get("imageID"), str)
-            and re.fullmatch(r"(?:docker-pullable://)?(?:[a-zA-Z0-9./_-]+@)?sha256:[0-9a-f]{64}|containerd://sha256:[0-9a-f]{64}", container["imageID"]), "fixture runtime imageID changed")
+            and re.fullmatch(r"(?:docker-pullable://)?(?:[a-zA-Z0-9./_-]+@)?sha256:[0-9a-f]{64}|containerd://sha256:[0-9a-f]{64}", container["imageID"])
+            and ("@" not in normalized_id or normalized_id.split("@", 1)[0] == repository)
+            and (not digest_only or (IMAGE.fullmatch(normalized_id) and normalized_id.split("@", 1)[0] == repository)),
+            "fixture runtime imageID changed (" + id_format + ")")
     service = get_owned(kube, state, "Service")
     require(isinstance(service.get("spec"), dict), "invalid fixture Service shape")
     require(service["spec"]["type"] == "ClusterIP" and service["spec"]["selector"] == {LABEL: state["nonce"]}

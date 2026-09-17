@@ -464,11 +464,11 @@ class FixtureTests(unittest.TestCase):
             ("image", "ghcr.io/codewiresh/workspace:private-tag-canary", "runtime-image-name-approved-repository-tag"),
             ("image", "nexus.example.invalid/oci-approved/codewire/workspace@sha256:" + "a" * 64,
              "runtime-image-name-approved-repository-digest"),
-            ("image", "sha256:" + "b" * 64, "runtime-image-name-digest-only"),
+            ("image", "sha256:" + "B" * 64, "runtime-image-name-unrecognized"),
             ("image", "private-image-key-event-canary", "runtime-image-name-unrecognized"),
             ("image", None, "runtime-image-name-unrecognized"),
-            ("imageID", "private-imageid-canary", "runtime-image-id"),
-            ("imageID", None, "runtime-image-id"),
+            ("imageID", "private-imageid-canary", "runtime-image-id-unrecognized"),
+            ("imageID", None, "runtime-image-id-unrecognized"),
         ]
         original_observe = FIXTURE.observe
         for index, (field, value, code) in enumerate(cases):
@@ -497,6 +497,70 @@ class FixtureTests(unittest.TestCase):
                 self.assertNotIn("canary", receipt)
                 self.assertFalse((self.args.state_dir / "ready.json").exists())
                 self.assertEqual(self.kube.objects, {})
+
+    def test_runtime_repository_evidence_combinations(self):
+        state = self.start()
+        container = self.kube.objects[("pods", state["name"])]["status"]["containerStatuses"][0]
+        digest = "sha256:" + "7" * 64
+        selected_id = "ghcr.io/codewiresh/workspace@" + digest
+        wrong_id = "nexus.example.invalid/oci-approved/codewire/workspace@" + digest
+        cases = [
+            (IMAGE, selected_id, True),
+            (IMAGE, "docker-pullable://" + selected_id, True),
+            (IMAGE, digest, True),
+            (IMAGE, "containerd://" + digest, True),
+            (digest, selected_id, True),
+            (digest, "docker-pullable://" + selected_id, True),
+            (IMAGE, wrong_id, False),
+            (IMAGE, "docker-pullable://" + wrong_id, False),
+            (digest, wrong_id, False),
+            (digest, "docker-pullable://" + wrong_id, False),
+            (digest, digest, False),
+            (digest, "containerd://" + digest, False),
+            (digest, "private-imageid-canary", False),
+            (digest, "ghcr.io/codewiresh/workspace:private-id-tag-canary", False),
+            ("ghcr.io/codewiresh/workspace:private-tag-canary", selected_id, False),
+            ("sha256:" + "G" * 64, selected_id, False),
+            (digest, "evil.invalid/workspace@" + digest, False),
+        ]
+        for image, image_id, accepted in cases:
+            with self.subTest(image=image, accepted=accepted):
+                container["image"], container["imageID"] = image, image_id
+                if accepted:
+                    self.assertEqual(FIXTURE.observe(self.kube, state)["content"], FIXTURE.CONTENT)
+                else:
+                    with self.assertRaises(FIXTURE.Failure) as caught:
+                        FIXTURE.observe(self.kube, state)
+                    self.assertIn(str(caught.exception), FIXTURE.OBSERVATION_FAILURE_CODES)
+                    self.assertNotIn(image_id, str(caught.exception))
+
+    def test_digest_only_name_requires_repository_id_in_failure_receipt(self):
+        original_observe = FIXTURE.observe
+        for index, (image_id, code) in enumerate([
+            ("sha256:" + "7" * 64, "runtime-image-id-digest-only"),
+            ("nexus.example.invalid/oci-approved/codewire/workspace@sha256:" + "7" * 64,
+             "runtime-image-id-approved-repository-digest"),
+            ("private-imageid-canary", "runtime-image-id-unrecognized"),
+        ]):
+            self.args.state_dir = self.parent / ("digest-receipt-" + str(index))
+
+            def mutated_observe(kube, state):
+                status = kube.objects[("pods", state["name"])]["status"]
+                prior = copy.deepcopy(status["containerStatuses"])
+                try:
+                    status["containerStatuses"][0].update(image="sha256:" + "6" * 64, imageID=image_id)
+                    return original_observe(kube, state)
+                finally:
+                    status["containerStatuses"] = prior
+
+            with patch.object(FIXTURE, "observe", side_effect=mutated_observe):
+                with self.assertRaises(FIXTURE.Failure):
+                    FIXTURE.start(self.args)
+            receipt = (self.args.state_dir / "failure.json").read_text()
+            self.assertEqual(json.loads(receipt), {"version": 1, "stage": "observe", "code": code})
+            self.assertNotIn(image_id, receipt)
+            self.assertFalse((self.args.state_dir / "ready.json").exists())
+            self.assertEqual(self.kube.objects, {})
 
 
 if __name__ == "__main__":
