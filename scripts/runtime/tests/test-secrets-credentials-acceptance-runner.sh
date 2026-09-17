@@ -86,7 +86,7 @@ case "$label" in
     fi
     ;;
   local-platform-mesh)
-    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw" &&
+    [[ "$*" == "--admin-oidc --cw-bin $fixtures/normal-cw --application-only" &&
        "${LOCAL_PLATFORM_DISPOSABLE_NETWORK:-}" == 1 &&
        -z "${LOCAL_PLATFORM_NETWORK_ID+x}" &&
        "${LOCAL_PLATFORM_MESH_PROBE_BIN:-}" == "$fixtures/dev-mesh-probe" ]] || exit 98

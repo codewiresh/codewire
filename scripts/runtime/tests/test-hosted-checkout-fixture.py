@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -22,6 +22,7 @@ sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("checkout_fixture", ROOT / "scripts/runtime/dev/hosted-checkout-fixture.py")
 FIXTURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FIXTURE)
+REAL_KUBE = FIXTURE.Kube
 USER, ORGANIZATION = "1" * 32, "2" * 32
 KEY = "ssh-ed25519 " + base64.b64encode(struct.pack(">I", 11) + b"ssh-ed25519" + struct.pack(">I", 32) + bytes(32)).decode()
 IMAGE = "ghcr.io/codewiresh/workspace@sha256:" + "3" * 64
@@ -37,6 +38,9 @@ class FakeKube:
         self.counter = "1\n"
         self.cluster = {"server": FIXTURE.DEV_SERVER, "tls-server-name": FIXTURE.DEV_TLS,
                         "certificate-authority-data": base64.b64encode(CERTIFICATE).decode()}
+
+    def wait_ready(self, name):
+        return self.run(["wait", "pod/" + name, "--for=condition=Ready", "--timeout=240s"], as_json=False)
 
     def run(self, args, payload=None, as_json=True):
         self.calls.append((list(args), copy.deepcopy(payload)))
@@ -149,6 +153,39 @@ class FixtureTests(unittest.TestCase):
         self.assertTrue(deletions[0][2].endswith(state["name"] + "-source"))
         self.assertEqual(self.cli("stop"), 0)  # Already-absent exact objects.
 
+    def test_cold_pull_wait_bound_and_ordinary_command_bound(self):
+        kube = REAL_KUBE(FIXTURE.DEV_CONTEXT, FIXTURE.DEV_NAMESPACE, self.parent)
+        process = Mock(pid=123, returncode=0)
+
+        def cold_pull(timeout):
+            # Observed cold pulls of 95s and 150s both exceeded the old 90s wait.
+            if timeout < 150:
+                raise subprocess.TimeoutExpired("synthetic-kubectl", timeout)
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            cold_pull(90)
+        process.wait.side_effect = cold_pull
+        with patch.object(FIXTURE.subprocess, "Popen", return_value=process) as launch:
+            self.assertEqual(kube.wait_ready("synthetic-pod"), "")
+        process.wait.assert_called_once_with(timeout=245)
+        self.assertEqual(launch.call_args.args[0], ["kubectl", "--context", FIXTURE.DEV_CONTEXT,
+            "--namespace", FIXTURE.DEV_NAMESPACE, "--request-timeout=20s", "wait",
+            "pod/synthetic-pod", "--for=condition=Ready", "--timeout=240s"])
+        process.wait.reset_mock(side_effect=True)
+        with patch.object(FIXTURE.subprocess, "Popen", return_value=process):
+            self.assertEqual(kube.run(["get", "pods"], as_json=False), "")
+        process.wait.assert_called_once_with(timeout=25)
+
+    def test_wait_timeout_kills_process_group_and_reaps_with_fixed_error(self):
+        kube = REAL_KUBE(FIXTURE.DEV_CONTEXT, FIXTURE.DEV_NAMESPACE, self.parent)
+        process = Mock(pid=123, returncode=-9)
+        process.wait.side_effect = [subprocess.TimeoutExpired("private-provider-canary", 245), None]
+        with patch.object(FIXTURE.subprocess, "Popen", return_value=process), patch.object(FIXTURE.os, "killpg") as kill:
+            with self.assertRaisesRegex(FIXTURE.Failure, "^fixture Kubernetes command failed$"):
+                kube.wait_ready("synthetic-pod")
+        kill.assert_called_once_with(123, FIXTURE.signal.SIGKILL)
+        self.assertEqual(process.wait.call_args_list, [unittest.mock.call(timeout=245), unittest.mock.call()])
+
     def test_route_is_only_enrolled_org_workspace_to_nonce_port(self):
         state = self.start()
         created = [payload for args, payload in self.kube.calls if args[0] == "create"]
@@ -233,12 +270,69 @@ class FixtureTests(unittest.TestCase):
                 with self.assertRaisesRegex(FIXTURE.Failure, "owned objects cleaned"):
                     FIXTURE.start(self.args)
                 self.assertEqual(self.kube.objects, {})
+                self.assertFalse((self.args.state_dir / "ready.json").exists())
         self.kube.failure = None
         self.kube.ready = READY + "untrusted-extra\n"
         self.args.state_dir = self.parent / "extra"
         with self.assertRaisesRegex(FIXTURE.Failure, "owned objects cleaned"):
             FIXTURE.start(self.args)
         self.assertEqual(self.kube.objects, {})
+
+    def test_failure_receipt_has_only_closed_stage_and_code_before_cleanup(self):
+        for failure, stage, code in (("create", "create", "operation-failed"),
+                                     ("wait", "readiness", "operation-failed"),
+                                     ("endpoint", "observe", "endpoint-identity"),
+                                     ("exec", "observe", "operation-failed")):
+            with self.subTest(failure=failure):
+                self.kube.failure = failure
+                self.args.state_dir = self.parent / ("receipt-" + failure)
+                original_stop = FIXTURE.stop
+
+                def inspect_then_stop(kube, state, directory):
+                    self.assertEqual(json.loads((directory / "failure.json").read_text()),
+                                     {"version": 1, "stage": stage, "code": code})
+                    return original_stop(kube, state, directory)
+
+                with patch.object(FIXTURE, "stop", side_effect=inspect_then_stop):
+                    with self.assertRaises(FIXTURE.Failure):
+                        FIXTURE.start(self.args)
+                self.assertFalse((self.args.state_dir / "ready.json").exists())
+                self.assertNotIn("private mock provider error", (self.args.state_dir / "failure.json").read_text())
+                self.assertEqual(self.kube.objects, {})
+
+    def test_observation_failure_allowlist_and_hostile_default(self):
+        for index, (message, code) in enumerate([
+            *FIXTURE.OBSERVATION_FAILURE_CODES.items(),
+            ("private-provider-key-status-event-canary", "operation-failed"),
+        ]):
+            with self.subTest(code=code, index=index):
+                self.args.state_dir = self.parent / ("observe-" + str(index))
+                with patch.object(FIXTURE, "observe", side_effect=FIXTURE.Failure(message)):
+                    with self.assertRaisesRegex(FIXTURE.Failure, "owned objects cleaned"):
+                        FIXTURE.start(self.args)
+                receipt = (self.args.state_dir / "failure.json").read_text()
+                self.assertEqual(json.loads(receipt), {"version": 1, "stage": "observe", "code": code})
+                self.assertNotIn(message, receipt)
+                self.assertFalse((self.args.state_dir / "ready.json").exists())
+                self.assertEqual(json.loads((self.args.state_dir / "finish.json").read_text()),
+                                 {"version": 1, "deleted": True})
+                self.assertEqual(self.kube.objects, {})
+
+    def test_failure_receipt_write_error_still_cleans_owned_objects(self):
+        self.kube.failure = "wait"
+        original_write = FIXTURE.write_json
+
+        def reject_failure_receipt(path, value):
+            if path.name == "failure.json":
+                raise OSError("private-filesystem-canary")
+            return original_write(path, value)
+
+        with patch.object(FIXTURE, "write_json", side_effect=reject_failure_receipt):
+            with self.assertRaises(OSError):
+                FIXTURE.start(self.args)
+        self.assertEqual(self.kube.objects, {})
+        self.assertFalse((self.args.state_dir / "ready.json").exists())
+        self.assertTrue((self.args.state_dir / "finish.json").exists())
 
     def test_ambiguous_create_never_adopts_or_deletes_unknown_uid(self):
         self.kube.failure = "create"
@@ -361,6 +455,112 @@ class FixtureTests(unittest.TestCase):
         pod["status"]["containerStatuses"][0]["imageID"] = ""
         with self.assertRaises(FIXTURE.Failure):
             FIXTURE.observe(self.kube, state)
+
+    def test_runtime_guard_subtypes_preserve_rejection_and_redact_values(self):
+        cases = [
+            ("containerStatuses", [], "runtime-container-shape"),
+            ("name", "private-name-canary", "runtime-container-identity"),
+            ("ready", False, "runtime-container-identity"),
+            ("image", "ghcr.io/codewiresh/workspace:private-tag-canary", "runtime-image-name-approved-repository-tag"),
+            ("image", "nexus.example.invalid/oci-approved/codewire/workspace@sha256:" + "a" * 64,
+             "runtime-image-name-approved-repository-digest"),
+            ("image", "sha256:" + "B" * 64, "runtime-image-name-unrecognized"),
+            ("image", "private-image-key-event-canary", "runtime-image-name-unrecognized"),
+            ("image", None, "runtime-image-name-unrecognized"),
+            ("imageID", "private-imageid-canary", "runtime-image-id-unrecognized"),
+            ("imageID", None, "runtime-image-id-unrecognized"),
+        ]
+        original_observe = FIXTURE.observe
+        for index, (field, value, code) in enumerate(cases):
+            with self.subTest(field=field, code=code):
+                self.args.state_dir = self.parent / ("runtime-" + str(index))
+
+                def mutated_observe(kube, state):
+                    result = kube.objects[("pods", state["name"])]
+                    prior = copy.deepcopy(result["status"])
+                    try:
+                        if field == "containerStatuses":
+                            result["status"][field] = value
+                        else:
+                            result["status"]["containerStatuses"][0][field] = value
+                        return original_observe(kube, state)
+                    finally:
+                        result["status"] = prior
+
+                with patch.object(FIXTURE, "observe", side_effect=mutated_observe):
+                    with self.assertRaises(FIXTURE.Failure):
+                        FIXTURE.start(self.args)
+                receipt = (self.args.state_dir / "failure.json").read_text()
+                self.assertEqual(json.loads(receipt), {"version": 1, "stage": "observe", "code": code})
+                if isinstance(value, str):
+                    self.assertNotIn(value, receipt)
+                self.assertNotIn("canary", receipt)
+                self.assertFalse((self.args.state_dir / "ready.json").exists())
+                self.assertEqual(self.kube.objects, {})
+
+    def test_runtime_repository_evidence_combinations(self):
+        state = self.start()
+        container = self.kube.objects[("pods", state["name"])]["status"]["containerStatuses"][0]
+        digest = "sha256:" + "7" * 64
+        selected_id = "ghcr.io/codewiresh/workspace@" + digest
+        wrong_id = "nexus.example.invalid/oci-approved/codewire/workspace@" + digest
+        cases = [
+            (IMAGE, selected_id, True),
+            (IMAGE, "docker-pullable://" + selected_id, True),
+            (IMAGE, digest, True),
+            (IMAGE, "containerd://" + digest, True),
+            (digest, selected_id, True),
+            (digest, "docker-pullable://" + selected_id, True),
+            (IMAGE, wrong_id, False),
+            (IMAGE, "docker-pullable://" + wrong_id, False),
+            (digest, wrong_id, False),
+            (digest, "docker-pullable://" + wrong_id, False),
+            (digest, digest, False),
+            (digest, "containerd://" + digest, False),
+            (digest, "private-imageid-canary", False),
+            (digest, "ghcr.io/codewiresh/workspace:private-id-tag-canary", False),
+            ("ghcr.io/codewiresh/workspace:private-tag-canary", selected_id, False),
+            ("sha256:" + "G" * 64, selected_id, False),
+            (digest, "evil.invalid/workspace@" + digest, False),
+        ]
+        for image, image_id, accepted in cases:
+            with self.subTest(image=image, accepted=accepted):
+                container["image"], container["imageID"] = image, image_id
+                if accepted:
+                    self.assertEqual(FIXTURE.observe(self.kube, state)["content"], FIXTURE.CONTENT)
+                else:
+                    with self.assertRaises(FIXTURE.Failure) as caught:
+                        FIXTURE.observe(self.kube, state)
+                    self.assertIn(str(caught.exception), FIXTURE.OBSERVATION_FAILURE_CODES)
+                    self.assertNotIn(image_id, str(caught.exception))
+
+    def test_digest_only_name_requires_repository_id_in_failure_receipt(self):
+        original_observe = FIXTURE.observe
+        for index, (image_id, code) in enumerate([
+            ("sha256:" + "7" * 64, "runtime-image-id-digest-only"),
+            ("nexus.example.invalid/oci-approved/codewire/workspace@sha256:" + "7" * 64,
+             "runtime-image-id-approved-repository-digest"),
+            ("private-imageid-canary", "runtime-image-id-unrecognized"),
+        ]):
+            self.args.state_dir = self.parent / ("digest-receipt-" + str(index))
+
+            def mutated_observe(kube, state):
+                status = kube.objects[("pods", state["name"])]["status"]
+                prior = copy.deepcopy(status["containerStatuses"])
+                try:
+                    status["containerStatuses"][0].update(image="sha256:" + "6" * 64, imageID=image_id)
+                    return original_observe(kube, state)
+                finally:
+                    status["containerStatuses"] = prior
+
+            with patch.object(FIXTURE, "observe", side_effect=mutated_observe):
+                with self.assertRaises(FIXTURE.Failure):
+                    FIXTURE.start(self.args)
+            receipt = (self.args.state_dir / "failure.json").read_text()
+            self.assertEqual(json.loads(receipt), {"version": 1, "stage": "observe", "code": code})
+            self.assertNotIn(image_id, receipt)
+            self.assertFalse((self.args.state_dir / "ready.json").exists())
+            self.assertEqual(self.kube.objects, {})
 
 
 if __name__ == "__main__":

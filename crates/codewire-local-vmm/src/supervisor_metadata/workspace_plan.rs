@@ -356,10 +356,13 @@ pub enum WorkspacePlanError {
     #[error("local credential authority is unavailable for protected repository preparation")]
     CredentialAuthorityUnavailable,
     #[cfg(target_os = "linux")]
-    #[error("protected GitHub repository preparation is unavailable")]
+    #[error("protected repository preparation is unavailable")]
     CredentialRepositoryUnavailable,
     #[cfg(target_os = "linux")]
-    #[error("protected GitHub repository output is invalid")]
+    #[error("protected repository preparation was rejected ({0:?})")]
+    CredentialRepositoryRejected(tonic::Code),
+    #[cfg(target_os = "linux")]
+    #[error("protected repository output is invalid")]
     CredentialRepositoryInvalid,
     #[cfg(target_os = "linux")]
     #[error("remote Git preparation timed out")]
