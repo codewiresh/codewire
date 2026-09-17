@@ -72,6 +72,9 @@ cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
     'secrets --platform --user list --output json')
+      if [[ "$APP_FAILURE" == cleanup-user-list ]]; then
+        printf '[]\n'; printf 'synthetic private list failure\n' >&2; return 23
+      fi
       cat "$TMPDIR_SMOKE/user.db" ;;
     'secrets --platform --organization list --output json')
       cat "$TMPDIR_SMOKE/organization.db" ;;
@@ -89,7 +92,10 @@ cw() {
       scope="$3"; scope="${scope#--}"; db="$TMPDIR_SMOKE/$scope.db"; key="$5"
       [[ "$APP_FAILURE" != "cleanup-$scope" ]] || return 1
       jq --arg key "$key" 'map(select(.key != $key))' "$db" >"$TMPDIR_SMOKE/db.next"
-      mv "$TMPDIR_SMOKE/db.next" "$db" ;;
+      mv "$TMPDIR_SMOKE/db.next" "$db"
+      if [[ "$APP_FAILURE" == cleanup-user-delete-lost && "$scope" == user ]]; then
+        printf 'synthetic private delete failure\n' >&2; return 24
+      fi ;;
     'secrets --platform projects list --output json')
       cat "$TMPDIR_SMOKE/projects.db" ;;
     'secrets --platform projects create '*)
@@ -581,6 +587,8 @@ fi
 [[ ! -e "$forced_runtime" ]] || fail 'explicit application cleanup exit retained fresh auth material'
 grep -Fx logout "$APP_TEST_ROOT/fresh-login-state/logout" >/dev/null ||
   fail 'explicit application cleanup exit skipped logout'
+[[ "$(wc -l <"$APP_TEST_ROOT/fresh-login-state/logout")" == 1 ]] ||
+  fail 'explicit application cleanup exit logged out more than once'
 pass
 eval "$TEST_CW"
 eval "$TEST_CW_WITH_TIMEOUT"
@@ -984,4 +992,75 @@ expect_failure stale-cleared-value env DATABASE_URL=synthetic-application CW_DEV
 pass
 pass
 pass
+# One old single check fails while the bounded host convergence succeeds.
+(
+  fixture
+  ENV_ID=synthetic-env
+  cw_with_timeout() {
+    printf 'attempt\n' >>"$TMPDIR_SMOKE/exec-attempts"
+    local count
+    count="$(wc -l <"$TMPDIR_SMOKE/exec-attempts")"
+    if [[ "$APP_FAILURE" == eventual && "$count" -gt 1 ]]; then
+      printf 'application-secret-check-ok\n'; return 0
+    fi
+    case "$APP_FAILURE" in
+      eventual|deadline) printf 'application check failed: startup-projection\n' ;;
+      stderr) printf 'application check failed: startup-projection\n' >&2 ;;
+      unrelated) printf 'application check failed: current-projection\n' ;;
+      mixed) printf 'application check failed: startup-projection\n'; printf 'transport failure\n' >&2 ;;
+      malformed) printf 'application check failed: startup-projection\n\n' ;;
+    esac
+    return 1
+  }
+  APP_FAILURE=eventual
+  if cw_with_timeout 5 run >"$TMPDIR_SMOKE/old.out"; then fail 'old single check unexpectedly passed'; fi
+  : >"$TMPDIR_SMOKE/exec-attempts"
+  run_application_secret_exec true clear 106
+  [[ "$(wc -l <"$TMPDIR_SMOKE/exec-attempts")" == 2 && "$(seconds_now)" == 105 ]] ||
+    fail 'startup convergence did not retry the exact fixed failure'
+  for variant in deadline stderr unrelated mixed malformed; do
+    APP_FAILURE="$variant"
+    : >"$TMPDIR_SMOKE/exec-attempts"
+    expect_failure "$variant" run_application_secret_exec true clear "$(( $(seconds_now) + 1 ))"
+    [[ "$(wc -l <"$TMPDIR_SMOKE/exec-attempts")" == 1 ]] || fail 'failure launched an extra managed check'
+    if [[ "$variant" == deadline || "$variant" == stderr ]]; then
+      grep -Fq 'timed out waiting for managed application startup projection' "$APP_TEST_ROOT/failure.err"
+    else
+      grep -Fq 'managed application-secret exec failed' "$APP_TEST_ROOT/failure.err"
+    fi
+  done
+)
+pass
+pass
+pass
+pass
+pass
+pass
+
+for variant in cleanup-user-list cleanup-user-delete-lost; do
+  reject_shared_cleanup_command() {
+    fixture
+    APP_SECRET_ALL_SCOPES=1
+    prepare_application_secrets
+    APP_FAILURE="$variant"
+    if cleanup_application_secrets; then printf 'cleanup-success\n'; fi
+    cp "$TMPDIR_SMOKE/organization.db" "$APP_TEST_ROOT/cleanup-organization.json"
+    cp "$TMPDIR_SMOKE/user.db" "$APP_TEST_ROOT/cleanup-user.json"
+    cp "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv" "$APP_TEST_ROOT/cleanup-commands.tsv"
+    cat "$TMPDIR_SMOKE"/app-cleanup-user-*.err >"$APP_TEST_ROOT/cleanup-private.err"
+  }
+  reject_shared_cleanup_command >"$APP_TEST_ROOT/cleanup-result.out" 2>"$APP_TEST_ROOT/cleanup-result.err"
+  [[ ! -s "$APP_TEST_ROOT/cleanup-result.out" ]] || fail 'failed command emitted cleanup success'
+  jq -e 'length == 0' "$APP_TEST_ROOT/cleanup-organization.json" >/dev/null || fail 'user failure skipped organization cleanup'
+  [[ -s "$APP_TEST_ROOT/cleanup-private.err" ]] || fail 'private command diagnostic was discarded'
+  if [[ "$variant" == cleanup-user-list ]]; then
+    grep -Fx $'list\tfinal\t23' "$APP_TEST_ROOT/cleanup-commands.tsv" >/dev/null
+  else
+    jq -e 'length == 0' "$APP_TEST_ROOT/cleanup-user.json" >/dev/null
+    grep -Fx $'delete\t0\t24' "$APP_TEST_ROOT/cleanup-commands.tsv" >/dev/null
+  fi
+  if grep -Fq 'synthetic private' "$APP_TEST_ROOT/cleanup-result.err"; then fail 'cleanup printed raw diagnostic'; fi
+  pass
+done
+
 printf 'Dev application-source shell fixtures passed: %s\n' "$APP_TEST_COUNT"

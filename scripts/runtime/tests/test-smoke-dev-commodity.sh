@@ -32,7 +32,7 @@ fail() {
 }
 
 assert_static_contract() {
-  local application_secret_smoke gateway_host_key_shape normalized_smoke pod_shape
+  local application_secret_smoke application_secret_exec gateway_host_key_shape normalized_smoke pod_shape
 
   bash -n "$SMOKE"
   bash -n "$WRAPPER"
@@ -95,8 +95,15 @@ assert_static_contract() {
     fail "gateway host-key proof reverted to an unbound Deployment template"
   fi
   application_secret_smoke="$(awk '/^run_application_secrets_smoke\(\)/,/^}/' "$SMOKE")"
-  rg -F 'cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty' <<<"$application_secret_smoke" >/dev/null ||
+  rg -F 'run_application_secret_exec "$guest_script" "$phase" "$phase_deadline"' <<<"$application_secret_smoke" >/dev/null ||
     fail "application-secret smoke no longer proves the live managed exec path"
+  application_secret_exec="$(awk '/^run_application_secret_exec\(\)/,/^}/' "$SMOKE")"
+  rg -F 'cw_with_timeout "$timeout_seconds" run --no-tty' <<<"$application_secret_exec" >/dev/null ||
+    fail "application-secret helper no longer launches the live managed exec path"
+  rg -F 'remaining=$((deadline - $(seconds_now)))' <<<"$application_secret_exec" >/dev/null ||
+    fail "application-secret helper lost its remaining phase budget"
+  rg -F '((timeout_seconds <= remaining)) || timeout_seconds="$remaining"' <<<"$application_secret_exec" >/dev/null ||
+    fail "application-secret helper lost its remaining phase budget cap"
   [[ "$(rg -c 'start_application_restart_witness APP_SECRET_ALL_HASHES_' <<<"$application_secret_smoke")" == 2 ]] ||
     fail "all-scope application smoke no longer starts a witness before both source restarts"
   rg -F 'wait_for_application_restart_witness_termination "$phase"' <<<"$application_secret_smoke" >/dev/null ||
