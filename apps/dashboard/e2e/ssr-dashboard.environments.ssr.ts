@@ -588,9 +588,11 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("tab")).toHaveCount(0);
     let launchRequests = 0;
     let stopRequests = 0;
+    let sandboxStopRequests = 0;
     page.on("request", (request) => {
       if (new URL(request.url()).pathname.endsWith("/_actions/terminal-sessions/launch")) launchRequests += 1;
       if (new URL(request.url()).pathname.endsWith("/_actions/terminal-sessions/stop")) stopRequests += 1;
+      if (new URL(request.url()).pathname.endsWith("/_actions/sandboxes/stop")) sandboxStopRequests += 1;
     });
     await page.getByRole("button", { name: "New terminal", exact: true }).click();
     // The bounded private RPC may time out after creating the shell. Inspect
@@ -679,9 +681,27 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Enter");
     await expect(terminalRows).toContainText(/__DURABLE_PID__\d+__/);
     const firstPid = /__DURABLE_PID__(\d+)__/.exec(await terminalRows.innerText())![1];
-    await page.goto(`/${slug}/`);
+    const filteredListPath = `/${slug}/?${new URLSearchParams({ search: environmentName, state: "running" })}`;
+    const filteredDetailPath = `/${slug}/${environmentId}/?${new URLSearchParams({ list_search: environmentName, list_state: "running" })}`;
+    await page.goto(filteredListPath);
     await openRowActions(row);
     await row.getByRole("link", { name: "Terminal", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}`);
+    await page.getByRole("link", { name: "Back to Sandboxes", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${filteredListPath}`);
+    await expect(page.getByLabel("Search Sandboxes", { exact: true })).toHaveValue(environmentName);
+    await openRowActions(row);
+    const inventoryStopsBeforeCancel = sandboxStopRequests;
+    await row.getByRole("button", { name: "Stop", exact: true }).click();
+    const inventoryStop = page.getByRole("dialog", { name: `Stop ${environmentName}?`, exact: true });
+    await expect(inventoryStop.locator('input[name="environment_id"]')).toHaveValue(environmentId);
+    await expect(inventoryStop.locator('input[name="list_search"]')).toHaveValue(environmentName);
+    await inventoryStop.getByRole("button", { name: "Cancel", exact: true }).click();
+    expect(sandboxStopRequests).toBe(inventoryStopsBeforeCancel);
+    await row.getByRole("link", { name: environmentName, exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}`);
+    // Continue the existing no-context compatibility and terminal journey too.
+    await page.goto(`/${slug}/${environmentId}/`);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(`__DURABLE_PID__${firstPid}__`);
     await terminalRoot.locator(".xterm").click();
@@ -820,6 +840,12 @@ test.describe.serial("server-rendered environments", () => {
     await noJavaScriptPage.goto(`/${slug}/${environmentId}/`);
     await expect(noJavaScriptPage.getByRole("heading", { name: "Use the CLI terminal" })).toBeVisible();
     expect(await noJavaScriptPage.locator("code").textContent()).toBe(`cw shell ${environmentId}`);
+    const managePorts = noJavaScriptPage.getByRole("link", { name: "Manage Ports", exact: true });
+    await expect(managePorts).toHaveAttribute("href", `/${slug}/?ports=${environmentId}`);
+    await managePorts.click();
+    await expect(noJavaScriptPage).toHaveURL(`${ssrUrl}/${slug}/?ports=${environmentId}`);
+    await expect(noJavaScriptPage.getByRole("heading", { name: `Ports · ${environmentName}`, exact: true })).toBeVisible();
+    await expect(noJavaScriptPage.getByRole("spinbutton", { name: "Internal port", exact: true })).toBeVisible();
     expect(noJavaScriptRequests.every((url) => new URL(url).origin === ssrUrl)).toBe(true);
     await noJavaScriptContext.close();
 
@@ -828,22 +854,24 @@ test.describe.serial("server-rendered environments", () => {
     await closeTicketBeforeAttachment(page, ticket);
     await expectTerminalLeaseDrained();
     expect(disallowedBrowserCalls).toEqual([]);
-    await page.goto(`/${slug}/${environmentId}/`);
+    await page.goto(filteredDetailPath);
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
+    const sandboxStopsBeforeCancel = sandboxStopRequests;
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     const stopDialog = page.getByRole("dialog", { name: `Stop ${environmentName}?`, exact: true });
     await expect(stopDialog).toBeVisible();
     await expect(stopDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await stopDialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(stopDialog).not.toBeVisible();
+    expect(sandboxStopRequests).toBe(sandboxStopsBeforeCancel);
     const [notStopped] = await sql`SELECT state FROM environments WHERE id = ${environmentId}`;
     expect(notStopped.state).toBe("running");
     const stopDeadline = await sourceDeletionDeadline();
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     await stopDialog.getByRole("button", { name: "Stop Sandbox", exact: true }).click();
-    await expect(page).toHaveURL(new RegExp(`/${slug}/${environmentId}/\\?message=`));
+    await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}&message=environment-stopping`);
     await waitForEnvironmentState(environmentId, ["stopped"], 120_000);
     await expect(page.locator("[data-sandbox-state]")).toContainText("stopped", { timeout: 30_000 });
     expect(await sourceDeletionDeadline()).toBe(stopDeadline);
@@ -896,10 +924,10 @@ test.describe.serial("server-rendered environments", () => {
     expect(cleared.project_spec).not.toHaveProperty("secrets");
     expect(cleared.state).toBe("stopped");
 
-    await page.goto(`/${slug}/${environmentId}/`);
+    await page.goto(filteredDetailPath);
     const beforeStartDeadline = await sourceDeletionDeadline();
     await page.getByRole("button", { name: "Start", exact: true }).click();
-    await expect(page).toHaveURL(new RegExp(`/${slug}/${environmentId}/\\?message=`));
+    await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}&message=environment-started`);
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await expect(page.locator("[data-sandbox-state]")).toContainText(/running/i, { timeout: 30_000 });
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
@@ -916,6 +944,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(deleteDialog).toBeVisible();
     await expect(deleteDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await deleteDialog.getByRole("button", { name: "Delete Sandbox", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${filteredListPath}&message=environment-destroying`);
     await waitForEnvironmentState(environmentId, ["destroyed"], 120_000);
     const [destroyed] = await sql`SELECT external_cleanup_completed_at FROM environments WHERE id = ${environmentId}`;
     expect(destroyed.external_cleanup_completed_at).not.toBeNull();

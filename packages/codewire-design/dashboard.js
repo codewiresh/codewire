@@ -59,7 +59,27 @@ const app = document.querySelector("[data-dashboard-app]");
     });
   };
 
+  const stopMetadata = (trigger) => {
+    const { environmentId, environmentName, listSearch = "", listState = "" } = trigger.dataset;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(environmentId || "")
+      || !environmentName || environmentName.length > 512
+      || /[\u0000-\u001f\u007f]/.test(environmentName + listSearch)
+      || Array.from(listSearch).length > 128
+      || !["", "all", "running", "stopped", "pending", "creating", "starting", "stopping", "error", "destroyed"].includes(listState)) return null;
+    return { environment_id: environmentId, name: environmentName, list_search: listSearch, list_state: listState };
+  };
+  const initializeStopButtons = (root = document) => {
+    const dialog = document.querySelector("[data-inventory-stop-dialog]");
+    if (!(dialog instanceof HTMLDialogElement)) return;
+    root.querySelectorAll?.("[data-inventory-stop]").forEach((trigger) => {
+      if (!(trigger instanceof HTMLButtonElement) || !stopMetadata(trigger)) return;
+      trigger.hidden = false;
+      const fallback = trigger.parentElement?.querySelector("[data-inventory-stop-fallback]");
+      if (fallback) fallback.hidden = true;
+    });
+  };
   initializeDialogs();
+  initializeStopButtons();
   document.addEventListener("htmx:beforeRequest", (event) => {
     const dialog = event.detail?.target?.closest("dialog[data-dialog]");
     if (!(dialog instanceof HTMLDialogElement)) return;
@@ -106,6 +126,22 @@ const app = document.querySelector("[data-dashboard-app]");
   document.addEventListener("htmx:timeout", dialogRequestError);
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    const stopTrigger = target?.closest("[data-inventory-stop]");
+    if (stopTrigger instanceof HTMLButtonElement) {
+      const dialog = document.querySelector("[data-inventory-stop-dialog]");
+      if (!(dialog instanceof HTMLDialogElement) || dialog.open) return;
+      const metadata = stopMetadata(stopTrigger);
+      if (!metadata) return;
+      const form = dialog.querySelector("form");
+      const name = dialog.querySelector("[data-inventory-stop-name]");
+      const controls = ["environment_id", "list_search", "list_state"].map((key) => form?.elements.namedItem(key));
+      if (!name || !controls.every((control) => control instanceof HTMLInputElement)) return;
+      event.preventDefault();
+      controls.forEach((control) => { control.value = metadata[control.name]; });
+      name.textContent = metadata.name;
+      openDialog(dialog, stopTrigger);
+      return;
+    }
     const trigger = target?.closest("[data-dialog-open]");
     if (trigger instanceof HTMLButtonElement) {
       const dialog = document.getElementById(trigger.dataset.dialogOpen);
@@ -121,7 +157,11 @@ const app = document.querySelector("[data-dashboard-app]");
       }
     }
   });
-  document.addEventListener("htmx:afterSwap", (event) => initializeDialogs(event.target instanceof Element ? event.target : document));
+  document.addEventListener("htmx:afterSwap", (event) => {
+    const root = event.target instanceof Element ? event.target : document;
+    initializeDialogs(root);
+    initializeStopButtons(root);
+  });
 })();
 
 const nameToSlug = (name) => name
@@ -230,9 +270,13 @@ if (app) {
     }
   };
 
+  const menuSelector = ".cw-org-details[open], .cw-action-menu[open], .cw-filter-menu[open], .cw-row-menu[open], .cw-menu-resize[open], .cw-menu-destroy[open]";
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    document.querySelectorAll(".cw-org-details[open], .cw-action-menu[open], .cw-filter-menu[open]").forEach((details) => {
+    // A dialog's close/backdrop event can reach here after it has closed.
+    // Preserve the underlying menus so its original opener stays focusable.
+    if (target?.closest("dialog") || document.querySelector("dialog:modal")) return;
+    document.querySelectorAll(menuSelector).forEach((details) => {
       if (target && !details.contains(target)) details.removeAttribute("open");
     });
     const drawerTrigger = target?.closest("[data-drawer-trigger]");
@@ -270,7 +314,7 @@ if (app) {
       openQuickSearch();
       return;
     }
-    const openDetails = document.querySelector(".cw-org-details[open], .cw-action-menu[open], .cw-filter-menu[open]");
+    const openDetails = target?.closest(menuSelector) || Array.from(document.querySelectorAll(menuSelector)).at(-1);
     if (event.key === "Escape" && openDetails) {
       openDetails.removeAttribute("open");
       openDetails.querySelector(":scope > summary")?.focus({ preventScroll: true });

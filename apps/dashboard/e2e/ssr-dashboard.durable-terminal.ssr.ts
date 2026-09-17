@@ -1046,6 +1046,159 @@ test("inventory keeps scheduled and protected deletion metadata visible on mobil
   await expect(page.locator("#dry-harbor .cw-sandbox-lifetime")).toContainText("Protected from automatic deletion");
 });
 
+test("inventory retains usable Actions at each responsive breakpoint and quick search offers supported destinations", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  const table = page.getByRole("table");
+  await expect(table.locator("thead th")).toHaveCount(6);
+  await expect(table.locator('thead th:not([scope="col"])')).toHaveCount(0);
+  await expect(table.getByText("Snapshot", { exact: true })).toHaveCount(0);
+  await expect(table.getByText("Region", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".cw-quota-stub")).toHaveCount(0);
+  for (const width of [1280, 900, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect(table.getByRole("columnheader", { name: "Actions" })).toBeVisible();
+    await expect(page.locator("#quiet-mesa .cw-action-cell")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  await page.keyboard.press("/");
+  const search = page.getByRole("dialog", { name: "Search Codewire" });
+  await expect(search).toBeVisible();
+  await search.getByRole("textbox", { name: "Search Codewire" }).fill("credentials");
+  await expect(search.getByRole("link", { name: "Credentials", exact: true })).toBeVisible();
+  await expect(search.getByRole("link", { name: "Account", exact: true })).toBeHidden();
+  await search.getByRole("textbox", { name: "Search Codewire" }).fill("application secrets");
+  await expect(search.getByRole("link", { name: "Personal application secrets", exact: true })).toBeVisible();
+  await expect(search.getByRole("link", { name: "Organization application secrets", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(search).not.toBeVisible();
+});
+
+test("inventory Resize dismisses innermost menus with focus return and retains edited values without mutation", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  let mutations = 0;
+  page.on("request", (request) => { if (request.method() === "POST") mutations += 1; });
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  const row = page.locator("#quiet-mesa");
+  const actions = row.locator(".cw-row-menu");
+  const resize = row.locator(".cw-menu-resize");
+  await actions.locator(":scope > summary").click();
+  await resize.locator(":scope > summary").click();
+  await resize.getByLabel("CPU (millicores)", { exact: true }).fill("3000");
+  await page.keyboard.press("Escape");
+  await expect(resize).toHaveJSProperty("open", false);
+  await expect(actions).toHaveJSProperty("open", true);
+  await expect(resize.locator(":scope > summary")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(actions).toHaveJSProperty("open", false);
+  await expect(actions.locator(":scope > summary")).toBeFocused();
+  await actions.locator(":scope > summary").click();
+  await resize.locator(":scope > summary").click();
+  await expect(resize.getByLabel("CPU (millicores)", { exact: true })).toHaveValue("3000");
+  await page.getByRole("heading", { name: "Sandboxes", exact: true }).click();
+  await expect(resize).toHaveJSProperty("open", false);
+  await expect(actions).toHaveJSProperty("open", false);
+  await actions.locator(":scope > summary").click();
+  await resize.locator(":scope > summary").click();
+  await expect(resize.getByLabel("CPU (millicores)", { exact: true })).toHaveValue("3000");
+  expect(mutations).toBe(0);
+});
+
+test("inventory Stop keeps its selected payload across refresh and submits only after confirmation", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  const posts: URLSearchParams[] = [];
+  await page.route("**/example-org/_actions/sandboxes/stop", async (route) => {
+    posts.push(new URLSearchParams(route.request().postData() || ""));
+    await route.fulfill({ status: 200, contentType: "text/html", body: "<h1>Stopped</h1>" });
+  });
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  const actions = page.locator("#quiet-mesa .cw-row-menu");
+  await actions.locator(":scope > summary").click();
+  const opener = page.locator("#quiet-mesa [data-inventory-stop]");
+  await opener.click();
+  const dialog = page.getByRole("dialog", { name: "Stop quiet-mesa?" });
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(opener).toBeFocused();
+  await opener.click();
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+  await expect(opener).toBeFocused();
+  await opener.click();
+  await page.mouse.click(1, 1);
+  await expect(dialog).not.toBeVisible();
+  expect(posts).toHaveLength(0);
+  await opener.click();
+  await page.evaluate(() => {
+    const row = document.querySelector("#quiet-mesa")!;
+    const replacement = row.cloneNode(true) as HTMLElement;
+    const trigger = replacement.querySelector<HTMLButtonElement>("[data-inventory-stop]")!;
+    trigger.hidden = true;
+    trigger.dataset.environmentId = "00000000-0000-0000-0000-000000000002";
+    trigger.dataset.environmentName = "another-sandbox";
+    row.replaceWith(replacement);
+    replacement.parentElement!.dispatchEvent(new Event("htmx:afterSwap", { bubbles: true }));
+    trigger.click();
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('input[name="environment_id"]')).toHaveValue("00000000-0000-0000-0000-000000000001");
+  await expect(page.locator("#quiet-mesa [data-inventory-stop]")).not.toHaveAttribute("hidden");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(posts).toHaveLength(0);
+  await page.locator("#quiet-mesa [data-inventory-stop]").click();
+  const replacementDialog = page.getByRole("dialog", { name: "Stop another-sandbox?" });
+  await page.locator("#quiet-mesa").evaluate((row) => row.remove());
+  await replacementDialog.getByRole("button", { name: "Stop Sandbox", exact: true }).click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(Object.fromEntries(posts[0])).toEqual({ _csrf: "fixture-csrf", environment_id: "00000000-0000-0000-0000-000000000002", list_search: "quiet-mesa", list_state: "running" });
+});
+
+test("inventory Stop has an explicit no-JavaScript confirmation", async ({ browser }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  try {
+    const page = await context.newPage();
+    let posts = 0;
+    page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
+    await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+    await page.locator("#quiet-mesa .cw-row-menu > summary").click();
+    const fallback = page.locator("#quiet-mesa [data-inventory-stop-fallback]");
+    await fallback.locator(":scope > summary").click();
+    await expect(fallback).toContainText("terminal sessions will end");
+    await expect(fallback.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeVisible();
+    await expect(fallback.locator("form")).toHaveAttribute("action", "/example-org/_actions/sandboxes/stop");
+    await fallback.locator(":scope > summary").click();
+    expect(posts).toBe(0);
+  } finally { await context.close(); }
+});
+
+test("inventory Stop retains its native fallback when refreshed metadata is invalid", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  await page.evaluate(() => {
+    const row = document.querySelector("#quiet-mesa")!;
+    const replacement = row.cloneNode(true) as HTMLElement;
+    const trigger = replacement.querySelector<HTMLButtonElement>("[data-inventory-stop]")!;
+    trigger.hidden = true;
+    trigger.dataset.environmentId = "invalid-id";
+    replacement.querySelector<HTMLElement>("[data-inventory-stop-fallback]")!.hidden = false;
+    row.replaceWith(replacement);
+    replacement.parentElement!.dispatchEvent(new Event("htmx:afterSwap", { bubbles: true }));
+  });
+  await page.locator("#quiet-mesa .cw-row-menu > summary").click();
+  await expect(page.locator("#quiet-mesa [data-inventory-stop]")).toBeHidden();
+  const fallback = page.locator("#quiet-mesa [data-inventory-stop-fallback]");
+  await expect(fallback).toBeVisible();
+  await fallback.locator(":scope > summary").click();
+  await expect(fallback.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeVisible();
+  await expect(page.locator("[data-inventory-stop-dialog]")).not.toBeVisible();
+});
+
 test("live deletion metadata preserves nanoseconds, terminal and open confirmation without inferring expiry", async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
@@ -1207,9 +1360,11 @@ test("a lifecycle submit remains locked across fresh polling and a cached return
   await page.route("**/_actions/sandboxes/start", async (route) => {
     submitted += 1;
     const form = new URLSearchParams(route.request().postData() || "");
-    expect([...form.keys()].sort()).toEqual(["_csrf", "environment_id", "return_to"]);
+    expect([...form.keys()].sort()).toEqual(["_csrf", "environment_id", "list_search", "list_state", "return_to"]);
     expect(form.get("environment_id")).toBe(environment);
     expect(form.get("return_to")).toBe("detail");
+    expect(form.get("list_search")).toBe("quiet-mesa");
+    expect(form.get("list_state")).toBe("running");
     // Synthetic unacknowledged native navigation: 204 keeps this document.
     await route.fulfill({ status: 204, body: "" });
   });
@@ -1222,6 +1377,9 @@ test("a lifecycle submit remains locked across fresh polling and a cached return
   await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("outcome is not confirmed");
   await expect(page.getByRole("link", { name: "Reload Sandbox status", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Reload Sandbox status", exact: true })).toHaveAttribute("href", "terminal-tabs.html?list_search=quiet-mesa&list_state=running");
+  await expect(page.getByRole("link", { name: "Back to Sandboxes", exact: true })).toHaveAttribute("href", "sandboxes.html?search=quiet-mesa&state=running");
+  await expect(page.locator("[data-terminal-reload]")).toHaveAttribute("href", "terminal-tabs.html?list_search=quiet-mesa&list_state=running");
   await page.locator('[data-sandbox-action="start"]').evaluate((button: HTMLButtonElement) => button.form!.requestSubmit(button));
   await expect(page.locator('[data-sandbox-action="start"]')).toBeDisabled();
   expect(submitted).toBe(1);

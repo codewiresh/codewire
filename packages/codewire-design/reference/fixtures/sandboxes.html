@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="../../components.css">
   <link rel="stylesheet" href="../../routes/dashboard.css">
   <link rel="stylesheet" href="../../routes/environments.css">
+  <script src="../../dashboard.js" defer></script>
   <style>
     .fixture-sidebar { position: fixed; inset: 0 auto 0 0; display: flex; width: 260px; flex-direction: column; border-right: 1px solid #1e1e1e; background: #0b0b0b; }
     .fixture-brand { height: 52px; padding: 16px 20px; border-bottom: 1px solid #1e1e1e; font: 600 14px/20px var(--font-mono); }
@@ -62,15 +63,35 @@
   <main class="fixture-main">
     <header class="fixture-head"><nav aria-label="Breadcrumb"><ol><li><a href="index.html">noel</a></li><li><span aria-current="page">sandboxes</span></li></ol></nav></header>
     <section class="fixture-content" id="sandbox-inventory" aria-labelledby="sandbox-inventory-title">
-      <header class="cw-list-title"><h1 class="cw-page-title" id="sandbox-inventory-title">Sandboxes</h1><span class="cw-quota-stub">4 / 50</span></header>
+      <header class="cw-list-title"><h1 class="cw-page-title" id="sandbox-inventory-title">Sandboxes</h1></header>
       <form class="cw-environment-toolbar" role="search"><label class="cw-sr-only" for="sandbox-search">Search sandboxes</label><input class="cw-input" id="sandbox-search" type="search" placeholder="Search by name"><button class="cw-button cw-button--outline cw-button--small cw-button--pill" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-filter"/></svg>Filter</button><a class="cw-button cw-button--pill" href="create-sandbox.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg>Create Sandbox</a></form>
       <div class="cw-table-shell cw-sandbox-table-shell">
         <table class="cw-table cw-sandbox-table">
-          <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Snapshot</th><th scope="col">Region</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead>
-          <tbody><tr id="quiet-mesa"><td><strong class="cw-environment-name">quiet-mesa</strong><small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: <time datetime="2026-09-17T00:26:00.123456789Z">17 Sep 2026, 00:26 UTC</time></small></td><td><span class="cw-status" data-tone="success">Running</span></td><td class="cw-mono">codewire/base:1.4</td><td class="cw-mono">eu</td><td>4 vCPU · 8 GiB · 10 GiB</td><td>started 2 min ago</td><td>12 Aug 2026</td><td><button class="cw-icon-button" type="button" aria-label="Actions for quiet-mesa">•••</button></td></tr><tr id="dry-harbor"><td><strong class="cw-environment-name">dry-harbor</strong><small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: Protected from automatic deletion</small></td><td><span class="cw-status">Stopped</span></td><td class="cw-mono">codewire/python:3.13</td><td class="cw-mono">us</td><td>1 vCPU · 2 GiB · 3 GiB</td><td>stopped 3 h ago</td><td>09 Aug 2026</td><td><button class="cw-icon-button" type="button" aria-label="Actions for dry-harbor">•••</button></td></tr></tbody>
+          <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead>
+<tbody><tr id="quiet-mesa"><td><a class="cw-environment-name" href="terminal-tabs.html?list_search=quiet-mesa&amp;list_state=running">quiet-mesa</a><small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: <time datetime="2026-09-17T00:26:00.123456789Z">17 Sep 2026, 00:26 UTC</time></small></td><td><span class="cw-status" data-tone="success">Running</span></td><td>4 vCPU · 8 GiB · 10 GiB</td><td>started 2 min ago</td><td>12 Aug 2026</td><td class="cw-action-cell"><details class="cw-row-menu"><summary aria-label="Actions for quiet-mesa">•••</summary><div class="cw-row-menu-panel"><a href="terminal-tabs.html?list_search=quiet-mesa&amp;list_state=running">Open Sandbox</a><section aria-label="Stop quiet-mesa"><button type="button" data-inventory-stop data-environment-id="00000000-0000-0000-0000-000000000001" data-environment-name="quiet-mesa" data-list-search="quiet-mesa" data-list-state="running" hidden>Stop</button><details class="cw-menu-destroy" data-inventory-stop-fallback><summary>Stop</summary><p>Running processes and terminal sessions will end. Workspace files are kept. Stopping does not cancel automatic deletion.</p><form method="post" action="/example-org/_actions/sandboxes/stop"><input type="hidden" name="_csrf" value="fixture-csrf"><input type="hidden" name="environment_id" value="00000000-0000-0000-0000-000000000001"><input type="hidden" name="list_search" value="quiet-mesa"><input type="hidden" name="list_state" value="running"><button type="submit">Stop Sandbox</button></form></details></section><details class="cw-menu-resize"><summary>Resize</summary><form><label>CPU (millicores)<input class="cw-input" name="cpu_millicores" type="number" value="4000"></label><button type="button" disabled>Review resize</button></form></details></div></details></td></tr><tr id="dry-harbor"><td><strong class="cw-environment-name">dry-harbor</strong><small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: Protected from automatic deletion</small></td><td><span class="cw-status">Stopped</span></td><td>1 vCPU · 2 GiB · 3 GiB</td><td>stopped 3 h ago</td><td>09 Aug 2026</td><td class="cw-action-cell"><button class="cw-icon-button" type="button" aria-label="Actions for dry-harbor">•••</button></td></tr></tbody>
         </table>
       </div>
     </section>
   </main>
+  <dialog class="cw-dialog" data-dialog data-inventory-stop-dialog aria-labelledby="inventory-stop-title" aria-describedby="inventory-stop-description">
+    <header class="cw-dialog-header"><h2 id="inventory-stop-title">Stop <span data-inventory-stop-name>Sandbox</span>?</h2></header>
+    <p class="cw-dialog-body" id="inventory-stop-description">Running processes and terminal sessions will end. Workspace files are kept so you can start the Sandbox again. Stopping does not cancel automatic deletion.</p>
+    <form class="cw-dialog-actions" method="post" action="/example-org/_actions/sandboxes/stop">
+      <input type="hidden" name="_csrf" value="fixture-csrf"><input type="hidden" name="environment_id"><input type="hidden" name="list_search"><input type="hidden" name="list_state">
+      <button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Stop Sandbox</button>
+    </form>
+  </dialog>
+  <dialog class="cw-command" data-quick-search aria-label="Search Codewire">
+    <form method="dialog" class="cw-command-shell">
+      <div class="cw-command-input-row"><input data-quick-search-input aria-label="Search Codewire" autocomplete="off" placeholder="Search destinations"><button value="cancel" aria-label="Close search">Esc</button></div>
+      <ul class="cw-command-results" data-quick-search-results>
+        <li><a href="/settings/?org=example-org" data-search-item data-search-text="personal account details security sessions">Account</a></li>
+        <li><a href="settings-credentials.html" data-search-item data-search-text="personal credentials provider github profiles git commit identity">Credentials</a></li>
+        <li><a href="application-secrets.html#personal-secrets" data-search-item data-search-text="personal application secrets">Personal application secrets</a></li>
+        <li><a href="application-secrets.html#organization-secrets" data-search-item data-search-text="organization application secrets">Organization application secrets</a></li>
+      </ul>
+      <p class="cw-command-empty" data-quick-search-empty hidden>No matching destination.</p>
+    </form>
+  </dialog>
 </body>
 </html>

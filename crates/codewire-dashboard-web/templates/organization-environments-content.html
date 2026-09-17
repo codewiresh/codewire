@@ -21,6 +21,15 @@
     {% include "environment-list.html" %}
   </div>
 
+  <dialog class="cw-dialog" data-dialog data-inventory-stop-dialog aria-labelledby="inventory-stop-title" aria-describedby="inventory-stop-description">
+    <header class="cw-dialog-header"><h2 id="inventory-stop-title">Stop <span data-inventory-stop-name>Sandbox</span>?</h2></header>
+    <p class="cw-dialog-body" id="inventory-stop-description">Running processes and terminal sessions will end. Workspace files are kept so you can start the Sandbox again. Stopping does not cancel automatic deletion.</p>
+    <form class="cw-dialog-actions" method="post" action="/{{ organization.slug }}/_actions/sandboxes/stop">
+      <input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id"><input type="hidden" name="list_search"><input type="hidden" name="list_state">
+      <button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Stop Sandbox</button>
+    </form>
+  </dialog>
+
   {% match page.resize_confirmation %}{% when Some with (resize) %}
   <section class="cw-card cw-detail-panel" aria-labelledby="resize-confirmation-title">
     <div class="cw-card-header"><div><h2 id="resize-confirmation-title" class="cw-card-title">Confirm resize · {{ resize.environment_name }}</h2><p class="cw-card-description">{{ resize.previous_resources }} → {{ resize.desired_resources }}</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Cancel</a></div>
