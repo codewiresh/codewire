@@ -38,10 +38,24 @@ impl PtyLaunchGuard {
     pub(crate) fn release(mut self) -> Box<dyn portable_pty::Child + Send + Sync> {
         self.0.take().expect("PTY launch child is owned")
     }
-    pub(crate) async fn terminate(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+    pub(crate) async fn terminate_confirmed(&mut self, timeout: std::time::Duration) -> bool {
+        let Some(child) = self.0.as_mut() else {
+            return true;
+        };
+        // A failed signal is not proof either way: the exact child may have
+        // already exited. Only a successful reap establishes completion.
+        let _ = child.kill();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    self.0 = None;
+                    return true;
+                }
+                Err(_) => return false,
+                Ok(None) if tokio::time::Instant::now() >= deadline => return false,
+                Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
         }
     }
 }
@@ -410,6 +424,75 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+
+    #[derive(Clone, Debug)]
+    struct CleanupChild {
+        reaped: bool,
+        wait_error: bool,
+    }
+
+    impl portable_pty::ChildKiller for CleanupChild {
+        fn kill(&mut self) -> io::Result<()> {
+            Err(io::Error::other("synthetic signal failure"))
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl portable_pty::Child for CleanupChild {
+        fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+            if self.wait_error {
+                return Err(io::Error::other("synthetic reap failure"));
+            }
+            Ok(self
+                .reaped
+                .then(|| portable_pty::ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> io::Result<portable_pty::ExitStatus> {
+            Err(io::Error::other("synthetic child has no OS process"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_cleanup_accepts_confirmed_reap_even_when_signal_races_exit() {
+        let mut child = PtyLaunchGuard::new(Box::new(CleanupChild {
+            reaped: true,
+            wait_error: false,
+        }));
+        assert!(child.terminate_confirmed(std::time::Duration::ZERO).await);
+        assert!(child.0.is_none());
+    }
+
+    #[tokio::test]
+    async fn launch_cleanup_timeout_is_not_reap_confirmation() {
+        let mut child = PtyLaunchGuard::new(Box::new(CleanupChild {
+            reaped: false,
+            wait_error: false,
+        }));
+        assert!(!child.terminate_confirmed(std::time::Duration::ZERO).await);
+        assert!(child.0.is_some(), "the exact child remains guarded");
+    }
+
+    #[tokio::test]
+    async fn launch_cleanup_wait_error_is_not_reap_confirmation() {
+        let mut child = PtyLaunchGuard::new(Box::new(CleanupChild {
+            reaped: false,
+            wait_error: true,
+        }));
+        assert!(
+            !child
+                .terminate_confirmed(std::time::Duration::from_secs(1))
+                .await
+        );
+        assert!(child.0.is_some(), "the exact child remains guarded");
+    }
 
     #[test]
     fn runc_process_values_live_only_in_owner_private_tmpfs_spec() {

@@ -168,6 +168,7 @@
                 pty: true,
                 exit_code: None,
                 output_end_offset: 0,
+                output_start_offset: 0,
                 status_message: String::new(),
             },
             EnvironmentSessionView {
@@ -178,6 +179,7 @@
                 pty: true,
                 exit_code: None,
                 output_end_offset: 0,
+                output_start_offset: 0,
                 status_message: String::new(),
             },
         ];
@@ -219,6 +221,7 @@
             pty: false,
             exit_code: Some(42),
             output_end_offset: 0,
+            output_start_offset: 0,
             status_message: String::new(),
         };
         assert_eq!(

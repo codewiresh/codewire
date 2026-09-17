@@ -2572,6 +2572,7 @@ mod linux {
                     session_id: session_id.to_owned(),
                     offset: 0,
                     limit: MAX_SESSION_OUTPUT as u64,
+                    allow_history_gap: false,
                 })
                 .await?;
             let mut stdout = Vec::new();
@@ -2922,6 +2923,7 @@ mod linux {
                 session_id: session_id.to_owned(),
                 offset: 0,
                 limit: MAX_SESSION_OUTPUT as u64,
+                allow_history_gap: false,
             })
             .await
         else {
@@ -2994,6 +2996,7 @@ mod linux {
                 session_id: session_id.to_owned(),
                 offset: 0,
                 limit: MAX_SESSION_OUTPUT as u64,
+                allow_history_gap: false,
             })
             .await
             .ok()
@@ -3044,6 +3047,7 @@ mod linux {
                 session_id: session_id.to_owned(),
                 offset: 0,
                 limit: MAX_SESSION_OUTPUT as u64,
+                allow_history_gap: false,
             })
             .await?;
         if !response.eof || response.next_offset > MAX_SESSION_OUTPUT as u64 {
@@ -3071,6 +3075,7 @@ mod linux {
                 session_id: session_id.to_owned(),
                 offset: 0,
                 limit: MAX_SESSION_OUTPUT as u64,
+                allow_history_gap: false,
             })
             .await?;
         if !response.eof || response.next_offset > MAX_SESSION_OUTPUT as u64 {

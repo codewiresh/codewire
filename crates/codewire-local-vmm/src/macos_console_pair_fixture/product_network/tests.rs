@@ -213,7 +213,8 @@ fn confined_endpoint_rejects_trailing_data_without_completion() {
     let mut stream = TcpStream::connect(address).unwrap();
     stream.write_all(&payload(false)).unwrap();
     stream.write_all(b"unexpected").unwrap();
-    stream.shutdown(Shutdown::Write).unwrap();
+    // A trailing byte must reject immediately, without waiting for client EOF.
+    // Keep the write side open: the rejecting peer may already have closed it.
     assert_child(&mut child, false);
     assert_stream_closed_without(&mut control, ENDPOINT_COMPLETED_MESSAGE);
 }

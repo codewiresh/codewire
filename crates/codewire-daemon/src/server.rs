@@ -187,6 +187,8 @@ where
     #[cfg(target_os = "linux")]
     let startup_config = config.clone();
     let implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
+    let session_owner = implementation.session_engine();
+    let _session_cancellation = session_owner.cancel_on_drop();
     let bridge_owner = implementation.credential_bridge();
     // Also cancel admission/registered work if this entire server future is
     // dropped. Normal exits below still await the actual owner drain.
@@ -281,6 +283,7 @@ where
 
     let result = async { tokio::select! {
         result = &mut serving => {
+            session_owner.cancel_launches();
             let _ = shutdown_tx.send(true);
             bridge_owner.shutdown().await;
             timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut ingress_serving)
@@ -289,6 +292,7 @@ where
             result.context("serve workspace daemon gRPC transport")
         }
         ingress_result = &mut ingress_serving => {
+            session_owner.cancel_launches();
             let shutting_down = *shutdown_rx.borrow();
             let _ = shutdown_tx.send(true);
             bridge_owner.shutdown().await;
@@ -311,6 +315,7 @@ where
             }
         }
         _ = shutdown_started.changed() => {
+            session_owner.cancel_launches();
             bridge_owner.shutdown().await;
             match timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut serving).await {
                 Ok(result) => {
@@ -333,10 +338,11 @@ where
     } }.await;
     // `?` inside a branch must not bypass the owner finalizer. This includes
     // prepared hosted Open waiters as well as both local/hosted active epochs.
+    let session_cleanup = session_owner.shutdown().await;
     bridge_owner.shutdown().await;
     shutdown_observer.abort();
     let _ = shutdown_observer.await;
-    result
+    result.and(session_cleanup.context("settle daemon session launches during shutdown"))
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
