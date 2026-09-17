@@ -96,6 +96,14 @@ fixture() {
 fixture
 validate_local_platform_options
 pass
+invalid_artifact_pair() {
+  fixture
+  mkdir -m 700 "$TMPDIR_SMOKE/other"
+  LOCAL_PLATFORM_ARTIFACT_ROOT="$TMPDIR_SMOKE/other/artifacts"
+  mkdir -m 700 "$LOCAL_PLATFORM_ARTIFACT_ROOT"
+  validate_local_platform_options
+}
+expect_failure mismatched-native-artifact-pair invalid_artifact_pair
 local_platform_parse --application-only
 [[ "$LP_APPLICATION_ONLY" == 1 ]] || fail 'application-only option was not parsed'
 validate_local_platform_options

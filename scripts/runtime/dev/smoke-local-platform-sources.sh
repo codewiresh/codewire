@@ -208,6 +208,11 @@ validate_local_platform_options() {
   [[ -f "$CW_BIN" && -x "$CW_BIN" && -d "$LOCAL_PLATFORM_ARTIFACT_ROOT" &&
      -f "$LOCAL_PLATFORM_ARTIFACT_LOCK" && -r "$LOCAL_PLATFORM_ARTIFACT_LOCK" ]] ||
     die 'normal CLI or matching native artifacts are unavailable'
+  # NativeRuntimeConfig admits a prepared artifact directory and its lock as
+  # one sealed pair. Catch a staging-parent typo before any browser login or
+  # provider enrollment rather than failing later while starting the VM.
+  [[ "${LOCAL_PLATFORM_ARTIFACT_ROOT%/*}" == "${LOCAL_PLATFORM_ARTIFACT_LOCK%/*}" ]] ||
+    die 'native artifact directory and lock must share one parent directory'
 }
 
 local_platform_prepare_mesh_owner() {
