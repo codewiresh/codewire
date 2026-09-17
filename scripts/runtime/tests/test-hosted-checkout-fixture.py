@@ -456,6 +456,48 @@ class FixtureTests(unittest.TestCase):
         with self.assertRaises(FIXTURE.Failure):
             FIXTURE.observe(self.kube, state)
 
+    def test_runtime_guard_subtypes_preserve_rejection_and_redact_values(self):
+        cases = [
+            ("containerStatuses", [], "runtime-container-shape"),
+            ("name", "private-name-canary", "runtime-container-identity"),
+            ("ready", False, "runtime-container-identity"),
+            ("image", "ghcr.io/codewiresh/workspace:private-tag-canary", "runtime-image-name-approved-repository-tag"),
+            ("image", "nexus.example.invalid/oci-approved/codewire/workspace@sha256:" + "a" * 64,
+             "runtime-image-name-approved-repository-digest"),
+            ("image", "sha256:" + "b" * 64, "runtime-image-name-digest-only"),
+            ("image", "private-image-key-event-canary", "runtime-image-name-unrecognized"),
+            ("image", None, "runtime-image-name-unrecognized"),
+            ("imageID", "private-imageid-canary", "runtime-image-id"),
+            ("imageID", None, "runtime-image-id"),
+        ]
+        original_observe = FIXTURE.observe
+        for index, (field, value, code) in enumerate(cases):
+            with self.subTest(field=field, code=code):
+                self.args.state_dir = self.parent / ("runtime-" + str(index))
+
+                def mutated_observe(kube, state):
+                    result = kube.objects[("pods", state["name"])]
+                    prior = copy.deepcopy(result["status"])
+                    try:
+                        if field == "containerStatuses":
+                            result["status"][field] = value
+                        else:
+                            result["status"]["containerStatuses"][0][field] = value
+                        return original_observe(kube, state)
+                    finally:
+                        result["status"] = prior
+
+                with patch.object(FIXTURE, "observe", side_effect=mutated_observe):
+                    with self.assertRaises(FIXTURE.Failure):
+                        FIXTURE.start(self.args)
+                receipt = (self.args.state_dir / "failure.json").read_text()
+                self.assertEqual(json.loads(receipt), {"version": 1, "stage": "observe", "code": code})
+                if isinstance(value, str):
+                    self.assertNotIn(value, receipt)
+                self.assertNotIn("canary", receipt)
+                self.assertFalse((self.args.state_dir / "ready.json").exists())
+                self.assertEqual(self.kube.objects, {})
+
 
 if __name__ == "__main__":
     unittest.main()
