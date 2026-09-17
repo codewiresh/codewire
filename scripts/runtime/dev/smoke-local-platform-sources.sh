@@ -36,6 +36,7 @@ LP_INITIAL_PRIVATE_CHECKOUT=0
 LP_LIVE_CODEX=0
 LP_LIVE_ANTHROPIC=0
 LP_LIVE_OPENAI=0
+LP_APPLICATION_ONLY=0
 # shellcheck source=scripts/runtime/dev/private-checkout-smoke.sh
 source "$REPO_ROOT/scripts/runtime/dev/private-checkout-smoke.sh"
 # shellcheck source=scripts/runtime/dev/provider-codex-smoke.sh
@@ -48,6 +49,10 @@ source "$REPO_ROOT/scripts/runtime/dev/provider-openai-smoke.sh"
 local_platform_usage() {
   cat <<'USAGE'
 Usage: scripts/runtime/dev/smoke-local-platform-sources.sh --admin-oidc --cw-bin /absolute/normal/cw
+
+--application-only tests application sources without enrolling or selecting any
+provider credential/profile. It can use the existing named Mesh network mode.
+It cannot be combined with live-provider or initial-private-checkout modes.
 
 Add --initial-private-checkout to test repository checkout before install using
 a generated platform SSH key and the checked-in host-loopback repository peer.
@@ -131,6 +136,7 @@ local_platform_parse() {
       --live-codex) LP_LIVE_CODEX=1; shift ;;
       --live-anthropic) LP_LIVE_ANTHROPIC=1; shift ;;
       --live-openai) LP_LIVE_OPENAI=1; shift ;;
+      --application-only) LP_APPLICATION_ONLY=1; shift ;;
       --cw-bin) [[ $# -ge 2 ]] || die '--cw-bin requires a path'; CW_BIN="$2"; shift 2 ;;
       -h|--help) local_platform_usage; return 2 ;;
       *) die 'unsupported local/platform smoke option' ;;
@@ -140,6 +146,10 @@ local_platform_parse() {
 
 validate_local_platform_options() {
   validate_dev_smoke_browser_auth
+  if [[ "$LP_APPLICATION_ONLY" == 1 ]]; then
+    [[ $((LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI + LP_INITIAL_PRIVATE_CHECKOUT)) == 0 ]] ||
+      die 'application-only cannot select a provider or initial private checkout'
+  fi
   if (( LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI > 0 )); then
     [[ $((LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI)) == 1 &&
        "$LP_INITIAL_PRIVATE_CHECKOUT" == 0 && -z "$LOCAL_PLATFORM_NETWORK_ID" &&
@@ -363,16 +373,20 @@ local_platform_cw() {
 }
 
 local_platform_binding() {
-  local project="$1" previous="$2"
+  local project="$1" previous="$2" credentials='null'
+  if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then
+    credentials="$(jq -nc --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" \
+      --arg reference "user/$PROVIDER_SSH_PROFILE_NAME" '{profile:$profile,reference:$reference,revision:1}')"
+  fi
   cw_with_timeout 30 env info --local "$SMOKE_NAME" --output json \
     >"$TMPDIR_SMOKE/local-environment.json" 2>"$TMPDIR_SMOKE/local-info.err" || return 1
   jq -e --arg id "$ENV_ID" --arg project "$project" \
-    --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" --arg reference "user/$PROVIDER_SSH_PROFILE_NAME" \
+    --argjson credentials "$credentials" \
     --arg server "$CODEWIRE_SERVER_URL" --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
     --arg user "$LP_USER_ID" --argjson previous "$previous" '
     .id == $id and .backend == "cloud-hypervisor" and .state == "running" and
     .cpu == 2 and .memory == "16Gi" and .generation == ($previous + 1) and
-    .source_selection.credentials == {profile:$profile,reference:$reference,revision:1} and
+    .source_selection.credentials == $credentials and
     (.source_selection.secrets.project // "") == $project and
     (.source_selection.secrets.user // null) == null and
     (.source_selection.secrets.organization // false) == false and
@@ -656,6 +670,8 @@ local_platform_cleanup() {
       log 'PASS: OpenAI Responses HTTP request in a Linux VM through a freshly enrolled platform API key, with cleanup; SDK, streaming, other providers and hosted placement are not implied'
     elif [[ "$LP_INITIAL_PRIVATE_CHECKOUT" == 1 ]]; then
       log 'PASS: local Linux initial private checkout through platform SSH before install, with cleanup; hosted checkout is not implied'
+    elif [[ "$LP_APPLICATION_ONLY" == 1 ]]; then
+      log 'PASS: local Linux VM with actual Dev application sources and no credential profile, transitions and cleanup; provider proof is separate'
     else
       log 'PASS: local Linux VM with actual Dev application sources and platform SSH, transitions and cleanup'
     fi
@@ -800,13 +816,18 @@ local_platform_journey() {
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
   local_platform_prepare_network
   local_platform_validate_network
-  prepare_provider_ssh
+  if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then prepare_provider_ssh; fi
   prepare_application_secrets
-  jq --slurpfile provider "$PROVIDER_SSH_DOCUMENT" --arg image "$LOCAL_PLATFORM_IMAGE" '
-    .image=$image | .credentials=$provider[0].credentials |
-    .install_command += "; " + $provider[0].install_command |
-    .startup_script += "; " + $provider[0].startup_script
-  ' "$APP_SECRET_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  if [[ "$LP_APPLICATION_ONLY" == 1 ]]; then
+    jq --arg image "$LOCAL_PLATFORM_IMAGE" '.image=$image' \
+      "$APP_SECRET_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  else
+    jq --slurpfile provider "$PROVIDER_SSH_DOCUMENT" --arg image "$LOCAL_PLATFORM_IMAGE" '
+      .image=$image | .credentials=$provider[0].credentials |
+      .install_command += "; " + $provider[0].install_command |
+      .startup_script += "; " + $provider[0].startup_script
+    ' "$APP_SECRET_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  fi
   local_platform_prepare_mesh_listener
   LP_CREATE_ATTEMPTED=1
   local -a LP_NETWORK_ARGS=()
@@ -821,16 +842,18 @@ local_platform_journey() {
   local_platform_network_prove
   local_platform_mesh_probe
   local_platform_application_phase a "platform:id:${APP_SECRET_IDS[0]}" "${APP_SECRET_HASHES[0]}"
-  local_platform_ssh_prove
+  if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then local_platform_ssh_prove; fi
   cw_with_timeout 300 env update --local "$ENV_ID" --secrets "platform:id:${APP_SECRET_IDS[1]}" --yes --output json \
     >"$TMPDIR_SMOKE/local-update.json" 2>"$TMPDIR_SMOKE/local-update.err" || die 'platform source replacement in the local VM failed'
   local_platform_application_phase b "platform:id:${APP_SECRET_IDS[1]}" "${APP_SECRET_HASHES[1]}"
   cw_with_timeout 300 env update --local "$ENV_ID" --clear-secrets --yes --output json \
     >"$TMPDIR_SMOKE/local-clear.json" 2>"$TMPDIR_SMOKE/local-clear.err" || die 'local platform-source clear failed'
   local_platform_application_phase clear '' absent
-  local_platform_ssh_reset_target
-  local_platform_ssh_prove
-  local_platform_ssh_revoke
+  if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then
+    local_platform_ssh_reset_target
+    local_platform_ssh_prove
+    local_platform_ssh_revoke
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

@@ -79,6 +79,7 @@ fixture() {
   LOCAL_PLATFORM_MESH_PROBE_BIN=''
   LP_NETWORK_CREATE_ATTEMPTED=0
   LP_LIVE_CODEX=0; LP_LIVE_ANTHROPIC=0; LP_LIVE_OPENAI=0
+  LP_APPLICATION_ONLY=0
   LOCAL_PLATFORM_OPENAI_MODEL=fixture-model-v1
   LP_INITIAL_PRIVATE_CHECKOUT=0; LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=''
   FIXTURE_NETWORKS_JSON=''
@@ -94,6 +95,31 @@ fixture() {
 fixture
 validate_local_platform_options
 pass
+local_platform_parse --application-only
+[[ "$LP_APPLICATION_ONLY" == 1 ]] || fail 'application-only option was not parsed'
+validate_local_platform_options
+pass
+for invalid in codex anthropic openai checkout; do
+  invalid_application_only_options() {
+    fixture
+    LP_APPLICATION_ONLY=1
+    case "$invalid" in
+      codex) LP_LIVE_CODEX=1 ;;
+      anthropic) LP_LIVE_ANTHROPIC=1 ;;
+      openai) LP_LIVE_OPENAI=1 ;;
+      checkout) LP_INITIAL_PRIVATE_CHECKOUT=1 ;;
+    esac
+    validate_local_platform_options
+  }
+  expect_failure "application-only-$invalid" invalid_application_only_options
+done
+fixture
+LP_APPLICATION_ONLY=1
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+LOCAL_PLATFORM_MESH_PROBE_BIN=/usr/bin/true
+validate_local_platform_options
+pass
+fixture
 local_platform_parse --live-codex
 [[ "$LP_LIVE_CODEX" == 1 ]] || fail 'Codex option was not parsed'
 validate_local_platform_options
@@ -292,13 +318,17 @@ cw_with_timeout() {
       touch "$TMPDIR_SMOKE/network-node-revoked" ;;
     'env info --local '*" --output json")
       jq -n --arg id "$ENV_ID" --arg project "platform:id:$PROJECT_ID" --arg profile "platform:id:$PROFILE_ID" \
-        --arg server "$CODEWIRE_SERVER_URL" --arg user "$LP_USER_ID" --arg org "$ORG_ID" --arg failure "$FAILURE" '
+        --arg server "$CODEWIRE_SERVER_URL" --arg user "$LP_USER_ID" --arg org "$ORG_ID" --arg failure "$FAILURE" \
+        --argjson application_only "$LP_APPLICATION_ONLY" '
         {id:$id,backend:"cloud-hypervisor",state:"running",cpu:2,memory:"16Gi",generation:1,
-         source_selection:{credentials:{profile:$profile,reference:"user/owned-profile",revision:1},
+         source_selection:{credentials:(if $application_only == 1 then null else {profile:$profile,reference:"user/owned-profile",revision:1} end),
            secrets:{project:$project},platform:{server_url:$server,organization_id:$org,user_id:$user}}} |
         if $failure == "wrong-vm" then .id="unowned"
         elif $failure == "wrong-profile" then .source_selection.credentials.profile="local:owned-profile"
         elif $failure == "wrong-revision" then .source_selection.credentials.revision=2
+        elif $failure == "unselected-profile" then .source_selection.credentials={profile:$profile,reference:"user/owned-profile",revision:1}
+        elif $failure == "empty-credentials" then .source_selection.credentials={}
+        elif $failure == "false-credentials" then .source_selection.credentials=false
         elif $failure == "wrong-project" then .source_selection.secrets.project="local:project"
         elif $failure == "wrong-user" then .source_selection.platform.user_id="unowned"
         elif $failure == "wrong-org" then .source_selection.platform.organization_id="unowned"
@@ -442,6 +472,16 @@ cmp "$REPO_ROOT/scripts/runtime/dev/native-mesh-listener.py" "$LP_WORKSPACE/.cw-
 jq -e '.ports == [{port:28083}] and (.startup_script | startswith("app-startup; ssh-startup; ") and contains("/workspace/.cw-mesh-smoke/listener.py --port 28083"))' \
   "$LP_WORKSPACE/codewire.yaml" >/dev/null || fail 'named Mesh was not attached to a declared guest port'
 pass
+fixture
+LP_APPLICATION_ONLY=1
+LP_WORKSPACE="$TMPDIR_SMOKE/workspace"; mkdir "$LP_WORKSPACE"
+printf '%s\n' '{"startup_script":"app-startup"}' >"$LP_WORKSPACE/codewire.yaml"
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+local_platform_prepare_mesh_listener
+jq -e '.ports == [{port:28083}] and (has("credentials") | not) and
+  (.startup_script | startswith("app-startup; ") and contains("/workspace/.cw-mesh-smoke/listener.py --port 28083") and (contains("ssh-startup") | not))' \
+  "$LP_WORKSPACE/codewire.yaml" >/dev/null || fail 'application-only Mesh listener changed source/provider intent'
+pass
 mesh_probe_fixture() {
   fixture
   LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
@@ -467,6 +507,17 @@ pass
 for invalid in wrong-vm wrong-profile wrong-revision wrong-project wrong-user wrong-org wrong-server extra-source stale leaped; do
   invalid_binding() { fixture; FAILURE="$invalid"; local_platform_binding "platform:id:$PROJECT_ID" 0; }
   expect_failure "$invalid" invalid_binding
+done
+fixture
+LP_APPLICATION_ONLY=1
+local_platform_binding "platform:id:$PROJECT_ID" 0
+pass
+for invalid in wrong-vm unselected-profile empty-credentials false-credentials wrong-project wrong-user wrong-org wrong-server extra-source stale leaped; do
+  invalid_application_only_binding() {
+    fixture; LP_APPLICATION_ONLY=1; FAILURE="$invalid"
+    local_platform_binding "platform:id:$PROJECT_ID" 0
+  }
+  expect_failure "application-only-$invalid" invalid_application_only_binding
 done
 fixture
 local_platform_ssh_prove
@@ -642,9 +693,13 @@ cw_with_timeout() {
     'env list --local --output json') printf '[]\n' ;;
     'env create --local '*)
       [[ "$*" == "env create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --path $LP_WORKSPACE --path-mode copy --file codewire.yaml --yes --output json" ]] || fail 'unsupported native create command'
-      jq -e --arg profile "platform:id:$PROFILE_ID" --arg project "platform:id:$PROJECT_ID" --arg image "$LOCAL_PLATFORM_IMAGE" '
-        .credentials.profile == $profile and .secrets.project == $project and .image == $image and
-        .install_command == "app-install; ssh-install" and .startup_script == "app-startup; ssh-startup"' \
+      jq -e --arg profile "platform:id:$PROFILE_ID" --arg project "platform:id:$PROJECT_ID" --arg image "$LOCAL_PLATFORM_IMAGE" \
+        --argjson application_only "$LP_APPLICATION_ONLY" '
+        .secrets.project == $project and .image == $image and
+        (if $application_only == 1 then (has("credentials") | not) and
+          .install_command == "app-install" and .startup_script == "app-startup"
+        else .credentials.profile == $profile and
+          .install_command == "app-install; ssh-install" and .startup_script == "app-startup; ssh-startup" end)' \
         "$LP_WORKSPACE/codewire.yaml" >/dev/null || fail 'combined source document drifted'
       [[ "$FAILURE" != create ]] || return 1
       jq -n --arg id "$VM_ID" '{id:$id}'; printf 'a\n' >"$TMPDIR_SMOKE/phase" ;;
@@ -689,6 +744,22 @@ for invalid in create update clear projection-clear target-cleanup target-instal
     ! grep -qx clear "$TMPDIR_SMOKE/ssh-phases" || fail 'failed target reset still ran positive SSH proof'
   fi
 done
+
+(
+  fixture
+  LP_APPLICATION_ONLY=1
+  LP_WORKSPACE="$TMPDIR_SMOKE"
+  PROVIDER_SSH_CREDENTIAL_ID=''; PROVIDER_SSH_PROFILE_ID=''
+  prepare_provider_ssh() { fail 'application-only enrolled SSH'; }
+  local_platform_ssh_prove() { fail 'application-only invoked provider proof'; }
+  local_platform_ssh_reset_target() { fail 'application-only reset a provider target'; }
+  local_platform_ssh_revoke() { fail 'application-only revoked a provider'; }
+  local_platform_journey
+  [[ "$(cat "$TMPDIR_SMOKE/application-phases")" == $'a\nb\nclear' ]] || fail 'application-only omitted source transitions'
+  [[ ! -e "$TMPDIR_SMOKE/ssh-phases" && ! -e "$TMPDIR_SMOKE/ssh-target-actions" &&
+     ! -e "$TMPDIR_SMOKE/provider.json" ]] || fail 'application-only created provider artifacts'
+)
+pass
 
 # Each live provider owns a public create/use/run flow, not the application/SSH
 # journey. Keep typed dispatch and parent ownership when a reply is lost.

@@ -460,7 +460,7 @@ start_fixed_child() {
         XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
         SMOKE_TMP_PARENT="${SMOKE_TMP_PARENT:-}" \
         "$ROOT/scripts/runtime/dev/smoke-local-platform-sources.sh" \
-          --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN"
+          --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN" --application-only
       ;;
     *) return 1 ;;
   esac
