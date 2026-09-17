@@ -32,6 +32,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck disable=SC1091
 source "$REPO_ROOT/scripts/runtime/dev/smoke-local-platform-sources.sh"
 REAL_LOCAL_PLATFORM_APPLICATION_PHASE="$(declare -f local_platform_application_phase)"
+REAL_LOCAL_PLATFORM_GUEST_CHECK="$(declare -f local_platform_guest_check)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cw-local-platform-tests.XXXXXXXX")"
 TEST_OWNER="$BASHPID"
 cleanup_test() {
@@ -78,6 +79,8 @@ fixture() {
   LOCAL_PLATFORM_MESH_PROBE_BIN=''
   LP_NETWORK_CREATE_ATTEMPTED=0
   LP_LIVE_CODEX=0; LP_LIVE_ANTHROPIC=0; LP_LIVE_OPENAI=0
+  LP_APPLICATION_ONLY=0
+  FIXTURE_EMPTY_SOURCE=0
   LOCAL_PLATFORM_OPENAI_MODEL=fixture-model-v1
   LP_INITIAL_PRIVATE_CHECKOUT=0; LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=''
   FIXTURE_NETWORKS_JSON=''
@@ -93,6 +96,31 @@ fixture() {
 fixture
 validate_local_platform_options
 pass
+local_platform_parse --application-only
+[[ "$LP_APPLICATION_ONLY" == 1 ]] || fail 'application-only option was not parsed'
+validate_local_platform_options
+pass
+for invalid in codex anthropic openai checkout; do
+  invalid_application_only_options() {
+    fixture
+    LP_APPLICATION_ONLY=1
+    case "$invalid" in
+      codex) LP_LIVE_CODEX=1 ;;
+      anthropic) LP_LIVE_ANTHROPIC=1 ;;
+      openai) LP_LIVE_OPENAI=1 ;;
+      checkout) LP_INITIAL_PRIVATE_CHECKOUT=1 ;;
+    esac
+    validate_local_platform_options
+  }
+  expect_failure "application-only-$invalid" invalid_application_only_options
+done
+fixture
+LP_APPLICATION_ONLY=1
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+LOCAL_PLATFORM_MESH_PROBE_BIN=/usr/bin/true
+validate_local_platform_options
+pass
+fixture
 local_platform_parse --live-codex
 [[ "$LP_LIVE_CODEX" == 1 ]] || fail 'Codex option was not parsed'
 validate_local_platform_options
@@ -289,19 +317,33 @@ cw_with_timeout() {
     'network revoke --network '*)
       [[ "$4" == shared-dev-network && "$6" == "$ORG_ID" && "$7" == "$SMOKE_NAME" ]] || fail 'wrong owned network-node revocation'
       touch "$TMPDIR_SMOKE/network-node-revoked" ;;
+    'org set '*)
+      [[ $# == 3 && "$3" == "$ORG_ID" ]] || fail 'Mesh owner selection changed the authenticated organization'
+      [[ "$FAILURE" != mesh-owner ]] || return 1
+      touch "$TMPDIR_SMOKE/mesh-owner-selected" ;;
     'env info --local '*" --output json")
       jq -n --arg id "$ENV_ID" --arg project "platform:id:$PROJECT_ID" --arg profile "platform:id:$PROFILE_ID" \
-        --arg server "$CODEWIRE_SERVER_URL" --arg user "$LP_USER_ID" --arg org "$ORG_ID" --arg failure "$FAILURE" '
+        --arg server "$CODEWIRE_SERVER_URL" --arg user "$LP_USER_ID" --arg org "$ORG_ID" --arg failure "$FAILURE" \
+        --argjson application_only "$LP_APPLICATION_ONLY" --argjson empty_source "$FIXTURE_EMPTY_SOURCE" '
         {id:$id,backend:"cloud-hypervisor",state:"running",cpu:2,memory:"16Gi",generation:1,
-         source_selection:{credentials:{profile:$profile,reference:"user/owned-profile",revision:1},
-           secrets:{project:$project},platform:{server_url:$server,organization_id:$org,user_id:$user}}} |
+         source_selection:{credentials:(if $application_only == 1 then null else {profile:$profile,reference:"user/owned-profile",revision:1} end),
+           secrets:{project:(if $empty_source == 1 then null else $project end)},
+           platform:(if $application_only == 1 and $empty_source == 1 then null
+                     else {server_url:$server,organization_id:$org,user_id:$user} end)}} |
         if $failure == "wrong-vm" then .id="unowned"
         elif $failure == "wrong-profile" then .source_selection.credentials.profile="local:owned-profile"
         elif $failure == "wrong-revision" then .source_selection.credentials.revision=2
+        elif $failure == "unselected-profile" then .source_selection.credentials={profile:$profile,reference:"user/owned-profile",revision:1}
+        elif $failure == "empty-credentials" then .source_selection.credentials={}
+        elif $failure == "false-credentials" then .source_selection.credentials=false
         elif $failure == "wrong-project" then .source_selection.secrets.project="local:project"
         elif $failure == "wrong-user" then .source_selection.platform.user_id="unowned"
         elif $failure == "wrong-org" then .source_selection.platform.organization_id="unowned"
         elif $failure == "wrong-server" then .source_selection.platform.server_url="https://wrong.invalid"
+        elif $failure == "retained-authority" then .source_selection.platform={server_url:$server,organization_id:$org,user_id:$user}
+        elif $failure == "false-authority" then .source_selection.platform=false
+        elif $failure == "empty-authority" then .source_selection.platform={}
+        elif $failure == "missing-authority" then .source_selection.platform=null
         elif $failure == "extra-source" then .source_selection.secrets.user="platform"
         elif $failure == "stale" then .generation=0
         elif $failure == "leaped" then .generation=2 else . end' ;;
@@ -346,6 +388,21 @@ cw_with_timeout() {
   esac
 }
 wait_until() { shift 2; "$@" || die 'fixture wait failed'; }
+fixture
+local_platform_prepare_mesh_owner
+[[ ! -e "$TMPDIR_SMOKE/mesh-owner-selected" ]] || fail 'network-free journey changed Mesh owner selection'
+pass
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+local_platform_prepare_mesh_owner
+[[ -e "$TMPDIR_SMOKE/mesh-owner-selected" ]] || fail 'named-network journey did not configure its isolated Mesh owner'
+pass
+fixture
+LOCAL_PLATFORM_DISPOSABLE_NETWORK=1
+local_platform_prepare_mesh_owner
+[[ -e "$TMPDIR_SMOKE/mesh-owner-selected" ]] || fail 'disposable network did not configure its isolated Mesh owner'
+pass
+invalid_mesh_owner() { fixture; LOCAL_PLATFORM_DISPOSABLE_NETWORK=1; FAILURE=mesh-owner; local_platform_prepare_mesh_owner; }
+expect_failure mesh-owner invalid_mesh_owner
 fixture
 LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
 local_platform_validate_network
@@ -441,6 +498,16 @@ cmp "$REPO_ROOT/scripts/runtime/dev/native-mesh-listener.py" "$LP_WORKSPACE/.cw-
 jq -e '.ports == [{port:28083}] and (.startup_script | startswith("app-startup; ssh-startup; ") and contains("/workspace/.cw-mesh-smoke/listener.py --port 28083"))' \
   "$LP_WORKSPACE/codewire.yaml" >/dev/null || fail 'named Mesh was not attached to a declared guest port'
 pass
+fixture
+LP_APPLICATION_ONLY=1
+LP_WORKSPACE="$TMPDIR_SMOKE/workspace"; mkdir "$LP_WORKSPACE"
+printf '%s\n' '{"startup_script":"app-startup"}' >"$LP_WORKSPACE/codewire.yaml"
+LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
+local_platform_prepare_mesh_listener
+jq -e '.ports == [{port:28083}] and (has("credentials") | not) and
+  (.startup_script | startswith("app-startup; ") and contains("/workspace/.cw-mesh-smoke/listener.py --port 28083") and (contains("ssh-startup") | not))' \
+  "$LP_WORKSPACE/codewire.yaml" >/dev/null || fail 'application-only Mesh listener changed source/provider intent'
+pass
 mesh_probe_fixture() {
   fixture
   LOCAL_PLATFORM_NETWORK_ID=shared-dev-network
@@ -467,6 +534,42 @@ for invalid in wrong-vm wrong-profile wrong-revision wrong-project wrong-user wr
   invalid_binding() { fixture; FAILURE="$invalid"; local_platform_binding "platform:id:$PROJECT_ID" 0; }
   expect_failure "$invalid" invalid_binding
 done
+fixture
+LP_APPLICATION_ONLY=1
+local_platform_binding "platform:id:$PROJECT_ID" 0
+pass
+for invalid in wrong-vm unselected-profile empty-credentials false-credentials wrong-project wrong-user wrong-org wrong-server extra-source stale leaped; do
+  invalid_application_only_binding() {
+    fixture; LP_APPLICATION_ONLY=1; FAILURE="$invalid"
+    local_platform_binding "platform:id:$PROJECT_ID" 0
+  }
+  expect_failure "application-only-$invalid" invalid_application_only_binding
+done
+fixture
+LP_APPLICATION_ONLY=1; FIXTURE_EMPTY_SOURCE=1
+local_platform_binding "" 0
+pass
+for invalid in retained-authority false-authority empty-authority; do
+  invalid_application_only_clear_binding() {
+    fixture; LP_APPLICATION_ONLY=1; FIXTURE_EMPTY_SOURCE=1; FAILURE="$invalid"
+    local_platform_binding "" 0
+  }
+  expect_failure "application-only-clear-$invalid" invalid_application_only_clear_binding
+done
+fixture
+FIXTURE_EMPTY_SOURCE=1
+local_platform_binding "" 0
+pass
+invalid_credential_clear_binding() {
+  fixture; FIXTURE_EMPTY_SOURCE=1; FAILURE=missing-authority
+  local_platform_binding "" 0
+}
+expect_failure credential-clear-missing-authority invalid_credential_clear_binding
+invalid_selected_application_binding() {
+  fixture; LP_APPLICATION_ONLY=1; FAILURE=missing-authority
+  local_platform_binding "platform:id:$PROJECT_ID" 0
+}
+expect_failure application-only-selected-missing-authority invalid_selected_application_binding
 fixture
 local_platform_ssh_prove
 local_platform_ssh_revoke
@@ -525,6 +628,24 @@ pass
 
 # A synthetic CLI requires terminal stdin for size detection and nonterminal
 # stdout for exit propagation, then allocates an actual guest PTY on --tty.
+(
+  eval "$REAL_LOCAL_PLATFORM_GUEST_CHECK"
+  guest_python="$(local_platform_guest_check absent | awk "/^python3 - <<'PY'$/ { active=1; next } /^PY$/ { active=0 } active")"
+  [[ -n "$guest_python" ]] || fail 'actual guest Python heredoc is missing'
+  guest_home="$TMPDIR_SMOKE/nondefault-home"
+  mkdir -m 0700 "$guest_home"
+  env HOME="$guest_home" python3 -c "$guest_python"
+  mkdir -p "$guest_home/.codewire"
+  printf '{}\n' >"$guest_home/.codewire/environment.json"
+  expect_failure persisted-environment-json env HOME="$guest_home" python3 -c "$guest_python"
+  rm "$guest_home/.codewire/environment.json"
+  mkdir -p "$guest_home/.codewire/daemon/sessions"
+  expect_failure readable-private-sessions env HOME="$guest_home" python3 -c "$guest_python"
+)
+pass
+pass
+pass
+
 LP_WORKSPACE="$TMPDIR_SMOKE"
 (
   eval "$REAL_LOCAL_PLATFORM_APPLICATION_PHASE"
@@ -540,19 +661,44 @@ LP_WORKSPACE="$TMPDIR_SMOKE"
   CODEWIRE_SERVER_URL=synthetic
   cw_with_timeout() {
     shift
-    [[ "$*" == 'run --no-tty -- /bin/sh -c '* ]] || fail 'unexpected non-PTY application command'
-    printf 'application-secret-check-ok\n'
+    if [[ "$*" == 'run --no-tty -- /bin/sh -c '* ]]; then
+      printf 'application-secret-check-ok\n'
+      printf 'Launched session session-%s\n' "$VM_ID" >&2
+      [[ "${SESSION_RECEIPT_FAILURE:-}" != duplicate-ack ]] || printf 'Launched session session-%s\n' "$VM_ID" >&2
+    elif [[ "$*" == "list $ENV_ID --output json" ]]; then
+      jq -n --arg id "session-$VM_ID" --arg guest "$SYNTHETIC_GUEST_CHECK" \
+        '[{session_id:$id,command:["/bin/sh","-c",$guest],pty:false,state:"Exited",exit_code:0}]' |
+        jq --arg failure "${SESSION_RECEIPT_FAILURE:-}" '
+          if $failure == "wrong-id" then .[0].session_id = "session-unrelated"
+          elif $failure == "wrong-command" then .[0].command = ["/bin/true"]
+          elif $failure == "pty" then .[0].pty = true
+          elif $failure == "nonzero" then .[0].exit_code = 1
+          elif $failure == "running" then .[0].state = "Running"
+          elif $failure == "duplicate-session" then . + . else . end'
+    else fail 'unexpected application or exact environment session command'; fi
   }
   local_platform_binding() { printf '{"generation":1}\n' >"$TMPDIR_SMOKE/local-environment.json"; }
   local_platform_guest_check() { printf '%s' "$SYNTHETIC_GUEST_CHECK"; }
   SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'"
   local_platform_application_phase actual synthetic expected
+  for SESSION_RECEIPT_FAILURE in wrong-id wrong-command pty nonzero running duplicate-session duplicate-ack; do
+    expect_failure "session-$SESSION_RECEIPT_FAILURE" local_platform_application_phase wrong-session synthetic expected
+  done
+  unset SESSION_RECEIPT_FAILURE
   SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'; exit 7"
   expect_failure pty-exit-status local_platform_application_phase failure synthetic expected
   SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'"
   LP_ENV+=(LOCAL_PTY_WITHOUT_TERMINAL=1)
   expect_failure missing-guest-pty local_platform_application_phase no-pty synthetic expected
 )
+pass
+pass
+pass
+
+pass
+pass
+pass
+pass
 pass
 pass
 pass
@@ -577,8 +723,18 @@ local_platform_application_phase() {
     clear) [[ -z "$2" && "$3" == absent ]] ;;
     *) return 1 ;;
   esac || fail 'wrong source selection'
+  [[ "$FAILURE" != "projection-$1" ]] || return 1
+  printf '%s\n' "$1" >>"$TMPDIR_SMOKE/application-phases"
 }
-local_platform_ssh_prove() { printf '%s\n' "$(cat "$TMPDIR_SMOKE/phase")" >>"$TMPDIR_SMOKE/ssh-phases"; }
+local_platform_ssh_prove() {
+  if [[ "$(cat "$TMPDIR_SMOKE/phase")" == clear ]]; then
+    [[ "$(cat "$TMPDIR_SMOKE/ssh-target-actions")" == $'cleanup\ninstall\nstartup' ]] ||
+      fail 'repeated positive proof did not use a fresh owned target'
+  else
+    [[ ! -e "$TMPDIR_SMOKE/ssh-target-actions" ]] || fail 'initial target was reset'
+  fi
+  printf '%s\n' "$(cat "$TMPDIR_SMOKE/phase")" >>"$TMPDIR_SMOKE/ssh-phases"
+}
 local_platform_ssh_revoke() {
   [[ "$(cat "$TMPDIR_SMOKE/ssh-phases")" == $'a\nclear' ]] || fail 'SSH not proved with both selected and cleared app sources'
 }
@@ -588,9 +744,13 @@ cw_with_timeout() {
     'env list --local --output json') printf '[]\n' ;;
     'env create --local '*)
       [[ "$*" == "env create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --path $LP_WORKSPACE --path-mode copy --file codewire.yaml --yes --output json" ]] || fail 'unsupported native create command'
-      jq -e --arg profile "platform:id:$PROFILE_ID" --arg project "platform:id:$PROJECT_ID" --arg image "$LOCAL_PLATFORM_IMAGE" '
-        .credentials.profile == $profile and .secrets.project == $project and .image == $image and
-        .install_command == "app-install; ssh-install" and .startup_script == "app-startup; ssh-startup"' \
+      jq -e --arg profile "platform:id:$PROFILE_ID" --arg project "platform:id:$PROJECT_ID" --arg image "$LOCAL_PLATFORM_IMAGE" \
+        --argjson application_only "$LP_APPLICATION_ONLY" '
+        .secrets.project == $project and .image == $image and
+        (if $application_only == 1 then (has("credentials") | not) and
+          .install_command == "app-install" and .startup_script == "app-startup"
+        else .credentials.profile == $profile and
+          .install_command == "app-install; ssh-install" and .startup_script == "app-startup; ssh-startup" end)' \
         "$LP_WORKSPACE/codewire.yaml" >/dev/null || fail 'combined source document drifted'
       [[ "$FAILURE" != create ]] || return 1
       jq -n --arg id "$VM_ID" '{id:$id}'; printf 'a\n' >"$TMPDIR_SMOKE/phase" ;;
@@ -603,6 +763,19 @@ cw_with_timeout() {
       [[ "$4" == "$VM_ID" ]] || fail 'wrong clear target'
       [[ "$FAILURE" != clear ]] || return 1
       printf 'clear\n' >"$TMPDIR_SMOKE/phase" ;;
+    'run --no-tty -- /bin/bash '* )
+      [[ "$(cat "$TMPDIR_SMOKE/application-phases")" == $'a\nb\nclear' && "$(cat "$TMPDIR_SMOKE/ssh-phases")" == a ]] ||
+        fail 'target lifecycle was not between clear projection proof and repeated SSH proof'
+      [[ "$5" == "$PROVIDER_SSH_SCRIPT" ]] || fail 'wrong target fixture'
+      case "$6" in
+        cleanup) [[ $# == 6 && ! -e "$TMPDIR_SMOKE/ssh-target-actions" ]] ;;
+        install) [[ $# == 7 && "$7" == /workspace/.cw-provider-ssh/selected.pub &&
+          "$(cat "$TMPDIR_SMOKE/ssh-target-actions")" == cleanup ]] ;;
+        startup) [[ $# == 6 && "$(cat "$TMPDIR_SMOKE/ssh-target-actions")" == $'cleanup\ninstall' ]] ;;
+        *) fail 'unexpected target lifecycle action' ;;
+      esac || fail 'target lifecycle order or preserved public authorization drifted'
+      printf '%s\n' "$6" >>"$TMPDIR_SMOKE/ssh-target-actions"
+      [[ "$FAILURE" != "target-$6" ]] || return 1 ;;
     *) fail "unexpected journey command: $*" ;;
   esac
 }
@@ -610,10 +783,34 @@ fixture
 LP_WORKSPACE="$TMPDIR_SMOKE"
 local_platform_journey
 pass
-for invalid in create update clear; do
-  invalid_journey() { fixture; LP_WORKSPACE="$TMPDIR_SMOKE"; FAILURE="$invalid"; local_platform_journey; }
+for invalid in create update clear projection-clear target-cleanup target-install target-startup; do
+  fixture
+  invalid_journey() { LP_WORKSPACE="$TMPDIR_SMOKE"; FAILURE="$invalid"; local_platform_journey; }
   expect_failure "$invalid" invalid_journey
+  if [[ "$invalid" == projection-clear ]]; then
+    [[ ! -e "$TMPDIR_SMOKE/ssh-target-actions" ]] || fail 'failed clear projection still reset the SSH target'
+    ! grep -qx clear "$TMPDIR_SMOKE/ssh-phases" || fail 'failed clear projection still ran positive SSH proof'
+  fi
+  if [[ "$invalid" == target-* ]]; then
+    ! grep -qx clear "$TMPDIR_SMOKE/ssh-phases" || fail 'failed target reset still ran positive SSH proof'
+  fi
 done
+
+(
+  fixture
+  LP_APPLICATION_ONLY=1
+  LP_WORKSPACE="$TMPDIR_SMOKE"
+  PROVIDER_SSH_CREDENTIAL_ID=''; PROVIDER_SSH_PROFILE_ID=''
+  prepare_provider_ssh() { fail 'application-only enrolled SSH'; }
+  local_platform_ssh_prove() { fail 'application-only invoked provider proof'; }
+  local_platform_ssh_reset_target() { fail 'application-only reset a provider target'; }
+  local_platform_ssh_revoke() { fail 'application-only revoked a provider'; }
+  local_platform_journey
+  [[ "$(cat "$TMPDIR_SMOKE/application-phases")" == $'a\nb\nclear' ]] || fail 'application-only omitted source transitions'
+  [[ ! -e "$TMPDIR_SMOKE/ssh-phases" && ! -e "$TMPDIR_SMOKE/ssh-target-actions" &&
+     ! -e "$TMPDIR_SMOKE/provider.json" ]] || fail 'application-only created provider artifacts'
+)
+pass
 
 # Each live provider owns a public create/use/run flow, not the application/SSH
 # journey. Keep typed dispatch and parent ownership when a reply is lost.
@@ -741,6 +938,16 @@ cw_with_timeout() {
       printf 'vm\n' >>"$TMPDIR_SMOKE/cleanup-calls"
       [[ "$FAILURE" != rm ]] || return 1
       touch "$TMPDIR_SMOKE/deleted" ;;
+    'env info --local '*" --output json")
+      [[ "$4" == "$VM_ID" && ! -e "$TMPDIR_SMOKE/deleted" ]] || fail 'launch observation changed ownership/order'
+      [[ "$FAILURE" != info-failure ]] || return 1
+      jq -n --arg id "$VM_ID" --arg failure "$FAILURE" '
+        {id:$id,state:"error",error_code:"guest_start_failed"} |
+        if $failure == "info-rebound" then .id="unowned"
+        elif $failure == "info-opaque" then .error_code="opaque-provider-material-canary"
+        elif $failure == "info-false" then .error_code=false
+        elif $failure == "info-array" then .error_code=["prepare_failed"]
+        elif $failure == "info-state" then .state="opaque-provider-material-canary" else . end' ;;
     'network nodes --network '*" --output json")
       [[ "$4" == "$LOCAL_PLATFORM_NETWORK_ID" && "$6" == "$ORG_ID" ]] || fail 'cleanup inspected a different network'
       [[ "$FAILURE" != network-list ]] || return 1
@@ -802,6 +1009,26 @@ run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
 [[ ! -e "$LP_HOME" && ! -e "$LP_RUNTIME" ]] || fail 'successful cleanup retained local state'
 [[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nprofile\ncredential\nprojects\nowners\nlogout' ]] || fail 'incomplete cleanup ordering'
 pass
+for observation in fixed info-failure info-rebound info-opaque info-false info-array info-state; do
+  cleanup_fixture
+  FAILURE="$observation"
+  failed_launch_cleanup() { ( trap local_platform_cleanup EXIT; exit 1 ); }
+  expect_failure "$observation launch cleanup" failed_launch_cleanup
+  [[ -e "$TMPDIR_SMOKE/deleted" && ! -e "$LP_RUNTIME" ]] || fail 'launch observer prevented cleanup'
+  jq -e '. == []' "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null || fail 'launch cleanup lost final absence proof'
+  ! rg -q opaque-provider-material-canary "$TMPDIR_SMOKE/local-failed-launch.json" || fail 'launch observer retained opaque material'
+  if [[ "$observation" == fixed ]]; then
+    jq -e --arg id "$VM_ID" '.observation == "observed" and .id == $id and
+      .state == "error" and .code_recognized == true and .error_code == "guest_start_failed"' \
+      "$TMPDIR_SMOKE/local-failed-launch.json" >/dev/null || fail 'fixed launch metadata was lost'
+  elif [[ "$observation" == info-opaque || "$observation" == info-false || "$observation" == info-array ]]; then
+    jq -e '.observation == "observed" and .code_recognized == false and .error_code == null' \
+      "$TMPDIR_SMOKE/local-failed-launch.json" >/dev/null || fail 'unknown launch class was fabricated'
+  else
+    jq -e '. == {observation:"unavailable"}' "$TMPDIR_SMOKE/local-failed-launch.json" >/dev/null || fail 'observer failure became a VM failure'
+  fi
+  pass
+done
 selected_network_cleanup_fixture
 run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
 [[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nnetwork\nprofile\ncredential\nprojects\nowners\nlogout' ]] ||

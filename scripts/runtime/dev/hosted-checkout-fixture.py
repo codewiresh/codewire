@@ -29,6 +29,33 @@ TARGET = Path(__file__).resolve().with_name("hosted-checkout-target.sh")
 CONTENT = "initial-private-checkout-synthetic-v1"
 LABEL = "codewire.sh/acceptance-checkout-nonce"
 MAX_OUTPUT = 1024 * 1024
+READINESS_SECONDS = 240
+READINESS_PROCESS_SECONDS = READINESS_SECONDS + 5
+# Closed observation discriminators: never persist exception text or provider data.
+OBSERVATION_FAILURE_CODES = {
+    "fixture lifetime expired": "lifetime-expired",
+    "fixture object identity changed": "object-identity",
+    "fixture object UID changed": "object-identity",
+    "invalid fixture Pod shape": "pod-shape",
+    "fixture is not ready": "pod-not-ready",
+    "fixture image changed": "pod-image",
+    "invalid fixture container status": "runtime-container-shape",
+    "fixture runtime container changed": "runtime-container-identity",
+    "fixture runtime imageID changed (approved-repository-digest)": "runtime-image-id-approved-repository-digest",
+    "fixture runtime imageID changed (digest-only)": "runtime-image-id-digest-only",
+    "fixture runtime imageID changed (unrecognized)": "runtime-image-id-unrecognized",
+    "fixture runtime image name changed (approved-repository-tag)": "runtime-image-name-approved-repository-tag",
+    "fixture runtime image name changed (approved-repository-digest)": "runtime-image-name-approved-repository-digest",
+    "fixture runtime image name changed (digest-only)": "runtime-image-name-digest-only",
+    "fixture runtime image name changed (unrecognized)": "runtime-image-name-unrecognized",
+    "invalid fixture Service shape": "service-shape",
+    "fixture service changed": "service-shape",
+    "invalid fixture service address": "service-address",
+    "invalid fixture endpoint shape": "endpoint-shape",
+    "fixture endpoint identity changed": "endpoint-identity",
+    "invalid fixture ready metadata": "ready-metadata",
+    "invalid public key": "ready-metadata",
+}
 IMAGE = re.compile(r"(?:ghcr\.io/codewiresh/workspace|nexus\.example\.invalid/oci-approved/codewire/workspace)@sha256:[0-9a-f]{64}")
 # Public route/trust binding from owning Infra clusters/kubernetes-access.json
 # main a7cb24de1ed865e44cc728530d4f47f64c33202c, dev-cluster. No alternatives.
@@ -104,6 +131,13 @@ class Kube:
         self.context, self.namespace, self.directory = context, namespace, directory
 
     def run(self, arguments, payload=None, as_json=True):
+        return self._run(arguments, payload, as_json, 25)
+
+    def wait_ready(self, name):
+        return self._run(["wait", "pod/" + name, "--for=condition=Ready",
+                          f"--timeout={READINESS_SECONDS}s"], None, False, READINESS_PROCESS_SECONDS)
+
+    def _run(self, arguments, payload, as_json, timeout_seconds):
         command = ["kubectl", "--context", self.context, "--namespace", self.namespace,
                    "--request-timeout=20s", *arguments]
         # Own process group; errors/output never become public diagnostics.
@@ -117,7 +151,7 @@ class Kube:
                 if payload is not None:
                     process.stdin.write(json.dumps(payload).encode())
                     process.stdin.close()
-                process.wait(timeout=95 if arguments[0] == "wait" else 25)
+                process.wait(timeout=timeout_seconds)
             except (subprocess.TimeoutExpired, BrokenPipeError):
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -212,6 +246,17 @@ def get_owned(kube, state, kind):
     return value
 
 
+def runtime_image_format(value):
+    if isinstance(value, str):
+        if IMAGE.fullmatch(value):
+            return "approved-repository-digest"
+        if re.fullmatch(IMAGE.pattern.split("@sha256:", 1)[0] + r":[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", value):
+            return "approved-repository-tag"
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            return "digest-only"
+    return "unrecognized"
+
+
 def observe(kube, state):
     require(time.time() < state["deadline"], "fixture lifetime expired")
     pod = get_owned(kube, state, "Pod")
@@ -230,11 +275,23 @@ def observe(kube, state):
     # Runtime imageID can name the selected OCI index's child manifest, not the
     # index itself. The immutable Pod spec is the pin; require the observed
     # runtime repository/image and a real content-addressed imageID as well.
-    require(container.get("name") == "target" and container.get("ready") is True
-            and isinstance(container.get("image"), str) and IMAGE.fullmatch(container["image"])
-            and container["image"].split("@", 1)[0] == state["image"].split("@", 1)[0]
-            and isinstance(container.get("imageID"), str)
-            and re.fullmatch(r"(?:docker-pullable://)?(?:[a-zA-Z0-9./_-]+@)?sha256:[0-9a-f]{64}|containerd://sha256:[0-9a-f]{64}", container["imageID"]), "fixture runtime image changed")
+    require(container.get("name") == "target" and container.get("ready") is True,
+            "fixture runtime container changed")
+    repository = state["image"].split("@", 1)[0]
+    digest_only = runtime_image_format(container.get("image")) == "digest-only"
+    require(digest_only or (isinstance(container.get("image"), str) and IMAGE.fullmatch(container["image"])
+            and container["image"].split("@", 1)[0] == repository),
+            "fixture runtime image name changed (" + runtime_image_format(container.get("image")) + ")")
+    image_id = container.get("imageID")
+    normalized_id = image_id.removeprefix("docker-pullable://") if isinstance(image_id, str) else None
+    id_format = runtime_image_format(normalized_id)
+    if id_format == "approved-repository-tag":
+        id_format = "unrecognized"
+    require(isinstance(container.get("imageID"), str)
+            and re.fullmatch(r"(?:docker-pullable://)?(?:[a-zA-Z0-9./_-]+@)?sha256:[0-9a-f]{64}|containerd://sha256:[0-9a-f]{64}", container["imageID"])
+            and ("@" not in normalized_id or normalized_id.split("@", 1)[0] == repository)
+            and (not digest_only or (IMAGE.fullmatch(normalized_id) and normalized_id.split("@", 1)[0] == repository)),
+            "fixture runtime imageID changed (" + id_format + ")")
     service = get_owned(kube, state, "Service")
     require(isinstance(service.get("spec"), dict), "invalid fixture Service shape")
     require(service["spec"]["type"] == "ClusterIP" and service["spec"]["selector"] == {LABEL: state["nonce"]}
@@ -366,6 +423,7 @@ def start(args):
              "deadline": time.time() + 1800, "resources": []}
     write_json(args.state_dir / "state.json", state)
     kube = Kube(args.context, args.namespace, args.state_dir)
+    stage = "create"
     try:
         for manifest in manifests(state, key):
             resource = {"kind": manifest["kind"], "name": manifest["metadata"]["name"], "uid": None}
@@ -374,14 +432,22 @@ def start(args):
             created = kube.run(["create", "-f", "-", "-o", "json"], manifest)
             resource["uid"] = check_object(created, state, resource)
             write_json(args.state_dir / "state.json", state)
-        kube.run(["wait", "pod/" + state["name"], "--for=condition=Ready", "--timeout=90s"] , as_json=False)
+        stage = "readiness"
+        kube.wait_ready(state["name"])
+        stage = "observe"
         ready = observe(kube, state)
         write_json(args.state_dir / "ready.json", ready)
-    except (Failure, OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (Failure, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        code = (OBSERVATION_FAILURE_CODES.get(str(error), "operation-failed")
+                if stage == "observe" and isinstance(error, Failure) else "operation-failed")
         try:
-            stop(kube, state, args.state_dir)
-        except Failure:
-            raise Failure("fixture startup failed and cleanup is incomplete; preserve state") from None
+            write_json(args.state_dir / "failure.json", {"version": 1, "stage": stage, "code": code})
+        finally:
+            # Receipt I/O failure must not skip independently owned cleanup.
+            try:
+                stop(kube, state, args.state_dir)
+            except Failure:
+                raise Failure("fixture startup failed and cleanup is incomplete; preserve state") from None
         raise Failure("fixture startup failed; owned objects cleaned") from None
 
 

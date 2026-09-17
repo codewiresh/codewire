@@ -30,7 +30,12 @@ checkout_fixture_validate() {
 }
 
 checkout_fixture_command() {
-  timeout 300 python3 "$CHECKOUT_ROOT/scripts/runtime/dev/hosted-checkout-fixture.py" "$@" \
+  local command_timeout=300
+  case "$1" in
+    start) command_timeout=1500 ;;
+    stop) command_timeout=750 ;;
+  esac
+  timeout "$command_timeout" python3 "$CHECKOUT_ROOT/scripts/runtime/dev/hosted-checkout-fixture.py" "$@" \
     >"$TMPDIR_SMOKE/fixture-command.out" 2>"$TMPDIR_SMOKE/fixture-command.err"
 }
 
@@ -145,6 +150,17 @@ checkout_inventory() {
   jq -e 'type == "array"' "$TMPDIR_SMOKE/checkout-inventory.json" >/dev/null 2>&1
 }
 
+checkout_build_document() {
+  local install revision="$CHECKOUT_REVISION"
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die 'hosted checkout revision is invalid'
+  install="set -eu; cd /workspace/private-checkout; test \"\$(git rev-parse HEAD)\" = '$revision'; test \"\$(cat proof.txt)\" = initial-private-checkout-synthetic-v1; test ! -e .install-proved; printf '%s\\n' initial-private-checkout-before-install > .install-proved"
+  jq -n --arg image "$DEV_CHECKOUT_WORKSPACE_IMAGE" --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" \
+    --arg url "$CHECKOUT_URL" --arg pin "$CHECKOUT_HOST_PIN" --arg install "$install" '
+    {version:1,image:$image,working_directory:"/workspace/private-checkout",credentials:{profile:$profile},
+      repositories:[{source:$url,known_hosts:[$pin],destination:"/workspace/private-checkout"}],
+      install_command:$install}'
+}
+
 checkout_create() {
   local document="$1" phase="$2"
   [[ "$document" == "$CHECKOUT_WORKSPACE/"* && "${document##*/}" != *'/'* &&
@@ -246,15 +262,9 @@ checkout_main() {
     >"$TMPDIR_SMOKE/checkout-selected.pub"
   CHECKOUT_FIXTURE_STARTED=1
   checkout_fixture_start
-  local install revision
+  local revision
   revision="$CHECKOUT_REVISION"
-  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die 'hosted checkout revision is invalid'
-  install="set -eu; cd /workspace/private-checkout; test \"\$(git rev-parse HEAD)\" = '$revision'; test \"\$(cat proof.txt)\" = initial-private-checkout-synthetic-v1; test ! -e .install-proved; printf '%s\\n' initial-private-checkout-before-install > .install-proved"
-  jq -n --arg image "$DEV_CHECKOUT_WORKSPACE_IMAGE" --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" \
-    --arg url "$CHECKOUT_URL" --arg revision "$revision" --arg pin "$CHECKOUT_HOST_PIN" --arg install "$install" '
-    {version:1,image:$image,working_directory:"/workspace/private-checkout",credentials:{profile:$profile},
-      repositories:[{source:$url,revision:$revision,known_hosts:[$pin],destination:"/workspace/private-checkout"}],
-      install_command:$install}' >"$CHECKOUT_WORKSPACE/codewire.yaml"
+  checkout_build_document >"$CHECKOUT_WORKSPACE/codewire.yaml"
   jq 'del(.credentials)' "$CHECKOUT_WORKSPACE/codewire.yaml" >"$CHECKOUT_WORKSPACE/unselected.json"
   checkout_reject "$CHECKOUT_WORKSPACE/unselected.json" unselected 'SSH repository checkout requires a selected credential profile'
   jq '.repositories[0].known_hosts=[]' "$CHECKOUT_WORKSPACE/codewire.yaml" >"$CHECKOUT_WORKSPACE/untrusted.json"
