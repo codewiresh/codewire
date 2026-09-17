@@ -48,6 +48,11 @@ ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
 )" ] || die 'prepared Kind snapshot profile does not select exactly the three affected mobile surfaces'
+[ "$(expected_snapshots prepared-kind-creation)" = "$(cat <<'EOF'
+ssr-dashboard.environments.ssr.ts-snapshots/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.environments.ssr.ts-snapshots/environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+)" ] || die 'creation snapshot profile does not select exactly the two existing creation goldens'
 if expected_snapshots unknown-profile >/dev/null 2>&1; then
   die 'unknown snapshot profile was accepted'
 fi
@@ -66,6 +71,30 @@ fi
   [ "$(snapshot_profile_database_url prepared-kind-management-secrets-mobile)" = \
     'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
   die 'prepared Kind snapshot topology changed'
+[ "$(snapshot_profile_context prepared-kind-creation)" = kind-codewire-e2e-ci ] &&
+  [ "$(snapshot_profile_namespace prepared-kind-creation)" = codewire-e2e ] &&
+  [ "$(snapshot_profile_origin prepared-kind-creation)" = http://127.0.0.1:8090 ] &&
+  [ "$(snapshot_profile_database_url prepared-kind-creation)" = \
+    'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
+  die 'creation snapshot profile changed the prepared Kind topology'
+creation_renderer="$(sed -n '/^          prepared-kind-creation)/,/;;/p' "$RUNNER")"
+for creation_contract in \
+    '--project=dashboard-ssr-desktop --project=dashboard-ssr-mobile' \
+    'apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts' \
+    '--grep "renders server-owned create options and resources with no browser service caller|keeps environment create and inventory usable on mobile"' \
+    '--update-snapshots=changed --retries=0 --workers=1 --reporter=line'; do
+  grep -Fq -- "$creation_contract" <<<"$creation_renderer" ||
+    die "creation renderer is missing its bounded selection: $creation_contract"
+done
+if grep -Eq -- '--grep-invert|--no-deps|management-visual\.ssr|read\.ssr|destroys through real Kind' <<<"$creation_renderer"; then
+  die 'creation renderer skips dependencies or selects unrelated surfaces'
+fi
+desktop_creation_owner="$(sed -n '/  test("renders server-owned create options and resources with no browser service caller"/,/^  });/p' "$ENVIRONMENT_SPEC")"
+mobile_creation_owner="$(sed -n '/  test("keeps environment create and inventory usable on mobile"/,/^  });/p' "$ENVIRONMENT_SPEC")"
+if ! grep -Fq 'toHaveScreenshot("environments-create-desktop.png")' <<<"$desktop_creation_owner" ||
+    ! grep -Fq 'toHaveScreenshot("environments-create-mobile.png")' <<<"$mobile_creation_owner"; then
+  die 'creation profile selections do not own their required screenshots'
+fi
 [ "$(retired_snapshots)" = "$(cat <<'EOF'
 ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png
 ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
@@ -346,7 +375,8 @@ if read_container_id "$cidfile" >/dev/null 2>&1; then
   die 'missing Docker container ID file was accepted'
 fi
 
-topology_calls="$fixture/topology-calls"
+for topology_profile in prepared-kind-management-secrets-mobile prepared-kind-creation; do
+topology_calls="$fixture/$topology_profile-topology-calls"
 (
   isolated_docker_client() {
     printf '%s\n' codewire-e2e-ci
@@ -362,7 +392,7 @@ topology_calls="$fixture/topology-calls"
       *) return 91 ;;
     esac
   }
-  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+  validate_snapshot_topology "$topology_profile" ignored
 ) || die 'exact prepared Kind topology was rejected'
 [ "$(grep -c 'rollout status deployment/' "$topology_calls")" = 4 ] ||
   die 'prepared Kind topology did not require all four UI dependencies to be Ready'
@@ -382,7 +412,7 @@ if (
       *) return 91 ;;
     esac
   }
-  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+  validate_snapshot_topology "$topology_profile" ignored
 ) >/dev/null 2>&1; then
   die 'prepared Kind topology accepted the wrong public origin'
 fi
@@ -391,7 +421,7 @@ if (
     printf '%s\n' another-cluster
   }
   kubectl() { return 0; }
-  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+  validate_snapshot_topology "$topology_profile" ignored
 ) >/dev/null 2>&1; then
   die 'prepared Kind topology accepted a missing exact cluster'
 fi
@@ -406,7 +436,7 @@ if (
       *) return 91 ;;
     esac
   }
-  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+  validate_snapshot_topology "$topology_profile" ignored
 ) >/dev/null 2>&1; then
   die 'prepared Kind topology accepted a dependency that was not Ready'
 fi
@@ -423,10 +453,11 @@ if (
       *) return 91 ;;
     esac
   }
-  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+  validate_snapshot_topology "$topology_profile" ignored
 ) >/dev/null 2>&1; then
   die 'prepared Kind topology accepted the wrong dashboard image reference'
 fi
+done
 printf 'not-a-container-id\n' >"$cidfile"
 if read_container_id "$cidfile" >/dev/null 2>&1; then
   die 'malformed Docker container ID was accepted'
@@ -497,7 +528,7 @@ while IFS= read -r snapshot; do
     "$snapshot_repo/$snapshot_relative_dir/$snapshot"
 done < <(expected_snapshots)
 git -C "$snapshot_repo" add "$snapshot_relative_dir"
-git -C "$snapshot_repo" -c user.name=Codewire -c user.email=codewire@example.invalid \
+git -C "$snapshot_repo" -c commit.gpgsign=false -c user.name=Codewire -c user.email=codewire@example.invalid \
   commit -qm 'snapshot validator fixture'
 while IFS= read -r snapshot; do
   rm "$snapshot_repo/$snapshot_relative_dir/$snapshot"
@@ -523,7 +554,7 @@ unexpected_snapshot='ssr-dashboard.read.ssr.ts-snapshots/unexpected-dashboard-ss
 printf '\x89PNG\r\n\x1a\nunexpected\n' > \
   "$snapshot_repo/$snapshot_relative_dir/$unexpected_snapshot"
 git -C "$snapshot_repo" add "$snapshot_relative_dir/$unexpected_snapshot"
-git -C "$snapshot_repo" -c user.name=Codewire -c user.email=codewire@example.invalid \
+git -C "$snapshot_repo" -c commit.gpgsign=false -c user.name=Codewire -c user.email=codewire@example.invalid \
   commit -qm 'add unapproved deletion fixture'
 rm "$snapshot_repo/$snapshot_relative_dir/$unexpected_snapshot"
 if validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" >/dev/null 2>&1; then
@@ -556,33 +587,49 @@ if validate_snapshot_stage "$baseline" "$stage" >/dev/null 2>&1; then
   die 'an unexpected snapshot mutation was accepted'
 fi
 
-prepared_baseline="$fixture/prepared-baseline"
-prepared_stage="$fixture/prepared-stage"
-prepared_target="$fixture/prepared-target"
+for prepared_profile in prepared-kind-management-secrets-mobile prepared-kind-creation; do
+prepared_baseline="$fixture/$prepared_profile-baseline"
+prepared_stage="$fixture/$prepared_profile-stage"
+prepared_target="$fixture/$prepared_profile-target"
 mkdir -p "$prepared_target"
 while IFS= read -r prepared_snapshot; do
   mkdir -p "$prepared_baseline/$(dirname "$prepared_snapshot")"
   printf '\x89PNG\r\n\x1a\nprepared baseline\n' >"$prepared_baseline/$prepared_snapshot"
-done < <(expected_snapshots prepared-kind-management-secrets-mobile)
+done < <(expected_snapshots "$prepared_profile")
 cp -a "$prepared_baseline/." "$prepared_stage/"
 while IFS= read -r prepared_snapshot; do
   printf 'changed\n' >>"$prepared_stage/$prepared_snapshot"
-done < <(expected_snapshots prepared-kind-management-secrets-mobile)
+done < <(expected_snapshots "$prepared_profile")
 validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
-  prepared-kind-management-secrets-mobile ||
-  die 'prepared Kind management-secrets-mobile update was rejected'
+  "$prepared_profile" ||
+  die "prepared Kind $prepared_profile update was rejected"
 promote_snapshots "$prepared_stage" "$prepared_target" \
-  prepared-kind-management-secrets-mobile
+  "$prepared_profile"
 while IFS= read -r prepared_snapshot; do
   cmp -s "$prepared_stage/$prepared_snapshot" "$prepared_target/$prepared_snapshot" ||
     die 'prepared Kind profile did not promote every allowlisted snapshot'
-done < <(expected_snapshots prepared-kind-management-secrets-mobile)
-mkdir -p "$prepared_stage/$(dirname "$current_snapshot")"
-printf '\x89PNG\r\n\x1a\nunapproved\n' >"$prepared_stage/$current_snapshot"
+done < <(expected_snapshots "$prepared_profile")
+prepared_saved_snapshot="$fixture/$prepared_profile-last.png"
+prepared_required_snapshot="$(expected_snapshots "$prepared_profile" | tail -n 1)"
+cp "$prepared_stage/$prepared_required_snapshot" "$prepared_saved_snapshot"
+rm "$prepared_stage/$prepared_required_snapshot"
 if validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
-    prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
-  die 'prepared Kind profile accepted a mutation outside its three targets'
+    "$prepared_profile" >/dev/null 2>&1; then
+  die "prepared Kind $prepared_profile accepted a missing required PNG"
 fi
+printf 'not a PNG\n' >"$prepared_stage/$prepared_required_snapshot"
+if validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
+    "$prepared_profile" >/dev/null 2>&1; then
+  die "prepared Kind $prepared_profile accepted an invalid required PNG"
+fi
+cp "$prepared_saved_snapshot" "$prepared_stage/$prepared_required_snapshot"
+mkdir -p "$prepared_stage/$(dirname "$unapproved_stage_snapshot")"
+printf '\x89PNG\r\n\x1a\nunapproved\n' >"$prepared_stage/$unapproved_stage_snapshot"
+if validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
+    "$prepared_profile" >/dev/null 2>&1; then
+  die "prepared Kind $prepared_profile accepted a mutation outside its targets"
+fi
+done
 rm -f "$stage/$unapproved_stage_snapshot"
 unapproved_stage_link='ssr-dashboard.management-visual.ssr.ts-snapshots/unapproved-link.png'
 ln -s "$stage/$current_snapshot" "$stage/$unapproved_stage_link"
@@ -607,6 +654,22 @@ if "$RUNNER" --prepared-kind-management-secrets-mobile \
     --prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
   die 'duplicate prepared Kind profile flag was accepted'
 fi
+for other_profile in prepared-kind-creation prepared-kind-management-secrets-mobile; do
+  profile_error=''
+  if profile_error="$("$RUNNER" --prepared-kind-creation "--$other_profile" 2>&1)"; then
+    die "creation profile accepted duplicate or mixed flag: $other_profile"
+  fi
+  grep -Fq 'only one prepared Kind snapshot profile may be specified' <<<"$profile_error" ||
+    die "creation flag collision was not rejected by the profile parser: $other_profile"
+done
+# All profiles share this failure barrier; a failed renderer cannot promote PNGs.
+# shellcheck disable=SC2016 # Match the runner's variables, not this fixture's.
+renderer_failure_line="$(grep -nF '[ "$docker_status" -eq 0 ] || fail' "$RUNNER" | cut -d: -f1)"
+# shellcheck disable=SC2016 # Match the runner's variables, not this fixture's.
+promotion_line="$(grep -nF '  promote_snapshots "$snapshot_stage" "$snapshot_dir" "$snapshot_profile"' "$RUNNER" | cut -d: -f1)"
+[ -n "$renderer_failure_line" ] && [ -n "$promotion_line" ] &&
+  [ "$renderer_failure_line" -lt "$promotion_line" ] ||
+  die 'renderer failure barrier does not precede profile snapshot promotion'
 grep -Fq 'scripts/ci/tests/test-kind-e2e-ubuntu-snapshot-runner.sh' "$PRODUCT_VERIFY" ||
   die 'snapshot runner contract test is not wired into edge verification'
 

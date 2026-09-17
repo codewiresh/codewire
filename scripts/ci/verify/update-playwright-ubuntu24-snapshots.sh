@@ -30,7 +30,7 @@ SNAPSHOT_CLEANUP_PID="$$"
 
 usage() {
   cat <<'EOF'
-Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH [--prepared-kind-management-secrets-mobile]
+Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH [--prepared-kind-management-secrets-mobile | --prepared-kind-creation]
 
 Regenerate the five affected dashboard snapshots whose checked-in suffix is
 ubuntu24-cft145. The local Kind stack must already be running through `make up`.
@@ -39,6 +39,11 @@ With --prepared-kind-management-secrets-mobile, regenerate only the two mobile
 Secrets snapshots and the mobile Security settings snapshot against the
 already-running codewire-e2e-ci Kind topology. This profile never creates,
 deploys, or forwards that topology and does not qualify the full runtime suite.
+
+With --prepared-kind-creation, regenerate only the two existing desktop/mobile
+Create Sandbox goldens on that prepared topology. Synthetic authentication and
+renderer isolation remain required. This profile never creates, deploys, or
+forwards the topology and does not qualify sandbox runtime or source recovery.
 
 The Chromium archive must be chrome-linux64.zip for version 145.0.7632.6 with
 the checksum pinned by scripts/ci/install-pinned-playwright-chromium.sh.
@@ -86,6 +91,12 @@ EOF
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-secrets-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+      ;;
+    prepared-kind-creation)
+      cat <<'EOF'
+ssr-dashboard.environments.ssr.ts-snapshots/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.environments.ssr.ts-snapshots/environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
       ;;
     *)
@@ -376,7 +387,7 @@ promote_snapshots() {
 snapshot_profile_context() {
   case "$1" in
     default) printf '%s\n' "$KUBE_CONTEXT" ;;
-    prepared-kind-management-secrets-mobile) printf '%s\n' "$PREPARED_KIND_CONTEXT" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation) printf '%s\n' "$PREPARED_KIND_CONTEXT" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -384,7 +395,7 @@ snapshot_profile_context() {
 snapshot_profile_namespace() {
   case "$1" in
     default) printf '%s\n' "$KUBE_NAMESPACE" ;;
-    prepared-kind-management-secrets-mobile) printf '%s\n' "$PREPARED_KIND_NAMESPACE" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation) printf '%s\n' "$PREPARED_KIND_NAMESPACE" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -392,7 +403,7 @@ snapshot_profile_namespace() {
 snapshot_profile_origin() {
   case "$1" in
     default) printf '%s\n' "$PLAYWRIGHT_BASE_URL" ;;
-    prepared-kind-management-secrets-mobile) printf '%s\n' "$PREPARED_KIND_PLAYWRIGHT_BASE_URL" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation) printf '%s\n' "$PREPARED_KIND_PLAYWRIGHT_BASE_URL" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -400,7 +411,7 @@ snapshot_profile_origin() {
 snapshot_profile_database_url() {
   case "$1" in
     default) printf '%s\n' "$DATABASE_URL" ;;
-    prepared-kind-management-secrets-mobile) printf '%s\n' "$PREPARED_KIND_DATABASE_URL" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation) printf '%s\n' "$PREPARED_KIND_DATABASE_URL" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -428,7 +439,7 @@ validate_snapshot_topology() {
         return 1
       }
   done
-  if [ "$profile" = prepared-kind-management-secrets-mobile ]; then
+  if [ "$profile" = prepared-kind-management-secrets-mobile ] || [ "$profile" = prepared-kind-creation ]; then
     kubectl --context "$kube_context" -n "$namespace" rollout status \
       deployment/codewire-credential-service --timeout=120s || {
         fail 'required dashboard dependency is not Ready: deployment/codewire-credential-service'
@@ -605,12 +616,12 @@ main() {
         chromium_archive="$2"
         shift 2
         ;;
-      --prepared-kind-management-secrets-mobile)
+      --prepared-kind-management-secrets-mobile|--prepared-kind-creation)
         [ "$snapshot_profile" = default ] || {
-          fail '--prepared-kind-management-secrets-mobile may be specified only once'
+          fail 'only one prepared Kind snapshot profile may be specified'
           return 2
         }
-        snapshot_profile='prepared-kind-management-secrets-mobile'
+        snapshot_profile="${1#--}"
         shift
         ;;
       --help|-h)
@@ -802,6 +813,15 @@ main() {
               --project=dashboard-ssr-mobile \
               apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts \
               --grep "renders every organization management surface without page overflow|renders account, security, and session surfaces in the selected context" \
+              --output /tmp/codewire-run/test-results \
+              --update-snapshots=changed --retries=0 --workers=1 --reporter=line
+            ;;
+          prepared-kind-creation)
+            ./apps/dashboard/node_modules/.bin/playwright test \
+              --config apps/dashboard/playwright.config.ts \
+              --project=dashboard-ssr-desktop --project=dashboard-ssr-mobile \
+              apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
+              --grep "renders server-owned create options and resources with no browser service caller|keeps environment create and inventory usable on mobile" \
               --output /tmp/codewire-run/test-results \
               --update-snapshots=changed --retries=0 --workers=1 --reporter=line
             ;;

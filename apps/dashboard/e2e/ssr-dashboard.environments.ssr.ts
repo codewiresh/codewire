@@ -447,6 +447,58 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator(`a[href="/settings/credentials/?org=${slug}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
   });
 
+  test("requires explicit recovery when a selected secret project is removed", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop authoritative source-recovery contract");
+    // Empty, isolated metadata only; the lifecycle's shared project is untouched.
+    const staleProjectId = crypto.randomUUID();
+    const name = `stale-source-${runId}`;
+    await sql`
+      INSERT INTO secret_projects (id, org_id, name)
+      VALUES (${staleProjectId}, ${orgId}, ${`removed-source-${runId}`})
+    `;
+    await openConfiguredImageForm(page);
+    await page.getByLabel("Name").fill(name);
+    const project = page.getByLabel("Secret project", { exact: true });
+    await project.selectOption(staleProjectId);
+    await sql`DELETE FROM secret_projects WHERE id = ${staleProjectId} AND org_id = ${orgId}`;
+    const rejected = page.waitForResponse((candidate) => (
+      candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`)
+      && candidate.request().method() === "POST"
+    ));
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
+    expect((await rejected).status()).toBe(422);
+    await expect(project).toBeEnabled();
+    await expect(project).toHaveValue(staleProjectId);
+    await expect(project).toHaveAttribute("aria-invalid", "true");
+    const stale = project.locator(`option[value="${staleProjectId}"]`);
+    await expect(stale).toBeEnabled();
+    await expect(stale).toHaveText("Current selected project (unavailable)");
+    const [notCreated] = await sql`
+      SELECT COUNT(*)::int AS count FROM environments WHERE org_id = ${orgId} AND name = ${name}
+    `;
+    expect(notCreated.count).toBe(0);
+
+    await project.selectOption("");
+    // A separate ordinary validation error proves recovery without creating
+    // another Sandbox or allowing stale metadata to silently attach resources.
+    await page.locator("[data-create-resources] > summary").click();
+    await page.getByLabel("TTL").fill("invalid-ttl");
+    const recovered = page.waitForResponse((candidate) => (
+      candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`)
+      && candidate.request().method() === "POST"
+    ));
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
+    expect((await recovered).status()).toBe(422);
+    await expect(project).toHaveValue("");
+    await expect(project).not.toHaveAttribute("aria-invalid", "true");
+    await expect(project.locator(`option[value="${staleProjectId}"]`)).toHaveCount(0);
+    await expect(page.getByLabel("TTL")).toHaveValue("invalid-ttl");
+    const [stillNotCreated] = await sql`
+      SELECT COUNT(*)::int AS count FROM environments WHERE org_id = ${orgId} AND name = ${name}
+    `;
+    expect(stillNotCreated.count).toBe(0);
+  });
+
   test("removing all preview rows suppresses inherited preset routes through real Kind", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop backend preview-selection contract");
     test.setTimeout(600_000);
@@ -488,6 +540,11 @@ test.describe.serial("server-rendered environments", () => {
     await row.getByText("Destroy", { exact: true }).click();
     await row.getByRole("button", { name: "Destroy permanently", exact: true }).click();
     await waitForEnvironmentState(created.id as string, ["destroyed"], 120_000);
+    const [destroyed] = await sql`
+      SELECT external_cleanup_completed_at FROM environments
+      WHERE id = ${created.id as string} AND org_id = ${orgId}
+    `;
+    expect(destroyed.external_cleanup_completed_at).not.toBeNull();
   });
 
   test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile }) => {
