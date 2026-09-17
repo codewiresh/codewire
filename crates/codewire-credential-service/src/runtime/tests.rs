@@ -233,6 +233,7 @@ impl Running {
             h.pool.clone(),
             h.store.clone(),
             Arc::new(NeverUpstream::default()),
+            None,
         ));
         let provider = h.provider.clone();
         let task = tokio::spawn(serve_owned(
@@ -343,6 +344,7 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
                 h.pool.clone(),
                 h.store.clone(),
                 Arc::new(upstream.clone()),
+                None,
             )),
             bridge.clone(),
             std::future::pending(),

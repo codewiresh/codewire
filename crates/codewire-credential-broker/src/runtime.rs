@@ -24,6 +24,10 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::anthropic::{AnthropicApiKeyAdapter, AnthropicStreamingResponse};
 use crate::codex_oauth::{CanonicalCodexOAuthBundle, CodexOAuthCredential};
 use crate::github::GitHubOAuthAdapter;
+use crate::github_app::{
+    GitHubAppAuthorizationError, GitHubAppAuthorizationOwner, GitHubAppRefreshError,
+    GitHubAppUserOAuthBundle, GitHubOAuthCredential,
+};
 use crate::openai::OpenAiChatGptOAuthAdapter;
 use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiApiKeyAdapter, OpenAiStreamingResponse,
@@ -53,10 +57,19 @@ mod synthetic_smoke_tests;
 pub struct BrokerCredentialRefreshRequest {
     pub refresh_id: Uuid,
     pub request_id: Uuid,
+    pub kind: BrokerCredentialRefreshKind,
     pub grant: DerivedGrant,
     pub operation: BrokerOperationId,
     pub route: BrokerRouteId,
     pub material_generation: u64,
+}
+
+/// Closed provider form for a durable refresh attempt. This is metadata only;
+/// it cannot carry a provider token or select an arbitrary executor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrokerCredentialRefreshKind {
+    CodexOAuth,
+    GitHubAppUserOAuth,
 }
 
 /// Refresh ownership or completion of a previously staged result.
@@ -133,6 +146,17 @@ pub trait BrokerLeaseProvider: Send + Sync {
         permit: Self::StartedRefresh,
         material: CanonicalCodexOAuthBundle,
     ) -> Result<(), BrokerRefreshError>;
+
+    /// Narrow GitHub App publication hook. The only accepted material is the
+    /// canonical protected App bundle; raw CLI token bytes and arbitrary
+    /// provider material cannot cross this boundary.
+    async fn commit_github_app_refresh(
+        &self,
+        _permit: Self::StartedRefresh,
+        _material: GitHubAppUserOAuthBundle,
+    ) -> Result<(), BrokerRefreshError> {
+        Err(BrokerRefreshError::Denied)
+    }
 
     /// Release a reservation only before Start. Absence of replacement material
     /// does not prove that a started provider request was safe to replay.
@@ -794,19 +818,74 @@ pub struct OpenAiBroker<P, U> {
     oauth_adapter: OpenAiChatGptOAuthAdapter,
     anthropic_adapter: AnthropicApiKeyAdapter,
     github_adapter: GitHubOAuthAdapter,
+    github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     oauth_refresh: tokio::sync::Mutex<()>,
     oauth_refresh_operations: TaskTracker,
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct OAuthCredentialGeneration {
+struct RefreshCredentialGeneration {
     credential_id: CredentialId,
+    revocation_generation: u64,
     material_generation: u64,
 }
 
 struct PreparedOAuthRequest {
     request: crate::PreparedOpenAiRequest,
-    generation: OAuthCredentialGeneration,
+    generation: RefreshCredentialGeneration,
+}
+
+struct PreparedGitHubRefreshRequest {
+    request: crate::github::PreparedGitHubRequest,
+    generation: RefreshCredentialGeneration,
+}
+
+/// The original, already-admitted operation that may receive one direct
+/// successor after its GitHub App credential rotates. Keeping these values
+/// together makes the replay boundary explicit: refresh code must retain the
+/// exact request coordinates and original grant rather than reconstructing a
+/// broader authorization later.
+struct GitHubRefreshPreparation<'a> {
+    request_id: Uuid,
+    slot: CapabilitySlot,
+    operation: BrokerOperationId,
+    route: BrokerRouteId,
+    provider_request: crate::github::ValidatedGitHubRequest,
+    force_refresh_of: Option<&'a RefreshCredentialGeneration>,
+    admitted_grant: &'a DerivedGrant,
+}
+
+fn refresh_generation(lease: &impl BrokerCredentialLease) -> RefreshCredentialGeneration {
+    RefreshCredentialGeneration {
+        credential_id: lease.credential_metadata().id.clone(),
+        revocation_generation: lease.credential_metadata().revocation_generation,
+        material_generation: lease.material_generation(),
+    }
+}
+
+/// A completed App refresh may replay an original provider request only with
+/// the direct successor published by that same durable refresh epoch.  A
+/// reconnect, revocation, or second rotation is a fresh authorization decision
+/// and must not inherit the first request's permission.
+fn require_direct_refresh_successor(
+    before: &RefreshCredentialGeneration,
+    after: &RefreshCredentialGeneration,
+) -> Result<(), BrokerRequestError> {
+    if after.credential_id != before.credential_id
+        || after.revocation_generation
+            != before
+                .revocation_generation
+                .checked_add(1)
+                .ok_or(BrokerRequestError::Denied)?
+        || after.material_generation
+            != before
+                .material_generation
+                .checked_add(1)
+                .ok_or(BrokerRequestError::Denied)?
+    {
+        return Err(BrokerRequestError::Denied);
+    }
+    Ok(())
 }
 
 /// Refresh and its bounded retry belong to the original request binding, not
@@ -830,6 +909,27 @@ fn validate_request_binding(
     Ok(())
 }
 
+fn bounded_refresh_grant(current: &DerivedGrant, admitted: &DerivedGrant) -> DerivedGrant {
+    let mut grant = current.clone();
+    // Rotation may advance material generations but cannot extend the original
+    // admitted operation deadline.
+    grant.expires_at_unix = match (grant.expires_at_unix, admitted.expires_at_unix) {
+        (Some(current), Some(original)) => Some(current.min(original)),
+        (current, original) => current.or(original),
+    };
+    grant
+}
+
+fn map_github_app_authorization_error(error: GitHubAppAuthorizationError) -> BrokerRequestError {
+    match error {
+        GitHubAppAuthorizationError::Unavailable => BrokerRequestError::AuthorityUnavailable,
+        GitHubAppAuthorizationError::Configuration
+        | GitHubAppAuthorizationError::InvalidAuthorizationCode
+        | GitHubAppAuthorizationError::Denied
+        | GitHubAppAuthorizationError::InvalidResponse => BrokerRequestError::Denied,
+    }
+}
+
 impl<P, U> OpenAiBroker<P, U>
 where
     P: BrokerLeaseProvider + 'static,
@@ -843,9 +943,22 @@ where
             oauth_adapter: OpenAiChatGptOAuthAdapter::new().map_err(map_adapter_error)?,
             anthropic_adapter: AnthropicApiKeyAdapter::new().map_err(map_adapter_error)?,
             github_adapter: GitHubOAuthAdapter::new().map_err(map_adapter_error)?,
+            github_app_authorization: None,
             oauth_refresh: tokio::sync::Mutex::new(()),
             oauth_refresh_operations: TaskTracker::new(),
         })
+    }
+
+    /// Install the App owner only through private credential-service process
+    /// composition. The broker exposes no request field or guest route that
+    /// can choose this authority or observe its client secret.
+    #[cfg(any(test, feature = "platform"))]
+    pub(crate) fn with_github_app_authorization_owner(
+        mut self,
+        owner: Arc<GitHubAppAuthorizationOwner>,
+    ) -> Self {
+        self.github_app_authorization = Some(owner);
+        self
     }
 
     pub(crate) async fn project_environment(
@@ -931,10 +1044,7 @@ where
                     return Err(BrokerRequestError::Denied);
                 }
                 let admitted_grant = lease.grant().clone();
-                let generation = OAuthCredentialGeneration {
-                    credential_id: lease.credential_metadata().id.clone(),
-                    material_generation: lease.material_generation(),
-                };
+                let generation = refresh_generation(&lease);
                 let credential = self
                     .oauth_adapter
                     .credential_from_lease(lease)
@@ -1064,10 +1174,13 @@ where
         &self,
         request: ValidatedGuestRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        let request_id = request.request_id;
+        let slot = request.slot;
+        let route = request.route;
         let validated = self
             .github_adapter
             .validate_request(
-                request.route.as_str(),
+                route.as_str(),
                 &request.method,
                 &request.path,
                 request.query.as_deref(),
@@ -1079,30 +1192,67 @@ where
             .map_err(|_| BrokerRequestError::InvalidRequest)?;
         let lease = self
             .leases
-            .lease_operation(
-                request.request_id,
-                request.slot.clone(),
-                operation.clone(),
-                request.route.clone(),
-            )
+            .lease_operation(request_id, slot.clone(), operation.clone(), route.clone())
             .await
             .map_err(map_lease_error)?;
-        validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
-        let (method, target, headers, body, policy) = self
+        validate_http_lease_coordinates(&lease, &slot, &operation, &route)?;
+        let admitted_grant = lease.grant().clone();
+        let generation = refresh_generation(&lease);
+        let credential = self
             .github_adapter
-            .prepare_validated(lease, validated)
-            .map_err(map_adapter_error)?
-            .into_parts();
-        let response = self
-            .upstream
-            .execute(BrokerUpstreamRequest {
-                method,
-                target,
-                headers,
-                body,
+            .credential_from_lease(lease)
+            .map_err(map_adapter_error)?;
+        let github_app_retry = credential.is_app();
+        let retry_request = validated.clone();
+        let original_generation = generation.clone();
+        let prepared = if credential
+            .should_refresh(current_unix_time()?)
+            .map_err(map_github_app_authorization_error)?
+        {
+            self.prepare_github_after_refresh(GitHubRefreshPreparation {
+                request_id,
+                slot: slot.clone(),
+                operation: operation.clone(),
+                route: route.clone(),
+                provider_request: validated,
+                force_refresh_of: Some(&generation),
+                admitted_grant: &admitted_grant,
             })
-            .await
-            .map_err(map_upstream_error)?;
+            .await?
+        } else {
+            PreparedGitHubRefreshRequest {
+                request: self
+                    .github_adapter
+                    .prepare_credential(validated, &credential)
+                    .map_err(map_adapter_error)?,
+                generation,
+            }
+        };
+        // An early expiry refresh already spent this original request's one
+        // rotation/replay budget. A 401 from its direct successor is returned
+        // normally; a second refresh could invalidate that successor and
+        // replay the same request under a third authorization generation.
+        let refreshed_before_request = prepared.generation != original_generation;
+        let rejected_generation = prepared.generation.clone();
+        let (mut response, mut policy) = self.execute_prepared_github(prepared.request).await?;
+        if response.status == StatusCode::UNAUTHORIZED
+            && github_app_retry
+            && !refreshed_before_request
+        {
+            drop(response);
+            let retry = self
+                .prepare_github_after_refresh(GitHubRefreshPreparation {
+                    request_id,
+                    slot,
+                    operation,
+                    route,
+                    provider_request: retry_request,
+                    force_refresh_of: Some(&rejected_generation),
+                    admitted_grant: &admitted_grant,
+                })
+                .await?;
+            (response, policy) = self.execute_prepared_github(retry.request).await?;
+        }
         let (status, headers, body) = response.into_parts();
         if status.is_informational() {
             return Err(BrokerRequestError::UpstreamFailed);
@@ -1117,6 +1267,30 @@ where
                 finished: false,
             }),
         ))
+    }
+
+    async fn execute_prepared_github(
+        &self,
+        prepared: crate::github::PreparedGitHubRequest,
+    ) -> Result<
+        (
+            BrokerUpstreamResponse,
+            crate::github::PreparedGitHubResponse,
+        ),
+        BrokerRequestError,
+    > {
+        let (method, target, headers, body, response_policy) = prepared.into_parts();
+        let upstream = self
+            .upstream
+            .execute(BrokerUpstreamRequest {
+                method,
+                target,
+                headers,
+                body,
+            })
+            .await
+            .map_err(map_upstream_error)?;
+        Ok((upstream, response_policy))
     }
 
     async fn execute_prepared(
@@ -1152,7 +1326,7 @@ where
         operation: BrokerOperationId,
         route: BrokerRouteId,
         provider_request: ValidatedOpenAiRequest,
-        force_refresh_of: Option<&OAuthCredentialGeneration>,
+        force_refresh_of: Option<&RefreshCredentialGeneration>,
         admitted_grant: &DerivedGrant,
     ) -> Result<PreparedOAuthRequest, BrokerRequestError> {
         let _refresh_guard = self.oauth_refresh.lock().await;
@@ -1171,24 +1345,12 @@ where
             if lease.credential_metadata().authentication_kind != CredentialAuthKind::OAuth {
                 return Err(BrokerRequestError::Denied);
             }
-            let generation = OAuthCredentialGeneration {
-                credential_id: lease.credential_metadata().id.clone(),
-                material_generation: lease.material_generation(),
-            };
+            let generation = refresh_generation(&lease);
             let refresh_request = BrokerCredentialRefreshRequest {
                 refresh_id: Uuid::new_v4(),
                 request_id,
-                grant: {
-                    let mut grant = lease.grant().clone();
-                    // Rotation may advance credential versions, but it cannot
-                    // extend the deadline of the original admitted request.
-                    grant.expires_at_unix =
-                        match (grant.expires_at_unix, admitted_grant.expires_at_unix) {
-                            (Some(current), Some(original)) => Some(current.min(original)),
-                            (current, original) => current.or(original),
-                        };
-                    grant
-                },
+                kind: BrokerCredentialRefreshKind::CodexOAuth,
+                grant: bounded_refresh_grant(lease.grant(), admitted_grant),
                 operation: operation.clone(),
                 route: route.clone(),
                 material_generation: lease.material_generation(),
@@ -1226,10 +1388,7 @@ where
                         .await
                         .map_err(map_lease_error)?;
                     validate_request_binding(lease.grant(), admitted_grant)?;
-                    let generation = OAuthCredentialGeneration {
-                        credential_id: lease.credential_metadata().id.clone(),
-                        material_generation: lease.material_generation(),
-                    };
+                    let generation = refresh_generation(&lease);
                     let credential = self
                         .oauth_adapter
                         .credential_from_lease(lease)
@@ -1348,6 +1507,180 @@ where
         };
         leases
             .commit_credential_refresh(permit, bundle)
+            .await
+            .map_err(map_refresh_error)?;
+        Ok(())
+    }
+
+    async fn prepare_github_after_refresh(
+        &self,
+        preparation: GitHubRefreshPreparation<'_>,
+    ) -> Result<PreparedGitHubRefreshRequest, BrokerRequestError> {
+        let GitHubRefreshPreparation {
+            request_id,
+            slot,
+            operation,
+            route,
+            provider_request,
+            force_refresh_of,
+            admitted_grant,
+        } = preparation;
+        let _refresh_guard = self.oauth_refresh.lock().await;
+        for refresh_waits in 0..=OAUTH_REFRESH_WAIT_ATTEMPTS {
+            let lease = self
+                .leases
+                .lease_operation(request_id, slot.clone(), operation.clone(), route.clone())
+                .await
+                .map_err(map_lease_error)?;
+            validate_request_binding(lease.grant(), admitted_grant)?;
+            if lease.credential_metadata().authentication_kind != CredentialAuthKind::OAuth {
+                return Err(BrokerRequestError::Denied);
+            }
+            let generation = refresh_generation(&lease);
+            let refresh_request = BrokerCredentialRefreshRequest {
+                refresh_id: Uuid::new_v4(),
+                request_id,
+                kind: BrokerCredentialRefreshKind::GitHubAppUserOAuth,
+                grant: bounded_refresh_grant(lease.grant(), admitted_grant),
+                operation: operation.clone(),
+                route: route.clone(),
+                material_generation: lease.material_generation(),
+            };
+            let credential = self
+                .github_adapter
+                .credential_from_lease(lease)
+                .map_err(map_adapter_error)?;
+            let Some(bundle) = credential.into_app() else {
+                // A replacement with legacy raw material may be selected only
+                // for a new request. Never replay an App-authenticated 401
+                // against a different credential form.
+                return Err(BrokerRequestError::Denied);
+            };
+            // The original request may only rotate its own exact material
+            // generation. A reconnect/replacement while it waited is a new
+            // authorization decision, never permission to replay this request
+            // through another user's credential.
+            if force_refresh_of.is_some_and(|expected| expected != &generation) {
+                return Err(BrokerRequestError::Denied);
+            }
+            let force_refresh = force_refresh_of.is_some();
+            if !force_refresh
+                && !bundle
+                    .should_refresh(current_unix_time()?)
+                    .map_err(map_github_app_authorization_error)?
+            {
+                return Ok(PreparedGitHubRefreshRequest {
+                    request: self
+                        .github_adapter
+                        .prepare_credential(provider_request, &GitHubOAuthCredential::App(bundle))
+                        .map_err(map_adapter_error)?,
+                    generation,
+                });
+            }
+            let owner = self
+                .github_app_authorization
+                .as_ref()
+                .ok_or(BrokerRequestError::AuthorityUnavailable)?;
+            match self
+                .refresh_github_app_credential(bundle, refresh_request, Arc::clone(owner))
+                .await?
+            {
+                Some(()) => {
+                    // Durable publication never substitutes authority. Reacquire
+                    // the original operation binding before preparing a successor.
+                    let lease = self
+                        .leases
+                        .lease_operation(request_id, slot.clone(), operation.clone(), route.clone())
+                        .await
+                        .map_err(map_lease_error)?;
+                    validate_request_binding(lease.grant(), admitted_grant)?;
+                    let successor_generation = refresh_generation(&lease);
+                    require_direct_refresh_successor(&generation, &successor_generation)?;
+                    let credential = self
+                        .github_adapter
+                        .credential_from_lease(lease)
+                        .map_err(map_adapter_error)?;
+                    let Some(bundle) = credential.into_app() else {
+                        return Err(BrokerRequestError::Denied);
+                    };
+                    return Ok(PreparedGitHubRefreshRequest {
+                        request: self
+                            .github_adapter
+                            .prepare_credential(
+                                provider_request,
+                                &GitHubOAuthCredential::App(bundle),
+                            )
+                            .map_err(map_adapter_error)?,
+                        generation: successor_generation,
+                    });
+                }
+                None if refresh_waits < OAUTH_REFRESH_WAIT_ATTEMPTS => {
+                    tokio::time::sleep(OAUTH_REFRESH_WAIT_INTERVAL).await;
+                }
+                None => return Err(BrokerRequestError::AuthorityUnavailable),
+            }
+        }
+        Err(BrokerRequestError::AuthorityUnavailable)
+    }
+
+    async fn refresh_github_app_credential(
+        &self,
+        bundle: GitHubAppUserOAuthBundle,
+        refresh_request: BrokerCredentialRefreshRequest,
+        owner: Arc<GitHubAppAuthorizationOwner>,
+    ) -> Result<Option<()>, BrokerRequestError> {
+        let permit = match self.leases.begin_credential_refresh(refresh_request).await {
+            Ok(BrokerRefreshAdmission::Reserved(reservation)) => reservation,
+            Ok(BrokerRefreshAdmission::Recovered) => return Ok(Some(())),
+            Err(BrokerRefreshError::InProgress | BrokerRefreshError::Stale) => return Ok(None),
+            Err(error) => return Err(map_refresh_error(error)),
+        };
+        // Transfer the Started provider exchange and durable publication into
+        // the existing shutdown tracker before any cancellable await. GitHub
+        // invalidates the old rotating token on refresh, so cancellation cannot
+        // strand a successful successor outside the journal.
+        let leases = Arc::clone(&self.leases);
+        let refresh = self.oauth_refresh_operations.spawn(async move {
+            Self::complete_github_app_refresh(leases, owner, bundle, permit).await
+        });
+        refresh
+            .await
+            .map_err(|_| BrokerRequestError::AuthorityUnavailable)?
+            .map(Some)
+    }
+
+    async fn complete_github_app_refresh(
+        leases: Arc<P>,
+        owner: Arc<GitHubAppAuthorizationOwner>,
+        bundle: GitHubAppUserOAuthBundle,
+        reservation: P::RefreshReservation,
+    ) -> Result<(), BrokerRequestError> {
+        let permit = leases
+            .start_credential_refresh(reservation)
+            .await
+            .map_err(|_| BrokerRequestError::AuthorityUnavailable)?;
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
+            owner.refresh(bundle),
+        )
+        .await;
+        let bundle = match exchange {
+            Ok(Ok(bundle)) => bundle,
+            Ok(Err(GitHubAppRefreshError::Permanent)) => {
+                return match leases.fail_credential_refresh(permit).await {
+                    Ok(()) => Err(BrokerRequestError::Denied),
+                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
+                };
+            }
+            Ok(Err(GitHubAppRefreshError::Uncertain)) | Err(_) => {
+                return match leases.fail_credential_refresh(permit).await {
+                    Ok(()) => Err(BrokerRequestError::UpstreamFailed),
+                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
+                };
+            }
+        };
+        leases
+            .commit_github_app_refresh(permit, bundle)
             .await
             .map_err(map_refresh_error)?;
         Ok(())
