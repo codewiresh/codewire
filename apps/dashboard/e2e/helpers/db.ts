@@ -46,6 +46,24 @@ export async function deleteSession(id: string) {
   await sql`DELETE FROM sessions WHERE id = ${id}`;
 }
 
+// Controlled visual data belongs only to the isolated synthetic visual owner.
+// Keep future expiry stable across real IdP sliding-expiry authentication.
+export async function stabilizeSyntheticAccountVisual(email: string, sessionIds: string[]) {
+  if (!email.startsWith("e2e-account-visual-") || sessionIds.length !== 2) {
+    throw new Error("Account visual data requires its isolated two-session fixture");
+  }
+  const users = await sql`
+    UPDATE users SET created_at = '2026-09-09T17:00:00Z', email_verified = true
+    WHERE email = ${email} RETURNING id
+  `;
+  if (users.length !== 1) throw new Error("Missing isolated Account visual owner");
+  const sessions = await sql`
+    UPDATE sessions SET created_at = '2026-09-16T10:00:00Z', expires_at = '2099-01-01T00:00:00Z'
+    WHERE user_id = ${users[0].id} AND id IN ${sql(sessionIds)} RETURNING id
+  `;
+  if (sessions.length !== 2) throw new Error("Account visual session ownership mismatch");
+}
+
 // Note: BETA-001 is the accepted local E2E invite contract.
 // Valid codes: BETA2024, EARLYBIRD, CODEWIRE1, PRIVATEBETA, DEVACCESS
 export const TEST_INVITE_CODE = "BETA2024";

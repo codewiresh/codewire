@@ -68,9 +68,11 @@
 [data-dashboard-app] .cw-org-management-layout { display: grid; grid-template-columns: 14rem minmax(0, 1fr); min-height: calc(100vh - 3.25rem); margin-inline: -1.25rem; }
 [data-dashboard-app] .cw-context-nav { padding: 1.35rem .75rem; border-right: 1px solid #1e1e1e; background: #0b0b0b; }
 [data-dashboard-app] .cw-context-nav-heading { display: grid; gap: .2rem; padding: 0 .55rem 1rem; }
-[data-dashboard-app] .cw-context-nav-heading h1 { overflow: hidden; margin: 0; color: #ededed; font-size: .9rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+[data-dashboard-app] .cw-context-nav-heading h1,
+[data-dashboard-app] .cw-context-nav-heading h2 { overflow: hidden; margin: 0; color: #ededed; font-size: .9rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 [data-dashboard-app] .cw-context-nav-heading span { overflow: hidden; color: #606060; font: .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 [data-dashboard-app] .cw-context-nav-links { display: grid; gap: .08rem; }
+[data-dashboard-app] .cw-context-nav-links ul { display: grid; gap: .08rem; margin: 0; padding: 0; list-style: none; }
 [data-dashboard-app] .cw-context-nav-links a { display: flex; align-items: center; justify-content: space-between; padding: .48rem .6rem; border-radius: 999px; color: #888; font-size: .75rem; }
 [data-dashboard-app] .cw-context-nav-links a:hover,
 [data-dashboard-app] .cw-context-nav-links a[aria-current="page"] { background: #191919; color: #ededed; }
@@ -142,6 +144,7 @@
   [data-dashboard-app] .cw-context-nav { width: 100%; min-width: 0; overflow: hidden; padding: .7rem .8rem; border-right: 0; border-bottom: 1px solid #1e1e1e; }
   [data-dashboard-app] .cw-context-nav-heading { padding: 0 0 .55rem; }
   [data-dashboard-app] .cw-context-nav-links { display: flex; width: 100%; min-width: 0; gap: .25rem; overflow-x: auto; overflow-y: hidden; }
+  [data-dashboard-app] .cw-context-nav-links ul { display: flex; flex: none; gap: .25rem; }
   [data-dashboard-app] .cw-context-nav-links a { flex: none; }
   [data-dashboard-app] .cw-context-main { padding: 1rem .8rem 2rem; }
   [data-dashboard-app] .cw-org-management-layout .cw-org-toolbar { align-items: stretch; }

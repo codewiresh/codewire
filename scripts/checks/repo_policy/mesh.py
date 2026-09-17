@@ -496,7 +496,14 @@ def mesh_final_surface_failures(
         client_sources = mesh_final_client_sources()
     for source, text in sorted(client_sources.items()):
         for fragment in MESH_RETIRED_CLIENT_PATH_FRAGMENTS:
-            if fragment in text:
+            present = fragment in text
+            if fragment == "/auth/session":
+                # The retired singular Mesh endpoint is not the cookie-owned
+                # IdP's separately admitted plural /api/auth/sessions endpoint.
+                # Still reject the singular segment with queries, children,
+                # absolute URLs or interpolated origins/suffixes.
+                present = re.search(r"/auth/session(?![A-Za-z0-9_-])", text) is not None
+            if present:
                 failures.append(
                     f"first-party Mesh client {source} retains raw Mesh path {fragment!r}"
                 )
@@ -552,6 +559,49 @@ def mesh_final_surface_self_test(
         raise RuntimeError("final Mesh guard did not discover a new first-party client")
     if not mesh_final_surface_failures(mesh_sources, policy, restored_clients):
         raise RuntimeError("final Mesh guard accepted a new first-party raw Mesh client")
+
+    session_client_path = "crates/codewire-dashboard-web/src/session-client-fixture.rs"
+    admitted_session_text = '''
+        let inventory = format!("{}/api/auth/sessions", state.identity_origin_string);
+        let revoke = format!("{}/api/auth/sessions/revoke", state.identity_origin_string);
+    '''
+    if "/auth/session" not in admitted_session_text:
+        raise RuntimeError("IdP session fixture no longer reproduces the old substring collision")
+    admitted_session_corpus = dict(client_sources)
+    admitted_session_corpus[session_client_path] = admitted_session_text
+    admitted_session_clients = mesh_final_client_sources(admitted_session_corpus)
+    if session_client_path not in admitted_session_clients:
+        raise RuntimeError("final Mesh guard did not discover the IdP session client fixture")
+    if mesh_final_surface_failures(mesh_sources, policy, admitted_session_clients):
+        raise RuntimeError("final Mesh guard rejected the separately admitted plural IdP clients")
+
+    retired_session_clients = (
+        'let endpoint = "/auth/session";',
+        'let endpoint = "/auth/session?token=synthetic";',
+        'let endpoint = "/auth/session#synthetic";',
+        'let endpoint = "/auth/session/child";',
+        'let endpoint = "https://mesh.example.test/auth/session";',
+        'let endpoint = format!("{}/auth/session", origin);',
+        'let endpoint = format!("/auth/session{}", suffix);',
+    )
+    for text in retired_session_clients:
+        retired_corpus = dict(admitted_session_clients)
+        retired_corpus[session_client_path] = text
+        expected_failure = (
+            f"first-party Mesh client {session_client_path} retains raw Mesh path '/auth/session'"
+        )
+        if expected_failure not in mesh_final_surface_failures(mesh_sources, policy, retired_corpus):
+            raise RuntimeError(f"final Mesh guard accepted a retired singular client: {text}")
+    for fragment in MESH_RETIRED_CLIENT_PATH_FRAGMENTS:
+        if fragment == "/auth/session":
+            continue
+        retired_corpus = dict(admitted_session_clients)
+        retired_corpus[session_client_path] = f'let endpoint = "{fragment}";'
+        expected_failure = (
+            f"first-party Mesh client {session_client_path} retains raw Mesh path {fragment!r}"
+        )
+        if expected_failure not in mesh_final_surface_failures(mesh_sources, policy, retired_corpus):
+            raise RuntimeError(f"final Mesh guard accepted another retired client fragment: {fragment}")
 
     store_rel = "crates/codewire-mesh/src/store.rs"
     atomic_create = "async fn network_create_with_owner("

@@ -2,7 +2,8 @@
 [data-dashboard-app] .cw-settings-layout { display: grid; grid-template-columns: 14rem minmax(0, 1fr); min-height: calc(100vh - 3.25rem); margin-inline: -1.25rem; }
 [data-dashboard-app] .cw-settings-subnav { padding: 1.35rem .75rem; border-right: 1px solid #1e1e1e; background: #0b0b0b; }
 [data-dashboard-app] .cw-settings-subnav-heading { display: grid; gap: .2rem; padding: 0 .55rem 1rem; }
-[data-dashboard-app] .cw-settings-subnav-heading strong { font-size: .9rem; font-weight: 600; }
+[data-dashboard-app] .cw-settings-subnav-heading strong,
+[data-dashboard-app] .cw-settings-subnav-heading h2 { margin: 0; font-size: .9rem; font-weight: 600; }
 [data-dashboard-app] .cw-settings-subnav-heading span { overflow: hidden; color: #606060; font: .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 [data-dashboard-app] .cw-settings-subnav nav { display: grid; gap: .08rem; }
 [data-dashboard-app] .cw-settings-subnav nav ul { display: grid; gap: .08rem; margin: 0; padding: 0; list-style: none; }
@@ -35,9 +36,16 @@
 [data-dashboard-app] .cw-settings-account-links > a { color: #3aa7c2; font-size: .72rem; }
 [data-dashboard-app] .cw-settings-account-links form { margin-left: auto; }
 [data-dashboard-app] .cw-settings-details { display: grid; gap: .75rem; margin: 0; }
-[data-dashboard-app] .cw-settings-details div { display: grid; grid-template-columns: 8rem 1fr; gap: 1rem; }
+[data-dashboard-app] .cw-settings-details div { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 1rem; }
 [data-dashboard-app] .cw-settings-details dt { color: #777; }
-[data-dashboard-app] .cw-settings-details dd { margin: 0; }
+[data-dashboard-app] .cw-settings-details dd { margin: 0; overflow-wrap: anywhere; }
+[data-dashboard-app] .cw-account-sessions { display: grid; gap: .75rem; margin: 1rem 0; padding: 0; list-style: none; }
+[data-dashboard-app] .cw-account-session { display: grid; gap: .75rem; padding: .9rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--bg-secondary); }
+[data-dashboard-app] .cw-account-session > header { display: grid; gap: .25rem; }
+[data-dashboard-app] .cw-account-session h3 { margin: 0; font-size: .78rem; }
+[data-dashboard-app] .cw-account-session code { overflow-wrap: anywhere; font-size: .7rem; }
+[data-dashboard-app] .cw-account-session > .cw-button { justify-self: start; }
+[data-dashboard-app] .cw-session-pagination { display: flex; flex-wrap: wrap; gap: 1rem; margin-block: 1rem; }
 [data-dashboard-app] .cw-credential-list,
 [data-dashboard-app] .cw-profile-list { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
 [data-dashboard-app] .cw-credential-row,
@@ -99,6 +107,7 @@
   [data-dashboard-app] .cw-settings-subnav a { flex: none; }
   [data-dashboard-app] .cw-settings-content { padding: 1rem .8rem 2rem; }
   [data-dashboard-app] .cw-settings-form { grid-template-columns: 1fr; }
+  [data-dashboard-app] .cw-settings-details div { grid-template-columns: 1fr; gap: .25rem; }
   [data-dashboard-app] .cw-credential-add-grid { grid-template-columns: 1fr; }
   [data-dashboard-app] .cw-settings-list-heading { align-items: start; flex-direction: column; }
   [data-dashboard-app] .cw-settings-account-links { align-items: stretch; flex-direction: column; }
