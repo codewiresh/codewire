@@ -2268,6 +2268,137 @@ mod tests {
     use super::*;
     use crate::templates::EnvironmentCreateFormTemplate;
 
+    fn setup_hrefs(html: &str) -> Vec<&str> {
+        html.split("href=\"")
+            .skip(1)
+            .filter_map(|tail| tail.split('"').next())
+            .filter(|href| href.contains("/settings/credentials/") || href.contains("/secrets/"))
+            .collect()
+    }
+
+    #[test]
+    fn create_setup_links_use_only_the_final_canonical_draft_handle() {
+        let organization = test_organization();
+        for kind in ["fresh", "restored", "error"] {
+            let mut form = default_create_form("csrf-not-navigation".into(), true);
+            form.draft_id = "00000000-0000-4000-8000-000000000003".into();
+            form.draft_actor = "actor-not-navigation".into();
+            form.name = "name-not-navigation".into();
+            form.draft_restored = kind == "restored";
+            if kind == "error" {
+                form.form_error = "Review your selections".into();
+                form.draft_restore_allowed = false;
+            }
+            // Options replace source fields. Navigation derives from the
+            // final form, so hydration cannot drop or replace the handle.
+            hydrate_options(
+                &mut form,
+                EnvironmentCreateOptions {
+                    presets: vec![],
+                    agents: vec![],
+                    sources: Default::default(),
+                    preview_base_domain: String::new(),
+                    confidential_available: false,
+                    confidential_price: String::new(),
+                },
+            );
+            let html = EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form: &form,
+            }
+            .render()
+            .unwrap();
+            let hrefs = setup_hrefs(&html);
+            assert_eq!(hrefs.len(), 6);
+            for href in hrefs {
+                assert!(href.ends_with("creation_draft=00000000-0000-4000-8000-000000000003"));
+                assert!(!href.contains("not-navigation"));
+                assert!(
+                    href.starts_with(&format!("/{}/secrets/", organization.slug))
+                        || href.starts_with(&format!(
+                            "/settings/credentials/?org={}&amp;",
+                            organization.slug
+                        ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_create_draft_ids_do_not_enter_setup_links() {
+        let organization = test_organization();
+        for id in [
+            "",
+            "00000000-0000-0000-0000-000000000000",
+            "00000000-0000-4000-8000-ABCDEF123456",
+            "https://canary.invalid/?private=value",
+        ] {
+            let mut form = default_create_form("current-csrf".into(), true);
+            form.draft_id = id.into();
+            assert!(form.creation_draft_parameter().is_empty());
+            let html = EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form: &form,
+            }
+            .render()
+            .unwrap();
+            assert!(
+                setup_hrefs(&html).into_iter().all(
+                    |href| !href.contains("creation_draft") && !href.contains("canary.invalid")
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn edit_source_setup_links_do_not_inherit_the_inventory_create_handle() {
+        let organization = test_organization();
+        let page = EnvironmentsPageView {
+            environments: vec![],
+            create_form: default_create_form("current-csrf".into(), false),
+            source_editor: Some(crate::view::EnvironmentSourcesEditView {
+                environment_id: "00000000-0000-4000-8000-000000000004".into(),
+                environment_name: "Existing Sandbox".into(),
+                fields: Default::default(),
+                expected: crate::view::EnvironmentSourcesSummaryView {
+                    selection: Default::default(),
+                    operation_generation: 1,
+                    project: String::new(),
+                    organization: false,
+                    personal: false,
+                    profile: String::new(),
+                    profile_revision: String::new(),
+                },
+            }),
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: String::new(),
+            state: "all".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let html = OrganizationEnvironmentsContentTemplate {
+            organization: &organization,
+            page: &page,
+        }
+        .render()
+        .unwrap();
+        let hrefs = setup_hrefs(&html);
+        assert_eq!(hrefs.len(), 4);
+        assert_eq!(hrefs[0], format!("/{}/secrets/user/", organization.slug));
+        assert_eq!(
+            hrefs[1],
+            format!("/{}/secrets/organization/", organization.slug)
+        );
+        assert_eq!(hrefs[2], organization.secrets_url);
+        assert_eq!(
+            hrefs[3],
+            format!("/settings/credentials/?org={}", organization.slug)
+        );
+    }
+
     #[test]
     fn explicit_return_template_keeps_drawer_url_and_requested_marker_together() {
         use crate::environment_drafts::DraftReturn;
@@ -3458,10 +3589,10 @@ mod tests {
             }));
         }
         assert!(manual_form.contains("type=\"button\" data-open-github-repositories aria-haspopup=\"dialog\" aria-controls=\"github-repository-picker\""));
-        assert!(
-            manual_form
-                .contains("<a href=\"/settings/credentials/?org=organization\">Connect GitHub</a>")
-        );
+        assert!(manual_form.contains(&format!(
+            "<a href=\"/settings/credentials/?org=organization&amp;{}\">Connect GitHub</a>",
+            form.creation_draft_parameter()
+        )));
         let dialog = picker.split('>').next().expect("dialog opening tag");
         assert!(dialog.contains("id=\"github-repository-picker\""));
         assert!(dialog.contains("aria-labelledby=\"github-repository-picker-title\""));

@@ -911,6 +911,15 @@ pub(crate) struct EnvironmentCreateFormView {
 }
 
 impl EnvironmentCreateFormView {
+    /// Navigation metadata only; derive it from the final form, not catalogs.
+    pub(crate) fn creation_draft_parameter(&self) -> String {
+        if crate::environment_drafts::canonical_id(&self.draft_id) {
+            format!("creation_draft={}", self.draft_id)
+        } else {
+            String::new()
+        }
+    }
+
     pub(crate) fn cpu_uses_catalog_option(&self) -> bool {
         matches!(self.cpu.as_str(), "1000" | "2000" | "4000" | "8000")
     }

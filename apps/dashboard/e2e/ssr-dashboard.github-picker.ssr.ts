@@ -33,8 +33,9 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
     const dialog = page.getByRole("dialog", { name: "Choose a GitHub repository", exact: true });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("status")).toContainText("Choose a profile with a GitHub connection");
+    const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
     await expect(dialog.getByRole("link", { name: "Connect GitHub or create a profile in Settings" }))
-      .toHaveAttribute("href", `/settings/credentials/?org=${slug}`);
+      .toHaveAttribute("href", `/settings/credentials/?org=${slug}&creation_draft=${draft}`);
     await page.keyboard.press("Escape");
     await expect(dialog).not.toBeVisible();
     await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("my-new-sandbox");

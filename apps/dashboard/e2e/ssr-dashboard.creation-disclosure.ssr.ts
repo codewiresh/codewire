@@ -95,11 +95,30 @@ async function exactReturnFixture(page: Page, requestedId = draftId) {
     const response = await route.fetch();
     const html = (await response.text())
       .replace(`data-create-draft-id="${draftId}"`, `data-create-draft-id="${requestedId}"`)
+      .replaceAll(`creation_draft=${draftId}`, `creation_draft=${requestedId}`)
       .replace('data-create-draft-exact="false"', 'data-create-draft-exact="true"');
     await route.fulfill({ response, body: html });
   });
   await page.goto(url);
 }
+
+test("Create setup links carry only the current draft handle and Edit links stay unchanged", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("name-never-navigation");
+  await page.getByLabel("Repository URL", { exact: true }).fill("https://canary.invalid/private-repository");
+  const links = page.locator('a[href*="settings-credentials.html"], a[href*="application-secrets.html"]');
+  await expect(links).toHaveCount(6);
+  for (const link of await links.all()) {
+    const href = await link.getAttribute("href");
+    const target = new URL(href!, page.url());
+    expect([...target.searchParams.entries()]).toEqual([["creation_draft", draftId]]);
+    expect(href).not.toContain("name-never-navigation");
+    expect(href).not.toContain("canary.invalid");
+  }
+  await page.goto(fixtureUrl().replace("create-sandbox.html", "edit-sandbox-sources.html"));
+  const editLink = page.getByRole("link", { name: "Manage personal credentials and profiles" });
+  await expect(editLink).toHaveAttribute("href", "settings-credentials.html");
+});
 
 test("explicit return offers the requested older draft, never the newer draft", async ({ page }) => {
   const requested = { ...selectionsDraft(), saved_at: Date.now() - 1000 };

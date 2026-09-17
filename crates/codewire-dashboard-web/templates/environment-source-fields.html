@@ -29,9 +29,9 @@
   <p class="cw-field-help">When names overlap: organization, then project, then personal. Ordinary environment configuration wins over all three.</p>
   <nav aria-label="Manage application secrets">
     <ul class="cw-source-choices">
-      <li><a href="/{{ organization.slug }}/secrets/user/">Add or manage personal secrets</a></li>
-      <li><a href="/{{ organization.slug }}/secrets/organization/">Manage organization secrets</a></li>
-      <li><a href="{{ organization.secrets_url }}">Manage secret projects</a></li>
+      <li><a href="/{{ organization.slug }}/secrets/user/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}">Add or manage personal secrets</a></li>
+      <li><a href="/{{ organization.slug }}/secrets/organization/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}">Manage organization secrets</a></li>
+      <li><a href="{{ organization.secrets_url }}{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}">Manage secret projects</a></li>
     </ul>
   </nav>
 </section>
@@ -61,7 +61,7 @@
   {% endif %}
   <nav aria-label="Manage provider credentials">
     <ul class="cw-source-choices">
-      <li><a href="/settings/credentials/?org={{ organization.slug }}">{% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}Add credentials and create a profile{% else %}Manage personal credentials and profiles{% endif %}</a></li>
+      <li><a href="/settings/credentials/?org={{ organization.slug }}{% if !source_creation_draft_parameter.is_empty() %}&amp;{{ source_creation_draft_parameter }}{% endif %}">{% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}Add credentials and create a profile{% else %}Manage personal credentials and profiles{% endif %}</a></li>
     </ul>
   </nav>
 </section>

@@ -1,4 +1,5 @@
 <section id="environment-create-card" class="cw-environment-create" role="dialog" aria-modal="true" aria-labelledby="environment-create-title" tabindex="-1" data-drawer-panel>
+  {% let creation_draft_parameter = form.creation_draft_parameter() %}
   <header class="cw-environment-create-header">
     <div class="cw-create-title-row">
       <h2 id="environment-create-title">Create Sandbox</h2>
@@ -46,7 +47,7 @@
 
       <section class="cw-create-repositories" aria-labelledby="create-repositories-title">
         <div class="cw-create-section-label"><h3 id="create-repositories-title">Repositories</h3><button type="button" data-add-repository><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Custom Git URL</button></div>
-        <nav class="cw-repository-actions" aria-label="Add a repository"><ul><li><button class="cw-button cw-button--outline" type="button" data-open-github-repositories aria-haspopup="dialog" aria-controls="github-repository-picker"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg>Choose from GitHub</button></li><li><a href="/settings/credentials/?org={{ organization.slug }}">Connect GitHub</a></li></ul></nav>
+        <nav class="cw-repository-actions" aria-label="Add a repository"><ul><li><button class="cw-button cw-button--outline" type="button" data-open-github-repositories aria-haspopup="dialog" aria-controls="github-repository-picker"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg>Choose from GitHub</button></li><li><a href="/settings/credentials/?org={{ organization.slug }}{% if !creation_draft_parameter.is_empty() %}&amp;{{ creation_draft_parameter }}{% endif %}">Connect GitHub</a></li></ul></nav>
         <p class="cw-field-help">Browse the GitHub account in your selected credential profile, or enter a custom Git URL.</p>
 
         <div class="cw-manual-repositories" data-manual-repositories>
@@ -76,6 +77,7 @@
 
       {% let source_fields_id = "environment-create" %}
       {% let sources = form.sources %}
+      {% let source_creation_draft_parameter = creation_draft_parameter.as_str() %}
       {% include "environment-source-fields.html" %}
 
       <section class="cw-create-panel cw-agent-picker" aria-labelledby="agents-title">
@@ -100,7 +102,7 @@
     <header class="cw-dialog-header"><h2 id="github-repository-picker-title">Choose a GitHub repository</h2><button class="cw-button cw-button--outline" type="button" data-close-github-repositories aria-label="Close GitHub repositories"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-close"/></svg></button></header>
     <section class="cw-dialog-body" aria-label="Browse GitHub repositories">
       <div class="cw-field"><label class="cw-label" for="github-picker-profile">GitHub credential profile</label><select id="github-picker-profile" class="cw-select" data-github-profile aria-describedby="github-picker-profile-help"{% if !form.sources.credential_selection_enabled || !form.sources.profile_error.is_empty() %} disabled{% endif %}><option value="">Choose a profile</option>{% for profile in form.sources.profiles %}<option value="{{ profile.id }}@{{ profile.revision }}"{% if profile.selected %} selected{% endif %}>{{ profile.name }} · revision {{ profile.revision }}{% if profile.synthetic && !profile.bound_revision %} · unavailable selection{% endif %}</option>{% endfor %}</select><p id="github-picker-profile-help" class="cw-field-help">{% if !form.sources.profile_selection_error.is_empty() %}{{ form.sources.profile_selection_error }} {% endif %}This also selects the Sandbox's provider credential profile. Tokens stay outside the Sandbox.</p></div>
-      <p><a href="/settings/credentials/?org={{ organization.slug }}">Connect GitHub or create a profile in Settings</a></p>
+      <p><a href="/settings/credentials/?org={{ organization.slug }}{% if !creation_draft_parameter.is_empty() %}&amp;{{ creation_draft_parameter }}{% endif %}">Connect GitHub or create a profile in Settings</a></p>
       <div class="cw-field"><label class="cw-label" for="github-repository-filter">Filter this page</label><input id="github-repository-filter" class="cw-input" type="search" placeholder="owner/repository" autocomplete="off" data-github-filter></div>
       <p role="status" data-github-status>Choose a profile with a GitHub connection.</p>
       <section aria-label="Available repositories" data-github-results></section>

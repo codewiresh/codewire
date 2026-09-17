@@ -318,6 +318,7 @@ mod tests {
     #[template(path = "environment-source-fields.html")]
     struct SourceFieldsTemplate<'a> {
         source_fields_id: &'a str,
+        source_creation_draft_parameter: &'a str,
         sources: &'a EnvironmentSourceFieldsView,
         organization: &'a SourceFieldsOrganization,
     }
@@ -472,6 +473,7 @@ mod tests {
             assert!(fields.profiles[1].selected && fields.profiles[1].synthetic);
             assert!(!fields.profiles[1].bound_revision);
             let body = SourceFieldsTemplate {
+                source_creation_draft_parameter: "",
                 source_fields_id: "create",
                 sources: &fields,
                 organization: &ORGANIZATION,
@@ -539,6 +541,7 @@ mod tests {
         };
         fields.select(&selected);
         let body = SourceFieldsTemplate {
+            source_creation_draft_parameter: "",
             source_fields_id: "create",
             sources: &fields,
             organization: &ORGANIZATION,
@@ -614,6 +617,7 @@ mod tests {
         };
         for source_fields_id in ["environment-create", "environment-edit"] {
             let body = SourceFieldsTemplate {
+                source_creation_draft_parameter: "",
                 source_fields_id,
                 sources: &sources,
                 organization: &ORGANIZATION,
@@ -662,6 +666,7 @@ mod tests {
             ..Default::default()
         };
         let body = SourceFieldsTemplate {
+            source_creation_draft_parameter: "",
             source_fields_id: "edit",
             sources: &sources,
             organization: &ORGANIZATION,
@@ -685,6 +690,7 @@ mod tests {
             ..Default::default()
         };
         let body = SourceFieldsTemplate {
+            source_creation_draft_parameter: "",
             source_fields_id: "create",
             sources: &sources,
             organization: &ORGANIZATION,
@@ -707,6 +713,7 @@ mod tests {
         assert!(!body.contains(" selected"));
 
         let disabled = SourceFieldsTemplate {
+            source_creation_draft_parameter: "",
             source_fields_id: "create",
             sources: &EnvironmentSourceFieldsView::default(),
             organization: &ORGANIZATION,

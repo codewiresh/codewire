@@ -302,7 +302,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("[data-github-repository-picker]")).not.toBeVisible();
     await expect(page.getByRole("button", { name: "Choose from GitHub" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Custom Git URL" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?org=${slug}`);
+    const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
+    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?org=${slug}&creation_draft=${draft}`);
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 
@@ -541,10 +542,11 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     await expect(page.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/${slug}/secrets/user/`);
-    await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
-    await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/`);
-    await expect(page.locator(`a[href="/settings/credentials/?org=${slug}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
+    const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
+    await expect(page.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/${slug}/secrets/user/?creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/?creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/?creation_draft=${draft}`);
+    await expect(page.locator(`a[href="/settings/credentials/?org=${slug}&creation_draft=${draft}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
   });
 
   test("requires explicit recovery when a selected secret project is removed", async ({ page, isMobile }) => {
