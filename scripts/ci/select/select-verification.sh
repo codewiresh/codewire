@@ -1476,8 +1476,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
-      scripts/ci/tests/test-deploy-*.sh|scripts/ci/tests/test-dispatch-deploy-*.sh|\
-      scripts/ci/tests/test-mesh-ingress-protocol.sh)
+      scripts/ci/tests/test-deploy-*.sh|scripts/ci/tests/test-dispatch-deploy-*.sh)
         select_token deploy
         recognized=true
         ;;

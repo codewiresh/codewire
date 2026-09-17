@@ -1034,7 +1034,7 @@ run_present_paths_case darwin_cross_check_tests pull_request refs/pull/20656/hea
 run_present_paths_case darwin_cross_test_unknown pull_request refs/pull/20656/head false \
   "$all_product" scripts/ci/tests/test-darwin-cross-check-future.sh
 run_present_paths_case mesh_ingress_protocol_guard pull_request refs/pull/1902/head false \
-  'deploy policy policy_shell' scripts/ci/tests/test-mesh-ingress-protocol.sh
+  'deploy policy policy_shell' scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
 run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902/head false \
   "$all_product" scripts/ci/tests/test-mesh-ingress-protocol-future.sh
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \

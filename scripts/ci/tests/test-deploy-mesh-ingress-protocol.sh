@@ -66,7 +66,7 @@ for render_test_scope in global production; do
         command helm "$@"
       }
       export -f helm
-      bash "$ROOT/scripts/ci/tests/test-mesh-ingress-protocol.sh" 2>/dev/null
+      bash "$ROOT/scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh" 2>/dev/null
     )"; then
       fail 'full runner accepted a failed Helm render'; exit 1
     fi
