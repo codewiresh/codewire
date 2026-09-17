@@ -9,6 +9,8 @@ const app = document.querySelector("[data-dashboard-app]");
   const dialogVersions = new WeakMap();
   const dialogRequests = new WeakMap();
   const dialogRequestSequences = new WeakMap();
+  const structuralEdits = new WeakSet();
+  const submittedForms = new WeakSet();
   const currentDialogRequest = (request) => request?.dialog.open
     && dialogVersions.get(request.dialog) === request.version
     && dialogRequestSequences.get(request.target) === request.sequence;
@@ -24,7 +26,7 @@ const app = document.querySelector("[data-dashboard-app]");
     form.reset();
     return copy;
   };
-  const isDirty = (dialog) => guardedControls(dialog).some((control) => {
+  const isDirty = (dialog) => Array.from(dialog.querySelectorAll("form[data-dirty-guard]")).some((form) => structuralEdits.has(form)) || guardedControls(dialog).some((control) => {
     if (control instanceof HTMLSelectElement) {
       const baseline = defaultSelect(control);
       return Array.from(control.options).some((option, index) => option.selected !== baseline.options[index].selected);
@@ -32,13 +34,24 @@ const app = document.querySelector("[data-dashboard-app]");
     if (["checkbox", "radio"].includes(control.type)) return control.checked !== control.defaultChecked;
     return control.value !== control.defaultValue;
   });
-  const discardEdits = (dialog) => guardedControls(dialog).forEach((control) => {
-    if (control instanceof HTMLSelectElement) {
-      const baseline = defaultSelect(control);
-      Array.from(control.options).forEach((option, index) => { option.selected = baseline.options[index].selected; });
-    } else if (["checkbox", "radio"].includes(control.type)) control.checked = control.defaultChecked;
-    else control.value = control.defaultValue;
-  });
+  const discardEdits = (dialog) => {
+    // Invalidate asynchronous Restore/autosave before making the DOM pristine.
+    dialog.dispatchEvent(new Event("codewire:discard-edits", { bubbles: true }));
+    const affectedDialogs = Array.from(dialog.querySelectorAll("dialog[data-dialog]"));
+    if (dialog instanceof HTMLDialogElement) affectedDialogs.push(dialog);
+    affectedDialogs.forEach((owner) => dialogVersions.set(owner, (dialogVersions.get(owner) || 0) + 1));
+    guardedControls(dialog).forEach((control) => {
+      if (control instanceof HTMLSelectElement) {
+        const baseline = defaultSelect(control);
+        Array.from(control.options).forEach((option, index) => { option.selected = baseline.options[index].selected; });
+      } else if (["checkbox", "radio"].includes(control.type)) control.checked = control.name === "confirm_reconnect" ? false : control.defaultChecked;
+      else control.value = control.defaultValue;
+    });
+    dialog.querySelectorAll("form[data-dirty-guard]").forEach((form) => structuralEdits.delete(form));
+    // Removed rows cannot be reconstructed without keeping private snapshots.
+    // The next Create opener must fetch a fresh authoritative form instead.
+    if (dialog.matches("[data-drawer]")) dialog.dataset.formDiscarded = "true";
+  };
   let discardPrompt;
   let pendingDiscard;
   const guardClose = (owner, perform) => {
@@ -90,7 +103,7 @@ const app = document.querySelector("[data-dashboard-app]");
         const pending = pendingDiscard;
         pendingDiscard = null;
         discardPrompt.close();
-        if (pending?.owner.isConnected && pending.owner.open) {
+        if (pending?.owner.isConnected && (pending.owner.open || pending.owner.matches("[data-drawer]:not([hidden])"))) {
           discardEdits(pending.owner);
           pending.perform();
         }
@@ -103,6 +116,64 @@ const app = document.querySelector("[data-dashboard-app]");
     discardPrompt.showModal();
   };
   const closeDialog = (dialog) => guardClose(dialog, () => dialog.close());
+  const navigationEligible = (owner) => owner?.isConnected
+    && !owner.querySelector('[aria-busy="true"]')
+    && !Array.from(owner.querySelectorAll("form[data-dirty-guard]")).some((form) => submittedForms.has(form));
+  const navigationOwner = () => {
+    const owners = document.querySelectorAll("dialog[data-dialog][open], [data-drawer]:not([hidden])");
+    return Array.from(owners).find((owner) => navigationEligible(owner) && isDirty(owner));
+  };
+  document.addEventListener("codewire:form-structure-edited", (event) => {
+    const form = event.target instanceof Element ? event.target.closest("form[data-dirty-guard]") : null;
+    if (form) structuralEdits.add(form);
+  });
+  document.addEventListener("codewire:dirty-navigation-query", (event) => {
+    const owner = event.detail?.owner || navigationOwner();
+    if (navigationEligible(owner) && isDirty(owner)) event.preventDefault();
+  });
+  document.addEventListener("codewire:guard-navigation", (event) => {
+    const owner = event.detail?.owner || navigationOwner();
+    if (navigationEligible(owner) && isDirty(owner)) {
+      event.preventDefault();
+      guardClose(owner, event.detail.perform);
+    }
+  });
+  document.addEventListener("submit", (event) => {
+    if (event.target instanceof HTMLFormElement && event.target.matches("[data-dirty-guard]")) submittedForms.add(event.target);
+  }, true);
+  document.addEventListener("htmx:afterRequest", (event) => {
+    const form = event.detail?.elt?.closest("form");
+    if (form) submittedForms.delete(form);
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!navigationOwner()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+  document.addEventListener("click", (event) => {
+    const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+    if (!(link instanceof HTMLAnchorElement) || event.defaultPrevented || event.button !== 0
+      || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.hasAttribute("download")
+      || (link.target && link.target !== "_self") || link.matches("[data-drawer-close]")) return;
+    if (link.matches("[data-drawer-trigger]")) {
+      const drawer = document.querySelector("[data-drawer]");
+      const rendered = drawer?.getAttribute("data-create-url");
+      if (rendered && drawer.dataset.formDiscarded !== "true") {
+        const local = new URL(rendered, location.origin);
+        const requested = new URL(link.href, location.origin);
+        if (local.pathname === requested.pathname && local.search === requested.search) return;
+      }
+    }
+    const target = new URL(link.href, location.href);
+    if (!["http:", "https:"].includes(target.protocol)
+      || (target.hash && target.origin === location.origin && target.pathname === location.pathname && target.search === location.search)) return;
+    if (!document.dispatchEvent(new CustomEvent("codewire:guard-navigation", {
+      cancelable: true, detail: { perform: () => location.assign(target.href) },
+    }))) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
   const openDialog = (dialog, opener = document.activeElement) => {
     if (!(dialog instanceof HTMLDialogElement) || dialog.open) return;
     const previous = opener instanceof Element ? opener.closest("dialog[data-dialog]") : null;
@@ -296,6 +367,17 @@ document.addEventListener("htmx:afterSwap", (event) => {
 if (app) {
   const closeSidebar = () => app.setAttribute("data-mobile-open", "false");
   const currentDrawer = () => document.querySelector("[data-drawer]");
+  let historyIndex = 0;
+  let historyRollback = null;
+  let allowedTraversal = null;
+  const ownedIndex = (state) => Number.isSafeInteger(state?.codewireDrawerIndex) ? state.codewireDrawerIndex : null;
+  // Tag only this document's current entry; preserve other history metadata.
+  window.history.replaceState({ ...(window.history.state || {}), codewireDrawerIndex: historyIndex }, "");
+  const guardDrawerNavigation = (drawer, perform) => {
+    if (document.dispatchEvent(new CustomEvent("codewire:guard-navigation", {
+      cancelable: true, detail: { owner: drawer, perform },
+    }))) perform();
+  };
 
   const drawerPathMatches = (drawer) => {
     const createUrl = drawer?.getAttribute("data-create-url");
@@ -329,14 +411,15 @@ if (app) {
 
   const openDrawer = (href) => {
     const drawer = currentDrawer();
-    if (!drawer) return false;
+    if (!drawer || drawer.dataset.formDiscarded === "true") return false;
     const target = new URL(href || drawer.getAttribute("data-create-url"), window.location.origin);
     const rendered = new URL(drawer.getAttribute("data-create-url"), window.location.origin);
     // A different form needs fresh server-rendered selection and concurrency metadata.
     if (target.pathname !== rendered.pathname || target.search !== rendered.search) return false;
     setDrawerOpen(true);
     if (target.pathname !== window.location.pathname || target.search !== window.location.search) {
-      window.history.pushState({ codewireDrawer: true }, "", `${target.pathname}${target.search}${target.hash}`);
+      historyIndex += 1;
+      window.history.pushState({ codewireDrawer: true, codewireDrawerIndex: historyIndex }, "", `${target.pathname}${target.search}${target.hash}`);
     }
     return true;
   };
@@ -344,13 +427,17 @@ if (app) {
   const closeDrawer = () => {
     const drawer = currentDrawer();
     if (!drawer || drawer.hidden) return false;
-    if (window.history.state?.codewireDrawer) {
-      window.history.back();
-    } else {
-      const closeUrl = new URL(drawer.getAttribute("data-close-url") || window.location.pathname, window.location.origin);
-      window.history.replaceState(null, "", `${closeUrl.pathname}${closeUrl.search}${closeUrl.hash}`);
-      setDrawerOpen(false, false);
-    }
+    if (historyRollback) return true;
+    guardDrawerNavigation(drawer, () => {
+      if (window.history.state?.codewireDrawer) {
+        allowedTraversal = historyIndex - 1;
+        window.history.back();
+      } else {
+        const closeUrl = new URL(drawer.getAttribute("data-close-url") || window.location.pathname, window.location.origin);
+        window.history.replaceState({ ...(window.history.state || {}), codewireDrawerIndex: historyIndex }, "", `${closeUrl.pathname}${closeUrl.search}${closeUrl.hash}`);
+        setDrawerOpen(false, false);
+      }
+    });
     return true;
   };
 
@@ -445,9 +532,41 @@ if (app) {
     if (empty instanceof HTMLElement) empty.hidden = visible !== 0;
   });
 
-  window.addEventListener("popstate", () => setDrawerOpen(drawerPathMatches(currentDrawer())));
+  window.addEventListener("popstate", (event) => {
+    const drawer = currentDrawer();
+    const next = ownedIndex(event.state);
+    if (historyRollback) {
+      if (next !== historyRollback.from) return;
+      const rollback = historyRollback;
+      historyRollback = null;
+      guardDrawerNavigation(drawer, () => {
+        allowedTraversal = rollback.to;
+        window.history.go(rollback.to - rollback.from);
+      });
+      return;
+    }
+    if (next === allowedTraversal) allowedTraversal = null;
+    else if (drawer && !drawer.hidden && !drawerPathMatches(drawer) && next !== null
+      && historyIndex !== null && next !== historyIndex
+      && !document.dispatchEvent(new CustomEvent("codewire:dirty-navigation-query", { cancelable: true, detail: { owner: drawer } }))) {
+      // popstate cannot be cancelled. Reconcile an app-owned entry first,
+      // keeping the actual form visible, then ask before the intended traversal.
+      historyRollback = { from: historyIndex, to: next };
+      window.history.go(historyIndex - next);
+      return;
+    }
+    historyIndex = next;
+    if (drawer?.dataset.formDiscarded === "true" && drawerPathMatches(drawer)) {
+      // Forward must honor the same fresh-form policy as a Create opener.
+      window.location.replace(window.location.href);
+      return;
+    }
+    setDrawerOpen(drawerPathMatches(drawer));
+  });
   document.addEventListener("codewire:drawer-replaced", () => setDrawerOpen(true));
-  document.addEventListener("htmx:afterSwap", () => setDrawerOpen(drawerPathMatches(currentDrawer()), false));
+  document.addEventListener("htmx:afterSwap", () => {
+    if (!historyRollback && allowedTraversal === null && !document.querySelector('dialog[aria-label="Discard changes?"][open]')) setDrawerOpen(drawerPathMatches(currentDrawer()), false);
+  });
   document.addEventListener("keydown", (event) => {
     if (document.querySelector("dialog:modal")) return;
     if (event.key !== "Tab") return;

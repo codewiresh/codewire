@@ -58,6 +58,152 @@ const fixtureUrl = () => {
   return `${origin}/reference/fixtures/create-sandbox.html`;
 };
 
+test("dirty Create Close keeps inputs and authority until explicit Discard, without overwriting saved selections", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.locator("[data-create-resources] summary").click();
+  await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+  await page.getByLabel("Name", { exact: true }).fill("unsaved-name-canary");
+  const form = page.locator("[data-environment-form]");
+  const csrf = await form.locator('[name="_csrf"]').inputValue();
+  await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+  const saved = await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()));
+  expect(saved).not.toContain("unsaved-name-canary");
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  await expect(prompt.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
+  await prompt.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("unsaved-name-canary");
+  await expect(form.locator('[name="_csrf"]')).toHaveValue(csrf);
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-drawer]")).toBeVisible();
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  // Blur may legitimately refresh saved_at. Discard itself must change neither
+  // the saved metadata nor selections; reset must never trigger autosave.
+  const beforeDiscard = await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()));
+  expect(JSON.parse(beforeDiscard!).selections).toEqual(JSON.parse(saved!).selections);
+  await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await expect(page.locator("[data-drawer]")).toBeHidden();
+  await expect(form.locator('[name="name"]')).toHaveValue("");
+  await expect(form.locator('[name="_csrf"]')).toHaveValue(csrf);
+  expect(await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()))).toBe(beforeDiscard);
+});
+
+test("dirty app-owned Create Back reconciles URL before Keep or explicit Discard", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  await page.locator("[data-drawer-trigger]").click();
+  await page.getByLabel("Name", { exact: true }).fill("keep-on-back");
+  await page.evaluate(() => history.back());
+  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  await expect(prompt).toBeVisible();
+  await expect(page).toHaveURL(fixtureUrl());
+  await expect(page.locator("[data-drawer]")).toBeVisible();
+  await prompt.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("keep-on-back");
+  await page.evaluate(() => history.back());
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await expect(page.locator("[data-drawer]")).toBeHidden();
+  await expect(page).toHaveURL(fixtureUrl().replace("create-sandbox.html", "index.html"));
+});
+
+test("structural Create edits are dirty without snapshots and the next opener fetches a fresh form", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  const rows = page.locator("[data-repository-row]");
+  const initial = await rows.count();
+  await page.getByRole("button", { name: "Custom Git URL", exact: true }).click();
+  await expect(rows).toHaveCount(initial + 1);
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await page.locator("[data-drawer-trigger]").click();
+  await expect(page.locator("[data-drawer]")).toBeVisible();
+  await expect(rows).toHaveCount(initial);
+});
+
+test("Forward after structural Discard fetches a fresh authoritative Create form", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  await page.locator("[data-drawer-trigger]").click();
+  const rows = page.locator("[data-repository-row]");
+  const initial = await rows.count();
+  await page.getByRole("button", { name: "Custom Git URL", exact: true }).click();
+  await expect(rows).toHaveCount(initial + 1);
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  await page.getByRole("dialog", { name: "Discard changes?", exact: true }).getByRole("button", { name: "Discard changes", exact: true }).click();
+  await expect(page.locator("[data-drawer]")).toBeHidden();
+  await page.evaluate(() => history.forward());
+  await expect(page.locator("[data-drawer]")).toBeVisible();
+  await expect(rows).toHaveCount(initial);
+  await expect(page.locator("[data-drawer]")).not.toHaveAttribute("data-form-discarded", "true");
+});
+
+test("drawer Close does not intercept an already-submitted Create mutation", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("in-flight-create");
+  // Durable controller-unit fixture: mark the same submit lifecycle without
+  // dispatching a fabricated sandbox request from this static HTML fixture.
+  await page.locator("[data-environment-form]").evaluate((form) => form.dispatchEvent(new Event("submit", { bubbles: true })));
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Discard changes?", exact: true })).toBeHidden();
+  await expect(page.locator("[data-drawer]")).toBeHidden();
+});
+
+test("a Create trigger requiring a different server form still guards dirty navigation", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("keep-different-form");
+  // Model the SSR exact-return URL, absent from this static fixture's router.
+  // The existing canonical trigger now requires fresh navigation, not reuse.
+  await page.locator("[data-drawer]").evaluate((drawer, id) => {
+    drawer.setAttribute("data-create-url", `${location.pathname}?creation_draft=${id}`);
+  }, draftId);
+  await page.locator("[data-drawer-trigger]").dispatchEvent("click");
+  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("keep-different-form");
+  await expect(page).toHaveURL(fixtureUrl());
+});
+
+test("dirty Create setup navigation offers Keep and Discard while preserving the exact saved draft", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  let creates = 0;
+  page.on("request", (request) => { if (/PrepareEnvironment|\/_actions\/sandboxes\/create/.test(request.url())) creates += 1; });
+  await page.locator("[data-create-resources] summary").click();
+  await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+  await page.getByLabel("Name", { exact: true }).fill("setup-private-canary");
+  const link = page.getByRole("link", { name: "Connect GitHub", exact: true });
+  const destination = new URL((await link.getAttribute("href"))!, page.url()).href;
+  await link.click();
+  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await expect(page).toHaveURL(fixtureUrl());
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("setup-private-canary");
+  await link.click();
+  await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await expect(page).toHaveURL(destination);
+  expect(new URL(page.url()).searchParams.get("creation_draft")).toBe(draftId);
+  const saved = await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()));
+  expect(JSON.parse(saved!).selections.cpu).toBe("2000");
+  expect(saved).not.toContain("setup-private-canary");
+  expect(creates).toBe(0);
+});
+
+test("native reload warns about dirty Create input and Cancel keeps the form", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("keep-on-reload");
+  const warning = page.waitForEvent("dialog");
+  const reload = page.reload({ timeout: 5000 }).catch((error) => error);
+  const dialog = await warning;
+  expect(dialog.type()).toBe("beforeunload");
+  await dialog.dismiss();
+  await reload;
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("keep-on-reload");
+});
+
 test("secret settings fixture provides an explicit metadata-only Return link", async ({ page }) => {
   await page.goto(fixtureUrl().replace("create-sandbox.html", `application-secrets.html?creation_draft=${draftId}`));
   const returnLink = page.getByRole("link", { name: "Return to Sandbox creation", exact: true });
@@ -254,7 +400,7 @@ test("explicit Create recovery keeps exact large revision bytes and makes no Cre
   expect(creates).toEqual([]);
 });
 
-for (const interruption of ["edit", "property edit", "close", "replacement"] as const) {
+for (const interruption of ["edit", "property edit", "close", "discard", "replacement"] as const) {
   test(`late Create recovery cannot overwrite after ${interruption}`, async ({ page }) => {
     const draft = selectionsDraft();
     await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
@@ -280,6 +426,15 @@ for (const interruption of ["edit", "property edit", "close", "replacement"] as 
       else if (interruption === "close") {
         await page.getByRole("link", { name: "Close Create Sandbox" }).click();
         await page.locator("[data-drawer-trigger]").first().click();
+      }
+      else if (interruption === "discard") {
+        // A property-only edit does not invalidate Restore through input/change.
+        // Discard must fence it before resetting the DOM back to pristine.
+        await page.getByLabel("Name", { exact: true }).evaluate((input: HTMLInputElement) => { input.value = "discard-pending-restore"; });
+        await page.getByRole("link", { name: "Close Create Sandbox" }).click();
+        await page.getByRole("dialog", { name: "Discard changes?", exact: true }).getByRole("button", { name: "Discard changes", exact: true }).click();
+        await expect(page.locator("[data-drawer]")).toBeHidden();
+        await expect(page.locator('[name="name"]')).toHaveValue("");
       }
       else await page.locator("#environment-create-card").evaluate((card) => card.replaceWith(card.cloneNode(true)));
     } finally { release(); }

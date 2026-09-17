@@ -189,3 +189,30 @@ test("Discard clears reconnect consent and preserves hidden concurrency fences",
   await expect(edit.locator('[name="expected_revision"]')).toHaveValue("8");
   await expect(edit.getByRole("combobox", { name: "GitHub", exact: true })).toHaveValue("fixture-github");
 });
+
+test("explicit leaving-page Discard fences a dialog request that began after the prompt opened", async ({ page }) => {
+  await page.getByRole("button", { name: "Add credential", exact: true }).click();
+  await page.getByRole("dialog", { name: "Add credential", exact: true }).getByRole("button", { name: "API key", exact: true }).click();
+  await page.getByRole("dialog", { name: "Add API key", exact: true }).getByLabel("API key", { exact: true }).fill("private-discard-canary");
+  // Controller-unit proof, using the actual HTMX lifecycle/version fence.
+  // A background request may start while the native prompt is open. No real
+  // mutation is aborted, retried or fabricated by this static fixture.
+  const obsoleteResponsePrevented = page.evaluate(() => new Promise<boolean>((resolve) => {
+    const owner = document.querySelector("#add-api-key")!;
+    const target = owner.querySelector("form")!;
+    const xhr = {};
+    document.dispatchEvent(new CustomEvent("codewire:guard-navigation", {
+      cancelable: true,
+      detail: { owner, perform: () => {
+        const response = new CustomEvent("htmx:beforeOnLoad", { cancelable: true, detail: { xhr } });
+        resolve(!document.dispatchEvent(response));
+      } },
+    }));
+    document.dispatchEvent(new CustomEvent("htmx:beforeRequest", { detail: { target, xhr } }));
+  }));
+  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
+  expect(await obsoleteResponsePrevented).toBe(true);
+  await expect(page.getByRole("dialog", { name: "Add API key", exact: true }).getByLabel("API key", { exact: true })).toHaveValue("");
+});

@@ -7,7 +7,7 @@
     </div>
   </header>
 
-  <form class="cw-environment-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/create" data-environment-form data-create-draft-actor="{{ form.draft_actor }}" data-create-draft-organization="{{ form.draft_organization }}" data-create-draft-id="{{ form.draft_id }}" data-create-draft-exact="{{ form.draft_return.requested() }}" data-create-draft-fresh="{{ form.draft_restore_allowed }}" data-create-draft-restored="{{ form.draft_restored }}" data-create-draft-url="/{{ organization.slug }}/_fragments/create-draft">
+  <form class="cw-environment-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/create" data-environment-form data-dirty-guard data-create-draft-actor="{{ form.draft_actor }}" data-create-draft-organization="{{ form.draft_organization }}" data-create-draft-id="{{ form.draft_id }}" data-create-draft-exact="{{ form.draft_return.requested() }}" data-create-draft-fresh="{{ form.draft_restore_allowed }}" data-create-draft-restored="{{ form.draft_restored }}" data-create-draft-url="/{{ organization.slug }}/_fragments/create-draft">
     <input type="hidden" name="_csrf" value="{{ form.csrf_token }}">
     <input type="hidden" name="preset_id" value="{{ form.preset_id }}">
     <input type="hidden" name="application_previews_explicit" value="true">

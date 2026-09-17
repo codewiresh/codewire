@@ -213,8 +213,19 @@
     cancelDraftRestore(state, form);
     const button = form.querySelector("[data-restore-create-draft]");
     if (button) button.disabled = true;
-    queueMicrotask(() => saveDraft(form, state));
+    const sequence = state.sequence;
+    queueMicrotask(() => { if (state.sequence === sequence) saveDraft(form, state); });
   };
+  document.addEventListener("codewire:discard-edits", (event) => {
+    if (!(event.target instanceof Element)) return;
+    event.target.querySelectorAll("[data-environment-form]").forEach((form) => {
+      const state = draftStates.get(form);
+      if (state) {
+        state.edited = true;
+        cancelDraftRestore(state, form);
+      }
+    });
+  });
   ["input", "change"].forEach((eventName) => document.addEventListener(eventName, (event) => {
     if (!(event.target instanceof Element)) return;
     const form = event.target.closest("[data-environment-form]");
@@ -473,13 +484,19 @@
     if (!(form instanceof HTMLFormElement)) return;
     if (event.target.closest("[data-add-repository]")) {
       appendTemplateRow(form, "[data-repository-template]", "[data-repository-rows]", "[data-repository-row]");
+      form.dispatchEvent(new Event("codewire:form-structure-edited", { bubbles: true }));
     } else if (event.target.closest("[data-remove-repository]")) {
       const rows = form.querySelectorAll("[data-repository-row]");
-      if (rows.length > 1) event.target.closest("[data-repository-row]")?.remove();
+      if (rows.length > 1) {
+        event.target.closest("[data-repository-row]")?.remove();
+        form.dispatchEvent(new Event("codewire:form-structure-edited", { bubbles: true }));
+      }
     } else if (event.target.closest("[data-add-app-port]")) {
       appendTemplateRow(form, "[data-app-port-template]", "[data-app-port-rows]", "[data-app-port-row]");
+      form.dispatchEvent(new Event("codewire:form-structure-edited", { bubbles: true }));
     } else if (event.target.closest("[data-remove-app-port]")) {
       event.target.closest("[data-app-port-row]")?.remove();
+      form.dispatchEvent(new Event("codewire:form-structure-edited", { bubbles: true }));
     } else if (event.target.closest("[data-reset-workspace-image]")) {
       const image = form.querySelector('[name="image"]');
       if (image instanceof HTMLInputElement) image.value = "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";

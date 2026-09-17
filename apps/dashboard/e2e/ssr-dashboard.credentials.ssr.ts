@@ -122,6 +122,13 @@ test.describe("managed provider credential browser journey", () => {
       const setupLink = page.getByRole("link", { name: "Connect GitHub", exact: true });
       await expect(setupLink).toHaveAttribute("href", settingsPath);
       await setupLink.click();
+      const discard = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+      await expect(discard).toBeVisible();
+      await discard.getByRole("button", { name: "Keep editing", exact: true }).click();
+      await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("setup-name-not-persisted");
+      await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
+      await setupLink.click();
+      await discard.getByRole("button", { name: "Discard changes", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}`);
       const returnLink = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
       await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
