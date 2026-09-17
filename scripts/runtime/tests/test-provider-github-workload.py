@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import os
+import re
 import socket
 import subprocess
 import signal
@@ -13,6 +14,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "dev/provider-github-workload.py").read_text()
+PUBLIC_ERROR = re.compile(
+    rb"\ACW_LIVE_GITHUB_ERROR:(?:preflight|binary|socket|account-hint|tmpfs|version|request|response)\n\Z"
+)
 
 
 class WorkloadTests(unittest.TestCase):
@@ -90,6 +94,10 @@ esac
         self.assertNotIn(b"PRIVATE_CANARY", completed.stdout + completed.stderr)
         return completed.returncode, completed.stdout, completed.stderr
 
+    def assert_public_failure(self, result):
+        self.assertEqual(result[:2], (1, b""))
+        self.assertRegex(result[2], PUBLIC_ERROR)
+
     def test_exact_stock_routing_isolation_and_account(self):
         self.assertEqual(self.execute(), (0, b"CW_LIVE_GITHUB_OK\n", b""))
 
@@ -97,10 +105,10 @@ esac
         for kind in ("wrong-version", "stderr", "failure", "malformed", "duplicate",
                      "wrong-login", "wrong-id", "wrong-type", "oversize"):
             with self.subTest(kind=kind):
-                self.assertEqual(self.execute(kind), (1, b"", b"CW_LIVE_GITHUB_ERROR\n"))
+                self.assert_public_failure(self.execute(kind))
 
     def test_timeout_drains_stock_process_and_removes_capture(self):
-        self.assertEqual(self.execute("timeout"), (1, b"", b"CW_LIVE_GITHUB_ERROR\n"))
+        self.assert_public_failure(self.execute("timeout"))
         pid = int((self.root / "pid").read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
@@ -120,10 +128,10 @@ esac
                     (self.root / "credential.sock").write_text("PRIVATE_CANARY")
                 else:
                     self.fake.chmod(0o777)
-                self.assertEqual(self.execute(), (1, b"", b"CW_LIVE_GITHUB_ERROR\n"))
+                self.assert_public_failure(self.execute())
 
     def test_unsupported_arguments_never_emit_success(self):
-        self.assertEqual(self.execute(args=("unsupported",)), (1, b"", b"CW_LIVE_GITHUB_ERROR\n"))
+        self.assert_public_failure(self.execute(args=("unsupported",)))
 
     def test_signal_drains_and_removes_private_capture(self):
         (self.root / "kind").write_text("timeout")
@@ -136,8 +144,7 @@ esac
             self.assertTrue((self.root / "pid").exists())
             child.send_signal(signal.SIGTERM)
             stdout, stderr = child.communicate(timeout=10)
-            self.assertEqual((child.returncode, stdout, stderr),
-                             (1, b"", b"CW_LIVE_GITHUB_ERROR\n"))
+            self.assert_public_failure((child.returncode, stdout, stderr))
             self.assertEqual(list(self.scratch.iterdir()), [])
             with self.assertRaises(ProcessLookupError):
                 os.kill(int((self.root / "pid").read_text()), 0)
@@ -160,8 +167,7 @@ esac
         (self.root / "kind").write_text("success")
         completed = subprocess.run(["/usr/bin/python3", "-c", script],
                                    capture_output=True, timeout=15)
-        self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
-                         (1, b"", b"CW_LIVE_GITHUB_ERROR\n"))
+        self.assert_public_failure((completed.returncode, completed.stdout, completed.stderr))
 
 
 if __name__ == "__main__":

@@ -25,6 +25,12 @@ VERSION = re.compile(
     rb"gh version 2\.97\.0 \([0-9]{4}-[0-9]{2}-[0-9]{2}\)\n"
     rb"https://github\.com/cli/cli/releases/tag/v2\.97\.0\n",
 )
+# The outer smoke retains this diagnostic privately. This finite, value-free
+# label is the only diagnostic that may cross the workload boundary.
+ERROR_STAGES = frozenset({
+    "preflight", "binary", "socket", "account-hint", "tmpfs", "version", "request", "response",
+})
+ERROR_STAGE = "preflight"
 
 
 def private_file(path: Path, mode: int) -> None:
@@ -71,25 +77,30 @@ def capture(args: list[str], environment: dict[str, str], scratch: Path,
 
 
 def run() -> None:
+    global ERROR_STAGE
     os.umask(0o077)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (CAPTURE_LIMIT, CAPTURE_LIMIT))
     if resource.getrlimit(resource.RLIMIT_CORE) != (0, 0):
         raise ValueError("core limit unavailable")
+    ERROR_STAGE = "binary"
     info = GH_BIN.lstat()
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
             or stat.S_IMODE(info.st_mode) != 0o755):
         raise ValueError("stock executable unavailable")
+    ERROR_STAGE = "socket"
     if not stat.S_ISSOCK(SOCKET.lstat().st_mode):
         raise ValueError("managed socket unavailable")
     # The prepared native artifact/image chain owns this pinned stock binary;
     # no download, alternate executable or caller-selected endpoint is allowed.
+    ERROR_STAGE = "account-hint"
     private_file(EXPECTED_LOGIN, 0o400)
     if EXPECTED_LOGIN.stat().st_size > 39:
         raise ValueError("invalid account hint")
     expected = EXPECTED_LOGIN.read_text(encoding="ascii")
     if LOGIN.fullmatch(expected) is None:
         raise ValueError("invalid account hint")
+    ERROR_STAGE = "tmpfs"
     if (SCRATCH_PARENT.is_symlink()
             or subprocess.check_output(
                 ["/usr/bin/findmnt", "-nro", "FSTYPE", "-T", str(SCRATCH_PARENT)],
@@ -109,10 +120,13 @@ def run() -> None:
             "GH_HOST": "github.com", "GH_TOKEN": "codewire-managed",
             "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "LC_ALL": "C",
         }
+        ERROR_STAGE = "version"
         if VERSION.fullmatch(capture(["--version"], environment, scratch, "version", 10)) is None:
             raise ValueError("stock version mismatch")
+        ERROR_STAGE = "request"
         payload = capture(["api", "--method", "GET", "user", "--hostname", "github.com"],
                           environment, scratch, "account", 110)
+        ERROR_STAGE = "response"
         account = json.loads(payload, object_pairs_hook=unique_object)
         if (not isinstance(account, dict) or account.get("login") != expected
                 or type(account.get("id")) is not int or account["id"] <= 0
@@ -125,6 +139,8 @@ def interrupted(_signal: int, _frame: object) -> None:
 
 
 def main(argv: list[str]) -> int:
+    global ERROR_STAGE
+    ERROR_STAGE = "preflight"
     try:
         for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
             signal.signal(number, interrupted)
@@ -132,7 +148,10 @@ def main(argv: list[str]) -> int:
             raise ValueError("unsupported arguments")
         run()
     except BaseException:
-        sys.stderr.write("CW_LIVE_GITHUB_ERROR\n")
+        # Do not surface exception text, exit status, provider headers, or
+        # payload. The label is an enumerated local execution stage only.
+        stage = ERROR_STAGE if ERROR_STAGE in ERROR_STAGES else "preflight"
+        sys.stderr.write("CW_LIVE_GITHUB_ERROR:" + stage + "\n")
         return 1
     sys.stdout.write("CW_LIVE_GITHUB_OK\n")
     return 0
