@@ -142,6 +142,13 @@ esac
             while not (self.root / "pid").exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertTrue((self.root / "pid").exists())
+            pid = int((self.root / "pid").read_text())
+            # A wrapper can be reaped while gh is left as an orphan/zombie
+            # under a container PID 1. Require direct ownership before cancel.
+            status = Path(f"/proc/{pid}/status").read_text()
+            parent = re.search(r"^PPid:\s+(\d+)$", status, re.MULTILINE)
+            self.assertIsNotNone(parent)
+            self.assertEqual(int(parent.group(1)), child.pid)
             child.send_signal(signal.SIGTERM)
             stdout, stderr = child.communicate(timeout=10)
             self.assert_public_failure((child.returncode, stdout, stderr))

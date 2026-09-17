@@ -54,12 +54,14 @@ def capture(args: list[str], environment: dict[str, str], scratch: Path,
     output, error = scratch / (label + ".out"), scratch / (label + ".err")
     with output.open("xb") as stdout, error.open("xb") as stderr:
         child = subprocess.Popen(
-            ["/usr/bin/timeout", "--kill-after=5s", str(duration) + "s", str(GH_BIN), *args],
+            [str(GH_BIN), *args],
             stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
             env=environment, cwd=scratch, start_new_session=True,
         )
         try:
-            code = child.wait(timeout=duration + 10)
+            # Own gh directly so cancellation reaps it, rather than killing a
+            # timeout wrapper and leaving gh to the host's orphan reaper.
+            code = child.wait(timeout=duration)
         except BaseException:
             try:
                 os.killpg(child.pid, signal.SIGKILL)
