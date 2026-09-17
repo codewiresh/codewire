@@ -55,6 +55,16 @@ pub(crate) fn canonical_id(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
 }
 
+// IdP account IDs are opaque (currently 32 hex bytes), not UUIDs. Match the
+// existing terminal account boundary and preserve identity bytes unchanged.
+pub(crate) fn actor_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 /// Reuse canonical cookie identity/2FA; only immutable public identity escapes.
 pub(crate) async fn actor(state: &AppState, cookie: HeaderValue) -> Result<String, ConnectError> {
     let mut headers = HeaderMap::new();
@@ -71,7 +81,7 @@ pub(crate) async fn actor(state: &AppState, cookie: HeaderValue) -> Result<Strin
         })?;
     enforce_two_factor(&identity)
         .map_err(|_| ConnectError::permission_denied("draft identity requires two-factor setup"))?;
-    if !canonical_id(&identity.id) {
+    if !actor_id(&identity.id) {
         return Err(ConnectError::unavailable(
             "draft identity metadata is invalid",
         ));
@@ -86,7 +96,8 @@ impl SelectionDraft {
         }
         let draft: Self = serde_json::from_slice(bytes).map_err(|_| ())?;
         if draft.version != 1
-            || ![&draft.actor, &draft.organization, &draft.draft]
+            || !actor_id(&draft.actor)
+            || ![&draft.organization, &draft.draft]
                 .into_iter()
                 .all(|id| canonical_id(id))
             || draft.saved_at > now
@@ -248,7 +259,7 @@ fn valid_ttl(value: &str) -> bool {
 mod tests {
     use super::*;
     const NOW: u64 = 4_000_000;
-    const ACTOR: &str = "00000000-0000-4000-8000-000000000001";
+    const ACTOR: &str = "11111111111140008000000000000001";
     const ORG: &str = "00000000-0000-4000-8000-000000000002";
     const DRAFT: &str = "00000000-0000-4000-8000-000000000003";
 
@@ -285,6 +296,43 @@ mod tests {
             format!("platform:id:{DRAFT}")
         );
         assert!(source.selection.secrets.as_option().unwrap().user.is_some());
+        for id in [
+            ACTOR,
+            "legacy-idp_account-ID",
+            "00000000-0000-4000-8000-000000000001",
+        ] {
+            assert!(actor_id(id));
+        }
+        for id in [
+            "",
+            "account:delimiter",
+            "actor@example.test",
+            "line\nbreak",
+            "non-ascii-é",
+        ] {
+            assert!(!actor_id(id));
+        }
+        assert!(!actor_id(&"a".repeat(129)));
+        let mut bounded = metadata();
+        bounded["actor"] = serde_json::json!("a".repeat(128));
+        assert!(parse(&bounded, NOW).is_ok());
+        bounded["actor"] = serde_json::json!("a".repeat(129));
+        assert!(parse(&bounded, NOW).is_err());
+        bounded["actor"] = serde_json::json!("Legacy_Actor-ID");
+        let exact = parse(&bounded, NOW).ok().unwrap();
+        assert!(exact.matches("Legacy_Actor-ID", ORG, DRAFT));
+        assert!(!exact.matches("legacy_actor-id", ORG, DRAFT));
+        for id in [
+            "",
+            "account:delimiter",
+            "actor@example.test",
+            "line\nbreak",
+            " actor",
+            "non-ascii-é",
+        ] {
+            bounded["actor"] = serde_json::json!(id);
+            assert!(parse(&bounded, NOW).is_err());
+        }
     }
 
     #[test]

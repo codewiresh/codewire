@@ -9,7 +9,7 @@ use axum::{
 
 use crate::{
     auth::{authenticated_identity, enforce_two_factor},
-    environment_drafts::{SelectionDraft, canonical_id},
+    environment_drafts::{SelectionDraft, actor_id, canonical_id},
     error::WebError,
     security::{canonical_cookie, valid_csrf_token},
     state::AppState,
@@ -126,7 +126,7 @@ pub(super) async fn restore(
         Err(WebError::Unauthorized) => return unavailable(StatusCode::UNAUTHORIZED),
         Err(_) => return unavailable(StatusCode::SERVICE_UNAVAILABLE),
     };
-    if enforce_two_factor(&identity).is_err() || !canonical_id(&identity.id) {
+    if enforce_two_factor(&identity).is_err() || !actor_id(&identity.id) {
         return unavailable(StatusCode::FORBIDDEN);
     }
     let cookie = canonical_cookie(&headers).expect("authority validated canonical cookie");
@@ -177,7 +177,7 @@ mod tests {
     const ORIGIN: &str = "https://dashboard.example.test";
     const DRAFT: &str = "00000000-0000-4000-8000-000000000003";
     const ORG: &str = "00000000-0000-4000-8000-000000000002";
-    const ACTOR: &str = "00000000-0000-4000-8000-000000000001";
+    const ACTOR: &str = "11111111111140008000000000000001";
     const NOW: u64 = 4_000_000;
 
     fn metadata() -> serde_json::Value {
@@ -226,13 +226,13 @@ mod tests {
         assert_eq!(form.csrf_token, "current-csrf");
         assert!(form.draft_restored && !form.draft_restore_allowed);
         let mut missing_preset = value;
-        missing_preset["selections"]["preset_id"] = serde_json::json!(ACTOR);
+        missing_preset["selections"]["preset_id"] = serde_json::json!(DRAFT);
         SelectionDraft::parse(missing_preset.to_string().as_bytes(), NOW)
             .ok()
             .unwrap()
             .hydrate(&mut form)
             .unwrap();
-        assert_eq!(form.preset_id, ACTOR);
+        assert_eq!(form.preset_id, DRAFT);
         assert!(!form.form_error.is_empty());
     }
 
@@ -324,7 +324,12 @@ mod tests {
                     if mode == "unauthenticated" { return StatusCode::UNAUTHORIZED.into_response(); }
                     if mode == "identity unavailable" { return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
                     if mode == "null identity" { return Json(serde_json::json!({"user": null})).into_response(); }
-                    return Json(serde_json::json!({"user": {"id": ACTOR, "email": "synthetic@example.test", "two_factor_enabled": mode != "two factor required"}})).into_response();
+                    let current_actor = match mode {
+                        "invalid identity" => "actor@example.test",
+                        "changed identity" => "different_opaque-account-ID",
+                        _ => ACTOR,
+                    };
+                    return Json(serde_json::json!({"user": {"id": current_actor, "email": "synthetic@example.test", "two_factor_enabled": mode != "two factor required"}})).into_response();
                 }
                 let bytes = if path.ends_with("/ListOrganizations") {
                     ListOrganizationsResponse {
@@ -387,10 +392,10 @@ mod tests {
             draft["actor"] = serde_json::json!(ORG);
         }
         if mode == "wrong organization" {
-            draft["organization"] = serde_json::json!(ACTOR);
+            draft["organization"] = serde_json::json!(DRAFT);
         }
         if mode == "wrong draft" {
-            draft["draft"] = serde_json::json!(ACTOR);
+            draft["draft"] = serde_json::json!(ORG);
         }
         let response = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -448,6 +453,8 @@ mod tests {
             ("null identity", StatusCode::UNAUTHORIZED),
             ("identity unavailable", StatusCode::SERVICE_UNAVAILABLE),
             ("two factor required", StatusCode::FORBIDDEN),
+            ("invalid identity", StatusCode::FORBIDDEN),
+            ("changed identity", StatusCode::FORBIDDEN),
             ("revoked membership", StatusCode::NOT_FOUND),
             ("wrong actor", StatusCode::FORBIDDEN),
             ("wrong organization", StatusCode::FORBIDDEN),

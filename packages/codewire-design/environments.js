@@ -5,6 +5,7 @@
   const draftCount = 5;
   const draftStates = new WeakMap();
   const canonicalId = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value) && value !== "00000000-0000-0000-0000-000000000000";
+  const actorId = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
   const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
   const draftNumber = (value, minimum, maximum) => typeof value === "string" && /^\d{1,7}$/.test(value) && Number(value) >= minimum && Number(value) <= maximum;
   const draftTtl = (value) => {
@@ -15,7 +16,7 @@
     return seconds >= 60 && seconds <= 31_536_000;
   };
   const validDraft = (draft) => {
-    if (!exactKeys(draft, ["version", "actor", "organization", "draft", "saved_at", "selections"]) || draft.version !== 1 || ![draft.actor, draft.organization, draft.draft].every(canonicalId) || !Number.isSafeInteger(draft.saved_at) || draft.saved_at < 0 || draft.saved_at > Date.now() || Date.now() - draft.saved_at >= draftAge) return false;
+    if (!exactKeys(draft, ["version", "actor", "organization", "draft", "saved_at", "selections"]) || draft.version !== 1 || !actorId(draft.actor) || ![draft.organization, draft.draft].every(canonicalId) || !Number.isSafeInteger(draft.saved_at) || draft.saved_at < 0 || draft.saved_at > Date.now() || Date.now() - draft.saved_at >= draftAge) return false;
     const value = draft.selections;
     if (!exactKeys(value, ["preset_id", "cpu", "memory", "disk", "ttl", "isolation_tier", "agents", "ports", "secret_project", "credential_profile", "include_org_secrets", "include_user_secrets"])) return false;
     if (!(value.preset_id === "" || canonicalId(value.preset_id)) || !draftNumber(value.cpu, 100, 128000) || !draftNumber(value.memory, 128, 1048576) || !draftNumber(value.disk, 1, 16384) || !draftTtl(value.ttl) || !["standard", "confidential"].includes(value.isolation_tier)) return false;
@@ -183,7 +184,7 @@
       if (!(form instanceof HTMLFormElement) || draftStates.has(form)) return;
       const state = { saved: null, edited: false, storageFailed: false, sequence: 0, controller: null };
       draftStates.set(form, state);
-      if (![form.dataset.createDraftActor, form.dataset.createDraftOrganization, form.dataset.createDraftId].every(canonicalId)) return;
+      if (!actorId(form.dataset.createDraftActor) || ![form.dataset.createDraftOrganization, form.dataset.createDraftId].every(canonicalId)) return;
       try {
         const saved = storedDrafts(form);
         state.saved = saved.find((draft) => draft.draft === form.dataset.createDraftId) || saved[0] || null;
