@@ -35,12 +35,16 @@ class FakeContext {
   page = new FakePage(this);
   session = false;
   signOuts = 0;
-  async newPage() { return this.page as never; }
+  async newPage() {
+    if (redirectMode === "hostile-browser-page") throw new Error("hostile-browser-private-payload-canary");
+    return this.page as never;
+  }
   async cookies() {
     return this.session ? [{ name: "codewire.session_token" }] : [];
   }
   async close() {
     this.page.abortPending();
+    if (redirectMode === "hostile-browser-close") throw new Error("hostile-browser-private-payload-canary");
     if (redirectMode === "cleanup-signal" && !cleanupSignalEmitted) {
       cleanupSignalEmitted = true;
       process.emit("SIGTERM", "SIGTERM");
@@ -152,6 +156,7 @@ mock.module("@playwright/test", () => ({
     launchPersistentContext: async (profile: string, options: { env?: Record<string, string> }) => {
       persistentProfile = profile;
       launchEnvironment = options.env ?? {};
+      if (redirectMode === "hostile-browser-launch") throw new Error("hostile-browser-private-payload-canary");
       activeContext = new FakeContext();
       return activeContext;
     },
@@ -360,6 +365,19 @@ test("opaque browser errors never enter original or cleanup diagnostics", async 
   expect(JSON.stringify(failure)).not.toContain("hostile-password-token-body-canary");
   expect(await readdir(value.config)).toEqual([]);
 });
+
+for (const stage of ["browser-launch", "browser-page", "browser-close"]) {
+  test(`opaque ${stage} failure is localized without disclosing payloads`, async () => {
+    const value = await fixture(`hostile-${stage}`);
+    const failure = await helper.main(value.args, 5_000).catch((error) => error);
+    expect(failure).toBeInstanceOf(helper.FixedStageError);
+    expect(failure.stage).toBe(stage);
+    expect(failure.message).toBe(stage);
+    expect(JSON.stringify(failure)).not.toContain("hostile-browser-private-payload-canary");
+    expect(await readdir(value.config)).toEqual([]);
+    expect(JSON.parse(await readFile(value.credential, "utf8"))).toEqual(document());
+  });
+}
 
 test("successful body with failed owned-directory cleanup is still nonzero", async () => {
   const value = await fixture();

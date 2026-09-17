@@ -71,6 +71,13 @@ function fail(stage: string): never {
   throw new FixedStageError(stage);
 }
 
+function fixedBrowserFailure(stage: string): (error: unknown) => never {
+  return (error) => {
+    if (error instanceof FixedStageError) throw error;
+    fail(stage);
+  };
+}
+
 export function parseOptions(argv: string[]): Options {
   const values = new Map<string, string>();
   const accepted = new Set([
@@ -493,13 +500,16 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
       },
       acceptDownloads: false,
       timeout: remaining(deadline),
-    });
-    page = await withinDeadline(() => context!.newPage(), deadline);
+    }).catch(fixedBrowserFailure("browser-launch"));
+    page = await withinDeadline(() => context!.newPage(), deadline)
+      .catch(fixedBrowserFailure("browser-page"));
     page.setDefaultTimeout(remaining(deadline));
     page.setDefaultNavigationTimeout(remaining(deadline));
     await withinDeadline(() => approveInOrdinaryBrowser(page!, challenge, credentials), deadline);
     await withinDeadline(() => signOut(page!), deadline);
-    await withinDeadline(() => context!.close(), deadline); context = undefined; page = undefined;
+    await withinDeadline(() => context!.close(), deadline)
+      .catch(fixedBrowserFailure("browser-close"));
+    context = undefined; page = undefined;
     const loginExit = await childExit(login, deadline);
     if (signalStage) fail(signalStage);
     if (loginExit !== 0) fail("cli-device-login");
