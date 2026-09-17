@@ -1277,6 +1277,10 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/provider-openai-smoke.sh|\
       scripts/runtime/dev/provider-openai-workload.py|\
       scripts/runtime/dev/private-checkout-smoke.sh|\
+      scripts/runtime/dev/smoke-dev-initial-private-checkout.sh|\
+      scripts/runtime/dev/hosted-checkout-fixture.py|\
+      scripts/runtime/dev/hosted-checkout-target.sh|\
+      scripts/runtime/dev/testdata/acceptance-identity.json|\
       scripts/runtime/dev/smoke-local-platform-sources.sh|\
       scripts/runtime/dev/run-secrets-credentials-acceptance.sh|\
       scripts/runtime/dev/native-mesh-listener.py|\
@@ -1290,6 +1294,8 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-provider-openai-smoke.sh|\
       scripts/runtime/tests/test-provider-openai-workload.py|\
       scripts/runtime/tests/test-private-checkout-smoke.sh|\
+      scripts/runtime/tests/test-dev-initial-private-checkout.sh|\
+      scripts/runtime/tests/test-hosted-checkout-fixture.py|\
       scripts/runtime/tests/test-local-platform-sources-smoke.sh|\
       scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh|\
       scripts/runtime/tests/test-native-mesh-listener.py|\
