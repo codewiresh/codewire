@@ -150,6 +150,75 @@ fn ambiguous_dispatch_has_no_retry_advice_or_private_status() {
     }
 }
 
+#[test]
+fn setup_readiness_is_required_only_before_launch_and_restart() {
+    assert!(Acknowledgement::Launch.requires_setup_ready());
+    assert!(Acknowledgement::Restart(SESSION_ID.into()).requires_setup_ready());
+    assert!(!Acknowledgement::Stop(SESSION_ID.into()).requires_setup_ready());
+    assert!(require_setup_ready(Ok(Some((true, None)))).is_ok());
+    for setup in [
+        None,
+        Some((false, None)),
+        Some((true, Some("claimed".into()))),
+        Some((true, Some("running".into()))),
+        Some((true, Some("reaping".into()))),
+        Some((true, Some(String::new()))),
+    ] {
+        assert!(matches!(
+            require_setup_ready(Ok(setup)),
+            Err(OrganizationRuntimeMutationError::Known(
+                AppError::Precondition(_)
+            ))
+        ));
+    }
+}
+
+#[test]
+fn local_setup_query_failure_is_known_without_retry_or_private_detail() {
+    let Err(OrganizationRuntimeMutationError::Known(error)) =
+        require_setup_ready(Err(sqlx::Error::Protocol(PRIVATE_SENTINEL.into())))
+    else {
+        panic!("a local query failure before dispatch must be known");
+    };
+    let rendered = crate::connect::rendered_workspace_error(&error, Some("synthetic-request"));
+    assert!(!format!("{rendered:?}").contains(PRIVATE_SENTINEL));
+    assert!(
+        !rendered
+            .details
+            .iter()
+            .any(|detail| matches!(detail, ConnectErrorDetail::RetryInfo(_)))
+    );
+}
+
+#[tokio::test]
+async fn stalled_setup_read_expires_known_without_polling_dispatch() {
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let observed = dispatched.clone();
+    let dispatch = async move {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, OrganizationRuntimeMutationError>(())
+    };
+    let result = async {
+        // The read is permanently pending, so this exercises timeout rather
+        // than relying on a scheduler race or a live database connection.
+        check_setup_readiness(std::future::pending(), Duration::ZERO).await?;
+        dispatch.await
+    }
+    .await;
+    let Err(OrganizationRuntimeMutationError::Known(error)) = result else {
+        panic!("an expired local read before dispatch must be known");
+    };
+    assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+    let rendered = crate::connect::rendered_workspace_error(&error, Some("synthetic-request"));
+    assert!(!format!("{rendered:?}").contains("outcome is unknown"));
+    assert!(
+        !rendered
+            .details
+            .iter()
+            .any(|detail| matches!(detail, ConnectErrorDetail::RetryInfo(_)))
+    );
+}
+
 struct Fixture {
     pool: PgPool,
     id: String,
@@ -196,6 +265,8 @@ impl Fixture {
             .bind(&id).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO environments (id, org_id, created_by, type, state, desired_state, preset_id, project_spec) VALUES ($1, $1, $1, 'sandbox', 'running', 'started', $1, '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)")
             .bind(&id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sandbox_environment_backend (environment_id, namespace, setup_complete) VALUES ($1, 'synthetic-session-admission', true)")
+            .bind(&id).execute(&pool).await.unwrap();
         Self { pool, id }
     }
 
@@ -230,6 +301,126 @@ impl Fixture {
         }
         self.pool.close().await;
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_setup_readiness_rejects_launch_restart_without_dispatch_and_preserves_stop() {
+    let fixture = Fixture::seed().await;
+    for (complete, owner) in [
+        (false, None),
+        (true, Some("claimed")),
+        (true, Some("running")),
+        (true, Some("reaping")),
+    ] {
+        sqlx::query(
+            "UPDATE sandbox_environment_backend SET setup_complete = $2, \
+               setup_owner_generation = CASE WHEN $3::text IS NULL THEN NULL ELSE 1 END, \
+               setup_owner_activity_id = CASE WHEN $3::text IS NULL THEN NULL ELSE 'synthetic-setup' END, \
+               setup_owner_attempt = CASE WHEN $3::text IS NULL THEN NULL ELSE 1 END, \
+               setup_owner_phase = CASE WHEN $3::text IS NULL THEN NULL ELSE 0 END, \
+               setup_owner_status = $3, \
+               setup_owner_pod_uid = CASE WHEN $3::text IN ('running', 'reaping') THEN 'synthetic-pod' ELSE NULL END \
+             WHERE environment_id = $1",
+        )
+        .bind(&fixture.id).bind(complete).bind(owner)
+        .execute(&fixture.pool).await.unwrap();
+        assert_setup_rejects_without_dispatch(&fixture).await;
+    }
+    sqlx::query("DELETE FROM sandbox_environment_backend WHERE environment_id = $1")
+        .bind(&fixture.id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert_setup_rejects_without_dispatch(&fixture).await;
+
+    sqlx::query("INSERT INTO sandbox_environment_backend (environment_id, namespace, setup_complete) VALUES ($1, 'synthetic-session-admission', true)")
+        .bind(&fixture.id).execute(&fixture.pool).await.unwrap();
+    for acknowledgement in [
+        Acknowledgement::Launch,
+        Acknowledgement::Restart(SESSION_ID.into()),
+    ] {
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let observed = dispatched.clone();
+        let record = run(
+            &fixture.pool,
+            &fixture.id,
+            &fixture.id,
+            acknowledgement,
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(running_record()))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(record.state, v1::SessionLifecycleState::Running as i32);
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+        assert!(
+            unresolved_organization_mutation_leases(&fixture.pool, &fixture.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    fixture.cleanup().await;
+}
+
+async fn assert_setup_rejects_without_dispatch(fixture: &Fixture) {
+    for acknowledgement in [
+        Acknowledgement::Launch,
+        Acknowledgement::Restart(SESSION_ID.into()),
+    ] {
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let observed = dispatched.clone();
+        let error = run(
+            &fixture.pool,
+            &fixture.id,
+            &fixture.id,
+            acknowledgement,
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(running_record()))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Precondition(_)));
+        assert!(!format!("{error:?}").contains("outcome is unknown"));
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+        assert!(
+            unresolved_organization_mutation_leases(&fixture.pool, &fixture.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // A blocked setup must not prevent stopping an already existing shell.
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let observed = dispatched.clone();
+    let record = run(
+        &fixture.pool,
+        &fixture.id,
+        &fixture.id,
+        Acknowledgement::Stop(SESSION_ID.into()),
+        async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            let mut stopped = running_record();
+            stopped.state = v1::SessionLifecycleState::Stopped as i32;
+            stopped.finished_at = Some(Default::default());
+            Ok(Some(stopped))
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(record.state, v1::SessionLifecycleState::Stopped as i32);
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    assert!(
+        unresolved_organization_mutation_leases(&fixture.pool, &fixture.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

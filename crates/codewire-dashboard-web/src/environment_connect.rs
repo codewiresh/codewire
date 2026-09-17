@@ -104,6 +104,17 @@ pub(crate) async fn environment(
     org_id: &str,
     environment_id: &str,
 ) -> Result<EnvironmentRow, ConnectError> {
+    environment_data(state, cookie, org_id, environment_id)
+        .await
+        .map(environment_row)
+}
+
+pub(crate) async fn environment_data(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+    environment_id: &str,
+) -> Result<Environment, ConnectError> {
     let response = environment_client(state, cookie)
         .get_environment(GetEnvironmentRequest {
             org_id: org_id.to_owned(),
@@ -115,7 +126,6 @@ pub(crate) async fn environment(
     response
         .environment
         .into_option()
-        .map(environment_row)
         .ok_or_else(|| ConnectError::not_found("environment not found"))
 }
 
@@ -593,7 +603,7 @@ pub(crate) async fn delete_port(
     Ok(())
 }
 
-fn environment_row(environment: Environment) -> EnvironmentRow {
+pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
     let sources = source_summary(&environment);
     let state = state_name(environment.state.to_i32());
     let display_name = if environment.name.trim().is_empty() {

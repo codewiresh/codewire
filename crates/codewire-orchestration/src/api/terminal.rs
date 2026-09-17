@@ -44,6 +44,8 @@ const TERMINAL_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type HmacSha256 = Hmac<Sha256>;
 
+mod durable;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TerminalTicketClaims {
     user_id: String,
@@ -76,10 +78,24 @@ pub(crate) fn issue_terminal_ticket_core(
 pub async fn terminal_websocket(
     State(state): State<ApiState>,
     Path((org_id, env_id)): Path<(String, String)>,
-    Query(query): Query<TerminalQuery>,
     request: Request<Body>,
 ) -> Response {
     let headers = request.headers().clone();
+    match durable::coordinates(&headers, request.uri().query()) {
+        Ok(Some(coordinates)) => {
+            return durable::websocket(state, org_id, env_id, coordinates, request).await;
+        }
+        Err(()) => {
+            return terminal_error(StatusCode::BAD_REQUEST, "invalid durable terminal request");
+        }
+        Ok(None) => {}
+    }
+    // Preserve the legacy query/authentication and byte protocol. A durable
+    // request cannot reach this one-shot shell-launching path by downgrade.
+    let Query(query) = match Query::<TerminalQuery>::try_from_uri(request.uri()) {
+        Ok(query) => query,
+        Err(error) => return error.into_response(),
+    };
     let user = match authenticate_socket_request(&state, &headers, &query.ticket).await {
         Ok(user) => user,
         Err(response) => return response,

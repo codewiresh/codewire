@@ -18,6 +18,7 @@ pub(crate) struct AppState {
     pub(crate) github_app_slug: String,
     pub(crate) http: reqwest::Client,
     pub(crate) credential_http: reqwest::Client,
+    pub(crate) session_http: reqwest::Client,
 }
 
 impl AppState {
@@ -43,6 +44,11 @@ impl AppState {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("static dashboard credential HTTP client configuration"),
+            session_http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(80))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("static dashboard session HTTP client configuration"),
         }
     }
 }

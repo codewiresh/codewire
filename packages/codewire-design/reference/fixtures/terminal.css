@@ -1,4 +1,4 @@
-.terminal-fixture { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100dvh; padding: var(--space-4); gap: var(--space-4); }
+.terminal-fixture:not(.cw-sandbox-detail-main) { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100dvh; padding: var(--space-4); gap: var(--space-4); }
 .terminal-fixture > header h1 { margin: var(--space-3) 0; font-size: 1.25rem; }
 .terminal-fixture > header p { margin: 0; color: var(--text-muted); }
 .terminal-fixture .cw-sandbox-terminal { min-height: 0; border: 1px solid #27272a; }
