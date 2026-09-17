@@ -110,7 +110,7 @@
       storage.setItem(draftKey(draft), bytes);
       if (storage.getItem(draftKey(draft)) !== bytes) throw new Error("draft storage mismatch");
       storedDrafts(form);
-      draftStatus(form, "Selections saved in this tab. Names, preview labels, image overrides, repository URLs and commands are not saved.");
+      draftStatus(form, "Selections saved in this tab.");
     } catch {
       state.storageFailed = true;
       draftStatus(form, "Selections cannot be saved in this browser. Keep this form open or re-enter them after returning.");
