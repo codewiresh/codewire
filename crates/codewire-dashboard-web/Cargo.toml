@@ -30,11 +30,9 @@ sha2 = { workspace = true }
 rand = { workspace = true }
 qrcode = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 subtle = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }

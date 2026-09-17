@@ -6,13 +6,18 @@
     </div>
   </header>
 
-  <form class="cw-environment-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/create" data-environment-form>
+  <form class="cw-environment-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/create" data-environment-form data-create-draft-actor="{{ form.draft_actor }}" data-create-draft-organization="{{ form.draft_organization }}" data-create-draft-id="{{ form.draft_id }}" data-create-draft-fresh="{{ form.draft_restore_allowed }}" data-create-draft-restored="{{ form.draft_restored }}" data-create-draft-url="/{{ organization.slug }}/_fragments/create-draft">
     <input type="hidden" name="_csrf" value="{{ form.csrf_token }}">
     <input type="hidden" name="preset_id" value="{{ form.preset_id }}">
     <input type="hidden" name="application_previews_explicit" value="true">
 
     <div class="cw-drawer-body">
       {% if !form.form_error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ form.form_error }}</div>{% endif %}
+      <section aria-label="Saved Create selections">
+        <p class="cw-field-help">Resource, agent, preview and source selections are saved for 30 minutes in this tab. Re-enter names, preview labels, image overrides, repository URLs and commands; these are not saved.</p>
+        <button class="cw-button cw-button--outline" type="button" data-restore-create-draft hidden>Restore saved selections</button>
+        <p class="cw-field-help" role="status" data-create-draft-status>{% if form.draft_restored %}Saved selections restored against current options. Review them before creating a Sandbox.{% endif %}</p>
+      </section>
 
       <div class="cw-field">
         <label class="cw-label" for="environment-name">Name</label>

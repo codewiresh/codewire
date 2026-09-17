@@ -1,4 +1,249 @@
 (() => {
+  const draftPrefix = "codewire.create-selections.v1:";
+  const draftLimit = 8192;
+  const draftAge = 30 * 60 * 1000;
+  const draftCount = 5;
+  const draftStates = new WeakMap();
+  const canonicalId = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value) && value !== "00000000-0000-0000-0000-000000000000";
+  const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+  const draftNumber = (value, minimum, maximum) => typeof value === "string" && /^\d{1,7}$/.test(value) && Number(value) >= minimum && Number(value) <= maximum;
+  const draftTtl = (value) => {
+    if (["", "0", "infinity"].includes(value)) return true;
+    if (typeof value !== "string" || value.length > 10) return false;
+    const match = value.match(/^(\d+)([smhd]?)$/);
+    const seconds = match && Number(match[1]) * ({ s: 1, m: 60, h: 3600, d: 86400, "": 60 }[match[2]]);
+    return seconds >= 60 && seconds <= 31_536_000;
+  };
+  const validDraft = (draft) => {
+    if (!exactKeys(draft, ["version", "actor", "organization", "draft", "saved_at", "selections"]) || draft.version !== 1 || ![draft.actor, draft.organization, draft.draft].every(canonicalId) || !Number.isSafeInteger(draft.saved_at) || draft.saved_at < 0 || draft.saved_at > Date.now() || Date.now() - draft.saved_at >= draftAge) return false;
+    const value = draft.selections;
+    if (!exactKeys(value, ["preset_id", "cpu", "memory", "disk", "ttl", "isolation_tier", "agents", "ports", "secret_project", "credential_profile", "include_org_secrets", "include_user_secrets"])) return false;
+    if (!(value.preset_id === "" || canonicalId(value.preset_id)) || !draftNumber(value.cpu, 100, 128000) || !draftNumber(value.memory, 128, 1048576) || !draftNumber(value.disk, 1, 16384) || !draftTtl(value.ttl) || !["standard", "confidential"].includes(value.isolation_tier)) return false;
+    if (!Array.isArray(value.agents) || value.agents.length > 6 || new Set(value.agents).size !== value.agents.length || value.agents.some((id) => !["claude-code", "codex", "gemini-cli", "kimi-code", "pi", "aider"].includes(id))) return false;
+    if (!Array.isArray(value.ports) || value.ports.length > 16 || value.ports.some((port) => !exactKeys(port, ["port", "access"]) || !draftNumber(port.port, 1, 65535) || !["creator", "org_members", "public"].includes(port.access))) return false;
+    if (!(value.secret_project === "" || canonicalId(value.secret_project)) || typeof value.credential_profile !== "string" || typeof value.include_org_secrets !== "boolean" || typeof value.include_user_secrets !== "boolean") return false;
+    if (value.credential_profile !== "") {
+      const parts = value.credential_profile.split("@");
+      // Revision bytes stay decimal text, including values beyond JS Number.
+      if (parts.length !== 2 || !canonicalId(parts[0]) || !/^[1-9]\d{0,18}$/.test(parts[1]) || BigInt(parts[1]) > 9223372036854775807n) return false;
+    }
+    return true;
+  };
+  const draftStatus = (form, message) => {
+    const status = form.querySelector("[data-create-draft-status]");
+    if (status) status.textContent = message;
+  };
+  const draftKey = (draft) => `${draftPrefix}${draft.actor}:${draft.organization}:${draft.draft}`;
+  const storedDrafts = (form) => {
+    const storage = window.sessionStorage;
+    const namespace = `${draftPrefix}${form.dataset.createDraftActor}:${form.dataset.createDraftOrganization}:`;
+    // Read only this feature's keys/values, with a finite scan and entry bound.
+    if (storage.length > 1000) throw new Error("storage scan limit");
+    const found = [];
+    const stale = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (!key?.startsWith(draftPrefix)) continue;
+      const bytes = storage.getItem(key);
+      let draft = null;
+      if (bytes && new TextEncoder().encode(bytes).length <= draftLimit) {
+        try { draft = JSON.parse(bytes); } catch { /* Invalid owned data is discarded. */ }
+      }
+      if (!validDraft(draft) || draftKey(draft) !== key) stale.push(key);
+      else found.push(draft);
+    }
+    stale.forEach((key) => storage.removeItem(key));
+    found.sort((a, b) => b.saved_at - a.saved_at);
+    found.slice(draftCount).forEach((draft) => storage.removeItem(draftKey(draft)));
+    return found.slice(0, draftCount).filter((draft) => draftKey(draft).startsWith(namespace));
+  };
+  const draftFormValue = (form, name) => form.elements.namedItem(name)?.value?.trim() || "";
+  const currentDraft = (form) => ({
+    version: 1, actor: form.dataset.createDraftActor, organization: form.dataset.createDraftOrganization,
+    draft: form.dataset.createDraftId, saved_at: Date.now(),
+    selections: {
+      preset_id: draftFormValue(form, "preset_id"), cpu: draftFormValue(form, "cpu"),
+      memory: draftFormValue(form, "memory"), disk: draftFormValue(form, "disk"),
+      ttl: draftFormValue(form, "ttl").toLowerCase(), isolation_tier: draftFormValue(form, "isolation_tier"),
+      agents: Array.from(form.querySelectorAll('[name="agent"]:checked'), (field) => field.value),
+      ports: Array.from(form.querySelectorAll("[data-app-port-row]"), (row) => ({
+        port: row.querySelector('[name^="app_port_"]')?.value.trim() || "",
+        access: row.querySelector('[name^="app_access_"]')?.value || "",
+      })),
+      secret_project: draftFormValue(form, "secret_project"), credential_profile: draftFormValue(form, "credential_profile"),
+      include_org_secrets: form.querySelector('[name="include_org_secrets"]')?.checked === true,
+      include_user_secrets: form.querySelector('[name="include_user_secrets"]')?.checked === true,
+    },
+  });
+  const pristineDraftForm = (form) => Array.from(form.elements).every((field) => {
+    if (field instanceof HTMLSelectElement) {
+      const options = Array.from(field.options);
+      const defaults = options.filter((option) => option.defaultSelected);
+      return field.selectedIndex === (defaults.length ? options.indexOf(defaults.at(-1)) : 0);
+    }
+    if (field instanceof HTMLInputElement && ["checkbox", "radio"].includes(field.type)) return field.checked === field.defaultChecked;
+    if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) return field.value === field.defaultValue;
+    return true;
+  });
+  const draftIsOpen = (form) => {
+    const drawer = form.closest("[data-drawer]");
+    return form.isConnected && (!drawer || (!drawer.hidden && drawer.dataset.open === "true"));
+  };
+  const cancelDraftRestore = (state, form) => {
+    if (state.controller && form?.isConnected) draftStatus(form, "Restore cancelled. Your inputs have been kept; review them or restore again before creating a Sandbox.");
+    state.sequence += 1;
+    state.controller?.abort();
+    state.controller = null;
+  };
+  const saveDraft = (form, state) => {
+    if (!form.isConnected || state.storageFailed) return;
+    const draft = currentDraft(form);
+    if (!validDraft(draft)) {
+      draftStatus(form, "Some selections are not ready to save. Complete their fields; free-form inputs are never saved.");
+      return;
+    }
+    try {
+      const bytes = JSON.stringify(draft);
+      if (new TextEncoder().encode(bytes).length > draftLimit) throw new Error("draft size limit");
+      const storage = window.sessionStorage;
+      storage.setItem(draftKey(draft), bytes);
+      if (storage.getItem(draftKey(draft)) !== bytes) throw new Error("draft storage mismatch");
+      storedDrafts(form);
+      draftStatus(form, "Selections saved in this tab. Names, preview labels, image overrides, repository URLs and commands are not saved.");
+    } catch {
+      state.storageFailed = true;
+      draftStatus(form, "Selections cannot be saved in this browser. Keep this form open or re-enter them after returning.");
+    }
+  };
+  const readDraftHtml = async (response) => {
+    if (!response.body) throw new Error("missing draft response");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let size = 0;
+    let text = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 1024 * 1024) throw new Error("draft response limit");
+        text += decoder.decode(value, { stream: true });
+      }
+      return text + decoder.decode();
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  };
+  const restoreDraft = async (form, state) => {
+    if (!state || !state.saved || state.edited || state.storageFailed || form.dataset.createDraftFresh !== "true" || !draftIsOpen(form) || !pristineDraftForm(form)) return;
+    cancelDraftRestore(state, form);
+    const sequence = state.sequence;
+    const controller = new AbortController();
+    state.controller = controller;
+    const button = form.querySelector("[data-restore-create-draft]");
+    if (button) button.disabled = true;
+    draftStatus(form, "Checking current options before restoring selections…");
+    const timer = window.setTimeout(() => controller.abort(), 40_000);
+    try {
+      if (!validDraft(state.saved)) throw new Error("draft expired");
+      const endpoint = new URL(form.dataset.createDraftUrl, window.location.origin);
+      if (endpoint.origin !== window.location.origin || !endpoint.pathname.endsWith("/_fragments/create-draft") || endpoint.search || endpoint.hash) throw new Error("invalid draft endpoint");
+      const response = await fetch(endpoint, {
+        method: "POST", credentials: "same-origin", redirect: "error", signal: controller.signal,
+        headers: { Accept: "text/html" },
+        body: new URLSearchParams({ _csrf: draftFormValue(form, "_csrf"), creation_draft: state.saved.draft, metadata: JSON.stringify(state.saved) }),
+      });
+      if (!response.ok || !response.headers.get("content-type")?.startsWith("text/html")) throw new Error("draft rejected");
+      const text = await readDraftHtml(response);
+      if (controller.signal.aborted || state.sequence !== sequence || state.edited || !draftIsOpen(form)) return;
+      if (!pristineDraftForm(form)) {
+        state.edited = true;
+        draftStatus(form, "Restore cancelled because this form changed. Your inputs have been kept; review them before creating a Sandbox.");
+        return;
+      }
+      const parsed = new DOMParser().parseFromString(text, "text/html");
+      const cards = parsed.querySelectorAll("#environment-create-card");
+      const replacement = cards.length === 1 && cards[0];
+      const restored = replacement?.querySelector("[data-environment-form]");
+      if (!restored || restored.dataset.createDraftActor !== form.dataset.createDraftActor || restored.dataset.createDraftOrganization !== form.dataset.createDraftOrganization || restored.dataset.createDraftId !== state.saved.draft || restored.dataset.createDraftRestored !== "true" || parsed.querySelector("script")) throw new Error("invalid restored form");
+      form.closest("#environment-create-card")?.replaceWith(replacement);
+      wireDraftForms();
+      restored.querySelector('[name="name"]')?.focus();
+    } catch {
+      if (!state.edited && state.sequence === sequence && draftIsOpen(form)) draftStatus(form, "Saved selections could not be restored. Reload and review current options; no Sandbox was created.");
+    } finally {
+      window.clearTimeout(timer);
+      if (state.controller === controller) state.controller = null;
+      if (button && form.isConnected) button.disabled = state.edited || state.storageFailed || !pristineDraftForm(form);
+    }
+  };
+  const wireDraftForms = () => {
+    document.querySelectorAll("[data-environment-form][data-create-draft-id]").forEach((form) => {
+      if (!(form instanceof HTMLFormElement) || draftStates.has(form)) return;
+      const state = { saved: null, edited: false, storageFailed: false, sequence: 0, controller: null };
+      draftStates.set(form, state);
+      if (![form.dataset.createDraftActor, form.dataset.createDraftOrganization, form.dataset.createDraftId].every(canonicalId)) return;
+      try {
+        const saved = storedDrafts(form);
+        state.saved = saved.find((draft) => draft.draft === form.dataset.createDraftId) || saved[0] || null;
+        const button = form.querySelector("[data-restore-create-draft]");
+        if (button) button.hidden = !state.saved || form.dataset.createDraftFresh !== "true";
+      } catch {
+        state.storageFailed = true;
+        draftStatus(form, "Selections cannot be saved in this browser. Keep this form open or re-enter them after returning.");
+      }
+      const owner = form.closest("[data-drawer]") || form.parentElement;
+      if (owner) {
+        const observer = new MutationObserver(() => {
+          if (!form.isConnected) { cancelDraftRestore(state, form); observer.disconnect(); }
+          else if (!draftIsOpen(form)) cancelDraftRestore(state, form);
+        });
+        observer.observe(owner, { childList: true, attributes: true, attributeFilter: ["hidden", "data-open"] });
+      }
+    });
+  };
+  const editDraft = (form) => {
+    const state = draftStates.get(form);
+    if (!state) return;
+    state.edited = true;
+    cancelDraftRestore(state, form);
+    const button = form.querySelector("[data-restore-create-draft]");
+    if (button) button.disabled = true;
+    queueMicrotask(() => saveDraft(form, state));
+  };
+  ["input", "change"].forEach((eventName) => document.addEventListener(eventName, (event) => {
+    if (!(event.target instanceof Element)) return;
+    const form = event.target.closest("[data-environment-form]");
+    if (form instanceof HTMLFormElement) editDraft(form);
+  }, true));
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const card = event.target.closest("#environment-create-card");
+    const form = card?.querySelector("[data-environment-form]");
+    if (!(form instanceof HTMLFormElement)) return;
+    const restore = event.target.closest("[data-restore-create-draft]");
+    if (restore) { void restoreDraft(form, draftStates.get(form)); return; }
+    if (event.target.closest("button")) editDraft(form);
+  }, true);
+  document.addEventListener("htmx:beforeSwap", (event) => {
+    document.querySelectorAll("[data-environment-form]").forEach((form) => {
+      if (event.detail?.target?.contains(form)) {
+        const state = draftStates.get(form);
+        if (state) cancelDraftRestore(state, form);
+      }
+    });
+  });
+  document.addEventListener("htmx:afterSwap", wireDraftForms);
+  window.addEventListener("pagehide", () => {
+    document.querySelectorAll("[data-environment-form]").forEach((form) => {
+      const state = draftStates.get(form);
+      if (state) cancelDraftRestore(state, form);
+    });
+  });
+  window.addEventListener("pageshow", wireDraftForms);
+  wireDraftForms();
+
   const nextIndex = (container, selector, minimum = 0) => {
     let highest = minimum - 1;
     container.querySelectorAll(selector).forEach((row) => {

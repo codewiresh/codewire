@@ -71,6 +71,47 @@ async function openRowActions(row: Locator) {
   await trigger.click();
 }
 
+async function assertExplicitCreateRecovery(page: Page) {
+  const dispatches: string[] = [];
+  const watchDispatch = (request: import("@playwright/test").Request) => {
+    if (/PrepareEnvironment|\/_actions\/sandboxes\/(?:create|prepare)/.test(request.url())) dispatches.push(request.url());
+  };
+  page.on("request", watchDispatch);
+  try {
+    const form = page.locator("[data-environment-form]");
+    await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
+    await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+    if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
+      await page.locator("[data-create-resources] > summary").click();
+    }
+    await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+    await page.getByLabel("TTL").fill("8h");
+    await page.getByLabel("Name", { exact: true }).fill("draft-name-not-persisted");
+    await page.getByLabel("Repository URL", { exact: true }).fill("https://draft-canary.invalid/private-repository");
+    await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+    await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    const csrf = await page.locator('[name="_csrf"]').inputValue();
+    const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
+    await page.getByRole("button", { name: "Restore saved selections" }).click();
+    const response = await responsePromise;
+    expect(response.status()).toBe(200);
+    expect(response.headers()["cache-control"]).toBe("private, no-store");
+    expect(response.headers()["vary"]).toBe("Cookie");
+    expect(response.headers()["set-cookie"]).toBeUndefined();
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
+    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+    await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
+    await expect(page.locator('[name="_csrf"]')).toHaveValue(csrf);
+    await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
+    expect(dispatches).toEqual([]);
+  } finally { page.off("request", watchDispatch); }
+}
+
 async function issueTerminalTicket(page: Page): Promise<string> {
   const response = await page.request.post(
     `${serverUrl}/codewire.console.v1.EnvironmentSetupService/IssueTerminalTicket`,
@@ -279,6 +320,9 @@ test.describe.serial("server-rendered environments", () => {
     expect(disallowedBrowserCalls).toEqual([]);
     expect(staleAssetRequests).toEqual([]);
     await expect(page).toHaveScreenshot("environments-create-desktop.png");
+    await assertExplicitCreateRecovery(page);
+    expect(disallowedBrowserCalls).toEqual([]);
+    expect(staleAssetRequests).toEqual([]);
     await page.keyboard.press("Escape");
     await expect(page).toHaveURL(new RegExp(`/${slug}/$`));
     await expect(page.locator("[data-drawer]")).toBeHidden();
@@ -433,6 +477,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(dimensions.clientWidth).toBeGreaterThan(0);
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
     await expect(page.getByLabel("Secret project", { exact: true })).toBeEnabled();
+    await assertExplicitCreateRecovery(page);
   });
 
   test("selects a platform secret project and preserves it after a form error", async ({ page, isMobile }) => {

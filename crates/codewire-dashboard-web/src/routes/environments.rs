@@ -245,6 +245,11 @@ impl EnvironmentSubmission {
         }
         EnvironmentCreateFormView {
             csrf_token: token,
+            draft_actor: String::new(),
+            draft_organization: String::new(),
+            draft_id: uuid::Uuid::new_v4().to_string(),
+            draft_restore_allowed: false,
+            draft_restored: false,
             expanded: true,
             name: self.name.trim().to_owned(),
             preset_id: self.preset_id.trim().to_owned(),
@@ -1515,6 +1520,8 @@ async fn build_page(
     mut form: EnvironmentCreateFormView,
     is_admin: bool,
 ) -> Result<EnvironmentsPageView, ConnectError> {
+    form.draft_actor = crate::environment_drafts::actor(state, cookie.clone()).await?;
+    form.draft_organization.clone_from(&organization.id);
     let mut environments =
         filtered_environments(state, cookie.clone(), &organization.id, query).await?;
     let confidential_actions_allowed =
@@ -1749,9 +1756,14 @@ fn render_environments_page(
     }
 }
 
-fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormView {
+pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormView {
     EnvironmentCreateFormView {
         csrf_token: token,
+        draft_actor: String::new(),
+        draft_organization: String::new(),
+        draft_id: uuid::Uuid::new_v4().to_string(),
+        draft_restore_allowed: true,
+        draft_restored: false,
         expanded,
         name: String::new(),
         preset_id: String::new(),
@@ -1789,7 +1801,10 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
     }
 }
 
-fn hydrate_options(form: &mut EnvironmentCreateFormView, options: EnvironmentCreateOptions) {
+pub(super) fn hydrate_options(
+    form: &mut EnvironmentCreateFormView,
+    options: EnvironmentCreateOptions,
+) {
     form.preview_base_domain = options.preview_base_domain;
     form.presets = options.presets;
     form.agents = options.agents;

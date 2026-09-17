@@ -14,6 +14,7 @@ mod credentials_connect;
 mod dependency;
 mod docs;
 mod environment_connect;
+mod environment_drafts;
 mod environment_source_forms;
 mod environment_sources;
 mod error;
