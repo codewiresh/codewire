@@ -306,20 +306,31 @@ pub(crate) struct SettingsData {
     pub(crate) git_email: String,
 }
 
-#[derive(Debug)]
+#[derive(Default)]
 pub(crate) struct SettingsPageView {
-    pub(crate) data: SettingsData,
+    pub(crate) account_id: String,
+    pub(crate) account_name: String,
+    pub(crate) account_email: String,
+    pub(crate) email_verified: bool,
+    pub(crate) account_created: String,
+    pub(crate) two_factor_enabled: bool,
+    pub(crate) sessions_available: bool,
+    pub(crate) current_session_id: String,
+    pub(crate) current_session_expiry: String,
+    pub(crate) sessions: Vec<AccountSessionRowView>,
+    pub(crate) next_sessions_url: String,
+    pub(crate) first_sessions_url: String,
     pub(crate) csrf_token: String,
     pub(crate) message: String,
     pub(crate) error: String,
 }
 
-#[derive(Debug)]
-pub(crate) struct SettingsPlaceholderView {
-    pub(crate) section: &'static str,
-    pub(crate) title: &'static str,
-    pub(crate) heading: &'static str,
-    pub(crate) description: &'static str,
+#[derive(Default)]
+pub(crate) struct AccountSessionRowView {
+    pub(crate) id: String,
+    pub(crate) created: String,
+    pub(crate) expires: String,
+    pub(crate) current: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -388,6 +399,8 @@ pub(crate) struct CredentialProfileRowView {
 }
 
 pub(crate) struct CredentialSettingsView {
+    pub(crate) git_identity: SettingsData,
+    pub(crate) git_identity_feedback: bool,
     pub(crate) active_dialog: String,
     pub(crate) credentials: Vec<CredentialRowView>,
     pub(crate) profiles: Vec<CredentialProfileRowView>,
@@ -1652,6 +1665,8 @@ mod secret_debug_tests {
     #[test]
     fn credential_settings_debug_redacts_csrf_capability() {
         let page = CredentialSettingsView {
+            git_identity: SettingsData::default(),
+            git_identity_feedback: false,
             active_dialog: String::new(),
             credentials: Vec::new(),
             profiles: Vec::new(),

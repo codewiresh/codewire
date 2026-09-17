@@ -19,6 +19,10 @@ pub(crate) struct IdentityUser {
     pub(crate) is_admin: bool,
     #[serde(default)]
     two_factor_enabled: bool,
+    #[serde(default)]
+    email_verified: bool,
+    #[serde(default)]
+    created_at: String,
     #[serde(skip)]
     skip_2fa_setup: bool,
 }
@@ -37,6 +41,14 @@ impl IdentityUser {
 
     pub(crate) fn two_factor_enabled(&self) -> bool {
         self.two_factor_enabled
+    }
+
+    pub(crate) fn email_verified(&self) -> bool {
+        self.email_verified
+    }
+
+    pub(crate) fn created_at(&self) -> &str {
+        &self.created_at
     }
 }
 
@@ -62,9 +74,10 @@ pub(crate) async fn authenticated_identity(
         return Err(WebError::IdentityUnavailable);
     }
     let envelope = response
-        .json::<IdentityEnvelope>()
+        .json::<Option<IdentityEnvelope>>()
         .await
-        .map_err(|_| WebError::IdentityUnavailable)?;
+        .map_err(|_| WebError::IdentityUnavailable)?
+        .ok_or(WebError::Unauthorized)?;
     let mut user = envelope.user.ok_or(WebError::Unauthorized)?;
     user.skip_2fa_setup = envelope.skip_2fa_setup;
     Ok(user)
@@ -106,6 +119,8 @@ mod tests {
             name: None,
             is_admin: false,
             two_factor_enabled: false,
+            email_verified: false,
+            created_at: String::new(),
             skip_2fa_setup: false,
         };
         assert!(matches!(

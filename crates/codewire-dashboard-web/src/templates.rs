@@ -7,8 +7,8 @@ use crate::view::{
     AccountAccessView, ApiKeysPageView, AuthFormView, CredentialSettingsView, DashboardView,
     DevicePageView, EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
     OrganizationFormView, OrganizationRow, PresetsPageView, SecretBucketPageView,
-    SecretProjectsPageView, SettingsPageView, SettingsPlaceholderView, SetupTwoFactorView,
-    TerminalPageView, TwoFactorRecoveryView,
+    SecretProjectsPageView, SettingsPageView, SetupTwoFactorView, TerminalPageView,
+    TwoFactorRecoveryView,
 };
 
 #[derive(Template)]
@@ -105,13 +105,6 @@ pub(crate) struct SettingsTemplate<'a> {
 pub(crate) struct CredentialSettingsTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) page: &'a CredentialSettingsView,
-}
-
-#[derive(Template)]
-#[template(path = "settings-placeholder.html")]
-pub(crate) struct SettingsPlaceholderTemplate<'a> {
-    pub(crate) view: &'a DashboardView,
-    pub(crate) page: &'a SettingsPlaceholderView,
 }
 
 #[derive(Template)]

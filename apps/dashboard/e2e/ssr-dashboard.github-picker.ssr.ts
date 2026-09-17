@@ -67,6 +67,53 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
     await expect(github.locator('[name="name"]')).toHaveCount(0);
     await expect(github.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
       .toHaveAttribute("href", "/assets/codewire/icons-v2.svg#icon-github");
+
+    // Exercise the actual bundled dialog guard without enrolling a credential
+    // or contacting a provider. All entered material belongs to this owner.
+    await page.keyboard.press("Escape");
+    let credentialMutations = 0;
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname.startsWith("/settings/credentials/_actions/")) credentialMutations += 1;
+    });
+    const addCredential = page.getByRole("button", { name: "Add credential", exact: true });
+    const chooser = page.getByRole("dialog", { name: "Add credential", exact: true });
+    const api = page.getByRole("dialog", { name: "Add API key", exact: true });
+    const discard = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+    await addCredential.click();
+    await chooser.getByRole("button", { name: "API key", exact: true }).click();
+    const provider = api.getByRole("combobox", { name: "Provider", exact: true });
+    const defaultProvider = await provider.inputValue();
+    const initialCsrf = await api.locator('[name="_csrf"]').inputValue();
+    await api.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(api).not.toBeVisible();
+    await expect(discard).not.toBeVisible();
+    await expect(addCredential).toBeFocused();
+    await addCredential.click();
+    await chooser.getByRole("button", { name: "API key", exact: true }).click();
+    const key = api.getByLabel("API key", { exact: true });
+    await key.fill("synthetic-discarded-key");
+    await provider.selectOption("anthropic");
+    await key.focus();
+    await page.keyboard.press("Escape");
+    await expect(discard.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(discard).not.toBeVisible();
+    await expect(key).toBeFocused();
+    await expect(key).toHaveValue("synthetic-discarded-key");
+    await expect(provider).toHaveValue("anthropic");
+    await expect(api.locator('[name="_csrf"]')).toHaveValue(initialCsrf);
+    await api.getByRole("button", { name: "Cancel", exact: true }).click();
+    await discard.getByRole("button", { name: "Discard changes", exact: true }).click();
+    await expect(addCredential).toBeFocused();
+    await addCredential.click();
+    await chooser.getByRole("button", { name: "API key", exact: true }).click();
+    await expect(key).toHaveValue("");
+    await expect(provider).toHaveValue(defaultProvider);
+    await expect(api.locator('[name="_csrf"]')).toHaveValue(initialCsrf);
+    await api.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(api).not.toBeVisible();
+    await expect(discard).not.toBeVisible();
+    expect(credentialMutations).toBe(0);
   } finally {
     if (!page.isClosed()) await page.close();
     await page.context().clearCookies();
