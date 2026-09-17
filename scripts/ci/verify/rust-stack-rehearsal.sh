@@ -648,6 +648,8 @@ start_temporal
 log "seeding orchestration API-key contract fixture"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
   -f "$ROOT/tests/fixtures/orchestration/seed.sql"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f "$ROOT/tests/fixtures/orchestration/runtime-ready.sql"
 if [[ "$(psql "$DATABASE_URL" -Atqc \
     "SELECT count(*) FROM sessions WHERE id IN ('ses_apikey_contract_admin', 'ses_apikey_contract_user') AND token_hash IN (encode(digest('apikey-contract-admin-session-token', 'sha256'), 'hex'), encode(digest('apikey-contract-user-session-token', 'sha256'), 'hex'))")" != "2" ]]; then
   echo "::error::orchestration contract session fixtures are not hash-only"

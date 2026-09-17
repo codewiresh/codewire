@@ -1271,6 +1271,28 @@ mod tests {
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));
         assert!(html.contains("name=\"expected_revision\" value=\"9\""));
+        let credential_row = html.split("class=\"cw-credential-row\"").nth(1).unwrap();
+        let (credential_primary, credential_dialog) = credential_row.split_once("<dialog").unwrap();
+        assert!(!credential_primary.contains("Generation"));
+        assert!(!credential_primary.contains("Expires"));
+        assert!(credential_primary.contains("Active"));
+        assert!(
+            credential_dialog
+                .split("</dialog>")
+                .next()
+                .unwrap()
+                .contains("Generation 7")
+        );
+        let profile_row = html.split("class=\"cw-profile-row\"").nth(1).unwrap();
+        let (profile_primary, profile_dialog) = profile_row.split_once("<dialog").unwrap();
+        assert!(!profile_primary.contains("Revision"));
+        assert!(
+            profile_dialog
+                .split("</dialog>")
+                .next()
+                .unwrap()
+                .contains("Revision 9")
+        );
         assert!(!html.contains("name=\"name\" value=\"legacy-github\""));
         assert!(html.contains("name=\"confirm_reconnect\" value=\"yes\" required"));
         assert!(
@@ -1280,6 +1302,24 @@ mod tests {
         assert!(html.contains("/settings/credentials/_actions/profiles/update?org=sample-org"));
         assert!(html.contains("name=\"private_key\" data-dialog-private"));
         assert!(html.contains("type=\"password\" data-dialog-private"));
+        for form in html.split("<form").skip(1) {
+            let opening = form.split('>').next().unwrap();
+            if opening.contains("cw-settings-form") {
+                assert_eq!(
+                    opening.contains("data-dirty-guard"),
+                    !opening.contains("_actions/git-identity"),
+                    "only editable credential/profile dialogs opt into close protection"
+                );
+            }
+            if form
+                .split("</form>")
+                .next()
+                .unwrap()
+                .contains("name=\"confirm_reconnect\"")
+            {
+                assert!(opening.contains("data-dirty-guard"));
+            }
+        }
         let github = html
             .split("aria-labelledby=\"connect-github-title\"")
             .nth(1)

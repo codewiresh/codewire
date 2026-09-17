@@ -72,6 +72,38 @@ function output(connection: Connection, text: string, offset = 0n) {
   return offset + BigInt(data.length);
 }
 
+test("detail layout keeps usable output and compact footer with alerts and short viewports", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "usable-terminal-output\r\n");
+  const terminal = page.locator("[data-terminal-root]");
+  await expect(terminal.locator(".xterm-rows")).toContainText("usable-terminal-output");
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 390, height: 560 }]) {
+    await page.setViewportSize(viewport);
+    for (const showAlert of [false, true]) {
+      await page.locator("#fixture-lifecycle-message").evaluate((node, visible) => { (node as HTMLElement).hidden = !visible; }, showAlert);
+      await expect.poll(async () => (await terminal.boundingBox())!.height).toBeGreaterThanOrEqual(180);
+      expect((await page.locator(".cw-terminal-footer").boundingBox())!.height).toBeLessThan(100);
+      const bounds = await page.locator(".cw-sandbox-detail-main").evaluate((main) => {
+        const output = main.querySelector("[data-terminal-root]")!.getBoundingClientRect();
+        const footer = main.querySelector(".cw-terminal-footer")!.getBoundingClientRect();
+        return { overlap: output.bottom > footer.top, horizontalOverflow: main.scrollWidth > main.clientWidth,
+          verticalOverflow: main.scrollHeight - main.clientHeight };
+      });
+      expect(bounds.overlap).toBe(false);
+      expect(bounds.horizontalOverflow).toBe(false);
+      if (viewport.height >= 844) expect(bounds.verticalOverflow,
+        `${viewport.width}×${viewport.height}, lifecycle alert ${showAlert ? "visible" : "hidden"}`).toBeLessThanOrEqual(1);
+      // A short screen retains output instead of hiding it to avoid scrolling.
+      await page.locator(".cw-terminal-footer").scrollIntoViewIfNeeded();
+      await expect(page.locator(".cw-terminal-footer")).toBeInViewport();
+    }
+  }
+});
+
 async function holdRenderCallbacks(page: Page) {
   await page.addInitScript(() => {
     type Presentation = { terminal: { write(data: string | Uint8Array, callback?: () => void): void } };
@@ -612,7 +644,11 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
     const panel = page.getByRole("tabpanel");
     const copy = panel.getByRole("button", { name: "Copy selection", exact: true });
     await expect(copy).toBeDisabled();
-    const bounds = (await panel.locator(".xterm-rows").getByText(text, { exact: true }).boundingBox())!;
+    const renderedOutput = panel.locator(".xterm-rows").getByText(text, { exact: true });
+    // Switching tabs can schedule a fit/repaint. Copy the visible rendered
+    // output, not stale row text while that presentation is still hidden.
+    await expect(renderedOutput).toBeVisible();
+    const bounds = (await renderedOutput.boundingBox())!;
     await page.mouse.move(bounds.x, bounds.y + bounds.height / 2);
     await page.mouse.down();
     await page.mouse.move(bounds.x + bounds.width, bounds.y + bounds.height / 2, { steps: 12 });
@@ -851,6 +887,11 @@ test("incomplete setup blocks launch and attachment until an explicit action aft
   state.setupComplete = false;
   state.sessions = [{ sessionId: sessionId(9), state: "running" }];
   await openFixture(page);
+  await expect(page.locator("[data-terminal-empty]")).toContainText("setup is not complete");
+  expect(state.lists).toBe(0);
+  // An explicit inventory read still permits inspecting/stopping a shell
+  // during setup; only automatic initial restoration waits for completion.
+  await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
   await expect(page.getByRole("tab")).toHaveCount(1);
   await expect(page.locator("[data-terminal-connection]")).toContainText("setup is not complete");
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
@@ -867,6 +908,26 @@ test("incomplete setup blocks launch and attachment until an explicit action aft
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect.poll(() => state.launches).toBe(1);
   await expect.poll(() => state.connections.length).toBe(1);
+});
+
+test("initial terminal inventory waits until workspace setup finishes", async ({ page }) => {
+  const state = await transport(page);
+  state.setupComplete = false;
+  state.listStatus = 503;
+  await openFixture(page);
+  await expect(page.locator("[data-terminal-empty]")).toContainText("setup is not complete");
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  expect(state.lists).toBe(0);
+  expect(state.connections).toHaveLength(0);
+  expect(state.launches).toBe(0);
+  state.setupComplete = true;
+  state.listStatus = 200;
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  expect(state.lists).toBe(1);
+  expect(state.connections).toHaveLength(0);
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
 });
 
 test("starting a stopped Sandbox enables terminals after its first ready status without reload", async ({ page }) => {
