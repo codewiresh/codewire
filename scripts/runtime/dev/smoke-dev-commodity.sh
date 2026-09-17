@@ -1223,7 +1223,11 @@ cleanup_fresh_oauth_login() {
 }
 
 assert_application_artifacts_redacted() {
-  local status
+  local status value
+  ((${#APP_SECRET_VALUES[@]} > 0)) || return 0
+  for value in "${APP_SECRET_VALUES[@]}"; do
+    [[ -n "$value" ]] || die 'application-secret artifact inspection has an empty pattern'
+  done
   # Only synthetic patterns enter this anonymous pipe, never grep argv/files.
   if grep -Fq -f <(printf '%s\n' "${APP_SECRET_VALUES[@]}") -- "$@"; then
     die 'application-secret value entered smoke output or metadata; output suppressed'

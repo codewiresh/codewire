@@ -290,6 +290,56 @@ expect_failure() {
   pass
 }
 
+# Exercise the real artifact guard independently of secret provisioning.
+fixture
+printf 'fixed-benign-receipt\n' >"$TMPDIR_SMOKE/artifact.out"
+# Reproduce the old false positive before asserting the repaired zero-pattern path.
+if ! grep -Fq -f <(printf '%s\n' "${APP_SECRET_VALUES[@]}") -- "$TMPDIR_SMOKE/artifact.out"; then
+  fail 'old zero-pattern mechanism did not match the benign receipt'
+fi
+assert_application_artifacts_redacted "$TMPDIR_SMOKE/artifact.out" >"$APP_TEST_ROOT/guard.out" 2>"$APP_TEST_ROOT/guard.err"
+[[ ! -s "$APP_TEST_ROOT/guard.out" && ! -s "$APP_TEST_ROOT/guard.err" ]] ||
+  fail 'zero-pattern inspection was not silent'
+pass
+
+APP_SECRET_VALUES=(synthetic-guard-first-canary synthetic-guard-later-canary)
+assert_application_artifacts_redacted "$TMPDIR_SMOKE/artifact.out"
+pass
+inspect_artifact_with_receipt() {
+  assert_application_artifacts_redacted "$1"
+  printf 'artifact-inspection-success\n'
+}
+assert_guard_failure_redacted() {
+  [[ ! -s "$APP_TEST_ROOT/failure.out" ]] || fail 'failed inspection emitted a success receipt'
+  if grep -Fq -e synthetic-guard-first-canary -e synthetic-guard-later-canary \
+      "$APP_TEST_ROOT/failure.out" "$APP_TEST_ROOT/failure.err"; then
+    fail 'failed inspection printed a synthetic canary'
+  fi
+}
+for index in 0 1; do
+  printf '%s\n' "${APP_SECRET_VALUES[$index]}" >"$TMPDIR_SMOKE/artifact.out"
+  expect_failure "captured-pattern-$index" inspect_artifact_with_receipt "$TMPDIR_SMOKE/artifact.out"
+  assert_guard_failure_redacted
+  grep -Fq 'application-secret value entered smoke output or metadata; output suppressed' "$APP_TEST_ROOT/failure.err"
+done
+printf 'fixed-benign-receipt\n' >"$TMPDIR_SMOKE/artifact.out"
+for variant in only first later; do
+  case "$variant" in
+    only) APP_SECRET_VALUES=('') ;;
+    first) APP_SECRET_VALUES=('' synthetic-guard-later-canary) ;;
+    later) APP_SECRET_VALUES=(synthetic-guard-first-canary '') ;;
+  esac
+  expect_failure "empty-pattern-$variant" inspect_artifact_with_receipt "$TMPDIR_SMOKE/artifact.out"
+  assert_guard_failure_redacted
+  grep -Fq 'application-secret artifact inspection has an empty pattern' "$APP_TEST_ROOT/failure.err"
+done
+APP_SECRET_VALUES=(synthetic-guard-first-canary synthetic-guard-later-canary)
+for artifact in "$TMPDIR_SMOKE/nonexistent.out" "$TMPDIR_SMOKE"; do
+  expect_failure artifact-read-error inspect_artifact_with_receipt "$artifact"
+  assert_guard_failure_redacted
+  grep -Fq 'application-secret artifact inspection failed' "$APP_TEST_ROOT/failure.err"
+done
+
 # These exercise the unchanged production wait_until with deterministic time,
 # independently of application metadata assertions below. Failed predicates
 # still take the real retry branch, and an expired deadline never polls.
