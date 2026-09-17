@@ -606,6 +606,27 @@ local_platform_cleanup_environment() {
       if jq -e --arg name "$SMOKE_NAME" 'any(.[]; .name == $name)' "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null; then
         resolved="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/local-cleanup-environments.json" "$SMOKE_NAME")" || rc=1
         if [[ -n "$resolved" && ( -z "$ENV_ID" || "$ENV_ID" == "$resolved" ) ]]; then
+          if [[ "${1:-0}" != 0 ]]; then
+            # Retain only public, fixed launch metadata before deleting this
+            # exact owned VM. Observer failure never changes cleanup authority.
+            if ! cw_with_timeout 30 env info --local "$resolved" --output json 2>/dev/null |
+              jq -e --arg id "$resolved" '
+                select(.id == $id and
+                  (.state | IN("starting", "running", "stopped", "error", "orphaned"))) |
+                .error_code as $code |
+                [null, "prepare_failed", "vmm_start_failed", "daemon_access_failed",
+                 "network_worker_failed", "guest_start_failed", "input_cleanup_failed",
+                 "guest_shutdown", "vmm_exit", "direct_share_exit", "network_worker_exit",
+                 "egress_broker_exit", "ingress_forwarder_exit", "mesh_transport_exit",
+                 "mesh_ingress_receiver_exit", "network_stack_failed"] as $codes |
+                ($codes | any(. == $code)) as $recognized |
+                {observation:"observed",id:.id,state:.state,
+                 code_recognized:$recognized,
+                 error_code:(if $recognized then $code else null end)}
+              ' >"$TMPDIR_SMOKE/local-failed-launch.json"; then
+              jq -n '{observation:"unavailable"}' >"$TMPDIR_SMOKE/local-failed-launch.json"
+            fi
+          fi
           cw_with_timeout 180 env rm --local --yes "$resolved" >"$TMPDIR_SMOKE/local-cleanup.out" 2>&1 || rc=1
         else rc=1; fi
       fi
@@ -620,7 +641,7 @@ local_platform_cleanup_environment() {
 local_platform_cleanup() {
   local rc=$? cleanup_rc=0
   trap - EXIT INT TERM HUP
-  local_platform_cleanup_environment || rc=1
+  local_platform_cleanup_environment "$rc" || rc=1
   private_checkout_stop || { rc=1; cleanup_rc=1; }
   if [[ "$LP_NETWORK_NODE_OWNED" == 1 ]]; then
     local network_node_rc=0

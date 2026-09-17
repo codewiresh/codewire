@@ -938,6 +938,16 @@ cw_with_timeout() {
       printf 'vm\n' >>"$TMPDIR_SMOKE/cleanup-calls"
       [[ "$FAILURE" != rm ]] || return 1
       touch "$TMPDIR_SMOKE/deleted" ;;
+    'env info --local '*" --output json")
+      [[ "$4" == "$VM_ID" && ! -e "$TMPDIR_SMOKE/deleted" ]] || fail 'launch observation changed ownership/order'
+      [[ "$FAILURE" != info-failure ]] || return 1
+      jq -n --arg id "$VM_ID" --arg failure "$FAILURE" '
+        {id:$id,state:"error",error_code:"guest_start_failed"} |
+        if $failure == "info-rebound" then .id="unowned"
+        elif $failure == "info-opaque" then .error_code="opaque-provider-material-canary"
+        elif $failure == "info-false" then .error_code=false
+        elif $failure == "info-array" then .error_code=["prepare_failed"]
+        elif $failure == "info-state" then .state="opaque-provider-material-canary" else . end' ;;
     'network nodes --network '*" --output json")
       [[ "$4" == "$LOCAL_PLATFORM_NETWORK_ID" && "$6" == "$ORG_ID" ]] || fail 'cleanup inspected a different network'
       [[ "$FAILURE" != network-list ]] || return 1
@@ -999,6 +1009,26 @@ run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
 [[ ! -e "$LP_HOME" && ! -e "$LP_RUNTIME" ]] || fail 'successful cleanup retained local state'
 [[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nprofile\ncredential\nprojects\nowners\nlogout' ]] || fail 'incomplete cleanup ordering'
 pass
+for observation in fixed info-failure info-rebound info-opaque info-false info-array info-state; do
+  cleanup_fixture
+  FAILURE="$observation"
+  failed_launch_cleanup() { ( trap local_platform_cleanup EXIT; exit 1 ); }
+  expect_failure "$observation launch cleanup" failed_launch_cleanup
+  [[ -e "$TMPDIR_SMOKE/deleted" && ! -e "$LP_RUNTIME" ]] || fail 'launch observer prevented cleanup'
+  jq -e '. == []' "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null || fail 'launch cleanup lost final absence proof'
+  ! rg -q opaque-provider-material-canary "$TMPDIR_SMOKE/local-failed-launch.json" || fail 'launch observer retained opaque material'
+  if [[ "$observation" == fixed ]]; then
+    jq -e --arg id "$VM_ID" '.observation == "observed" and .id == $id and
+      .state == "error" and .code_recognized == true and .error_code == "guest_start_failed"' \
+      "$TMPDIR_SMOKE/local-failed-launch.json" >/dev/null || fail 'fixed launch metadata was lost'
+  elif [[ "$observation" == info-opaque || "$observation" == info-false || "$observation" == info-array ]]; then
+    jq -e '.observation == "observed" and .code_recognized == false and .error_code == null' \
+      "$TMPDIR_SMOKE/local-failed-launch.json" >/dev/null || fail 'unknown launch class was fabricated'
+  else
+    jq -e '. == {observation:"unavailable"}' "$TMPDIR_SMOKE/local-failed-launch.json" >/dev/null || fail 'observer failure became a VM failure'
+  fi
+  pass
+done
 selected_network_cleanup_fixture
 run_cleanup >"$TMPDIR_SMOKE/cleanup-result.out" 2>&1
 [[ "$(cat "$TMPDIR_SMOKE/cleanup-calls")" == $'vm\nnetwork\nprofile\ncredential\nprojects\nowners\nlogout' ]] ||
