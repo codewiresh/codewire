@@ -66,6 +66,23 @@ grep -Fq 'preflight --context' "$TEST_ROOT/preflight-call" || fail 'topology che
 COUNT=$((COUNT + 1))
 enroll
 TMPDIR_SMOKE="$TEST_ROOT/state"; mkdir "$TMPDIR_SMOKE"
+for mode in start stop inspect; do
+  (
+    timeout() { printf '%s\n' "$@" >"$TEST_ROOT/fixture-command.args"; }
+    checkout_fixture_command "$mode" --state-dir "$TEST_ROOT/owned-state"
+  )
+  case "$mode" in
+    start) expected_timeout=1500 ;;
+    stop) expected_timeout=750 ;;
+    inspect) expected_timeout=300 ;;
+  esac
+  mapfile -t fixture_args <"$TEST_ROOT/fixture-command.args"
+  [[ "${fixture_args[*]}" == "$expected_timeout python3 $CHECKOUT_ROOT/scripts/runtime/dev/hosted-checkout-fixture.py $mode --state-dir $TEST_ROOT/owned-state" ]] ||
+    fail 'fixture mode timeout or exact arguments drifted'
+  [[ ! -s "$TMPDIR_SMOKE/fixture-command.out" && ! -s "$TMPDIR_SMOKE/fixture-command.err" ]] ||
+    fail 'fixture command redirection drifted'
+  COUNT=$((COUNT + 1))
+done
 SMOKE_NAME=synthetic-hosted-checkout; ENV_ID="$ENVIRONMENT_ID"
 PROVIDER_SSH_PROFILE_ID="$PROFILE_ID"
 READY_STATE=running; READY_SETUP=true; READY_ERROR=null; READY_PROFILE="platform:id:$PROFILE_ID"; READY_REVISION=1

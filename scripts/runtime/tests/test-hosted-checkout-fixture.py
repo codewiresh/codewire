@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -22,6 +22,7 @@ sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("checkout_fixture", ROOT / "scripts/runtime/dev/hosted-checkout-fixture.py")
 FIXTURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FIXTURE)
+REAL_KUBE = FIXTURE.Kube
 USER, ORGANIZATION = "1" * 32, "2" * 32
 KEY = "ssh-ed25519 " + base64.b64encode(struct.pack(">I", 11) + b"ssh-ed25519" + struct.pack(">I", 32) + bytes(32)).decode()
 IMAGE = "ghcr.io/codewiresh/workspace@sha256:" + "3" * 64
@@ -37,6 +38,9 @@ class FakeKube:
         self.counter = "1\n"
         self.cluster = {"server": FIXTURE.DEV_SERVER, "tls-server-name": FIXTURE.DEV_TLS,
                         "certificate-authority-data": base64.b64encode(CERTIFICATE).decode()}
+
+    def wait_ready(self, name):
+        return self.run(["wait", "pod/" + name, "--for=condition=Ready", "--timeout=240s"], as_json=False)
 
     def run(self, args, payload=None, as_json=True):
         self.calls.append((list(args), copy.deepcopy(payload)))
@@ -149,6 +153,39 @@ class FixtureTests(unittest.TestCase):
         self.assertTrue(deletions[0][2].endswith(state["name"] + "-source"))
         self.assertEqual(self.cli("stop"), 0)  # Already-absent exact objects.
 
+    def test_cold_pull_wait_bound_and_ordinary_command_bound(self):
+        kube = REAL_KUBE(FIXTURE.DEV_CONTEXT, FIXTURE.DEV_NAMESPACE, self.parent)
+        process = Mock(pid=123, returncode=0)
+
+        def cold_pull(timeout):
+            # Observed cold pulls of 95s and 150s both exceeded the old 90s wait.
+            if timeout < 150:
+                raise subprocess.TimeoutExpired("synthetic-kubectl", timeout)
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            cold_pull(90)
+        process.wait.side_effect = cold_pull
+        with patch.object(FIXTURE.subprocess, "Popen", return_value=process) as launch:
+            self.assertEqual(kube.wait_ready("synthetic-pod"), "")
+        process.wait.assert_called_once_with(timeout=245)
+        self.assertEqual(launch.call_args.args[0], ["kubectl", "--context", FIXTURE.DEV_CONTEXT,
+            "--namespace", FIXTURE.DEV_NAMESPACE, "--request-timeout=20s", "wait",
+            "pod/synthetic-pod", "--for=condition=Ready", "--timeout=240s"])
+        process.wait.reset_mock(side_effect=True)
+        with patch.object(FIXTURE.subprocess, "Popen", return_value=process):
+            self.assertEqual(kube.run(["get", "pods"], as_json=False), "")
+        process.wait.assert_called_once_with(timeout=25)
+
+    def test_wait_timeout_kills_process_group_and_reaps_with_fixed_error(self):
+        kube = REAL_KUBE(FIXTURE.DEV_CONTEXT, FIXTURE.DEV_NAMESPACE, self.parent)
+        process = Mock(pid=123, returncode=-9)
+        process.wait.side_effect = [subprocess.TimeoutExpired("private-provider-canary", 245), None]
+        with patch.object(FIXTURE.subprocess, "Popen", return_value=process), patch.object(FIXTURE.os, "killpg") as kill:
+            with self.assertRaisesRegex(FIXTURE.Failure, "^fixture Kubernetes command failed$"):
+                kube.wait_ready("synthetic-pod")
+        kill.assert_called_once_with(123, FIXTURE.signal.SIGKILL)
+        self.assertEqual(process.wait.call_args_list, [unittest.mock.call(timeout=245), unittest.mock.call()])
+
     def test_route_is_only_enrolled_org_workspace_to_nonce_port(self):
         state = self.start()
         created = [payload for args, payload in self.kube.calls if args[0] == "create"]
@@ -233,6 +270,7 @@ class FixtureTests(unittest.TestCase):
                 with self.assertRaisesRegex(FIXTURE.Failure, "owned objects cleaned"):
                     FIXTURE.start(self.args)
                 self.assertEqual(self.kube.objects, {})
+                self.assertFalse((self.args.state_dir / "ready.json").exists())
         self.kube.failure = None
         self.kube.ready = READY + "untrusted-extra\n"
         self.args.state_dir = self.parent / "extra"

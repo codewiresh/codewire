@@ -30,7 +30,12 @@ checkout_fixture_validate() {
 }
 
 checkout_fixture_command() {
-  timeout 300 python3 "$CHECKOUT_ROOT/scripts/runtime/dev/hosted-checkout-fixture.py" "$@" \
+  local command_timeout=300
+  case "$1" in
+    start) command_timeout=1500 ;;
+    stop) command_timeout=750 ;;
+  esac
+  timeout "$command_timeout" python3 "$CHECKOUT_ROOT/scripts/runtime/dev/hosted-checkout-fixture.py" "$@" \
     >"$TMPDIR_SMOKE/fixture-command.out" 2>"$TMPDIR_SMOKE/fixture-command.err"
 }
 

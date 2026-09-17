@@ -29,6 +29,8 @@ TARGET = Path(__file__).resolve().with_name("hosted-checkout-target.sh")
 CONTENT = "initial-private-checkout-synthetic-v1"
 LABEL = "codewire.sh/acceptance-checkout-nonce"
 MAX_OUTPUT = 1024 * 1024
+READINESS_SECONDS = 240
+READINESS_PROCESS_SECONDS = READINESS_SECONDS + 5
 IMAGE = re.compile(r"(?:ghcr\.io/codewiresh/workspace|nexus\.example\.invalid/oci-approved/codewire/workspace)@sha256:[0-9a-f]{64}")
 # Public route/trust binding from owning Infra clusters/kubernetes-access.json
 # main a7cb24de1ed865e44cc728530d4f47f64c33202c, dev-cluster. No alternatives.
@@ -104,6 +106,13 @@ class Kube:
         self.context, self.namespace, self.directory = context, namespace, directory
 
     def run(self, arguments, payload=None, as_json=True):
+        return self._run(arguments, payload, as_json, 25)
+
+    def wait_ready(self, name):
+        return self._run(["wait", "pod/" + name, "--for=condition=Ready",
+                          f"--timeout={READINESS_SECONDS}s"], None, False, READINESS_PROCESS_SECONDS)
+
+    def _run(self, arguments, payload, as_json, timeout_seconds):
         command = ["kubectl", "--context", self.context, "--namespace", self.namespace,
                    "--request-timeout=20s", *arguments]
         # Own process group; errors/output never become public diagnostics.
@@ -117,7 +126,7 @@ class Kube:
                 if payload is not None:
                     process.stdin.write(json.dumps(payload).encode())
                     process.stdin.close()
-                process.wait(timeout=95 if arguments[0] == "wait" else 25)
+                process.wait(timeout=timeout_seconds)
             except (subprocess.TimeoutExpired, BrokenPipeError):
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -374,7 +383,7 @@ def start(args):
             created = kube.run(["create", "-f", "-", "-o", "json"], manifest)
             resource["uid"] = check_object(created, state, resource)
             write_json(args.state_dir / "state.json", state)
-        kube.run(["wait", "pod/" + state["name"], "--for=condition=Ready", "--timeout=90s"] , as_json=False)
+        kube.wait_ready(state["name"])
         ready = observe(kube, state)
         write_json(args.state_dir / "ready.json", ready)
     except (Failure, OSError, ValueError, KeyError, TypeError, AttributeError):
