@@ -114,6 +114,12 @@ fn format_time_opt(t: Option<chrono::NaiveDateTime>) -> Option<String> {
     t.map(format_time)
 }
 
+/// A deletion deadline is a source value, not a seconds-rounded event label.
+/// Keep RFC3339 UTC compatibility while preserving its database precision.
+pub(crate) fn shutdown_deadline_string(t: Option<chrono::NaiveDateTime>) -> Option<String> {
+    t.map(|deadline| deadline.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string())
+}
+
 /// Mirrors `computePreviewURL`.
 pub(crate) fn compute_preview_url(
     label: &str,
@@ -191,7 +197,7 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
             Some(setup_error)
         },
         ttl_seconds: row.try_get("ttl_seconds")?,
-        shutdown_at: format_time_opt(row.try_get("shutdown_at")?),
+        shutdown_at: shutdown_deadline_string(row.try_get("shutdown_at")?),
         cpu_millicores: row.try_get("cpu_millicores")?,
         memory_mb: row.try_get("memory_mb")?,
         disk_gb: row.try_get("disk_gb")?,
@@ -1362,6 +1368,22 @@ pub(crate) async fn extend_environment_ttl_core(
 mod tests {
     use super::*;
     use codewire_server_core::validation::validate_value;
+
+    #[test]
+    fn shutdown_deadline_preserves_source_precision_and_legacy_absence() {
+        assert_eq!(shutdown_deadline_string(None), None);
+        for expected in ["2026-09-17T00:43:17Z", "2026-09-17T00:43:17.753549Z"] {
+            let source = chrono::DateTime::parse_from_rfc3339(expected)
+                .unwrap()
+                .naive_utc();
+            assert_eq!(
+                shutdown_deadline_string(Some(source)).as_deref(),
+                Some(expected)
+            );
+            // Other timestamp labels deliberately retain their old contract.
+            assert_eq!(format_time(source), "2026-09-17T00:43:17Z");
+        }
+    }
 
     #[test]
     fn preview_url_mirrors_go() {

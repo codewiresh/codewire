@@ -218,6 +218,7 @@
 .cw-sandbox-heading dl div { display: flex; gap: .35rem; }
 .cw-sandbox-heading dt { color: #5d5d5d; font: .58rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .cw-sandbox-heading dd { margin: 0; color: #aaa; font: .62rem var(--font-mono); }
+.cw-sandbox-heading dl .cw-sandbox-lifetime { flex-direction: column; gap: .2rem; }
 .cw-sandbox-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .4rem; }
 .cw-sandbox-actions form { display: contents; }
 .cw-action-menu { position: relative; }
@@ -270,6 +271,7 @@
   .cw-sandbox-heading dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .45rem; }
   .cw-sandbox-heading dl div { min-width: 0; }
   .cw-sandbox-heading dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cw-sandbox-heading .cw-sandbox-lifetime dd { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
   .cw-sandbox-actions { justify-content: flex-start; }
   .cw-terminal-footer .cw-mono { flex-basis: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cw-action-menu > form { right: auto; left: 0; width: min(18rem, calc(100vw - 1.6rem)); }

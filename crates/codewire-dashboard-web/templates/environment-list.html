@@ -1,23 +1,21 @@
 {% if page.environments.is_empty() %}
 <div class="cw-table-shell cw-sandbox-table-shell">
-  <table class="cw-table cw-sandbox-table"><thead><tr><th>Name</th><th>State</th><th>Snapshot</th><th>Region</th><th>Resources</th><th>Last event</th><th>Created</th><th><span class="cw-sr-only">Actions</span></th></tr></thead><tbody><tr><td colspan="8"><div class="cw-state"><strong>No Sandboxes found</strong><p>Start an isolated workspace from a repository or image.</p><a class="cw-button cw-button--pill" href="{{ organization.environments_url }}new/" data-drawer-trigger>Create Sandbox</a></div></td></tr></tbody></table>
+  <table class="cw-table cw-sandbox-table"><thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead><tbody><tr><td colspan="6"><div class="cw-state"><strong>No Sandboxes found</strong><p>Start an isolated workspace from a repository or image.</p><a class="cw-button cw-button--pill" href="{{ organization.environments_url }}new/" data-drawer-trigger>Create Sandbox</a></div></td></tr></tbody></table>
 </div>
 {% else %}
 <div class="cw-table-shell cw-sandbox-table-shell">
   <table class="cw-table cw-sandbox-table">
-    <thead><tr><th>Name</th><th>State</th><th>Snapshot</th><th>Region</th><th>Resources</th><th>Last event</th><th>Created</th><th><span class="cw-sr-only">Actions</span></th></tr></thead>
+    <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead>
     <tbody>
       {% for sandbox in page.environments %}
       <tr>
-        <td><a class="cw-environment-name" href="/{{ organization.slug }}/{{ sandbox.id }}/" title="{{ sandbox.id }}">{{ sandbox.name }}</a>{% if !sandbox.preset_name.is_empty() %}<small class="cw-environment-preset">{{ sandbox.preset_name }}</small>{% endif %}{% if sandbox.isolation_tier == "confidential" %}<small class="cw-environment-preset">Confidential</small>{% endif %}</td>
+        <td><a class="cw-environment-name" href="{{ page.detail_url(organization.slug, sandbox.id) }}" title="{{ sandbox.id }}">{{ sandbox.name }}</a>{% if !sandbox.preset_name.is_empty() %}<small class="cw-environment-preset">{{ sandbox.preset_name }}</small>{% endif %}{% if sandbox.isolation_tier == "confidential" %}<small class="cw-environment-preset">Confidential</small>{% endif %}<small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: {% let lifetime = sandbox %}{% include "environment-lifetime.html" %}</small></td>
         <td><span class="cw-status" data-tone="{{ sandbox.state_tone }}"><span class="cw-sr-only" aria-hidden="true">{{ sandbox.state_symbol }}</span>{{ sandbox.state }}</span></td>
-        <td><span class="cw-stub-badge" title="Snapshots are coming soon">Coming soon</span></td>
-        <td class="cw-mono cw-muted" aria-label="Region unavailable">—</td>
         <td class="cw-mono">{{ sandbox.resources }}</td>
         <td>{{ sandbox.last_event }}</td>
         <td>{{ sandbox.created }}</td>
         <td class="cw-action-cell"><details class="cw-row-menu"><summary aria-label="Actions for {{ sandbox.name }}">•••</summary><div class="cw-row-menu-panel">
-          <a href="/{{ organization.slug }}/{{ sandbox.id }}/">Open Sandbox</a>
+          <a href="{{ page.detail_url(organization.slug, sandbox.id) }}">Open Sandbox</a>
           <span class="cw-row-menu-meta">{{ sandbox.cost }} usage</span>
           <details class="cw-menu-resize"><summary>Secrets and credentials</summary>
             {% if let Some(sources) = sandbox.sources %}
@@ -25,16 +23,16 @@
             {% else %}<p>Current source selection is unavailable.</p>{% endif %}
             {% if sandbox.sources.is_some() && sandbox.can_destroy && sandbox.confidential_actions_allowed %}<a href="{{ organization.environments_url }}?sources={{ sandbox.id }}">Edit secrets and credentials</a>{% endif %}
           </details>
-          {% if sandbox.can_stop %}<form method="post" action="/{{ organization.slug }}/_actions/sandboxes/stop" hx-post="/{{ organization.slug }}/_actions/sandboxes/stop"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ sandbox.id }}"><button type="submit">Stop</button></form>{% endif %}
+          {% if sandbox.can_stop %}<section aria-label="Stop {{ sandbox.name }}"><button type="button" data-inventory-stop data-environment-id="{{ sandbox.id }}" data-environment-name="{{ sandbox.name }}" data-list-search="{{ page.search }}" data-list-state="{{ page.state }}" hidden>Stop</button><details class="cw-menu-destroy" data-inventory-stop-fallback><summary>Stop</summary><p>Running processes and terminal sessions will end. Workspace files are kept. Stopping does not cancel automatic deletion.</p><form method="post" action="/{{ organization.slug }}/_actions/sandboxes/stop"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ sandbox.id }}"><input type="hidden" name="list_search" value="{{ page.search }}"><input type="hidden" name="list_state" value="{{ page.state }}"><button type="submit">Stop Sandbox</button></form></details></section>{% endif %}
           {% if sandbox.confidential_actions_allowed %}
-          {% if sandbox.can_start %}<form method="post" action="/{{ organization.slug }}/_actions/sandboxes/start" hx-post="/{{ organization.slug }}/_actions/sandboxes/start"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ sandbox.id }}"><button type="submit">Start</button></form>{% endif %}
+          {% if sandbox.can_start %}<form method="post" action="/{{ organization.slug }}/_actions/sandboxes/start" hx-post="/{{ organization.slug }}/_actions/sandboxes/start"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ sandbox.id }}"><input type="hidden" name="list_search" value="{{ page.search }}"><input type="hidden" name="list_state" value="{{ page.state }}"><button type="submit">Start</button></form>{% endif %}
           {% if sandbox.isolation_tier == "confidential" %}<a href="{{ organization.environments_url }}?trust={{ sandbox.id }}">Trust report</a>{% endif %}
           <details class="cw-menu-resize"><summary>Resize</summary><form method="post" action="/{{ organization.slug }}/_actions/sandboxes/resize/plan" hx-post="/{{ organization.slug }}/_actions/sandboxes/resize/plan"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ sandbox.id }}"><label>CPU (millicores)<input class="cw-input" name="cpu_millicores" type="number" min="100" max="128000" value="{{ sandbox.cpu_millicores }}" required></label><label>Memory (MiB)<input class="cw-input" name="memory_mb" type="number" min="128" max="1048576" value="{{ sandbox.memory_mb }}" required></label><label>Disk (GiB)<input class="cw-input" name="disk_gb" type="number" min="1" max="16384" value="{{ sandbox.disk_gb }}" required></label><button class="cw-button cw-button--small" type="submit">Review resize</button></form></details>
           <a href="{{ organization.environments_url }}?ports={{ sandbox.id }}">Ports</a>
-          {% if sandbox.can_stop %}<a href="/{{ organization.slug }}/{{ sandbox.id }}/">Terminal</a><a href="{{ sandbox.vscode_url }}">VS Code</a>{% endif %}
+          {% if sandbox.can_stop %}<a href="{{ page.detail_url(organization.slug, sandbox.id) }}">Terminal</a><a href="{{ sandbox.vscode_url }}">VS Code</a>{% endif %}
           {% for port in sandbox.ports %}{% if port.has_preview %}<a href="{{ port.preview_url }}" target="_blank" rel="noopener noreferrer">{{ port.label }} preview</a>{% endif %}{% endfor %}
           {% endif %}
-          {% if sandbox.can_destroy %}<details class="cw-menu-destroy"><summary>Destroy</summary><form method="post" action="/{{ organization.slug }}/_actions/sandboxes/delete" hx-post="/{{ organization.slug }}/_actions/sandboxes/delete"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ sandbox.id }}"><p>Destroy <strong>{{ sandbox.name }}</strong>? This cannot be undone.</p><button type="submit">Destroy permanently</button></form></details>{% endif %}
+          {% if sandbox.can_destroy %}<details class="cw-menu-destroy"><summary>Delete</summary><form method="post" action="/{{ organization.slug }}/_actions/sandboxes/delete" hx-post="/{{ organization.slug }}/_actions/sandboxes/delete"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ sandbox.id }}"><input type="hidden" name="list_search" value="{{ page.search }}"><input type="hidden" name="list_state" value="{{ page.state }}"><p>Delete <strong>{{ sandbox.name }}</strong>? This cannot be undone.</p><button type="submit">Delete permanently</button></form></details>{% endif %}
         </div></details></td>
       </tr>
       {% endfor %}

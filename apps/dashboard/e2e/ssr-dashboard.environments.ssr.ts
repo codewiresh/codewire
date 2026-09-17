@@ -131,6 +131,20 @@ async function closeTicketBeforeAttachment(page: Page, ticket: string) {
   expect(result).toBe("closed:1000");
 }
 
+async function sourceDeletionDeadline(): Promise<string> {
+  // shutdown_at is a naive UTC source timestamp, with PostgreSQL microsecond
+  // precision. Compare the exact BFF nanosecond representation, not a rounded
+  // JavaScript Date or a guessed deadline computed from the requested TTL.
+  const [source] = await sql`
+    SELECT protected,
+           to_char(shutdown_at, 'YYYY-MM-DD"T"HH24:MI:SS.US') || '000Z' AS deadline
+    FROM environments WHERE id = ${environmentId} AND org_id = ${orgId}
+  `;
+  expect(source?.protected).toBe(false);
+  expect(source?.deadline).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/);
+  return source.deadline as string;
+}
+
 async function seedPinnedPreset() {
   presetId = crypto.randomUUID();
   await sql`
@@ -569,12 +583,16 @@ test.describe.serial("server-rendered environments", () => {
     // Runtime Running precedes setup completion; projection and workspace
     // replacement still belong to setup until this authenticated status arrives.
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
+    const initialDeadline = await sourceDeletionDeadline();
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", initialDeadline, { timeout: 30_000 });
     await expect(page.getByRole("tab")).toHaveCount(0);
     let launchRequests = 0;
     let stopRequests = 0;
+    let sandboxStopRequests = 0;
     page.on("request", (request) => {
       if (new URL(request.url()).pathname.endsWith("/_actions/terminal-sessions/launch")) launchRequests += 1;
       if (new URL(request.url()).pathname.endsWith("/_actions/terminal-sessions/stop")) stopRequests += 1;
+      if (new URL(request.url()).pathname.endsWith("/_actions/sandboxes/stop")) sandboxStopRequests += 1;
     });
     await page.getByRole("button", { name: "New terminal", exact: true }).click();
     // The bounded private RPC may time out after creating the shell. Inspect
@@ -663,9 +681,27 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Enter");
     await expect(terminalRows).toContainText(/__DURABLE_PID__\d+__/);
     const firstPid = /__DURABLE_PID__(\d+)__/.exec(await terminalRows.innerText())![1];
-    await page.goto(`/${slug}/`);
+    const filteredListPath = `/${slug}/?${new URLSearchParams({ search: environmentName, state: "running" })}`;
+    const filteredDetailPath = `/${slug}/${environmentId}/?${new URLSearchParams({ list_search: environmentName, list_state: "running" })}`;
+    await page.goto(filteredListPath);
     await openRowActions(row);
     await row.getByRole("link", { name: "Terminal", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}`);
+    await page.getByRole("link", { name: "Back to Sandboxes", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${filteredListPath}`);
+    await expect(page.getByLabel("Search Sandboxes", { exact: true })).toHaveValue(environmentName);
+    await openRowActions(row);
+    const inventoryStopsBeforeCancel = sandboxStopRequests;
+    await row.getByRole("button", { name: "Stop", exact: true }).click();
+    const inventoryStop = page.getByRole("dialog", { name: `Stop ${environmentName}?`, exact: true });
+    await expect(inventoryStop.locator('input[name="environment_id"]')).toHaveValue(environmentId);
+    await expect(inventoryStop.locator('input[name="list_search"]')).toHaveValue(environmentName);
+    await inventoryStop.getByRole("button", { name: "Cancel", exact: true }).click();
+    expect(sandboxStopRequests).toBe(inventoryStopsBeforeCancel);
+    await row.getByRole("link", { name: environmentName, exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}`);
+    // Continue the existing no-context compatibility and terminal journey too.
+    await page.goto(`/${slug}/${environmentId}/`);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(`__DURABLE_PID__${firstPid}__`);
     await terminalRoot.locator(".xterm").click();
@@ -699,8 +735,13 @@ test.describe.serial("server-rendered environments", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     expect((await terminalRoot.boundingBox())!.height).toBeGreaterThanOrEqual(180);
     expect((await page.locator(".cw-terminal-footer").boundingBox())!.height).toBeLessThan(100);
+    await expect(page.locator("[data-sandbox-lifetime] time")).toBeVisible();
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", await sourceDeletionDeadline());
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveText(/^\d{2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} UTC$/);
     await expect(page).toHaveScreenshot("terminal-full-mobile.png", {
-      mask: [page.locator(".xterm-rows")],
+      // The live deadline is asserted against the source above. Mask only its
+      // variable text in the golden; retain the label and metadata layout.
+      mask: [page.locator(".xterm-rows"), page.locator("[data-sandbox-lifetime] time")],
       maskColor: "#080808",
     });
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -748,6 +789,41 @@ test.describe.serial("server-rendered environments", () => {
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(`__DURABLE_RECONNECT__preserved-session__${firstPid}__`);
     expect(launchRequests).toBe(2);
     expect(stopRequests).toBe(1);
+    // A no-op resource review must use the in-place private route and leave
+    // the current terminal root, session and shell alive.
+    const originalTerminalRoot = (await terminalRoot.elementHandle())!;
+    await page.getByRole("button", { name: "Resize", exact: true }).click();
+    const resizeDialog = page.getByRole("dialog", { name: `Resize ${environmentName}`, exact: true });
+    const noopReview = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/plan"));
+    await resizeDialog.getByRole("button", { name: "Review resize", exact: true }).click();
+    const reviewed = await noopReview;
+    expect(reviewed.status()).toBe(200);
+    const noopPlan = await reviewed.json();
+    expect(noopPlan.mode).toBe("noop");
+    expect(noopPlan.environmentId).toBe(environmentId);
+    expect(noopPlan.requestId).toMatch(/^[0-9a-f]{32}$/);
+    await expect(resizeDialog.locator("[data-resize-restart-consent]")).not.toBeVisible();
+    await expect(resizeDialog.locator("[data-resize-session-consent]")).not.toBeVisible();
+    const noopAck = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/apply"));
+    await resizeDialog.getByRole("button", { name: "Apply resize", exact: true }).click();
+    const applied = await noopAck;
+    expect(applied.status()).toBe(200);
+    const noopOperation = await applied.json();
+    expect(noopOperation.requestId).toBe(noopPlan.requestId);
+    expect(noopOperation.desiredResources).toEqual(noopPlan.desiredResources);
+    await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
+    await resizeDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/${environmentId}/`);
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
+    expect(await originalTerminalRoot.evaluate((root) => root.isConnected)).toBe(true);
+    expect(await terminalRoot.evaluate((root, original) => root === original, originalTerminalRoot)).toBe(true);
+    await originalTerminalRoot.dispose();
+    await terminalRoot.locator(".xterm").click();
+    await page.keyboard.type("printf '__RESIZE_NOOP__%s__\\n' \"$$\"");
+    await page.keyboard.press("Enter");
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(`__RESIZE_NOOP__${firstPid}__`);
+    expect(launchRequests).toBe(2);
+    expect(stopRequests).toBe(1);
     await page.getByRole("button", { name: "Close terminal", exact: true }).click();
     await page.getByRole("dialog", { name: "Close terminal?" }).getByRole("button", { name: "Close terminal", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(0);
@@ -764,6 +840,12 @@ test.describe.serial("server-rendered environments", () => {
     await noJavaScriptPage.goto(`/${slug}/${environmentId}/`);
     await expect(noJavaScriptPage.getByRole("heading", { name: "Use the CLI terminal" })).toBeVisible();
     expect(await noJavaScriptPage.locator("code").textContent()).toBe(`cw shell ${environmentId}`);
+    const managePorts = noJavaScriptPage.getByRole("link", { name: "Manage Ports", exact: true });
+    await expect(managePorts).toHaveAttribute("href", `/${slug}/?ports=${environmentId}`);
+    await managePorts.click();
+    await expect(noJavaScriptPage).toHaveURL(`${ssrUrl}/${slug}/?ports=${environmentId}`);
+    await expect(noJavaScriptPage.getByRole("heading", { name: `Ports · ${environmentName}`, exact: true })).toBeVisible();
+    await expect(noJavaScriptPage.getByRole("spinbutton", { name: "Internal port", exact: true })).toBeVisible();
     expect(noJavaScriptRequests.every((url) => new URL(url).origin === ssrUrl)).toBe(true);
     await noJavaScriptContext.close();
 
@@ -772,25 +854,56 @@ test.describe.serial("server-rendered environments", () => {
     await closeTicketBeforeAttachment(page, ticket);
     await expectTerminalLeaseDrained();
     expect(disallowedBrowserCalls).toEqual([]);
-    await page.goto(`/${slug}/${environmentId}/`);
+    await page.goto(filteredDetailPath);
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
+    const sandboxStopsBeforeCancel = sandboxStopRequests;
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     const stopDialog = page.getByRole("dialog", { name: `Stop ${environmentName}?`, exact: true });
     await expect(stopDialog).toBeVisible();
     await expect(stopDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await stopDialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(stopDialog).not.toBeVisible();
+    expect(sandboxStopRequests).toBe(sandboxStopsBeforeCancel);
     const [notStopped] = await sql`SELECT state FROM environments WHERE id = ${environmentId}`;
     expect(notStopped.state).toBe("running");
+    const stopDeadline = await sourceDeletionDeadline();
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     await stopDialog.getByRole("button", { name: "Stop Sandbox", exact: true }).click();
-    await expect(page).toHaveURL(new RegExp(`/${slug}/${environmentId}/\\?message=`));
+    await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}&message=environment-stopping`);
     await waitForEnvironmentState(environmentId, ["stopped"], 120_000);
+    await expect(page.locator("[data-sandbox-state]")).toContainText("stopped", { timeout: 30_000 });
+    expect(await sourceDeletionDeadline()).toBe(stopDeadline);
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", stopDeadline);
+    await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
+    // Stopped compute changes are saved for Start, not a disguised restart.
+    await page.getByRole("button", { name: "Resize", exact: true }).click();
+    await resizeDialog.getByLabel("CPU (millicores)", { exact: true }).fill("750");
+    await resizeDialog.getByLabel("Memory (MiB)", { exact: true }).fill("1536");
+    const stoppedReview = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/plan"));
+    await resizeDialog.getByRole("button", { name: "Review resize", exact: true }).click();
+    const stoppedPlanResponse = await stoppedReview;
+    expect(stoppedPlanResponse.status()).toBe(200);
+    const stoppedPlan = await stoppedPlanResponse.json();
+    expect(stoppedPlan.mode).toBe("apply-on-start");
+    expect(stoppedPlan.restartRequired).toBe(false);
+    expect(stoppedPlan.sessionsWillTerminate).toBe(false);
+    const stoppedAck = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/apply"));
+    await resizeDialog.getByRole("button", { name: "Apply resize", exact: true }).click();
+    const stoppedResponse = await stoppedAck;
+    expect(stoppedResponse.status()).toBe(200);
+    expect((await stoppedResponse.json()).requestId).toBe(stoppedPlan.requestId);
+    await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
+    await resizeDialog.getByRole("button", { name: "Close", exact: true }).click();
+    const [deferred] = await sql`SELECT state, cpu_millicores, memory_mb FROM environments WHERE id = ${environmentId}`;
+    expect(deferred).toMatchObject({ state: "stopped", cpu_millicores: 750, memory_mb: 1536 });
+    await expect(page.locator("[data-sandbox-resources]")).toHaveCount(2);
+    await expect(page.locator("[data-sandbox-resources]")).toHaveText(["0.75 vCPU · 1536 MiB · 10 GiB", "0.75 vCPU · 1536 MiB · 10 GiB"], { timeout: 30_000 });
     await page.goto(`/${slug}/`);
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("stopped");
+    await expect(row.locator(".cw-sandbox-lifetime time")).toHaveAttribute("datetime", await sourceDeletionDeadline());
 
     await openRowActions(row);
     await row.getByText("Secrets and credentials", { exact: true }).click();
@@ -811,13 +924,19 @@ test.describe.serial("server-rendered environments", () => {
     expect(cleared.project_spec).not.toHaveProperty("secrets");
     expect(cleared.state).toBe("stopped");
 
-    await page.goto(`/${slug}/${environmentId}/`);
+    await page.goto(filteredDetailPath);
+    const beforeStartDeadline = await sourceDeletionDeadline();
     await page.getByRole("button", { name: "Start", exact: true }).click();
-    await expect(page).toHaveURL(new RegExp(`/${slug}/${environmentId}/\\?message=`));
+    await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}&message=environment-started`);
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
-    await page.reload();
-    await expect(page.locator(".cw-sandbox-heading .cw-status")).toContainText(/running/i);
+    await expect(page.locator("[data-sandbox-state]")).toContainText(/running/i, { timeout: 30_000 });
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
+    // Running is observed before the subsequent deadline write. Wait for that
+    // source-owned write rather than assuming lifecycle completion implies it.
+    await expect.poll(sourceDeletionDeadline, { timeout: 30_000 }).not.toBe(beforeStartDeadline);
+    const restartedDeadline = await sourceDeletionDeadline();
+    expect(restartedDeadline).not.toBe(beforeStartDeadline);
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", restartedDeadline, { timeout: 30_000 });
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
     await page.getByRole("button", { name: "Delete", exact: true }).click();
@@ -825,6 +944,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(deleteDialog).toBeVisible();
     await expect(deleteDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await deleteDialog.getByRole("button", { name: "Delete Sandbox", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${filteredListPath}&message=environment-destroying`);
     await waitForEnvironmentState(environmentId, ["destroyed"], 120_000);
     const [destroyed] = await sql`SELECT external_cleanup_completed_at FROM environments WHERE id = ${environmentId}`;
     expect(destroyed.external_cleanup_completed_at).not.toBeNull();

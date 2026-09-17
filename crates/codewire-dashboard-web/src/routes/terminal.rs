@@ -7,6 +7,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::{
+    auth::{authenticated_identity, enforce_two_factor},
     environment_connect,
     error::WebError,
     response::{TerminalStyleNonce, error_page, render_terminal_page},
@@ -14,11 +15,13 @@ use crate::{
     security::{csrf_cookie, new_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::TerminalTemplate,
-    view::TerminalPageView,
+    view::{SandboxListContext, TerminalPageView},
 };
 
 #[derive(Default, Deserialize)]
 pub(super) struct TerminalQuery {
+    #[serde(flatten)]
+    list_context: SandboxListContext,
     #[serde(default)]
     message: String,
     #[serde(default)]
@@ -31,7 +34,8 @@ pub(super) async fn page(
     Query(query): Query<TerminalQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = terminal_path(&slug, &environment_id);
+    let list_context = query.list_context.normalized();
+    let continuation = list_context.detail_url(&slug, &environment_id);
     if !codewire_server_core::organization_slug::valid_organization_slug(&slug)
         || !canonical_environment_id(&environment_id)
     {
@@ -42,6 +46,16 @@ pub(super) async fn page(
             Ok(context) => context,
             Err(response) => return response,
         };
+    // Capture the immutable actor from this request's authenticated cookie,
+    // never from terminal inventory, display names or browser storage. Private
+    // Resize requests compare it with freshly authenticated identity again.
+    let identity = match authenticated_identity(&state, &headers).await {
+        Ok(identity) => identity,
+        Err(error) => return error_page(error),
+    };
+    if let Err(error) = enforce_two_factor(&identity) {
+        return error_page(error);
+    }
     let mut environment =
         match environment_connect::environment(&state, cookie, &organization.id, &environment_id)
             .await
@@ -62,9 +76,12 @@ pub(super) async fn page(
             }
         };
     let view = TerminalPageView {
+        account_id: identity.id,
         organization_id: organization.id.clone(),
         environment,
         websocket_origin,
+        list_url: list_context.list_url(&slug),
+        list_context,
         message: super::environments::page_message(&query.message).into(),
         error: super::environments::page_error(&query.error).into(),
     };
@@ -118,6 +135,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detail_query_decodes_list_context_without_changing_feedback() {
+        let uri = "/my-org/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/?list_search=a%26state%3Ddestroyed&list_state=running&message=environment-started".parse().unwrap();
+        let Query(query) = Query::<TerminalQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.list_context.list_search, "a&state=destroyed");
+        assert_eq!(query.list_context.list_state, "running");
+        assert_eq!(query.message, "environment-started");
+        let Query(legacy) = Query::<TerminalQuery>::try_from_uri(
+            &"/my-org/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/"
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(legacy.list_context.normalized().list_state, "all");
+        assert_eq!(legacy.list_context.list_search, "");
+    }
+
+    #[test]
     fn disruptive_controls_use_native_dialogs_and_keep_the_detail_context() {
         let template = include_str!("../../templates/terminal.html");
         for name in ["stop", "delete"] {
@@ -136,7 +170,19 @@ mod tests {
                 .count(),
             3
         );
+        for name in ["list_search", "list_state"] {
+            assert_eq!(template.matches(&format!("name=\"{name}\"")).count(), 3);
+        }
+        assert!(
+            template
+                .contains("href=\"{{ page.list_url }}\" aria-label=\"Back to Sandboxes\">←</a>")
+        );
+        assert!(template.contains("href=\"{{ page.list_context.detail_url(organization.slug, page.environment.id) }}\" data-sandbox-observation-reload"));
         assert!(!template.contains("cw-action-menu--danger"));
+        assert!(
+            template.contains("{% if page.environment.confidential_actions_allowed %}<noscript>")
+        );
+        assert!(template.contains("href=\"{{ organization.environments_url }}?ports={{ page.environment.id }}\">Manage Ports</a>"));
         assert_eq!(template.matches("data-terminal-root ").count(), 1);
     }
 

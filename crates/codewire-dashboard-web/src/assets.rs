@@ -37,6 +37,7 @@ pub(crate) const TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/terminal-v1.js";
 pub(crate) const DURABLE_TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/durable-terminal-v1.js";
 pub(crate) const TERMINAL_PROTOCOL_SCRIPT_PATH: &str = "/assets/codewire/terminal-protocol-v1.js";
 pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v1.js";
+pub(crate) const SANDBOX_RESIZE_SCRIPT_PATH: &str = "/assets/codewire/sandbox-resize-v1.js";
 pub(crate) const TERMINAL_RENDERER_SCRIPT_PATH: &str = "/assets/codewire/terminal-renderer-v1.js";
 pub(crate) const TERMINAL_PRESENTATION_SCRIPT_PATH: &str =
     "/assets/codewire/terminal-presentation-v1.js";
@@ -92,6 +93,8 @@ const TERMINAL_PROTOCOL_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/terminal-protocol.js");
 const TERMINAL_READINESS_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/terminal-readiness.js");
+const SANDBOX_RESIZE_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/sandbox-resize.js");
 const TERMINAL_RENDERER_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/terminal-renderer.js");
 const TERMINAL_PRESENTATION_SCRIPT: &str =
@@ -213,6 +216,13 @@ pub(crate) fn router() -> Router<AppState> {
             static_asset(
                 "application/javascript; charset=utf-8",
                 TERMINAL_PROTOCOL_SCRIPT,
+            ),
+        )
+        .route(
+            SANDBOX_RESIZE_SCRIPT_PATH,
+            static_asset(
+                "application/javascript; charset=utf-8",
+                SANDBOX_RESIZE_SCRIPT,
             ),
         )
         .route(
