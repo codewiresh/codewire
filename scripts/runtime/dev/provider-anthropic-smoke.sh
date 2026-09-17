@@ -84,7 +84,7 @@ run_provider_anthropic_smoke() {
       >"$TMPDIR_SMOKE/provider-anthropic-proof.out" 2>"$TMPDIR_SMOKE/provider-anthropic-proof.err"; then
     die 'bounded live Claude workload failed; raw provider output remains private inside the disposable VM'
   fi
-  [[ ! -s "$TMPDIR_SMOKE/provider-anthropic-proof.err" ]] || die 'live Claude workload returned a public error receipt'
+  assert_managed_run_stderr "$TMPDIR_SMOKE/provider-anthropic-proof.err" || die 'live Claude workload returned unexpected stderr'
   cmp -s "$TMPDIR_SMOKE/provider-anthropic-proof.out" <(printf 'CW_LIVE_CLAUDE_OK\n') ||
     die 'live Claude workload omitted its exact public receipt'
   log 'live Anthropic API request validated with stock Claude in the local 2-vCPU/16-GiB VM; parent cleanup remains pending and other providers are not implied'
