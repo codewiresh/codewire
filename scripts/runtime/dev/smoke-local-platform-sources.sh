@@ -400,7 +400,9 @@ local_platform_binding() {
     (.source_selection.secrets.project // "") == $project and
     (.source_selection.secrets.user // null) == null and
     (.source_selection.secrets.organization // false) == false and
-    .source_selection.platform == {server_url:$server,organization_id:$org,user_id:$user}
+    .source_selection.platform ==
+      (if $credentials == null and $project == "" then null
+       else {server_url:$server,organization_id:$org,user_id:$user} end)
   ' "$TMPDIR_SMOKE/local-environment.json" >/dev/null
 }
 

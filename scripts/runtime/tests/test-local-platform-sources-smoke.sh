@@ -80,6 +80,7 @@ fixture() {
   LP_NETWORK_CREATE_ATTEMPTED=0
   LP_LIVE_CODEX=0; LP_LIVE_ANTHROPIC=0; LP_LIVE_OPENAI=0
   LP_APPLICATION_ONLY=0
+  FIXTURE_EMPTY_SOURCE=0
   LOCAL_PLATFORM_OPENAI_MODEL=fixture-model-v1
   LP_INITIAL_PRIVATE_CHECKOUT=0; LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=''
   FIXTURE_NETWORKS_JSON=''
@@ -323,10 +324,12 @@ cw_with_timeout() {
     'env info --local '*" --output json")
       jq -n --arg id "$ENV_ID" --arg project "platform:id:$PROJECT_ID" --arg profile "platform:id:$PROFILE_ID" \
         --arg server "$CODEWIRE_SERVER_URL" --arg user "$LP_USER_ID" --arg org "$ORG_ID" --arg failure "$FAILURE" \
-        --argjson application_only "$LP_APPLICATION_ONLY" '
+        --argjson application_only "$LP_APPLICATION_ONLY" --argjson empty_source "$FIXTURE_EMPTY_SOURCE" '
         {id:$id,backend:"cloud-hypervisor",state:"running",cpu:2,memory:"16Gi",generation:1,
          source_selection:{credentials:(if $application_only == 1 then null else {profile:$profile,reference:"user/owned-profile",revision:1} end),
-           secrets:{project:$project},platform:{server_url:$server,organization_id:$org,user_id:$user}}} |
+           secrets:{project:(if $empty_source == 1 then null else $project end)},
+           platform:(if $application_only == 1 and $empty_source == 1 then null
+                     else {server_url:$server,organization_id:$org,user_id:$user} end)}} |
         if $failure == "wrong-vm" then .id="unowned"
         elif $failure == "wrong-profile" then .source_selection.credentials.profile="local:owned-profile"
         elif $failure == "wrong-revision" then .source_selection.credentials.revision=2
@@ -337,6 +340,10 @@ cw_with_timeout() {
         elif $failure == "wrong-user" then .source_selection.platform.user_id="unowned"
         elif $failure == "wrong-org" then .source_selection.platform.organization_id="unowned"
         elif $failure == "wrong-server" then .source_selection.platform.server_url="https://wrong.invalid"
+        elif $failure == "retained-authority" then .source_selection.platform={server_url:$server,organization_id:$org,user_id:$user}
+        elif $failure == "false-authority" then .source_selection.platform=false
+        elif $failure == "empty-authority" then .source_selection.platform={}
+        elif $failure == "missing-authority" then .source_selection.platform=null
         elif $failure == "extra-source" then .source_selection.secrets.user="platform"
         elif $failure == "stale" then .generation=0
         elif $failure == "leaped" then .generation=2 else . end' ;;
@@ -538,6 +545,31 @@ for invalid in wrong-vm unselected-profile empty-credentials false-credentials w
   }
   expect_failure "application-only-$invalid" invalid_application_only_binding
 done
+fixture
+LP_APPLICATION_ONLY=1; FIXTURE_EMPTY_SOURCE=1
+local_platform_binding "" 0
+pass
+for invalid in retained-authority false-authority empty-authority; do
+  invalid_application_only_clear_binding() {
+    fixture; LP_APPLICATION_ONLY=1; FIXTURE_EMPTY_SOURCE=1; FAILURE="$invalid"
+    local_platform_binding "" 0
+  }
+  expect_failure "application-only-clear-$invalid" invalid_application_only_clear_binding
+done
+fixture
+FIXTURE_EMPTY_SOURCE=1
+local_platform_binding "" 0
+pass
+invalid_credential_clear_binding() {
+  fixture; FIXTURE_EMPTY_SOURCE=1; FAILURE=missing-authority
+  local_platform_binding "" 0
+}
+expect_failure credential-clear-missing-authority invalid_credential_clear_binding
+invalid_selected_application_binding() {
+  fixture; LP_APPLICATION_ONLY=1; FAILURE=missing-authority
+  local_platform_binding "platform:id:$PROJECT_ID" 0
+}
+expect_failure application-only-selected-missing-authority invalid_selected_application_binding
 fixture
 local_platform_ssh_prove
 local_platform_ssh_revoke
