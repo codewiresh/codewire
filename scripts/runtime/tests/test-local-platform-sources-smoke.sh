@@ -32,6 +32,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck disable=SC1091
 source "$REPO_ROOT/scripts/runtime/dev/smoke-local-platform-sources.sh"
 REAL_LOCAL_PLATFORM_APPLICATION_PHASE="$(declare -f local_platform_application_phase)"
+REAL_LOCAL_PLATFORM_GUEST_CHECK="$(declare -f local_platform_guest_check)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cw-local-platform-tests.XXXXXXXX")"
 TEST_OWNER="$BASHPID"
 cleanup_test() {
@@ -525,6 +526,24 @@ pass
 
 # A synthetic CLI requires terminal stdin for size detection and nonterminal
 # stdout for exit propagation, then allocates an actual guest PTY on --tty.
+(
+  eval "$REAL_LOCAL_PLATFORM_GUEST_CHECK"
+  guest_python="$(local_platform_guest_check absent | awk "/^python3 - <<'PY'$/ { active=1; next } /^PY$/ { active=0 } active")"
+  [[ -n "$guest_python" ]] || fail 'actual guest Python heredoc is missing'
+  guest_home="$TMPDIR_SMOKE/nondefault-home"
+  mkdir -m 0700 "$guest_home"
+  env HOME="$guest_home" python3 -c "$guest_python"
+  mkdir -p "$guest_home/.codewire"
+  printf '{}\n' >"$guest_home/.codewire/environment.json"
+  expect_failure persisted-environment-json env HOME="$guest_home" python3 -c "$guest_python"
+  rm "$guest_home/.codewire/environment.json"
+  mkdir -p "$guest_home/.codewire/daemon/sessions"
+  expect_failure readable-private-sessions env HOME="$guest_home" python3 -c "$guest_python"
+)
+pass
+pass
+pass
+
 LP_WORKSPACE="$TMPDIR_SMOKE"
 (
   eval "$REAL_LOCAL_PLATFORM_APPLICATION_PHASE"
@@ -540,19 +559,44 @@ LP_WORKSPACE="$TMPDIR_SMOKE"
   CODEWIRE_SERVER_URL=synthetic
   cw_with_timeout() {
     shift
-    [[ "$*" == 'run --no-tty -- /bin/sh -c '* ]] || fail 'unexpected non-PTY application command'
-    printf 'application-secret-check-ok\n'
+    if [[ "$*" == 'run --no-tty -- /bin/sh -c '* ]]; then
+      printf 'application-secret-check-ok\n'
+      printf 'Launched session session-%s\n' "$VM_ID" >&2
+      [[ "${SESSION_RECEIPT_FAILURE:-}" != duplicate-ack ]] || printf 'Launched session session-%s\n' "$VM_ID" >&2
+    elif [[ "$*" == "list $ENV_ID --output json" ]]; then
+      jq -n --arg id "session-$VM_ID" --arg guest "$SYNTHETIC_GUEST_CHECK" \
+        '[{session_id:$id,command:["/bin/sh","-c",$guest],pty:false,state:"Exited",exit_code:0}]' |
+        jq --arg failure "${SESSION_RECEIPT_FAILURE:-}" '
+          if $failure == "wrong-id" then .[0].session_id = "session-unrelated"
+          elif $failure == "wrong-command" then .[0].command = ["/bin/true"]
+          elif $failure == "pty" then .[0].pty = true
+          elif $failure == "nonzero" then .[0].exit_code = 1
+          elif $failure == "running" then .[0].state = "Running"
+          elif $failure == "duplicate-session" then . + . else . end'
+    else fail 'unexpected application or exact environment session command'; fi
   }
   local_platform_binding() { printf '{"generation":1}\n' >"$TMPDIR_SMOKE/local-environment.json"; }
   local_platform_guest_check() { printf '%s' "$SYNTHETIC_GUEST_CHECK"; }
   SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'"
   local_platform_application_phase actual synthetic expected
+  for SESSION_RECEIPT_FAILURE in wrong-id wrong-command pty nonzero running duplicate-session duplicate-ack; do
+    expect_failure "session-$SESSION_RECEIPT_FAILURE" local_platform_application_phase wrong-session synthetic expected
+  done
+  unset SESSION_RECEIPT_FAILURE
   SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'; exit 7"
   expect_failure pty-exit-status local_platform_application_phase failure synthetic expected
   SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'"
   LP_ENV+=(LOCAL_PTY_WITHOUT_TERMINAL=1)
   expect_failure missing-guest-pty local_platform_application_phase no-pty synthetic expected
 )
+pass
+pass
+pass
+
+pass
+pass
+pass
+pass
 pass
 pass
 pass

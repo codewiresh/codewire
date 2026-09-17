@@ -396,24 +396,23 @@ while test "\$(cat /workspace/.cw-app-smoke/startup-sha 2>/dev/null || true)" !=
   attempt=\$((attempt + 1)); test "\$attempt" -lt 100; sleep 0.1
 done
 python3 - <<'PY'
-import json
+import os
 from pathlib import Path
-root = Path('/home/codewire/.codewire')
+root = Path.home() / '.codewire'
 # The pinned native workspace passes ordinary values directly to its launcher;
 # unlike platform placement it never persists an environment.json file.
 assert not (root / 'environment.json').exists()
-sessions = list((root / 'daemon' / 'sessions').glob('*/session.json'))
-assert sessions, 'managed session metadata is missing'
-for path in sessions:
-    session = json.loads(path.read_text())
-    assert all(value.split('=', 1)[0] not in ('DATABASE_URL', 'CW_DEV_PRECEDENCE') for value in session['env'])
+# Native daemon state is private to the out-of-container daemon, not a
+# workload home projection. Public cw list binds the launched session below;
+# privileged daemon projection tests own durable metadata redaction proof.
+assert not os.access(root / 'daemon' / 'sessions', os.R_OK | os.X_OK), 'private daemon sessions are accessible'
 PY
 printf 'application-secret-check-ok\\n'
 SCRIPT
 }
 
 local_platform_application_phase() {
-  local phase="$1" project="$2" expected="$3" guest command receipt
+  local phase="$1" project="$2" expected="$3" guest command receipt session_id
   local_platform_binding "$project" "$LP_GENERATION" || die 'local VM source/profile/authority binding drifted'
   LP_GENERATION="$(jq -er .generation "$TMPDIR_SMOKE/local-environment.json")"
   guest="$(local_platform_guest_check "$expected")"
@@ -421,6 +420,18 @@ local_platform_application_phase() {
     >"$TMPDIR_SMOKE/local-app-$phase.out" 2>"$TMPDIR_SMOKE/local-app-$phase.err" ||
     die 'platform application projection failed in the local VM'
   grep -qx application-secret-check-ok "$TMPDIR_SMOKE/local-app-$phase.out" || die 'local application receipt is missing'
+  session_id="$(sed -nE 's/^Launched session (session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/\1/p' \
+    "$TMPDIR_SMOKE/local-app-$phase.err")"
+  [[ "$session_id" =~ ^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+    die 'local managed exec omitted an exact unique session acknowledgement'
+  cw_with_timeout 30 list "$ENV_ID" --output json >"$TMPDIR_SMOKE/local-app-sessions-$phase.json" \
+    2>"$TMPDIR_SMOKE/local-app-sessions-$phase.err" || die 'local managed session inspection failed'
+  jq -es --arg id "$session_id" --arg guest "$guest" '
+    length == 1 and (.[0] | type == "array" and
+      ([.[] | select(.session_id == $id)] |
+        length == 1 and .[0].command == ["/bin/sh", "-c", $guest] and
+        .[0].pty == false and .[0].state == "Exited" and .[0].exit_code == 0))
+  ' "$TMPDIR_SMOKE/local-app-sessions-$phase.json" >/dev/null || die 'local managed session receipt did not match exact successful exec'
   # cw needs terminal stdin to read its initial size. Redirect cw's stdout
   # inside that host PTY so attach is noninteractive and propagates the guest
   # exit status, rather than waiting for the interactive detach chord.
