@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Source selection recovery</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/environments.css">
+</head>
+<body class="cw-body">
+<main>
+  <h1>Source selection recovery</h1>
+  <p>Design fixture: exact selected metadata is retained. Only an explicit choice changes the source.</p>
+  <form aria-label="Unavailable selection">
+    <section class="cw-create-panel" aria-labelledby="stale-sources-title">
+      <h2 id="stale-sources-title">Unavailable selection</h2>
+      <fieldset class="cw-source-fields"><legend>Platform sources</legend>
+        <label class="cw-label" for="stale-project">Secret project</label>
+        <select class="cw-select" id="stale-project" name="secret_project" aria-invalid="true" aria-describedby="stale-project-help">
+          <option value="">No project secrets</option>
+          <option value="6bf8d155-e84c-4fc5-b479-b17022fe41dd" selected>Current selected project (unavailable)</option>
+          <option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76">development</option>
+        </select>
+        <p class="cw-field-help" id="stale-project-help">The selected project is unavailable. Choose no project secrets or an available project to continue.</p>
+      </fieldset>
+      <fieldset class="cw-source-fields"><legend>Platform credential profile</legend>
+        <label class="cw-label" for="stale-profile">Credential profile</label>
+        <select class="cw-select" id="stale-profile" name="credential_profile" aria-invalid="true" aria-describedby="stale-profile-help">
+          <option value="">No provider credentials</option>
+          <option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@8">work · revision 8 · 3 identities</option>
+          <option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7" selected>work · revision 7 · unavailable selection</option>
+        </select>
+        <p class="cw-field-help" id="stale-profile-help">The selected profile revision is unavailable. Choose no provider credentials or an available revision to continue.</p>
+      </fieldset>
+    </section>
+  </form>
+  <form aria-label="Catalog unavailable">
+    <section class="cw-create-panel" aria-labelledby="failed-sources-title">
+      <h2 id="failed-sources-title">Catalog unavailable</h2>
+      <input type="hidden" name="include_org_secrets" value="platform">
+      <input type="hidden" name="include_user_secrets" value="platform">
+      <input type="hidden" name="secret_project" value="6bf8d155-e84c-4fc5-b479-b17022fe41dd">
+      <fieldset class="cw-source-fields" disabled><legend>Platform sources</legend>
+        <label><input type="checkbox" name="include_org_secrets" value="platform" checked>Organization secrets</label>
+        <label><input type="checkbox" name="include_user_secrets" value="platform" checked>Personal secrets</label>
+        <label class="cw-label" for="failed-project">Secret project</label>
+        <select class="cw-select" id="failed-project" name="secret_project"><option value="6bf8d155-e84c-4fc5-b479-b17022fe41dd" selected>Current selected project (metadata unavailable)</option></select>
+      </fieldset>
+      <input type="hidden" name="credential_profile" value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7">
+      <fieldset class="cw-source-fields" disabled><legend>Platform credential profile</legend>
+        <label class="cw-label" for="failed-profile">Credential profile</label>
+        <select class="cw-select" id="failed-profile" name="credential_profile"><option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7" selected>Current selected profile (metadata unavailable) · revision 7 · selection metadata unavailable</option></select>
+      </fieldset>
+      <p class="cw-field-error" role="alert">Credential profiles could not be loaded. Reload before selecting a profile.</p>
+    </section>
+  </form>
+  <form aria-label="Catalog load failed">
+    <section class="cw-create-panel" aria-labelledby="load-failed-sources-title">
+      <h2 id="load-failed-sources-title">Catalog load failed</h2>
+      <input type="hidden" name="secret_project" value="6bf8d155-e84c-4fc5-b479-b17022fe41dd">
+      <fieldset class="cw-source-fields"><legend>Platform sources</legend>
+        <label><input type="checkbox" name="include_org_secrets" value="platform" checked>Organization secrets</label>
+        <label><input type="checkbox" name="include_user_secrets" value="platform" checked>Personal secrets</label>
+        <label class="cw-label" for="load-failed-project">Secret project</label>
+        <select class="cw-select" id="load-failed-project" name="secret_project" disabled><option value="6bf8d155-e84c-4fc5-b479-b17022fe41dd" selected>Current selected project (metadata unavailable)</option></select>
+        <p class="cw-field-error" role="alert">Project names could not be loaded. Reload before selecting a project.</p>
+      </fieldset>
+      <input type="hidden" name="credential_profile" value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7">
+      <fieldset class="cw-source-fields" disabled><legend>Platform credential profile</legend>
+        <label class="cw-label" for="load-failed-profile">Credential profile</label>
+        <select class="cw-select" id="load-failed-profile" name="credential_profile"><option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7" selected>Current selected profile (metadata unavailable) · revision 7 · selection metadata unavailable</option></select>
+        <p class="cw-field-error" role="alert">Credential profiles could not be loaded. Reload before selecting a profile.</p>
+      </fieldset>
+    </section>
+  </form>
+</main>
+</body>
+</html>

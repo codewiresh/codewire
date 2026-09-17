@@ -841,6 +841,8 @@ pub(crate) struct EnvironmentSourceFieldsView {
     pub(crate) profiles: Vec<EnvironmentCredentialProfileOption>,
     pub(crate) project_error: String,
     pub(crate) profile_error: String,
+    pub(crate) project_selection_error: String,
+    pub(crate) profile_selection_error: String,
     // Readable metadata is not proof that a placement can deliver it. The
     // mutation adapter enables these only with the corresponding backend path.
     pub(crate) application_selection_enabled: bool,
@@ -854,6 +856,7 @@ pub(crate) struct EnvironmentSecretProjectOption {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) selected: bool,
+    pub(crate) synthetic: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -863,6 +866,7 @@ pub(crate) struct EnvironmentCredentialProfileOption {
     pub(crate) revision: u64,
     pub(crate) identity_count: usize,
     pub(crate) bound_revision: bool,
+    pub(crate) synthetic: bool,
     pub(crate) selected: bool,
 }
 
@@ -932,6 +936,8 @@ impl EnvironmentCreateFormView {
             || !self.form_error.is_empty()
             || !self.sources.project_error.is_empty()
             || !self.sources.profile_error.is_empty()
+            || !self.sources.project_selection_error.is_empty()
+            || !self.sources.profile_selection_error.is_empty()
             || self.app_ports.iter().any(|row| {
                 !row.port_error.is_empty()
                     || !row.label_error.is_empty()

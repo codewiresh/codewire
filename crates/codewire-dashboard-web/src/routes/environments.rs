@@ -2639,6 +2639,7 @@ mod tests {
                     id: id.into(),
                     name: "development".into(),
                     selected: false,
+                    synthetic: false,
                 }],
                 profiles: vec![crate::view::EnvironmentCredentialProfileOption {
                     id: id.into(),
@@ -2646,6 +2647,7 @@ mod tests {
                     revision: 7,
                     identity_count: 2,
                     bound_revision: false,
+                    synthetic: false,
                     selected: false,
                 }],
                 ..Default::default()
@@ -2668,6 +2670,81 @@ mod tests {
         let mut no_credentials_consent = draft;
         no_credentials_consent.confirm_personal_credentials = false;
         assert!(validated_dashboard_project_spec(&no_credentials_consent, &[]).is_err());
+    }
+
+    #[test]
+    fn create_rejects_stale_sources_before_dispatch_and_accepts_explicit_recovery() {
+        let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let options = || EnvironmentCreateOptions {
+            presets: vec![],
+            preview_base_domain: String::new(),
+            agents: vec![],
+            confidential_available: false,
+            confidential_price: String::new(),
+            sources: crate::view::EnvironmentSourceFieldsView {
+                application_selection_enabled: true,
+                credential_selection_enabled: true,
+                projects: vec![crate::view::EnvironmentSecretProjectOption {
+                    id: "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76".into(),
+                    name: "development".into(),
+                    selected: false,
+                    synthetic: false,
+                }],
+                profiles: vec![crate::view::EnvironmentCredentialProfileOption {
+                    id: id.into(),
+                    name: "work".into(),
+                    revision: 8,
+                    identity_count: 2,
+                    bound_revision: false,
+                    synthetic: false,
+                    selected: false,
+                }],
+                ..Default::default()
+            },
+        };
+        for selection in [
+            format!("secret_project={id}"),
+            format!("credential_profile={id}%407"),
+            "credential_profile=315dd4c2-6bf2-4c3b-9d8f-68fc97654a76%407".into(),
+        ] {
+            let submission = EnvironmentSubmission::parse(
+                format!("image=example.test%2Fworkspace&{selection}").as_bytes(),
+            )
+            .unwrap();
+            let mut form = submission.form_view("synthetic-csrf".into());
+            hydrate_options(&mut form, options());
+            assert!(form.sources.complete());
+            assert!(form.has_errors());
+            assert!(
+                submission
+                    .validate_and_draft("org-test", &mut form)
+                    .is_none()
+            );
+        }
+        for selection in [
+            "secret_project=&credential_profile=".into(),
+            format!("credential_profile={id}%408"),
+            "secret_project=315dd4c2-6bf2-4c3b-9d8f-68fc97654a76".into(),
+        ] {
+            let submission = EnvironmentSubmission::parse(
+                format!("image=example.test%2Fworkspace&{selection}").as_bytes(),
+            )
+            .unwrap();
+            let mut form = submission.form_view("synthetic-csrf".into());
+            hydrate_options(&mut form, options());
+            assert!(!form.has_errors());
+            let draft = submission
+                .validate_and_draft("org-test", &mut form)
+                .unwrap();
+            assert_eq!(
+                draft.expected_profile_revision,
+                if selection.ends_with("408") {
+                    Some(8)
+                } else {
+                    None
+                }
+            );
+        }
     }
 
     #[test]
@@ -2754,6 +2831,13 @@ mod tests {
         );
         assert!(!request.confirm_personal_secrets && !request.confirm_personal_credentials);
         page.source_editor.as_mut().unwrap().fields.project_error = "Catalog unavailable".into();
+        assert!(render(&page).contains("type=\"submit\" disabled>Save sources</button>"));
+        let fields = &mut page.source_editor.as_mut().unwrap().fields;
+        fields.project_error.clear();
+        fields.select_bound(&codewire_proto::codewire::v1::EnvironmentSourceSelection {
+            profile_revision: Some(7),
+            ..Default::default()
+        });
         assert!(render(&page).contains("type=\"submit\" disabled>Save sources</button>"));
     }
 
@@ -3247,7 +3331,14 @@ mod tests {
             )
         );
         assert!(!form.sources.credential_selection_enabled);
-        assert!(picker.contains("data-github-profile disabled"));
+        let profile_select = picker
+            .split("data-github-profile")
+            .nth(1)
+            .unwrap()
+            .split('>')
+            .next()
+            .unwrap();
+        assert!(profile_select.contains(" disabled"));
         assert!(!html.contains("data-show-github-repositories"));
         assert!(!html.contains("GitHub connected"));
     }
