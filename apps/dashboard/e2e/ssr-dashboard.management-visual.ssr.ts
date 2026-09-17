@@ -3,8 +3,12 @@ import { fillField } from "./helpers/auth-flow";
 import {
   bypassTwoFactor,
   clearRateLimits,
+  cleanupUser,
+  createAuthenticatedSession,
   disableTwoFactor,
   getUserId,
+  seedSyntheticUser,
+  stabilizeSyntheticAccountVisual,
 } from "./helpers/db";
 import { ensureTestSandboxPreset } from "./helpers/environment";
 import { addOrgMember, cleanupTestOrg, ensureTestOrg } from "./helpers/org";
@@ -12,6 +16,9 @@ import { TEST_PASSWORD, USERS } from "./helpers/seed";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slug = "e2e-management-visual";
+const accountVisualEmail = `e2e-account-visual-${crypto.randomUUID()}@codewire.sh`;
+let accountVisualSession = { id: "", token: "" };
+let managementOrgId = "";
 
 async function expectNoPageOverflow(page: Page) {
   expect(await page.evaluate(() => ({
@@ -40,6 +47,7 @@ test.describe.serial("rounded management interface", () => {
     const ownerId = await getUserId(USERS.master.email);
     if (!ownerId) throw new Error("E2E master user was not seeded");
     const orgId = await ensureTestOrg("Management Visual", slug, ownerId);
+    managementOrgId = orgId;
     const adminId = await getUserId(USERS.admin.email);
     if (!adminId) throw new Error("E2E admin user was not seeded");
     await addOrgMember(orgId, adminId, "admin");
@@ -47,7 +55,8 @@ test.describe.serial("rounded management interface", () => {
   });
 
   test.afterAll(async () => {
-    await cleanupTestOrg(slug);
+    try { await cleanupTestOrg(slug); }
+    finally { await cleanupUser(accountVisualEmail); }
   });
 
   test("renders every organization management surface without page overflow", async ({
@@ -78,13 +87,32 @@ test.describe.serial("rounded management interface", () => {
     page,
     isMobile,
   }) => {
+    // Add this owner only after the organization/Members screenshots. Binding
+    // the byte-lowest ID as actor also makes current/other row ordering stable.
+    await seedSyntheticUser(accountVisualEmail, "Account visual owner");
+    await bypassTwoFactor(accountVisualEmail);
+    const accountVisualId = await getUserId(accountVisualEmail);
+    if (!accountVisualId) throw new Error("Isolated Account visual owner missing");
+    await addOrgMember(managementOrgId, accountVisualId, "member");
+    const sessions = await Promise.all([
+      createAuthenticatedSession(accountVisualEmail), createAuthenticatedSession(accountVisualEmail),
+    ]);
+    sessions.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    accountVisualSession = sessions[0];
+    await stabilizeSyntheticAccountVisual(accountVisualEmail, sessions.map((session) => session.id));
+    await page.context().clearCookies();
+    await page.context().addCookies([{ name: "codewire.session_token", value: accountVisualSession.token, url: ssrUrl }]);
     for (const [path, heading, snapshot] of [
       ["/settings/", "Account", "management-settings"],
-      ["/settings/security/", "Security settings", "management-security"],
+      ["/settings/security/", "Security", "management-security"],
       ["/settings/sessions/", "Active sessions", "management-sessions"],
     ] as const) {
       const response = await page.goto(`${path}?org=${slug}`);
       expect(response?.status()).toBe(200);
+      await expect(page).toHaveURL(`/settings/?org=${slug}${path === "/settings/" ? "" : path.includes("security") ? "#security" : "#sessions"}`);
+      await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
+      await expect(page.locator(".cw-account-session")).toHaveCount(2);
+      await expect(page.locator("#account-details dd").first()).toHaveText("Account visual owner");
       await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
         "Management Visual",
       );
@@ -94,6 +122,9 @@ test.describe.serial("rounded management interface", () => {
         `${snapshot}-${isMobile ? "mobile" : "desktop"}.png`,
         {
           fullPage: false,
+          // Only per-run public identifiers are volatile. Real metadata,
+          // controls, two-row inventory and org context remain asserted.
+          mask: [page.locator("#account-details dd").nth(1), page.locator("#sessions code")],
         },
       );
     }
