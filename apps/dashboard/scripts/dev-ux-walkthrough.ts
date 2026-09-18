@@ -1,6 +1,6 @@
 // Runs ONLY inside the existing protected Dev auth helper. No traces, page
 // dumps, screenshots, stored browser sessions, or provider authorizations.
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, request, type Locator, type Page } from "@playwright/test";
 import { DevUxError, type OwnedUxSandbox } from "./dev-ux-ownership";
 
 const ORIGIN = "https://codewire-dev.sh";
@@ -66,15 +66,17 @@ async function credentials(page: Page, slug: string): Promise<void> {
 }
 
 async function settings(page: Page, slug: string): Promise<void> {
-  await visit(page, `/settings/?org=${slug}`);
-  for (const title of ["Account details", "Security", "Active sessions"]) {
-    await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
-  }
-  await fits(page);
-  for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API Keys"]]) {
-    await visit(page, `/settings/${path}/?org=${slug}`);
-    await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
+  for (const query of [`?org=${slug}`, ""]) {
+    await visit(page, `/settings/${query}`);
+    for (const title of ["Account details", "Security", "Active sessions"]) {
+      await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+    }
     await fits(page);
+    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API Keys"]]) {
+      await visit(page, `/settings/${path}/${query}`);
+      await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
+      await fits(page);
+    }
   }
 }
 
@@ -95,6 +97,36 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
   await expect(picker.getByRole("link", { name: "Connect GitHub or create a profile in Settings" })).toBeVisible();
   await button(picker, "Close GitHub repositories").click();
   await fits(page, page.locator("#environment-create-card"));
+  // Read-only setup detours: do not create credentials or application secrets.
+  for (const destination of ["secrets", "credentials"]) {
+    if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
+      await page.locator("[data-create-resources] > summary").click();
+    }
+    await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+    await page.getByLabel("Delete after (TTL)", { exact: true }).fill("8h");
+    await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    const draft = await form.getAttribute("data-create-draft-id");
+    expect(draft).toMatch(/^[0-9a-f-]{36}$/);
+    const setup = destination === "secrets"
+      ? page.getByRole("link", { name: "Add or manage personal secrets", exact: true })
+      : page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link");
+    await setup.click();
+    await expect(page).toHaveURL(`${ORIGIN}/settings/${destination}/?org=${slug}&creation_draft=${draft}`);
+    const back = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
+    await expect(back).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
+    await back.click();
+    await expect(form).toHaveAttribute("data-create-draft-id", draft!);
+    await expect(form).toHaveAttribute("data-create-draft-actor", userId);
+    await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+    await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+    await button(page, "Restore saved selections").click();
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
+    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+    await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
+    await fits(page, page.locator("#environment-create-card"));
+  }
 }
 
 export async function runDevUxWalkthrough(page: Page, options: {
@@ -110,16 +142,21 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await stage(`create-form-${width}`, () => createForm(page, slug, userId, orgId));
   }
   await page.setViewportSize({ width: 1440, height: 900 });
+  let previewPattern = "";
   await stage("create-sandbox", async () => {
     await owned.admit(deadline);
+    previewPattern = (await page.locator(".cw-preview-pattern").innerText()).trim();
     await page.getByLabel("Name", { exact: true }).fill(owned.name);
-    await page.locator("[data-create-resources] > summary").click();
+    if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
+      await page.locator("[data-create-resources] > summary").click();
+    }
     await page.getByLabel("CPU", { exact: true }).selectOption("1000");
     await page.getByLabel("Memory", { exact: true }).selectOption("2048");
     await page.getByLabel("Disk", { exact: true }).selectOption("10");
     await page.getByLabel("Delete after (TTL)", { exact: true }).fill("1h");
     // Use the product's configured default image. Never inherit a saved source
     // selection or attach the dedicated account's existing secrets/providers.
+    await page.locator("[data-reset-workspace-image]").click();
     expect(await page.getByLabel("Workspace image", { exact: true }).inputValue()).not.toBe("");
     await expect(page.getByLabel("Credential profile", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
@@ -142,6 +179,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
   };
   let firstId: string | null = null;
   let pid = "";
+  let job = "";
   await stage("terminal-colors-copy", async () => {
     await visit(page, detailPath);
     await expect(button(page, "New terminal")).toBeEnabled({ timeout: 240_000 });
@@ -165,6 +203,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("__UX_COPY__");
   });
   await stage("terminal-tabs-navigation-reconnect", async () => {
+    await send("cd /tmp; sleep 300 & CW_UX_JOB=$!; printf '__UX_JOB__%s__\\n' \"$CW_UX_JOB\"");
+    await expect(rows).toContainText(/__UX_JOB__\d+__/);
+    job = /__UX_JOB__(\d+)__/.exec(await rows.innerText())![1];
     await button(page, "Rename terminal").click();
     const rename = dialog(page, "Rename terminal");
     await rename.getByLabel("Terminal name", { exact: true }).fill("UX shell");
@@ -176,31 +217,91 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(button(page, "Disconnect")).toBeEnabled();
     await button(page, "New terminal").click();
     await expect(page.getByRole("tab")).toHaveCount(2);
+    const secondId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
+    expect(secondId).toBeTruthy();
+    expect(secondId).not.toBe(firstId);
     await expect(button(page, "Disconnect")).toBeEnabled();
     await send("printf '__UX_SECOND__%s__%s__\\n' \"${CW_UX_SESSION-unset}\" \"$$\"");
     await expect(rows).toContainText(/__UX_SECOND__unset__\d+__/);
     expect(/__UX_SECOND__unset__(\d+)__/.exec(await rows.innerText())![1]).not.toBe(pid);
+    await button(page, "Rename terminal").click();
+    await rename.getByLabel("Terminal name", { exact: true }).fill("UX logs");
+    await button(rename, "Save name").click();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("tab")).toHaveText(["UX shell", "UX logs"]);
+    await expect(page.getByRole("tab", { name: "UX logs", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondId!);
     await page.getByRole("tab", { name: "UX shell", exact: true }).click();
     await button(page, "Disconnect").click();
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
     await button(page, "Reconnect").click();
     await expect(button(page, "Disconnect")).toBeEnabled();
-    await send("printf '__UX_RESUMED__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\"");
-    await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__`);
+    await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_RESUMED__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
+    await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__/tmp__${job}__`);
+    await page.getByRole("tab", { name: "UX shell", exact: true }).press("ArrowRight");
+    await expect(page.getByRole("tab", { name: "UX logs", exact: true })).toBeFocused();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondId!);
+    await button(page, "Close terminal").click();
+    const close = dialog(page, "Close terminal?");
+    await button(close, "Cancel").click();
+    await expect(page.getByRole("tab")).toHaveCount(2);
+    await button(page, "Close terminal").click();
+    await button(close, "Close terminal").click();
+    await expect(page.getByRole("tab")).toHaveCount(1);
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstId!);
+    await expect(button(page, "Disconnect")).toBeEnabled();
+    await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_SURVIVOR__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
+    await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
     await page.setViewportSize({ width: 390, height: 844 });
     await fits(page);
     expect((await terminal.boundingBox())!.height).toBeGreaterThanOrEqual(180);
     await page.setViewportSize({ width: 1440, height: 900 });
   });
   await stage("ports-resize-dismissal", async () => {
+    // Same bounded synthetic server as commodity smoke; never serve files or
+    // attach provider credentials. Destroying this owned Sandbox cleans it up.
+    const canary = "codewire-dev-ux-preview";
+    await send(`node -e 'require("http").createServer((q,s)=>{s.writeHead(200,{"content-type":"text/plain","cache-control":"no-store"});s.end("${canary}")}).listen(8080,"0.0.0.0")' >/dev/null 2>&1 &`);
+    await send(`for i in 1 2 3 4 5; do test "$(curl -fsS --max-time 2 http://127.0.0.1:8080)" = "${canary}" && { printf '__UX_PREVIEW_%s__\\n' ready; break; }; sleep 1; done`);
+    await expect(rows).toContainText("__UX_PREVIEW_ready__");
     const before = page.url();
     await button(page, "Ports").click();
     const ports = dialog(page, `Ports · ${owned.name}`);
     await expect(ports).toBeVisible();
     await expect(ports.getByLabel("Internal port", { exact: true })).toBeVisible();
+    await ports.getByLabel("Internal port", { exact: true }).fill("8080");
+    await ports.getByLabel("Preview label", { exact: true }).fill("ux-preview");
+    await expect(ports.getByLabel("Who can open the preview?", { exact: true })).toHaveValue("creator");
+    await button(ports, "Add port").click();
+    const port = ports.locator(".cw-port-row", { has: page.getByText("ux-preview", { exact: true }) });
+    await expect(port).toContainText("8080 · Creator");
+    const open = port.getByRole("link", { name: "Open preview", exact: true });
+    const preview = await open.getAttribute("href");
+    const expected = new URL(previewPattern.replace("{label}", "ux-preview").replace("{sandbox-id-prefix}", id.slice(0, 5)));
+    expect(expected.protocol).toBe("https:");
+    expect(expected.hostname.startsWith(`ux-preview-${id.slice(0, 5)}-${slug}.`)).toBe(true);
+    expect(new URL(preview!).href).toBe(expected.href);
+    await button(port, "Copy URL").click();
+    await expect(port.locator("[data-preview-copy-status]")).toHaveText("Preview URL copied.");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(preview);
+    // Isolated request context has no browser cookies. Do not follow login
+    // redirects, inject auth across domains, or change the preview to public.
+    const anonymous = await request.newContext();
+    try {
+      const denied = await anonymous.get(preview!, { maxRedirects: 0, timeout: 15_000 });
+      expect([302, 303, 401, 403]).toContain(denied.status());
+      expect(await denied.text()).not.toContain(canary);
+      // #2142: normal private-preview Open has no browser-auth handoff yet.
+      // Do not inject a full account cookie or claim authenticated Open proof.
+      await button(port, "Remove ux-preview preview").click();
+      await expect(port).toHaveCount(0);
+      const removed = await anonymous.get(preview!, { maxRedirects: 0, timeout: 15_000 });
+      expect(removed.status()).toBe(404);
+      expect(await removed.text()).not.toContain(canary);
+    } finally { await anonymous.dispose(); }
     await button(ports, "Close").click();
     expect(page.url()).toBe(before);
-    await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__`);
+    await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
     await button(page, "Resize").click();
     const resize = dialog(page, `Resize ${owned.name}`);
     await expect(resize).toBeVisible();

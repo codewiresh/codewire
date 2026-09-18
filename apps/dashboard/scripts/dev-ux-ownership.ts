@@ -24,7 +24,7 @@ export class OwnedUxSandbox {
   constructor(private readonly userId: string, private readonly orgId: string,
     private readonly command: Command) {}
 
-  private async lookup(deadline: number): Promise<OwnedEnvironment | undefined> {
+  private async lookup(deadline: number, retryBound = true): Promise<OwnedEnvironment | undefined> {
     const result = await this.command(["env", "--platform", "list", "--all", "--output", "json"], deadline);
     if (!Array.isArray(result) || result.some((row) => !row || typeof row !== "object")) {
       throw new DevUxError("ux-owned-resource-list");
@@ -33,12 +33,33 @@ export class OwnedUxSandbox {
     if (rows.length > 1) throw new DevUxError("ux-owned-resource-ambiguous");
     const row = rows[0];
     if (!row) return undefined;
-    if (row.org_id !== this.orgId || row.created_by !== this.userId || !UUID.test(row.id)
+    if (row.placement !== "platform" || typeof row.id !== "string" || !UUID.test(row.id)
       || typeof row.state !== "string" || (this.id && row.id !== this.id)) {
       throw new DevUxError("ux-owned-resource-mismatch");
     }
+    // Unified list is discovery, not ownership evidence: it omits org/creator.
+    // CLI info cannot resolve destroying/destroyed environments. Those states
+    // are terminal evidence only after this exact ID's full ownership binding.
+    if (this.id && ["destroying", "destroyed"].includes(row.state)) {
+      return { id: row.id, state: row.state };
+    }
+    let value: unknown;
+    try {
+      value = await this.command(["env", "--platform", "info", row.id, "--output", "json"], deadline);
+    } catch {
+      // A bound environment may enter destruction between list and info.
+      if (this.id && retryBound) return this.lookup(deadline, false);
+      throw new DevUxError("ux-owned-resource-mismatch");
+    }
+    const detail = value as Record<string, unknown> | null;
+    if (!detail || Array.isArray(detail) || typeof detail !== "object"
+      || detail.id !== row.id || detail.name !== this.name
+      || detail.org_id !== this.orgId || detail.created_by !== this.userId
+      || typeof detail.state !== "string") {
+      throw new DevUxError("ux-owned-resource-mismatch");
+    }
     this.id = row.id;
-    return { id: row.id, state: row.state };
+    return { id: row.id, state: detail.state };
   }
 
   async admit(deadline: number): Promise<void> {
