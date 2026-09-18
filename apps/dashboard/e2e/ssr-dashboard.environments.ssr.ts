@@ -758,8 +758,8 @@ test.describe.serial("server-rendered environments", () => {
     await page.reload();
     const row = page.locator("tr", { hasText: name }).first();
     await openRowActions(row);
-    await row.getByText("Destroy", { exact: true }).click();
-    await row.getByRole("button", { name: "Destroy permanently", exact: true }).click();
+    await row.getByText("Delete", { exact: true }).click();
+    await row.getByRole("button", { name: "Delete permanently", exact: true }).click();
     await waitForEnvironmentState(created.id as string, ["destroyed"], 120_000);
     const [destroyed] = await sql`
       SELECT external_cleanup_completed_at FROM environments
