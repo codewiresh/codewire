@@ -8,6 +8,9 @@ const deadline = () => Date.now() + 1000;
 
 function fixture() {
   let rows: unknown = [];
+  let detailOverride: unknown;
+  let overrideDetail = false;
+  let infoFailureState = "";
   const calls: string[][] = [];
   const owned = new OwnedUxSandbox(USER, ORG, async (args) => {
     calls.push(args);
@@ -15,10 +18,25 @@ function fixture() {
       rows = [{ ...row(), state: "destroyed" }];
       return "";
     }
-    return rows;
+    if (args.includes("info")) {
+      if (infoFailureState) {
+        rows = [{ ...row(), state: infoFailureState }];
+        throw new Error("not found");
+      }
+      if (overrideDetail) return detailOverride;
+      const matched = Array.isArray(rows) ? rows.find((row) => row.id === args[3]) : undefined;
+      if (!matched || ["destroying", "destroyed"].includes(matched.state)) throw new Error("not found");
+      return matched;
+    }
+    return Array.isArray(rows) ? rows.map((row) => ({
+      id: row.id, name: row.name, placement: row.placement, selected: false,
+      state: row.state, daemon_health: "unavailable",
+    })) : rows;
   });
-  const row = () => ({ id: ID, name: owned.name, org_id: ORG, created_by: USER, state: "running" });
-  return { owned, calls, row, set: (value: unknown) => { rows = value; } };
+  const row = () => ({ id: ID, name: owned.name, placement: "platform", org_id: ORG, created_by: USER, state: "running" });
+  return { owned, calls, row, set: (value: unknown) => { rows = value; },
+    detail: (value: unknown) => { overrideDetail = true; detailOverride = value; },
+    failInfo: (state: string) => { infoFailureState = state; } };
 }
 
 test("organization routes require exact unique owner and a path-safe slug", () => {
@@ -49,7 +67,7 @@ test("preexisting random-name collision refuses admission without deletion", asy
 
 test("ambiguous Create response reconciles only exact claimed name, actor and org", async () => {
   const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
-  f.set([{ ...f.row(), name: "unrelated" }, f.row()]);
+  f.set([{ ...f.row(), id: "00000000-0000-4000-8000-000000000002", name: "unrelated" }, f.row()]);
   await f.owned.cleanup(deadline());
   expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["env", "--platform", "rm", "--yes", ID]]);
 });
@@ -77,9 +95,59 @@ test("once acknowledged, a changed ID never becomes a cleanup target", async () 
 
 test("terminal destruction is reusable; pending destruction must finish within reserve", async () => {
   const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
+  f.set([f.row()]);
+  await f.owned.createdId(deadline());
   f.set([{ ...f.row(), state: "destroying" }]);
   await expect(f.owned.cleanup(Date.now() - 1)).rejects.toThrow("ux-cleanup-timeout");
   f.set([{ ...f.row(), state: "destroyed" }]);
   await f.owned.cleanup(deadline());
   expect(f.calls.some((args) => args.includes("rm"))).toBe(false);
+});
+
+test("skinny unified list requires full info ownership before any deletion", async () => {
+  for (const detail of [null, [], {}, { id: ID }, "unexpected"]) {
+    const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
+    f.set([f.row()]); f.detail(detail);
+    await expect(f.owned.cleanup(deadline())).rejects.toThrow("ux-owned-resource-mismatch");
+    expect(f.calls.some((args) => args.includes("rm"))).toBe(false);
+  }
+  for (const field of ["id", "name", "org_id", "created_by", "state"]) {
+    const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
+    f.set([f.row()]); f.detail({ ...f.row(), [field]: field === "state" ? null : "foreign" });
+    await expect(f.owned.cleanup(deadline())).rejects.toThrow("ux-owned-resource-mismatch");
+    expect(f.calls.some((args) => args.includes("rm"))).toBe(false);
+  }
+});
+
+test("terminal rows cannot establish ownership and local placement is rejected", async () => {
+  for (const change of [{ state: "destroying" }, { state: "destroyed" }, { placement: "local" }]) {
+    const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
+    f.set([{ ...f.row(), ...change }]);
+    await expect(f.owned.cleanup(deadline())).rejects.toThrow("ux-owned-resource-mismatch");
+    expect(f.calls.some((args) => args.includes("rm"))).toBe(false);
+  }
+});
+
+test("bound terminal cleanup does not call info or repeat deletion", async () => {
+  const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
+  f.set([f.row()]); await f.owned.createdId(deadline());
+  const calls = f.calls.length;
+  f.set([{ ...f.row(), state: "destroyed" }]);
+  await f.owned.cleanup(deadline());
+  expect(f.calls.slice(calls)).toEqual([["env", "--platform", "list", "--all", "--output", "json"]]);
+});
+
+test("bound list-info destruction race rechecks once, never treating an info error as cleanup", async () => {
+  for (const nextState of ["running", "destroyed"]) {
+    const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
+    f.set([f.row()]); await f.owned.createdId(deadline());
+    const before = f.calls.length;
+    f.failInfo(nextState);
+    if (nextState === "destroyed") await f.owned.cleanup(deadline());
+    else await expect(f.owned.cleanup(deadline())).rejects.toThrow("ux-owned-resource-mismatch");
+    const calls = f.calls.slice(before);
+    expect(calls.filter(args => args.includes("list"))).toHaveLength(2);
+    expect(calls.filter(args => args.includes("info"))).toHaveLength(nextState === "destroyed" ? 1 : 2);
+    expect(calls.some(args => args.includes("rm"))).toBe(false);
+  }
 });

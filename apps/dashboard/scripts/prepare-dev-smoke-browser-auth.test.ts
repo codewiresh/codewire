@@ -249,7 +249,11 @@ case " $* " in
   *" org list --output json "*) printf '%s\\n' '[{"id":"${ORG}","role":"owner","slug":"dedicated-smoke"}]' ;;
   *" org current "*) printf 'ID: ${ORG}\\nRole: owner\\n' ;;
   *" env --platform list --all --output json "*)
-    if test -f "$CW_CONFIG_DIR/ux-resource.json"; then cat "$CW_CONFIG_DIR/ux-resource.json"; else printf '[]'; fi ;;
+    if test -f "$CW_CONFIG_DIR/ux-resource.json"; then
+      "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); console.log(JSON.stringify(rows.map(({id,name,state})=>({id,name,state,placement:"platform",selected:false,daemon_health:"unavailable"}))));'
+    else printf '[]'; fi ;;
+  *" env --platform info "*)
+    "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row||["destroying","destroyed"].includes(row.state))process.exit(92); console.log(JSON.stringify(row));' "$6" ;;
   *" env --platform rm --yes "*)
     printf 'destroy\\n' >>"${directory}/audit"
     ${mode === "ux-cleanup-failure" ? "exit 96" : ":"}
