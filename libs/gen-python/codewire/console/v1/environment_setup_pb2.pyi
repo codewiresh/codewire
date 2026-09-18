@@ -14,10 +14,12 @@ class GetEnvironmentCreateOptionsRequest(_message.Message):
     def __init__(self, org_id: _Optional[str] = ...) -> None: ...
 
 class GetEnvironmentCreateOptionsResponse(_message.Message):
-    __slots__ = ("presets",)
+    __slots__ = ("presets", "preview_base_domain")
     PRESETS_FIELD_NUMBER: _ClassVar[int]
+    PREVIEW_BASE_DOMAIN_FIELD_NUMBER: _ClassVar[int]
     presets: _containers.RepeatedCompositeFieldContainer[_preset_pb2.Preset]
-    def __init__(self, presets: _Optional[_Iterable[_Union[_preset_pb2.Preset, _Mapping]]] = ...) -> None: ...
+    preview_base_domain: str
+    def __init__(self, presets: _Optional[_Iterable[_Union[_preset_pb2.Preset, _Mapping]]] = ..., preview_base_domain: _Optional[str] = ...) -> None: ...
 
 class IssueTerminalTicketRequest(_message.Message):
     __slots__ = ()

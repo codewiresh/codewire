@@ -305,17 +305,28 @@ pub(super) async fn mutation_cookie(
     path: &str,
 ) -> Result<axum::http::HeaderValue, Response> {
     let continuation = global_settings_path(path, selected_slug);
+    mutation_cookie_with_continuation(state, headers, csrf, &continuation).await
+}
+
+// The caller supplies a closed, route-owned continuation. It changes only
+// login/2FA navigation, never organization selection or mutation authority.
+pub(super) async fn mutation_cookie_with_continuation(
+    state: &AppState,
+    headers: &HeaderMap,
+    csrf: &str,
+    continuation: &str,
+) -> Result<axum::http::HeaderValue, Response> {
     if !account_sessions::cookie_authority_is_unique(headers) {
-        return Err(login_redirect(&continuation, headers));
+        return Err(login_redirect(continuation, headers));
     }
     let identity = authenticated_identity(state, headers)
         .await
         .map_err(|error| match error {
-            WebError::Unauthorized => login_redirect(&continuation, headers),
+            WebError::Unauthorized => login_redirect(continuation, headers),
             error => error_page(error),
         })?;
     if enforce_two_factor(&identity).is_err() {
-        return Err(two_factor_redirect(&continuation, headers));
+        return Err(two_factor_redirect(continuation, headers));
     }
     if !request_has_same_origin(headers, &state.public_origin) || !valid_csrf_token(headers, csrf) {
         return Err(error_page(WebError::CsrfRejected));
@@ -323,7 +334,7 @@ pub(super) async fn mutation_cookie(
     // These actions mutate current-user resources. Optional navigation context
     // cannot grant authority and must not make a personal write depend on an
     // organization list or sandbox inventory being available.
-    canonical_cookie(headers).map_err(|()| login_redirect(&continuation, headers))
+    canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))
 }
 
 fn global_settings_path(path: &str, selected_slug: &str) -> String {

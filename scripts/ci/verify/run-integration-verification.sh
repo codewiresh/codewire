@@ -1005,6 +1005,7 @@ run_orchestration() {
     ORCHESTRATION_USER_SESSION_TOKEN=apikey-contract-user-session-token \
     ORCHESTRATION_SEEDED=1 ORCHESTRATION_KUBE_MODE=configured \
     ORCHESTRATION_CONTRACT_SCOPE=complete \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --locked --profile ci -p codewire-orchestration \
       --test wire_contract --features kind-e2e \
       configured_orchestration_wire_contract -- \

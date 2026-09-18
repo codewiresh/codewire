@@ -1968,7 +1968,10 @@ connect_edge_probes() {
 # not-found, an authenticated ClusterIP Service-DNS request proves the binding
 # success path, and a direct port-forward proves anonymous and cross-capability
 # requests fail closed on the internal listener.
-internal_connect_listener_probes() {
+coordinator_runtime_smokes() {
+  # The internal binding and public coordinator probes share one environment.
+  # Keep its live runtime until every consumer finishes; otherwise the normal
+  # reconciler correctly invalidates the later public running-state check.
   log "running internal Connect listener isolation probes"
   local public_base="${KIND_INGRESS_URL}/codewire.internal.v1.GatewayBindingService"
   curl_settled -X POST -H 'content-type: application/json' -d '{}' \
@@ -1994,7 +1997,7 @@ internal_connect_listener_probes() {
     crd/sandboxclaims.extensions.agents.x-k8s.io
 
   (
-    # Reuse the existing UUID-addressed coordinator fixture. The binding
+    # Admit the stopped UUID-addressed coordinator fixture. The binding
     # endpoint must mint a token the real coordinator accepts, rather than
     # merely returning a syntactically plausible token from its own process.
     local bound_environment_id=00000000-0000-4000-8000-000000000501
@@ -2008,23 +2011,38 @@ internal_connect_listener_probes() {
 
     # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
     cleanup_internal_connect_fixture() {
+      local status=$? cleanup_status=0
       set +e
       if [ -n "$port_forward_pid" ]; then
         kill "$port_forward_pid" >/dev/null 2>&1 || true
         wait "$port_forward_pid" 2>/dev/null || true
       fi
-      kubectl -n "$NS" exec -i deploy/postgres -- \
-        psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || true
+      if ! kubectl -n "$NS" exec -i deploy/postgres -- \
+        psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1
+BEGIN;
+UPDATE environments SET state = 'stopped', desired_state = 'stopped'
+WHERE id = '$bound_environment_id';
 DELETE FROM environment_ports WHERE id = '$bound_port_id';
 DELETE FROM sandbox_environment_backend WHERE environment_id = '$bound_environment_id';
+COMMIT;
 SQL
+      then
+        # Preserve the runtime if its retirement transaction failed. Do not
+        # manufacture another running row with no backend during cleanup.
+        echo '::error::failed to retire the coordinator runtime fixture' >&2
+        rm -f "$port_forward_log"
+        [ "$status" -ne 0 ] || status=1
+        exit "$status"
+      fi
       kubectl -n "$NS" delete sandboxclaim "$bound_pod" \
-        --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
+        --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       kubectl -n "$NS" delete pod "$bound_pod" \
-        --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
+        --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       kubectl -n "$NS" delete pod "$bound_gateway" \
-        --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
+        --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       rm -f "$port_forward_log"
+      [ "$status" -ne 0 ] || status="$cleanup_status"
+      exit "$status"
     }
     trap cleanup_internal_connect_fixture EXIT
 
@@ -2119,15 +2137,17 @@ EOF
 
     kubectl -n "$NS" exec -i deploy/postgres -- \
       psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+BEGIN;
 DELETE FROM sandbox_environment_backend WHERE environment_id = '$bound_environment_id';
 DELETE FROM environment_ports WHERE id = '$bound_port_id';
-UPDATE environments
-SET state = 'running', desired_state = 'started'
-WHERE id = '$bound_environment_id';
 INSERT INTO sandbox_environment_backend (environment_id, namespace, pod_name, pod_ip)
 VALUES ('$bound_environment_id', '$NS', '$bound_pod', '$bound_pod_ip');
 INSERT INTO environment_ports (id, environment_id, port, label, access)
 VALUES ('$bound_port_id', '$bound_environment_id', 3000, 'internal-connect-kind', 'creator');
+UPDATE environments
+SET state = 'running', desired_state = 'started', error_reason = NULL
+WHERE id = '$bound_environment_id';
+COMMIT;
 SQL
     # This originates in a gateway-labeled Pod and addresses the ClusterIP by
     # Service DNS. The caller rereads its exact-audience projected token, and
@@ -2219,9 +2239,10 @@ SQL
       sleep 2
     done
 
+    log "internal Connect listener isolation probes OK"
+    mesh_product_connect_ownership_smoke
+    coordinator_ingress_smoke
   )
-
-  log "internal Connect listener isolation probes OK"
 }
 
 coordinator_ingress_smoke() {

@@ -1,10 +1,10 @@
 use axum::{
     Form,
     extract::{
-        Query, State,
+        FromRequestParts, Query, RawQuery, State,
         rejection::{FormRejection, QueryRejection},
     },
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::Response,
 };
 use codewire_workload_secrets::{
@@ -17,6 +17,7 @@ use serde::Deserialize;
 use crate::{
     account_sessions,
     auth::{IdentityUser, authenticated_identity, enforce_two_factor},
+    environment_drafts::DraftReturn,
     error::WebError,
     response::{error_page, login_redirect, redirect, render_template, two_factor_redirect},
     secrets_presets_connect::{self, SecretBucket},
@@ -30,6 +31,8 @@ pub(super) const PATH: &str = "/settings/secrets/";
 
 #[derive(Default, Deserialize)]
 pub(super) struct PageQuery {
+    #[serde(skip)]
+    draft: DraftReturn,
     #[serde(default)]
     org: String,
     #[serde(default)]
@@ -38,6 +41,26 @@ pub(super) struct PageQuery {
     message: String,
     #[serde(default)]
     error: String,
+}
+
+// Draft handles are optional navigation, not authority. Parse them separately
+// so duplicate or invalid handles cannot reject a valid personal-secret write.
+pub(super) struct PersonalSecretQuery(PageQuery);
+
+impl<S: Send + Sync> FromRequestParts<S> for PersonalSecretQuery {
+    type Rejection = QueryRejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let RawQuery(raw) = RawQuery::from_request_parts(parts, state)
+            .await
+            .expect("RawQuery is infallible");
+        let Query(mut query) = Query::<PageQuery>::from_request_parts(parts, state).await?;
+        query.draft = match DraftReturn::parse(raw.as_deref()) {
+            exact @ DraftReturn::Exact(_) => exact,
+            _ => DraftReturn::NoRequest,
+        };
+        Ok(Self(query))
+    }
 }
 
 // These forms hold request authority and, for SetForm, write-only material.
@@ -79,9 +102,9 @@ pub(super) struct DeleteForm {
 pub(super) async fn page(
     State(state): State<AppState>,
     headers: HeaderMap,
-    query: Result<Query<PageQuery>, QueryRejection>,
+    query: Result<PersonalSecretQuery, QueryRejection>,
 ) -> Response {
-    let Ok(Query(query)) = query else {
+    let Ok(PersonalSecretQuery(query)) = query else {
         return feedback(&headers, &PageQuery::default(), "error", "invalid-page");
     };
     let (identity, cookie) = match identity_context(&state, &headers).await {
@@ -159,10 +182,10 @@ async fn mutation_context(
 pub(super) async fn set_action(
     State(state): State<AppState>,
     headers: HeaderMap,
-    query: Result<Query<PageQuery>, QueryRejection>,
+    query: Result<PersonalSecretQuery, QueryRejection>,
     form: Result<Form<SetForm>, FormRejection>,
 ) -> Response {
-    let Ok(Query(query)) = query else {
+    let Ok(PersonalSecretQuery(query)) = query else {
         return private(error_page(WebError::Forbidden));
     };
     let Ok(Form(form)) = form else {
@@ -228,10 +251,10 @@ pub(super) async fn set_action(
 pub(super) async fn rename_action(
     State(state): State<AppState>,
     headers: HeaderMap,
-    query: Result<Query<PageQuery>, QueryRejection>,
+    query: Result<PersonalSecretQuery, QueryRejection>,
     form: Result<Form<RenameForm>, FormRejection>,
 ) -> Response {
-    let Ok(Query(query)) = query else {
+    let Ok(PersonalSecretQuery(query)) = query else {
         return private(error_page(WebError::Forbidden));
     };
     let Ok(Form(form)) = form else {
@@ -291,10 +314,10 @@ pub(super) async fn rename_action(
 pub(super) async fn delete_action(
     State(state): State<AppState>,
     headers: HeaderMap,
-    query: Result<Query<PageQuery>, QueryRejection>,
+    query: Result<PersonalSecretQuery, QueryRejection>,
     form: Result<Form<DeleteForm>, FormRejection>,
 ) -> Response {
-    let Ok(Query(query)) = query else {
+    let Ok(PersonalSecretQuery(query)) = query else {
         return private(error_page(WebError::Forbidden));
     };
     let Ok(Form(form)) = form else {
@@ -357,13 +380,26 @@ async fn render(
         ""
     };
     page.account_id = identity.id.clone();
-    page.action_query = context_query(&dashboard.selected_organization_slug, cursor);
+    page.action_query = context_query(&dashboard.selected_organization_slug, cursor, &query.draft);
+    page.reload_url = format!("{PATH}{}", page.action_query);
+    page.creation_return_url = if dashboard.has_selected_organization
+        && dashboard.selected_organization_slug == query.org
+        && matches!(query.draft, DraftReturn::Exact(_))
+    {
+        format!(
+            "/{}/new/{}",
+            dashboard.selected_organization_slug,
+            query.draft.query()
+        )
+    } else {
+        String::new()
+    };
     page.first_page_url = if cursor.is_empty() {
         String::new()
     } else {
         format!(
             "{PATH}{}",
-            context_query(&dashboard.selected_organization_slug, "")
+            context_query(&dashboard.selected_organization_slug, "", &query.draft)
         )
     };
     if page.message.is_empty() {
@@ -381,7 +417,8 @@ async fn render(
                     "{PATH}{}",
                     context_query(
                         &dashboard.selected_organization_slug,
-                        &inventory.next_cursor
+                        &inventory.next_cursor,
+                        &query.draft
                     )
                 );
             }
@@ -502,13 +539,16 @@ fn approved_error(code: &str) -> &'static str {
     }
 }
 
-fn context_query(org: &str, cursor: &str) -> String {
+fn context_query(org: &str, cursor: &str, draft: &DraftReturn) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     if !org.is_empty() && org.len() <= 128 {
         query.append_pair("org", org);
     }
     if !cursor.is_empty() && secrets_presets_connect::valid_user_secret_cursor(cursor) {
         query.append_pair("cursor", cursor);
+    }
+    if let DraftReturn::Exact(id) = draft {
+        query.append_pair("creation_draft", id);
     }
     let query = query.finish();
     if query.is_empty() {
@@ -519,7 +559,7 @@ fn context_query(org: &str, cursor: &str) -> String {
 }
 
 fn feedback(headers: &HeaderMap, context: &PageQuery, key: &str, code: &str) -> Response {
-    let mut query = context_query(&context.org, &context.cursor);
+    let mut query = context_query(&context.org, &context.cursor, &context.draft);
     query.push(if query.is_empty() { '?' } else { '&' });
     // Both feedback fields are fixed call-site literals, never upstream text.
     query.push_str(key);

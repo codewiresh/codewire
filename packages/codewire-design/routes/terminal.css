@@ -31,6 +31,7 @@ dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
 .cw-terminal-tabs-bar { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); }
 .cw-terminal-tabs-bar nav { min-width: 0; flex: 1; overflow-x: auto; }
 .cw-terminal-tabs-bar ul { display: flex; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+[data-terminal-tabs][hidden] { display: none; }
 .cw-terminal-tabs-bar li { flex: none; }
 .cw-terminal-tabs-bar [role="tab"] { padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-secondary); font: .75rem var(--font-mono); cursor: pointer; }
 .cw-terminal-tabs-bar [aria-selected="true"] { background: var(--bg-surface-hover); color: var(--fg-primary); }

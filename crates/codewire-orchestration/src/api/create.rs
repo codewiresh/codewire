@@ -51,6 +51,8 @@ pub struct CreateEnvironmentBody {
     pub confirm_personal_credentials: bool,
     #[serde(default)]
     pub confirm_personal_secrets: bool,
+    #[serde(default)]
+    pub omit_application_previews: bool,
 }
 
 /// Mirrors `api.Preset` (the slice the create flow consumes; the full
@@ -145,6 +147,13 @@ fn ensure_no_preset_secret_delivery(preset: &Preset) -> AppResult<()> {
 
 /// Validate the one canonical request representation.
 pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> AppResult<()> {
+    if body.omit_application_previews && !body.project_spec.application_ports.is_empty() {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "conflicting_preview_selection",
+            "omit_application_previews requires an empty application_ports list",
+        ));
+    }
     body.project_spec
         .ensure_platform_compatible()
         .map_err(invalid_project_spec)?;
@@ -237,10 +246,39 @@ pub(crate) fn merge_project_spec_defaults(
     explicit.validate().map_err(invalid_project_spec)
 }
 
+pub(crate) fn merge_environment_defaults(
+    body: &mut CreateEnvironmentBody,
+    defaults: &codewire_project::ProjectSpec,
+) -> AppResult<()> {
+    if body.omit_application_previews {
+        // Suppress only preview defaults. Other workload defaults and explicit
+        // provider/application-secret selection rules remain unchanged.
+        let mut defaults = defaults.clone();
+        defaults.application_ports.clear();
+        merge_project_spec_defaults(&mut body.project_spec, &defaults)
+    } else {
+        merge_project_spec_defaults(&mut body.project_spec, defaults)
+    }
+}
+
 pub(crate) fn ensure_current_platform_runtime_support(
     body: &CreateEnvironmentBody,
 ) -> AppResult<()> {
     let spec = &body.project_spec;
+    super::ports::validate_application_previews(spec)?;
+    for repository in &spec.repositories {
+        if codewire_project::parse_repository_ssh_host(&repository.source)
+            .map_err(invalid_project_spec)?
+            .is_some()
+            && spec.credentials.is_none()
+        {
+            return Err(coded(
+                StatusCode::BAD_REQUEST,
+                "repository_credentials_required",
+                "SSH repository checkout requires an explicitly selected credential profile containing an SSH identity",
+            ));
+        }
+    }
     let pending = if spec
         .repositories
         .iter()
@@ -896,7 +934,7 @@ pub(crate) async fn create_environment_core(
                             repo_url = repository_source,
                             "smart create: using saved repo config"
                         );
-                        merge_project_spec_defaults(&mut body.project_spec, &saved_spec)?;
+                        merge_environment_defaults(&mut body, &saved_spec)?;
                         match saved_preset {
                             Some(preset) => {
                                 validate_preset_scope(&preset, org_id)?;
@@ -908,6 +946,9 @@ pub(crate) async fn create_environment_core(
                                 return Err(repository_analysis_pending());
                             }
                             None => {
+                                // Saved workload defaults must be executable
+                                // before image resolution can write a preset.
+                                ensure_current_platform_runtime_support(&body)?;
                                 resolve_project_preset(pool, org_id, &body.project_spec).await?
                             }
                         }
@@ -923,7 +964,7 @@ pub(crate) async fn create_environment_core(
             };
 
             ensure_no_preset_secret_delivery(&preset)?;
-            merge_project_spec_defaults(&mut body.project_spec, &preset.project_spec)?;
+            merge_environment_defaults(&mut body, &preset.project_spec)?;
             apply_environment_resource_defaults(&mut body.project_spec);
             body.project_spec.validate().map_err(invalid_project_spec)?;
             ensure_current_platform_runtime_support(&body)?;
@@ -1291,6 +1332,170 @@ credentials: {profile: user/work}
                 .spec;
         ensure_current_platform_runtime_support(&CreateEnvironmentBody {
             project_spec: credentials,
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    fn ssh_project(source: &str) -> codewire_project::ProjectSpec {
+        let host = codewire_project::parse_repository_ssh_host(source)
+            .unwrap()
+            .unwrap();
+        codewire_project::ProjectSpec {
+            repositories: vec![codewire_project::RepositorySpec {
+                source: source.into(),
+                destination: "/workspace/app".into(),
+                known_hosts: vec![format!(
+                    "{} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx",
+                    host.known_hosts_name()
+                )],
+                ..Default::default()
+            }],
+            working_directory: "/workspace/app".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ssh_checkout_requires_an_explicit_profile_without_echoing_repository_data() {
+        for source in [
+            "git@example.test:private-canary/app.git",
+            "ssh://git@example.test:2222/private-canary/app.git",
+        ] {
+            let mut body = CreateEnvironmentBody {
+                project_spec: ssh_project(source),
+                ..Default::default()
+            };
+            apply_project_spec_defaults(&mut body).unwrap();
+            let AppError::Coded {
+                status,
+                code,
+                detail,
+            } = ensure_current_platform_runtime_support(&body).unwrap_err()
+            else {
+                panic!("SSH without a profile was not rejected with a typed error");
+            };
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(code, "repository_credentials_required");
+            assert!(detail.contains("SSH identity"));
+            assert!(!detail.contains("private-canary"));
+            assert!(!detail.contains(source));
+            body.project_spec.credentials = Some(codewire_project::CredentialBinding {
+                profile: "platform:user/work".into(),
+            });
+            // Profile ownership/revision and the actual SSH slot remain the
+            // existing source-admission and worker checks, not this presence check.
+            ensure_current_platform_runtime_support(&body).unwrap();
+        }
+        let body = CreateEnvironmentBody {
+            project_spec: codewire_project::parse_project_yaml(
+                "repositories: [{source: https://example.test/org/app.git}]\n",
+            )
+            .unwrap()
+            .spec,
+            ..Default::default()
+        };
+        ensure_current_platform_runtime_support(&body).unwrap();
+    }
+
+    #[test]
+    fn inherited_ssh_repositories_cannot_inherit_profile_authority() {
+        let mut defaults = ssh_project("git@example.test:org/app.git");
+        defaults.credentials = Some(codewire_project::CredentialBinding {
+            profile: "platform:user/default-must-not-grant".into(),
+        });
+        let mut body = CreateEnvironmentBody::default();
+        merge_environment_defaults(&mut body, &defaults).unwrap();
+        assert!(body.project_spec.credentials.is_none());
+        assert!(matches!(
+            ensure_current_platform_runtime_support(&body),
+            Err(AppError::Coded {
+                code: "repository_credentials_required",
+                ..
+            })
+        ));
+        body.project_spec.application_ports =
+            codewire_project::parse_project_yaml("ports: [{port: 2222, label: ssh}]\n")
+                .unwrap()
+                .spec
+                .application_ports;
+        let error = ensure_current_platform_runtime_support(&body).unwrap_err();
+        assert!(
+            !matches!(
+                error,
+                AppError::Coded {
+                    code: "repository_credentials_required",
+                    ..
+                }
+            ),
+            "preview validation must retain priority over SSH profile presence"
+        );
+    }
+
+    #[test]
+    fn explicit_no_previews_suppresses_only_inherited_preview_defaults() {
+        let defaults = codewire_project::parse_project_yaml(
+            "image: example.test/workspace\nports: [{port: 3000, label: web}]\n",
+        )
+        .unwrap()
+        .spec;
+        let mut legacy = CreateEnvironmentBody::default();
+        merge_environment_defaults(&mut legacy, &defaults).unwrap();
+        assert_eq!(legacy.project_spec.application_ports.len(), 1);
+
+        let mut explicit = CreateEnvironmentBody {
+            omit_application_previews: true,
+            ..Default::default()
+        };
+        apply_project_spec_defaults(&mut explicit).unwrap();
+        // Both repository and preset default stages use this helper.
+        for _ in 0..2 {
+            merge_environment_defaults(&mut explicit, &defaults).unwrap();
+            assert!(explicit.project_spec.application_ports.is_empty());
+            assert_eq!(explicit.project_spec.image, "example.test/workspace");
+        }
+        ensure_current_platform_runtime_support(&explicit).unwrap();
+        explicit.project_spec.application_ports = defaults.application_ports;
+        assert!(matches!(
+            apply_project_spec_defaults(&mut explicit),
+            Err(AppError::Coded {
+                code: "conflicting_preview_selection",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn inherited_preview_defaults_are_checked_before_platform_setup() {
+        for yaml in [
+            "ports: [{port: 3000, label: web}, {port: 3001, label: web}]\n",
+            "ports: [{port: 2222, label: ssh}]\n",
+            "ports: [{port: 3000, label: web, access: private}]\n",
+            "ports: [{port: 3000}]\n",
+        ] {
+            let defaults = codewire_project::parse_project_yaml(yaml).unwrap().spec;
+            // These are valid generic project/local-VM specifications. The
+            // platform must reject unsupported previews after preset merging,
+            // rather than silently dropping them during environment setup.
+            let mut caller = codewire_project::ProjectSpec::default();
+            merge_project_spec_defaults(&mut caller, &defaults).unwrap();
+            assert!(
+                ensure_current_platform_runtime_support(&CreateEnvironmentBody {
+                    project_spec: caller,
+                    ..Default::default()
+                })
+                .is_err(),
+                "inherited preview was admitted: {yaml:?}"
+            );
+        }
+
+        let defaults = codewire_project::parse_project_yaml("ports: [{port: 3000, label: 9web}]\n")
+            .unwrap()
+            .spec;
+        let mut caller = codewire_project::ProjectSpec::default();
+        merge_project_spec_defaults(&mut caller, &defaults).unwrap();
+        ensure_current_platform_runtime_support(&CreateEnvironmentBody {
+            project_spec: caller,
             ..Default::default()
         })
         .unwrap();
@@ -1801,6 +2006,7 @@ credentials: {profile: user/work}
                 "expected_profile_revision",
                 "isolation_tier",
                 "name",
+                "omit_application_previews",
                 "preset_id",
                 "project_spec",
                 "ttl_seconds"

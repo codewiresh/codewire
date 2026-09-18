@@ -30,6 +30,7 @@ _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds",
     24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision",
     27: "confirm_personal_credentials", 28: "confirm_personal_secrets",
+    29: "omit_application_previews",
 }
 
 _SOURCE_DESCRIPTOR_FIELDS = {

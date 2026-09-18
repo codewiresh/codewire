@@ -15,7 +15,7 @@ test("ports load in place and late dismissed responses cannot redirect or replac
   const dialog = page.getByRole("dialog", { name: "Ports · Example Sandbox", exact: true });
   await ports.click();
   await expect(dialog.getByText("Internal 3000 · Creator", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("link", { name: "Open preview" })).toHaveAttribute("href", "https://web-5d1db-example.cwpreview.sh");
+  await expect(dialog.getByRole("link", { name: "Open preview" })).toHaveAttribute("href", "https://web-5d1db-example.preview.example.test");
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: test.info().outputPath("ports-dialog.png") });
   await dialog.getByRole("button", { name: "Close", exact: true }).click();

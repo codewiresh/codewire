@@ -10,6 +10,17 @@ test.beforeEach(async ({ page }) => {
   await page.goto(`${origin}/reference/fixtures/settings-credentials.html`);
 });
 
+test("explicit Create return carries only its draft handle while credential inputs stay private", async ({ page }) => {
+  const returnLink = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
+  await expect(returnLink).toHaveAttribute("href", "/fixture-org/new/?creation_draft=00000000-0000-4000-8000-000000000003");
+  await choose(page, "OpenAI API key");
+  const dialog = page.getByRole("dialog", { name: "Add OpenAI API key", exact: true });
+  const privateCanary = "synthetic-draft-return-write-only-canary";
+  await dialog.getByLabel("API key", { exact: true }).fill(privateCanary);
+  await expect(returnLink).toHaveAttribute("href", "/fixture-org/new/?creation_draft=00000000-0000-4000-8000-000000000003");
+  expect(await page.locator("a[href]").evaluateAll((links) => links.map((link) => link.getAttribute("href")).join("\n"))).not.toContain(privateCanary);
+});
+
 const dialog = (page: Page, name: string) => page.getByRole("dialog", { name, exact: true });
 const action = (owner: Page | Locator, name: string) => owner.getByRole("button", { name, exact: true });
 const prompt = (page: Page) => dialog(page, "Discard changes?");
@@ -324,4 +335,31 @@ test("leaving a retained document clears private values without changing hidden 
   await expect(api.getByLabel("API key", { exact: true })).toHaveValue("");
   await expect(api.locator('[name="_csrf"]')).toHaveValue("design-fixture-only");
   await expect(api.locator('[name="provider"]')).toHaveValue("openai");
+});
+
+test("explicit leaving-page Discard fences a dialog request that began after the prompt opened", async ({ page }) => {
+  await choose(page, "OpenAI API key");
+  const api = dialog(page, "Add OpenAI API key");
+  await api.getByLabel("API key", { exact: true }).fill("private-discard-canary");
+  // Controller-unit proof, using the actual HTMX lifecycle/version fence.
+  // A background request may start while the native prompt is open. No real
+  // mutation is aborted, retried or fabricated by this static fixture.
+  const obsoleteResponsePrevented = page.evaluate(() => new Promise<boolean>((resolve) => {
+    const owner = document.querySelector("#add-openai-api-key")!;
+    const target = owner.querySelector("form")!;
+    const xhr = {};
+    document.dispatchEvent(new CustomEvent("codewire:guard-navigation", {
+      cancelable: true,
+      detail: { owner, perform: () => {
+        const response = new CustomEvent("htmx:beforeOnLoad", { cancelable: true, detail: { xhr } });
+        resolve(!document.dispatchEvent(response));
+      } },
+    }));
+    document.dispatchEvent(new CustomEvent("htmx:beforeRequest", { detail: { target, xhr } }));
+  }));
+  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
+  expect(await obsoleteResponsePrevented).toBe(true);
+  await expect(api.getByLabel("API key", { exact: true })).toHaveValue("");
 });

@@ -262,7 +262,7 @@ class ListEnvironmentsResponse(_message.Message):
     def __init__(self, environments: _Optional[_Iterable[_Union[Environment, _Mapping]]] = ..., next_page_token: _Optional[str] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentRequest(_message.Message):
-    __slots__ = ("org_id", "preset_id", "name", "ttl_seconds", "isolation_tier", "project_spec", "expected_profile_revision", "confirm_personal_credentials", "confirm_personal_secrets")
+    __slots__ = ("org_id", "preset_id", "name", "ttl_seconds", "isolation_tier", "project_spec", "expected_profile_revision", "confirm_personal_credentials", "confirm_personal_secrets", "omit_application_previews")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     PRESET_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
@@ -272,6 +272,7 @@ class CreateEnvironmentRequest(_message.Message):
     EXPECTED_PROFILE_REVISION_FIELD_NUMBER: _ClassVar[int]
     CONFIRM_PERSONAL_CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
     CONFIRM_PERSONAL_SECRETS_FIELD_NUMBER: _ClassVar[int]
+    OMIT_APPLICATION_PREVIEWS_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     preset_id: str
     name: str
@@ -281,7 +282,8 @@ class CreateEnvironmentRequest(_message.Message):
     expected_profile_revision: int
     confirm_personal_credentials: bool
     confirm_personal_secrets: bool
-    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ..., expected_profile_revision: _Optional[int] = ..., confirm_personal_credentials: _Optional[bool] = ..., confirm_personal_secrets: _Optional[bool] = ...) -> None: ...
+    omit_application_previews: bool
+    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ..., expected_profile_revision: _Optional[int] = ..., confirm_personal_credentials: _Optional[bool] = ..., confirm_personal_secrets: _Optional[bool] = ..., omit_application_previews: _Optional[bool] = ...) -> None: ...
 
 class EnvironmentSourceSelection(_message.Message):
     __slots__ = ("secrets", "credentials", "profile_revision")

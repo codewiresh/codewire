@@ -14,7 +14,7 @@
   {% if let Some(editor) = page.source_editor %}
   <div class="cw-drawer-layer" data-drawer data-create-url="{{ organization.environments_url }}?sources={{ editor.environment_id }}" data-close-url="{{ organization.environments_url }}" data-open="true"><a class="cw-drawer-backdrop" href="{{ organization.environments_url }}" data-drawer-close aria-label="Close Edit Sandbox sources"></a>{% include "environment-sources-edit.html" %}</div>
   {% else %}
-  <div class="cw-drawer-layer" data-drawer data-create-url="{{ organization.environments_url }}new/" data-close-url="{{ organization.environments_url }}" data-open="{% if page.create_form.expanded %}true{% else %}false{% endif %}"{% if !page.create_form.expanded %} hidden{% endif %}><a class="cw-drawer-backdrop" href="{{ organization.environments_url }}" data-drawer-close aria-label="Close Create Sandbox"></a>{% let form = page.create_form %}{% include "environment-create-form.html" %}</div>
+  <div class="cw-drawer-layer" data-drawer data-create-url="{{ organization.environments_url }}new/{{ page.create_form.draft_return.query() }}" data-close-url="{{ organization.environments_url }}" data-open="{% if page.create_form.expanded %}true{% else %}false{% endif %}"{% if !page.create_form.expanded %} hidden{% endif %}><a class="cw-drawer-backdrop" href="{{ organization.environments_url }}" data-drawer-close aria-label="Close Create Sandbox"></a>{% let form = page.create_form %}{% include "environment-create-form.html" %}</div>
   {% endif %}
 
   <div id="environment-list" hx-get="/{{ organization.slug }}/_fragments/sandboxes" hx-trigger="every 5s" hx-include="#environment-filters" hx-swap="innerHTML">

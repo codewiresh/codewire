@@ -512,15 +512,19 @@ mod tests {
     }
 
     #[test]
-    fn environment_setup_create_options_are_presets_only_and_reserve_removed_fields() {
+    fn environment_setup_create_options_include_preview_domain_and_reserve_removed_fields() {
         assert_eq!(
             ENVIRONMENT_SETUP_SERVICE_SERVICE_NAME,
             "codewire.console.v1.EnvironmentSetupService"
         );
 
-        let options = GetEnvironmentCreateOptionsResponse::default();
+        let options = GetEnvironmentCreateOptionsResponse {
+            preview_base_domain: "preview.example.test".into(),
+            ..Default::default()
+        };
         let json = serde_json::to_value(options).expect("environment setup options JSON");
         assert_ne!(json.get("presets"), Some(&serde_json::Value::Null));
+        assert_eq!(json["previewBaseDomain"], "preview.example.test");
         assert!(json.get("secretProjects").is_none());
         assert!(json.get("githubStatus").is_none());
 
@@ -546,7 +550,10 @@ mod tests {
                 .iter()
                 .map(|field| (field.number, field.name.as_deref()))
                 .collect::<Vec<_>>(),
-            vec![(Some(2), Some("presets"))]
+            vec![
+                (Some(2), Some("presets")),
+                (Some(4), Some("preview_base_domain")),
+            ]
         );
         for (number, name) in [(1, "github_status"), (3, "secret_projects")] {
             assert!(

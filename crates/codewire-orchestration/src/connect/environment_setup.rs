@@ -47,6 +47,7 @@ impl EnvironmentSetupService for EnvironmentSetupConnectService {
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(GetEnvironmentCreateOptionsResponse {
             presets,
+            preview_base_domain: options.preview_base_domain,
             ..Default::default()
         })
     }

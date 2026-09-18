@@ -401,6 +401,8 @@ pub(crate) struct CredentialProfileRowView {
 }
 
 pub(crate) struct CredentialSettingsView {
+    pub(crate) navigation_query: String,
+    pub(crate) creation_return_url: String,
     pub(crate) git_identity: SettingsData,
     pub(crate) git_identity_feedback: bool,
     pub(crate) active_dialog: String,
@@ -1037,12 +1039,15 @@ impl EnvironmentRepositoryFormRow {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct EnvironmentAppPortFormRow {
     pub(crate) index: usize,
     pub(crate) port: String,
     pub(crate) label: String,
     pub(crate) access: String,
+    pub(crate) port_error: String,
+    pub(crate) label_error: String,
+    pub(crate) access_error: String,
 }
 
 impl EnvironmentAppPortFormRow {
@@ -1068,6 +1073,8 @@ pub(crate) struct EnvironmentSourceFieldsView {
     pub(crate) profiles: Vec<EnvironmentCredentialProfileOption>,
     pub(crate) project_error: String,
     pub(crate) profile_error: String,
+    pub(crate) project_selection_error: String,
+    pub(crate) profile_selection_error: String,
     // Readable metadata is not proof that a placement can deliver it. The
     // mutation adapter enables these only with the corresponding backend path.
     pub(crate) application_selection_enabled: bool,
@@ -1081,6 +1088,7 @@ pub(crate) struct EnvironmentSecretProjectOption {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) selected: bool,
+    pub(crate) synthetic: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1090,12 +1098,19 @@ pub(crate) struct EnvironmentCredentialProfileOption {
     pub(crate) revision: u64,
     pub(crate) identity_count: usize,
     pub(crate) bound_revision: bool,
+    pub(crate) synthetic: bool,
     pub(crate) selected: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentCreateFormView {
     pub(crate) csrf_token: String,
+    pub(crate) draft_actor: String,
+    pub(crate) draft_organization: String,
+    pub(crate) draft_id: String,
+    pub(crate) draft_return: crate::environment_drafts::DraftReturn,
+    pub(crate) draft_restore_allowed: bool,
+    pub(crate) draft_restored: bool,
     pub(crate) expanded: bool,
     pub(crate) name: String,
     pub(crate) preset_id: String,
@@ -1111,6 +1126,7 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) confidential_available: bool,
     pub(crate) show_confidential_controls: bool,
     pub(crate) confidential_price: String,
+    pub(crate) preview_base_domain: String,
     pub(crate) selected_agents: Vec<String>,
     pub(crate) app_ports: Vec<EnvironmentAppPortFormRow>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
@@ -1127,6 +1143,15 @@ pub(crate) struct EnvironmentCreateFormView {
 }
 
 impl EnvironmentCreateFormView {
+    /// Navigation metadata only; derive it from the final form, not catalogs.
+    pub(crate) fn creation_draft_parameter(&self) -> String {
+        if crate::environment_drafts::canonical_id(&self.draft_id) {
+            format!("creation_draft={}", self.draft_id)
+        } else {
+            String::new()
+        }
+    }
+
     pub(crate) fn cpu_uses_catalog_option(&self) -> bool {
         matches!(self.cpu.as_str(), "1000" | "2000" | "4000" | "8000")
     }
@@ -1158,6 +1183,13 @@ impl EnvironmentCreateFormView {
             || !self.form_error.is_empty()
             || !self.sources.project_error.is_empty()
             || !self.sources.profile_error.is_empty()
+            || !self.sources.project_selection_error.is_empty()
+            || !self.sources.profile_selection_error.is_empty()
+            || self.app_ports.iter().any(|row| {
+                !row.port_error.is_empty()
+                    || !row.label_error.is_empty()
+                    || !row.access_error.is_empty()
+            })
     }
 }
 
@@ -1181,6 +1213,9 @@ pub(crate) struct EnvironmentPortPanelView {
     pub(crate) label: String,
     pub(crate) access: String,
     pub(crate) form_error: String,
+    pub(crate) port_error: String,
+    pub(crate) label_error: String,
+    pub(crate) access_error: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1567,6 +1602,8 @@ pub(crate) struct SecretProjectFormView {
 
 #[derive(Debug)]
 pub(crate) struct SecretProjectsPageView {
+    pub(crate) creation_draft_query: String,
+    pub(crate) creation_return_url: String,
     pub(crate) projects: Vec<SecretProjectRow>,
     pub(crate) form: SecretProjectFormView,
     pub(crate) csrf_token: String,
@@ -1588,6 +1625,8 @@ pub(crate) struct SecretFormView {
 // Only metadata is retained. Submitted values must never enter a page view.
 #[derive(Default)]
 pub(crate) struct PersonalSecretsPageView {
+    pub(crate) creation_return_url: String,
+    pub(crate) reload_url: String,
     pub(crate) account_id: String,
     pub(crate) secrets: Vec<SecretRow>,
     pub(crate) available: bool,
@@ -1615,6 +1654,8 @@ impl fmt::Debug for PersonalSecretsPageView {
 
 #[derive(Debug)]
 pub(crate) struct SecretBucketPageView {
+    pub(crate) creation_draft_query: String,
+    pub(crate) creation_return_url: String,
     pub(crate) title: String,
     pub(crate) description: &'static str,
     pub(crate) bucket: String,
@@ -1922,6 +1963,8 @@ mod secret_debug_tests {
     #[test]
     fn credential_settings_debug_redacts_csrf_capability() {
         let page = CredentialSettingsView {
+            navigation_query: String::new(),
+            creation_return_url: String::new(),
             git_identity: SettingsData::default(),
             git_identity_feedback: false,
             active_dialog: String::new(),

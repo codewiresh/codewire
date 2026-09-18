@@ -281,6 +281,7 @@ pub struct CreateEnvironmentRequest {
     pub expected_profile_revision: Option<u64>,
     pub confirm_personal_credentials: bool,
     pub confirm_personal_secrets: bool,
+    pub omit_application_previews: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]

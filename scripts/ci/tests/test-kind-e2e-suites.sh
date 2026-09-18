@@ -510,9 +510,11 @@ deploy_overlay() { record deploy; }
 host_key_authorization_smoke() { record host-key-authz; }
 edge_routing_probes() { record edge; }
 connect_edge_probes() { record connect-edge; }
-internal_connect_listener_probes() { record internal-connect; }
-mesh_product_connect_ownership_smoke() { record mesh-product-connect-ownership; }
-coordinator_ingress_smoke() { record coordinator; }
+coordinator_runtime_smokes() {
+  record internal-connect
+  record mesh-product-connect-ownership
+  record coordinator
+}
 billing_contract_through_ingress() { record billing; }
 deploy_agent_sandbox_and_smoke() { record sandbox-temporal; }
 dashboard_browser_e2e() { record dashboard-browser; }

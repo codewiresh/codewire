@@ -11,6 +11,7 @@ mod billing;
 mod credentials;
 mod dashboard;
 mod device;
+mod environment_drafts;
 mod environments;
 mod github_repositories;
 mod invitations;
@@ -268,6 +269,11 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/{slug}/_fragments/github-repositories",
             post(github_repositories::repositories),
+        )
+        .route(
+            "/{slug}/_fragments/create-draft",
+            post(environment_drafts::restore)
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
         )
         .route(
             "/{slug}/_actions/sandboxes/create",

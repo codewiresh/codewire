@@ -54,9 +54,7 @@ run_integrated_kind_suite() {
   host_key_authorization_smoke
   edge_routing_probes
   connect_edge_probes
-  internal_connect_listener_probes
-  mesh_product_connect_ownership_smoke
-  coordinator_ingress_smoke
+  coordinator_runtime_smokes
   billing_contract_through_ingress
   deploy_agent_sandbox_and_smoke
   dashboard_browser_e2e

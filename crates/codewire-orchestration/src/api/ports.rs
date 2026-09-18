@@ -26,6 +26,58 @@ fn is_reserved_port(port: i32) -> bool {
     port == 2222 || port == 2223
 }
 
+pub(crate) fn validate_preview_port(port: i32, label: &str, access: &str) -> AppResult<()> {
+    if !(1..=65_535).contains(&port) {
+        return Err(AppError::BadRequest(
+            "port must be between 1 and 65535".into(),
+        ));
+    }
+    if is_reserved_port(port) {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "port_reserved",
+            "port is reserved by the agent",
+        ));
+    }
+    let bytes = label.as_bytes();
+    let edge = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    if !(2..=22).contains(&bytes.len())
+        || !bytes.first().is_some_and(edge)
+        || !bytes.last().is_some_and(edge)
+        || !bytes.iter().all(|byte| edge(byte) || *byte == b'-')
+    {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_port_label",
+            "preview label must contain 2–22 lowercase letters, digits or hyphens and start and end with a letter or digit",
+        ));
+    }
+    if !matches!(access, "" | "public" | "org_members" | "creator") {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_access",
+            "access must be public, org_members, or creator",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_application_previews(spec: &codewire_project::ProjectSpec) -> AppResult<()> {
+    let mut ports = std::collections::HashSet::new();
+    let mut labels = std::collections::HashSet::new();
+    for port in &spec.application_ports {
+        validate_preview_port(i32::from(port.port), &port.label, &port.access)?;
+        if !ports.insert(port.port) || !labels.insert(port.label.as_str()) {
+            return Err(coded(
+                StatusCode::BAD_REQUEST,
+                "port_conflict",
+                "application previews must use distinct internal ports and labels",
+            ));
+        }
+    }
+    Ok(())
+}
+
 trait PortDnsNotifier {
     async fn notify(&self, env_id: &str, action: &'static str) -> Result<(), sqlx::Error>;
 }
@@ -83,19 +135,7 @@ pub(crate) async fn create_port_core(
     let env = fetch_env_summary(pool, org_id, env_id).await?;
     require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
 
-    if !(1..=65_535).contains(&body.port) {
-        return Err(AppError::BadRequest(
-            "port must be between 1 and 65535".into(),
-        ));
-    }
-
-    if is_reserved_port(body.port) {
-        return Err(coded(
-            StatusCode::BAD_REQUEST,
-            "port_reserved",
-            "port is reserved by the agent",
-        ));
-    }
+    validate_preview_port(body.port, &body.label, &body.access)?;
 
     let access = if body.access.is_empty() {
         "creator"
@@ -339,6 +379,59 @@ mod tests {
     use super::*;
     use codewire_server_core::validation::validate_value;
     use std::sync::Mutex;
+
+    #[test]
+    fn shared_preview_validation_preserves_database_labels_and_access_defaults() {
+        for label in ["web", "9web", "a0", "9-9"] {
+            for access in ["", "creator", "org_members", "public"] {
+                validate_preview_port(3000, label, access).unwrap();
+            }
+        }
+        for (port, label, access) in [
+            (0, "web", "creator"),
+            (65536, "web", "creator"),
+            (2222, "web", "creator"),
+            (2223, "web", "creator"),
+            (3000, "", "creator"),
+            (3000, "x", "creator"),
+            (3000, "Web", "creator"),
+            (3000, "-web", "creator"),
+            (3000, "web-", "creator"),
+            (3000, "web/x", "creator"),
+            (3000, "web", "private"),
+        ] {
+            assert!(validate_preview_port(port, label, access).is_err());
+        }
+        assert!(validate_preview_port(3000, &"a".repeat(23), "creator").is_err());
+    }
+
+    #[test]
+    fn effective_platform_previews_reject_duplicate_labels_ports_and_unsupported_access() {
+        let mut spec = codewire_project::ProjectSpec {
+            application_ports: vec![
+                codewire_project::ApplicationPort {
+                    port: 3000,
+                    label: "web".into(),
+                    access: String::new(),
+                },
+                codewire_project::ApplicationPort {
+                    port: 8080,
+                    label: "api".into(),
+                    access: "org_members".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        validate_application_previews(&spec).unwrap();
+        spec.application_ports[1].label = "web".into();
+        assert!(validate_application_previews(&spec).is_err());
+        spec.application_ports[1].label = "api".into();
+        spec.application_ports[1].port = 3000;
+        assert!(validate_application_previews(&spec).is_err());
+        spec.application_ports[1].port = 8080;
+        spec.application_ports[1].access = "private".into();
+        assert!(validate_application_previews(&spec).is_err());
+    }
 
     #[derive(Default)]
     struct RecordingNotifier(Mutex<Vec<(String, &'static str)>>);

@@ -26,6 +26,10 @@ message GetEnvironmentCreateOptionsResponse {
   reserved "github_status", "secret_projects";
 
   repeated codewire.v1.Preset presets = 2;
+  // Configured public DNS suffix for HTTPS previews; empty when unavailable.
+  // Environment IDs are assigned only after creation, so pre-create URLs are
+  // patterns, never assigned addresses or external TCP port mappings.
+  string preview_base_domain = 4;
 }
 
 message IssueTerminalTicketRequest {}

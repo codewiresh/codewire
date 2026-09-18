@@ -5,6 +5,9 @@
   const styleNonce = document.currentScript?.nonce || "";
   const storagePrefix = "codewire:terminal:v1:";
   const maxTabs = 8;
+  const validLabel = (value) => typeof value === "string" && value.length > 0 && value.length <= 64
+    && value.isWellFormed() && value === value.trim()
+    && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value);
   const live = (state) => ["starting", "running"].includes(state);
   const ended = (state) => !["starting", "running", "stopping"].includes(state);
 
@@ -23,12 +26,17 @@
     const panels = root.querySelector("[data-terminal-panels]");
     const template = root.querySelector("[data-terminal-tab-template]");
     const newButton = root.querySelector("[data-terminal-new]");
+    const renameButton = root.querySelector("[data-terminal-rename]");
     const refreshButton = root.querySelector("[data-terminal-refresh]");
     const message = root.querySelector("[data-terminal-message]");
     const existing = root.querySelector("[data-terminal-existing]");
     const existingForm = root.querySelector("[data-terminal-existing-form]");
     const dialog = root.querySelector("[data-terminal-close-dialog]");
     const confirm = dialog.querySelector("[data-terminal-confirm-close]");
+    const renameDialog = root.querySelector("[data-terminal-rename-dialog]");
+    const renameForm = renameDialog.querySelector("form");
+    const renameInput = renameForm.querySelector("[data-terminal-name]");
+    const renameSave = renameForm.querySelector('[type="submit"]');
     const org = root.dataset.terminalOrgId;
     const environment = root.dataset.terminalEnvironmentId;
     const slug = root.dataset.terminalOrgSlug;
@@ -44,6 +52,8 @@
     let number = 0;
     let inventory = [];
     let closeTarget = null;
+    let renameTarget = null;
+    let renameOpener = null;
     let requestController = null;
     let foregroundCheck = false;
     // Rendered lifecycle state is not fresh setup readiness. Wait for the
@@ -65,7 +75,8 @@
       try {
         sessionStorage.setItem(`${storagePrefix}account`, account);
         sessionStorage.setItem(storageKey(), JSON.stringify({ version: 1, accountId: account,
-          organizationId: org, environmentId: environment, sessions: [...tabs.keys()], activeSessionId: active }));
+          organizationId: org, environmentId: environment, sessions: [...tabs.keys()], activeSessionId: active,
+          labels: [...tabs.values()].map((tab) => ({ sessionId: tab.id, label: tab.label })) }));
       } catch { /* An unavailable store does not prevent an explicit terminal. */ }
     }
     function references() {
@@ -73,17 +84,27 @@
         const raw = sessionStorage.getItem(storageKey());
         if (!raw || raw.length > 4096) return null;
         const value = JSON.parse(raw);
-        if (!P.closed(value, ["version", "accountId", "organizationId", "environmentId", "sessions", "activeSessionId"])
+        if (!P.closed(value, ["version", "accountId", "organizationId", "environmentId", "sessions", "activeSessionId"], ["labels"])
           || value.version !== 1 || value.accountId !== account || value.organizationId !== org
           || value.environmentId !== environment || !Array.isArray(value.sessions) || value.sessions.length > maxTabs
           || value.sessions.some((id) => !P.sessionId(id)) || new Set(value.sessions).size !== value.sessions.length
           || (value.activeSessionId !== null && !value.sessions.includes(value.activeSessionId))) return null;
-        return value;
+        // Display labels never confer session authority. Ignore malformed
+        // optional labels without discarding valid, scoped session references.
+        const labels = value.labels;
+        const labelsValid = Array.isArray(labels) && labels.length <= maxTabs
+          && labels.every((item) => P.closed(item, ["sessionId", "label"])
+            && value.sessions.includes(item.sessionId) && validLabel(item.label))
+          && new Set(labels.map((item) => item.sessionId)).size === labels.length;
+        return { ...value, labels: labelsValid ? labels : [] };
       } catch { return null; }
     }
     function updateControls() {
       const controlBlocked = !authorized || pending || uncertain || needsReload || suspended || !runtimeControlReady();
       const blocked = controlBlocked || !setupComplete;
+      tabList.hidden = !authorized || suspended;
+      renameSave.disabled = !authorized || pending || uncertain || needsReload || suspended;
+      renameButton.disabled = renameSave.disabled || !tabs.has(active);
       root.querySelector("[data-terminal-reload]").hidden = !needsReload;
       newButton.disabled = blocked || tabs.size >= maxTabs;
       refreshButton.disabled = pending || suspended;
@@ -100,6 +121,21 @@
         tab.presentation.terminal.options.disableStdin = blocked || tab.socket?.readyState !== WebSocket.OPEN || !live(tab.state);
       }
     }
+    function clearRename() {
+      renameTarget = null;
+      renameInput.value = "";
+      renameInput.setCustomValidity("");
+    }
+    function invalidateRename() {
+      clearRename();
+      renameOpener = null;
+      renameDialog.close();
+    }
+    function label(tab, text) {
+      tab.label = text;
+      tab.button.textContent = text;
+      tab.panel.querySelector("h2").textContent = text;
+    }
     function choose(id, focus = false) {
       if (!tabs.has(id)) return;
       active = id;
@@ -113,6 +149,7 @@
           if (focus) tab.button.focus();
         }
       }
+      updateControls();
       store();
     }
     function connectionText(tab, text) { tab.connection.textContent = text; }
@@ -386,6 +423,7 @@
       tab.presentation.terminal.options.disableStdin = true;
     }
     function dispose(tab) {
+      if (renameTarget?.tab === tab) invalidateRename();
       detach(tab);
       tab.disposed = true;
       tab.renderEpoch += 1;
@@ -397,6 +435,7 @@
       tabs.delete(tab.id);
     }
     function clearPresentations() {
+      invalidateRename();
       for (const tab of tabs.values()) dispose(tab);
       active = null;
       dialog.close();
@@ -408,7 +447,10 @@
       const panel = template.content.firstElementChild.cloneNode(true);
       panel.id = `terminal-panel-${number}`;
       panel.dataset.terminalSessionId = session.sessionId;
-      panel.querySelector("h2").textContent = `Terminal ${number}`;
+      let displayNumber = number;
+      while ([...tabs.values()].some((tab) => tab.label === `Terminal ${displayNumber}`)) displayNumber += 1;
+      const defaultLabel = `Terminal ${displayNumber}`;
+      panel.querySelector("h2").textContent = defaultLabel;
       const item = document.createElement("li");
       item.setAttribute("role", "presentation");
       const button = document.createElement("button");
@@ -416,12 +458,13 @@
       button.id = `terminal-tab-${number}`;
       button.setAttribute("role", "tab");
       button.setAttribute("aria-controls", panel.id);
-      button.textContent = `Terminal ${number}`;
+      button.textContent = defaultLabel;
       panel.setAttribute("aria-labelledby", button.id);
       item.append(button);
       tabList.append(item);
       panels.append(panel);
       const tab = { id: session.sessionId, state: session.state, item, button, panel,
+        label: button.textContent,
         root: panel.querySelector("[data-terminal-root]"), connection: panel.querySelector("[data-terminal-connection]"),
         historyGap: panel.querySelector("[data-terminal-history-gap]"),
         toggle: panel.querySelector("[data-terminal-toggle]"), reset: panel.querySelector("[data-terminal-replay]"),
@@ -522,6 +565,7 @@
       const current = ++epoch;
       pending = true;
       authorized = false;
+      invalidateRename();
       panels.hidden = true;
       for (const tab of tabs.values()) detach(tab, "Checking account…", true);
       updateControls();
@@ -547,7 +591,11 @@
           const saved = references();
           const selected = saved ? saved.sessions : inventory.filter((session) => live(session.state)).slice(0, maxTabs).map((session) => session.sessionId);
           missing = selected.some((id) => !available.has(id));
-          for (const id of selected) if (available.has(id)) add(available.get(id));
+          for (const id of selected) if (available.has(id)) {
+            const tab = add(available.get(id));
+            const savedLabel = saved?.labels.find((item) => item.sessionId === id);
+            if (savedLabel) label(tab, savedLabel.label);
+          }
           active = saved?.activeSessionId ?? null;
         }
         for (const tab of tabs.values()) {
@@ -624,6 +672,17 @@
       }
     }
     newButton.addEventListener("click", () => { void mutate("launch"); });
+    renameButton.addEventListener("click", () => {
+      const tab = tabs.get(active);
+      if (!authorized || pending || uncertain || needsReload || suspended || !tab) return;
+      renameTarget = { tab, account, epoch };
+      renameOpener = tab;
+      renameInput.value = tab.label;
+      renameInput.setCustomValidity("");
+      renameDialog.showModal();
+      renameInput.focus();
+      renameInput.select();
+    });
     refreshButton.addEventListener("click", () => { void refresh(); });
     existing.addEventListener("change", updateControls);
     existingForm.addEventListener("submit", (event) => {
@@ -649,6 +708,34 @@
       void mutate("stop", id);
     });
     dialog.addEventListener("close", () => { const tab = tabs.get(closeTarget); closeTarget = null; tab?.close.focus(); });
+    renameInput.addEventListener("input", () => renameInput.setCustomValidity(""));
+    renameForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const target = renameTarget;
+      if (!renameDialog.open || !target || !authorized || pending || uncertain || needsReload || suspended
+        || target.account !== account || target.epoch !== epoch || tabs.get(target.tab.id) !== target.tab) {
+        invalidateRename();
+        return;
+      }
+      const name = renameInput.value.trim();
+      if (!validLabel(name)) {
+        renameInput.setCustomValidity("Enter a terminal name of 1–64 characters without control characters.");
+        renameInput.reportValidity();
+        return;
+      }
+      label(target.tab, name);
+      store();
+      clearRename();
+      renameDialog.close();
+      announce("Terminal renamed in this browser tab.");
+    });
+    renameDialog.addEventListener("close", () => {
+      if (renameDialog.open) return; // A queued older close must not clear a new editor.
+      const opener = renameOpener;
+      clearRename();
+      renameOpener = null;
+      if (!renameButton.disabled && opener && tabs.get(opener.id) === opener) renameButton.focus();
+    });
     tabList.addEventListener("keydown", (event) => {
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
       const ids = [...tabs.keys()];
@@ -664,7 +751,9 @@
       requestController?.abort();
       pending = false;
       authorized = false;
+      invalidateRename();
       panels.hidden = true;
+      tabList.hidden = true;
       for (const tab of tabs.values()) detach(tab, "Disconnected", true);
       dialog.close();
     });
@@ -676,6 +765,7 @@
     function foreground() {
       if (suspended) return;
       authorized = false;
+      invalidateRename();
       panels.hidden = true;
       foregroundCheck = true;
       for (const tab of tabs.values()) detach(tab, "Checking account…", true);

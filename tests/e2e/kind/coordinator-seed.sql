@@ -3,8 +3,10 @@
 -- org_contract_1, usr_contract_user, its membership, and the bearer session
 -- token. Coordinator authorization additionally requires a UUID environment
 -- id, while the older billing fixture deliberately uses env_contract_1.
+-- The runtime fixture owner admits this stopped row only after its claim,
+-- workspace and backend exist, then retires it after all coordinator probes.
 INSERT INTO environments (
-    id, org_id, created_by, type, state, name, preset_id,
+    id, org_id, created_by, type, state, desired_state, name, preset_id,
     cpu_millicores, memory_mb, total_running_seconds, project_spec
 )
 VALUES (
@@ -12,7 +14,8 @@ VALUES (
     'org_contract_1',
     'usr_contract_user',
     'sandbox',
-    'running',
+    'stopped',
+    'stopped',
     'coordinator-kind-e2e',
     'preset_contract_1',
     500,
