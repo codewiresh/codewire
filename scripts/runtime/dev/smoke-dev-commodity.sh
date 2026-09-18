@@ -1158,6 +1158,10 @@ validate_dev_smoke_browser_auth() {
 
 prepare_dev_smoke_browser_login() {
   local config_dir="$1"
+  local -a ux_args=()
+  # Only this protected all-scope journey admits the disposable UX sandbox.
+  # Provider-SSH and other browser login consumers retain their existing scope.
+  if application_all_scopes_selected; then ux_args=(--ux-walkthrough enabled); fi
   # The checked-in helper enforces empty owner-0700 tmpfs state before reading
   # the separately supplied credential file. Its output contains fixed stages
   # only. It never inherits shell, owner-provider, browser or OpenBao state.
@@ -1172,7 +1176,7 @@ prepare_dev_smoke_browser_login() {
       --expected-user-id "$EXPECTED_CODEWIRE_ADMIN_USER_ID" \
       --expected-email "$EXPECTED_CODEWIRE_ADMIN_EMAIL" \
       --expected-org-id "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
-      --chromium-executable "$DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN"
+      --chromium-executable "$DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN" "${ux_args[@]}"
   ) || die 'fresh automated Dev browser login failed'
 }
 

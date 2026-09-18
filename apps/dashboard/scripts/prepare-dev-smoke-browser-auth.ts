@@ -17,6 +17,7 @@ import { constants as fsConstants } from "node:fs";
 import { accessSync } from "node:fs";
 import { basename, join } from "node:path";
 import { userInfo } from "node:os";
+import { DevUxError, OwnedUxSandbox, uxOrganizationSlug } from "./dev-ux-ownership";
 
 const DEV_ORIGIN = "https://codewire-dev.sh";
 const TOTAL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -43,6 +44,7 @@ type Options = {
   expectedEmail: string;
   expectedOrgId: string;
   chromiumExecutable: string;
+  uxWalkthrough: boolean;
 };
 
 export type CredentialDocument = {
@@ -57,7 +59,7 @@ export type CredentialDocument = {
 export type DeviceChallenge = { verificationUrl: string; userCode: string };
 
 type CleanupOperation = "browser-sign-out" | "browser-context-close" | "browser-profile-remove"
-  | "browser-temp-remove" | "runtime-remove" | "home-remove" | "config-clear";
+  | "browser-temp-remove" | "runtime-remove" | "home-remove" | "config-clear" | "ux-sandbox-remove";
 
 export class FixedStageError extends Error {
   cleanupFailures: string[] = [];
@@ -87,10 +89,11 @@ export function parseOptions(argv: string[]): Options {
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
     const value = argv[index + 1];
-    if (!accepted.has(name) || !value || values.has(name)) fail("invalid-arguments");
+    if ((!accepted.has(name) && name !== "--ux-walkthrough") || !value || values.has(name)) fail("invalid-arguments");
     values.set(name, value);
   }
-  if (values.size !== accepted.size) fail("invalid-arguments");
+  if ([...accepted].some((key) => !values.has(key))
+    || (values.has("--ux-walkthrough") && values.get("--ux-walkthrough") !== "enabled")) fail("invalid-arguments");
   return {
     cwBin: values.get("--cw-bin")!,
     configDir: values.get("--config-dir")!,
@@ -99,6 +102,7 @@ export function parseOptions(argv: string[]): Options {
     expectedEmail: values.get("--expected-email")!,
     expectedOrgId: values.get("--expected-org-id")!,
     chromiumExecutable: values.get("--chromium-executable")!,
+    uxWalkthrough: values.has("--ux-walkthrough"),
   };
 }
 
@@ -440,9 +444,13 @@ async function clearDirectory(path: string): Promise<void> {
 }
 
 export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): Promise<void> {
-  const deadline = Date.now() + totalTimeoutMs;
   disableCoreDumps();
   const options = parseOptions(argv);
+  // Do not expand the enclosing protected container's 25-minute budget. UX
+  // including login gets five minutes plus two-minute resource cleanup, leaving
+  // over seventeen minutes for the original all-scope journey. Slow cold starts
+  // fail closed; cleanup never borrows an expired action deadline.
+  const deadline = Date.now() + Math.min(totalTimeoutMs, options.uxWalkthrough ? 300_000 : TOTAL_TIMEOUT_MS);
   if (basename(options.cwBin) !== "cw") fail("invalid-cw-binary");
   await requireExecutable(options.cwBin, "invalid-cw-binary");
   await requireExecutable(options.chromiumExecutable, "invalid-browser-binary");
@@ -471,6 +479,7 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
   let page: Page | undefined;
   let success = false;
   let originalFailure: FixedStageError | undefined;
+  let uxSandbox: OwnedUxSandbox | undefined;
   let signalStage = "";
   const signals = ["SIGHUP", "SIGINT", "SIGTERM"] as NodeJS.Signals[];
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
@@ -506,10 +515,6 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
     page.setDefaultTimeout(remaining(deadline));
     page.setDefaultNavigationTimeout(remaining(deadline));
     await withinDeadline(() => approveInOrdinaryBrowser(page!, challenge, credentials), deadline);
-    await withinDeadline(() => signOut(page!), deadline);
-    await withinDeadline(() => context!.close(), deadline)
-      .catch(fixedBrowserFailure("browser-close"));
-    context = undefined; page = undefined;
     const loginExit = await childExit(login, deadline);
     if (signalStage) fail(signalStage);
     if (loginExit !== 0) fail("cli-device-login");
@@ -536,9 +541,28 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
     const organizations = await runJson(options.cwBin, env, ["org", "list", "--output", "json"], deadline);
     const current = await runText(options.cwBin, env, ["org", "current"], deadline);
     assertIdentityResponses(whoami, organizations, current, options);
+    if (options.uxWalkthrough) {
+      const slug = uxOrganizationSlug(organizations, options.expectedOrgId);
+      uxSandbox = new OwnedUxSandbox(options.expectedUserId, options.expectedOrgId, async (args, limit) => {
+        const bounded = Math.min(limit, Date.now() + 30_000);
+        return args.includes("rm")
+          ? runText(options.cwBin, env, args, bounded)
+          : runJson(options.cwBin, env, args, bounded);
+      });
+      const { runDevUxWalkthrough } = await import("./dev-ux-walkthrough");
+      await withinDeadline(() => runDevUxWalkthrough(page!, {
+        slug, userId: options.expectedUserId, orgId: options.expectedOrgId,
+        owned: uxSandbox!, deadline,
+      }), deadline);
+    }
+    await withinDeadline(() => signOut(page!), deadline);
+    await withinDeadline(() => context!.close(), deadline)
+      .catch(fixedBrowserFailure("browser-close"));
+    context = undefined; page = undefined;
     success = true;
   } catch (error) {
-    originalFailure = error instanceof FixedStageError ? error : new FixedStageError("unexpected-failure");
+    originalFailure = error instanceof FixedStageError ? error
+      : new FixedStageError(error instanceof DevUxError ? error.stage : "unexpected-failure");
     throw originalFailure;
   } finally {
     const cleanupFailures: string[] = [];
@@ -554,12 +578,19 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
       if (context) await cleanupAttempt("browser-context-close", () => withinDeadline(
         () => context!.close(), Math.min(cleanupDeadline, Date.now() + 5000),
       ));
+      // Quiesce browser actions before resource reconciliation, including a
+      // walkthrough whose outer deadline fired during an in-flight request.
+      if (uxSandbox) {
+        await cleanupAttempt("ux-sandbox-remove", () => uxSandbox!.cleanup(Date.now() + 120_000));
+        if (cleanupFailures.length) success = false;
+        else console.error("[dev-ux] owned-sandbox-cleanup:passed");
+      }
       if (!success) {
         const logout = spawn(options.cwBin, ["--server", DEV_ORIGIN, "logout"], {
           env, stdio: ["ignore", "ignore", "ignore"], detached: true,
         });
         let logoutExit = 1;
-        try { logoutExit = await childExit(logout, cleanupDeadline); }
+        try { logoutExit = await childExit(logout, Date.now() + 30_000); }
         catch { if (!await stopProcessGroup(logout)) cleanupFailures.push("logout-process:unreaped"); }
         if (logoutExit !== 0) cleanupFailures.push("cli-logout:nonzero-or-timeout");
       }

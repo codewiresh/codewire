@@ -470,6 +470,7 @@ for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests
     scripts/runtime/dev/hosted-checkout-fixture.py scripts/runtime/dev/hosted-checkout-target.sh \
     scripts/runtime/tests/test-hosted-checkout-fixture.py scripts/runtime/dev/testdata/acceptance-identity.json \
     apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts \
+    apps/dashboard/scripts/dev-ux-ownership.ts apps/dashboard/scripts/dev-ux-ownership.test.ts apps/dashboard/scripts/dev-ux-walkthrough.ts \
     scripts/runtime/dev/smoke-local-platform-sources.sh scripts/runtime/tests/test-local-platform-sources-smoke.sh \
     scripts/runtime/dev/run-secrets-credentials-acceptance.sh scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh \
     scripts/runtime/dev/native-mesh-listener.py scripts/runtime/tests/test-native-mesh-listener.py \
