@@ -27,7 +27,9 @@ impl CredentialMutationOwner {
         }
         let replacement = replacement_selector(credential_id, expected_revision)?;
         if self.shared.github_app_authorization.is_none() {
-            return Err(Error::Unavailable);
+            // No worker or publication has started. This is a definite setup
+            // failure, not an unknown mutation outcome.
+            return Err(Error::GitHubAppNotConfigured);
         }
         let scope = Scope::new(
             authority,

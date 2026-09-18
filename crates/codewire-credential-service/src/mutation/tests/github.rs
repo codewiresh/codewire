@@ -2,6 +2,39 @@
 
 use super::*;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_app_missing_configuration_is_definite_and_never_publishes() -> Result<()> {
+    let h = Harness::new().await?;
+    let result = async {
+        ensure!(h.owner.shared.github_app_authorization.is_none());
+        let (status, value) = h
+            .rpc
+            .update(
+                "CompleteGithubAppAuthorization",
+                Auth::Cookie,
+                json!({"code": "c3ludGhldGljLWNvZGU="}),
+            )
+            .await?;
+        ensure!(!status.is_success());
+        ensure!(value["code"] == "failed_precondition");
+        ensure!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no credential was changed")
+        );
+        ensure!(!value.to_string().contains("may have completed"));
+        h.drained().await?;
+        ensure!(h.count().await? == 0);
+        ensure!(h.provider.generate_calls.load(Ordering::SeqCst) == 0);
+        ensure!(!h.control("version.pid").exists());
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
 async fn github_challenge(stream: &mut ConnectStream) -> Result<()> {
     let frame = stream.next().await?.context("missing GitHub challenge")?;
     ensure!(frame["challenge"]["verificationUrl"] == "https://github.com/login/device");
