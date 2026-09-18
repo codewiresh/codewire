@@ -93,7 +93,7 @@ run_provider_openai_smoke() {
       >"$TMPDIR_SMOKE/provider-openai-proof.out" 2>"$TMPDIR_SMOKE/provider-openai-proof.err"; then
     die 'bounded live OpenAI workload failed; raw provider output remains private inside the disposable VM'
   fi
-  [[ ! -s "$TMPDIR_SMOKE/provider-openai-proof.err" ]] || die 'live OpenAI workload returned a public error receipt'
+  assert_managed_run_stderr "$TMPDIR_SMOKE/provider-openai-proof.err" || die 'live OpenAI workload returned unexpected stderr'
   cmp -s "$TMPDIR_SMOKE/provider-openai-proof.out" <(printf 'CW_LIVE_OPENAI_OK\n') ||
     die 'live OpenAI workload omitted its exact public receipt'
   log 'live OpenAI Responses HTTP request validated in the local 2-vCPU/16-GiB VM; parent cleanup remains pending and SDK, streaming and other providers are not implied'

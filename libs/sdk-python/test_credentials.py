@@ -80,6 +80,7 @@ class CredentialFixture:
         raise AssertionError("this fixture does not exercise this mutation")
 
     enroll_github = unsupported_mutation
+    complete_github_app_authorization = unsupported_mutation
     add_api_key_credential = unsupported_mutation
     rename_credential = unsupported_mutation
     rotate_api_key_credential = unsupported_mutation
