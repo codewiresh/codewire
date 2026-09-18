@@ -559,7 +559,7 @@ set -euo pipefail
 [[ "$1" == --no-env-file && "$2" == --config=/dev/null &&
    "$3" == */apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts ]] || exit 92
 shift 3
-[[ $# == 14 && "$1" == --cw-bin && "$3" == --config-dir &&
+[[ ( $# == 14 || ( $# == 16 && "${15}" == --ux-walkthrough && "${16}" == enabled ) ) && "$1" == --cw-bin && "$3" == --config-dir &&
    "$5" == --credential-file && "$7" == --expected-user-id &&
    "$8" == 11111111111111111111111111111111 && "$9" == --expected-email &&
    "${10}" == owner@example.invalid && "${11}" == --expected-org-id &&
@@ -570,6 +570,7 @@ config_dir="$4"
 state="$(dirname "$2")/fresh-login-state"
 mkdir -p "$state"
 printf 'browser-helper\n' >"$state/browser-called"
+printf '%s\n' "${15:-none}" >"$state/ux-mode"
 CW_CONFIG_DIR="$config_dir" "$2" --server https://codewire-dev.sh login --org "${12}"
 [[ "$(cat "$state/variant" 2>/dev/null || true)" != helper-failed ]] || exit 95
 BROWSER_STUB
@@ -585,6 +586,11 @@ for phase in application-secrets-all-scopes provider-ssh; do
   export AWS_SECRET_ACCESS_KEY=forbidden-owner-provider SSH_AUTH_SOCK=/forbidden/owner-agent BAO_TOKEN=forbidden
   prepare_fresh_oauth_cli
   grep -qx browser-helper "$APP_TEST_ROOT/fresh-login-state/browser-called" || fail 'browser helper was not selected'
+  if [[ "$phase" == application-secrets-all-scopes ]]; then
+    grep -qx -- --ux-walkthrough "$APP_TEST_ROOT/fresh-login-state/ux-mode" || fail 'all-scope UX was not selected'
+  else
+    grep -qx none "$APP_TEST_ROOT/fresh-login-state/ux-mode" || fail 'provider SSH gained UX mutation'
+  fi
   cleanup_fresh_oauth_login
   [[ ! -e "$SMOKE_OAUTH_RUNTIME_DIR" && -f "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]] ||
     fail 'fresh browser cleanup retained login or removed its input credential file'

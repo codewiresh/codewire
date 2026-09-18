@@ -817,6 +817,9 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts|\
+      apps/dashboard/scripts/dev-ux-ownership.ts|\
+      apps/dashboard/scripts/dev-ux-ownership.test.ts|\
+      apps/dashboard/scripts/dev-ux-walkthrough.ts|\
       apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts)
         # Dedicated Dev smoke tooling uses dashboard's pinned browser libraries,
         # but does not change product templates or require rebuilding Kind.

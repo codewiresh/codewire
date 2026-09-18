@@ -23,6 +23,24 @@ let cleanupSignalEmitted = false;
 let credentialFills = 0;
 const settingsSignOutButtons = ["Sign out", "Sign out", "Sign out of this browser"];
 let matchedSignOutButtons: string[] = [];
+let uxInvocations = 0;
+let uxConfig = "";
+mock.module("./dev-ux-walkthrough", () => ({
+  runDevUxWalkthrough: async (_page: unknown, options: {
+    owned: import("./dev-ux-ownership").OwnedUxSandbox; deadline: number;
+  }) => {
+    uxInvocations += 1;
+    await options.owned.admit(options.deadline);
+    options.owned.beforeCreate();
+    await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify([{
+      name: options.owned.name, id: "00000000-0000-4000-8000-000000000009",
+      org_id: ORG, created_by: USER, state: "running",
+    }]));
+    if (redirectMode === "ux-signal") process.emit("SIGTERM", "SIGTERM");
+    if (redirectMode === "ux-timeout") await new Promise(() => {});
+    if (!["ux-success", "ux-cleanup-failure"].includes(redirectMode)) throw new Error("hostile-ux-private-value-canary");
+  },
+}));
 
 class FakeResponse {
   constructor(private readonly path: string, private readonly code: number) {}
@@ -197,8 +215,10 @@ async function fixture(mode = "success") {
   cleanupSignalEmitted = false;
   credentialFills = 0;
   matchedSignOutButtons = [];
+  uxInvocations = 0;
   const directory = await mkdtemp(`${root}/case.`);
   const config = join(directory, "login");
+  uxConfig = config;
   const credential = join(directory, "dedicated.json");
   const cwDirectory = await mkdtemp(`${binRoot}/case.`);
   const cw = join(cwDirectory, "cw");
@@ -226,9 +246,16 @@ test -z "\${OPENAI_API_KEY+x}\${CODEWIRE_API_KEY+x}\${BAO_TOKEN+x}\${DISPLAY+x}\
 case " $* " in
   *" login --org "*) ${login} ;;
   *" whoami --output json "*) printf '%s\\n' '${whoami}' ;;
-  *" org list --output json "*) printf '%s\\n' '[{"id":"${ORG}","role":"owner"}]' ;;
+  *" org list --output json "*) printf '%s\\n' '[{"id":"${ORG}","role":"owner","slug":"dedicated-smoke"}]' ;;
   *" org current "*) printf 'ID: ${ORG}\\nRole: owner\\n' ;;
-  *" logout "*) rm -f -- "$CW_CONFIG_DIR/config.json" "$CW_CONFIG_DIR/credentials.json" ;;
+  *" env --platform list --all --output json "*)
+    if test -f "$CW_CONFIG_DIR/ux-resource.json"; then cat "$CW_CONFIG_DIR/ux-resource.json"; else printf '[]'; fi ;;
+  *" env --platform rm --yes "*)
+    printf 'destroy\\n' >>"${directory}/audit"
+    ${mode === "ux-cleanup-failure" ? "exit 96" : ":"}
+    sed 's/"state":"running"/"state":"destroyed"/' "$CW_CONFIG_DIR/ux-resource.json" >"$CW_CONFIG_DIR/ux-destroyed.json"
+    mv "$CW_CONFIG_DIR/ux-destroyed.json" "$CW_CONFIG_DIR/ux-resource.json" ;;
+  *" logout "*) printf 'logout\\n' >>"${directory}/audit"; rm -f -- "$CW_CONFIG_DIR/config.json" "$CW_CONFIG_DIR/credentials.json" ;;
   *) exit 92 ;;
 esac
 `, { mode: 0o700 });
@@ -296,6 +323,7 @@ test("ordinary browser selectors prepare a fresh CLI login and sign out without 
   await helper.main(value.args, 5_000);
   expect((await readdir(value.config)).sort()).toEqual(["config.json", "credentials.json"]);
   expect(activeContext.signOuts).toBe(1);
+  expect(uxInvocations).toBe(0);
   expect(persistentProfile).toBe(join(value.config, ".browser-profile"));
   expect(Object.keys(launchEnvironment).sort()).toEqual([
     "HOME", "LC_ALL", "PATH", "TMPDIR", "TZ", "XDG_RUNTIME_DIR",
@@ -309,6 +337,48 @@ test("ordinary browser selectors prepare a fresh CLI login and sign out without 
     expect(source).not.toContain(forbidden);
   }
 });
+
+test("UX is opt-in and refuses arbitrary argument values", async () => {
+  const value = await fixture();
+  expect(helper.parseOptions(value.args).uxWalkthrough).toBe(false);
+  expect(helper.parseOptions([...value.args, "--ux-walkthrough", "enabled"]).uxWalkthrough).toBe(true);
+  for (const extra of [["--ux-walkthrough", "false"], ["--ux-walkthrough"],
+    ["--ux-walkthrough", "enabled", "--ux-walkthrough", "enabled"]]) {
+    expect(() => helper.parseOptions([...value.args, ...extra])).toThrow("invalid-arguments");
+  }
+});
+
+test("wrong identity prevents all UX mutation and revokes the owned login", async () => {
+  const value = await fixture("wrong-identity");
+  await expect(helper.main([...value.args, "--ux-walkthrough", "enabled"], 5000)).rejects.toThrow("identity-mismatch");
+  expect(uxInvocations).toBe(0);
+  expect(await readFile(join(value.directory, "audit"), "utf8")).toBe("logout\n");
+});
+
+for (const mode of ["ux-success", "ux-failure", "ux-signal", "ux-timeout", "ux-cleanup-failure"]) {
+  test(`${mode}: cleanup is independent of browser and precedes OAuth logout`, async () => {
+    const value = await fixture(mode);
+    const result = await helper.main([...value.args, "--ux-walkthrough", "enabled"], mode === "ux-timeout" ? 50 : 5000)
+      .catch((error) => error);
+    expect(uxInvocations).toBe(1);
+    const audit = await readFile(join(value.directory, "audit"), "utf8");
+    if (mode === "ux-success") {
+      expect(result).toBeUndefined();
+      expect(audit).toBe("destroy\n");
+    } else {
+      expect(result).toBeInstanceOf(helper.FixedStageError);
+      expect(`${result.message} ${result.cleanupFailures}`).not.toContain("hostile-ux-private-value-canary");
+      expect(audit).toBe("destroy\nlogout\n");
+      expect(await readdir(value.config)).toEqual([]);
+      if (mode === "ux-cleanup-failure") {
+        expect(result.cleanupFailures).toContain("ux-sandbox-remove:failed");
+        expect(result.stage).toBe("cleanup-incomplete");
+      }
+      if (mode === "ux-signal") expect(result.stage).toBe("signal-sigterm");
+      if (mode === "ux-timeout") expect(result.stage).toBe("total-timeout");
+    }
+  });
+}
 
 test("external redirects are rejected before each credential or device action", async () => {
   for (const [mode, stage, fills] of [
