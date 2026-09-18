@@ -1157,19 +1157,26 @@ validate_dev_smoke_browser_auth() {
 }
 
 prepare_dev_smoke_browser_login() {
-  local config_dir="$1"
+  local config_dir="$1" work_parent work_dir helper_status=0 cleanup_status=0
   local -a ux_args=()
   # Only this protected all-scope journey admits the disposable UX sandbox.
   # Provider-SSH and other browser login consumers retain their existing scope.
   if application_all_scopes_selected; then ux_args=(--ux-walkthrough enabled); fi
+  work_parent="$(dirname -- "$config_dir")"
+  work_dir="$(mktemp -d "$work_parent/.cw-browser-auth.XXXXXX")" ||
+    die 'cannot create isolated browser helper runtime'
+  chmod 0700 "$work_dir" || die 'cannot secure isolated browser helper runtime'
   # The checked-in helper enforces empty owner-0700 tmpfs state before reading
-  # the separately supplied credential file. Its output contains fixed stages
-  # only. It never inherits shell, owner-provider, browser or OpenBao state.
-  (
+  # the separately supplied credential file. Run Bun from the checked-in root
+  # with installation disabled: auto-install would write package state into the
+  # empty OAuth config directory before the helper can validate it. Its output
+  # contains fixed stages only and it never inherits shell, owner-provider,
+  # browser or OpenBao state.
+  if ! (
     ulimit -c 0
-    cd -- "$config_dir"
-    exec env -i PATH=/usr/bin:/bin HOME=/nonexistent LC_ALL=C TMPDIR="$config_dir" \
-      "$DEV_SMOKE_BROWSER_AUTH_BUN_BIN" --no-env-file --config=/dev/null \
+    cd -- "$ROOT"
+    exec env -i PATH=/usr/bin:/bin HOME=/nonexistent LC_ALL=C TMPDIR="$work_dir" \
+      "$DEV_SMOKE_BROWSER_AUTH_BUN_BIN" --no-env-file --config=/dev/null --no-install \
       "$ROOT/apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts" \
       --cw-bin "$CW_BIN" --config-dir "$config_dir" \
       --credential-file "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" \
@@ -1177,7 +1184,18 @@ prepare_dev_smoke_browser_login() {
       --expected-email "$EXPECTED_CODEWIRE_ADMIN_EMAIL" \
       --expected-org-id "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
       --chromium-executable "$DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN" "${ux_args[@]}"
-  ) || die 'fresh automated Dev browser login failed'
+  ); then
+    helper_status=1
+  fi
+  if [[ "$work_dir" == "$work_parent"/.cw-browser-auth.?????? && -d "$work_dir" && ! -L "$work_dir" &&
+        "$(stat -c '%u:%a' -- "$work_dir")" == "$(id -u):700" ]]; then
+    rm -rf -- "$work_dir" || cleanup_status=1
+    [[ ! -e "$work_dir" && ! -L "$work_dir" ]] || cleanup_status=1
+  else
+    cleanup_status=1
+  fi
+  [[ "$cleanup_status" == 0 ]] || die 'isolated browser helper runtime cleanup failed'
+  [[ "$helper_status" == 0 ]] || die 'fresh automated Dev browser login failed'
 }
 
 assert_fresh_oauth_principal() {

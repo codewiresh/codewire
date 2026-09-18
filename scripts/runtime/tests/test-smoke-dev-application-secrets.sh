@@ -556,17 +556,21 @@ set -euo pipefail
 [[ "$HOME" == /nonexistent && "$PATH" == /usr/bin:/bin &&
    -z "${AWS_SECRET_ACCESS_KEY+x}" && -z "${SSH_AUTH_SOCK+x}" &&
    -z "${CW_CONFIG_DIR+x}" && -z "${BAO_TOKEN+x}" ]] || exit 91
-[[ "$1" == --no-env-file && "$2" == --config=/dev/null &&
-   "$3" == */apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts ]] || exit 92
-shift 3
+[[ "$1" == --no-env-file && "$2" == --config=/dev/null && "$3" == --no-install &&
+   "$4" == */apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts ]] || exit 92
+helper_script="$4"
+shift 4
 [[ ( $# == 14 || ( $# == 16 && "${15}" == --ux-walkthrough && "${16}" == enabled ) ) && "$1" == --cw-bin && "$3" == --config-dir &&
    "$5" == --credential-file && "$7" == --expected-user-id &&
    "$8" == 11111111111111111111111111111111 && "$9" == --expected-email &&
    "${10}" == owner@example.invalid && "${11}" == --expected-org-id &&
    "${12}" == 22222222222222222222222222222222 && "${13}" == --chromium-executable ]] || exit 93
 config_dir="$4"
-[[ "$PWD" == "$config_dir" && "$TMPDIR" == "$config_dir" && "$(stat -c %a "$config_dir")" == 700 &&
-   -z "$(ls -A "$config_dir")" ]] || exit 94
+expected_root="${helper_script%/apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts}"
+[[ "$PWD" == "$expected_root" && "$TMPDIR" == "$(dirname "$config_dir")"/.cw-browser-auth.* &&
+   "$(stat -c %a "$TMPDIR")" == 700 && -z "$(ls -A "$TMPDIR")" &&
+   "$(stat -c %a "$config_dir")" == 700 && -z "$(ls -A "$config_dir")" ]] || exit 94
+printf 'synthetic-bun-workspace\n' >"$TMPDIR/cache-marker"
 state="$(dirname "$2")/fresh-login-state"
 mkdir -p "$state"
 printf 'browser-helper\n' >"$state/browser-called"
@@ -591,6 +595,8 @@ for phase in application-secrets-all-scopes provider-ssh; do
   else
     grep -qx none "$APP_TEST_ROOT/fresh-login-state/ux-mode" || fail 'provider SSH gained UX mutation'
   fi
+  [[ -z "$(find "$SMOKE_OAUTH_RUNTIME_DIR" -mindepth 1 -maxdepth 1 -name '.cw-browser-auth-*' -print -quit)" ]] ||
+    fail 'browser helper retained its disposable package workspace'
   cleanup_fresh_oauth_login
   [[ ! -e "$SMOKE_OAUTH_RUNTIME_DIR" && -f "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]] ||
     fail 'fresh browser cleanup retained login or removed its input credential file'

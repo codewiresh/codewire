@@ -1,5 +1,5 @@
 // Invoke through the checked-in smoke harness with a fixed Bun executable,
-// `--no-env-file`, `--config=/dev/null`, and an empty private working directory.
+// `--no-env-file`, `--config=/dev/null`, `--no-install`, and private temporary state.
 import { chromium, type BrowserContext, type Page } from "@playwright/test";
 import * as OTPAuth from "otpauth";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
