@@ -73,6 +73,14 @@ async function openFixture(page: Page) {
   await expect(page.getByRole("button", { name: "Refresh sessions", exact: true })).toBeEnabled();
 }
 
+async function renameTerminal(page: Page, name: string) {
+  await page.getByRole("button", { name: "Rename terminal", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Rename terminal", exact: true });
+  await dialog.getByLabel("Terminal name", { exact: true }).fill(name);
+  await dialog.getByRole("button", { name: "Save name", exact: true }).click();
+  await expect(dialog).toBeHidden();
+}
+
 function output(connection: Connection, text: string, offset = 0n) {
   const data = Buffer.from(text);
   connection.route.send(JSON.stringify({ type: "output", offset: String(offset), nextOffset: String(offset + BigInt(data.length)), data: data.toString("base64") }));
@@ -634,21 +642,30 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
   await openFixture(page);
   expect(state.launches).toBe(0);
   await expect(page.getByRole("tab")).toHaveCount(0);
+  const rename = page.getByRole("button", { name: "Rename terminal", exact: true });
+  await expect(rename).toBeDisabled();
+  await expect(page.locator(".cw-terminal-tabs-bar").getByRole("button", { name: "Rename terminal", exact: true })).toHaveCount(1);
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect.poll(() => state.connections.length).toBe(1);
   output(state.connections[0], "first-terminal-output\r\n");
   await expect(page.getByRole("tabpanel")).toContainText("first-terminal-output");
+  await renameTerminal(page, "Build");
+  await expect(rename).toBeFocused();
+  await expect(page.getByRole("tabpanel").getByRole("button", { name: "Rename terminal", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Build", exact: true })).toBeVisible();
+  expect(state.launches).toBe(1);
+  expect(state.connections).toHaveLength(1);
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect.poll(() => state.connections.length).toBe(2);
   output(state.connections[1], "second-terminal-output\r\n");
   await expect(page.getByRole("tabpanel")).toContainText("second-terminal-output");
   await expect(page.getByRole("tabpanel")).not.toContainText("first-terminal-output");
-  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
+  await page.getByRole("tab", { name: "Build", exact: true }).click();
   await expect(page.getByRole("tabpanel")).toContainText("first-terminal-output");
-  await page.getByRole("tab", { name: "Terminal 1", exact: true }).press("ArrowRight");
+  await page.getByRole("tab", { name: "Build", exact: true }).press("ArrowRight");
   await expect(page.getByRole("tab", { name: "Terminal 2", exact: true })).toBeFocused();
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(page.url()).origin });
-  for (const [name, text] of [["Terminal 1", "first-terminal-output"], ["Terminal 2", "second-terminal-output"]]) {
+  for (const [name, text] of [["Build", "first-terminal-output"], ["Terminal 2", "second-terminal-output"]]) {
     await page.getByRole("tab", { name, exact: true }).click();
     const panel = page.getByRole("tabpanel");
     const copy = panel.getByRole("button", { name: "Copy selection", exact: true });
@@ -679,12 +696,192 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
   const stored = await page.evaluate(() => ({ ...sessionStorage }));
   const references = JSON.parse(stored[`${prefix}account-a:${org}:${environment}`]);
-  expect(Object.keys(references).sort()).toEqual(["accountId", "activeSessionId", "environmentId", "organizationId", "sessions", "version"]);
+  expect(Object.keys(references).sort()).toEqual(["accountId", "activeSessionId", "environmentId", "labels", "organizationId", "sessions", "version"]);
   expect(references.sessions).toEqual(Array.from({ length: 8 }, (_, index) => sessionId(index + 1)));
+  expect(references.labels).toEqual(Array.from({ length: 8 }, (_, index) => ({ sessionId: sessionId(index + 1), label: index ? `Terminal ${index + 1}` : "Build" })));
   expect(JSON.stringify(stored)).not.toContain("terminal-output");
   expect(JSON.stringify(stored)).not.toContain("csrf");
-  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
+  await page.getByRole("tab", { name: "Build", exact: true }).click();
   await page.screenshot({ path: testInfo.outputPath("durable-terminal-tabs.png"), fullPage: true });
+  expect(state.stops).toBe(0);
+});
+
+test("terminal names survive reload and reconnect, render literally, and clear only the closed tab", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "private-transcript-not-a-name\r\n");
+  await renameTerminal(page, "<b>Build</b>");
+  const build = page.getByRole("tab", { name: "<b>Build</b>", exact: true });
+  await expect(build).toHaveText("<b>Build</b>");
+  await expect(build.locator("b")).toHaveCount(0);
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => state.connections.length).toBe(2);
+  await renameTerminal(page, "Logs");
+  await page.reload();
+  await expect.poll(() => state.connections.length).toBe(4);
+  await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", sessionId(2));
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await renameTerminal(page, "Server logs");
+  expect(state.connections).toHaveLength(4);
+  await page.getByRole("button", { name: "Reconnect", exact: true }).click();
+  await expect.poll(() => state.connections.length).toBe(6);
+  await expect(page.getByRole("tab", { name: "Server logs", exact: true })).toHaveAttribute("aria-selected", "true");
+  expect(state.connections.at(-1)!.url.searchParams.get("session_id")).toBe(sessionId(2));
+  expect(state.launches).toBe(2);
+  expect(state.stops).toBe(0);
+  await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+  await page.getByRole("dialog", { name: "Close terminal?", exact: true }).getByRole("button", { name: "Close terminal", exact: true }).click();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect(build).toHaveAttribute("aria-selected", "true");
+  const saved = await page.evaluate((key) => sessionStorage.getItem(key)!, `${prefix}account-a:${org}:${environment}`);
+  expect(JSON.parse(saved).labels).toEqual([{ sessionId: sessionId(1), label: "<b>Build</b>" }]);
+  expect(saved).not.toContain("private-transcript");
+  expect(saved).not.toContain("Server logs");
+  expect(state.stops).toBe(1);
+});
+
+test("new terminal names do not collide with restored numeric labels", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  for (let index = 0; index < 2; index += 1) {
+    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(index + 1);
+  }
+  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
+  await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+  await page.getByRole("dialog", { name: "Close terminal?", exact: true }).getByRole("button", { name: "Close terminal", exact: true }).click();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await page.reload();
+  await expect(page.getByRole("tab", { name: "Terminal 2", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Terminal 3", exact: true })).toBeVisible();
+  await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", sessionId(3));
+  expect(state.launches).toBe(3);
+});
+
+test("tab-bar Rename captures the selected terminal and disables after the last tab closes", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }, { sessionId: sessionId(2), state: "running" }];
+  await openFixture(page);
+  await expect(page.getByRole("tab")).toHaveCount(2);
+  const trigger = page.getByRole("button", { name: "Rename terminal", exact: true });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "Rename terminal", exact: true });
+  await expect(dialog.getByLabel("Terminal name", { exact: true })).toHaveValue("Terminal 1");
+  await dialog.getByLabel("Terminal name", { exact: true }).fill("Build");
+  // An unrelated selection update cannot retarget an already-open editor.
+  await page.locator('[role="tab"]').nth(1).dispatchEvent("click");
+  await dialog.getByRole("button", { name: "Save name", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Build", exact: true })).toHaveAttribute("aria-selected", "false");
+  await expect(page.getByRole("tab", { name: "Terminal 2", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(trigger).toBeFocused();
+  for (const remaining of [1, 0]) {
+    await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+    await page.getByRole("dialog", { name: "Close terminal?", exact: true }).getByRole("button", { name: "Close terminal", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(remaining);
+  }
+  await expect(trigger).toBeDisabled();
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(2);
+});
+
+test("terminal rename cancellation and validation preserve the name and return focus", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  const trigger = page.getByRole("button", { name: "Rename terminal", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Rename terminal", exact: true });
+  for (const cancel of ["Cancel", "Escape"] as const) {
+    await trigger.click();
+    await expect(dialog.getByLabel("Terminal name", { exact: true })).toBeFocused();
+    await dialog.getByLabel("Terminal name", { exact: true }).fill("Do not save");
+    if (cancel === "Escape") await page.keyboard.press("Escape");
+    else await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await expect(page.getByRole("tab", { name: "Terminal 1", exact: true })).toBeVisible();
+    await expect(page.locator("[data-terminal-name]")).toHaveValue("");
+  }
+  await trigger.click();
+  const input = dialog.getByLabel("Terminal name", { exact: true });
+  await expect(input).toHaveAttribute("maxlength", "64");
+  for (const name of [" ", "bad\u202ename", "x".repeat(65)]) {
+    await input.evaluate((node, value) => { (node as HTMLInputElement).value = value; node.dispatchEvent(new Event("input", { bubbles: true })); }, name);
+    await dialog.getByRole("button", { name: "Save name", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await expect(page.locator("[data-terminal-tabs] button")).toHaveText("Terminal 1");
+    expect(await input.evaluate((node) => (node as HTMLInputElement).checkValidity())).toBe(false);
+  }
+  await input.fill("  Build  ");
+  await dialog.getByRole("button", { name: "Save name", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Build", exact: true })).toBeVisible();
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("terminal labels preserve v1 references and reject malformed or differently scoped optional metadata", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }, { sessionId: sessionId(2), state: "running" }];
+  await openFixture(page);
+  await expect(page.getByRole("tab")).toHaveCount(2);
+  const record = { version: 1, accountId: "account-a", organizationId: org, environmentId: environment,
+    sessions: [sessionId(2), sessionId(1)], activeSessionId: sessionId(2) };
+  const label = { sessionId: sessionId(2), label: "Deploy" };
+  const cases = [
+    { value: record, named: false, selected: sessionId(2) },
+    { value: { ...record, labels: [label] }, named: true, selected: sessionId(2) },
+    { value: { ...record, labels: [{ ...label, label: "x".repeat(65) }] }, named: false, selected: sessionId(2) },
+    { value: { ...record, labels: [{ ...label, label: "bad\u202ename" }] }, named: false, selected: sessionId(2) },
+    { value: { ...record, labels: [{ ...label, sessionId: sessionId(3) }] }, named: false, selected: sessionId(2) },
+    { value: { ...record, labels: [label, label] }, named: false, selected: sessionId(2) },
+    { value: { ...record, labels: [label], accountId: "another-account" }, named: false, selected: sessionId(1) },
+    { value: { ...record, labels: [label], organizationId: environment }, named: false, selected: sessionId(1) },
+    { value: { ...record, labels: [label], environmentId: org }, named: false, selected: sessionId(1) },
+    { value: { ...record, labels: [label] }, named: false, selected: sessionId(1), oversized: true },
+  ];
+  for (const item of cases) {
+    const raw = JSON.stringify(item.value) + (item.oversized ? " ".repeat(4097) : "");
+    await page.evaluate(({ key, raw }) => sessionStorage.setItem(key, raw), { key: `${prefix}account-a:${org}:${environment}`, raw });
+    await page.reload();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", item.selected);
+    await expect(page.getByRole("tab", { name: "Deploy", exact: true })).toHaveCount(item.named ? 1 : 0);
+  }
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("account revalidation hides terminal labels and invalidates a stale rename editor", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await renameTerminal(page, "Private account name");
+  await page.getByRole("button", { name: "Rename terminal", exact: true }).click();
+  await page.getByLabel("Terminal name", { exact: true }).fill("Unsaved private name");
+  let release!: () => void;
+  state.listGate = new Promise<void>((resolve) => { release = resolve; });
+  state.accountId = "account-b";
+  await page.evaluate(() => dispatchEvent(new Event("focus")));
+  await expect.poll(() => state.lists).toBe(2);
+  await expect(page.locator("[data-terminal-tabs]")).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "Rename terminal", exact: true })).toBeHidden();
+  await expect(page.locator("[data-terminal-name]")).toHaveValue("");
+  release();
+  await expect(page.getByRole("tab", { name: "Terminal 2", exact: true })).toBeVisible();
+  await page.locator("[data-terminal-rename-form]").evaluate((form) => {
+    form.querySelector<HTMLInputElement>("input")!.value = "Stale rename";
+    (form as HTMLFormElement).requestSubmit();
+  });
+  await expect(page.getByRole("tab", { name: "Stale rename", exact: true })).toHaveCount(0);
+  await expect(page.locator("[data-terminal-name]")).toHaveValue("");
+  const saved = await page.evaluate(() => ({ ...sessionStorage }));
+  expect(JSON.stringify(saved)).not.toMatch(/Private account name|Unsaved private name|Stale rename/);
+  expect(Object.keys(saved).some((key) => key.startsWith(`${prefix}account-a:`))).toBe(false);
+  expect(state.launches).toBe(0);
   expect(state.stops).toBe(0);
 });
 

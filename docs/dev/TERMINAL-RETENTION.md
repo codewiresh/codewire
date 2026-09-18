@@ -22,6 +22,21 @@ or renumber byte offsets.
   admission retry unfinished retired-directory cleanup; cleanup failure blocks
   admission so hidden transcripts cannot accumulate behind the inventory limit.
 
+## Browser tabs and names
+
+The dashboard opens at most eight terminal tabs. Rename changes only the display
+name, not the shell, session identity, or connection. Names are limited to 64
+characters without control characters and are saved in this browser tab's
+session storage, alongside session IDs and the active selection. They are not
+shared between browsers; do not put secrets in names.
+
+Metadata is scoped to the authenticated account, organization, and environment.
+Restoration uses fresh authorized session inventory. Revalidation hides labels
+and clears an open rename editor; an account change or authorization failure
+clears terminal references. Closing or removing a tab removes its saved label.
+Browser storage never receives transcripts, commands, credentials, or replay
+cursors. Existing records without names remain supported.
+
 ## Cursor gaps and clients
 
 Session records expose `output_start_offset` and `output_end_offset` as absolute

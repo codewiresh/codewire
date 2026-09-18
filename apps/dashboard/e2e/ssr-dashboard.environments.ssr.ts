@@ -681,6 +681,12 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Enter");
     await expect(terminalRows).toContainText(/__DURABLE_PID__\d+__/);
     const firstPid = /__DURABLE_PID__(\d+)__/.exec(await terminalRows.innerText())![1];
+    await page.getByRole("button", { name: "Rename terminal", exact: true }).click();
+    const rename = page.getByRole("dialog", { name: "Rename terminal", exact: true });
+    await rename.getByLabel("Terminal name", { exact: true }).fill("Build shell");
+    await rename.getByRole("button", { name: "Save name", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Build shell", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
     const filteredListPath = `/${slug}/?${new URLSearchParams({ search: environmentName, state: "running" })}`;
     const filteredDetailPath = `/${slug}/${environmentId}/?${new URLSearchParams({ list_search: environmentName, list_state: "running" })}`;
     await page.goto(filteredListPath);
@@ -704,6 +710,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.goto(`/${slug}/${environmentId}/`);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(`__DURABLE_PID__${firstPid}__`);
+    await expect(page.getByRole("tab", { name: "Build shell", exact: true })).toHaveAttribute("aria-selected", "true");
     await terminalRoot.locator(".xterm").click();
     await page.keyboard.type("printf '__DURABLE_RESUME__%s__%s__%s__\\n' \"$CW_DURABLE_BROWSER\" \"$PWD\" \"$$\"");
     await page.keyboard.press("Enter");
@@ -720,11 +727,26 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Enter");
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(/__SECOND_TERMINAL__unset__\d+__/);
     expect(/__SECOND_TERMINAL__unset__(\d+)__/.exec(await terminalRoot.locator(".xterm-rows").innerText())![1]).not.toBe(firstPid);
+    await page.getByRole("button", { name: "Rename terminal", exact: true }).click();
+    await rename.getByLabel("Terminal name", { exact: true }).fill("Log shell");
+    await rename.getByRole("button", { name: "Save name", exact: true }).click();
+    await page.getByRole("tab", { name: "Build shell", exact: true }).click();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
+    await expect(terminalRoot.locator(".xterm-rows")).toContainText(resumed);
+    await page.getByRole("tab", { name: "Build shell", exact: true }).press("ArrowRight");
+    await expect(page.getByRole("tab", { name: "Log shell", exact: true })).toBeFocused();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondSessionId!);
     await page.getByRole("button", { name: "Close terminal", exact: true }).click();
     await page.getByRole("dialog", { name: "Close terminal?" }).getByRole("button", { name: "Close terminal", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(1);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(resumed);
+    await expect(page.getByRole("tab", { name: "Build shell", exact: true })).toHaveAttribute("aria-selected", "true");
+    // Restore the ordinary label before the existing chrome goldens. Rename
+    // behavior is asserted above; snapshot names stay deterministic.
+    await page.getByRole("button", { name: "Rename terminal", exact: true }).click();
+    await rename.getByLabel("Terminal name", { exact: true }).fill("Terminal 1");
+    await rename.getByRole("button", { name: "Save name", exact: true }).click();
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(page.locator(".cw-sandbox-terminal")).toHaveScreenshot("terminal-drawer-desktop.png", {
       mask: [terminalRoot.locator(".xterm-rows")],
