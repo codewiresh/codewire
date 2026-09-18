@@ -302,14 +302,183 @@ class WorkflowContractTests(unittest.TestCase):
             "host_key_authorization_smoke",
             "edge_routing_probes",
             "connect_edge_probes",
-            "internal_connect_listener_probes",
-            "mesh_product_connect_ownership_smoke",
-            "coordinator_ingress_smoke",
+            "coordinator_runtime_smokes",
             "billing_contract_through_ingress",
             "deploy_agent_sandbox_and_smoke",
             "dashboard_browser_e2e",
             "rust_reconciler_ttl_e2e",
         ])
+
+
+class CoordinatorFixtureLifetimeTests(unittest.TestCase):
+    """Execute the real owner with synthetic commands, never a live cluster."""
+
+    @staticmethod
+    def owner_source() -> str:
+        source = COMMON.read_text(encoding="utf-8")
+        return source.split("coordinator_runtime_smokes() {", 1)[1].split(
+            "\ncoordinator_ingress_smoke() {", 1
+        )[0]
+
+    def run_owner(self, failure: str = "", premature_cleanup: bool = False):
+        body = self.owner_source()
+        if premature_cleanup:
+            # Reproduce the prior lifetime, not a weaker coordinator: retire
+            # and remove the backend immediately before the public consumers.
+            body = body.replace(
+                "    mesh_product_connect_ownership_smoke\n",
+                "    printf stopped >\"$FIXTURE/state\"\n"
+                "    rm -f \"$FIXTURE/backend\"\n"
+                "    mesh_product_connect_ownership_smoke\n",
+                1,
+            )
+        harness = r'''
+set -euo pipefail
+NS=codewire-e2e
+ROOT=/synthetic-codewire
+KIND_INGRESS_URL=http://127.0.0.1:8090
+KIND_POSTGRES_LOCAL_IMAGE=synthetic-postgres
+CARGO_CI_DIR=/synthetic-codewire/target/ci
+PROBE_HEADERS="$FIXTURE/headers"
+printf stopped >"$FIXTURE/state"
+record() { printf '%s\n' "$1" >>"$FIXTURE/events"; }
+log() { :; }
+sleep() { /usr/bin/sleep 0.01; }
+kubectl_apply() {
+  if [ "${!#}" = - ]; then
+    local manifest
+    manifest="$(cat)"
+    [[ "$manifest" == *'kind: SandboxClaim'* ]] || return 61
+    record runtime-created
+    touch "$FIXTURE/runtime"
+  fi
+}
+kubectl() {
+  local args="$*" sql state
+  case "$args" in
+    *' exec -i deploy/postgres '*)
+      sql="$(cat)"
+      if [[ "$sql" == *"state = 'stopped'"* ]]; then
+        record retire
+        printf '%s\n' "$sql" >"$FIXTURE/retire.sql"
+        [ "$FAILURE" != retirement ] || return 41
+        printf stopped >"$FIXTURE/state"
+        rm -f "$FIXTURE/backend"
+      else
+        record admit
+        printf '%s\n' "$sql" >"$FIXTURE/admit.sql"
+        [ -f "$FIXTURE/runtime" ] || return 62
+        touch "$FIXTURE/backend"
+        printf running >"$FIXTURE/state"
+      fi
+      ;;
+    *' get pod '*) printf '10.244.0.9' ;;
+    *' exec cw-binding-gateway-'*)
+      printf '%s\n' '{"environmentId":"00000000-0000-4000-8000-000000000501","workspacePodIp":"10.244.0.9","appPorts":[3000],"sidecarToken":"synthetic"}'
+      ;;
+    *' port-forward '*)
+      printf 'Forwarding from 127.0.0.1:23456 -> 8085\n'
+      exec /usr/bin/sleep 60
+      ;;
+    *' delete sandboxclaim '*|*' delete pod '*)
+      if [ -f "$FIXTURE/runtime" ] && [ "$(<"$FIXTURE/state")" = stopped ]; then
+        record runtime-deleted
+        rm -f "$FIXTURE/runtime"
+      fi
+      ;;
+    'wait '*|*' wait '*|*' patch sandboxclaim '*) : ;;
+    *) printf 'unexpected synthetic kubectl: %s\n' "$args" >&2; return 63 ;;
+  esac
+}
+curl_settled() {
+  PROBE_BODY='{"code":"unauthenticated"}'
+  if [[ "$*" == *127.0.0.1:23456* ]]; then
+    PROBE_CODE=401
+    printf 'x-codewire-service: codewire-orchestration-internal\n' >"$PROBE_HEADERS"
+  else
+    PROBE_CODE=404
+    printf 'x-codewire-service: codewire-orchestration\n' >"$PROBE_HEADERS"
+  fi
+}
+timeout() {
+  [ -f "$FIXTURE/backend" ] && [ "$(<"$FIXTURE/state")" = running ] || return 64
+  [ "$FAILURE" != internal ] || return 31
+  record internal
+}
+mesh_product_connect_ownership_smoke() {
+  record mesh
+  [ "$FAILURE" != mesh ] || return 33
+}
+coordinator_ingress_smoke() {
+  [ -f "$FIXTURE/backend" ] && [ "$(<"$FIXTURE/state")" = running ] || return 66
+  record coordinator
+  [ "$FAILURE" != coordinator ] || return 37
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="codewire-coordinator-lifetime-") as directory:
+            fixture = Path(directory)
+            result = subprocess.run(
+                ["bash", "-c", harness + "\ncoordinator_runtime_smokes() {" + body
+                 + "\ncoordinator_runtime_smokes\nrecord downstream\n"],
+                env={"PATH": os.environ["PATH"], "FIXTURE": directory, "FAILURE": failure},
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertTrue((fixture / "events").exists(), result.stderr)
+            events = (fixture / "events").read_text().splitlines()
+            sql = {
+                name: (fixture / f"{name}.sql").read_text()
+                for name in ("admit", "retire")
+                if (fixture / f"{name}.sql").exists()
+            }
+            return result, events, sql
+
+    def test_shared_runtime_survives_every_consumer_then_retires(self) -> None:
+        result, events, sql = self.run_owner()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(events, [
+            "runtime-created", "admit", "internal", "mesh", "coordinator",
+            "retire", "runtime-deleted", "downstream",
+        ])
+        for transaction in sql.values():
+            self.assertTrue(transaction.startswith("BEGIN;\n"))
+            self.assertTrue(transaction.endswith("COMMIT;\n"))
+        self.assertLess(sql["admit"].index("INSERT INTO sandbox_environment_backend"),
+                        sql["admit"].index("SET state = 'running'"))
+        self.assertLess(sql["retire"].index("SET state = 'stopped'"),
+                        sql["retire"].index("DELETE FROM sandbox_environment_backend"))
+
+    def test_prior_premature_cleanup_is_rejected(self) -> None:
+        result, events, _ = self.run_owner(premature_cleanup=True)
+        self.assertEqual(result.returncode, 66, result.stderr)
+        self.assertIn("mesh", events)
+        self.assertNotIn("coordinator", events)
+        self.assertNotIn("downstream", events)
+        self.assertEqual(events.count("retire"), 1)
+
+    def test_probe_failures_preserve_status_and_always_cleanup(self) -> None:
+        for failure, status, absent in (
+            ("internal", 1, "mesh"), ("mesh", 33, "coordinator"),
+            ("coordinator", 37, "downstream"),
+        ):
+            with self.subTest(failure=failure):
+                result, events, _ = self.run_owner(failure=failure)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(events.count("retire"), 1)
+                self.assertEqual(events.count("runtime-deleted"), 1)
+                self.assertNotIn(absent, events)
+                self.assertNotIn("downstream", events)
+
+    def test_retirement_failure_cannot_pass_or_remove_live_runtime(self) -> None:
+        result, events, _ = self.run_owner(failure="retirement")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("failed to retire", result.stderr)
+        self.assertNotIn("runtime-deleted", events)
+        self.assertNotIn("downstream", events)
+
+    def test_seed_is_not_running_before_runtime_admission(self) -> None:
+        seed = (ROOT / "tests/e2e/kind/coordinator-seed.sql").read_text()
+        self.assertIn("state, desired_state, name", seed)
+        self.assertRegex(seed, r"'sandbox',\s*'stopped',\s*'stopped',")
 
 
 class SelectorContractTests(unittest.TestCase):
