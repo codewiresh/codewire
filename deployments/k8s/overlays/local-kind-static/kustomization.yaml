@@ -25,6 +25,7 @@ configMapGenerator:
     behavior: merge
     literals:
       - GITHUB_APP_SLUG=codewire-synthetic
+      - GITHUB_APP_CLIENT_ID=Iv1.kindsynthetic
 
 images:
   - name: git.example.com/codewire/derp

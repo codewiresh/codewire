@@ -103,12 +103,14 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
     assert_github_repository_edges(per_file, fail)
     assert_internal_connect_listener_exemption(unrouted, per_file, fail)
     assert_mesh_primary_origin_rest_edge(fail)
+    assert_github_browser_callback_edges(fail)
     if getattr(_args, "self_test", False):
         try:
             internal_connect_listener_self_test()
             mesh_connect_backend_topology_self_test(ownership, owners, per_file)
             mesh_coordinator_transport_self_test()
             mesh_primary_origin_rest_edge_self_test()
+            github_browser_callback_edges_self_test()
             credential_mutation_edges_self_test(per_file)
             credential_delegation_edges_self_test(per_file)
             github_repository_edges_self_test(per_file)
@@ -156,6 +158,113 @@ ISOLATED_CREDENTIAL_SERVICES = {
     "codewire.v1.CredentialDelegationService",
     "codewire.v1.GithubRepositoryService",
 }
+
+
+GITHUB_BROWSER_CALLBACK = "/api/v1/github/oauth/callback"
+GITHUB_BROWSER_INGRESSES = {
+    "deployments/k8s/base/ingress.yaml": ("codewire-dashboard", "codewire-dashboard", "name: http"),
+    "deployments/k8s/overlays/local-kind/ingress.yaml": ("codewire-local", "dashboard", "number: 5173"),
+    "deployments/k8s/overlays/local-kind-static/ingress.yaml": ("codewire-local", "dashboard", "number: 5173"),
+    "tests/e2e/kind/ingress.yaml": ("codewire-preview-e2e", "codewire-dashboard", "name: http"),
+}
+
+
+def assert_github_browser_callback_ingress(
+    document: str, label: str, backend: str, port: str, fail: Callable[[str], None]
+) -> None:
+    # Keep the callback in the application rule, never the wildcard preview rule.
+    rules = re.split(r"^\s{2,4}- (?:host|http):", document, flags=re.MULTILINE)[1:]
+    callback_rules = [rule for rule in rules if GITHUB_BROWSER_CALLBACK in rule]
+    if len(callback_rules) != 1:
+        fail(f"{label}: browser GitHub callback needs exactly one application rule")
+        return
+    rule = callback_rules[0]
+    # Kustomize sorts path entries as backend/path/pathType, unlike source YAML.
+    entries = list(re.finditer(
+        r"^([ ]*)- (?:path|backend):[^\n]*\n[\s\S]*?(?=^\1- |\Z)",
+        rule, re.MULTILINE,
+    ))
+    paths: list[tuple[str, str, str]] = []
+    for entry in entries:
+        block = entry.group(0)
+        path = re.search(r"^\s*(?:- )?path: (\S+)[ \t]*$", block, re.MULTILINE)
+        mode = re.search(r"^\s*pathType: (\S+)[ \t]*$", block, re.MULTILINE)
+        if path is not None and mode is not None:
+            body = re.sub(r"^\s*(?:- )?(?:path|pathType):[^\n]*\n?", "", block, flags=re.MULTILINE)
+            body = re.sub(r"\s+", " ", body).strip().removeprefix("- ")
+            paths.append((path.group(1), mode.group(1), body))
+    callbacks = [(mode, body) for path, mode, body in paths if path.startswith(GITHUB_BROWSER_CALLBACK)]
+    expected = ("Exact", f"backend: service: name: {backend} port: {port}")
+    if callbacks != [expected]:
+        fail(f"{label}: browser GitHub callback must be Exact -> {backend} {port}")
+    if not any(path == GITHUB_BROWSER_CALLBACK for path, _, _ in paths):
+        fail(f"{label}: browser GitHub callback must use the exact callback path")
+    fallbacks = [(mode, body) for path, mode, body in paths if path == "/api"]
+    fallback = ("Prefix", "backend: service: name: codewire-orchestration port: name: http")
+    if fallbacks != [fallback]:
+        fail(f"{label}: browser callback must preserve the application /api orchestration fallback")
+    if "*." in rule.split("paths:", 1)[0]:
+        fail(f"{label}: browser GitHub callback must not use a wildcard preview host")
+
+
+def assert_github_browser_callback_edges(
+    fail: Callable[[str], None], reader: Callable[[str], str] = read_text
+) -> None:
+    for file in ("Caddyfile", "Caddyfile.docker"):
+        text = reader(file)
+        block = caddy_handle_block(text, GITHUB_BROWSER_CALLBACK)
+        if len(re.findall(r"\bhandle\s+" + re.escape(GITHUB_BROWSER_CALLBACK) + r"\s*\{", text)) != 1 or not block:
+            fail(f"{file}: browser GitHub callback needs one exact dashboard handle")
+        elif not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):5173\s*\}", block):
+            fail(f"{file}: browser GitHub callback must use dashboard port 5173")
+        fallback = caddy_handle_block(text, "/api/*") or ""
+        if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8084\s*\}", fallback):
+            fail(f"{file}: browser callback must preserve /api orchestration port 8084")
+        if block and text.index(block) > text.index(fallback or text):
+            fail(f"{file}: browser GitHub callback must precede the broad API handle")
+    for file, (name, backend, port) in GITHUB_BROWSER_INGRESSES.items():
+        document = ingress_document_by_name(reader(file), name, file, fail)
+        if document is not None:
+            assert_github_browser_callback_ingress(document, file, backend, port, fail)
+
+
+def github_browser_callback_edges_self_test() -> None:
+    files = ["Caddyfile", "Caddyfile.docker", *GITHUB_BROWSER_INGRESSES]
+    for file in files:
+        original = read_text(file)
+        attacks = {
+            "missing": original.replace(GITHUB_BROWSER_CALLBACK, "/wrong-callback"),
+            "non-exact path": original.replace(GITHUB_BROWSER_CALLBACK, GITHUB_BROWSER_CALLBACK + "/*"),
+        }
+        if file.startswith("Caddyfile"):
+            block = caddy_handle_block(original, GITHUB_BROWSER_CALLBACK)
+            if not block:
+                raise RuntimeError(f"{file}: missing browser callback fixture")
+            attacks["wrong backend"] = original.replace(block, block.replace(":5173", ":8084"))
+            attacks["duplicate"] = original.replace(block, block + "\n" + block)
+            fallback = caddy_handle_block(original, "/api/*") or ""
+            attacks["changed fallback"] = original.replace(fallback, fallback.replace(":8084", ":5173"))
+            attacks["wrong order"] = original.replace(block, "CALLBACK_ORDER_FIXTURE", 1).replace(fallback, block, 1).replace("CALLBACK_ORDER_FIXTURE", fallback, 1)
+        else:
+            _, backend, port = GITHUB_BROWSER_INGRESSES[file]
+            block_match = re.search(r"^\s*- path: " + re.escape(GITHUB_BROWSER_CALLBACK) + r"\n[\s\S]*?(?=^\s*- path:)", original, re.MULTILINE)
+            if not block_match:
+                raise RuntimeError(f"{file}: missing browser callback fixture")
+            block = block_match.group(0)
+            attacks["Prefix"] = original.replace(block, block.replace("pathType: Exact", "pathType: Prefix"))
+            attacks["wrong backend"] = original.replace(block, block.replace(f"name: {backend}", "name: codewire-orchestration"))
+            attacks["wrong port"] = original.replace(block, block.replace(port, "number: 8084"))
+            attacks["duplicate"] = original.replace(block, block + block)
+            attacks["changed fallback"] = original.replace("path: /api\n", "path: /other-api\n")
+            if file == "deployments/k8s/base/ingress.yaml":
+                attacks["wildcard preview rule"] = original.replace("- host: codewire.sh", '- host: "*.codewire.sh"', 1)
+            else:
+                attacks["wildcard preview rule"] = original.replace("    - http:\n", '    - host: "*.codewire-dev.local"\n      http:\n', 1)
+        for attack, changed in attacks.items():
+            failures: list[str] = []
+            assert_github_browser_callback_edges(failures.append, lambda path: changed if path == file else read_text(path))
+            if not any(file in message for message in failures):
+                raise RuntimeError(f"{file}: browser callback accepted {attack}")
 
 
 def assert_github_repository_edges(
@@ -1298,6 +1407,9 @@ def assert_rendered_dev_ingress_identities(fail: Callable[[str], None]) -> None:
         result.stdout, "codewire-orchestration-grpc", label, fail
     )
     general_connect = ingress_document_by_name(result.stdout, "codewire-connect", label, fail)
+    dashboard = ingress_document_by_name(result.stdout, "codewire-dashboard", label, fail)
+    if dashboard is not None:
+        assert_github_browser_callback_ingress(dashboard, label, "codewire-dashboard", "name: http", fail)
     assert_coordinator_ingress_shape(coordinator_connect, f"{label} codewire-coordinator-connect", fail)
     assert_environment_session_ingress_shape(
         environment_session,

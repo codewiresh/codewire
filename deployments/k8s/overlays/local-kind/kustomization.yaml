@@ -20,12 +20,13 @@ resources:
 
 # The non-promotable Kind credential fixture provides this fixed synthetic App
 # itself. Production and Dev continue to receive only their deployment-owned
-# public App slug through the shared ConfigMap.
+# public App identifiers through the dedicated public ConfigMap.
 configMapGenerator:
   - name: codewire-dashboard-public-config
     behavior: merge
     literals:
       - GITHUB_APP_SLUG=codewire-synthetic
+      - GITHUB_APP_CLIENT_ID=Iv1.kindsynthetic
 
 images:
   - name: git.example.com/codewire/derp

@@ -13,7 +13,7 @@ const CSRF_COOKIE_NAME: &str = "codewire_ssr_csrf";
 const LEGACY_CSRF_COOKIE_NAME: &str = "codewire_csrf";
 const CSRF_TOKEN_BYTES: usize = 32;
 const GITHUB_APP_AUTHORIZATION_COOKIE: &str = "codewire_github_app_authorization";
-const GITHUB_APP_AUTHORIZATION_PATH: &str = "/settings/credentials/github/";
+const GITHUB_APP_AUTHORIZATION_PATH: &str = "/api/v1/github/oauth/";
 const GITHUB_APP_COOKIE_VERSION: u8 = 1;
 const GITHUB_APP_RECONNECT_ID_BYTES: usize = 36;
 pub(crate) const TWO_FACTOR_CHALLENGE_COOKIE: &str = "codewire_2fa_challenge";
@@ -415,7 +415,7 @@ mod tests {
         );
         assert_eq!(
             clear_github_app_authorization_cookie("https://dashboard.example.test"),
-            "codewire_github_app_authorization=deleted; Path=/settings/credentials/github/; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
+            "codewire_github_app_authorization=deleted; Path=/api/v1/github/oauth/; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
         );
     }
 

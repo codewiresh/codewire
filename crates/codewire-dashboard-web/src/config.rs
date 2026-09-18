@@ -46,9 +46,10 @@ pub struct Config {
     pub(crate) confidential_storage_enabled: bool,
     pub(crate) confidential_admin_only: bool,
     pub(crate) turnstile_site_key: String,
-    /// Public GitHub App slug used only to construct the browser installation
-    /// redirect. The App client secret is held solely by credential-service.
+    /// Public GitHub App identifiers. The client secret is held solely by
+    /// credential-service, never the dashboard or browser.
     pub(crate) github_app_slug: String,
+    pub(crate) github_app_client_id: String,
 }
 
 impl Config {
@@ -100,6 +101,11 @@ impl Config {
             Err(env::VarError::NotPresent) => String::new(),
             Err(env::VarError::NotUnicode(_)) => bail!("GITHUB_APP_SLUG must be valid UTF-8"),
         };
+        let github_app_client_id = match env::var("GITHUB_APP_CLIENT_ID") {
+            Ok(value) => parse_github_app_client_id(value)?,
+            Err(env::VarError::NotPresent) => String::new(),
+            Err(env::VarError::NotUnicode(_)) => bail!("GITHUB_APP_CLIENT_ID must be valid UTF-8"),
+        };
 
         Ok(Self {
             listen_addr,
@@ -115,8 +121,21 @@ impl Config {
             confidential_admin_only,
             turnstile_site_key,
             github_app_slug,
+            github_app_client_id,
         })
     }
+}
+
+fn parse_github_app_client_id(value: String) -> anyhow::Result<String> {
+    let value = value.trim().to_owned();
+    if value.len() > 100
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
+    {
+        bail!("GITHUB_APP_CLIENT_ID must be a GitHub App client ID")
+    }
+    Ok(value)
 }
 
 fn parse_github_app_slug(value: String) -> anyhow::Result<String> {
@@ -222,5 +241,17 @@ mod tests {
                 "accepted {value}"
             );
         }
+    }
+
+    #[test]
+    fn github_app_client_id_is_optional_and_is_not_a_url_or_secret() {
+        assert_eq!(parse_github_app_client_id(String::new()).unwrap(), "");
+        for value in ["Iv1.kindsynthetic", "Iv23lif1Example"] {
+            assert_eq!(parse_github_app_client_id(value.into()).unwrap(), value);
+        }
+        for value in ["https://github.com", "id&redirect_uri=bad", "a b", "a\nb"] {
+            assert!(parse_github_app_client_id(value.into()).is_err());
+        }
+        assert!(parse_github_app_client_id("a".repeat(101)).is_err());
     }
 }

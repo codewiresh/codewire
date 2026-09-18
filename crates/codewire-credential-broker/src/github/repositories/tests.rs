@@ -165,7 +165,10 @@ async fn invalid_account_request_or_identity_never_reads_material_or_calls_provi
 #[tokio::test]
 async fn provider_errors_are_closed_and_their_bodies_are_never_polled() {
     for (status, expected) in [
-        (StatusCode::UNAUTHORIZED, RepositoryDiscoveryError::Denied),
+        (
+            StatusCode::UNAUTHORIZED,
+            RepositoryDiscoveryError::Unauthorized,
+        ),
         (StatusCode::FORBIDDEN, RepositoryDiscoveryError::Denied),
         (
             StatusCode::TOO_MANY_REQUESTS,

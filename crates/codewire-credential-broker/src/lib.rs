@@ -37,7 +37,7 @@ pub use codex_oauth::{
 };
 pub use github_app::{
     GitHubAppAuthorizationConfig, GitHubAppAuthorizationError, GitHubAppAuthorizationImport,
-    GitHubAppAuthorizationOwner,
+    GitHubAppAuthorizationOwner, GitHubAppRefreshError, GitHubAppUserOAuthBundle,
 };
 pub use network::ProviderHttpsTransport;
 pub use openai::{
@@ -47,10 +47,10 @@ pub use openai::{
 #[cfg(feature = "local-broker-synthetic-smoke")]
 pub use runtime::SyntheticOpenAiSmokeTransport;
 pub use runtime::{
-    BrokerCredentialRefreshRequest, BrokerHttpResponse, BrokerLeaseError, BrokerLeaseProvider,
-    BrokerRefreshAdmission, BrokerRefreshError, BrokerRequestError, BrokerResponseBody,
-    BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
-    OpenAiBroker,
+    BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest, BrokerHttpResponse,
+    BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
+    BrokerRequestError, BrokerResponseBody, BrokerUpstreamError, BrokerUpstreamRequest,
+    BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
 };
 
 use codewire_access::{CredentialMetadata, DerivedGrant, GrantPermission};

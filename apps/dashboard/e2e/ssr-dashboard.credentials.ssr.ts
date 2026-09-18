@@ -4,7 +4,7 @@ import { bypassTwoFactor, cleanupUser, createAuthenticatedSession, getUserId, se
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import {
   destroyGithubCheckout, githubCheckoutImage, githubCheckoutInstall, githubCheckoutName,
-  githubGitCounters, verifyGithubCheckout,
+  githubConnectionMetadata, githubGitCounters, verifyGithubCheckout,
 } from "./helpers/github-checkout";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
@@ -16,56 +16,132 @@ async function openGithubConnection(page: Page) {
   await expect(page.getByRole("dialog", { name: "Connect GitHub", exact: true })).toBeVisible();
 }
 
-async function completeGithubAppConnection(page: Page, code: string) {
-  const form = page.getByRole("form", { name: "GitHub App", exact: true });
+async function completeGithubAppConnection(page: Page, code: string, alterCallback?: (url: URL) => void) {
+  const dialog = page.locator("dialog[open]");
+  const form = dialog.locator('form[action^="/settings/credentials/_actions/github/authorize"]');
   const githubAuthorizePath = "/settings/credentials/_actions/github/authorize";
-  const githubInstallationPath = "/apps/codewire-synthetic/installations/new";
-  // The native form hands the browser to GitHub after this 303. The Kind
-  // fixture must not load a provider-controlled page, so submit the exact
-  // form action through this browser context's request client instead. It
-  // shares the session and callback-state cookie jar with the page, letting
-  // the test exercise the real authorization and callback routes without an
-  // external-network navigation race.
   const action = await form.getAttribute("action");
-  const csrf = await form.locator('[name="_csrf"]').inputValue();
   if (!action) throw new Error("GitHub App authorization form omitted its action");
   expect(new URL(action, ssrUrl).pathname).toBe(githubAuthorizePath);
-  let state = "";
-  const authorization = await page.context().request.post(new URL(action, ssrUrl).toString(), {
-    form: { _csrf: csrf },
-    headers: {
-      Origin: ssrUrl,
-      Referer: `${ssrUrl}/settings/credentials/`,
-    },
-    maxRedirects: 0,
+  const formId = await form.getAttribute("id");
+  if (!formId) throw new Error("GitHub App authorization form omitted its identity");
+  const continueButton = dialog.getByRole("button", { name: "Continue to GitHub", exact: true });
+  await expect(continueButton).toHaveAttribute("form", formId);
+  // Only GitHub's external authorization navigation is synthetic. Native form
+  // submission, redirects, Origin/CSRF, cookies, the real local callback, token
+  // exchange and protected storage all keep their checked-in implementation.
+  // page.route only intercepts the first request in a redirect chain. Use the
+  // pinned Chromium transport's exact external Request-stage interception so
+  // the native BFF POST and its redirect are not replaced by a request client.
+  const transport = await page.context().newCDPSession(page);
+  let mainFrameId = "";
+  let callbackUrl = "";
+  const pending = new Set<string>();
+  let resolveProvider!: () => void;
+  let rejectProvider!: (error: unknown) => void;
+  const providerReturn = new Promise<void>((resolve, reject) => {
+    resolveProvider = resolve;
+    rejectProvider = reject;
   });
-  expect(authorization.status()).toBe(303);
-  expect(authorization.headers()["cache-control"]).toBe("no-store");
-  const location = authorization.headers().location;
-  if (!location) throw new Error("GitHub App authorization omitted its installation redirect");
-  const target = new URL(location);
-  expect(target.origin).toBe("https://github.com");
-  expect(target.pathname).toBe(githubInstallationPath);
-  state = target.searchParams.get("state") || "";
-  if (!state) throw new Error("GitHub App authorization omitted its state fence");
-  const cookie = authorization.headers()["set-cookie"] || "";
-  expect(cookie).toContain("codewire_github_app_authorization=");
-  expect(cookie).toContain("HttpOnly");
-  expect(cookie).toContain("SameSite=Lax");
-  expect(cookie).toContain("Path=/settings/credentials/github/");
-
-  const callbackUrl = new URL(
-    `/settings/credentials/github/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
-    ssrUrl,
-  ).toString();
-  const response = await page.context().request.get(callbackUrl, { maxRedirects: 0 });
-  expect(response.status()).toBe(303);
-  expect(response.headers()["cache-control"]).toBe("no-store, max-age=0");
-  expect(response.headers()["referrer-policy"]).toBe("no-referrer");
-  expect(response.headers()["set-cookie"] || "").toContain("Max-Age=0");
-  const completion = response.headers().location;
-  if (!completion) throw new Error("GitHub App callback omitted its completion redirect");
-  await page.goto(new URL(completion, ssrUrl).toString());
+  const authorizeProvider = async (event: {
+    requestId: string; frameId: string; resourceType: string; request: { method: string; url: string };
+  }) => {
+    expect(event.frameId).toBe(mainFrameId);
+    expect(event.resourceType).toBe("Document");
+    expect(event.request.method).toBe("GET");
+    expect(callbackUrl).toBe("");
+    const target = new URL(event.request.url);
+    expect(target.origin).toBe("https://github.com");
+    expect(target.pathname).toBe("/login/oauth/authorize");
+    expect(target.searchParams.get("client_id")).toBe("Iv1.kindsynthetic");
+    expect(target.searchParams.get("redirect_uri")).toBe(`${ssrUrl}/api/v1/github/oauth/callback`);
+    expect([...target.searchParams.keys()].sort()).toEqual(["client_id", "redirect_uri", "state"]);
+    const state = target.searchParams.get("state");
+    if (!state) throw new Error("GitHub App authorization omitted its state fence");
+    const stateCookie = (await page.context().cookies(`${ssrUrl}/api/v1/github/oauth/callback`))
+      .find((cookie) => cookie.name === "codewire_github_app_authorization");
+    // Assert cookie behavior in the browser as well as the server's wire
+    // policy: Chromium may omit raw Set-Cookie after a fulfilled redirect.
+    expect(stateCookie?.httpOnly).toBe(true);
+    expect(stateCookie?.sameSite).toBe("Lax");
+    expect(stateCookie?.path).toBe("/api/v1/github/oauth/");
+    const callback = new URL(target.searchParams.get("redirect_uri")!);
+    callback.searchParams.set("code", code);
+    callback.searchParams.set("state", state);
+    alterCallback?.(callback);
+    callbackUrl = callback.toString();
+    await transport.send("Fetch.fulfillRequest", {
+      requestId: event.requestId, responseCode: 302,
+      responseHeaders: [{ name: "Location", value: callbackUrl }, { name: "Cache-Control", value: "no-store" }],
+      body: "",
+    });
+  };
+  const onPaused = (event: Parameters<typeof authorizeProvider>[0]) => {
+    pending.add(event.requestId);
+    void authorizeProvider(event).then(() => {
+      pending.delete(event.requestId);
+      resolveProvider();
+    }, async (error: unknown) => {
+      try {
+        await transport.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "Aborted" });
+        pending.delete(event.requestId);
+      } catch { /* Final cleanup retries; preserve the failed provider assertion. */ }
+      rejectProvider(error);
+    });
+  };
+  transport.on("Fetch.requestPaused", onPaused);
+  let primaryFailure: unknown;
+  try {
+    const { frameTree } = await transport.send("Page.getFrameTree");
+    mainFrameId = frameTree.frame.id;
+    await transport.send("Fetch.enable", { patterns: [{
+      urlPattern: "https://github.com/login/oauth/authorize*", resourceType: "Document", requestStage: "Request",
+    }] });
+    const [authorization, response] = await Promise.all([
+      page.waitForResponse((response) => response.request().method() === "POST"
+        && response.url() === new URL(action, ssrUrl).toString(), { timeout: 30_000 }),
+      page.waitForResponse((response) => response.request().method() === "GET"
+        && new URL(response.url()).origin === ssrUrl
+        && new URL(response.url()).pathname === "/api/v1/github/oauth/callback", { timeout: 30_000 }),
+      continueButton.click({ timeout: 30_000 }),
+      providerReturn,
+    ]);
+    expect(authorization.status()).toBe(303);
+    expect(await authorization.request().headerValue("origin")).toBe(ssrUrl);
+    expect(authorization.headers()["cache-control"]).toBe("no-store");
+    const cookie = await authorization.headerValue("set-cookie") || "";
+    expect(cookie).toContain("codewire_github_app_authorization=");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).toContain("Path=/api/v1/github/oauth/");
+    expect(response.status()).toBe(303);
+    expect(response.headers()["cache-control"]).toBe("no-store, max-age=0");
+    expect(response.headers()["referrer-policy"]).toBe("no-referrer");
+    const completion = response.headers().location;
+    if (!completion) throw new Error("GitHub App callback omitted its completion redirect");
+    expect(completion).not.toContain(code);
+    await expect(page).toHaveURL(new URL(completion, ssrUrl).toString());
+    // The exact Max-Age=0 clearing header is covered by security.rs. Here
+    // require its observable effect before replaying the consumed callback.
+    expect((await page.context().cookies()).some((cookie) => cookie.name === "codewire_github_app_authorization"))
+      .toBe(false);
+    return callbackUrl;
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
+  } finally {
+    const cleanupFailures: unknown[] = [];
+    for (const requestId of pending) {
+      try { await transport.send("Fetch.failRequest", { requestId, errorReason: "Aborted" }); }
+      catch (error) { cleanupFailures.push(error); }
+    }
+    try { await transport.send("Fetch.disable"); } catch (error) { cleanupFailures.push(error); }
+    transport.off("Fetch.requestPaused", onPaused);
+    try { await transport.detach(); } catch (error) { cleanupFailures.push(error); }
+    if (!primaryFailure && cleanupFailures.length) {
+      throw new AggregateError(cleanupFailures, "Synthetic GitHub navigation cleanup failed");
+    }
+  }
 }
 
 test.describe("managed provider credential browser journey", () => {
@@ -75,7 +151,7 @@ test.describe("managed provider credential browser journey", () => {
   );
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("connects GitHub, checks out a selected repository, then revokes and deletes it", async ({ page, isMobile }) => {
+  test("refreshes GitHub App authorization before a protected repository checkout, then revokes and deletes it", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop credential lifecycle contract");
     test.setTimeout(600_000);
     const name = "synthetic-user";
@@ -102,15 +178,53 @@ test.describe("managed provider credential browser journey", () => {
       expect(settings?.status()).toBe(200);
       await expect(page.locator("dialog[open]")).toHaveCount(0);
       await openGithubConnection(page);
-      const form = page.getByRole("form", { name: "GitHub App", exact: true });
+      const connection = page.getByRole("dialog", { name: "Connect GitHub", exact: true });
+      const form = connection.locator("form");
       await expect(form.locator('[name="name"]')).toHaveCount(0);
-      await expect(form.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
+      await expect(connection.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
         .toHaveAttribute("href", "/assets/codewire/icons-v2.svg#icon-github");
-      await expect(form).toContainText("Your verified GitHub username names this connection");
-      await expect(form).not.toContainText("one-time code");
-      await completeGithubAppConnection(page, "kind-synthetic-code-one");
+      await expect(connection).toContainText("Your verified GitHub username names this connection");
+      await expect(connection).not.toContainText("one-time code");
+      await expect(connection.getByRole("link", { name: "Install/manage repository access" }))
+        .toHaveAttribute("href", "https://github.com/apps/codewire-synthetic/installations/new");
+      expect(await githubConnectionMetadata(owner)).toEqual([]);
+      // These returns never reach provider exchange or publish a credential.
+      // Each retry starts from the newly rendered form and a fresh state cookie.
+      for (const alter of [
+        (url: URL) => url.searchParams.append("code", "duplicate-code"),
+        (url: URL) => url.searchParams.append("state", "duplicate-state"),
+        (url: URL) => url.searchParams.set("state", "wrong-state"),
+        (url: URL) => url.searchParams.set("code", "invalid?code"),
+      ]) {
+        await completeGithubAppConnection(page, "kind-synthetic-code-one", alter);
+        await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-app-failed&dialog=connect-github`);
+        await expect(connection).toBeVisible();
+        await expect(page.locator(".cw-credential-row")).toHaveCount(0);
+        expect(await githubConnectionMetadata(owner)).toEqual([]);
+      }
+      await completeGithubAppConnection(page, "kind-synthetic-code-uninstalled");
+      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-installation-required&dialog=connect-github`);
+      await expect(connection.getByRole("alert")).toContainText("No credential was changed");
+      await expect(page.locator(".cw-credential-row")).toHaveCount(0);
+      expect(await githubConnectionMetadata(owner)).toEqual([]);
+      // A newly authorized, now-installed account can complete normally.
+      const completedCallback = await completeGithubAppConnection(page, "kind-synthetic-code-one");
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=github-app-connected`);
       await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
+      const enrolled = await githubConnectionMetadata(owner);
+      expect(enrolled).toHaveLength(1);
+      // App user authorization publishes OAuth material; the separate
+      // github_app auth kind does not describe this user-token connection.
+      expect(enrolled[0]).toMatchObject({
+        user_id: owner, organization_id: null, provider: "github", authentication_kind: "oauth",
+        status: "active", revocation_generation: "1", material_generation: "1", protected_material_present: true,
+      });
+      // A consumed callback must not publish again or advance either generation.
+      await page.goto(completedCallback);
+      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-app-failed&dialog=connect-github`);
+      expect(await githubConnectionMetadata(owner)).toEqual(enrolled);
+      await page.goto("/settings/credentials/");
+      const beforePicker = await githubGitCounters();
       let rendered = await page.locator("body").textContent();
       expect(rendered?.includes("gho_")).toBe(false);
       expect(rendered?.includes("ghu_")).toBe(false);
@@ -146,7 +260,8 @@ test.describe("managed provider credential browser journey", () => {
       const credentialId = await githubChoice.locator("option", { hasText: name }).getAttribute("value");
       if (!credentialId) throw new Error("Verified GitHub connection was not selectable");
       await githubChoice.selectOption(credentialId);
-      await createProfile.getByRole("button", { name: "Create profile", exact: true }).click();
+      await page.getByRole("dialog", { name: "Create profile", exact: true })
+        .getByRole("button", { name: "Create profile", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=profile-created`);
       await expect(page.getByRole("status")).toHaveText("Credential profile created.");
       let profileRow = page.locator(".cw-profile-row", { hasText: profileName });
@@ -162,6 +277,8 @@ test.describe("managed provider credential browser journey", () => {
       await picker.getByRole("combobox", { name: "GitHub credential profile" }).selectOption(`${profileId}@1`);
       const choices = picker.locator("[data-select-github-repository]");
       await expect(choices).toHaveCount(50);
+      const afterPicker = await githubGitCounters();
+      expect(afterPicker.appRefresh).toBe(beforePicker.appRefresh + 1);
       await expect(picker.getByRole("button", { name: /synthetic-user\/repository-50/ })).toBeDisabled();
       await picker.getByRole("searchbox", { name: "Filter this page" }).fill("repository-01");
       await expect(picker.locator("[data-select-github-repository]:visible")).toHaveCount(1);
@@ -204,24 +321,32 @@ test.describe("managed provider credential browser journey", () => {
       // The normal destroy finished before removing its selected profile.
       await page.goto("/settings/credentials/");
       profileRow = page.locator(".cw-profile-row", { hasText: profileName });
-      await profileRow.getByRole("button", { name: "Edit profile", exact: true }).click();
-      await profileRow.getByText("Delete profile", { exact: true }).click();
-      await profileRow.getByRole("button", { name: `Delete ${profileName}`, exact: true }).click();
+      await profileRow.getByRole("button", { name: "Manage profile", exact: true }).click();
+      await page.getByRole("dialog", { name: profileName, exact: true })
+        .getByRole("button", { name: "Delete profile", exact: true }).click();
+      await page.getByRole("dialog", { name: `Delete ${profileName}?`, exact: true })
+        .getByRole("button", { name: "Delete profile", exact: true }).click();
       await expect(profileRow).toHaveCount(0);
       row = page.locator(".cw-credential-row", { hasText: name });
 
+      await expect(row).toContainText("Active");
+      await expect(row).toContainText("Generation 2");
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
-      await row.getByText("Revoke", { exact: true }).click();
-      await row.getByRole("button", { name: `Revoke ${name}`, exact: true }).click();
+      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
+        .getByRole("button", { name: "Revoke credential", exact: true }).click();
+      await page.getByRole("dialog", { name: `Revoke ${name}?`, exact: true })
+        .getByRole("button", { name: "Revoke credential", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-revoked`);
       await expect(page.getByRole("status")).toHaveText("Credential revoked.");
       row = page.locator(".cw-credential-row", { hasText: name });
       await expect(row).toContainText("Revoked");
-      await expect(row).toContainText("Generation 2");
+      await expect(row).toContainText("Generation 3");
 
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
-      await row.getByText("Delete", { exact: true }).click();
-      await row.getByRole("button", { name: `Delete ${name}`, exact: true }).click();
+      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
+        .getByRole("button", { name: "Delete credential", exact: true }).click();
+      await page.getByRole("dialog", { name: `Delete ${name}?`, exact: true })
+        .getByRole("button", { name: "Delete credential", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-deleted`);
       await expect(page.getByRole("status")).toHaveText("Credential deleted.");
       await expect(page.locator(".cw-credential-row", { hasText: name })).toHaveCount(0);

@@ -56,6 +56,12 @@ spec:
                   name: codewire-dashboard-public-config
                   key: GITHUB_APP_SLUG
                   optional: true
+            - name: GITHUB_APP_CLIENT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-dashboard-public-config
+                  key: GITHUB_APP_CLIENT_ID
+                  optional: true
           ports:
             - containerPort: 5173
               name: http

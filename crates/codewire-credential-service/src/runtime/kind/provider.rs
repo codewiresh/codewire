@@ -33,8 +33,15 @@ pub(super) const GITHUB_APP_CLIENT_ID: &str = "Iv1.kindsynthetic";
 pub(super) const GITHUB_APP_CLIENT_SECRET: &str = "kind-synthetic-secret";
 pub(super) const GITHUB_APP_SLUG: &str = "codewire-synthetic";
 pub(super) const GITHUB_APP_CALLBACK_URL: &str =
-    "http://127.0.0.1:8090/settings/credentials/github/callback";
+    "http://127.0.0.1:8090/api/v1/github/oauth/callback";
 pub(super) const GITHUB_APP_USER_TOKEN: &str = "ghu_kind_synthetic_user_token_1234567890";
+const GITHUB_APP_UNINSTALLED_USER_TOKEN: &str = "ghu_kind_synthetic_uninstalled_user_1234567890";
+pub(super) const GITHUB_APP_REFRESHED_USER_TOKEN: &str =
+    "ghu_kind_synthetic_refreshed_user_token_1234567890";
+const GITHUB_APP_INITIAL_REFRESH_TOKEN: &str =
+    "ghr_kind_synthetic_initial_refresh_token_1234567890";
+const GITHUB_APP_REFRESHED_REFRESH_TOKEN: &str =
+    "ghr_kind_synthetic_refreshed_refresh_token_1234567890";
 const GITHUB_APP_AUTHORIZATION_CODES: [&str; 2] =
     ["kind-synthetic-code-one", "kind-synthetic-code-two"];
 
@@ -129,6 +136,9 @@ struct Counters {
     last_refresh: Option<(u64, u64)>,
     github_advertisements: u64,
     github_upload_packs: u64,
+    github_app_refreshes: u64,
+    github_refreshed_advertisements: u64,
+    github_refreshed_upload_packs: u64,
 }
 
 #[derive(Clone)]
@@ -151,22 +161,35 @@ impl SyntheticProvider {
         body: &[u8],
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let fixture = self.1.as_ref().ok_or(BrokerUpstreamError::Protocol)?;
+        let refreshed_app = github_refreshed_app_git_authorization(headers);
         let (operation, body) = fixture.execute(method, target, headers, body).await?;
         {
             let mut counters = self.0.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
             match operation {
                 super::git::Operation::Advertisement => {
-                    counters.github_advertisements = increment(counters.github_advertisements)?
+                    counters.github_advertisements = increment(counters.github_advertisements)?;
+                    if refreshed_app {
+                        counters.github_refreshed_advertisements =
+                            increment(counters.github_refreshed_advertisements)?;
+                    }
                 }
                 super::git::Operation::UploadPack => {
-                    counters.github_upload_packs = increment(counters.github_upload_packs)?
+                    counters.github_upload_packs = increment(counters.github_upload_packs)?;
+                    if refreshed_app {
+                        counters.github_refreshed_upload_packs =
+                            increment(counters.github_refreshed_upload_packs)?;
+                    }
                 }
             }
             // Only successful authenticated backend responses advance these
-            // closed counters. No request/header/body or private path is logged.
+            // closed counters. The refreshed-App counters identify only the
+            // fixed public fixture scenario, never a header or token value.
             tracing::info!(target: TARGET, event = "github_git_response", operation = operation.name(),
                 github_advertisement_calls = counters.github_advertisements,
-                github_upload_pack_calls = counters.github_upload_packs, "github_git_response");
+                github_upload_pack_calls = counters.github_upload_packs,
+                github_refreshed_advertisement_calls = counters.github_refreshed_advertisements,
+                github_refreshed_upload_pack_calls = counters.github_refreshed_upload_packs,
+                "github_git_response");
         }
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
@@ -190,15 +213,54 @@ impl SyntheticProvider {
                 ("content-type", "application/x-www-form-urlencoded"),
                 ("user-agent", "Codewire-Credential-Service"),
             ],
-        ) || !GITHUB_APP_AUTHORIZATION_CODES
-            .iter()
-            .any(|code| body == github_app_exchange_body(code).as_bytes())
-        {
+        ) {
             return Err(BrokerUpstreamError::Protocol);
         }
+        if body == github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0]).as_bytes() {
+            // 60 seconds is valid for GitHub App user tokens, but inside the
+            // five-minute renewal skew. The managed browser journey therefore
+            // proves durable controlled refresh before its protected checkout.
+            return json_response(json!({
+                "access_token": GITHUB_APP_USER_TOKEN,
+                "token_type": "bearer",
+                "expires_in": 60,
+                "refresh_token": GITHUB_APP_INITIAL_REFRESH_TOKEN,
+                "refresh_token_expires_in": 15_897_600,
+            }));
+        }
+        if body == github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[1]).as_bytes() {
+            // The duplicate-account browser path retains a non-expiring
+            // response as a compatibility check; it is never persisted.
+            return json_response(json!({
+                "access_token": GITHUB_APP_USER_TOKEN,
+                "token_type": "bearer",
+            }));
+        }
+        if body == github_app_exchange_body("kind-synthetic-code-uninstalled").as_bytes() {
+            return json_response(json!({
+                "access_token": GITHUB_APP_UNINSTALLED_USER_TOKEN,
+                "token_type": "bearer",
+            }));
+        }
+        if body != github_app_refresh_body().as_bytes() {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let refreshes = {
+            let mut counters = self.0.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
+            counters.github_app_refreshes = increment(counters.github_app_refreshes)?;
+            counters.github_app_refreshes
+        };
+        // This closed count intentionally omits request material. It lets the
+        // managed browser fixture distinguish the one durable App renewal
+        // from a merely successful initial callback.
+        tracing::info!(target: TARGET, event = "github_app_refresh",
+            github_app_refresh_calls = refreshes, "github_app_refresh");
         json_response(json!({
-            "access_token": GITHUB_APP_USER_TOKEN,
+            "access_token": GITHUB_APP_REFRESHED_USER_TOKEN,
             "token_type": "bearer",
+            "expires_in": 28_800,
+            "refresh_token": GITHUB_APP_REFRESHED_REFRESH_TOKEN,
+            "refresh_token_expires_in": 15_897_600,
         }))
     }
 
@@ -210,7 +272,7 @@ impl SyntheticProvider {
         if !body.is_empty() || !github_app_api_headers(headers) {
             return Err(BrokerUpstreamError::Protocol);
         }
-        json_response(json!({"login": "synthetic-user"}))
+        json_response(json!({"id": 7, "login": "synthetic-user"}))
     }
 
     fn github_app_installations(
@@ -224,6 +286,11 @@ impl SyntheticProvider {
             || !github_app_api_headers(headers)
         {
             return Err(BrokerUpstreamError::Protocol);
+        }
+        if headers.get("authorization").is_some_and(|value| {
+            value == format!("Bearer {GITHUB_APP_UNINSTALLED_USER_TOKEN}").as_str()
+        }) {
+            return json_response(json!({"installations": []}));
         }
         json_response(json!({
             "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG}],
@@ -278,6 +345,9 @@ impl SyntheticProvider {
                 broker_retry_once_calls = counters.attempts[1], broker_retry_exhausted_calls = counters.attempts[2],
                 github_advertisement_calls = counters.github_advertisements,
                 github_upload_pack_calls = counters.github_upload_packs,
+                github_app_refresh_calls = counters.github_app_refreshes,
+                github_refreshed_advertisement_calls = counters.github_refreshed_advertisements,
+                github_refreshed_upload_pack_calls = counters.github_refreshed_upload_packs,
                 "provider_totals");
         }
     }
@@ -434,7 +504,13 @@ impl BrokerUpstreamTransport for SyntheticProvider {
 
 fn github_app_exchange_body(code: &str) -> String {
     format!(
-        "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code={code}&redirect_uri=http%3A%2F%2F127.0.0.1%3A8090%2Fsettings%2Fcredentials%2Fgithub%2Fcallback"
+        "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code={code}&redirect_uri=http%3A%2F%2F127.0.0.1%3A8090%2Fapi%2Fv1%2Fgithub%2Foauth%2Fcallback"
+    )
+}
+
+fn github_app_refresh_body() -> String {
+    format!(
+        "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&grant_type=refresh_token&refresh_token={GITHUB_APP_INITIAL_REFRESH_TOKEN}"
     )
 }
 
@@ -451,28 +527,50 @@ fn exact_headers(headers: &HeaderMap, expected: &[(&str, &str)]) -> bool {
 }
 
 fn github_app_api_headers(headers: &HeaderMap) -> bool {
-    exact_headers(
-        headers,
-        &[
-            (
-                "authorization",
-                "Bearer ghu_kind_synthetic_user_token_1234567890",
-            ),
-            ("accept", "application/vnd.github+json"),
-            ("user-agent", "Codewire-Credential-Service"),
-        ],
-    )
+    [
+        GITHUB_APP_USER_TOKEN,
+        GITHUB_APP_REFRESHED_USER_TOKEN,
+        GITHUB_APP_UNINSTALLED_USER_TOKEN,
+    ]
+    .iter()
+    .any(|token| {
+        let authorization = format!("Bearer {token}");
+        exact_headers(
+            headers,
+            &[
+                ("authorization", &authorization),
+                ("accept", "application/vnd.github+json"),
+                ("user-agent", "Codewire-Credential-Service"),
+            ],
+        )
+    })
 }
 
 fn github_bearer_authorization(headers: &HeaderMap) -> bool {
     let Some(value) = headers.get("authorization") else {
         return false;
     };
-    [GITHUB_DEVICE_TOKEN, GITHUB_APP_USER_TOKEN]
-        .iter()
-        .any(|token| {
-            value == HeaderValue::from_str(&format!("Bearer {token}")).expect("synthetic token")
-        })
+    [
+        GITHUB_DEVICE_TOKEN,
+        GITHUB_APP_USER_TOKEN,
+        GITHUB_APP_REFRESHED_USER_TOKEN,
+    ]
+    .iter()
+    .any(|token| {
+        value == HeaderValue::from_str(&format!("Bearer {token}")).expect("synthetic token")
+    })
+}
+
+fn github_refreshed_app_git_authorization(headers: &HeaderMap) -> bool {
+    let Some(value) = headers.get("authorization") else {
+        return false;
+    };
+    let authorization = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD
+            .encode(format!("x-access-token:{GITHUB_APP_REFRESHED_USER_TOKEN}"))
+    );
+    value == HeaderValue::from_str(&authorization).expect("synthetic token")
 }
 
 fn json_response(value: Value) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
@@ -640,6 +738,32 @@ mod tests {
             .unwrap();
         assert_eq!(provider.0.lock().unwrap().github_advertisements, 1);
         assert_eq!(provider.0.lock().unwrap().github_upload_packs, 1);
+        let refreshed_authorization = HeaderValue::from_str(&format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD
+                .encode(format!("x-access-token:{GITHUB_APP_REFRESHED_USER_TOKEN}"))
+        ))
+        .unwrap();
+        let mut refreshed_get = headers.clone();
+        refreshed_get.insert("authorization", refreshed_authorization.clone());
+        refreshed_get.remove("content-type");
+        provider
+            .github_git(&Method::GET, &advertisement, &refreshed_get, &[])
+            .await
+            .unwrap();
+        let mut refreshed_post = headers.clone();
+        refreshed_post.insert("authorization", refreshed_authorization);
+        provider
+            .github_git(&Method::POST, &upload, &refreshed_post, request.as_bytes())
+            .await
+            .unwrap();
+        {
+            let counters = provider.0.lock().unwrap();
+            assert_eq!(counters.github_advertisements, 2);
+            assert_eq!(counters.github_upload_packs, 2);
+            assert_eq!(counters.github_refreshed_advertisements, 1);
+            assert_eq!(counters.github_refreshed_upload_packs, 1);
+        }
         git.close().await.unwrap();
         assert!(
             provider
@@ -647,13 +771,17 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(provider.0.lock().unwrap().github_upload_packs, 1);
+        assert_eq!(provider.0.lock().unwrap().github_upload_packs, 2);
     }
 
     #[test]
     fn repository_fixture_is_bounded_paginated_and_requires_its_synthetic_identity() {
         let provider = SyntheticProvider::new();
-        for token in [GITHUB_DEVICE_TOKEN, GITHUB_APP_USER_TOKEN] {
+        for token in [
+            GITHUB_DEVICE_TOKEN,
+            GITHUB_APP_USER_TOKEN,
+            GITHUB_APP_REFRESHED_USER_TOKEN,
+        ] {
             let headers = HeaderMap::from_iter([(
                 http::header::AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
@@ -707,6 +835,12 @@ mod tests {
         );
         assert!(
             provider
+                .github_app_exchange(&exchange_headers, github_app_refresh_body().as_bytes())
+                .is_ok()
+        );
+        assert_eq!(provider.0.lock().unwrap().github_app_refreshes, 1);
+        assert!(
+            provider
                 .github_app_exchange(&exchange_headers, b"client_id=wrong")
                 .is_err()
         );
@@ -734,6 +868,21 @@ mod tests {
                 .github_app_installations(&installations, &api_headers, &[])
                 .is_ok()
         );
+        let mut refreshed_api_headers = api_headers.clone();
+        refreshed_api_headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer ghu_kind_synthetic_refreshed_user_token_1234567890"),
+        );
+        assert!(
+            provider
+                .github_app_user(&refreshed_api_headers, &[])
+                .is_ok()
+        );
+        assert!(
+            provider
+                .github_app_installations(&installations, &refreshed_api_headers, &[])
+                .is_ok()
+        );
         let wrong_installations = "https://api.github.com/user/installations?per_page=99&page=1"
             .parse()
             .unwrap();
@@ -749,6 +898,43 @@ mod tests {
             HeaderValue::from_static("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
         );
         assert!(provider.github_app_user(&wrong_token, &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn github_app_fixture_distinguishes_installation_recovery_without_repository_access() {
+        use codewire_credential_broker::{
+            GitHubAppAuthorizationConfig, GitHubAppAuthorizationError, GitHubAppAuthorizationOwner,
+        };
+        let provider = SyntheticProvider::new();
+        let config = GitHubAppAuthorizationConfig::new(
+            GITHUB_APP_CLIENT_ID.into(),
+            zeroize::Zeroizing::new(GITHUB_APP_CLIENT_SECRET.into()),
+            GITHUB_APP_SLUG.into(),
+            GITHUB_APP_CALLBACK_URL.into(),
+        )
+        .unwrap();
+        let owner = GitHubAppAuthorizationOwner::new(config, std::sync::Arc::new(provider));
+        assert!(matches!(
+            owner
+                .complete(zeroize::Zeroizing::new(
+                    b"kind-synthetic-code-uninstalled".to_vec()
+                ))
+                .await,
+            Err(GitHubAppAuthorizationError::InstallationRequired)
+        ));
+        assert!(
+            owner
+                .complete(zeroize::Zeroizing::new(
+                    GITHUB_APP_AUTHORIZATION_CODES[0].as_bytes().to_vec()
+                ))
+                .await
+                .is_ok()
+        );
+        let uninstalled = HeaderMap::from_iter([(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {GITHUB_APP_UNINSTALLED_USER_TOKEN}")).unwrap(),
+        )]);
+        assert!(!github_bearer_authorization(&uninstalled));
     }
 
     fn body(marker: &str) -> Vec<u8> {

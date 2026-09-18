@@ -57,6 +57,25 @@ pub(crate) fn render_page(template: impl Template) -> Response {
     render_template(StatusCode::OK, template)
 }
 
+pub(crate) fn render_credential_settings_page(template: impl Template) -> Response {
+    let mut response = render_page(template);
+    if response.status() == StatusCode::OK {
+        // Chromium applies the initiating document's form-action policy to
+        // the native authorization POST's cross-origin redirect as well. Only
+        // Credentials permits this fixed provider destination; other pages,
+        // scripts, connections and error responses keep the default policy.
+        let policy = CONTENT_SECURITY_POLICY.replace(
+            "form-action 'self'",
+            "form-action 'self' https://github.com",
+        );
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_str(&policy).expect("static credential form policy"),
+        );
+    }
+    response
+}
+
 pub(crate) fn render_page_with_connect_origin(
     template: impl Template,
     connect_origin: &str,
@@ -291,6 +310,36 @@ mod tests {
         );
         assert!(!CONTENT_SECURITY_POLICY.contains("unsafe-inline"));
         assert!(!CONTENT_SECURITY_POLICY.contains("unsafe-eval"));
+    }
+
+    #[test]
+    fn only_credential_settings_allow_the_github_app_form_redirect() {
+        #[derive(Template)]
+        #[template(source = "<main>Credentials</main>", ext = "html")]
+        struct Credentials;
+
+        let response = render_credential_settings_page(Credentials);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "same-origin");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            policy.replace(
+                "form-action 'self' https://github.com",
+                "form-action 'self'"
+            ),
+            CONTENT_SECURITY_POLICY
+        );
+        assert!(policy.contains("form-action 'self' https://github.com;"));
+        assert_eq!(
+            render_page(Credentials).headers()[header::CONTENT_SECURITY_POLICY],
+            CONTENT_SECURITY_POLICY
+        );
     }
 
     #[test]

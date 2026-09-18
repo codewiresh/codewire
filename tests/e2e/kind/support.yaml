@@ -30,6 +30,7 @@ metadata:
 data:
   TURNSTILE_SITE_KEY: ""
   GITHUB_APP_SLUG: codewire-synthetic
+  GITHUB_APP_CLIENT_ID: Iv1.kindsynthetic
 ---
 apiVersion: v1
 kind: Secret

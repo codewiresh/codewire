@@ -31,6 +31,7 @@ use codewire_access::{CredentialAuthKind, CredentialStatus};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use url::Url;
 
+use crate::github_app::GitHubOAuthCredential;
 use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiStreamingResponse, PreparedOpenAiResponse,
 };
@@ -222,25 +223,44 @@ impl GitHubOAuthAdapter {
         request: ValidatedGitHubRequest,
     ) -> Result<PreparedGitHubRequest, CredentialBrokerError> {
         validate_lease(&lease, request.operation)?;
-        lease.with_material(|material| self.prepare_material(request, material))
+        let credential = lease
+            .with_material(GitHubOAuthCredential::parse)
+            .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
+        self.prepare_credential(request, &credential)
     }
 
-    fn prepare_material(
+    /// Extract only a closed GitHub credential form after an already-admitted
+    /// lease. Runtime refresh code uses this to distinguish a rotating App
+    /// bundle from raw CLI/device-flow material without widening the proxy API.
+    pub(crate) fn credential_from_lease<L: BrokerCredentialLease>(
+        &self,
+        lease: L,
+    ) -> Result<GitHubOAuthCredential, CredentialBrokerError> {
+        let metadata = lease.credential_metadata();
+        if metadata.provider.as_str() != "github"
+            || metadata.authentication_kind != CredentialAuthKind::OAuth
+            || metadata.status != CredentialStatus::Active
+            || metadata.revocation_generation == 0
+            || lease.material_generation() == 0
+        {
+            return Err(CredentialBrokerError::UnsupportedLease);
+        }
+        lease
+            .with_material(GitHubOAuthCredential::parse)
+            .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)
+    }
+
+    pub(crate) fn prepare_credential(
         &self,
         request: ValidatedGitHubRequest,
-        material: &[u8],
+        credential: &GitHubOAuthCredential,
     ) -> Result<PreparedGitHubRequest, CredentialBrokerError> {
         let target = build_target_url(&request.policy, &request.request)
             .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
-        if material.is_empty()
-            || material.len() > 4096
-            || !material.iter().all(|byte| byte.is_ascii_graphic())
-        {
-            return Err(CredentialBrokerError::InvalidCredentialMaterial);
-        }
-        let token = std::str::from_utf8(material)
+        let token = credential
+            .access_token()
             .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
-        let prepared = prepare_credentials(&request.policy, &Token(token), &request.body)
+        let prepared = prepare_credentials(&request.policy, &Token(&token), &request.body)
             .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
         let mut headers = prepare_outbound_headers(&request.policy, &request.headers, &prepared)
             .map_err(|_| CredentialBrokerError::RequestDenied)?;
@@ -273,6 +293,7 @@ impl GitHubOAuthAdapter {
     }
 }
 
+#[derive(Clone)]
 pub struct ValidatedGitHubRequest {
     operation: GitHubOperation,
     policy: ProxyRouteConfig,

@@ -383,6 +383,8 @@ impl CredentialRowView {
 pub(crate) struct CredentialProfileEntryView {
     pub(crate) slot: &'static str,
     pub(crate) credential: String,
+    pub(crate) status: &'static str,
+    pub(crate) status_tone: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -402,6 +404,7 @@ pub(crate) struct CredentialSettingsView {
     pub(crate) git_identity: SettingsData,
     pub(crate) git_identity_feedback: bool,
     pub(crate) active_dialog: String,
+    pub(crate) github_install_url: String,
     pub(crate) credentials: Vec<CredentialRowView>,
     pub(crate) profiles: Vec<CredentialProfileRowView>,
     pub(crate) choices: CredentialChoicesView,
@@ -1844,6 +1847,7 @@ mod secret_debug_tests {
             git_identity: SettingsData::default(),
             git_identity_feedback: false,
             active_dialog: String::new(),
+            github_install_url: String::new(),
             credentials: Vec::new(),
             profiles: Vec::new(),
             choices: CredentialChoicesView::default(),
