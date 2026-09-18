@@ -200,6 +200,28 @@ pub(super) async fn personal_settings_shell_view_from_identity(
         DependencyResult::Available(rows) => (rows, false),
         DependencyResult::Unavailable => (Vec::new(), true),
     };
+    personal_settings_shell_view_from_organizations(
+        state,
+        identity,
+        cookie,
+        selected_slug,
+        organizations,
+        unavailable,
+    )
+    .await
+}
+
+/// Reuse the exact memberships already validated by a personal resource route.
+/// In particular, one-time creation responses must not start a second optional
+/// metadata read after successfully receiving the new secret material.
+pub(super) async fn personal_settings_shell_view_from_organizations(
+    state: &AppState,
+    identity: &IdentityUser,
+    cookie: axum::http::HeaderValue,
+    selected_slug: &str,
+    organizations: Vec<OrganizationRow>,
+    unavailable: bool,
+) -> Result<DashboardView, WebError> {
     let mut view = shell_from_organizations(identity, organizations, unavailable);
     // Missing or inaccessible context is discarded without resolving any
     // organization that was not returned for this exact authenticated caller.

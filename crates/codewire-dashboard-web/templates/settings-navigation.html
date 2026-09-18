@@ -6,6 +6,7 @@
     <li><a href="/settings/{{ view.global_context_query }}"{% if settings_personal && settings_section == "account" %} aria-current="page"{% endif %}>Account</a></li>
     <li><a href="/settings/credentials/{{ view.global_context_query }}"{% if settings_personal && settings_section == "credentials" %} aria-current="page"{% endif %}>Credentials</a></li>
     <li><a href="/settings/secrets/{{ view.global_context_query }}"{% if settings_personal && settings_section == "secrets" %} aria-current="page"{% endif %}>Secrets</a></li>
+    <li><a href="/settings/api-keys/{{ view.global_context_query }}"{% if settings_personal && settings_section == "api-keys" %} aria-current="page"{% endif %}>API Keys</a></li>
   </ul>
   {% if view.has_selected_organization %}
   <h3 id="settings-organization-title" class="cw-context-nav-label">Organization · {{ view.selected_organization_name }}</h3>

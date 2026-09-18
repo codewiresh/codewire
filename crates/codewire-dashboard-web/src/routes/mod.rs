@@ -16,6 +16,7 @@ mod github_repositories;
 mod invitations;
 mod organization_governance;
 mod organizations;
+mod personal_api_keys;
 mod personal_secrets;
 mod public;
 mod sandbox_resize;
@@ -166,6 +167,20 @@ pub(crate) fn router() -> Router<AppState> {
             post(organization_governance::revoke_invitation),
         )
         .route("/{slug}/api-keys", get(slash_redirect))
+        .route("/settings/api-keys", get(slash_redirect))
+        .route("/settings/api-keys/", get(personal_api_keys::page))
+        .route(
+            "/settings/api-keys/_actions/create",
+            post(personal_api_keys::create_action).layer(DefaultBodyLimit::max(8192)),
+        )
+        .route(
+            "/settings/api-keys/_actions/toggle",
+            post(personal_api_keys::toggle_action).layer(DefaultBodyLimit::max(8192)),
+        )
+        .route(
+            "/settings/api-keys/_actions/delete",
+            post(personal_api_keys::delete_action).layer(DefaultBodyLimit::max(8192)),
+        )
         .route(
             "/{slug}/api-keys/",
             get(organization_governance::api_keys_page),

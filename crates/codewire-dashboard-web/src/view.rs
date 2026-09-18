@@ -1491,6 +1491,51 @@ pub(crate) struct ApiKeysPageView {
 }
 
 #[derive(Debug)]
+pub(crate) struct PersonalApiKeyRow {
+    pub(crate) key: ApiKeyRow,
+    pub(crate) expires: String,
+    pub(crate) scopes: Vec<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PersonalApiKeyGroupView {
+    pub(crate) organization: OrganizationRow,
+    pub(crate) keys: Vec<PersonalApiKeyRow>,
+    pub(crate) available: bool,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct PersonalApiKeyFormView {
+    pub(crate) org_id: String,
+    pub(crate) name: String,
+    pub(crate) expiration: String,
+    pub(crate) error: String,
+    pub(crate) expanded: bool,
+}
+
+// Only a successful Create response can populate one_time_key. Never derive
+// diagnostics for this model or persist it as navigation/history state.
+#[derive(Default)]
+pub(crate) struct PersonalApiKeysPageView {
+    pub(crate) groups: Vec<PersonalApiKeyGroupView>,
+    pub(crate) organizations: Vec<OrganizationRow>,
+    pub(crate) organizations_available: bool,
+    pub(crate) account_id: String,
+    pub(crate) csrf_token: String,
+    pub(crate) form: PersonalApiKeyFormView,
+    pub(crate) one_time_key: String,
+    pub(crate) one_time_name: String,
+    pub(crate) one_time_organization: String,
+    pub(crate) message: String,
+    pub(crate) error: String,
+    pub(crate) action_query: String,
+    pub(crate) reload_url: String,
+    pub(crate) first_page_url: String,
+    pub(crate) next_page_url: String,
+}
+
+#[derive(Debug)]
 pub(crate) struct SecretProjectRow {
     pub(crate) id: String,
     pub(crate) name: String,

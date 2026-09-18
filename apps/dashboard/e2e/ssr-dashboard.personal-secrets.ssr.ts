@@ -31,9 +31,9 @@ test("Settings uses one subtitle-free heading and personal destinations independ
     await page.goto(fixture(path));
     const aside = page.locator(".cw-settings-subnav");
     await expect(aside.locator("header")).toHaveText("Settings");
-    await expect(aside.getByRole("list", { name: "Personal", exact: true }).getByRole("link")).toHaveText(["Account", "Credentials", "Secrets"]);
+    await expect(aside.getByRole("list", { name: "Personal", exact: true }).getByRole("link")).toHaveText(["Account", "Credentials", "Secrets", "API Keys"]);
     await expect(aside.locator('[aria-current="page"]')).toHaveText(active);
-    await expect(aside.locator('a[href^="/settings/api-keys/"]')).toHaveCount(0);
+    await expect(aside.getByRole("list", { name: "Personal", exact: true }).getByRole("link", { name: "API Keys", exact: true })).toHaveAttribute("href", "settings-api-keys.html");
     await expect(aside.getByRole("heading", { name: /Organization/ })).toHaveCount(0);
     await fits(page);
   }
