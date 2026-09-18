@@ -48,6 +48,11 @@ ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
 )" ] || die 'prepared Kind snapshot profile does not select exactly the three affected mobile surfaces'
+[ "$(expected_snapshots prepared-kind-creation)" = "$(cat <<'EOF'
+ssr-dashboard.environments.ssr.ts-snapshots/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.environments.ssr.ts-snapshots/environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+)" ] || die 'creation snapshot profile does not select exactly the two existing creation goldens'
 [ "$(expected_snapshots prepared-kind-terminal)" = "$(cat <<'EOF'
 ssr-dashboard.environments.ssr.ts-snapshots/terminal-drawer-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
 ssr-dashboard.environments.ssr.ts-snapshots/terminal-full-mobile-dashboard-ssr-desktop-ubuntu24-cft145.png
@@ -62,6 +67,22 @@ ssr-dashboard.management-visual.ssr.ts-snapshots/management-sessions-desktop-das
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-sessions-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
 )" ] || die 'Account snapshot profile does not select exactly the six existing settings goldens'
+[ "$(expected_snapshots prepared-kind-settings-navigation)" = "$(
+  for surface in presets secrets secret-bucket api-keys members billing settings security sessions; do
+    for project in desktop mobile; do
+      printf 'ssr-dashboard.management-visual.ssr.ts-snapshots/management-%s-%s-dashboard-ssr-%s-ubuntu24-cft145.png\n' \
+        "$surface" "$project" "$project"
+    done
+  done
+)" ] || die 'settings navigation profile does not select exactly the eighteen existing management goldens'
+navigation_snapshots="$(expected_snapshots prepared-kind-settings-navigation)"
+[ "$(wc -l <<<"$navigation_snapshots" | tr -d '[:space:]')" = 18 ] &&
+  [ "$(sort -u <<<"$navigation_snapshots" | wc -l | tr -d '[:space:]')" = 18 ] ||
+  die 'settings navigation profile has duplicate or missing snapshot targets'
+while IFS= read -r navigation_snapshot; do
+  [ -f "$ROOT/$SNAPSHOT_RELATIVE_DIR/$navigation_snapshot" ] ||
+    die "settings navigation profile added a nonexistent golden: $navigation_snapshot"
+done <<<"$navigation_snapshots"
 if expected_snapshots unknown-profile >/dev/null 2>&1; then
   die 'unknown snapshot profile was accepted'
 fi
@@ -80,6 +101,30 @@ fi
   [ "$(snapshot_profile_database_url prepared-kind-management-secrets-mobile)" = \
     'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
   die 'prepared Kind snapshot topology changed'
+[ "$(snapshot_profile_context prepared-kind-creation)" = kind-codewire-e2e-ci ] &&
+  [ "$(snapshot_profile_namespace prepared-kind-creation)" = codewire-e2e ] &&
+  [ "$(snapshot_profile_origin prepared-kind-creation)" = http://127.0.0.1:8090 ] &&
+  [ "$(snapshot_profile_database_url prepared-kind-creation)" = \
+    'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
+  die 'creation snapshot profile changed the prepared Kind topology'
+creation_renderer="$(sed -n '/^          prepared-kind-creation)/,/;;/p' "$RUNNER")"
+for creation_contract in \
+    '--project=dashboard-ssr-desktop --project=dashboard-ssr-mobile' \
+    'apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts' \
+    '--grep "renders server-owned create options and resources with no browser service caller|keeps environment create and inventory usable on mobile"' \
+    '--update-snapshots=changed --retries=0 --workers=1 --reporter=line'; do
+  grep -Fq -- "$creation_contract" <<<"$creation_renderer" ||
+    die "creation renderer is missing its bounded selection: $creation_contract"
+done
+if grep -Eq -- '--grep-invert|--no-deps|management-visual\.ssr|read\.ssr|destroys through real Kind' <<<"$creation_renderer"; then
+  die 'creation renderer skips dependencies or selects unrelated surfaces'
+fi
+desktop_creation_owner="$(sed -n '/  test("renders server-owned create options and resources with no browser service caller"/,/^  });/p' "$ENVIRONMENT_SPEC")"
+mobile_creation_owner="$(sed -n '/  test("keeps environment create and inventory usable on mobile"/,/^  });/p' "$ENVIRONMENT_SPEC")"
+if ! grep -Fq 'toHaveScreenshot("environments-create-desktop.png")' <<<"$desktop_creation_owner" ||
+    ! grep -Fq 'toHaveScreenshot("environments-create-mobile.png")' <<<"$mobile_creation_owner"; then
+  die 'creation profile selections do not own their required screenshots'
+fi
 [ "$(snapshot_profile_context prepared-kind-terminal)" = kind-codewire-e2e-ci ] &&
   [ "$(snapshot_profile_namespace prepared-kind-terminal)" = codewire-e2e ] &&
   [ "$(snapshot_profile_origin prepared-kind-terminal)" = http://127.0.0.1:8090 ] &&
@@ -92,6 +137,29 @@ fi
   [ "$(snapshot_profile_database_url prepared-kind-account)" = \
     'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
   die 'Account snapshot profile changed the prepared Kind topology'
+[ "$(snapshot_profile_context prepared-kind-settings-navigation)" = kind-codewire-e2e-ci ] &&
+  [ "$(snapshot_profile_namespace prepared-kind-settings-navigation)" = codewire-e2e ] &&
+  [ "$(snapshot_profile_origin prepared-kind-settings-navigation)" = http://127.0.0.1:8090 ] &&
+  [ "$(snapshot_profile_database_url prepared-kind-settings-navigation)" = \
+    'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
+  die 'settings navigation profile changed the prepared Kind topology'
+navigation_renderer="$(sed -n '/^          prepared-kind-settings-navigation)/,/;;/p' "$RUNNER")"
+for navigation_contract in \
+    '--config apps/dashboard/playwright.config.ts' \
+    '--project=dashboard-ssr-desktop --project=dashboard-ssr-mobile' \
+    'apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts' \
+    '--grep "renders every organization management surface without page overflow|renders account, security, and session surfaces in the selected context"' \
+    '--output /tmp/codewire-run/test-results' \
+    '--update-snapshots=changed --retries=0 --workers=1 --reporter=line'; do
+  grep -Fq -- "$navigation_contract" <<<"$navigation_renderer" ||
+    die "settings navigation renderer is missing its bounded selection: $navigation_contract"
+done
+[ "$(grep -c '\./apps/dashboard/node_modules/\.bin/playwright test' <<<"$navigation_renderer")" = 1 ] &&
+  [ "$(grep -c -- '--grep ' <<<"$navigation_renderer")" = 1 ] ||
+  die 'settings navigation renderer gained an additional test selection'
+if grep -Eq -- '--grep-invert|--no-deps|environments\.ssr|read\.ssr|admin audit' <<<"$navigation_renderer"; then
+  die 'settings navigation renderer skips authentication dependencies or selects unrelated surfaces'
+fi
 account_renderer="$(sed -n '/^          prepared-kind-account)/,/;;/p' "$RUNNER")"
 for account_contract in \
     '--project=dashboard-ssr-desktop --project=dashboard-ssr-mobile' \
@@ -448,7 +516,7 @@ fi
 grep -Fq -- '--env PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$runtime_workspace_image"' "$RUNNER" ||
   die 'renderer does not pass the verified workspace into the real lifecycle journey'
 
-for topology_profile in prepared-kind-management-secrets-mobile prepared-kind-terminal prepared-kind-account; do
+for topology_profile in prepared-kind-management-secrets-mobile prepared-kind-creation prepared-kind-terminal prepared-kind-account prepared-kind-settings-navigation; do
 topology_calls="$fixture/$topology_profile-topology-calls"
 (
   isolated_docker_client() {
@@ -660,7 +728,7 @@ if validate_snapshot_stage "$baseline" "$stage" >/dev/null 2>&1; then
   die 'an unexpected snapshot mutation was accepted'
 fi
 
-for prepared_profile in prepared-kind-management-secrets-mobile prepared-kind-terminal prepared-kind-account; do
+for prepared_profile in prepared-kind-management-secrets-mobile prepared-kind-creation prepared-kind-terminal prepared-kind-account prepared-kind-settings-navigation; do
 prepared_baseline="$fixture/$prepared_profile-baseline"
 prepared_stage="$fixture/$prepared_profile-stage"
 prepared_target="$fixture/$prepared_profile-target"
@@ -697,8 +765,8 @@ if validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
   die "prepared Kind $prepared_profile accepted an invalid required PNG"
 fi
 cp "$prepared_saved_snapshot" "$prepared_stage/$prepared_required_snapshot"
-mkdir -p "$prepared_stage/$(dirname "$current_snapshot")"
-printf '\x89PNG\r\n\x1a\nunapproved\n' >"$prepared_stage/$current_snapshot"
+mkdir -p "$prepared_stage/$(dirname "$unapproved_stage_snapshot")"
+printf '\x89PNG\r\n\x1a\nunapproved\n' >"$prepared_stage/$unapproved_stage_snapshot"
 if validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
     "$prepared_profile" >/dev/null 2>&1; then
   die "prepared Kind $prepared_profile accepted a mutation outside its targets"
@@ -728,16 +796,40 @@ if "$RUNNER" --prepared-kind-management-secrets-mobile \
     --prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
   die 'duplicate prepared Kind profile flag was accepted'
 fi
+for other_profile in prepared-kind-creation prepared-kind-management-secrets-mobile prepared-kind-terminal; do
+  profile_error=''
+  if profile_error="$("$RUNNER" --prepared-kind-creation "--$other_profile" 2>&1)"; then
+    die "creation profile accepted duplicate or mixed flag: $other_profile"
+  fi
+  grep -Fq 'only one prepared Kind snapshot profile may be specified' <<<"$profile_error" ||
+    die "creation flag collision was not rejected by the profile parser: $other_profile"
+done
+# All profiles share this failure barrier; a failed renderer cannot promote PNGs.
+# shellcheck disable=SC2016 # Match the runner's variables, not this fixture's.
+renderer_failure_line="$(grep -nF '[ "$docker_status" -eq 0 ] || fail' "$RUNNER" | cut -d: -f1)"
+# shellcheck disable=SC2016 # Match the runner's variables, not this fixture's.
+promotion_line="$(grep -nF '  promote_snapshots "$snapshot_stage" "$snapshot_dir" "$snapshot_profile"' "$RUNNER" | cut -d: -f1)"
+[ -n "$renderer_failure_line" ] && [ -n "$promotion_line" ] &&
+  [ "$renderer_failure_line" -lt "$promotion_line" ] ||
+  die 'renderer failure barrier does not precede profile snapshot promotion'
 if "$RUNNER" --prepared-kind-terminal --prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
   die 'two different prepared Kind profiles were accepted together'
 fi
-for other_profile in prepared-kind-account prepared-kind-terminal prepared-kind-management-secrets-mobile; do
+for other_profile in prepared-kind-account prepared-kind-terminal prepared-kind-management-secrets-mobile prepared-kind-settings-navigation; do
   profile_error=''
   if profile_error="$("$RUNNER" --prepared-kind-account "--$other_profile" 2>&1)"; then
     die "Account profile accepted duplicate or mixed flag: $other_profile"
   fi
   grep -Fq 'only one prepared Kind snapshot profile may be specified' <<<"$profile_error" ||
     die "Account flag collision was not rejected by the profile parser: $other_profile"
+done
+for other_profile in prepared-kind-settings-navigation prepared-kind-account prepared-kind-terminal prepared-kind-management-secrets-mobile; do
+  profile_error=''
+  if profile_error="$("$RUNNER" --prepared-kind-settings-navigation "--$other_profile" 2>&1)"; then
+    die "settings navigation profile accepted duplicate or mixed flag: $other_profile"
+  fi
+  grep -Fq 'only one prepared Kind snapshot profile may be specified' <<<"$profile_error" ||
+    die "settings navigation flag collision was not rejected by the profile parser: $other_profile"
 done
 # All profiles share this failure barrier; a failed renderer cannot promote PNGs.
 # shellcheck disable=SC2016 # Match the runner's variables, not this fixture's.

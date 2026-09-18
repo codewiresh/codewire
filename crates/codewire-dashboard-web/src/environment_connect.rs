@@ -34,6 +34,7 @@ const UNARY_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct EnvironmentCreateOptions {
     pub(crate) presets: Vec<EnvironmentPresetOption>,
+    pub(crate) preview_base_domain: String,
     pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) confidential_available: bool,
     pub(crate) confidential_price: String,
@@ -250,6 +251,7 @@ pub(crate) async fn create_options(
                         port: port.port.to_string(),
                         label: port.label,
                         access: port.access,
+                        ..Default::default()
                     })
                     .collect(),
                 uses_protected_secret_bindings,
@@ -260,11 +262,40 @@ pub(crate) async fn create_options(
 
     Ok(EnvironmentCreateOptions {
         presets,
+        preview_base_domain: validated_preview_domain(&setup.preview_base_domain),
         agents: agent_catalog(),
         confidential_available,
         confidential_price,
         sources: crate::environment_sources::options(state, cookie, org_id).await,
     })
+}
+
+fn validated_preview_domain(domain: &str) -> String {
+    if domain.is_empty()
+        || domain.len() > 253
+        || !domain.contains('.')
+        || !domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        || !url::Url::parse(&format!("https://preview.{domain}"))
+            .is_ok_and(|url| matches!(url.host(), Some(url::Host::Domain(_))))
+    {
+        String::new()
+    } else {
+        domain.to_ascii_lowercase()
+    }
 }
 
 fn project_spec_uses_protected_secret_bindings(spec: &codewire_project::ProjectSpec) -> bool {
@@ -826,9 +857,23 @@ fn port_row(port: Port) -> EnvironmentPortRow {
             value if value == PortAccess::OrgMembers as i32 => "Org",
             _ => "Creator",
         },
-        has_preview: preview_url.starts_with("https://") || preview_url.starts_with("http://"),
+        has_preview: valid_assigned_preview_url(&preview_url),
         preview_url,
     }
+}
+
+fn valid_assigned_preview_url(value: &str) -> bool {
+    value.starts_with("https://")
+        && url::Url::parse(value).is_ok_and(|url| {
+            url.scheme() == "https"
+                && matches!(url.host(), Some(url::Host::Domain(_)))
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.port().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
 }
 
 fn agent_catalog() -> Vec<EnvironmentAgentView> {
@@ -1262,6 +1307,53 @@ mod tests {
             },
         ] {
             assert!(verify_resize_operation(&request, &operation, &foreign).is_err());
+        }
+    }
+
+    #[test]
+    fn preview_suffix_is_bounded_and_never_a_url_or_hardcoded_fallback() {
+        assert_eq!(
+            validated_preview_domain("preview.EXAMPLE.test"),
+            "preview.example.test"
+        );
+        for invalid in [
+            "",
+            "https://cwpreview.sh",
+            "*.cwpreview.sh",
+            "cwpreview.sh:443",
+            "cwpreview.sh/path",
+            "evil@example.test",
+            "bad_name.example",
+            "cwpreview.sh.",
+            "127.0.0.1",
+            "example.123",
+            "example.0x7f",
+        ] {
+            assert_eq!(validated_preview_domain(invalid), "");
+        }
+    }
+
+    #[test]
+    fn assigned_preview_requires_a_valid_https_root_and_preserves_exact_api_text() {
+        let exact = "https://9web-ab123-example.preview.example.test";
+        assert!(valid_assigned_preview_url(exact));
+        let row = port_row(Port {
+            preview_url: Some(exact.into()),
+            ..Default::default()
+        });
+        assert!(row.has_preview);
+        assert_eq!(row.preview_url, exact);
+        for invalid in [
+            "https://",
+            "http://web.example.test",
+            "https://user:password@web.example.test",
+            "https://web.example.test:8443",
+            "https://web.example.test/path",
+            "https://web.example.test/?token=secret",
+            "https://web.example.test/#fragment",
+            "https://web.example.test.127.0.0.1",
+        ] {
+            assert!(!valid_assigned_preview_url(invalid), "admitted {invalid:?}");
         }
     }
 

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::GitHubOAuthAdapter;
+use crate::github_app::GitHubOAuthCredential;
 use crate::{BrokerUpstreamRequest, BrokerUpstreamTransport};
 
 pub const MAX_PAGE: u32 = 10_000;
@@ -29,6 +30,7 @@ pub trait GithubRepositoryAccountLease: Sized {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryDiscoveryError {
     InvalidRequest,
+    Unauthorized,
     Denied,
     RateLimited,
     Unavailable,
@@ -94,14 +96,27 @@ pub async fn list_repositories(
         .map_err(|_| Error::InvalidRequest)?;
     let (prepared, decoded_redaction) = lease
         .with_material(|material| {
-            let prepared = adapter.prepare_material(request, material)?;
+            let credential = GitHubOAuthCredential::parse(material)
+                .map_err(|_| crate::CredentialBrokerError::InvalidCredentialMaterial)?;
+            let prepared = adapter.prepare_credential(request, &credential)?;
             let authorization = prepared
                 .headers
                 .get(http::header::AUTHORIZATION)
                 .ok_or(crate::CredentialBrokerError::InvalidCredentialMaterial)?;
             // JSON escape spellings are unbounded. Retain only broker-local,
-            // zeroizing matchers and check decoded allowlisted strings too.
-            let decoded_redaction = RedactionSet::new([material, authorization.as_bytes()]);
+            // zeroizing matchers and check decoded allowlisted strings too. A
+            // canonical App bundle serializes its token fields, so redacting
+            // only the whole envelope would miss JSON-escaped bare tokens.
+            let components = credential
+                .redaction_components()
+                .map_err(|_| crate::CredentialBrokerError::InvalidCredentialMaterial)?;
+            let mut patterns = components
+                .iter()
+                .map(|component| component.as_slice())
+                .collect::<Vec<_>>();
+            patterns.push(material);
+            patterns.push(authorization.as_bytes());
+            let decoded_redaction = RedactionSet::new(patterns);
             Ok::<_, crate::CredentialBrokerError>((prepared, decoded_redaction))
         })
         .map_err(|_| Error::Denied)?;
@@ -127,7 +142,10 @@ pub async fn list_repositories(
     {
         return Err(Error::RateLimited);
     }
-    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(Error::Unauthorized);
+    }
+    if status == StatusCode::FORBIDDEN {
         return Err(Error::Denied);
     }
     if status != StatusCode::OK {

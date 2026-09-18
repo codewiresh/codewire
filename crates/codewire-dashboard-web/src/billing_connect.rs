@@ -424,6 +424,7 @@ mod tests {
             is_admin: false,
             organizations: Vec::new(),
             has_organizations: false,
+            organization_navigation_unavailable: false,
             show_checklist: false,
             new_organization_url: "/organizations/new/".into(),
             settings_url: "/settings/".into(),

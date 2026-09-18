@@ -34,8 +34,8 @@ use uuid::Uuid;
 use super::{PlatformBrokerLeaseProvider, PlatformRuntimeAuthority, PlatformRuntimeError};
 use crate::{
     AdmittedCredentialBridge, BrokerBridgeError, BrokerLeaseError, BrokerUpstreamTransport,
-    CredentialBridgeResponseSink, CredentialBridgeTransport, OpenAiBroker, admit_credential_bridge,
-    run_admitted_credential_bridge,
+    CredentialBridgeResponseSink, CredentialBridgeTransport, GitHubAppAuthorizationOwner,
+    OpenAiBroker, admit_credential_bridge, run_admitted_credential_bridge,
 };
 
 /// Admission and active/draining epochs share one process-wide service budget.
@@ -87,6 +87,7 @@ struct ServiceState<A, U> {
     credentials: Arc<PlatformCredentialStore>,
     profiles: PlatformAccessProfileStore,
     upstream: U,
+    github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     permits: Arc<Semaphore>,
     accepting: Arc<Mutex<bool>>,
     workers: TaskTracker,
@@ -126,6 +127,7 @@ where
                 credentials,
                 profiles,
                 upstream,
+                github_app_authorization: None,
                 permits: Arc::new(Semaphore::new(PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS)),
                 accepting: Arc::new(Mutex::new(true)),
                 workers: TaskTracker::new(),
@@ -153,6 +155,21 @@ where
             state.workers.clone(),
             state.shutdown.clone(),
         ));
+        Ok(self)
+    }
+
+    /// Private credential-service composition for the finite GitHub App
+    /// refresh authority. No bridge frame, guest request, or profile-selected
+    /// route can install or select this owner.
+    pub fn with_github_app_authorization_owner(
+        mut self,
+        owner: Arc<GitHubAppAuthorizationOwner>,
+    ) -> Result<Self, PlatformRuntimeError> {
+        let state = Arc::get_mut(&mut self.state).ok_or(PlatformRuntimeError::Denied)?;
+        if state.github_app_authorization.is_some() || state.shutdown.is_cancelled() {
+            return Err(PlatformRuntimeError::Denied);
+        }
+        state.github_app_authorization = Some(owner);
         Ok(self)
     }
 
@@ -328,6 +345,10 @@ where
         epoch.ensure_live().map_err(bridge_status)?;
         let broker =
             OpenAiBroker::new(provider, self.state.upstream.clone()).map_err(|_| unavailable())?;
+        let broker = match &self.state.github_app_authorization {
+            Some(owner) => broker.with_github_app_authorization_owner(owner.clone()),
+            None => broker,
+        };
         Ok(Admission {
             broker,
             admitted,

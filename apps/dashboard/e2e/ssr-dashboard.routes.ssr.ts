@@ -227,21 +227,22 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.locator('form[action="/settings/credentials/_actions/profiles/create"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/github/authorize"]')).toHaveCount(1);
-    for (const provider of ["GitHub", "OpenAI Codex"]) {
+    for (const provider of ["GitHub", "Codex"]) {
       await page.getByRole("button", { name: "Add credential", exact: true }).click();
       await page.getByRole("dialog", { name: "Add credential", exact: true })
         .getByRole("button", { name: provider, exact: true }).click();
       const connection = page.getByRole("dialog", { name: provider === "GitHub" ? "Connect GitHub" : "Connect Codex", exact: true });
       if (provider === "GitHub") {
-        const github = connection.getByRole("form", { name: "GitHub App", exact: true });
+        const github = connection.locator("form");
         await expect(github).toHaveAttribute("action", "/settings/credentials/_actions/github/authorize");
         await expect(github.locator('[name="name"]')).toHaveCount(0);
-        await expect(github.getByRole("button", { name: "Continue to GitHub", exact: true }))
-          .toBeVisible();
+        const submit = connection.getByRole("button", { name: "Continue to GitHub", exact: true });
+        await expect(submit).toBeVisible();
+        expect(await submit.evaluate((button: HTMLButtonElement) => button.form?.id)).toBe("connect-github-form");
       } else {
-        await expect(connection.getByRole("form", { name: provider, exact: true }))
+        await expect(connection.locator("form"))
           .toHaveAttribute("action", "/settings/credentials/_actions/credentials/oauth/enroll");
-        await expect(connection).toContainText("Enable device code authorization for Codex");
+        await expect(connection).toContainText(/enable device code authorization for Codex/i);
         await expect(connection.getByRole("link", { name: "ChatGPT Security settings", exact: true }))
           .toHaveAttribute("href", "https://chatgpt.com/#settings/Security");
       }
@@ -260,13 +261,14 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await profileName.clear();
     await page.getByRole("dialog", { name: "Create profile", exact: true })
       .getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(page.locator('form[action$="/credentials/api-key/add"]')).toHaveCount(1);
+    await expect(page.locator('form[action$="/credentials/api-key/add"]')).toHaveCount(2);
     await expect(page.locator('form[action$="/credentials/ssh/generate"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/import"]')).toHaveCount(1);
-    const protectedInputs = page.locator('input[type="password"]');
-    await expect(protectedInputs).toHaveCount(2);
+    const protectedInputs = page.locator('#add-openai-api-key input[type="password"], #add-anthropic-api-key input[type="password"], #import-ssh input[type="password"]');
+    await expect(protectedInputs).toHaveCount(3);
     await expect(protectedInputs.nth(0)).toHaveValue("");
     await expect(protectedInputs.nth(1)).toHaveValue("");
+    await expect(protectedInputs.nth(2)).toHaveValue("");
     await expect(page.locator('textarea[name="private_key"]')).toHaveValue("");
   });
 
@@ -309,6 +311,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     for (const [route, heading] of [
       ["/settings/", "Account"],
       ["/settings/credentials/", "Credentials"],
+      ["/settings/secrets/", "Secrets"],
       ["/settings/security/", "Security"],
       ["/settings/sessions/", "Active sessions"],
     ] as const) {
@@ -325,7 +328,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
   test("global routes preserve only an accessible organization context", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop global-context contract");
 
-    for (const route of ["/settings/", "/settings/credentials/", "/settings/security/", "/settings/sessions/"]) {
+    for (const route of ["/settings/", "/settings/credentials/", "/settings/secrets/", "/settings/security/", "/settings/sessions/"]) {
       const response = await page.goto(`${route}?org=${cleanRoutesOrgSlug}`);
       expect(response?.status()).toBe(200);
       await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
@@ -344,8 +347,18 @@ test.describe("server-rendered public, auth, and account routes", () => {
     for (const route of [
       "/settings/?org=not-a-member",
       "/settings/credentials/?org=not-a-member",
+      "/settings/secrets/?org=not-a-member",
       "/settings/security/?org=not-a-member",
       "/settings/sessions/?org=not-a-member",
+    ]) {
+      const response = await page.goto(route);
+      expect(response?.status()).toBe(200);
+      await expect(page.locator(".cw-settings-subnav").getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+      await expect(page.locator('.cw-settings-subnav a[href*="not-a-member"]')).toHaveCount(0);
+      await expect(page.locator(".cw-sidebar-slot").getByRole("link", { name: "Settings" }))
+        .toHaveAttribute("href", "/settings/");
+    }
+    for (const route of [
       "/admin/?org=not-a-member",
       "/admin/billing/?org=not-a-member",
       "/admin/audit/?org=not-a-member",

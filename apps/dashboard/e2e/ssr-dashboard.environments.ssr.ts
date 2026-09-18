@@ -8,6 +8,11 @@ import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { USERS } from "./helpers/seed";
 import { terminalWebSocketUrl } from "./helpers/terminal-websocket";
 
+// The serial Create setup journey enters write-only personal secret values.
+// Worker capture settings must be file-scoped. Explicit layout goldens below
+// remain enabled and are taken before those inputs are entered.
+test.use({ screenshot: "off", trace: "off", video: "off" });
+
 const sql = postgres(process.env.DATABASE_URL!);
 const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
@@ -69,6 +74,187 @@ async function openRowActions(row: Locator) {
   const trigger = row.locator('summary[aria-label^="Actions for "]');
   await expect(trigger).toBeVisible();
   await trigger.click();
+}
+
+async function assertExplicitCreateRecovery(page: Page) {
+  const dispatches: string[] = [];
+  const personalKey = `CREATE_RETURN_${crypto.randomUUID().replaceAll("-", "_")}`;
+  let primaryFailure: unknown;
+  const watchDispatch = (request: import("@playwright/test").Request) => {
+    if (/PrepareEnvironment|\/_actions\/sandboxes\/(?:create|prepare)/.test(request.url())) dispatches.push(request.url());
+  };
+  page.on("request", watchDispatch);
+  try {
+    const form = page.locator("[data-environment-form]");
+    await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
+    await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+    if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
+      await page.locator("[data-create-resources] > summary").click();
+    }
+    await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+    await page.getByLabel("TTL").fill("8h");
+    await page.getByLabel("Name", { exact: true }).fill("draft-name-not-persisted");
+    await page.getByLabel("Repository URL", { exact: true }).fill("https://draft-canary.invalid/private-repository");
+    await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    const requestedDraft = await form.getAttribute("data-create-draft-id");
+    expect(requestedDraft).toMatch(/^[0-9a-f-]{36}$/);
+    // A second real Create draft is newer. Returning must not offer it in
+    // place of the original, or interpret discarded inventory selectors.
+    await page.goto(`/${slug}/new/`);
+    await expect(form).not.toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await page.locator("[data-create-resources] > summary").click();
+    await page.getByLabel("CPU", { exact: true }).selectOption("4000");
+    await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    for (const suffix of [
+      "creation_draft=unavailable",
+      `creation_draft=${requestedDraft}&%63reation_draft=${requestedDraft}`,
+      `ignored=${"x".repeat(1024)}&%63reation_draft=${requestedDraft}`,
+    ]) {
+      await page.goto(`/${slug}/new/?${suffix}`);
+      await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=unavailable`);
+      await expect(form).toHaveAttribute("data-create-draft-exact", "true");
+      await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
+      await expect(page.locator("[data-create-draft-status]")).toContainText("requested saved selections are unavailable");
+      await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+    }
+    await page.goto(`/${slug}/new/?destroyed=bogus&sources=first&sources=second&creation_draft=${requestedDraft}`);
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await expect(form).toHaveAttribute("data-create-draft-exact", "true");
+    await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
+    await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+    // The unchanged drawer controller must keep the explicit query open
+    // through ordinary inventory polling, Back, and a closed/reopened view.
+    await page.waitForResponse((response) => response.url().includes(`/${slug}/_fragments/sandboxes`) && response.ok());
+    await expect(page.locator("[data-drawer]")).toBeVisible();
+    await page.goto(`/${slug}/`);
+    await page.goBack();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(page.locator("[data-drawer]")).toBeVisible();
+    await page.locator("[data-drawer-panel]").getByRole("link", { name: "Close Create Sandbox" }).click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
+    await expect(page.locator("[data-drawer]")).toBeHidden();
+    await page.goto(`/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(page.locator("[data-drawer]")).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+    // Exercise the actual native Settings detour, not a direct fabricated
+    // return URL: validation, mutation, and explicit Return retain this exact
+    // older draft while the new source remains available but unattached.
+    await page.getByRole("link", { name: "Manage secret projects", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/secrets/?creation_draft=${requestedDraft}`);
+    const returnLink = page.getByRole("link", { name: "Return to Sandbox creation", exact: true });
+    await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
+    await page.getByText("New Project", { exact: true }).click();
+    const secretCsrf = await page.locator('input[name="_csrf"]').first().inputValue();
+    await page.getByLabel("Project name", { exact: true }).fill(" ");
+    const validationResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().includes("/secrets/_actions/projects/create"));
+    await page.getByRole("button", { name: "Create Project", exact: true }).click();
+    expect((await validationResponse).status()).toBe(422);
+    await expect(page.getByRole("alert")).toContainText("Name is required");
+    await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(page.locator('input[name="_csrf"]').first()).toHaveValue(secretCsrf);
+    const detourProjectName = `return-project-${crypto.randomUUID()}`;
+    await page.getByLabel("Project name", { exact: true }).fill(detourProjectName);
+    await Promise.all([
+      page.waitForURL(`${ssrUrl}/${slug}/secrets/?creation_draft=${requestedDraft}&message=project-created`),
+      page.getByRole("button", { name: "Create Project", exact: true }).click(),
+    ]);
+    const [createdProject] = await sql`SELECT id FROM secret_projects WHERE org_id = ${orgId} AND name = ${detourProjectName}`;
+    expect(createdProject?.id).toBeTruthy();
+    await returnLink.click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
+    await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+    await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
+    await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
+    await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    // The new personal Settings consumer must retain the same exact draft
+    // through cancellation, server validation and a real native secret write.
+    // Owning tests disable trace/video/failure screenshots around these inputs.
+    const personalPath = `/settings/secrets/?org=${slug}&creation_draft=${requestedDraft}`;
+    await page.getByRole("link", { name: "Add or manage personal secrets", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${personalPath}`);
+    const personalReturn = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
+    await expect(personalReturn).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
+    const addSecret = page.getByRole("button", { name: "Add secret", exact: true }).first();
+    await addSecret.click();
+    const secretDialog = page.getByRole("dialog", { name: "Add secret", exact: true });
+    await secretDialog.getByLabel("Key", { exact: true }).fill(personalKey);
+    await secretDialog.getByLabel("Value", { exact: true }).fill("synthetic-cancelled-creation-value");
+    await secretDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByRole("dialog", { name: "Discard changes?", exact: true })
+      .getByRole("button", { name: "Discard changes", exact: true }).click();
+    await addSecret.click();
+    await expect(secretDialog.getByLabel("Value", { exact: true })).toHaveValue("");
+    await secretDialog.getByLabel("Key", { exact: true }).fill("bad-key");
+    await secretDialog.getByLabel("Value", { exact: true }).fill("synthetic-rejected-creation-value");
+    // Exercise server validation explicitly; normal native field constraints
+    // remain separately asserted and unchanged in the product.
+    await secretDialog.locator("form").evaluate((node: HTMLFormElement) => { node.noValidate = true; });
+    const secretValidation = page.waitForResponse((response) => response.request().method() === "POST"
+      && new URL(response.url()).pathname === "/settings/secrets/_actions/set");
+    await secretDialog.getByRole("button", { name: "Add secret", exact: true }).click();
+    expect((await secretValidation).status()).toBe(422);
+    await expect(secretDialog.getByRole("alert")).toContainText("ASCII letters");
+    await expect(secretDialog.getByLabel("Value", { exact: true })).toHaveValue("");
+    await expect(personalReturn).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
+    await secretDialog.getByLabel("Key", { exact: true }).fill(personalKey);
+    await secretDialog.getByLabel("Value", { exact: true }).fill("synthetic-saved-creation-value");
+    const secretWrite = page.waitForRequest((request) => request.method() === "POST"
+      && new URL(request.url()).pathname === "/settings/secrets/_actions/set");
+    await secretDialog.getByRole("button", { name: "Add secret", exact: true }).click();
+    expect((await secretWrite).headers().origin).toBe(ssrUrl);
+    await expect(page).toHaveURL(`${ssrUrl}${personalPath}&message=secret-saved`);
+    await expect(page.locator(".cw-personal-secret-row", { hasText: personalKey })).toHaveCount(1);
+    await personalReturn.click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
+    const csrf = await form.locator('[name="_csrf"]').inputValue();
+    const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
+    await page.getByRole("button", { name: "Restore saved selections" }).click();
+    const response = await responsePromise;
+    expect(response.status()).toBe(200);
+    expect(response.headers()["cache-control"]).toBe("private, no-store");
+    expect(response.headers()["vary"]).toBe("Cookie");
+    expect(response.headers()["set-cookie"]).toBeUndefined();
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
+    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+    await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
+    await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
+    await expect(form.locator('[name="_csrf"]')).toHaveValue(csrf);
+    await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
+    await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
+    expect(dispatches).toEqual([]);
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
+  } finally {
+    page.off("request", watchDispatch);
+    try {
+      const [row] = await sql`SELECT COUNT(*)::int AS count FROM tenant_secrets
+        WHERE path = ${`/users/${ownerId}`} AND key = ${personalKey}`;
+      if (row.count > 0) {
+        const response = await page.request.post(`${serverUrl}/codewire.v1.SecretService/DeleteUserSecret`, {
+          headers: { Origin: ssrUrl }, data: { key: personalKey }, timeout: 15_000,
+        });
+        expect(response.status()).toBe(200);
+        const [remaining] = await sql`SELECT COUNT(*)::int AS count FROM tenant_secrets
+          WHERE path = ${`/users/${ownerId}`} AND key = ${personalKey}`;
+        expect(remaining.count).toBe(0);
+      }
+    } catch (error) {
+      if (primaryFailure !== undefined) throw new AggregateError([primaryFailure, error], "Create return and cleanup failed", { cause: primaryFailure });
+      throw error;
+    }
+  }
 }
 
 async function issueTerminalTicket(page: Page): Promise<string> {
@@ -149,10 +335,10 @@ async function seedPinnedPreset() {
   presetId = crypto.randomUUID();
   await sql`
     INSERT INTO environment_presets
-      (id, org_id, name, slug, description, build_status, default_ttl_seconds, project_spec)
+      (id, org_id, name, slug, description, build_status, default_ttl_seconds, auto_image_ref, project_spec)
     VALUES
       (${presetId}, ${orgId}, ${presetName}, ${presetName},
-       'Pinned SSR environment lifecycle preset', 'ready', 3600,
+       'Pinned SSR environment lifecycle preset', 'ready', 3600, ${workspaceRuntimeImage},
        ${sql.json({
          schema_version: 1,
          image: workspaceRuntimeImage,
@@ -187,13 +373,15 @@ async function seedPinnedPreset() {
 async function openConfiguredImageForm(page: Page) {
   await page.goto(`/${slug}/new/`);
   await page.getByLabel("Workspace image").fill(workspaceRuntimeImage);
+  await page.locator("[data-create-runtime] > summary").click();
+  await page.locator("[data-create-resources] > summary").click();
   await page.getByLabel("Install Command").fill("printf 'configured-explicitly\\n'");
   await page.getByLabel("Startup Script").fill("printf 'started-explicitly\\n'");
   await page.getByLabel("TTL").fill("3600s");
   await page.locator('input[name="agent"][value="codex"]').check();
   await page.getByRole("button", { name: "Add", exact: true }).click();
-  await page.getByLabel("Container port").fill("3000");
-  await page.getByLabel("Port label").fill("web");
+  await page.getByLabel("Internal port", { exact: true }).fill("3000");
+  await page.getByLabel("Preview label", { exact: true }).fill("web");
 }
 
 test.describe.serial("server-rendered environments", () => {
@@ -233,7 +421,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("[data-github-repository-picker]")).not.toBeVisible();
     await expect(page.getByRole("button", { name: "Choose from GitHub" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Custom Git URL" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?org=${slug}`);
+    const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
+    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?org=${slug}&creation_draft=${draft}`);
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 
@@ -272,12 +461,12 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("#environment-name")).toBeFocused();
     const ttl = page.getByLabel("TTL");
     await expect(ttl).toHaveValue("infinity");
+    await page.locator("[data-create-resources] > summary").click();
     await ttl.fill("0");
     await ttl.press("Tab");
     await expect(ttl).toHaveValue("infinity");
     await page.locator("#environment-name").focus();
-    await expect(page.locator("#environment-snapshot")).toBeDisabled();
-    await expect(page.locator('#environment-snapshot[name]')).toHaveCount(0);
+    await expect(page.locator("#environment-snapshot, .cw-snapshot-meter")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await expect(page.locator('[action$="/_actions/sandboxes/prepare"]')).toHaveCount(0);
     await expect(page.locator('[data-event-action$="/_events/sandboxes/prepare"]')).toHaveCount(0);
@@ -291,6 +480,9 @@ test.describe.serial("server-rendered environments", () => {
     expect(disallowedBrowserCalls).toEqual([]);
     expect(staleAssetRequests).toEqual([]);
     await expect(page).toHaveScreenshot("environments-create-desktop.png");
+    await assertExplicitCreateRecovery(page);
+    expect(disallowedBrowserCalls).toEqual([]);
+    expect(staleAssetRequests).toEqual([]);
     await page.keyboard.press("Escape");
     await expect(page).toHaveURL(new RegExp(`/${slug}/$`));
     await expect(page.locator("[data-drawer]")).toBeHidden();
@@ -351,13 +543,14 @@ test.describe.serial("server-rendered environments", () => {
 
     await page.locator('input[name="agent"][value="codex"]').check();
     await page.getByRole("button", { name: "Add", exact: true }).click();
-    await page.getByLabel("Container port").fill("3000");
-    await page.getByLabel("Port label").fill("web");
+    await page.getByLabel("Internal port", { exact: true }).fill("3000");
+    await page.getByLabel("Preview label", { exact: true }).fill("web");
+    await page.locator("[data-create-runtime] > summary").click();
     await page.getByLabel("Install Command").fill("bun install");
     await page.getByLabel("Startup Script").fill("bun run dev");
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
-    await expect(page.getByLabel("Container port")).toHaveValue("3000");
-    await expect(page.getByLabel("Port label")).toHaveValue("web");
+    await expect(page.getByLabel("Internal port", { exact: true })).toHaveValue("3000");
+    await expect(page.getByLabel("Preview label", { exact: true })).toHaveValue("web");
     await expect(page.getByRole("heading", { name: "Application secrets", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Provider credentials", exact: true })).toBeVisible();
     await expect(page.getByLabel("Personal secrets", { exact: false })).toBeEnabled();
@@ -432,7 +625,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByLabel("Repository URL", { exact: true }).fill(repositoryUrl);
     await page.getByLabel("Branch", { exact: true }).fill("main");
     await page.getByLabel("Mount path", { exact: true }).fill("codewire");
-    await expect(page.getByRole("heading", { name: "Runtime", exact: true })).toBeVisible();
+    await expect(page.locator("[data-create-runtime] > summary")).toHaveText("Runtime commands");
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue(repositoryUrl);
     await expect(page.getByLabel("Branch", { exact: true })).toHaveValue("main");
     await expect(page.getByLabel("Mount path", { exact: true })).toHaveValue("codewire");
@@ -444,6 +637,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(dimensions.clientWidth).toBeGreaterThan(0);
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
     await expect(page.getByLabel("Secret project", { exact: true })).toBeEnabled();
+    await assertExplicitCreateRecovery(page);
   });
 
   test("selects a platform secret project and preserves it after a form error", async ({ page, isMobile }) => {
@@ -467,10 +661,111 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     await expect(page.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/${slug}/secrets/user/`);
-    await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
-    await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/`);
-    await expect(page.locator(`a[href="/settings/credentials/?org=${slug}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
+    const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
+    await expect(page.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}&creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/?creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/?creation_draft=${draft}`);
+    await expect(page.locator(`a[href="/settings/credentials/?org=${slug}&creation_draft=${draft}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
+  });
+
+  test("requires explicit recovery when a selected secret project is removed", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop authoritative source-recovery contract");
+    // Empty, isolated metadata only; the lifecycle's shared project is untouched.
+    const staleProjectId = crypto.randomUUID();
+    const name = `stale-source-${runId}`;
+    await sql`
+      INSERT INTO secret_projects (id, org_id, name)
+      VALUES (${staleProjectId}, ${orgId}, ${`removed-source-${runId}`})
+    `;
+    await openConfiguredImageForm(page);
+    await page.getByLabel("Name").fill(name);
+    const project = page.getByLabel("Secret project", { exact: true });
+    await project.selectOption(staleProjectId);
+    await sql`DELETE FROM secret_projects WHERE id = ${staleProjectId} AND org_id = ${orgId}`;
+    const rejected = page.waitForResponse((candidate) => (
+      candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`)
+      && candidate.request().method() === "POST"
+    ));
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
+    expect((await rejected).status()).toBe(422);
+    await expect(project).toBeEnabled();
+    await expect(project).toHaveValue(staleProjectId);
+    await expect(project).toHaveAttribute("aria-invalid", "true");
+    const stale = project.locator(`option[value="${staleProjectId}"]`);
+    await expect(stale).toBeEnabled();
+    await expect(stale).toHaveText("Current selected project (unavailable)");
+    const [notCreated] = await sql`
+      SELECT COUNT(*)::int AS count FROM environments WHERE org_id = ${orgId} AND name = ${name}
+    `;
+    expect(notCreated.count).toBe(0);
+
+    await project.selectOption("");
+    // A separate ordinary validation error proves recovery without creating
+    // another Sandbox or allowing stale metadata to silently attach resources.
+    await page.locator("[data-create-resources] > summary").click();
+    await page.getByLabel("TTL").fill("invalid-ttl");
+    const recovered = page.waitForResponse((candidate) => (
+      candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`)
+      && candidate.request().method() === "POST"
+    ));
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
+    expect((await recovered).status()).toBe(422);
+    await expect(project).toHaveValue("");
+    await expect(project).not.toHaveAttribute("aria-invalid", "true");
+    await expect(project.locator(`option[value="${staleProjectId}"]`)).toHaveCount(0);
+    await expect(page.getByLabel("TTL")).toHaveValue("invalid-ttl");
+    const [stillNotCreated] = await sql`
+      SELECT COUNT(*)::int AS count FROM environments WHERE org_id = ${orgId} AND name = ${name}
+    `;
+    expect(stillNotCreated.count).toBe(0);
+  });
+
+  test("removing all preview rows suppresses inherited preset routes through real Kind", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop backend preview-selection contract");
+    test.setTimeout(600_000);
+    const name = "ssr-no-preview-workspace";
+    await openConfiguredImageForm(page);
+    await page.getByLabel("Name").fill(name);
+    await page.getByRole("button", { name: "Remove preview port", exact: true }).click();
+    await expect(page.locator("[data-app-port-row]")).toHaveCount(0);
+    await expect(page.locator('[name="application_previews_explicit"]')).toHaveValue("true");
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/?message=environment-created`);
+    const [created] = await sql`
+      SELECT id, preset_id, project_spec FROM environments
+      WHERE org_id = ${orgId} AND name = ${name}
+    `;
+    expect(created?.id).toBeTruthy();
+    expect(created.preset_id).toBe(presetId);
+    expect(created.project_spec.application_ports ?? []).toEqual([]);
+    await waitForEnvironmentState(created.id as string, ["running"], 300_000);
+    // Running precedes setup's preview registration phase. Assert only after
+    // the actual setup owner has finished, not against a transient empty list.
+    await expect.poll(async () => {
+      const [backend] = await sql`
+        SELECT setup_complete FROM sandbox_environment_backend
+        WHERE environment_id = ${created.id as string}
+      `;
+      return backend?.setup_complete === true;
+    }, { timeout: 120_000 }).toBe(true);
+    const [routes] = await sql`
+      SELECT COUNT(*)::int AS count FROM environment_ports
+      WHERE environment_id = ${created.id as string}
+    `;
+    expect(routes.count).toBe(0);
+    // Restore the live rail and release resources before the following
+    // lifecycle/visual fixture; afterAll remains the failure-path cleanup.
+    await page.reload();
+    const row = page.locator("tr", { hasText: name }).first();
+    await openRowActions(row);
+    await row.getByText("Destroy", { exact: true }).click();
+    await row.getByRole("button", { name: "Destroy permanently", exact: true }).click();
+    await waitForEnvironmentState(created.id as string, ["destroyed"], 120_000);
+    const [destroyed] = await sql`
+      SELECT external_cleanup_completed_at FROM environments
+      WHERE id = ${created.id as string} AND org_id = ${orgId}
+    `;
+    expect(destroyed.external_cleanup_completed_at).not.toBeNull();
   });
 
   test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile }) => {
@@ -782,13 +1077,21 @@ test.describe.serial("server-rendered environments", () => {
     await portPanel.getByRole("spinbutton", { name: "Internal port", exact: true }).fill("8080");
     await portPanel.getByLabel("Preview label", { exact: true }).fill("manual-http");
     await portPanel.getByRole("button", { name: "Add port", exact: true }).click();
-    await expect(portPanel.getByRole("status")).toContainText("Port created");
+    await expect(portPanel.getByRole("status").filter({ hasText: "Port created" })).toBeVisible();
     const port = portPanel.locator(".cw-port-row", {
       has: page.getByText("manual-http", { exact: true }),
     });
     await expect(port).toContainText("8080");
+    const previewUrl = await port.getByRole("link", { name: "Open preview", exact: true }).getAttribute("href");
+    expect(previewUrl).toBeTruthy();
+    const parsedPreview = new URL(previewUrl!);
+    expect(parsedPreview.protocol).toBe("https:");
+    expect(parsedPreview.hostname).toContain(`manual-http-${environmentId.slice(0, 5)}-${slug}.`);
+    await port.getByRole("button", { name: "Copy URL", exact: true }).click();
+    await expect(port.locator("[data-preview-copy-status]")).toHaveText("Preview URL copied.");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(previewUrl);
     await port.getByRole("button", { name: "Remove manual-http preview", exact: true }).click();
-    await expect(portPanel.getByRole("status")).toContainText("Port deleted");
+    await expect(portPanel.getByRole("status").filter({ hasText: "Port deleted" })).toBeVisible();
     await expect(port).toHaveCount(0);
     await expect(configuredPort).toHaveCount(1);
     await expect(configuredPort).toContainText("3000 · Creator");
@@ -936,7 +1239,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(sourceEditor.locator('[name="expected_secret_project"]')).toHaveValue(secretProjectId);
     await expect(sourceEditor.locator('[name="confirm_personal_secrets"]')).toHaveCount(0);
     await expect(sourceEditor.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
-    await expect(sourceEditor.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/${slug}/secrets/user/`);
+    await expect(sourceEditor.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}`);
     await expect(sourceEditor.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
     await expect(sourceEditor.locator(`a[href="/settings/credentials/?org=${slug}"]`)).toBeVisible();
     await sourceEditor.getByLabel("Secret project", { exact: true }).selectOption("");

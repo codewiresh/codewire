@@ -76,6 +76,7 @@ fn assert_stopped_selection(environment: &Value, expected: &Value) {
 }
 
 pub(super) async fn run(harness: &Harness) {
+    assert_ssh_profile_admission_precedes_writes(harness).await;
     assert_create_resolves_named_sources(harness).await;
 
     let empty = empty_selection();
@@ -173,6 +174,173 @@ pub(super) async fn run(harness: &Harness) {
     );
     assert_eq!(cleared["selection"], empty_selection());
     assert_stopped_selection(&get_environment(harness).await, &empty_selection());
+}
+
+async fn assert_ssh_profile_admission_precedes_writes(harness: &Harness) {
+    // This URL is supplied only by the selected synthetic service harness,
+    // never inferred from an ambient developer database or browser identity.
+    let database = std::env::var("TEST_DATABASE_URL")
+        .expect("SSH admission contract requires the isolated service-harness database");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database)
+        .await
+        .unwrap();
+    let preset = format!("ssh-admission-{}", uuid::Uuid::new_v4());
+    let pin = "example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx";
+    let default_spec = json!({
+        "schema_version": 1,
+        "working_directory": "/workspace/app",
+        "repositories": [{"source": "git@example.test:private-admission/app.git",
+            "destination": "/workspace/app", "known_hosts": [pin]}],
+        "credentials": {"profile": "platform:user/wire-contract-empty"},
+    });
+    sqlx::query("INSERT INTO environment_presets(id,org_id,name,project_spec) VALUES($1,$2,$1,$3)")
+        .bind(&preset)
+        .bind(PRIMARY_ORG)
+        .bind(&default_spec)
+        .execute(&pool)
+        .await
+        .unwrap();
+    async fn counts(pool: &sqlx::PgPool) -> (i64, i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT count(*) FROM environment_presets WHERE org_id=$1), \
+            (SELECT count(*) FROM environments WHERE org_id=$1), \
+            (SELECT count(*) FROM sandbox_template_config WHERE preset_id IN \
+                (SELECT id FROM environment_presets WHERE org_id=$1))",
+        )
+        .bind(PRIMARY_ORG)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+    let before = counts(&pool).await;
+    for source in [
+        "git@example.test:private-admission/app.git",
+        "ssh://git@example.test/private-admission/app.git",
+    ] {
+        let response = harness.connect_json(ENVIRONMENT_SERVICE, "CreateEnvironment", json!({
+            "orgId": PRIMARY_ORG,
+            "projectSpec": {"schemaVersion": 1, "image": format!("example.test/ssh-admission-{preset}"),
+                "workingDirectory": "/workspace/app",
+                "repositories": [{"source": source, "destination": "/workspace/app", "knownHosts": [pin]}]},
+        }), Auth::Admin).await;
+        let error = assert_connect_error(
+            &response,
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "SSH repository checkout requires an explicitly selected credential profile containing an SSH identity",
+        );
+        assert!(!error.to_string().contains("private-admission"));
+        assert_eq!(
+            counts(&pool).await,
+            before,
+            "rejected direct SSH wrote a preset/environment/preset image configuration"
+        );
+    }
+    let response = harness
+        .connect_json(
+            ENVIRONMENT_SERVICE,
+            "CreateEnvironment",
+            json!({
+                "orgId": PRIMARY_ORG, "presetId": preset,
+                "projectSpec": {"schemaVersion": 1, "workingDirectory": "/workspace"},
+            }),
+            Auth::Admin,
+        )
+        .await;
+    assert_connect_error(
+        &response,
+        StatusCode::BAD_REQUEST,
+        "invalid_argument",
+        "SSH repository checkout requires an explicitly selected credential profile containing an SSH identity",
+    );
+    assert_eq!(
+        counts(&pool).await,
+        before,
+        "rejected inherited SSH wrote a preset/environment/preset image configuration"
+    );
+    // The saved-repository path may otherwise auto-create an image preset
+    // before its final validation. Preview defaults remain validated there,
+    // with no provider authority inherited from workload configuration.
+    let saved_source = format!("https://example.test/{preset}/app.git");
+    let saved_spec = json!({
+        "schema_version": 1,
+        "image": format!("example.test/saved-{preset}"),
+        "working_directory": "/workspace/app",
+        "application_ports": [{"port": 2222, "label": "ssh", "access": "creator"}],
+    });
+    let inserted = sqlx::query(
+        "INSERT INTO repo_configs(id,org_id,repo_url,project_spec,created_by) \
+        SELECT $1,id,$3,$4,created_by FROM organizations WHERE id=$2",
+    )
+    .bind(&preset)
+    .bind(PRIMARY_ORG)
+    .bind(&saved_source)
+    .bind(&saved_spec)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(inserted.rows_affected(), 1);
+    let response = harness
+        .connect_json(
+            ENVIRONMENT_SERVICE,
+            "CreateEnvironment",
+            json!({
+                "orgId": PRIMARY_ORG,
+                "projectSpec": {"schemaVersion": 1, "workingDirectory": "/workspace/app",
+                    "repositories": [{"source": saved_source, "destination": "/workspace/app"}]},
+            }),
+            Auth::Admin,
+        )
+        .await;
+    assert_connect_error(
+        &response,
+        StatusCode::BAD_REQUEST,
+        "invalid_argument",
+        "port is reserved by the agent",
+    );
+    assert_eq!(
+        counts(&pool).await,
+        before,
+        "invalid saved defaults auto-created a preset before runtime validation"
+    );
+    sqlx::query("DELETE FROM repo_configs WHERE id=$1 AND org_id=$2")
+        .bind(&preset)
+        .bind(PRIMARY_ORG)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = harness.connect_json(ENVIRONMENT_SERVICE, "CreateEnvironment", json!({
+        "orgId": PRIMARY_ORG, "presetId": "preset_contract_in_use",
+        "projectSpec": {"schemaVersion": 1, "workingDirectory": "/workspace/app",
+            "repositories": [{"source": "https://example.test/org/app.git", "destination": "/workspace/app"}]},
+    }), Auth::Admin).await;
+    response.assert_status(StatusCode::OK, "HTTPS without a profile remains admitted");
+    let environment = response.json()["environment"].clone();
+    assert!(
+        environment["sourceSelection"]["credentials"].is_null(),
+        "ordinary HTTPS silently selected a credential profile"
+    );
+    let environment_id = environment["id"]
+        .as_str()
+        .expect("HTTPS creation returned an environment");
+    assert!(!environment_id.is_empty());
+    sqlx::query("DELETE FROM environments WHERE id=$1 AND org_id=$2")
+        .bind(environment_id)
+        .bind(PRIMARY_ORG)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(counts(&pool).await, before);
+    sqlx::query("DELETE FROM environment_presets WHERE id=$1 AND org_id=$2")
+        .bind(&preset)
+        .bind(PRIMARY_ORG)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
 }
 
 async fn assert_create_resolves_named_sources(harness: &Harness) {

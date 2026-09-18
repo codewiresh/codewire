@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr
 import io
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -118,6 +119,7 @@ def assert_turnstile_negative_fixtures() -> None:
         "deployments/k8s/overlays/production",
         "deployments/k8s/overlays/local-kind",
         "deployments/k8s/overlays/local-kind-static",
+        "tests/e2e/kind",
     ]
     rendered = {
         overlay: subprocess.run(
@@ -227,6 +229,68 @@ def assert_turnstile_negative_fixtures() -> None:
         '        - name: IDP_PORT\n          value: "8091"\n',
         "production IdP must not receive the Turnstile bypass email",
     )
+
+    for overlay in overlays:
+        dashboard = next(
+            document for document in documents(rendered[overlay])
+            if top_level_field(document, "kind") == "Deployment"
+            and resource_name(document) == "codewire-dashboard"
+        )
+        match = re.search(
+            r"^        - name: GITHUB_APP_CLIENT_ID\n"
+            r"          valueFrom:\n"
+            r"            configMapKeyRef:\n"
+            r"              key: GITHUB_APP_CLIENT_ID\n"
+            r"              name: [^\n]+\n"
+            r"              optional: true\n",
+            dashboard, re.MULTILINE,
+        )
+        if match is None:
+            raise AssertionError(f"{overlay}: missing public GitHub client-ID fixture")
+        entry = match.group(0)
+        for label, changed in (
+            ("missing", ""),
+            ("duplicate", entry + entry),
+            ("secret-source", entry.replace("configMapKeyRef", "secretKeyRef")),
+            ("required", entry.replace("optional: true", "optional: false")),
+            ("wrong-key", entry.replace("key: GITHUB_APP_CLIENT_ID", "key: client-secret")),
+            ("wrong-config-map", re.sub(r"name: codewire-dashboard-public-config[^\n]*", "name: codewire-config", entry)),
+        ):
+            assert_rejected(
+                f"{overlay}-github-{label}", overlay, entry, changed,
+                "dashboard must optionally read GITHUB_APP_CLIENT_ID exactly once",
+                deployment_name="codewire-dashboard",
+            )
+        assert_rejected(
+            f"{overlay}-github-private-env", overlay, entry,
+            entry + "        - name: GITHUB_APP_CLIENT_SECRET\n          value: synthetic-forbidden\n",
+            "dashboard must never receive private GitHub App configuration",
+            deployment_name="codewire-dashboard",
+        )
+        assert_rejected(
+            f"{overlay}-github-authorization-secret-dashboard", overlay, entry,
+            entry + '        - name: FORBIDDEN_APP_CONFIG\n          valueFrom:\n'
+            '            secretKeyRef:\n              name: codewire-github-app-authorization\n'
+            '              key: client-secret\n',
+            "dashboard must never receive the GitHub App authorization Secret",
+            deployment_name="codewire-dashboard",
+        )
+        public_config = next(
+            document for document in documents(rendered[overlay])
+            if top_level_field(document, "kind") == "ConfigMap"
+            and (resource_name(document) or "").startswith("codewire-dashboard-public-config")
+        )
+        id_line = next(line + "\n" for line in public_config.splitlines() if line.startswith("  GITHUB_APP_CLIENT_ID:"))
+        assert_rejected(
+            f"{overlay}-github-private-config", overlay, id_line,
+            id_line + "  GITHUB_APP_CLIENT_SECRET: synthetic-forbidden\n",
+            "public ConfigMap must contain only the three public identifiers",
+        )
+        assert_rejected(
+            f"{overlay}-github-invalid-id", overlay, id_line,
+            '  GITHUB_APP_CLIENT_ID: "https://invalid.example/private?value=x"\n',
+            "GitHub dashboard App identifiers must",
+        )
 
 
 def main() -> None:

@@ -56,6 +56,7 @@ pub enum CredentialMutationError {
     MustBeRevoked,
     EnrollmentFailed,
     EnrollmentUnsupported,
+    GitHubInstallationRequired,
     CleanupFailed,
     PublicationUnknown,
 }
@@ -88,7 +89,7 @@ impl CredentialMutationOwner {
         store: Arc<PlatformCredentialStore>,
         enrollment: CodexEnrollmentOwner,
         github_enrollment: GitHubEnrollmentOwner,
-        github_app_authorization: Option<GitHubAppAuthorizationOwner>,
+        github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
@@ -96,7 +97,7 @@ impl CredentialMutationOwner {
                 store,
                 enrollment: Arc::new(enrollment),
                 github_enrollment: Arc::new(github_enrollment),
-                github_app_authorization: github_app_authorization.map(Arc::new),
+                github_app_authorization,
             }),
             accepting: Mutex::new(true),
             capacity: Arc::new(Semaphore::new(MAX_OPERATIONS)),

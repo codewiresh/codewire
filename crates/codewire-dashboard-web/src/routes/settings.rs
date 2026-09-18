@@ -36,7 +36,7 @@ pub(super) struct SettingsQuery {
 pub(super) async fn settings(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<SettingsQuery>,
+    Query(mut query): Query<SettingsQuery>,
 ) -> Response {
     let continuation = global_settings_path(SETTINGS_PATH, &query.org);
     if !account_sessions::cookie_authority_is_unique(&headers) {
@@ -54,10 +54,11 @@ pub(super) async fn settings(
         Ok(cookie) => cookie,
         Err(()) => return login_redirect(&continuation, &headers),
     };
-    let mut dashboard = match super::dashboard::dashboard_shell_view_from_identity(
+    let dashboard = match super::dashboard::personal_settings_shell_view_from_identity(
         &state,
         &identity,
         cookie.clone(),
+        &query.org,
     )
     .await
     {
@@ -68,16 +69,7 @@ pub(super) async fn settings(
         }
         Err(error) => return error_page(error),
     };
-    if let Err(error) = super::dashboard::select_shell_organization(
-        &state,
-        cookie.clone(),
-        &mut dashboard,
-        &query.org,
-    )
-    .await
-    {
-        return error_page(error);
-    }
+    query.org = dashboard.selected_organization_slug.clone();
     if query
         .cursor
         .as_deref()
@@ -289,26 +281,17 @@ async fn section_redirect(
     if !account_sessions::cookie_authority_is_unique(headers) {
         return private(login_redirect(&continuation, headers));
     }
-    let mut dashboard = match super::dashboard::dashboard_shell_view(state, headers).await {
-        Ok(dashboard) => dashboard,
-        Err(WebError::Unauthorized) => return login_redirect(&continuation, headers),
-        Err(WebError::TwoFactorRequired) => return two_factor_redirect(&continuation, headers),
-        Err(error) => return error_page(error),
-    };
-    let cookie = match canonical_cookie(headers) {
-        Ok(cookie) => cookie,
-        Err(()) => return login_redirect(&continuation, headers),
-    };
-    if let Err(error) =
-        super::dashboard::select_shell_organization(state, cookie, &mut dashboard, selected_slug)
-            .await
-    {
-        return error_page(error);
-    }
+    let dashboard =
+        match super::dashboard::personal_settings_shell_view(state, headers, selected_slug).await {
+            Ok(dashboard) => dashboard,
+            Err(WebError::Unauthorized) => return login_redirect(&continuation, headers),
+            Err(WebError::TwoFactorRequired) => return two_factor_redirect(&continuation, headers),
+            Err(error) => return error_page(error),
+        };
     private(redirect(
         format!(
             "{}#{section}",
-            global_settings_path(SETTINGS_PATH, selected_slug)
+            global_settings_path(SETTINGS_PATH, &dashboard.selected_organization_slug)
         ),
         headers,
     ))
@@ -322,38 +305,36 @@ pub(super) async fn mutation_cookie(
     path: &str,
 ) -> Result<axum::http::HeaderValue, Response> {
     let continuation = global_settings_path(path, selected_slug);
+    mutation_cookie_with_continuation(state, headers, csrf, &continuation).await
+}
+
+// The caller supplies a closed, route-owned continuation. It changes only
+// login/2FA navigation, never organization selection or mutation authority.
+pub(super) async fn mutation_cookie_with_continuation(
+    state: &AppState,
+    headers: &HeaderMap,
+    csrf: &str,
+    continuation: &str,
+) -> Result<axum::http::HeaderValue, Response> {
+    if !account_sessions::cookie_authority_is_unique(headers) {
+        return Err(login_redirect(continuation, headers));
+    }
     let identity = authenticated_identity(state, headers)
         .await
         .map_err(|error| match error {
-            WebError::Unauthorized => login_redirect(&continuation, headers),
+            WebError::Unauthorized => login_redirect(continuation, headers),
             error => error_page(error),
         })?;
     if enforce_two_factor(&identity).is_err() {
-        return Err(two_factor_redirect(&continuation, headers));
+        return Err(two_factor_redirect(continuation, headers));
     }
     if !request_has_same_origin(headers, &state.public_origin) || !valid_csrf_token(headers, csrf) {
         return Err(error_page(WebError::CsrfRejected));
     }
-    let cookie = canonical_cookie(headers).map_err(|()| login_redirect(&continuation, headers))?;
-    if !selected_slug.is_empty() {
-        let mut dashboard =
-            super::dashboard::dashboard_shell_view_from_identity(state, &identity, cookie.clone())
-                .await
-                .map_err(|error| match error {
-                    WebError::Unauthorized => login_redirect(&continuation, headers),
-                    WebError::TwoFactorRequired => two_factor_redirect(&continuation, headers),
-                    error => error_page(error),
-                })?;
-        super::dashboard::select_shell_organization(
-            state,
-            cookie.clone(),
-            &mut dashboard,
-            selected_slug,
-        )
-        .await
-        .map_err(error_page)?;
-    }
-    Ok(cookie)
+    // These actions mutate current-user resources. Optional navigation context
+    // cannot grant authority and must not make a personal write depend on an
+    // organization list or sandbox inventory being available.
+    canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))
 }
 
 fn global_settings_path(path: &str, selected_slug: &str) -> String {
@@ -425,6 +406,7 @@ mod tests {
             is_admin: false,
             organizations: Vec::new(),
             has_organizations: false,
+            organization_navigation_unavailable: false,
             show_checklist: false,
             new_organization_url: "/organizations/new/".into(),
             settings_url: SETTINGS_PATH.into(),
@@ -569,10 +551,15 @@ mod tests {
             include_str!("../../templates/settings-nav.html"),
             include_str!("../../templates/organization-settings-nav.html"),
         ] {
-            assert!(nav.contains("/settings/credentials/"));
+            assert!(nav.contains("settings-navigation.html"));
             assert!(!nav.contains("/settings/security/"));
             assert!(!nav.contains("/settings/sessions/"));
         }
+        let navigation = include_str!("../../templates/settings-navigation.html");
+        assert!(navigation.contains("/settings/credentials/"));
+        assert!(navigation.contains("/settings/secrets/"));
+        assert!(!navigation.contains("/settings/security/"));
+        assert!(!navigation.contains("/settings/sessions/"));
     }
 
     #[test]

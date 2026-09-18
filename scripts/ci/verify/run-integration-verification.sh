@@ -228,6 +228,12 @@ run_database() {
       --lib runtime::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "isolated credential runtime matrix" "$logfile" 4
 
+  logfile="$RUN_DIR/github-repository-discovery.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib repositories::tests::integration:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "GitHub repository discovery matrix" "$logfile" 6
+
   logfile="$RUN_DIR/kind-credential-effective-acl.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
@@ -999,6 +1005,7 @@ run_orchestration() {
     ORCHESTRATION_USER_SESSION_TOKEN=apikey-contract-user-session-token \
     ORCHESTRATION_SEEDED=1 ORCHESTRATION_KUBE_MODE=configured \
     ORCHESTRATION_CONTRACT_SCOPE=complete \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --locked --profile ci -p codewire-orchestration \
       --test wire_contract --features kind-e2e \
       configured_orchestration_wire_contract -- \

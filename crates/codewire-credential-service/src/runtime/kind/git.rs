@@ -22,7 +22,9 @@ use tempfile::TempDir;
 use tokio::sync::Semaphore;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use super::provider::{GITHUB_APP_USER_TOKEN, GITHUB_DEVICE_TOKEN};
+use super::provider::{
+    GITHUB_APP_REFRESHED_USER_TOKEN, GITHUB_APP_USER_TOKEN, GITHUB_DEVICE_TOKEN,
+};
 use process::{IO_LIMIT, command, run};
 
 pub(super) const REVISION: &str = "78e440926ea15ee9644a69199694e39f6f06e3ce";
@@ -163,15 +165,19 @@ fn validate(
 }
 
 fn github_authorization_is_synthetic(value: Option<&[u8]>) -> bool {
-    [GITHUB_DEVICE_TOKEN, GITHUB_APP_USER_TOKEN]
-        .iter()
-        .any(|token| {
-            let authorization = format!(
-                "Basic {}",
-                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
-            );
-            value == Some(authorization.as_bytes())
-        })
+    [
+        GITHUB_DEVICE_TOKEN,
+        GITHUB_APP_USER_TOKEN,
+        GITHUB_APP_REFRESHED_USER_TOKEN,
+    ]
+    .iter()
+    .any(|token| {
+        let authorization = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
+        );
+        value == Some(authorization.as_bytes())
+    })
 }
 
 struct Lifecycle {

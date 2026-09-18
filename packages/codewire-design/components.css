@@ -82,6 +82,22 @@ dialog.cw-dialog::backdrop {
   background: rgba(0, 0, 0, 0.72);
 }
 
+dialog.cw-discard-dialog {
+  width: min(32rem, calc(100vw - 2rem));
+}
+
+dialog.cw-dialog .cw-danger-button {
+  border-color: rgba(239, 68, 68, .25);
+  background: transparent;
+  color: var(--destructive);
+}
+
+dialog.cw-dialog .cw-danger-button:hover,
+dialog.cw-dialog .cw-danger-button:focus-visible {
+  border-color: rgba(239, 68, 68, .55);
+  background: rgba(239, 68, 68, .08);
+}
+
 .cw-dialog-header h2 {
   margin: 0;
   font-size: 1.125rem;

@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     Form,
-    extract::{Path, Query, RawForm, State},
+    extract::{Path, Query, RawForm, RawQuery, State, rejection::QueryRejection},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse as _, Response},
 };
@@ -24,8 +24,8 @@ use crate::{
     environment_connect::{self, EnvironmentCreateOptions},
     error::WebError,
     response::{
-        HTMX_REQUEST, error_page, login_redirect, render_page_with_connect_origin, render_template,
-        render_template_with_connect_origin,
+        HTMX_REQUEST, error_page, login_redirect, redirect, render_page_with_connect_origin,
+        render_template, render_template_with_connect_origin,
     },
     routes::organization_governance::{
         action_context, connect_page_error, get_context, mutation_redirect, valid_identifier,
@@ -153,6 +153,7 @@ struct EnvironmentSubmission {
     repositories: Vec<(String, String, String)>,
     agents: Vec<String>,
     app_ports: Vec<(String, String, String)>,
+    application_previews_explicit: bool,
     agent_secret_supplied: bool,
     sources: Result<crate::environment_source_forms::SourceSubmission, ()>,
 }
@@ -232,6 +233,8 @@ impl EnvironmentSubmission {
             repositories: repositories.into_values().collect(),
             agents,
             app_ports: app_ports.into_values().collect(),
+            application_previews_explicit: take(&mut values, "application_previews_explicit")
+                == "true",
             agent_secret_supplied,
             sources: crate::environment_source_forms::SourceSubmission::parse(bytes),
         })
@@ -244,6 +247,12 @@ impl EnvironmentSubmission {
         }
         EnvironmentCreateFormView {
             csrf_token: token,
+            draft_actor: String::new(),
+            draft_organization: String::new(),
+            draft_id: uuid::Uuid::new_v4().to_string(),
+            draft_return: crate::environment_drafts::DraftReturn::default(),
+            draft_restore_allowed: false,
+            draft_restored: false,
             expanded: true,
             name: self.name.trim().to_owned(),
             preset_id: self.preset_id.trim().to_owned(),
@@ -259,6 +268,7 @@ impl EnvironmentSubmission {
             confidential_available: false,
             show_confidential_controls: false,
             confidential_price: String::new(),
+            preview_base_domain: String::new(),
             selected_agents: self.agents.clone(),
             app_ports: app_port_rows(&self.app_ports),
             presets: Vec::new(),
@@ -315,7 +325,7 @@ impl EnvironmentSubmission {
         if self.agents.is_empty() {
             self.agents = preset.default_agents.clone();
         }
-        if self.app_ports.is_empty() {
+        if self.app_ports.is_empty() && !self.application_previews_explicit {
             self.app_ports = preset
                 .default_app_ports
                 .iter()
@@ -406,21 +416,41 @@ impl EnvironmentSubmission {
         };
 
         let mut ports = Vec::new();
-        for (port, label, access) in &self.app_ports {
+        let mut seen_ports = std::collections::HashSet::new();
+        let mut seen_labels = std::collections::HashSet::new();
+        for (index, (port, label, access)) in self.app_ports.iter().enumerate() {
             if port.trim().is_empty() && label.trim().is_empty() {
                 continue;
             }
-            let Ok(port_number) = port.trim().parse::<i32>() else {
-                form.form_error = "Application ports must be between 1 and 65535.".to_owned();
+            let row = &mut form.app_ports[index];
+            let port_number = port.trim().parse::<u16>().ok().filter(|port| *port != 0);
+            match port_number {
+                None => row.port_error = "Enter an internal port from 1 to 65535.".into(),
+                Some(2222 | 2223) => {
+                    row.port_error =
+                        "Ports 2222 and 2223 are reserved for the Sandbox runtime.".into()
+                }
+                Some(port) if !seen_ports.insert(port) => {
+                    row.port_error = "This internal port is already used in another row.".into()
+                }
+                Some(_) => {}
+            }
+            if !valid_port_label(label.trim()) {
+                row.label_error = "Use 2–22 lowercase letters, digits or hyphens; start and end with a letter or digit.".into();
+            } else if !seen_labels.insert(label.trim()) {
+                row.label_error = "This preview label is already used in another row.".into();
+            }
+            if !matches!(access.as_str(), "" | "creator" | "org_members" | "public") {
+                row.access_error = "Choose who can open this HTTPS preview.".into();
+            }
+            if !row.port_error.is_empty()
+                || !row.label_error.is_empty()
+                || !row.access_error.is_empty()
+            {
                 continue;
             };
-            if !(1..=65_535).contains(&port_number) || !valid_port_label(label.trim()) {
-                form.form_error =
-                    "Application ports need a valid port and lowercase label.".to_owned();
-                continue;
-            }
             ports.push(ApplicationPort {
-                port: port_number as u16,
+                port: port_number.expect("validated internal port"),
                 label: label.trim().to_owned(),
                 access: allowlisted_access(access).to_owned(),
             });
@@ -437,6 +467,7 @@ impl EnvironmentSubmission {
             [repository] => repository.destination.clone(),
             _ => "/workspace".to_owned(),
         };
+        let omit_application_previews = self.application_previews_explicit && ports.is_empty();
         let project_spec = ProjectSpec {
             schema_version: PROJECT_SCHEMA_VERSION,
             image: self.image.trim().to_owned(),
@@ -466,6 +497,7 @@ impl EnvironmentSubmission {
             name: nonempty(self.name.trim()),
             ttl_seconds: ttl,
             isolation_tier: isolation_tier.into(),
+            omit_application_previews,
             project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
             ..Default::default()
         };
@@ -568,16 +600,88 @@ pub(super) async fn page(
     Query(query): Query<EnvironmentsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    render_page(state, slug, query, headers, false).await
+    render_page(
+        state,
+        slug,
+        query,
+        headers,
+        false,
+        Default::default(),
+        false,
+    )
+    .await
 }
 
 pub(super) async fn new_page(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-    Query(query): Query<EnvironmentsQuery>,
+    query: Result<Query<EnvironmentsQuery>, QueryRejection>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    render_page(state, slug, query, headers, true).await
+    let draft_return = crate::environment_drafts::DraftReturn::parse(raw.as_deref());
+    // Explicit returns have no inventory/source-editor selectors. A malformed
+    // discarded selector must not reject navigation before authentication.
+    let query = match create_return_query(query, &draft_return) {
+        Ok(query) => query,
+        Err(error) => return error.into_response(),
+    };
+    let canonicalize = draft_return.requested() && !draft_return.canonical_query(raw.as_deref());
+    render_page(
+        state,
+        slug,
+        query,
+        headers,
+        true,
+        draft_return,
+        canonicalize,
+    )
+    .await
+}
+
+fn create_return_query(
+    query: Result<Query<EnvironmentsQuery>, QueryRejection>,
+    draft_return: &crate::environment_drafts::DraftReturn,
+) -> Result<EnvironmentsQuery, QueryRejection> {
+    if draft_return.requested() {
+        Ok(EnvironmentsQuery::default())
+    } else {
+        query.map(|Query(query)| query)
+    }
+}
+
+#[cfg(test)]
+mod draft_return_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_return_discards_invalid_and_conflicting_inventory_selectors() {
+        for uri in [
+            "/org/new/?creation_draft=00000000-0000-4000-8000-000000000003&destroyed=bogus",
+            "/org/new/?sources=first&sources=second&creation_draft=unavailable",
+            "/org/new/?creation_draft=unavailable&sources=editor&ports=other&resize_environment=another&search=private-canary",
+        ] {
+            let uri: axum::http::Uri = uri.parse().unwrap();
+            let navigation = crate::environment_drafts::DraftReturn::parse(uri.query());
+            assert!(navigation.requested());
+            let query = create_return_query(Query::try_from_uri(&uri), &navigation).unwrap();
+            assert!(query.sources.is_empty() && query.ports.is_empty());
+            assert!(query.resize_environment.is_empty() && query.search.is_empty());
+            assert!(!query.destroyed);
+        }
+    }
+
+    #[test]
+    fn ordinary_inventory_query_keeps_original_values_and_rejection() {
+        let uri = axum::http::Uri::from_static("/org/new/?search=app&state=running");
+        let query = create_return_query(Query::try_from_uri(&uri), &Default::default()).unwrap();
+        assert_eq!(query.search, "app");
+        assert_eq!(query.state, "running");
+        let invalid = axum::http::Uri::from_static("/org/new/?destroyed=bogus");
+        let response =
+            create_return_query(Query::try_from_uri(&invalid), &Default::default()).unwrap_err();
+        assert_eq!(response.into_response().status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 async fn render_page(
@@ -586,9 +690,11 @@ async fn render_page(
     query: EnvironmentsQuery,
     headers: HeaderMap,
     create_open: bool,
+    draft_return: crate::environment_drafts::DraftReturn,
+    canonicalize: bool,
 ) -> Response {
     let continuation = if create_open {
-        format!("/{slug}/new/")
+        format!("/{slug}/new/{}", draft_return.query())
     } else {
         environments_path(&slug)
     };
@@ -597,8 +703,18 @@ async fn render_page(
             Ok(context) => context,
             Err(response) => return response,
         };
+    if canonicalize {
+        return redirect(
+            format!("/{}/new/{}", organization.slug, draft_return.query()),
+            &headers,
+        );
+    }
     let token = new_csrf_token();
-    let form = default_create_form(token.clone(), create_open);
+    let mut form = default_create_form(token.clone(), create_open);
+    if let crate::environment_drafts::DraftReturn::Exact(id) = &draft_return {
+        form.draft_id.clone_from(id);
+    }
+    form.draft_return = draft_return;
     let page = match build_page(
         &state,
         cookie,
@@ -1142,8 +1258,19 @@ pub(super) async fn create_port(
         .parse::<i32>()
         .ok()
         .filter(|port| (1..=65_535).contains(port));
-    let result = if let Some(port) = port.filter(|_| valid_port_label(&submission.label)) {
-        match environment_connect::create_port(
+    let result = match port {
+        None => "invalid-port",
+        Some(2222 | 2223) => "reserved-port",
+        Some(_) if !valid_port_label(&submission.label) => "invalid-port-label",
+        Some(_)
+            if !matches!(
+                submission.access.as_str(),
+                "creator" | "org_members" | "public"
+            ) =>
+        {
+            "invalid-port-access"
+        }
+        Some(port) => match environment_connect::create_port(
             &state,
             cookie.clone(),
             CreatePortRequest {
@@ -1162,10 +1289,9 @@ pub(super) async fn create_port(
                 return login_redirect(&environments_path(&slug), &headers);
             }
             Err(error) if error.code == ErrorCode::PermissionDenied => "not-authorized",
+            Err(error) if error.code == ErrorCode::AlreadyExists => "port-conflict",
             Err(_) => "port-unavailable",
-        }
-    } else {
-        "invalid-port"
+        },
     };
     port_response(
         &state,
@@ -1350,6 +1476,24 @@ async fn render_port_dialog(
         label: label.chars().take(128).collect(),
         access: allowlisted_access(access).to_owned(),
         form_error: error.to_owned(),
+        port_error: if matches!(
+            action.result,
+            "invalid-port" | "reserved-port" | "port-conflict"
+        ) {
+            error.into()
+        } else {
+            String::new()
+        },
+        label_error: if matches!(action.result, "invalid-port-label" | "port-conflict") {
+            error.into()
+        } else {
+            String::new()
+        },
+        access_error: if action.result == "invalid-port-access" {
+            error.into()
+        } else {
+            String::new()
+        },
     };
     // A partial response must not rotate the page's CSRF cookie or navigate
     // away: the terminal and every unswapped form still belong to that page.
@@ -1511,6 +1655,8 @@ async fn build_page(
     mut form: EnvironmentCreateFormView,
     is_admin: bool,
 ) -> Result<EnvironmentsPageView, ConnectError> {
+    form.draft_actor = crate::environment_drafts::actor(state, cookie.clone()).await?;
+    form.draft_organization.clone_from(&organization.id);
     let mut environments =
         filtered_environments(state, cookie.clone(), &organization.id, query).await?;
     let confidential_actions_allowed =
@@ -1574,6 +1720,9 @@ async fn build_page(
             label: String::new(),
             access: "creator".to_owned(),
             form_error: port_error(&query.error).to_owned(),
+            port_error: String::new(),
+            label_error: String::new(),
+            access_error: String::new(),
         }),
         None => None,
     };
@@ -1742,9 +1891,15 @@ fn render_environments_page(
     }
 }
 
-fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormView {
+pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormView {
     EnvironmentCreateFormView {
         csrf_token: token,
+        draft_actor: String::new(),
+        draft_organization: String::new(),
+        draft_id: uuid::Uuid::new_v4().to_string(),
+        draft_return: crate::environment_drafts::DraftReturn::default(),
+        draft_restore_allowed: true,
+        draft_restored: false,
         expanded,
         name: String::new(),
         preset_id: String::new(),
@@ -1765,6 +1920,7 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         confidential_available: false,
         show_confidential_controls: false,
         confidential_price: String::new(),
+        preview_base_domain: String::new(),
         selected_agents: Vec::new(),
         app_ports: Vec::new(),
         presets: Vec::new(),
@@ -1781,7 +1937,11 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
     }
 }
 
-fn hydrate_options(form: &mut EnvironmentCreateFormView, options: EnvironmentCreateOptions) {
+pub(super) fn hydrate_options(
+    form: &mut EnvironmentCreateFormView,
+    options: EnvironmentCreateOptions,
+) {
+    form.preview_base_domain = options.preview_base_domain;
     form.presets = options.presets;
     form.agents = options.agents;
     form.confidential_available = options.confidential_available;
@@ -1871,6 +2031,7 @@ fn app_port_rows(values: &[(String, String, String)]) -> Vec<EnvironmentAppPortF
             port: port.clone(),
             label: label.clone(),
             access: allowlisted_access(access).to_owned(),
+            ..Default::default()
         })
         .collect()
 }
@@ -1966,7 +2127,9 @@ fn allowlisted_agents(values: &[String]) -> Vec<String> {
 fn valid_port_label(value: &str) -> bool {
     let bytes = value.as_bytes();
     (2..=22).contains(&bytes.len())
-        && bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
         && bytes
             .last()
             .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
@@ -2095,7 +2258,15 @@ pub(super) fn page_error(value: &str) -> &'static str {
 fn port_error(value: &str) -> &'static str {
     match value {
         "not-authorized" => "You do not have permission to change this preview.",
-        "invalid-port" => "Port must be 1–65535 with a lowercase 2–22 character label.",
+        "invalid-port" => "Enter an internal port from 1 to 65535.",
+        "reserved-port" => "Ports 2222 and 2223 are reserved for the Sandbox runtime.",
+        "invalid-port-label" => {
+            "Use a 2–22 character lowercase preview label, starting and ending with a letter or digit."
+        }
+        "invalid-port-access" => "Choose who can open the HTTPS preview.",
+        "port-conflict" => {
+            "This internal port or preview label is already registered. Choose a different port or label."
+        }
         "port-unavailable" => {
             "The port change could not be confirmed. Check the current list before trying again."
         }
@@ -2133,6 +2304,298 @@ mod tests {
     use super::*;
     use crate::templates::EnvironmentCreateFormTemplate;
 
+    fn setup_hrefs(html: &str) -> Vec<&str> {
+        html.split("href=\"")
+            .skip(1)
+            .filter_map(|tail| tail.split('"').next())
+            .filter(|href| href.contains("/settings/credentials/") || href.contains("/secrets/"))
+            .collect()
+    }
+
+    #[test]
+    fn create_setup_links_use_only_the_final_canonical_draft_handle() {
+        let organization = test_organization();
+        for kind in ["fresh", "restored", "error"] {
+            let mut form = default_create_form("csrf-not-navigation".into(), true);
+            form.draft_id = "00000000-0000-4000-8000-000000000003".into();
+            form.draft_actor = "actor-not-navigation".into();
+            form.name = "name-not-navigation".into();
+            form.draft_restored = kind == "restored";
+            if kind == "error" {
+                form.form_error = "Review your selections".into();
+                form.draft_restore_allowed = false;
+            }
+            // Options replace source fields. Navigation derives from the
+            // final form, so hydration cannot drop or replace the handle.
+            hydrate_options(
+                &mut form,
+                EnvironmentCreateOptions {
+                    presets: vec![],
+                    agents: vec![],
+                    sources: Default::default(),
+                    preview_base_domain: String::new(),
+                    confidential_available: false,
+                    confidential_price: String::new(),
+                },
+            );
+            let html = EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form: &form,
+            }
+            .render()
+            .unwrap();
+            let hrefs = setup_hrefs(&html);
+            assert_eq!(hrefs.len(), 6);
+            for href in hrefs {
+                assert!(href.ends_with("creation_draft=00000000-0000-4000-8000-000000000003"));
+                assert!(!href.contains("not-navigation"));
+                assert!(
+                    href.starts_with(&format!("/{}/secrets/", organization.slug))
+                        || href.starts_with(&format!(
+                            "/settings/secrets/?org={}&amp;",
+                            organization.slug
+                        ))
+                        || href.starts_with(&format!(
+                            "/settings/credentials/?org={}&amp;",
+                            organization.slug
+                        ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_create_draft_ids_do_not_enter_setup_links() {
+        let organization = test_organization();
+        for id in [
+            "",
+            "00000000-0000-0000-0000-000000000000",
+            "00000000-0000-4000-8000-ABCDEF123456",
+            "https://canary.invalid/?private=value",
+        ] {
+            let mut form = default_create_form("current-csrf".into(), true);
+            form.draft_id = id.into();
+            assert!(form.creation_draft_parameter().is_empty());
+            let html = EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form: &form,
+            }
+            .render()
+            .unwrap();
+            assert!(
+                setup_hrefs(&html).into_iter().all(
+                    |href| !href.contains("creation_draft") && !href.contains("canary.invalid")
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn edit_source_setup_links_do_not_inherit_the_inventory_create_handle() {
+        let organization = test_organization();
+        let page = EnvironmentsPageView {
+            environments: vec![],
+            create_form: default_create_form("current-csrf".into(), false),
+            source_editor: Some(crate::view::EnvironmentSourcesEditView {
+                environment_id: "00000000-0000-4000-8000-000000000004".into(),
+                environment_name: "Existing Sandbox".into(),
+                fields: Default::default(),
+                expected: crate::view::EnvironmentSourcesSummaryView {
+                    selection: Default::default(),
+                    operation_generation: 1,
+                    project: String::new(),
+                    organization: false,
+                    personal: false,
+                    profile: String::new(),
+                    profile_revision: String::new(),
+                },
+            }),
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: String::new(),
+            state: "all".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let html = OrganizationEnvironmentsContentTemplate {
+            organization: &organization,
+            page: &page,
+        }
+        .render()
+        .unwrap();
+        let hrefs = setup_hrefs(&html);
+        assert_eq!(hrefs.len(), 4);
+        assert_eq!(
+            hrefs[0],
+            format!("/settings/secrets/?org={}", organization.slug)
+        );
+        assert_eq!(
+            hrefs[1],
+            format!("/{}/secrets/organization/", organization.slug)
+        );
+        assert_eq!(hrefs[2], organization.secrets_url);
+        assert_eq!(
+            hrefs[3],
+            format!("/settings/credentials/?org={}", organization.slug)
+        );
+    }
+
+    #[test]
+    fn explicit_return_template_keeps_drawer_url_and_requested_marker_together() {
+        use crate::environment_drafts::DraftReturn;
+        let organization = test_organization();
+        for navigation in [
+            DraftReturn::NoRequest,
+            DraftReturn::Exact("00000000-0000-4000-8000-000000000003".into()),
+            DraftReturn::Unavailable,
+        ] {
+            let mut form = default_create_form("current-csrf".into(), true);
+            if let DraftReturn::Exact(id) = &navigation {
+                form.draft_id.clone_from(id);
+            }
+            form.draft_return = navigation.clone();
+            let page = EnvironmentsPageView {
+                environments: Vec::new(),
+                create_form: form,
+                source_editor: None,
+                port_panel: None,
+                trust_summary: None,
+                resize_confirmation: None,
+                resize_operation: None,
+                search: String::new(),
+                state: "all".into(),
+                message: String::new(),
+                error: String::new(),
+            };
+            let html = OrganizationEnvironmentsContentTemplate {
+                organization: &organization,
+                page: &page,
+            }
+            .render()
+            .unwrap();
+            assert!(html.contains(&format!(
+                "data-create-url=\"{}new/{}\"",
+                organization.environments_url,
+                navigation.query()
+            )));
+            assert!(html.contains(&format!(
+                "data-create-draft-exact=\"{}\"",
+                navigation.requested()
+            )));
+            assert!(html.contains("name=\"_csrf\" value=\"current-csrf\""));
+            assert!(crate::environment_drafts::canonical_id(
+                &page.create_form.draft_id
+            ));
+        }
+    }
+
+    #[test]
+    fn preview_row_errors_preserve_all_inputs_and_are_field_associated() {
+        let submission = EnvironmentSubmission::parse(b"image=example.test/workspace&app_port_0=3000&app_label_0=web&app_access_0=creator&app_port_1=8080&app_label_1=web&app_access_1=public&app_port_2=3000&app_label_2=api&app_access_2=org_members&app_port_3=2222&app_label_3=ssh&app_access_3=creator&app_port_4=65536&app_label_4=Bad&app_access_4=private").unwrap();
+        let mut form = submission.form_view("synthetic-csrf".into());
+        assert!(
+            submission
+                .validate_and_draft("org-test", &mut form)
+                .is_none()
+        );
+        assert_eq!(form.app_ports.len(), 5);
+        assert!(form.app_ports[0].port_error.is_empty());
+        assert!(form.app_ports[1].label_error.contains("already used"));
+        assert!(form.app_ports[2].port_error.contains("already used"));
+        assert!(form.app_ports[3].port_error.contains("reserved"));
+        assert!(!form.app_ports[4].port_error.is_empty());
+        assert!(!form.app_ports[4].label_error.is_empty());
+        assert!(!form.app_ports[4].access_error.is_empty());
+        assert_eq!(form.app_ports[4].port, "65536");
+        assert_eq!(form.app_ports[4].label, "Bad");
+        let organization = test_organization();
+        let html = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        }
+        .render()
+        .unwrap();
+        assert!(html.contains("aria-describedby=\"app-label-error-1\""));
+        assert!(html.contains("aria-describedby=\"app-port-error-2\""));
+        assert!(html.contains("aria-describedby=\"app-access-error-4\""));
+        assert!(html.contains("name=\"app_port_4\" type=\"number\""));
+        assert!(html.contains("value=\"65536\""));
+    }
+
+    #[test]
+    fn advanced_creation_disclosures_open_for_errors_and_preserve_exact_values() {
+        let organization = test_organization();
+        let render = |form: &EnvironmentCreateFormView| {
+            EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form,
+            }
+            .render()
+            .unwrap()
+        };
+        let mut form = default_create_form("synthetic-csrf".into(), true);
+        let html = render(&form);
+        assert!(html.contains("data-create-resources>"));
+        assert!(html.contains("data-create-runtime>"));
+        assert!(html.contains("1 vCPU</option>"));
+        assert!(html.contains("2 GiB</option>"));
+        assert!(html.contains("not an idle timeout"));
+        assert!(!html.contains("cw-snapshot-meter"));
+        assert!(!html.contains("Use 0 for infinity"));
+        form.cpu = "750".into();
+        form.cpu_error = "Choose a valid resource value".into();
+        form.install_command = "printf '<preserved-command>'".into();
+        let html = render(&form);
+        assert!(html.contains("data-create-resources open>"));
+        assert!(html.contains("data-create-runtime open>"));
+        assert!(html.contains("value=\"750\" selected>750 millicores"));
+        assert!(!html.contains("<preserved-command>"));
+        assert!(html.contains("preserved-command"));
+    }
+
+    #[test]
+    fn configured_preview_pattern_is_provisional_and_never_a_fallback_address() {
+        let mut form = default_create_form("synthetic-csrf".into(), true);
+        let organization = test_organization();
+        let render = |form: &EnvironmentCreateFormView| {
+            EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form,
+            }
+            .render()
+            .unwrap()
+        };
+        let missing = render(&form);
+        assert!(missing.contains("Preview URLs are unavailable on this deployment."));
+        assert!(!missing.contains("cwpreview.sh"));
+        form.preview_base_domain = "preview.example.test".into();
+        let configured = render(&form);
+        assert!(
+            configured.contains("https://{label}-{sandbox-id-prefix}-test.preview.example.test")
+        );
+        assert!(configured.contains("not an assigned URL"));
+        assert!(!configured.contains("href=\"https://{label}"));
+        assert!(configured.contains("does not block every other form of network access"));
+    }
+
+    #[test]
+    fn digit_first_preview_labels_and_default_creator_access_are_preserved() {
+        let submission = EnvironmentSubmission::parse(
+            b"image=example.test/workspace&app_port_0=3000&app_label_0=9web&app_access_0=",
+        )
+        .unwrap();
+        let mut form = submission.form_view("synthetic-csrf".into());
+        let request = submission
+            .validate_and_draft("org-test", &mut form)
+            .unwrap();
+        let spec = codewire_project_proto::from_proto(request.project_spec.into_option().unwrap())
+            .unwrap();
+        assert_eq!(spec.application_ports[0].label, "9web");
+        assert_eq!(spec.application_ports[0].access, "creator");
+    }
+
     #[tokio::test]
     async fn port_fragments_preserve_the_existing_csrf_token_and_terminal_document() {
         let panel = EnvironmentPortPanelView {
@@ -2150,6 +2613,9 @@ mod tests {
             label: "<invalid>".into(),
             access: "creator".into(),
             form_error: "Check the preview label.".into(),
+            port_error: String::new(),
+            label_error: "Check the preview label.".into(),
+            access_error: String::new(),
         };
         let response =
             render_port_panel(&test_organization(), &panel, "existing-synthetic-csrf", "");
@@ -2359,10 +2825,8 @@ mod tests {
             id: "org-test".into(),
             name: "Test".into(),
             slug: "test".into(),
-            role: "owner",
             can_admin: true,
             environments_url: "/test/".into(),
-            snapshots_url: "/test/snapshots/".into(),
             presets_url: "/test/presets/".into(),
             secrets_url: "/test/secrets/".into(),
             api_keys_url: "/test/api-keys/".into(),
@@ -2596,6 +3060,7 @@ mod tests {
         let mut form = submission.form_view("token".into());
         let options = || EnvironmentCreateOptions {
             presets: vec![],
+            preview_base_domain: String::new(),
             agents: vec![],
             confidential_available: false,
             confidential_price: String::new(),
@@ -2606,6 +3071,7 @@ mod tests {
                     id: id.into(),
                     name: "development".into(),
                     selected: false,
+                    synthetic: false,
                 }],
                 profiles: vec![crate::view::EnvironmentCredentialProfileOption {
                     id: id.into(),
@@ -2613,6 +3079,7 @@ mod tests {
                     revision: 7,
                     identity_count: 2,
                     bound_revision: false,
+                    synthetic: false,
                     selected: false,
                 }],
                 ..Default::default()
@@ -2635,6 +3102,81 @@ mod tests {
         let mut no_credentials_consent = draft;
         no_credentials_consent.confirm_personal_credentials = false;
         assert!(validated_dashboard_project_spec(&no_credentials_consent, &[]).is_err());
+    }
+
+    #[test]
+    fn create_rejects_stale_sources_before_dispatch_and_accepts_explicit_recovery() {
+        let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let options = || EnvironmentCreateOptions {
+            presets: vec![],
+            preview_base_domain: String::new(),
+            agents: vec![],
+            confidential_available: false,
+            confidential_price: String::new(),
+            sources: crate::view::EnvironmentSourceFieldsView {
+                application_selection_enabled: true,
+                credential_selection_enabled: true,
+                projects: vec![crate::view::EnvironmentSecretProjectOption {
+                    id: "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76".into(),
+                    name: "development".into(),
+                    selected: false,
+                    synthetic: false,
+                }],
+                profiles: vec![crate::view::EnvironmentCredentialProfileOption {
+                    id: id.into(),
+                    name: "work".into(),
+                    revision: 8,
+                    identity_count: 2,
+                    bound_revision: false,
+                    synthetic: false,
+                    selected: false,
+                }],
+                ..Default::default()
+            },
+        };
+        for selection in [
+            format!("secret_project={id}"),
+            format!("credential_profile={id}%407"),
+            "credential_profile=315dd4c2-6bf2-4c3b-9d8f-68fc97654a76%407".into(),
+        ] {
+            let submission = EnvironmentSubmission::parse(
+                format!("image=example.test%2Fworkspace&{selection}").as_bytes(),
+            )
+            .unwrap();
+            let mut form = submission.form_view("synthetic-csrf".into());
+            hydrate_options(&mut form, options());
+            assert!(form.sources.complete());
+            assert!(form.has_errors());
+            assert!(
+                submission
+                    .validate_and_draft("org-test", &mut form)
+                    .is_none()
+            );
+        }
+        for selection in [
+            "secret_project=&credential_profile=".into(),
+            format!("credential_profile={id}%408"),
+            "secret_project=315dd4c2-6bf2-4c3b-9d8f-68fc97654a76".into(),
+        ] {
+            let submission = EnvironmentSubmission::parse(
+                format!("image=example.test%2Fworkspace&{selection}").as_bytes(),
+            )
+            .unwrap();
+            let mut form = submission.form_view("synthetic-csrf".into());
+            hydrate_options(&mut form, options());
+            assert!(!form.has_errors());
+            let draft = submission
+                .validate_and_draft("org-test", &mut form)
+                .unwrap();
+            assert_eq!(
+                draft.expected_profile_revision,
+                if selection.ends_with("408") {
+                    Some(8)
+                } else {
+                    None
+                }
+            );
+        }
     }
 
     #[test]
@@ -2722,6 +3264,13 @@ mod tests {
         assert!(!request.confirm_personal_secrets && !request.confirm_personal_credentials);
         page.source_editor.as_mut().unwrap().fields.project_error = "Catalog unavailable".into();
         assert!(render(&page).contains("type=\"submit\" disabled>Save sources</button>"));
+        let fields = &mut page.source_editor.as_mut().unwrap().fields;
+        fields.project_error.clear();
+        fields.select_bound(&codewire_proto::codewire::v1::EnvironmentSourceSelection {
+            profile_revision: Some(7),
+            ..Default::default()
+        });
+        assert!(render(&page).contains("type=\"submit\" disabled>Save sources</button>"));
     }
 
     #[test]
@@ -2808,6 +3357,7 @@ mod tests {
         let mut submission =
             EnvironmentSubmission::parse(b"preset_id=preset-id&cpu=750").expect("submission");
         let options = EnvironmentCreateOptions {
+            preview_base_domain: String::new(),
             confidential_available: false,
             confidential_price: String::new(),
             presets: vec![crate::view::EnvironmentPresetOption {
@@ -2827,6 +3377,7 @@ mod tests {
                     port: "3000".to_owned(),
                     label: "web".to_owned(),
                     access: "creator".to_owned(),
+                    ..Default::default()
                 }],
                 uses_protected_secret_bindings: true,
                 official: false,
@@ -2852,6 +3403,28 @@ mod tests {
             &codewire_proto::codewire::v1::ProjectSecretBindings::default()
         );
         assert_eq!(submission.app_ports[0].0, "3000");
+        assert!(!submission.application_previews_explicit);
+
+        let mut explicit = EnvironmentSubmission::parse(
+            b"preset_id=preset-id&cpu=750&application_previews_explicit=true",
+        )
+        .unwrap();
+        explicit.apply_selected_preset_defaults(&options);
+        assert!(explicit.app_ports.is_empty());
+        assert_eq!(explicit.memory, "1024");
+        let mut explicit_form = explicit.form_view("token".into());
+        let explicit_draft = explicit
+            .validate_and_draft("org-test", &mut explicit_form)
+            .unwrap();
+        assert!(explicit_draft.omit_application_previews);
+        assert!(
+            explicit_draft
+                .project_spec
+                .as_option()
+                .unwrap()
+                .application_ports
+                .is_empty()
+        );
 
         let mut form = submission.form_view("token".to_owned());
         form.presets = options.presets;
@@ -2932,10 +3505,8 @@ mod tests {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
             slug: "organization".to_owned(),
-            role: "owner",
             can_admin: true,
             environments_url: "/organization/".to_owned(),
-            snapshots_url: "/organization/snapshots/".to_owned(),
             presets_url: "/organization/presets/".to_owned(),
             secrets_url: "/organization/secrets/".to_owned(),
             api_keys_url: "/organization/api-keys/".to_owned(),
@@ -2991,10 +3562,8 @@ mod tests {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
             slug: "organization".to_owned(),
-            role: "owner",
             can_admin: true,
             environments_url: "/organization/".to_owned(),
-            snapshots_url: "/organization/snapshots/".to_owned(),
             presets_url: String::new(),
             secrets_url: String::new(),
             api_keys_url: String::new(),
@@ -3069,10 +3638,8 @@ mod tests {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
             slug: "organization".to_owned(),
-            role: "owner",
             can_admin: true,
             environments_url: String::new(),
-            snapshots_url: String::new(),
             presets_url: String::new(),
             secrets_url: String::new(),
             api_keys_url: String::new(),
@@ -3122,10 +3689,8 @@ mod tests {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
             slug: "organization".to_owned(),
-            role: "owner",
             can_admin: true,
             environments_url: "/organization/".to_owned(),
-            snapshots_url: "/organization/snapshots/".to_owned(),
             presets_url: "/organization/presets/".to_owned(),
             secrets_url: "/organization/secrets/".to_owned(),
             api_keys_url: "/organization/api-keys/".to_owned(),
@@ -3167,10 +3732,10 @@ mod tests {
             }));
         }
         assert!(manual_form.contains("type=\"button\" data-open-github-repositories aria-haspopup=\"dialog\" aria-controls=\"github-repository-picker\""));
-        assert!(
-            manual_form
-                .contains("<a href=\"/settings/credentials/?org=organization\">Connect GitHub</a>")
-        );
+        assert!(manual_form.contains(&format!(
+            "<a href=\"/settings/credentials/?org=organization&amp;{}\">Connect GitHub</a>",
+            form.creation_draft_parameter()
+        )));
         let dialog = picker.split('>').next().expect("dialog opening tag");
         assert!(dialog.contains("id=\"github-repository-picker\""));
         assert!(dialog.contains("aria-labelledby=\"github-repository-picker-title\""));
@@ -3190,7 +3755,14 @@ mod tests {
             )
         );
         assert!(!form.sources.credential_selection_enabled);
-        assert!(picker.contains("data-github-profile disabled"));
+        let profile_select = picker
+            .split("data-github-profile")
+            .nth(1)
+            .unwrap()
+            .split('>')
+            .next()
+            .unwrap();
+        assert!(profile_select.contains(" disabled"));
         assert!(!html.contains("data-show-github-repositories"));
         assert!(!html.contains("GitHub connected"));
     }

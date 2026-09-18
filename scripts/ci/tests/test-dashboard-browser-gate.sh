@@ -9,6 +9,7 @@ ENVIRONMENTS="$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts"
 SECRETS_PRESETS="$ROOT/apps/dashboard/e2e/ssr-dashboard.secrets-presets.ssr.ts"
 GOVERNANCE="$ROOT/apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts"
 CREDENTIALS="$ROOT/apps/dashboard/e2e/ssr-dashboard.credentials.ssr.ts"
+GITHUB_CHECKOUT="$ROOT/apps/dashboard/e2e/helpers/github-checkout.ts"
 INTEGRATED="$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
 COMMON="$ROOT/scripts/ci/verify/kind/common.sh"
 BROWSER_RUNTIME="$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
@@ -214,6 +215,10 @@ grep -Fq '/apps/codewire-synthetic/installations/new' "$CREDENTIALS" ||
   fail 'managed credential browser journey does not bind the synthetic GitHub App slug'
 grep -Fq 'response.headers()["referrer-policy"]' "$CREDENTIALS" ||
   fail 'managed credential browser journey does not verify callback referrer protection'
+grep -Fq 'afterPicker.appRefresh).toBe(beforePicker.appRefresh + 1)' "$CREDENTIALS" ||
+  fail 'managed credential browser journey does not require one controlled GitHub App refresh'
+grep -Fq 'refreshedAdvertisement' "$GITHUB_CHECKOUT" ||
+  fail 'managed credential browser journey does not require checkout through the refreshed App authorization'
 if grep -Fq 'responseBody.indexOf("ABCD-EFGH")' "$CREDENTIALS"; then
   fail 'managed credential browser journey still models GitHub device authorization'
 fi

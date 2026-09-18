@@ -193,6 +193,7 @@ async fn request(adapter: &Adapter) -> Result<BrokerCredentialRefreshRequest> {
     Ok(BrokerCredentialRefreshRequest {
         refresh_id: Uuid::new_v4(),
         request_id: Uuid::new_v4(),
+        kind: BrokerCredentialRefreshKind::CodexOAuth,
         grant: admitted.grant().clone(),
         operation: admitted.permission().operation.clone(),
         route: admitted.permission().route.clone(),

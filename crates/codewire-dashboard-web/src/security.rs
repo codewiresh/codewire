@@ -13,8 +13,9 @@ const CSRF_COOKIE_NAME: &str = "codewire_ssr_csrf";
 const LEGACY_CSRF_COOKIE_NAME: &str = "codewire_csrf";
 const CSRF_TOKEN_BYTES: usize = 32;
 const GITHUB_APP_AUTHORIZATION_COOKIE: &str = "codewire_github_app_authorization";
-const GITHUB_APP_AUTHORIZATION_PATH: &str = "/settings/credentials/github/";
+const GITHUB_APP_AUTHORIZATION_PATH: &str = "/api/v1/github/oauth/";
 const GITHUB_APP_COOKIE_VERSION: u8 = 1;
+const GITHUB_APP_NAVIGATION_COOKIE_VERSION: u8 = 2;
 const GITHUB_APP_RECONNECT_ID_BYTES: usize = 36;
 pub(crate) const TWO_FACTOR_CHALLENGE_COOKIE: &str = "codewire_2fa_challenge";
 pub(crate) const PASSWORD_RESET_COOKIE: &str = "codewire_password_reset";
@@ -36,6 +37,63 @@ pub(crate) fn new_csrf_token() -> String {
 pub(crate) struct GitHubAppAuthorizationContinuation {
     pub(crate) credential_id: Option<String>,
     pub(crate) expected_generation: Option<u64>,
+    pub(crate) navigation: Option<GitHubAppNavigation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GitHubAppNavigation {
+    pub(crate) organization_id: String,
+    pub(crate) draft_id: Option<String>,
+}
+
+impl GitHubAppNavigation {
+    fn encode(&self) -> Option<String> {
+        if !crate::environment_drafts::canonical_id(&self.organization_id)
+            || self
+                .draft_id
+                .as_deref()
+                .is_some_and(|id| !crate::environment_drafts::canonical_id(id))
+        {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(74);
+        bytes.push(1);
+        bytes.extend_from_slice(self.organization_id.as_bytes());
+        bytes.push(u8::from(self.draft_id.is_some()));
+        if let Some(id) = &self.draft_id {
+            bytes.extend_from_slice(id.as_bytes());
+        }
+        Some(URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    fn decode(encoded: &str) -> Option<Self> {
+        if !matches!(encoded.len(), 51 | 99) {
+            return None;
+        }
+        let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+        if bytes.first() != Some(&1) || !matches!(bytes.len(), 38 | 74) {
+            return None;
+        }
+        let organization_id = std::str::from_utf8(&bytes[1..37]).ok()?;
+        if !crate::environment_drafts::canonical_id(organization_id) {
+            return None;
+        }
+        let draft_id = match (bytes[37], bytes.len()) {
+            (0, 38) => None,
+            (1, 74) => {
+                let id = std::str::from_utf8(&bytes[38..]).ok()?;
+                if !crate::environment_drafts::canonical_id(id) {
+                    return None;
+                }
+                Some(id.into())
+            }
+            _ => return None,
+        };
+        Some(Self {
+            organization_id: organization_id.into(),
+            draft_id,
+        })
+    }
 }
 
 pub(crate) fn github_app_authorization_cookie(
@@ -44,6 +102,7 @@ pub(crate) fn github_app_authorization_cookie(
     session: &HeaderValue,
     credential_id: Option<&str>,
     expected_generation: Option<u64>,
+    navigation: Option<&GitHubAppNavigation>,
 ) -> Option<String> {
     let state = decode_fixed_state(state)?;
     let reconnect = match (credential_id, expected_generation) {
@@ -56,7 +115,13 @@ pub(crate) fn github_app_authorization_cookie(
     let mut bytes = Vec::with_capacity(
         1 + CSRF_TOKEN_BYTES + 32 + 1 + reconnect.map_or(0, |_| GITHUB_APP_RECONNECT_ID_BYTES + 8),
     );
-    bytes.push(GITHUB_APP_COOKIE_VERSION);
+    // Optional navigation cannot invalidate a valid authorization/reconnect.
+    let navigation = navigation.and_then(GitHubAppNavigation::encode);
+    bytes.push(if navigation.is_some() {
+        GITHUB_APP_NAVIGATION_COOKIE_VERSION
+    } else {
+        GITHUB_APP_COOKIE_VERSION
+    });
     bytes.extend_from_slice(&state);
     bytes.extend_from_slice(&Sha256::digest(session.as_bytes()));
     match reconnect {
@@ -67,10 +132,15 @@ pub(crate) fn github_app_authorization_cookie(
             bytes.extend_from_slice(&generation.to_be_bytes());
         }
     }
+    let mut encoded = URL_SAFE_NO_PAD.encode(bytes);
+    if let Some(navigation) = navigation {
+        encoded.push('.');
+        encoded.push_str(&navigation);
+    }
     lax_scoped_secret_cookie(
         public_origin,
         GITHUB_APP_AUTHORIZATION_COOKIE,
-        &URL_SAFE_NO_PAD.encode(bytes),
+        &encoded,
         GITHUB_APP_AUTHORIZATION_PATH,
         10 * 60,
     )
@@ -82,13 +152,24 @@ pub(crate) fn github_app_authorization_continuation(
     session: &HeaderValue,
 ) -> Option<GitHubAppAuthorizationContinuation> {
     let encoded = unique_cookie_value(headers, GITHUB_APP_AUTHORIZATION_COOKIE)?;
-    let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let (core, navigation) = encoded
+        .split_once('.')
+        .map_or((encoded, None), |(core, nav)| (core, Some(nav)));
+    // Only decode the independently bounded core, even when a malicious
+    // navigation tail is huge or not base64. Authorization remains strict.
+    if !matches!(core.len(), 88 | 147) {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(core).ok()?;
     let state = decode_fixed_state(state)?;
     let fixed = 1 + CSRF_TOKEN_BYTES + 32 + 1;
     if bytes.len() != fixed && bytes.len() != fixed + GITHUB_APP_RECONNECT_ID_BYTES + 8 {
         return None;
     }
-    if bytes[0] != GITHUB_APP_COOKIE_VERSION
+    if !matches!(
+        bytes[0],
+        GITHUB_APP_COOKIE_VERSION | GITHUB_APP_NAVIGATION_COOKIE_VERSION
+    ) || (bytes[0] == GITHUB_APP_COOKIE_VERSION && navigation.is_some())
         || !bool::from(bytes[1..1 + CSRF_TOKEN_BYTES].ct_eq(&state))
         || !bool::from(
             bytes[1 + CSRF_TOKEN_BYTES..1 + CSRF_TOKEN_BYTES + 32]
@@ -97,10 +178,11 @@ pub(crate) fn github_app_authorization_continuation(
     {
         return None;
     }
-    match bytes[fixed - 1] {
+    let mut continuation = match bytes[fixed - 1] {
         0 if bytes.len() == fixed => Some(GitHubAppAuthorizationContinuation {
             credential_id: None,
             expected_generation: None,
+            navigation: None,
         }),
         1 if bytes.len() == fixed + GITHUB_APP_RECONNECT_ID_BYTES + 8 => {
             let id =
@@ -116,10 +198,15 @@ pub(crate) fn github_app_authorization_continuation(
             Some(GitHubAppAuthorizationContinuation {
                 credential_id: Some(id.into()),
                 expected_generation: Some(generation),
+                navigation: None,
             })
         }
         _ => None,
+    }?;
+    if bytes[0] == GITHUB_APP_NAVIGATION_COOKIE_VERSION {
+        continuation.navigation = navigation.and_then(GitHubAppNavigation::decode);
     }
+    Some(continuation)
 }
 
 pub(crate) fn clear_github_app_authorization_cookie(public_origin: &str) -> String {
@@ -392,6 +479,7 @@ mod tests {
             &session,
             Some(id),
             Some(7),
+            None,
         )
         .unwrap();
         assert!(cookie.contains("HttpOnly; SameSite=Lax; Max-Age=600; Secure"));
@@ -415,7 +503,181 @@ mod tests {
         );
         assert_eq!(
             clear_github_app_authorization_cookie("https://dashboard.example.test"),
-            "codewire_github_app_authorization=deleted; Path=/settings/credentials/github/; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
+            "codewire_github_app_authorization=deleted; Path=/api/v1/github/oauth/; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
+        );
+    }
+
+    #[test]
+    fn github_navigation_tail_cannot_change_or_repair_authorization_core() {
+        let state = new_csrf_token();
+        let session = HeaderValue::from_static("codewire.session_token=synthetic-session");
+        let id = "00000000-0000-4000-8000-000000000001";
+        let nav = GitHubAppNavigation {
+            organization_id: "00000000-0000-4000-8000-000000000002".into(),
+            draft_id: Some("00000000-0000-4000-8000-000000000003".into()),
+        };
+        let headers = |value: &str| {
+            HeaderMap::from_iter([(
+                header::COOKIE,
+                HeaderValue::from_str(&format!("{GITHUB_APP_AUTHORIZATION_COOKIE}={value}"))
+                    .unwrap(),
+            )])
+        };
+        for reconnect in [false, true] {
+            let credential_id = reconnect.then_some(id);
+            let generation = reconnect.then_some(7);
+            let cookie = github_app_authorization_cookie(
+                "https://dashboard.synthetic.invalid",
+                &state,
+                &session,
+                credential_id,
+                generation,
+                Some(&nav),
+            )
+            .unwrap();
+            let value = cookie.split(';').next().unwrap().split_once('=').unwrap().1;
+            let (core, tail) = value.split_once('.').unwrap();
+            let continuation =
+                github_app_authorization_continuation(&headers(value), &state, &session).unwrap();
+            assert_eq!(continuation.navigation, Some(nav.clone()));
+            let mut bad_version = URL_SAFE_NO_PAD.decode(tail).unwrap();
+            bad_version[0] = 2;
+            let mut bad_flag = URL_SAFE_NO_PAD.decode(tail).unwrap();
+            bad_flag[37] = 2;
+            let mut nil_org = URL_SAFE_NO_PAD.decode(tail).unwrap();
+            nil_org[1..37].copy_from_slice(b"00000000-0000-0000-0000-000000000000");
+            let mut nil_draft = URL_SAFE_NO_PAD.decode(tail).unwrap();
+            nil_draft[38..].copy_from_slice(b"00000000-0000-0000-0000-000000000000");
+            for malformed in [
+                String::new(),
+                "not-base64!".into(),
+                format!("{tail}.extra"),
+                "x".repeat(2048),
+                URL_SAFE_NO_PAD.encode(bad_version),
+                URL_SAFE_NO_PAD.encode(bad_flag),
+                URL_SAFE_NO_PAD.encode(nil_org),
+                URL_SAFE_NO_PAD.encode(nil_draft),
+                tail[..tail.len() - 1].into(),
+            ] {
+                let continuation = github_app_authorization_continuation(
+                    &headers(&format!("{core}.{malformed}")),
+                    &state,
+                    &session,
+                )
+                .unwrap();
+                assert!(continuation.navigation.is_none());
+                assert_eq!(continuation.credential_id.as_deref(), credential_id);
+                assert_eq!(continuation.expected_generation, generation);
+            }
+            assert!(
+                github_app_authorization_continuation(&headers(core), &state, &session)
+                    .unwrap()
+                    .navigation
+                    .is_none()
+            );
+            let bytes = URL_SAFE_NO_PAD.decode(core).unwrap();
+            for offset in [0, 1, 33, 65] {
+                let mut corrupted = bytes.clone();
+                corrupted[offset] = if offset == 0 {
+                    3
+                } else if offset == 65 {
+                    2
+                } else {
+                    corrupted[offset] ^ 1
+                };
+                assert!(
+                    github_app_authorization_continuation(
+                        &headers(&format!("{}.{tail}", URL_SAFE_NO_PAD.encode(corrupted))),
+                        &state,
+                        &session
+                    )
+                    .is_none()
+                );
+            }
+            if reconnect {
+                let mut zero_generation = bytes.clone();
+                zero_generation[102..110].fill(0);
+                assert!(
+                    github_app_authorization_continuation(
+                        &headers(&format!(
+                            "{}.{tail}",
+                            URL_SAFE_NO_PAD.encode(zero_generation)
+                        )),
+                        &state,
+                        &session
+                    )
+                    .is_none()
+                );
+                let mut malformed_id = bytes.clone();
+                malformed_id[66] = b'z';
+                assert!(
+                    github_app_authorization_continuation(
+                        &headers(&format!("{}.{tail}", URL_SAFE_NO_PAD.encode(malformed_id))),
+                        &state,
+                        &session
+                    )
+                    .is_none()
+                );
+            }
+            assert!(
+                github_app_authorization_continuation(&headers(value), &new_csrf_token(), &session)
+                    .is_none()
+            );
+            assert!(
+                github_app_authorization_continuation(
+                    &headers(value),
+                    &state,
+                    &HeaderValue::from_static("codewire.session_token=other-session")
+                )
+                .is_none()
+            );
+            let legacy = github_app_authorization_cookie(
+                "https://dashboard.synthetic.invalid",
+                &state,
+                &session,
+                credential_id,
+                generation,
+                None,
+            )
+            .unwrap();
+            let legacy_value = legacy.split(';').next().unwrap().split_once('=').unwrap().1;
+            assert!(
+                github_app_authorization_continuation(&headers(legacy_value), &state, &session)
+                    .unwrap()
+                    .navigation
+                    .is_none()
+            );
+            assert!(
+                github_app_authorization_continuation(
+                    &headers(&format!("{legacy_value}.{tail}")),
+                    &state,
+                    &session
+                )
+                .is_none()
+            );
+            let invalid_nav = GitHubAppNavigation {
+                organization_id: "invalid".into(),
+                ..nav.clone()
+            };
+            assert_eq!(
+                github_app_authorization_cookie(
+                    "https://dashboard.synthetic.invalid",
+                    &state,
+                    &session,
+                    credential_id,
+                    generation,
+                    Some(&invalid_nav)
+                ),
+                Some(legacy)
+            );
+        }
+        let org_only = GitHubAppNavigation {
+            draft_id: None,
+            ..nav
+        };
+        assert_eq!(
+            GitHubAppNavigation::decode(&org_only.encode().unwrap()),
+            Some(org_only)
         );
     }
 

@@ -11,7 +11,7 @@ use sqlx::{PgPool, Row};
 use super::ApiState;
 use super::create::{
     CreateEnvironmentBody, apply_project_spec_defaults, ensure_current_platform_runtime_support,
-    ensure_no_secret_delivery, merge_project_spec_defaults, preset_is_visible_to_org,
+    ensure_no_secret_delivery, merge_environment_defaults, preset_is_visible_to_org,
     preset_scope_is_well_formed, repository_analysis_pending,
 };
 use super::environments::{coded, coded_owned, format_time, require_org_member};
@@ -173,6 +173,30 @@ async fn lookup_repo_config(
 #[derive(Debug)]
 pub struct EnvironmentCreateOptionsBody {
     pub presets: Vec<PresetWire>,
+    pub preview_base_domain: String,
+}
+
+fn preview_domain_is_valid(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.contains('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        && url::Url::parse(&format!("https://preview.{domain}"))
+            .is_ok_and(|url| matches!(url.host(), Some(url::Host::Domain(_))))
 }
 pub(crate) async fn get_environment_create_options_core(
     state: &ApiState,
@@ -189,7 +213,14 @@ pub(crate) async fn get_environment_create_options_core(
             "failed to list presets",
         )
     })?;
-    Ok(EnvironmentCreateOptionsBody { presets })
+    Ok(EnvironmentCreateOptionsBody {
+        presets,
+        preview_base_domain: if preview_domain_is_valid(&state.preview_base_domain) {
+            state.preview_base_domain.to_ascii_lowercase()
+        } else {
+            String::new()
+        },
+    })
 }
 
 fn requires_repository_analysis(body: &CreateEnvironmentBody) -> bool {
@@ -292,7 +323,7 @@ async fn prepare_draft(
                 ));
             }
             Ok(Some(rc)) => {
-                merge_project_spec_defaults(&mut body.project_spec, &rc.project_spec)?;
+                merge_environment_defaults(&mut body, &rc.project_spec)?;
                 apply_project_spec_defaults(&mut body)?;
                 applied_repo_config = Some(rc);
             }
@@ -329,7 +360,7 @@ async fn prepare_draft(
     }
     validate_resolved_preset(resolved_preset.as_ref())?;
     if let Some(preset) = resolved_preset.as_ref() {
-        merge_project_spec_defaults(&mut body.project_spec, &preset.project_spec)?;
+        merge_environment_defaults(&mut body, &preset.project_spec)?;
     }
     apply_project_spec_defaults(&mut body)?;
     ensure_current_platform_runtime_support(&body)?;
@@ -407,11 +438,49 @@ mod tests {
     }
 
     #[test]
-    fn environment_create_options_are_presets_only() {
+    fn environment_create_options_have_presets_and_public_preview_metadata_only() {
         let options = EnvironmentCreateOptionsBody {
             presets: vec![preset(codewire_project::ProjectSpec::default())],
+            preview_base_domain: "preview.example.test".into(),
         };
         assert_eq!(options.presets.len(), 1);
+        assert_eq!(options.preview_base_domain, "preview.example.test");
+    }
+
+    #[test]
+    fn preview_metadata_accepts_only_bounded_dns_suffixes() {
+        for domain in ["cwpreview.sh", "codewire-dev.local", "preview.EXAMPLE.test"] {
+            assert!(preview_domain_is_valid(domain));
+        }
+        for domain in [
+            "",
+            "https://cwpreview.sh",
+            "*.cwpreview.sh",
+            "cwpreview.sh:443",
+            "cwpreview.sh/path",
+            ".cwpreview.sh",
+            "cwpreview.sh.",
+            "-bad.example",
+            "bad-.example",
+            "bad_name.example",
+            "localhost",
+            "127.0.0.1",
+            "example.123",
+            "example.0x7f",
+        ] {
+            assert!(!preview_domain_is_valid(domain));
+        }
+        assert!(!preview_domain_is_valid(&format!(
+            "{}.test",
+            "a".repeat(64)
+        )));
+        assert!(!preview_domain_is_valid(&format!(
+            "{}.{}.{}.{}.test",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(63)
+        )));
     }
 
     fn assert_coded(

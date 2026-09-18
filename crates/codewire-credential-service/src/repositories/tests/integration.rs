@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use codewire_access::{AccessProfile, AccessProfileName, ProviderId};
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
+    GitHubAppAuthorizationConfig, GitHubAppAuthorizationOwner,
 };
 use codewire_platform_credentials::CredentialRegistration;
 use codewire_server_core::auth::{
@@ -21,13 +22,38 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::Notify;
+use zeroize::Zeroizing;
 
-#[derive(Default)]
+const GITHUB_APP_INITIAL_TOKEN: &str = "ghu_synthetic_app_initial_token_1234567890";
+const GITHUB_APP_REFRESH_TOKEN: &str = "ghr_synthetic_app_refresh_token_1234567890";
+const GITHUB_APP_REFRESHED_TOKEN: &str = "ghu_synthetic_app_refreshed_token_1234567890";
+const GITHUB_APP_REFRESHED_REFRESH_TOKEN: &str =
+    "ghr_synthetic_app_refreshed_refresh_token_1234567890";
+
 struct Provider {
     calls: AtomicUsize,
+    app_refreshes: AtomicUsize,
+    reject_first_app_repository: AtomicBool,
+    reject_first_refreshed_app_repository: AtomicBool,
+    initial_app_access_lifetime: AtomicUsize,
     hold: AtomicBool,
     entered: Notify,
     released: Notify,
+}
+
+impl Default for Provider {
+    fn default() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            app_refreshes: AtomicUsize::new(0),
+            reject_first_app_repository: AtomicBool::new(false),
+            reject_first_refreshed_app_repository: AtomicBool::new(false),
+            initial_app_access_lifetime: AtomicUsize::new(28_800),
+            hold: AtomicBool::new(false),
+            entered: Notify::new(),
+            released: Notify::new(),
+        }
+    }
 }
 
 #[async_trait]
@@ -37,18 +63,61 @@ impl BrokerUpstreamTransport for Provider {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (method, target, headers, body) = request.into_parts();
+        if method == Method::POST
+            && target.origin().ascii_serialization() == "https://github.com"
+            && target.path() == "/login/oauth/access_token"
+        {
+            return self.github_app_exchange(&headers, &body);
+        }
+        if method == Method::GET
+            && target.origin().ascii_serialization() == "https://api.github.com"
+            && target.path() == "/user"
+        {
+            return self.github_app_user(&headers, &body);
+        }
+        if method == Method::GET
+            && target.origin().ascii_serialization() == "https://api.github.com"
+            && target.path() == "/user/installations"
+        {
+            return self.github_app_installations(&target, &headers, &body);
+        }
         assert_eq!(method, Method::GET);
         assert_eq!(
             target.origin().ascii_serialization(),
             "https://api.github.com"
         );
         assert_eq!(target.path(), "/user/repos");
-        assert_eq!(
-            headers.get("authorization").unwrap(),
-            &format!("Bearer {GITHUB_TOKEN}")
-        );
+        let authorization = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        let app_initial = authorization == format!("Bearer {GITHUB_APP_INITIAL_TOKEN}");
+        let app_refreshed = authorization == format!("Bearer {GITHUB_APP_REFRESHED_TOKEN}");
+        if ![
+            format!("Bearer {GITHUB_TOKEN}"),
+            format!("Bearer {GITHUB_APP_INITIAL_TOKEN}"),
+            format!("Bearer {GITHUB_APP_REFRESHED_TOKEN}"),
+        ]
+        .contains(&authorization.to_owned())
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
         assert!(body.is_empty());
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if app_initial
+            && self
+                .reject_first_app_repository
+                .swap(false, Ordering::SeqCst)
+        {
+            return json_response(StatusCode::UNAUTHORIZED, json!({}));
+        }
+        if app_refreshed
+            && self
+                .reject_first_refreshed_app_repository
+                .swap(false, Ordering::SeqCst)
+        {
+            return json_response(StatusCode::UNAUTHORIZED, json!({}));
+        }
         if self.hold.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
             self.released.notified().await;
@@ -60,23 +129,136 @@ impl BrokerUpstreamTransport for Provider {
                 "archived":false,"disabled":false,"temp_clone_token":"private-provider-clone-token",
                 "clone_url":"https://attacker.example/not-forwarded"}])
         };
-        Ok(BrokerUpstreamResponse::new(
-            StatusCode::OK,
-            HeaderMap::from_iter([(
-                http::header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )]),
-            Box::pin(futures::stream::once(async move {
-                Ok(serde_json::to_vec(&body).unwrap().into())
-            })),
-        ))
+        json_response(StatusCode::OK, body)
     }
+}
+
+impl Provider {
+    fn github_app_exchange(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if headers.get(http::header::ACCEPT) != Some(&HeaderValue::from_static("application/json"))
+            || headers.get(http::header::CONTENT_TYPE)
+                != Some(&HeaderValue::from_static(
+                    "application/x-www-form-urlencoded",
+                ))
+            || headers.get(http::header::USER_AGENT)
+                != Some(&HeaderValue::from_static("Codewire-Credential-Service"))
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let form = url::form_urlencoded::parse(body).collect::<BTreeMap<_, _>>();
+        if form.get("client_id").map(|value| value.as_ref()) != Some("Iv1.syntheticclient")
+            || form.get("client_secret").map(|value| value.as_ref())
+                != Some("synthetic-client-secret")
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        match form.get("grant_type").map(|value| value.as_ref()) {
+            None if form.get("code").map(|value| value.as_ref()) == Some("synthetic-code-123") => {
+                json_response(
+                    StatusCode::OK,
+                    json!({
+                        "access_token": GITHUB_APP_INITIAL_TOKEN,
+                        "token_type": "bearer",
+                        "expires_in": self.initial_app_access_lifetime.load(Ordering::SeqCst),
+                        "refresh_token": GITHUB_APP_REFRESH_TOKEN,
+                        "refresh_token_expires_in": 15_897_600,
+                    }),
+                )
+            }
+            Some("refresh_token")
+                if form.get("refresh_token").map(|value| value.as_ref())
+                    == Some(GITHUB_APP_REFRESH_TOKEN) =>
+            {
+                self.app_refreshes.fetch_add(1, Ordering::SeqCst);
+                json_response(
+                    StatusCode::OK,
+                    json!({
+                        "access_token": GITHUB_APP_REFRESHED_TOKEN,
+                        "token_type": "bearer",
+                        "expires_in": 28_800,
+                        "refresh_token": GITHUB_APP_REFRESHED_REFRESH_TOKEN,
+                        "refresh_token_expires_in": 15_897_600,
+                    }),
+                )
+            }
+            _ => Err(BrokerUpstreamError::Protocol),
+        }
+    }
+
+    fn github_app_user(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if !body.is_empty() || !github_app_headers(headers) {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        json_response(StatusCode::OK, json!({"id": 73, "login": "synthetic-user"}))
+    }
+
+    fn github_app_installations(
+        &self,
+        target: &url::Url,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if !body.is_empty()
+            || target.as_str() != "https://api.github.com/user/installations?per_page=100&page=1"
+            || !github_app_headers(headers)
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        json_response(
+            StatusCode::OK,
+            json!({"installations": [{"id": 41, "app_slug": "codewire"}]}),
+        )
+    }
+}
+
+fn github_app_headers(headers: &HeaderMap) -> bool {
+    let Some(authorization) = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    matches!(
+        authorization,
+        value if value == format!("Bearer {GITHUB_APP_INITIAL_TOKEN}")
+            || value == format!("Bearer {GITHUB_APP_REFRESHED_TOKEN}")
+    ) && headers.get(http::header::ACCEPT)
+        == Some(&HeaderValue::from_static("application/vnd.github+json"))
+        && headers.get(http::header::USER_AGENT)
+            == Some(&HeaderValue::from_static("Codewire-Credential-Service"))
+}
+
+fn json_response(
+    status: StatusCode,
+    body: serde_json::Value,
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    Ok(BrokerUpstreamResponse::new(
+        status,
+        HeaderMap::from_iter([(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )]),
+        Box::pin(futures::stream::once(async move {
+            Ok(serde_json::to_vec(&body)
+                .map_err(|_| BrokerUpstreamError::Protocol)?
+                .into())
+        })),
+    ))
 }
 
 struct Fixture {
     h: Harness,
     owner: Arc<GithubRepositoryOwner>,
     provider: Arc<Provider>,
+    github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     client: reqwest::Client,
     url: String,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
@@ -84,14 +266,35 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Result<Self> {
+        Self::with_github_app(false).await
+    }
+
+    async fn app() -> Result<Self> {
+        Self::with_github_app(true).await
+    }
+
+    async fn with_github_app(github_app: bool) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let h = Harness::unserved(address).await?;
         let provider = Arc::new(Provider::default());
+        let github_app_authorization = github_app.then(|| {
+            Arc::new(GitHubAppAuthorizationOwner::new(
+                GitHubAppAuthorizationConfig::new(
+                    "Iv1.syntheticclient".into(),
+                    Zeroizing::new("synthetic-client-secret".into()),
+                    "codewire".into(),
+                    "https://codewire.example/api/v1/github/oauth/callback".into(),
+                )
+                .expect("synthetic GitHub App configuration"),
+                provider.clone(),
+            ))
+        });
         let owner = Arc::new(GithubRepositoryOwner::new(
             h.pool.clone(),
             h.store.clone(),
             provider.clone(),
+            github_app_authorization.clone(),
         ));
         let app = connect_router_with_auth(
             owner.router(),
@@ -107,6 +310,7 @@ impl Fixture {
             h,
             owner,
             provider,
+            github_app_authorization,
             server,
             client: reqwest::Client::builder()
                 .no_proxy()
@@ -164,6 +368,44 @@ impl Fixture {
         Ok((profile, record))
     }
 
+    async fn app_profile(&self) -> Result<(AccessProfile, CredentialRecord)> {
+        let github = self
+            .github_app_authorization
+            .as_ref()
+            .context("GitHub App fixture owner")?;
+        let mut imported = github
+            .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+            .await
+            .context("synthetic GitHub App authorization")?;
+        let (mut material, account_hint) = imported.take_import()?;
+        let protected = ProtectedValue::new(std::mem::take(&mut *material))?;
+        let owner = Owner::User(OwnerId::parse(ALICE)?);
+        let record = self
+            .h
+            .store
+            .create(
+                &owner,
+                CredentialRegistration {
+                    provider: ProviderId::parse("github")?,
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: uuid::Uuid::new_v4().to_string(),
+                    account_hint,
+                    expires_at_unix: None,
+                },
+                &protected,
+            )
+            .await?;
+        let profile = self
+            .profiles()
+            .create(
+                &owner,
+                AccessProfileName::parse(uuid::Uuid::new_v4().to_string())?,
+                BTreeMap::from([(CapabilitySlot::github(), record.metadata.id.clone())]),
+            )
+            .await?;
+        Ok((profile, record))
+    }
+
     async fn authority(&self) -> Result<CredentialMutationAuthority> {
         let headers = HeaderMap::from_iter([(
             http::header::AUTHORIZATION,
@@ -188,6 +430,7 @@ impl Fixture {
         self.provider.released.notify_one();
         self.server.abort();
         let _ = self.server.await;
+        self.owner.shutdown().await;
         self.h.finish(result).await
     }
 }
@@ -427,6 +670,90 @@ async fn original_authority_profile_and_credential_races_never_release_metadata(
             .with_context(|| format!("discovery race {scenario}"))?;
     }
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_app_repository_picker_refreshes_once_and_never_rebinds_a_cursor() -> Result<()> {
+    let f = Fixture::app().await?;
+    let result = async {
+        let (profile, original) = f.app_profile().await?;
+        let stale_cursor = Selection::parse(ListGithubRepositoriesRequest {
+            profile_id: profile.id.as_str().into(),
+            profile_revision: profile.revision,
+            page_size: 1,
+            ..Default::default()
+        })
+        .map_err(|_| anyhow::anyhow!("synthetic repository selection must be valid"))?
+        .cursor(&profile.owner, &original, 2);
+        f.provider
+            .reject_first_app_repository
+            .store(true, Ordering::SeqCst);
+        let (status, page) = response(f.post(&profile).bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK
+                && page["repositories"]
+                    .as_array()
+                    .is_some_and(|repositories| repositories.len() == 1)
+        );
+        ensure!(f.provider.calls.load(Ordering::SeqCst) == 2);
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
+        let current =
+            f.h.store
+                .record(&profile.owner, &original.metadata.id)
+                .await?;
+        ensure!(same_refreshed_record(&original, &current).is_ok());
+
+        let calls_before_cursor = f.provider.calls.load(Ordering::SeqCst);
+        error(
+            f.post(&profile).bearer_auth(oauth(ALICE)).json(&json!({
+                "profileId": profile.id.as_str(),
+                "profileRevision": profile.revision.to_string(),
+                "pageSize": 1,
+                "pageToken": stale_cursor,
+            })),
+            "aborted",
+        )
+        .await?;
+        ensure!(f.provider.calls.load(Ordering::SeqCst) == calls_before_cursor);
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() -> Result<()> {
+    let f = Fixture::app().await?;
+    let result = async {
+        // This is within the App bundle's renewal skew, so discovery refreshes
+        // before its first repository request. The successor's 401 must be
+        // surfaced, never trigger a second rotation and replay.
+        f.provider
+            .initial_app_access_lifetime
+            .store(60, Ordering::SeqCst);
+        let (profile, original) = f.app_profile().await?;
+        f.provider
+            .reject_first_refreshed_app_repository
+            .store(true, Ordering::SeqCst);
+        error(
+            f.post(&profile).bearer_auth(oauth(ALICE)),
+            "permission_denied",
+        )
+        .await?;
+        ensure!(f.provider.calls.load(Ordering::SeqCst) == 1);
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
+        let current =
+            f.h.store
+                .record(&profile.owner, &original.metadata.id)
+                .await?;
+        ensure!(same_refreshed_record(&original, &current).is_ok());
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
 }
 
 #[tokio::test]

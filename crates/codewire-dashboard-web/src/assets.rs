@@ -81,7 +81,11 @@ const TERMINAL_STYLES: &str = include_str!("../../../packages/codewire-design/ro
 const BILLING_ADMIN_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/billing-admin.css");
 const XTERM_STYLES: &str = include_str!("../assets/xterm/xterm-6.0.0.css");
-const DASHBOARD_SCRIPT: &str = include_str!("../../../packages/codewire-design/dashboard.js");
+const DASHBOARD_SCRIPT: &str = concat!(
+    include_str!("../../../packages/codewire-design/dashboard.js"),
+    "\n",
+    include_str!("../../../packages/codewire-design/preview-ports.js"),
+);
 const PUBLIC_SCRIPT: &str = include_str!("../../../packages/codewire-design/public.js");
 const ORGANIZATIONS_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/organizations.js");
@@ -458,6 +462,24 @@ mod tests {
         let changed = static_response(&conditional, "text/css; charset=utf-8", "body{color:red}");
         assert_eq!(changed.status(), StatusCode::OK);
         assert_ne!(changed.headers()[header::ETAG], etag);
+    }
+
+    #[test]
+    fn preview_copy_is_in_the_shared_asset_loaded_by_both_ports_hosts() {
+        let controller = include_str!("../../../packages/codewire-design/preview-ports.js");
+        assert!(DASHBOARD_SCRIPT.contains(controller));
+        assert!(!ENVIRONMENTS_SCRIPT.contains("data-copy-preview"));
+        for html in [
+            include_str!("../templates/terminal.html"),
+            include_str!("../templates/organization-environments.html"),
+        ] {
+            assert!(html.contains(SCRIPT_PATH));
+        }
+        assert!(include_str!("../templates/environment-ports.html").contains("data-copy-preview"));
+        assert!(
+            include_str!("../../../packages/codewire-design/reference/fixtures/terminal.html")
+                .contains("../../preview-ports.js")
+        );
     }
 
     #[test]

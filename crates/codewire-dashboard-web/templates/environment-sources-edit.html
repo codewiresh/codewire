@@ -13,11 +13,12 @@
       <p class="cw-field-help">{{ editor.environment_name }}. Changing selections restarts a running Sandbox and retains its workspace data. A stopped Sandbox remains stopped.</p>
       {% let source_fields_id = "environment-edit" %}
       {% let sources = editor.fields %}
+      {% let source_creation_draft_parameter = "" %}
       {% include "environment-source-fields.html" %}
       <label class="cw-source-choice"><input type="checkbox" name="allow_restart" value="true"><span>I confirm the managed restart and interruption of current sessions.</span></label>
       <p class="cw-field-help">Clear both application-source checkboxes and choose no project to remove application secrets. Choose no provider credentials to clear the profile.</p>
-      {% if !editor.fields.complete() %}<p class="cw-field-error" role="alert">Complete source metadata is required before saving. Reload this page.</p>{% endif %}
+      {% if !editor.fields.ready_for_edit() %}<p class="cw-field-error" role="alert">Valid source selections and complete source metadata are required before saving. Reload this page.</p>{% endif %}
     </div>
-    <footer class="cw-drawer-footer"><button class="cw-button cw-button--accent cw-button--pill" type="submit"{% if !editor.fields.complete() %} disabled{% endif %}>Save sources</button></footer>
+    <footer class="cw-drawer-footer"><button class="cw-button cw-button--accent cw-button--pill" type="submit"{% if !editor.fields.ready_for_edit() %} disabled{% endif %}>Save sources</button></footer>
   </form>
 </section>

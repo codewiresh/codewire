@@ -2,19 +2,32 @@ use askama::Template;
 
 use crate::admin_connect::{AdminCatalogView, AdminStatsView, AuditLogRow};
 use crate::billing_connect::BillingPageView;
-#[cfg(test)]
 use crate::view::EnvironmentCreateFormView;
 use crate::view::{
     AccountAccessView, ApiKeysPageView, AuthFormView, CredentialSettingsView, DashboardView,
     DevicePageView, EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
-    OrganizationFormView, OrganizationRow, PresetsPageView, SecretBucketPageView,
-    SecretProjectsPageView, SettingsPageView, SetupTwoFactorView, TerminalPageView,
-    TwoFactorRecoveryView,
+    OrganizationFormView, OrganizationRow, PersonalApiKeysPageView, PersonalSecretsPageView,
+    PresetsPageView, SecretBucketPageView, SecretProjectsPageView, SettingsPageView,
+    SetupTwoFactorView, TerminalPageView, TwoFactorRecoveryView,
 };
 
 #[derive(Template)]
 #[template(path = "home.html")]
 pub(crate) struct HomeTemplate;
+
+#[derive(Template)]
+#[template(path = "settings-secrets.html")]
+pub(crate) struct SettingsSecretsTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) page: &'a PersonalSecretsPageView,
+}
+
+#[derive(Template)]
+#[template(path = "settings-api-keys.html")]
+pub(crate) struct SettingsApiKeysTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) page: &'a PersonalApiKeysPageView,
+}
 
 #[derive(Template)]
 #[template(path = "admin-overview.html")]
@@ -247,7 +260,6 @@ pub(crate) struct SnapshotsTemplate<'a> {
     pub(crate) organization: &'a OrganizationContext,
 }
 
-#[cfg(test)]
 #[derive(Template)]
 #[template(path = "environment-create-form.html")]
 pub(crate) struct EnvironmentCreateFormTemplate<'a> {

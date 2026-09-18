@@ -207,6 +207,8 @@ export interface CreateEnvironmentRequest {
   expected_profile_revision?: bigint;
   confirm_personal_credentials?: boolean;
   confirm_personal_secrets?: boolean;
+  /** Suppress inherited preview defaults during creation, not network access. */
+  omit_application_previews?: boolean;
 }
 
 export interface UpdateEnvironmentSourcesRequest {
