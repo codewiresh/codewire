@@ -185,11 +185,13 @@ impl CodewireClient {
             .await
             .map_err(|_| github_enrollment_unknown())?;
         let mut challenged = false;
-        while let Some(message) = stream
-            .message::<EnrollGithubResponse>()
-            .await
-            .map_err(|_| github_enrollment_unknown())?
-        {
+        loop {
+            let message = match stream.message::<EnrollGithubResponse>().await {
+                Ok(Some(message)) => message,
+                Ok(None) => return Err(github_enrollment_unknown()),
+                Err(error) if challenged => return Err(github_enrollment_terminal_error(error)),
+                Err(_) => return Err(github_enrollment_unknown()),
+            };
             match message.to_owned_message().event {
                 Some(enroll_github_response::Event::Challenge(challenge)) if !challenged => {
                     if !valid_github_challenge(&challenge) || !on_challenge(*challenge) {
@@ -210,7 +212,6 @@ impl CodewireClient {
                 _ => return Err(github_enrollment_unknown()),
             }
         }
-        Err(github_enrollment_unknown())
     }
 }
 
@@ -238,6 +239,30 @@ fn github_enrollment_unknown() -> ClientError {
     )
 }
 
+/// A known terminal reason after a verified challenge is safe to render using
+/// our own fixed text. Every other close remains an uncertain publication: no
+/// peer-supplied message or provider diagnostic crosses this boundary.
+fn github_enrollment_terminal_error(error: connectrpc::ConnectError) -> ClientError {
+    let error = ClientError::from(error);
+    let reason = error
+        .error_info()
+        .filter(|info| info.domain() == "codewire.sh")
+        .map(ErrorInfo::reason);
+    match (error.code(), reason) {
+        (ErrorCode::FailedPrecondition, Some("CREDENTIAL_ENROLLMENT_FAILED")) => ClientError::new(
+            ErrorCode::FailedPrecondition,
+            "isolated GitHub enrollment did not complete; no platform credential was stored",
+        ),
+        (ErrorCode::FailedPrecondition, Some("CREDENTIAL_ENROLLMENT_UNSUPPORTED")) => {
+            ClientError::new(
+                ErrorCode::FailedPrecondition,
+                "isolated GitHub enrollment output is unsupported; no platform credential was stored",
+            )
+        }
+        _ => github_enrollment_unknown(),
+    }
+}
+
 fn valid_challenge(challenge: &CodexDeviceChallenge) -> bool {
     challenge.verification_url == "https://auth.openai.com/codex/device"
         && !challenge.user_code.is_empty()
@@ -260,6 +285,7 @@ fn enrollment_unknown() -> ClientError {
 mod tests {
     use super::*;
     use buffa::Message;
+    use codewire_proto::google::rpc::ErrorInfo as GoogleErrorInfo;
     use wiremock::matchers::{body_bytes, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -450,8 +476,19 @@ mod tests {
     }
 
     async fn stream_at(server: &MockServer, route: &str, body: &mut Vec<u8>) {
+        stream_at_terminal(server, route, body, b"{}").await;
+    }
+
+    async fn stream_at_terminal(
+        server: &MockServer,
+        route: &str,
+        body: &mut Vec<u8>,
+        terminal: &[u8],
+    ) {
         // Real Connect envelopes, including the terminal JSON envelope.
-        body.extend_from_slice(&[2, 0, 0, 0, 2, b'{', b'}']);
+        body.push(2);
+        body.extend_from_slice(&(terminal.len() as u32).to_be_bytes());
+        body.extend_from_slice(terminal);
         Mock::given(method("POST"))
             .and(path(route))
             .and(header(
@@ -467,6 +504,25 @@ mod tests {
             .expect(1)
             .mount(server)
             .await;
+    }
+
+    fn github_terminal_error(code: &str, reason: &str, domain: &str) -> Vec<u8> {
+        let detail = connectrpc::ErrorDetail::from_message(
+            "google.rpc.ErrorInfo",
+            &GoogleErrorInfo {
+                reason: reason.into(),
+                domain: domain.into(),
+                ..Default::default()
+            },
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "error": {
+                "code": code,
+                "message": "private provider diagnostic must not cross the client boundary",
+                "details": [detail],
+            }
+        }))
+        .unwrap()
     }
 
     #[tokio::test]
@@ -584,6 +640,66 @@ mod tests {
         assert_eq!(result.id, "stored-github-id");
         assert_eq!(result.revocation_generation, 9_007_199_254_740_993);
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn github_enrollment_renders_only_closed_post_challenge_failure_classes() {
+        for (code, reason, domain, expected_code, expected_message) in [
+            (
+                "failed_precondition",
+                "CREDENTIAL_ENROLLMENT_FAILED",
+                "codewire.sh",
+                ErrorCode::FailedPrecondition,
+                "isolated GitHub enrollment did not complete; no platform credential was stored",
+            ),
+            (
+                "failed_precondition",
+                "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
+                "codewire.sh",
+                ErrorCode::FailedPrecondition,
+                "isolated GitHub enrollment output is unsupported; no platform credential was stored",
+            ),
+            (
+                "failed_precondition",
+                "CREDENTIAL_ENROLLMENT_FAILED",
+                "untrusted.invalid",
+                ErrorCode::Unknown,
+                "GitHub enrollment acknowledgement is unknown; reconcile the credential by name before retrying",
+            ),
+            (
+                "unknown",
+                "CREDENTIAL_MUTATION_UNCERTAIN",
+                "codewire.sh",
+                ErrorCode::Unknown,
+                "GitHub enrollment acknowledgement is unknown; reconcile the credential by name before retrying",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let mut body = frame(github_challenge("https://github.com/login/device"));
+            let terminal = github_terminal_error(code, reason, domain);
+            stream_at_terminal(
+                &server,
+                "/codewire.v1.CredentialMutationService/EnrollGithub",
+                &mut body,
+                &terminal,
+            )
+            .await;
+            let error = client(&server)
+                .enroll_github(
+                    EnrollGithubRequest {
+                        name: "work".into(),
+                        ..Default::default()
+                    },
+                    |_| true,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(error.message(), expected_message);
+            assert!(!error.message().contains("private provider"));
+            assert!(error.reason().is_none());
+            server.verify().await;
+        }
     }
 
     #[tokio::test]
