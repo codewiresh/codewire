@@ -191,7 +191,9 @@ test.describe("managed provider credential browser journey", () => {
       expect(draft).toMatch(/^[0-9a-f-]{36}$/);
       await page.locator("[data-create-resources] > summary").click();
       await page.getByLabel("CPU", { exact: true }).selectOption("2000");
-      await page.getByLabel("TTL", { exact: true }).fill("3600s");
+      const ttl = page.getByLabel("Delete after (TTL)", { exact: true });
+      await expect(ttl).toBeVisible();
+      await ttl.fill("3600s");
       await page.getByRole("textbox", { name: "Name", exact: true }).fill("setup-name-not-persisted");
       await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
       const settingsPath = `/settings/credentials/?org=${slug}&creation_draft=${draft}`;
@@ -343,7 +345,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(draftForm).toHaveAttribute("data-create-draft-actor", owner);
       await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
       await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("2000");
-      await expect(page.getByLabel("TTL", { exact: true })).toHaveValue("3600s");
+      await expect(ttl).toHaveValue("3600s");
       await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
       await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("");
       expect(setupDispatches).toEqual([]);

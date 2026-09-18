@@ -8,6 +8,11 @@ import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { USERS } from "./helpers/seed";
 import { terminalWebSocketUrl } from "./helpers/terminal-websocket";
 
+// The serial Create setup journey enters write-only personal secret values.
+// Worker capture settings must be file-scoped. Explicit layout goldens below
+// remain enabled and are taken before those inputs are entered.
+test.use({ screenshot: "off", trace: "off", video: "off" });
+
 const sql = postgres(process.env.DATABASE_URL!);
 const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
@@ -209,7 +214,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
     await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
-    const csrf = await page.locator('[name="_csrf"]').inputValue();
+    const csrf = await form.locator('[name="_csrf"]').inputValue();
     const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
     await page.getByRole("button", { name: "Restore saved selections" }).click();
     const response = await responsePromise;
@@ -224,7 +229,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
-    await expect(page.locator('[name="_csrf"]')).toHaveValue(csrf);
+    await expect(form.locator('[name="_csrf"]')).toHaveValue(csrf);
     await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     expect(dispatches).toEqual([]);
@@ -421,8 +426,6 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 
-  test.describe(() => {
-  test.use({ screenshot: "off", trace: "off", video: "off" });
   test("renders server-owned create options and resources with no browser service caller", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop create-options and visual contract");
     const disallowedBrowserCalls = watchDisallowedBrowserCalls(page);
@@ -483,7 +486,6 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Escape");
     await expect(page).toHaveURL(new RegExp(`/${slug}/$`));
     await expect(page.locator("[data-drawer]")).toBeHidden();
-  });
   });
 
   test("opens the pre-rendered sheet instantly and updates clean history without navigation", async ({ page, isMobile }) => {
@@ -611,8 +613,6 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
   });
 
-  test.describe(() => {
-  test.use({ screenshot: "off", trace: "off", video: "off" });
   test("keeps environment create and inventory usable on mobile", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile responsive and visual contract");
     await page.goto(`/${slug}/new/`);
@@ -638,7 +638,6 @@ test.describe.serial("server-rendered environments", () => {
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
     await expect(page.getByLabel("Secret project", { exact: true })).toBeEnabled();
     await assertExplicitCreateRecovery(page);
-  });
   });
 
   test("selects a platform secret project and preserves it after a form error", async ({ page, isMobile }) => {
