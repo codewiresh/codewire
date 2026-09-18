@@ -171,11 +171,20 @@ struct Harness {
     stdout: JoinHandle<Vec<u8>>,
     stderr: JoinHandle<Vec<u8>>,
     stop_projection: Option<oneshot::Sender<()>>,
-    projection: Option<JoinHandle<(usize, usize)>>,
+    projection: Option<JoinHandle<ProjectionHistory>>,
     session_client: SessionClient,
     client: DaemonServiceClient<Channel>,
     root: tempfile::TempDir,
     endpoint: String,
+    environment: Uuid,
+}
+
+#[derive(Default)]
+struct ProjectionHistory {
+    ids: BTreeSet<String>,
+    recipients: BTreeSet<Vec<u8>>,
+    count: usize,
+    cancellations: BTreeSet<String>,
 }
 
 struct ProjectionGate {
@@ -189,7 +198,7 @@ impl Harness {
         Self::start_with_gate(None).await
     }
 
-    async fn start_with_gate(mut gate: Option<ProjectionGate>) -> Self {
+    async fn start_with_gate(gate: Option<ProjectionGate>) -> Self {
         let root = tempfile::Builder::new()
             .prefix("cw-proj-")
             .tempdir()
@@ -203,6 +212,16 @@ impl Harness {
         }
         create_launcher_adapter(&canonical);
         let environment = Uuid::new_v4();
+        Self::open(root, environment, ProjectionHistory::default(), gate).await
+    }
+
+    async fn open(
+        root: tempfile::TempDir,
+        environment: Uuid,
+        history: ProjectionHistory,
+        mut gate: Option<ProjectionGate>,
+    ) -> Self {
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "projection_daemon_child", "--nocapture"])
             .env_clear()
@@ -264,11 +283,13 @@ impl Harness {
         assert_eq!(ready.environment_generation, GENERATION);
         let (stop_projection, mut stop) = oneshot::channel();
         let projection = tokio::spawn(async move {
-            let mut ids = BTreeSet::new();
-            let mut recipients = BTreeSet::new();
-            let mut count = 0;
+            let ProjectionHistory {
+                mut ids,
+                mut recipients,
+                mut count,
+                mut cancellations,
+            } = history;
             let mut gated_request_id = None;
-            let mut cancellations = BTreeSet::new();
             loop {
                 let message = tokio::select! {
                     _ = &mut stop => break,
@@ -350,7 +371,12 @@ impl Harness {
                 .unwrap();
                 count += 1;
             }
-            (count, cancellations.len())
+            ProjectionHistory {
+                ids,
+                recipients,
+                count,
+                cancellations,
+            }
         });
         Self {
             child,
@@ -363,6 +389,7 @@ impl Harness {
             client,
             root,
             endpoint,
+            environment,
         }
     }
 
@@ -460,14 +487,24 @@ impl Harness {
         self.stop_with_cancellations(0).await;
     }
 
-    async fn stop_with_cancellations(mut self, cancellations: usize) {
+    async fn stop_with_cancellations(self, cancellations: usize) {
+        self.stop_preserving_store(2, cancellations).await;
+    }
+
+    async fn stop_preserving_store(
+        mut self,
+        projections: usize,
+        cancellations: usize,
+    ) -> (tempfile::TempDir, Uuid, ProjectionHistory) {
         self.stop_projection.take().unwrap().send(()).unwrap();
-        assert_eq!(
-            bounded(self.projection.take().unwrap()).await.unwrap(),
-            (2, cancellations)
-        );
+        let history = bounded(self.projection.take().unwrap()).await.unwrap();
+        assert_eq!(history.count, projections);
+        assert_eq!(history.cancellations.len(), cancellations);
+        let pid = self.child.id().expect("owned daemon PID before reaping");
         drop(self.stdin.take());
         let status = bounded(self.child.wait()).await.unwrap();
+        assert_eq!(self.child.try_wait().unwrap(), Some(status));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
         let stdout = bounded(self.stdout).await.unwrap();
         let stderr = bounded(self.stderr).await.unwrap();
         assert!(
@@ -483,6 +520,7 @@ impl Harness {
                 .count(),
             0
         );
+        (self.root, self.environment, history)
     }
 }
 
@@ -527,10 +565,10 @@ async fn transient_projection_preserves_override_and_terminal_exit_twice() {
 }
 
 async fn launch_and_restart(pty: bool) {
-    launch_and_restart_with_harness(Harness::start().await, pty).await;
+    launch_and_restart_with_harness(Harness::start().await, pty, true).await;
 }
 
-async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool) {
+async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen_daemon: bool) {
     let term = if pty { "requested-term" } else { "" };
     let launched = bounded(
         harness
@@ -561,6 +599,17 @@ async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool) {
     let output = harness.output(&id, 0, pty).await;
     assert_probe(&output, FIRST, pty);
     harness.assert_persisted_inputs(&id, pty, term);
+
+    if reopen_daemon {
+        // Reap the old daemon, retain only its owned persisted store, and
+        // reconnect a new bridge with the exact same admitted authority.
+        // Carry recipient/request history so freshness spans both daemons.
+        let (root, environment, history) = harness.stop_preserving_store(1, 0).await;
+        harness = Harness::open(root, environment, history, None).await;
+        let recovered = harness.exited(&id).await;
+        assert_eq!(recovered.output_end_offset, first.output_end_offset);
+        harness.assert_persisted_inputs(&id, pty, term);
+    }
 
     let restarted = bounded(harness.client.restart_session(authorized(
         v1::RestartSessionRequest {
@@ -778,7 +827,7 @@ async fn delayed_projection_fits_launch_budget(index: usize) {
         tokio::time::sleep(Duration::from_secs(6)).await;
         release.send(()).unwrap();
     });
-    launch_and_restart_with_harness(harness, true).await;
+    launch_and_restart_with_harness(harness, true, false).await;
     delay.await.unwrap();
 }
 

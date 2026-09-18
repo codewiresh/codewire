@@ -30,7 +30,7 @@ SNAPSHOT_CLEANUP_PID="$$"
 
 usage() {
   cat <<'EOF'
-Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH [--prepared-kind-management-secrets-mobile | --prepared-kind-creation | --prepared-kind-terminal | --prepared-kind-account]
+Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH [--prepared-kind-management-secrets-mobile | --prepared-kind-creation | --prepared-kind-terminal | --prepared-kind-account | --prepared-kind-settings-navigation]
 
 Regenerate the five affected dashboard snapshots whose checked-in suffix is
 ubuntu24-cft145. The local Kind stack must already be running through `make up`.
@@ -54,6 +54,11 @@ With --prepared-kind-account, regenerate only the six existing desktop/mobile
 Account, Security, and Active sessions goldens on that prepared topology.
 This profile preserves synthetic authentication and renderer isolation, never
 creates/deploys/forwards the topology, and does not qualify session revocation.
+
+With --prepared-kind-settings-navigation, regenerate only the eighteen existing
+desktop/mobile organization-management and Account, Security, and Active sessions
+goldens. It runs the two existing management visual tests with authentication
+dependencies on that prepared topology, without creating/deploying/forwarding it.
 
 The Chromium archive must be chrome-linux64.zip for version 145.0.7632.6 with
 the checksum pinned by scripts/ci/install-pinned-playwright-chromium.sh.
@@ -117,6 +122,28 @@ EOF
       ;;
     prepared-kind-account)
       cat <<'EOF'
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-sessions-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-sessions-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+      ;;
+    prepared-kind-settings-navigation)
+      cat <<'EOF'
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-presets-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-presets-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-secrets-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-secrets-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-api-keys-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-api-keys-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-members-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-members-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-billing-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-billing-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
@@ -413,7 +440,7 @@ promote_snapshots() {
 snapshot_profile_context() {
   case "$1" in
     default) printf '%s\n' "$KUBE_CONTEXT" ;;
-    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal|prepared-kind-account) printf '%s\n' "$PREPARED_KIND_CONTEXT" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal|prepared-kind-account|prepared-kind-settings-navigation) printf '%s\n' "$PREPARED_KIND_CONTEXT" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -421,7 +448,7 @@ snapshot_profile_context() {
 snapshot_profile_namespace() {
   case "$1" in
     default) printf '%s\n' "$KUBE_NAMESPACE" ;;
-    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal|prepared-kind-account) printf '%s\n' "$PREPARED_KIND_NAMESPACE" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal|prepared-kind-account|prepared-kind-settings-navigation) printf '%s\n' "$PREPARED_KIND_NAMESPACE" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -429,7 +456,7 @@ snapshot_profile_namespace() {
 snapshot_profile_origin() {
   case "$1" in
     default) printf '%s\n' "$PLAYWRIGHT_BASE_URL" ;;
-    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal|prepared-kind-account) printf '%s\n' "$PREPARED_KIND_PLAYWRIGHT_BASE_URL" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal|prepared-kind-account|prepared-kind-settings-navigation) printf '%s\n' "$PREPARED_KIND_PLAYWRIGHT_BASE_URL" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -437,7 +464,7 @@ snapshot_profile_origin() {
 snapshot_profile_database_url() {
   case "$1" in
     default) printf '%s\n' "$DATABASE_URL" ;;
-    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal|prepared-kind-account) printf '%s\n' "$PREPARED_KIND_DATABASE_URL" ;;
+    prepared-kind-management-secrets-mobile|prepared-kind-creation|prepared-kind-terminal|prepared-kind-account|prepared-kind-settings-navigation) printf '%s\n' "$PREPARED_KIND_DATABASE_URL" ;;
     *) fail "unknown snapshot profile: $1"; return 2 ;;
   esac
 }
@@ -465,7 +492,7 @@ validate_snapshot_topology() {
         return 1
       }
   done
-  if [ "$profile" = prepared-kind-management-secrets-mobile ] || [ "$profile" = prepared-kind-creation ] || [ "$profile" = prepared-kind-terminal ] || [ "$profile" = prepared-kind-account ]; then
+  if [ "$profile" = prepared-kind-management-secrets-mobile ] || [ "$profile" = prepared-kind-creation ] || [ "$profile" = prepared-kind-terminal ] || [ "$profile" = prepared-kind-account ] || [ "$profile" = prepared-kind-settings-navigation ]; then
     kubectl --context "$kube_context" -n "$namespace" rollout status \
       deployment/codewire-credential-service --timeout=120s || {
         fail 'required dashboard dependency is not Ready: deployment/codewire-credential-service'
@@ -665,7 +692,7 @@ main() {
         chromium_archive="$2"
         shift 2
         ;;
-      --prepared-kind-management-secrets-mobile|--prepared-kind-creation|--prepared-kind-terminal|--prepared-kind-account)
+      --prepared-kind-management-secrets-mobile|--prepared-kind-creation|--prepared-kind-terminal|--prepared-kind-account|--prepared-kind-settings-navigation)
         [ "$snapshot_profile" = default ] || {
           fail 'only one prepared Kind snapshot profile may be specified'
           return 2
@@ -893,6 +920,15 @@ main() {
               --project=dashboard-ssr-desktop --project=dashboard-ssr-mobile \
               apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts \
               --grep "renders account, security, and session surfaces in the selected context" \
+              --output /tmp/codewire-run/test-results \
+              --update-snapshots=changed --retries=0 --workers=1 --reporter=line
+            ;;
+          prepared-kind-settings-navigation)
+            ./apps/dashboard/node_modules/.bin/playwright test \
+              --config apps/dashboard/playwright.config.ts \
+              --project=dashboard-ssr-desktop --project=dashboard-ssr-mobile \
+              apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts \
+              --grep "renders every organization management surface without page overflow|renders account, security, and session surfaces in the selected context" \
               --output /tmp/codewire-run/test-results \
               --update-snapshots=changed --retries=0 --workers=1 --reporter=line
             ;;

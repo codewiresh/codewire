@@ -29,7 +29,7 @@
   <p class="cw-field-help">When names overlap: organization, then project, then personal. Ordinary environment configuration wins over all three.</p>
   <nav aria-label="Manage application secrets">
     <ul class="cw-source-choices">
-      <li><a href="/{{ organization.slug }}/secrets/user/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}">Add or manage personal secrets</a></li>
+      <li><a href="/settings/secrets/?org={{ organization.slug }}{% if !source_creation_draft_parameter.is_empty() %}&amp;{{ source_creation_draft_parameter }}{% endif %}">Add or manage personal secrets</a></li>
       <li><a href="/{{ organization.slug }}/secrets/organization/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}">Manage organization secrets</a></li>
       <li><a href="{{ organization.secrets_url }}{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}">Manage secret projects</a></li>
     </ul>

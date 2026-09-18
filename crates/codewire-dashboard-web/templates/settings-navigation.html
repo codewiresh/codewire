@@ -1,0 +1,31 @@
+<header class="cw-settings-subnav-heading cw-context-nav-heading"><h2>Settings</h2></header>
+{% if view.organization_navigation_unavailable %}<p class="cw-settings-navigation-notice" role="status">Organization navigation is temporarily unavailable. Personal settings still work.</p>{% endif %}
+<nav class="cw-context-nav-links" aria-label="{% if settings_personal %}Settings{% else %}Organization navigation{% endif %}">
+  <h3 id="settings-personal-title" class="cw-context-nav-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title">
+    <li><a href="/settings/{{ view.global_context_query }}"{% if settings_personal && settings_section == "account" %} aria-current="page"{% endif %}>Account</a></li>
+    <li><a href="/settings/credentials/{{ view.global_context_query }}"{% if settings_personal && settings_section == "credentials" %} aria-current="page"{% endif %}>Credentials</a></li>
+    <li><a href="/settings/secrets/{{ view.global_context_query }}"{% if settings_personal && settings_section == "secrets" %} aria-current="page"{% endif %}>Secrets</a></li>
+    <li><a href="/settings/api-keys/{{ view.global_context_query }}"{% if settings_personal && settings_section == "api-keys" %} aria-current="page"{% endif %}>API Keys</a></li>
+  </ul>
+  {% if view.has_selected_organization %}
+  <h3 id="settings-organization-title" class="cw-context-nav-label">Organization · {{ view.selected_organization_name }}</h3>
+  <ul aria-labelledby="settings-organization-title">
+    <li><a href="{{ view.selected_organization_url }}">Sandboxes</a></li>
+    <li><a href="/{{ view.selected_organization_slug }}/snapshots/">Snapshots <small>Soon</small></a></li>
+    <li><a href="/{{ view.selected_organization_slug }}/presets/"{% if !settings_personal && settings_section == "presets" %} aria-current="page"{% endif %}>Presets</a></li>
+    <li><a href="/{{ view.selected_organization_slug }}/secrets/"{% if !settings_personal && settings_section == "secrets" %} aria-current="page"{% endif %}>Secrets</a></li>
+    <li><a href="/{{ view.selected_organization_slug }}/api-keys/"{% if !settings_personal && settings_section == "api-keys" %} aria-current="page"{% endif %}>API Keys</a></li>
+    <li><a href="/{{ view.selected_organization_slug }}/members/"{% if !settings_personal && settings_section == "members" %} aria-current="page"{% endif %}>Members</a></li>
+    <li><a href="/{{ view.selected_organization_slug }}/billing/"{% if !settings_personal && settings_section == "billing" %} aria-current="page"{% endif %}>Billing</a></li>
+  </ul>
+  {% endif %}
+  {% if view.is_admin %}
+  <h3 id="settings-admin-title" class="cw-context-nav-label">Admin</h3>
+  <ul aria-labelledby="settings-admin-title">
+    <li><a href="/admin/{{ view.global_context_query }}">Overview</a></li>
+    <li><a href="/admin/billing/{{ view.global_context_query }}">Billing catalog</a></li>
+    <li><a href="/admin/audit/{{ view.global_context_query }}">Audit log</a></li>
+  </ul>
+  {% endif %}
+</nav>

@@ -2352,6 +2352,10 @@ mod tests {
                 assert!(
                     href.starts_with(&format!("/{}/secrets/", organization.slug))
                         || href.starts_with(&format!(
+                            "/settings/secrets/?org={}&amp;",
+                            organization.slug
+                        ))
+                        || href.starts_with(&format!(
                             "/settings/credentials/?org={}&amp;",
                             organization.slug
                         ))
@@ -2423,7 +2427,10 @@ mod tests {
         .unwrap();
         let hrefs = setup_hrefs(&html);
         assert_eq!(hrefs.len(), 4);
-        assert_eq!(hrefs[0], format!("/{}/secrets/user/", organization.slug));
+        assert_eq!(
+            hrefs[0],
+            format!("/settings/secrets/?org={}", organization.slug)
+        );
         assert_eq!(
             hrefs[1],
             format!("/{}/secrets/organization/", organization.slug)
@@ -2818,10 +2825,8 @@ mod tests {
             id: "org-test".into(),
             name: "Test".into(),
             slug: "test".into(),
-            role: "owner",
             can_admin: true,
             environments_url: "/test/".into(),
-            snapshots_url: "/test/snapshots/".into(),
             presets_url: "/test/presets/".into(),
             secrets_url: "/test/secrets/".into(),
             api_keys_url: "/test/api-keys/".into(),
@@ -3500,10 +3505,8 @@ mod tests {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
             slug: "organization".to_owned(),
-            role: "owner",
             can_admin: true,
             environments_url: "/organization/".to_owned(),
-            snapshots_url: "/organization/snapshots/".to_owned(),
             presets_url: "/organization/presets/".to_owned(),
             secrets_url: "/organization/secrets/".to_owned(),
             api_keys_url: "/organization/api-keys/".to_owned(),
@@ -3559,10 +3562,8 @@ mod tests {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
             slug: "organization".to_owned(),
-            role: "owner",
             can_admin: true,
             environments_url: "/organization/".to_owned(),
-            snapshots_url: "/organization/snapshots/".to_owned(),
             presets_url: String::new(),
             secrets_url: String::new(),
             api_keys_url: String::new(),
@@ -3637,10 +3638,8 @@ mod tests {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
             slug: "organization".to_owned(),
-            role: "owner",
             can_admin: true,
             environments_url: String::new(),
-            snapshots_url: String::new(),
             presets_url: String::new(),
             secrets_url: String::new(),
             api_keys_url: String::new(),
@@ -3690,10 +3689,8 @@ mod tests {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
             slug: "organization".to_owned(),
-            role: "owner",
             can_admin: true,
             environments_url: "/organization/".to_owned(),
-            snapshots_url: "/organization/snapshots/".to_owned(),
             presets_url: "/organization/presets/".to_owned(),
             secrets_url: "/organization/secrets/".to_owned(),
             api_keys_url: "/organization/api-keys/".to_owned(),

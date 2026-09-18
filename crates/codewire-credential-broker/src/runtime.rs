@@ -926,6 +926,7 @@ fn map_github_app_authorization_error(error: GitHubAppAuthorizationError) -> Bro
         GitHubAppAuthorizationError::Configuration
         | GitHubAppAuthorizationError::InvalidAuthorizationCode
         | GitHubAppAuthorizationError::Denied
+        | GitHubAppAuthorizationError::InstallationRequired
         | GitHubAppAuthorizationError::InvalidResponse => BrokerRequestError::Denied,
     }
 }

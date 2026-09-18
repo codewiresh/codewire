@@ -65,6 +65,53 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
         if secret_key in entry:
             fail(f"{label}: dashboard must never receive {secret_key}")
 
+    def assert_github_public_projection(resources: list[str], document: str | None, label: str, mode: str) -> None:
+        # Browser authorization needs public identifiers, never the App secret or
+        # the credential-service's secret-bearing authorization configuration.
+        if document is not None:
+            for name in ("GITHUB_APP_SLUG", "GITHUB_APP_CLIENT_ID"):
+                entry = env_entry(document, name)
+                expected = (
+                    r"^          valueFrom:[ \t]*\n"
+                    r"            configMapKeyRef:[ \t]*\n"
+                    rf"              key: {name}[ \t]*\n"
+                    r"              name: codewire-dashboard-public-config(?:-[a-z0-9]{10})?[ \t]*\n"
+                    r"              optional: true[ \t]*\n?\Z"
+                )
+                if entry is None or not re.search(expected, entry, re.MULTILINE):
+                    fail(f"{label}: dashboard must optionally read {name} exactly once from only {public_config}")
+            if re.search(r"^        - name: (?:CREDENTIAL_GITHUB_APP_|GITHUB_APP_(?:CLIENT_SECRET|PRIVATE_KEY))", document, re.MULTILINE):
+                fail(f"{label}: dashboard must never receive private GitHub App configuration")
+            if re.search(r"\bcodewire-github-app-authorization\b", document):
+                fail(f"{label}: dashboard must never receive the GitHub App authorization Secret")
+        configs = [
+            resource for resource in resources
+            if top_level_field(resource, "kind") == "ConfigMap"
+            and re.fullmatch(r"codewire-dashboard-public-config(?:-[a-z0-9]{10})?", resource_name(resource) or "")
+        ]
+        if len(configs) != 1:
+            fail(f"{label}: expected one GitHub dashboard public ConfigMap")
+        else:
+            data = re.search(r"^data:\n([\s\S]*?)(?=^[A-Za-z]|\Z)", configs[0], re.MULTILINE)
+            entries = re.findall(r"^  ([A-Za-z0-9_]+): (.*)$", data.group(1) if data else "", re.MULTILINE)
+            if sorted(key for key, _ in entries) != sorted((site_key, "GITHUB_APP_SLUG", "GITHUB_APP_CLIENT_ID")):
+                fail(f"{label}: GitHub dashboard public ConfigMap must contain only the three public identifiers")
+            values = dict(entries)
+            client_id = values.get("GITHUB_APP_CLIENT_ID", "")
+            slug = values.get("GITHUB_APP_SLUG", "")
+            if mode == "local":
+                if client_id != "Iv1.kindsynthetic" or slug != "codewire-synthetic":
+                    fail(f"{label}: GitHub dashboard App identifiers must use fixed synthetic Kind values")
+            elif not re.fullmatch(r'(?:"[A-Za-z0-9.]{0,100}"|[A-Za-z0-9.]{1,100})', client_id) or not re.fullmatch(r'(?:"[A-Za-z0-9-]{0,100}"|[A-Za-z0-9-]{1,100})', slug):
+                fail(f"{label}: GitHub dashboard App identifiers must be empty or bounded public metadata")
+        for resource in resources:
+            if top_level_field(resource, "kind") == "Deployment" and resource_name(resource) != "codewire-dashboard":
+                if re.search(r"^        - name: GITHUB_APP_(?:SLUG|CLIENT_ID)\s*$", resource, re.MULTILINE) or public_config in resource:
+                    fail(f"{label}: unrelated Deployment/{resource_name(resource)} inherits the GitHub dashboard public projection")
+            if top_level_field(resource, "kind") == "ConfigMap" and (resource_name(resource) or "").startswith("codewire-config-"):
+                if re.search(r"^  GITHUB_APP_(?:SLUG|CLIENT_ID):", resource, re.MULTILINE):
+                    fail(f"{label}: shared codewire-config must not contain GitHub dashboard App identifiers")
+
     def assert_idp_projection(document: str, label: str, mode: str) -> None:
         if site_key in document or public_config in document:
             fail(f"{label}: IdP must never receive the public Turnstile projection")
@@ -122,6 +169,7 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
             rendered_idp = deployment(resources, "codewire-idp", label)
             if rendered_dashboard is not None:
                 assert_public_key_projection(rendered_dashboard, label)
+            assert_github_public_projection(resources, rendered_dashboard, label, mode)
             if rendered_idp is not None:
                 assert_idp_projection(rendered_idp, label, mode)
 
@@ -181,6 +229,12 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
                     )
                 ):
                     fail(f"{label}: unrelated Deployment/{name} inherits a Turnstile projection")
+        # The managed E2E topology uses the same dashboard deployment but a
+        # non-generated public ConfigMap. Keep its synthetic App contract bound.
+        path = "tests/e2e/kind"
+        resources = documents(run(["kustomize", "build", path]).stdout)
+        label = f"{path} (rendered)"
+        assert_github_public_projection(resources, deployment(resources, "codewire-dashboard", label), label, "local")
     except Exception as error:  # noqa: BLE001 - repository policy boundary
         fail(str(error))
 

@@ -34,6 +34,28 @@ type GitCounters = {
   refreshedUploadPack: number;
 };
 
+export async function githubConnectionMetadata(userId: string) {
+  if (process.env.PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE !== "1") {
+    throw new Error("GitHub connection metadata requires the managed synthetic Kind fixture");
+  }
+  // Inspect only this test owner's metadata and envelope-validity booleans.
+  // Neither plaintext nor encrypted provider material enters browser reports.
+  return sql`
+    SELECT c.id, c.user_id, c.organization_id, c.provider, c.authentication_kind,
+           c.status, c.revocation_generation::text, c.material_generation::text,
+           (m.credential_id IS NOT NULL AND m.material_generation = c.material_generation
+            AND m.kek_provider = 'openbao-transit' AND m.key_version > 0
+            AND octet_length(m.wrapped_dek) BETWEEN 1 AND 65536
+            AND octet_length(m.ciphertext) BETWEEN 16 AND 1048592
+            AND octet_length(m.nonce) = 12 AND m.format = 1 AND m.wrapped_format = 1)
+             AS protected_material_present
+    FROM platform_credentials c
+    LEFT JOIN platform_credential_material m ON m.credential_id = c.id
+    WHERE c.user_id = ${userId}
+    ORDER BY c.id
+  `;
+}
+
 async function waitForGithubCheckoutSetup(environmentId: string) {
   // Running makes Exec available, but setup continues asynchronously. Read
   // only status metadata; setup errors may contain child output, so never

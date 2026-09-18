@@ -73,6 +73,8 @@ async function openRowActions(row: Locator) {
 
 async function assertExplicitCreateRecovery(page: Page) {
   const dispatches: string[] = [];
+  const personalKey = `CREATE_RETURN_${crypto.randomUUID().replaceAll("-", "_")}`;
+  let primaryFailure: unknown;
   const watchDispatch = (request: import("@playwright/test").Request) => {
     if (/PrepareEnvironment|\/_actions\/sandboxes\/(?:create|prepare)/.test(request.url())) dispatches.push(request.url());
   };
@@ -165,6 +167,48 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
     await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    // The new personal Settings consumer must retain the same exact draft
+    // through cancellation, server validation and a real native secret write.
+    // Owning tests disable trace/video/failure screenshots around these inputs.
+    const personalPath = `/settings/secrets/?org=${slug}&creation_draft=${requestedDraft}`;
+    await page.getByRole("link", { name: "Add or manage personal secrets", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}${personalPath}`);
+    const personalReturn = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
+    await expect(personalReturn).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
+    const addSecret = page.getByRole("button", { name: "Add secret", exact: true }).first();
+    await addSecret.click();
+    const secretDialog = page.getByRole("dialog", { name: "Add secret", exact: true });
+    await secretDialog.getByLabel("Key", { exact: true }).fill(personalKey);
+    await secretDialog.getByLabel("Value", { exact: true }).fill("synthetic-cancelled-creation-value");
+    await secretDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByRole("dialog", { name: "Discard changes?", exact: true })
+      .getByRole("button", { name: "Discard changes", exact: true }).click();
+    await addSecret.click();
+    await expect(secretDialog.getByLabel("Value", { exact: true })).toHaveValue("");
+    await secretDialog.getByLabel("Key", { exact: true }).fill("bad-key");
+    await secretDialog.getByLabel("Value", { exact: true }).fill("synthetic-rejected-creation-value");
+    // Exercise server validation explicitly; normal native field constraints
+    // remain separately asserted and unchanged in the product.
+    await secretDialog.locator("form").evaluate((node: HTMLFormElement) => { node.noValidate = true; });
+    const secretValidation = page.waitForResponse((response) => response.request().method() === "POST"
+      && new URL(response.url()).pathname === "/settings/secrets/_actions/set");
+    await secretDialog.getByRole("button", { name: "Add secret", exact: true }).click();
+    expect((await secretValidation).status()).toBe(422);
+    await expect(secretDialog.getByRole("alert")).toContainText("ASCII letters");
+    await expect(secretDialog.getByLabel("Value", { exact: true })).toHaveValue("");
+    await expect(personalReturn).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
+    await secretDialog.getByLabel("Key", { exact: true }).fill(personalKey);
+    await secretDialog.getByLabel("Value", { exact: true }).fill("synthetic-saved-creation-value");
+    const secretWrite = page.waitForRequest((request) => request.method() === "POST"
+      && new URL(request.url()).pathname === "/settings/secrets/_actions/set");
+    await secretDialog.getByRole("button", { name: "Add secret", exact: true }).click();
+    expect((await secretWrite).headers().origin).toBe(ssrUrl);
+    await expect(page).toHaveURL(`${ssrUrl}${personalPath}&message=secret-saved`);
+    await expect(page.locator(".cw-personal-secret-row", { hasText: personalKey })).toHaveCount(1);
+    await personalReturn.click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     const csrf = await page.locator('[name="_csrf"]').inputValue();
     const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
     await page.getByRole("button", { name: "Restore saved selections" }).click();
@@ -182,8 +226,30 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
     await expect(page.locator('[name="_csrf"]')).toHaveValue(csrf);
     await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
+    await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     expect(dispatches).toEqual([]);
-  } finally { page.off("request", watchDispatch); }
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
+  } finally {
+    page.off("request", watchDispatch);
+    try {
+      const [row] = await sql`SELECT COUNT(*)::int AS count FROM tenant_secrets
+        WHERE path = ${`/users/${ownerId}`} AND key = ${personalKey}`;
+      if (row.count > 0) {
+        const response = await page.request.post(`${serverUrl}/codewire.v1.SecretService/DeleteUserSecret`, {
+          headers: { Origin: ssrUrl }, data: { key: personalKey }, timeout: 15_000,
+        });
+        expect(response.status()).toBe(200);
+        const [remaining] = await sql`SELECT COUNT(*)::int AS count FROM tenant_secrets
+          WHERE path = ${`/users/${ownerId}`} AND key = ${personalKey}`;
+        expect(remaining.count).toBe(0);
+      }
+    } catch (error) {
+      if (primaryFailure !== undefined) throw new AggregateError([primaryFailure, error], "Create return and cleanup failed", { cause: primaryFailure });
+      throw error;
+    }
+  }
 }
 
 async function issueTerminalTicket(page: Page): Promise<string> {
@@ -355,6 +421,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 
+  test.describe(() => {
+  test.use({ screenshot: "off", trace: "off", video: "off" });
   test("renders server-owned create options and resources with no browser service caller", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop create-options and visual contract");
     const disallowedBrowserCalls = watchDisallowedBrowserCalls(page);
@@ -415,6 +483,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Escape");
     await expect(page).toHaveURL(new RegExp(`/${slug}/$`));
     await expect(page.locator("[data-drawer]")).toBeHidden();
+  });
   });
 
   test("opens the pre-rendered sheet instantly and updates clean history without navigation", async ({ page, isMobile }) => {
@@ -542,6 +611,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
   });
 
+  test.describe(() => {
+  test.use({ screenshot: "off", trace: "off", video: "off" });
   test("keeps environment create and inventory usable on mobile", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile responsive and visual contract");
     await page.goto(`/${slug}/new/`);
@@ -568,6 +639,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Secret project", { exact: true })).toBeEnabled();
     await assertExplicitCreateRecovery(page);
   });
+  });
 
   test("selects a platform secret project and preserves it after a form error", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop source-selection contract");
@@ -591,7 +663,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     await expect(page.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
-    await expect(page.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/${slug}/secrets/user/?creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}&creation_draft=${draft}`);
     await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/?creation_draft=${draft}`);
     await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/?creation_draft=${draft}`);
     await expect(page.locator(`a[href="/settings/credentials/?org=${slug}&creation_draft=${draft}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
@@ -1146,7 +1218,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(sourceEditor.locator('[name="expected_secret_project"]')).toHaveValue(secretProjectId);
     await expect(sourceEditor.locator('[name="confirm_personal_secrets"]')).toHaveCount(0);
     await expect(sourceEditor.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
-    await expect(sourceEditor.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/${slug}/secrets/user/`);
+    await expect(sourceEditor.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}`);
     await expect(sourceEditor.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
     await expect(sourceEditor.locator(`a[href="/settings/credentials/?org=${slug}"]`)).toBeVisible();
     await sourceEditor.getByLabel("Secret project", { exact: true }).selectOption("");

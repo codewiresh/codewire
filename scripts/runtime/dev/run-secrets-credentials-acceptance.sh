@@ -57,7 +57,7 @@ individual journey with --only. Available journeys:
   dev-provider-ssh
   local-platform-mesh
   live-codex                (Linux local VM; fresh Codex device approval required)
-  live-github               (NOT RUN: no checked-in live GitHub journey)
+  live-github               (Linux local VM; fresh GitHub device approval required)
   live-openai               (Linux local VM; fresh API key and explicit model required)
   live-anthropic            (Linux local VM; fresh Anthropic API key input required)
   initial-private-checkout   (Linux local VM with generated platform SSH)
@@ -295,7 +295,7 @@ readiness_reason() {
         printf '%s' 'explicit canonical fresh provider-SSH OAuth directory unavailable'; return 1;
       fi
       ;;
-    live-codex|live-anthropic)
+    live-codex|live-anthropic|live-github)
       local_platform_ready || { printf '%s' 'explicit normal CLI/local platform inputs unavailable'; return 1; }
       ;;
     live-openai)
@@ -303,9 +303,6 @@ readiness_reason() {
       [[ "${LOCAL_PLATFORM_OPENAI_MODEL:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || {
         printf '%s' 'explicit bounded LOCAL_PLATFORM_OPENAI_MODEL unavailable'; return 1;
       }
-      ;;
-    live-github)
-      printf '%s' "no checked-in $journey journey"; return 1
       ;;
     initial-private-checkout)
       if ! { local_platform_ready && canonical_executable "${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}"; }; then
@@ -364,11 +361,13 @@ start_fixed_child() {
         --workspace-image-import-bin "$ACCEPTANCE_NATIVE_WORKSPACE_IMAGE_IMPORT_BIN" \
         --scratch-parent "$ACCEPTANCE_NATIVE_SCRATCH_PARENT"
       ;;
-    local-platform|initial-private-checkout|live-codex|live-anthropic|live-openai)
+    local-platform|initial-private-checkout|live-codex|live-anthropic|live-openai|live-github)
       local -a checkout_env=() checkout_args=()
       if [[ "$journey" == initial-private-checkout ]]; then
         checkout_env=("LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN=${LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN:-}")
         checkout_args=(--initial-private-checkout)
+      elif [[ "$journey" == live-github ]]; then
+        checkout_args=(--live-github)
       elif [[ "$journey" == live-codex ]]; then
         checkout_args=(--live-codex)
       elif [[ "$journey" == live-anthropic ]]; then
@@ -460,7 +459,7 @@ start_fixed_child() {
         XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
         SMOKE_TMP_PARENT="${SMOKE_TMP_PARENT:-}" \
         "$ROOT/scripts/runtime/dev/smoke-local-platform-sources.sh" \
-          --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN"
+          --admin-oidc --cw-bin "$ACCEPTANCE_NORMAL_CW_BIN" --application-only
       ;;
     *) return 1 ;;
   esac

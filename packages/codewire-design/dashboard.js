@@ -5,6 +5,7 @@ const app = document.querySelector("[data-dashboard-app]");
   // Native dialogs own focus trapping and Escape. Keep only presentation state
   // here: no form values, credentials, terminal output or capabilities.
   const dialogOpeners = new WeakMap();
+  const dialogReturnFocus = new WeakMap();
   const initializedDialogs = new WeakSet();
   const dialogVersions = new WeakMap();
   const dialogRequests = new WeakMap();
@@ -54,12 +55,33 @@ const app = document.querySelector("[data-dashboard-app]");
   };
   let discardPrompt;
   let pendingDiscard;
+  const clearPrivate = (dialog) => dialog.querySelectorAll("[data-dialog-private]").forEach((control) => {
+    if (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) {
+      control.value = "";
+      control.defaultValue = "";
+    }
+  });
+  const cancelDiscard = () => {
+    const pending = pendingDiscard;
+    pendingDiscard = null;
+    pending?.observer.disconnect();
+    if (discardPrompt?.open) discardPrompt.close();
+    if (pending?.owner.isConnected && (pending.owner.open || pending.owner.matches("[data-drawer]:not([hidden])"))
+      && pending.focus instanceof HTMLElement && pending.focus.isConnected) {
+      pending.focus.focus({ preventScroll: true });
+    }
+  };
+  const draftNodes = "form, input, textarea, select, option, optgroup";
+  const replacesDraft = (owner, records) => !owner.isConnected
+    || records.some((record) => owner.contains(record.target)
+      && [...record.addedNodes, ...record.removedNodes].some((node) => node instanceof Element
+        && (node.matches(draftNodes) || node.querySelector(draftNodes))));
   const guardClose = (owner, perform) => {
     if (!isDirty(owner)) { perform(); return; }
     if (pendingDiscard) return;
     if (!discardPrompt) {
       discardPrompt = document.createElement("dialog");
-      discardPrompt.className = "cw-dialog";
+      discardPrompt.className = "cw-dialog cw-discard-dialog";
       discardPrompt.setAttribute("aria-label", "Discard changes?");
       const header = document.createElement("header");
       header.className = "cw-dialog-header";
@@ -80,12 +102,7 @@ const app = document.querySelector("[data-dashboard-app]");
       discard.type = "button";
       discard.className = "cw-button cw-danger-button";
       discard.textContent = "Discard changes";
-      const keepEditing = () => {
-        const pending = pendingDiscard;
-        pendingDiscard = null;
-        discardPrompt.close();
-        if (pending?.focus instanceof HTMLElement && pending.focus.isConnected) pending.focus.focus({ preventScroll: true });
-      };
+      const keepEditing = cancelDiscard;
       keep.addEventListener("click", keepEditing);
       discardPrompt.addEventListener("cancel", (event) => { event.preventDefault(); keepEditing(); });
       let backdropPress = false;
@@ -101,7 +118,15 @@ const app = document.querySelector("[data-dashboard-app]");
       });
       discard.addEventListener("click", () => {
         const pending = pendingDiscard;
+        // HTMX may replace the form or its controls while confirmation is
+        // open. Never apply an old dismissal decision to that new draft.
+        // Autosave/status text updates do not replace the user's draft.
+        if (!pending || replacesDraft(pending.owner, pending.observer.takeRecords())) {
+          cancelDiscard();
+          return;
+        }
         pendingDiscard = null;
+        pending.observer.disconnect();
         discardPrompt.close();
         if (pending?.owner.isConnected && (pending.owner.open || pending.owner.matches("[data-drawer]:not([hidden])"))) {
           discardEdits(pending.owner);
@@ -112,10 +137,14 @@ const app = document.querySelector("[data-dashboard-app]");
       discardPrompt.append(header, description, actions);
       document.body.append(discardPrompt);
     }
-    pendingDiscard = { owner, perform, focus: document.activeElement };
+    const observer = new MutationObserver((records) => {
+      if (pendingDiscard?.owner === owner && replacesDraft(owner, records)) cancelDiscard();
+    });
+    pendingDiscard = { owner, perform, focus: document.activeElement, observer };
+    observer.observe(document.body, { childList: true, subtree: true });
     discardPrompt.showModal();
   };
-  const closeDialog = (dialog) => guardClose(dialog, () => dialog.close());
+  const closeDialog = (dialog) => guardClose(dialog, () => { clearPrivate(dialog); dialog.close(); });
   const navigationEligible = (owner) => owner?.isConnected
     && !owner.querySelector('[aria-busy="true"]')
     && !Array.from(owner.querySelectorAll("form[data-dirty-guard]")).some((form) => submittedForms.has(form));
@@ -179,10 +208,19 @@ const app = document.querySelector("[data-dashboard-app]");
     const previous = opener instanceof Element ? opener.closest("dialog[data-dialog]") : null;
     const originalOpener = previous ? dialogOpeners.get(previous) : opener;
     const show = () => {
-      if (previous?.open) previous.close();
+      const returnFocus = dialogReturnFocus.get(dialog);
+      if (previous?.open) {
+        dialogReturnFocus.set(previous, opener);
+        clearPrivate(previous);
+        previous.close();
+      }
       dialogOpeners.set(dialog, originalOpener);
       dialogVersions.set(dialog, (dialogVersions.get(dialog) || 0) + 1);
       dialog.showModal();
+      if (opener instanceof Element && opener.matches("[data-dialog-back]")
+        && returnFocus instanceof HTMLElement && dialog.contains(returnFocus)) {
+        returnFocus.focus({ preventScroll: true });
+      }
       dialog.dispatchEvent(new Event("codewire:dialog-open", { bubbles: true }));
     };
     if (previous?.open) guardClose(previous, show);
@@ -210,10 +248,9 @@ const app = document.querySelector("[data-dashboard-app]");
       dialog.addEventListener("cancel", (event) => { event.preventDefault(); closeDialog(dialog); });
       dialog.addEventListener("close", () => {
         if (dialog.open) return;
+        if (pendingDiscard?.owner === dialog) cancelDiscard();
         dialogVersions.set(dialog, (dialogVersions.get(dialog) || 0) + 1);
-        dialog.querySelectorAll("[data-dialog-private]").forEach((control) => {
-          if (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) control.value = "";
-        });
+        clearPrivate(dialog);
         const opener = dialogOpeners.get(dialog);
         dialogOpeners.delete(dialog);
         // A chooser may have switched directly to another dialog. Do not steal
@@ -247,6 +284,12 @@ const app = document.querySelector("[data-dashboard-app]");
   };
   initializeDialogs();
   initializeStopButtons();
+  // Navigation (including a successful native POST) must not leave write-only
+  // values in a retained BFCache document. Do not clear them on failed submits.
+  window.addEventListener("pagehide", () => {
+    cancelDiscard();
+    document.querySelectorAll("dialog[data-dialog]").forEach(clearPrivate);
+  });
   document.addEventListener("htmx:beforeRequest", (event) => {
     const dialog = event.detail?.target?.closest("dialog[data-dialog]");
     if (!(dialog instanceof HTMLDialogElement)) return;

@@ -50,6 +50,7 @@ fn config(upstream: &str) -> crate::Config {
         confidential_admin_only: true,
         turnstile_site_key: String::new(),
         github_app_slug: String::new(),
+        github_app_client_id: String::new(),
     }
 }
 
@@ -240,7 +241,6 @@ async fn registered_secret_pages_keep_context_only_in_own_links_and_actions() {
     let dashboard = serve(crate::app(config(&upstream.origin))).await;
     for path in [
         "/synthetic/secrets/".into(),
-        "/synthetic/secrets/user/".into(),
         "/synthetic/secrets/organization/".into(),
         format!("/synthetic/secrets/{PROJECT}/"),
     ] {
@@ -296,7 +296,7 @@ async fn native_and_htmx_validation_errors_preserve_return_errors_and_csrf_not_v
                 vec![("name", "")],
             ),
             (
-                "/synthetic/secrets/user/_actions/set",
+                "/synthetic/secrets/organization/_actions/set",
                 vec![("key", "bad-key"), ("value", PRIVATE_MARKER)],
             ),
         ] {
@@ -420,7 +420,9 @@ async fn every_secret_mutation_preserves_navigation_without_changing_connect_pay
             suffix: "/DeleteSecretProject".into(),
         },
     ];
-    for (bucket, kind) in [("organization", ""), ("user", "User"), (PROJECT, "Project")] {
+    // Personal mutations belong to personal_secrets and its actor-bound
+    // continuation tests; legacy user aliases do not restore org context.
+    for (bucket, kind) in [("organization", ""), (PROJECT, "Project")] {
         for (action, message, suffix, fields) in [
             (
                 "set",

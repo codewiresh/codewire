@@ -17,9 +17,10 @@ configMapGenerator:
   - name: codewire-dashboard-public-config
     literals:
       - TURNSTILE_SITE_KEY=
-      # A public App slug only; its client ID and client secret belong solely
-      # to credential-service's dedicated authorization Secret.
+      # Public App identifiers only; the client secret remains solely in
+      # credential-service's dedicated authorization Secret.
       - GITHUB_APP_SLUG=
+      - GITHUB_APP_CLIENT_ID=
 
 labels:
   - pairs:

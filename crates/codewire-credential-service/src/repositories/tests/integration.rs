@@ -284,7 +284,7 @@ impl Fixture {
                     "Iv1.syntheticclient".into(),
                     Zeroizing::new("synthetic-client-secret".into()),
                     "codewire".into(),
-                    "https://codewire.example/settings/credentials/github/callback".into(),
+                    "https://codewire.example/api/v1/github/oauth/callback".into(),
                 )
                 .expect("synthetic GitHub App configuration"),
                 provider.clone(),

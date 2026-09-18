@@ -633,7 +633,7 @@ mod tests {
             assert!(!body.contains(" disabled"));
             assert!(!body.contains("name=\"confirm_personal_credentials\""));
             assert!(!body.contains("name=\"confirm_personal_secrets\""));
-            assert!(body.contains("href=\"/test-org/secrets/user/\""));
+            assert!(body.contains("href=\"/settings/secrets/?org=test-org\""));
             assert!(body.contains("href=\"/test-org/secrets/organization/\""));
             assert!(body.contains("href=\"/test-org/secrets/\""));
             assert!(body.contains("href=\"/settings/credentials/?org=test-org\""));
@@ -678,7 +678,7 @@ mod tests {
         assert!(body.contains("role=\"alert\">Project names could not be loaded."));
         assert!(!body.contains("No secret projects are available"));
         assert!(!body.contains("You have no credential profiles yet"));
-        assert!(body.contains("href=\"/test-org/secrets/user/\""));
+        assert!(body.contains("href=\"/settings/secrets/?org=test-org\""));
         assert!(body.contains("Manage personal credentials and profiles</a>"));
     }
 
@@ -701,7 +701,7 @@ mod tests {
         assert!(body.contains("You have no credential profiles yet."));
         assert!(body.contains("<nav aria-label=\"Manage provider credentials\">"));
         assert!(body.contains("Create a profile in Settings, then select it here.</p>"));
-        assert!(body.contains("href=\"/test-org/secrets/user/\""));
+        assert!(body.contains("href=\"/settings/secrets/?org=test-org\""));
         assert!(body.contains("href=\"/test-org/secrets/organization/\""));
         assert!(body.contains("href=\"/test-org/secrets/\""));
         assert!(body.contains(

@@ -374,6 +374,7 @@ mod tests {
             confidential_admin_only: true,
             turnstile_site_key: String::new(),
             github_app_slug: String::new(),
+            github_app_client_id: String::new(),
         }
     }
 

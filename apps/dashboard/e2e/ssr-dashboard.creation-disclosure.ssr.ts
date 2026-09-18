@@ -108,6 +108,24 @@ test("dirty app-owned Create Back reconciles URL before Keep or explicit Discard
   await expect(page).toHaveURL(fixtureUrl().replace("create-sandbox.html", "index.html"));
 });
 
+test("Create status updates do not cancel an open Discard decision", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("keep-while-saving");
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  await expect(prompt).toBeVisible();
+  // A deterministic late autosave status update, from the test only. The
+  // form/controls are unchanged, unlike the stale-form HTMX regression.
+  await page.locator("[data-create-draft-status]").evaluate((status) => {
+    status.textContent = "Selections saved while awaiting a decision.";
+  });
+  await expect(prompt).toBeVisible();
+  await expect(prompt.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
+  await prompt.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("keep-while-saving");
+  await expect(page.locator("[data-drawer]")).toBeVisible();
+});
+
 test("structural Create edits are dirty without snapshots and the next opener fetches a fresh form", async ({ page }) => {
   await page.goto(fixtureUrl());
   const rows = page.locator("[data-repository-row]");
@@ -268,12 +286,14 @@ test("Create setup links carry only the current draft handle and Edit links stay
   await page.goto(fixtureUrl());
   await page.getByLabel("Name", { exact: true }).fill("name-never-navigation");
   await page.getByLabel("Repository URL", { exact: true }).fill("https://canary.invalid/private-repository");
-  const links = page.locator('a[href*="settings-credentials.html"], a[href*="application-secrets.html"]');
+  const links = page.locator('a[href*="settings-credentials.html"], a[href*="settings-secrets.html"], a[href*="application-secrets.html"]');
   await expect(links).toHaveCount(6);
   for (const link of await links.all()) {
     const href = await link.getAttribute("href");
     const target = new URL(href!, page.url());
-    expect([...target.searchParams.entries()]).toEqual([["creation_draft", draftId]]);
+    expect([...target.searchParams.entries()]).toEqual(target.pathname.endsWith("/settings-secrets.html")
+      ? [["org", "fixture-org"], ["creation_draft", draftId]]
+      : [["creation_draft", draftId]]);
     expect(href).not.toContain("name-never-navigation");
     expect(href).not.toContain("canary.invalid");
   }

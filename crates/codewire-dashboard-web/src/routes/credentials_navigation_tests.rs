@@ -9,6 +9,7 @@ async fn github_native_authorize_records_only_fresh_verified_navigation() {
     let (upstream, calls) = fixture("success").await;
     let mut cfg = config(&upstream.origin);
     cfg.github_app_slug = "codewire-synthetic".into();
+    cfg.github_app_client_id = "Iv1.kindsynthetic".into();
     let dashboard = serve(crate::app(cfg)).await;
     for suffix in [
         String::new(),
@@ -30,11 +31,19 @@ async fn github_native_authorize_records_only_fresh_verified_navigation() {
         let target =
             url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
         assert_eq!(target.origin().ascii_serialization(), "https://github.com");
-        assert_eq!(target.path(), "/apps/codewire-synthetic/installations/new");
+        assert_eq!(target.path(), "/login/oauth/authorize");
         let pairs: Vec<_> = target.query_pairs().collect();
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].0, "state");
+        assert_eq!(pairs.len(), 3);
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| key == "client_id" && value == "Iv1.kindsynthetic")
+        );
+        assert!(pairs.iter().any(|(key, value)| key == "redirect_uri"
+            && value == &format!("{ORIGIN}/api/v1/github/oauth/callback")));
+        let state = &pairs.iter().find(|(key, _)| key == "state").unwrap().1;
         let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.contains("Path=/api/v1/github/oauth/;"));
         assert!(cookie.contains("HttpOnly; SameSite=Lax; Max-Age=600; Secure"));
         let state_cookie = cookie.split(';').next().unwrap();
         let mut headers = authority("unused");
@@ -46,7 +55,7 @@ async fn github_native_authorize_records_only_fresh_verified_navigation() {
         );
         let continuation = crate::security::github_app_authorization_continuation(
             &headers,
-            &pairs[0].1,
+            state,
             &crate::security::canonical_cookie(&headers).unwrap(),
         )
         .unwrap();
@@ -67,6 +76,7 @@ async fn reconnect_authorization_survives_only_optional_navigation_lookup_failur
         let (upstream, calls) = fixture(mode).await;
         let mut cfg = config(&upstream.origin);
         cfg.github_app_slug = "codewire-synthetic".into();
+        cfg.github_app_client_id = "Iv1.kindsynthetic".into();
         let dashboard = serve(crate::app(cfg)).await;
         let csrf = crate::security::new_csrf_token();
         let response = client().post(format!("{}/settings/credentials/_actions/github/authorize?org=synthetic&creation_draft={DRAFT}", dashboard.origin)).headers(authority(&csrf)).form(&[("_csrf", csrf.as_str()), ("credential_id", PROJECT), ("expected_revocation_generation", "7"), ("confirm_reconnect", "yes")]).send().await.unwrap();
@@ -124,7 +134,7 @@ async fn reconnect_authorization_survives_only_optional_navigation_lookup_failur
 #[tokio::test]
 async fn github_callbacks_drop_bad_navigation_without_changing_authorization_or_reconnect() {
     use crate::security::{GitHubAppNavigation, github_app_authorization_cookie};
-    const CALLBACK: &str = "/settings/credentials/github/callback";
+    const CALLBACK: &str = "/api/v1/github/oauth/callback";
     let session = HeaderValue::from_static("codewire.session_token=synthetic-session");
     for mode in [
         "success",
@@ -456,11 +466,16 @@ async fn navigation_does_not_change_credentials_authentication_or_mutation_fence
                     .unwrap();
                 let expected = match mode {
                     "foreign origin" | "bad csrf" => StatusCode::FORBIDDEN,
-                    "no membership" => StatusCode::NOT_FOUND,
                     _ if htmx => StatusCode::OK,
                     _ => StatusCode::SEE_OTHER,
                 };
                 assert_eq!(response.status(), expected, "changed fence for {mode}");
+                if mode == "no membership" {
+                    let target = response.headers()[if htmx { "hx-redirect" } else { "location" }]
+                        .to_str()
+                        .unwrap();
+                    assert!(target.contains("message=profile-created"));
+                }
                 if matches!(mode, "unauthenticated" | "two factor") {
                     let target = response.headers()[if htmx { "hx-redirect" } else { "location" }]
                         .to_str()
@@ -479,9 +494,17 @@ async fn navigation_does_not_change_credentials_authentication_or_mutation_fence
                 assert!(!response.text().await.unwrap().contains(PRIVATE_MARKER));
             }
         }
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().filter(|(path, _)| mutation(path)).count(),
+            if mode == "no membership" { 6 } else { 0 }
+        );
+        // Profile mutations are current-user operations, even when a stale
+        // organization name is retained solely as navigation context.
         assert!(
-            !calls.lock().unwrap().iter().any(|(path, _)| mutation(path)),
-            "rejected credential write dispatched"
+            !calls
+                .iter()
+                .any(|(path, _)| path.ends_with("/ListOrganizations"))
         );
     }
 }

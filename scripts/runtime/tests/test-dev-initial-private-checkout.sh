@@ -66,8 +66,63 @@ grep -Fq 'preflight --context' "$TEST_ROOT/preflight-call" || fail 'topology che
 COUNT=$((COUNT + 1))
 enroll
 TMPDIR_SMOKE="$TEST_ROOT/state"; mkdir "$TMPDIR_SMOKE"
+for mode in start stop inspect; do
+  (
+    timeout() { printf '%s\n' "$@" >"$TEST_ROOT/fixture-command.args"; }
+    checkout_fixture_command "$mode" --state-dir "$TEST_ROOT/owned-state"
+  )
+  case "$mode" in
+    start) expected_timeout=1500 ;;
+    stop) expected_timeout=750 ;;
+    inspect) expected_timeout=300 ;;
+  esac
+  mapfile -t fixture_args <"$TEST_ROOT/fixture-command.args"
+  [[ "${fixture_args[*]}" == "$expected_timeout python3 $CHECKOUT_ROOT/scripts/runtime/dev/hosted-checkout-fixture.py $mode --state-dir $TEST_ROOT/owned-state" ]] ||
+    fail 'fixture mode timeout or exact arguments drifted'
+  [[ ! -s "$TMPDIR_SMOKE/fixture-command.out" && ! -s "$TMPDIR_SMOKE/fixture-command.err" ]] ||
+    fail 'fixture command redirection drifted'
+  COUNT=$((COUNT + 1))
+done
 SMOKE_NAME=synthetic-hosted-checkout; ENV_ID="$ENVIRONMENT_ID"
 PROVIDER_SSH_PROFILE_ID="$PROFILE_ID"
+CHECKOUT_REVISION=1111111111111111111111111111111111111111
+CHECKOUT_URL=ssh://codewire@10.96.1.2:22222/repository.git
+CHECKOUT_HOST_PIN='[10.96.1.2]:22222 ssh-ed25519 AAAA'
+DEV_CHECKOUT_WORKSPACE_IMAGE="ghcr.io/codewiresh/workspace@sha256:$(printf '%064d' 3)"
+checkout_build_document >"$TEST_ROOT/built-document.json"
+expected_install="set -eu; cd /workspace/private-checkout; test \"\$(git rev-parse HEAD)\" = '$CHECKOUT_REVISION'; test \"\$(cat proof.txt)\" = initial-private-checkout-synthetic-v1; test ! -e .install-proved; printf '%s\\n' initial-private-checkout-before-install > .install-proved"
+jq -e --arg image "$DEV_CHECKOUT_WORKSPACE_IMAGE" --arg profile "platform:id:$PROFILE_ID" \
+  --arg url "$CHECKOUT_URL" --arg pin "$CHECKOUT_HOST_PIN" --arg install "$expected_install" '
+  . == {version:1,image:$image,working_directory:"/workspace/private-checkout",credentials:{profile:$profile},
+    repositories:[{source:$url,known_hosts:[$pin],destination:"/workspace/private-checkout"}],install_command:$install}
+  and (.repositories[0] | has("revision") | not)
+' "$TEST_ROOT/built-document.json" >/dev/null || fail 'actual checkout document changed its selector or proof contract'
+COUNT=$((COUNT + 1))
+mkdir "$TEST_ROOT/install-root"
+printf 'initial-private-checkout-synthetic-v1\n' >"$TEST_ROOT/install-root/proof.txt"
+execute_built_install() (
+  export TEST_ROOT INSTALL_HEAD
+  cd() { builtin cd "$TEST_ROOT/install-root"; }
+  git() { [[ "$*" == 'rev-parse HEAD' ]] || return 1; printf '%s\n' "$INSTALL_HEAD"; }
+  export -f cd git
+  bash -e -c "$(jq -r .install_command "$TEST_ROOT/built-document.json")"
+)
+INSTALL_HEAD=2222222222222222222222222222222222222222
+expect_failure execute_built_install
+[[ ! -e "$TEST_ROOT/install-root/.install-proved" ]] || fail 'wrong checkout HEAD created an install marker'
+INSTALL_HEAD="$CHECKOUT_REVISION"
+execute_built_install
+grep -qx initial-private-checkout-before-install "$TEST_ROOT/install-root/.install-proved" ||
+  fail 'matching checkout HEAD did not produce the exact install marker'
+COUNT=$((COUNT + 1))
+for invalid_revision in '' deadbeef 111111111111111111111111111111111111111G; do
+  reject_document_revision() {
+    CHECKOUT_REVISION="$invalid_revision"
+    checkout_build_document
+  }
+  expect_failure reject_document_revision
+  [[ ! -s "$TEST_ROOT/rejected.out" ]] || fail 'invalid revision emitted a checkout document'
+done
 READY_STATE=running; READY_SETUP=true; READY_ERROR=null; READY_PROFILE="platform:id:$PROFILE_ID"; READY_REVISION=1
 cw_with_timeout() {
   shift

@@ -33,9 +33,11 @@ LP_NETWORK_CREATE_ATTEMPTED=0
 LP_MESH_PORT=28083
 LP_ENV=()
 LP_INITIAL_PRIVATE_CHECKOUT=0
+LP_LIVE_GITHUB=0
 LP_LIVE_CODEX=0
 LP_LIVE_ANTHROPIC=0
 LP_LIVE_OPENAI=0
+LP_APPLICATION_ONLY=0
 # shellcheck source=scripts/runtime/dev/private-checkout-smoke.sh
 source "$REPO_ROOT/scripts/runtime/dev/private-checkout-smoke.sh"
 # shellcheck source=scripts/runtime/dev/provider-codex-smoke.sh
@@ -45,9 +47,16 @@ source "$REPO_ROOT/scripts/runtime/dev/provider-anthropic-smoke.sh"
 # shellcheck source=scripts/runtime/dev/provider-openai-smoke.sh
 source "$REPO_ROOT/scripts/runtime/dev/provider-openai-smoke.sh"
 
+# shellcheck source=scripts/runtime/dev/provider-github-smoke.sh
+source "$REPO_ROOT/scripts/runtime/dev/provider-github-smoke.sh"
+
 local_platform_usage() {
   cat <<'USAGE'
 Usage: scripts/runtime/dev/smoke-local-platform-sources.sh --admin-oidc --cw-bin /absolute/normal/cw
+
+--application-only tests application sources without enrolling or selecting any
+provider credential/profile. It can use the existing named Mesh network mode.
+It cannot be combined with live-provider or initial-private-checkout modes.
 
 Add --initial-private-checkout to test repository checkout before install using
 a generated platform SSH key and the checked-in host-loopback repository peer.
@@ -57,6 +66,8 @@ tests a stock Codex request inside the VM. It needs a fresh Codex device approva
 after Codewire login; it cannot be combined with checkout or Mesh modes.
 --live-anthropic instead enrolls a fresh Anthropic API key through cw's protected
 input and tests pinned Claude. These live-provider modes cannot be combined.
+--live-github tests pinned stock gh api user through the managed Unix socket,
+with a fresh GitHub device approval; it proves neither private checkout nor hosted placement.
 --live-openai tests one plain Responses HTTP request with a fresh OpenAI API key.
 It requires LOCAL_PLATFORM_OPENAI_MODEL to name an explicit model snapshot.
 
@@ -128,9 +139,11 @@ local_platform_parse() {
     case "$1" in
       --admin-oidc) SMOKE_AUTH_MODE=admin-oidc; shift ;;
       --initial-private-checkout) LP_INITIAL_PRIVATE_CHECKOUT=1; shift ;;
+      --live-github) LP_LIVE_GITHUB=1; shift ;;
       --live-codex) LP_LIVE_CODEX=1; shift ;;
       --live-anthropic) LP_LIVE_ANTHROPIC=1; shift ;;
       --live-openai) LP_LIVE_OPENAI=1; shift ;;
+      --application-only) LP_APPLICATION_ONLY=1; shift ;;
       --cw-bin) [[ $# -ge 2 ]] || die '--cw-bin requires a path'; CW_BIN="$2"; shift 2 ;;
       -h|--help) local_platform_usage; return 2 ;;
       *) die 'unsupported local/platform smoke option' ;;
@@ -140,8 +153,12 @@ local_platform_parse() {
 
 validate_local_platform_options() {
   validate_dev_smoke_browser_auth
-  if (( LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI > 0 )); then
-    [[ $((LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI)) == 1 &&
+  if [[ "$LP_APPLICATION_ONLY" == 1 ]]; then
+    [[ $((LP_LIVE_GITHUB + LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI + LP_INITIAL_PRIVATE_CHECKOUT)) == 0 ]] ||
+      die 'application-only cannot select a provider or initial private checkout'
+  fi
+  if (( LP_LIVE_GITHUB + LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI > 0 )); then
+    [[ $((LP_LIVE_GITHUB + LP_LIVE_CODEX + LP_LIVE_ANTHROPIC + LP_LIVE_OPENAI)) == 1 &&
        "$LP_INITIAL_PRIVATE_CHECKOUT" == 0 && -z "$LOCAL_PLATFORM_NETWORK_ID" &&
        "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 0 && -z "$LOCAL_PLATFORM_MESH_PROBE_BIN" &&
        -z "$LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN" ]] ||
@@ -191,6 +208,21 @@ validate_local_platform_options() {
   [[ -f "$CW_BIN" && -x "$CW_BIN" && -d "$LOCAL_PLATFORM_ARTIFACT_ROOT" &&
      -f "$LOCAL_PLATFORM_ARTIFACT_LOCK" && -r "$LOCAL_PLATFORM_ARTIFACT_LOCK" ]] ||
     die 'normal CLI or matching native artifacts are unavailable'
+  # NativeRuntimeConfig admits a prepared artifact directory and its lock as
+  # one sealed pair. Catch a staging-parent typo before any browser login or
+  # provider enrollment rather than failing later while starting the VM.
+  [[ "${LOCAL_PLATFORM_ARTIFACT_ROOT%/*}" == "${LOCAL_PLATFORM_ARTIFACT_LOCK%/*}" ]] ||
+    die 'native artifact directory and lock must share one parent directory'
+}
+
+local_platform_prepare_mesh_owner() {
+  [[ -n "$LOCAL_PLATFORM_NETWORK_ID" || "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 1 ]] || return 0
+  # Browser-assisted OAuth owns a separate temporary HOME. Select the already
+  # authenticated organization through the public CLI in this VM's HOME too,
+  # so native Mesh metadata is created here without copying any credential.
+  cw_with_timeout 30 org set "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
+    >"$TMPDIR_SMOKE/local-mesh-owner.out" 2>"$TMPDIR_SMOKE/local-mesh-owner.err" ||
+    die 'isolated hosted Mesh organization selection failed'
 }
 
 local_platform_read_networks() {
@@ -363,20 +395,26 @@ local_platform_cw() {
 }
 
 local_platform_binding() {
-  local project="$1" previous="$2"
+  local project="$1" previous="$2" credentials='null'
+  if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then
+    credentials="$(jq -nc --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" \
+      --arg reference "user/$PROVIDER_SSH_PROFILE_NAME" '{profile:$profile,reference:$reference,revision:1}')"
+  fi
   cw_with_timeout 30 env info --local "$SMOKE_NAME" --output json \
     >"$TMPDIR_SMOKE/local-environment.json" 2>"$TMPDIR_SMOKE/local-info.err" || return 1
   jq -e --arg id "$ENV_ID" --arg project "$project" \
-    --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" --arg reference "user/$PROVIDER_SSH_PROFILE_NAME" \
+    --argjson credentials "$credentials" \
     --arg server "$CODEWIRE_SERVER_URL" --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
     --arg user "$LP_USER_ID" --argjson previous "$previous" '
     .id == $id and .backend == "cloud-hypervisor" and .state == "running" and
     .cpu == 2 and .memory == "16Gi" and .generation == ($previous + 1) and
-    .source_selection.credentials == {profile:$profile,reference:$reference,revision:1} and
+    .source_selection.credentials == $credentials and
     (.source_selection.secrets.project // "") == $project and
     (.source_selection.secrets.user // null) == null and
     (.source_selection.secrets.organization // false) == false and
-    .source_selection.platform == {server_url:$server,organization_id:$org,user_id:$user}
+    .source_selection.platform ==
+      (if $credentials == null and $project == "" then null
+       else {server_url:$server,organization_id:$org,user_id:$user} end)
   ' "$TMPDIR_SMOKE/local-environment.json" >/dev/null
 }
 
@@ -396,24 +434,23 @@ while test "\$(cat /workspace/.cw-app-smoke/startup-sha 2>/dev/null || true)" !=
   attempt=\$((attempt + 1)); test "\$attempt" -lt 100; sleep 0.1
 done
 python3 - <<'PY'
-import json
+import os
 from pathlib import Path
-root = Path('/home/codewire/.codewire')
+root = Path.home() / '.codewire'
 # The pinned native workspace passes ordinary values directly to its launcher;
 # unlike platform placement it never persists an environment.json file.
 assert not (root / 'environment.json').exists()
-sessions = list((root / 'daemon' / 'sessions').glob('*/session.json'))
-assert sessions, 'managed session metadata is missing'
-for path in sessions:
-    session = json.loads(path.read_text())
-    assert all(value.split('=', 1)[0] not in ('DATABASE_URL', 'CW_DEV_PRECEDENCE') for value in session['env'])
+# Native daemon state is private to the out-of-container daemon, not a
+# workload home projection. Public cw list binds the launched session below;
+# privileged daemon projection tests own durable metadata redaction proof.
+assert not os.access(root / 'daemon' / 'sessions', os.R_OK | os.X_OK), 'private daemon sessions are accessible'
 PY
 printf 'application-secret-check-ok\\n'
 SCRIPT
 }
 
 local_platform_application_phase() {
-  local phase="$1" project="$2" expected="$3" guest command receipt
+  local phase="$1" project="$2" expected="$3" guest command receipt session_id
   local_platform_binding "$project" "$LP_GENERATION" || die 'local VM source/profile/authority binding drifted'
   LP_GENERATION="$(jq -er .generation "$TMPDIR_SMOKE/local-environment.json")"
   guest="$(local_platform_guest_check "$expected")"
@@ -421,6 +458,18 @@ local_platform_application_phase() {
     >"$TMPDIR_SMOKE/local-app-$phase.out" 2>"$TMPDIR_SMOKE/local-app-$phase.err" ||
     die 'platform application projection failed in the local VM'
   grep -qx application-secret-check-ok "$TMPDIR_SMOKE/local-app-$phase.out" || die 'local application receipt is missing'
+  session_id="$(sed -nE 's/^Launched session (session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/\1/p' \
+    "$TMPDIR_SMOKE/local-app-$phase.err")"
+  [[ "$session_id" =~ ^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+    die 'local managed exec omitted an exact unique session acknowledgement'
+  cw_with_timeout 30 list "$ENV_ID" --output json >"$TMPDIR_SMOKE/local-app-sessions-$phase.json" \
+    2>"$TMPDIR_SMOKE/local-app-sessions-$phase.err" || die 'local managed session inspection failed'
+  jq -es --arg id "$session_id" --arg guest "$guest" '
+    length == 1 and (.[0] | type == "array" and
+      ([.[] | select(.session_id == $id)] |
+        length == 1 and .[0].command == ["/bin/sh", "-c", $guest] and
+        .[0].pty == false and .[0].state == "Exited" and .[0].exit_code == 0))
+  ' "$TMPDIR_SMOKE/local-app-sessions-$phase.json" >/dev/null || die 'local managed session receipt did not match exact successful exec'
   # cw needs terminal stdin to read its initial size. Redirect cw's stdout
   # inside that host PTY so attach is noninteractive and propagates the guest
   # exit status, rather than waiting for the interactive detach chord.
@@ -448,6 +497,21 @@ local_platform_ssh_prove() {
   cw_with_timeout 120 run --no-tty -- /bin/bash "$PROVIDER_SSH_SCRIPT" prove "$host_key" \
     >"$TMPDIR_SMOKE/local-ssh.out" 2>"$TMPDIR_SMOKE/local-ssh.err" || die 'local VM platform-backed stock SSH proof failed'
   grep -qx stock-ssh-workload-proved "$TMPDIR_SMOKE/local-ssh.out" || die 'stock SSH receipt is missing'
+}
+
+local_platform_ssh_reset_target() {
+  local action
+  local -a arguments
+  # The positive proof is deliberately a fresh-target proof. Preserve the
+  # selected provider identity, but retire its owned synthetic target/client
+  # history before repeating exact-five authentication after VM relaunch.
+  for action in cleanup install startup; do
+    arguments=("$action")
+    [[ "$action" != install ]] || arguments+=(/workspace/.cw-provider-ssh/selected.pub)
+    cw_with_timeout 60 run --no-tty -- /bin/bash "$PROVIDER_SSH_SCRIPT" "${arguments[@]}" \
+      >"$TMPDIR_SMOKE/local-ssh-reset-$action.out" 2>"$TMPDIR_SMOKE/local-ssh-reset-$action.err" ||
+      die "local synthetic SSH target $action failed"
+  done
 }
 
 local_platform_ssh_revoke() {
@@ -554,6 +618,27 @@ local_platform_cleanup_environment() {
       if jq -e --arg name "$SMOKE_NAME" 'any(.[]; .name == $name)' "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null; then
         resolved="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/local-cleanup-environments.json" "$SMOKE_NAME")" || rc=1
         if [[ -n "$resolved" && ( -z "$ENV_ID" || "$ENV_ID" == "$resolved" ) ]]; then
+          if [[ "${1:-0}" != 0 ]]; then
+            # Retain only public, fixed launch metadata before deleting this
+            # exact owned VM. Observer failure never changes cleanup authority.
+            if ! cw_with_timeout 30 env info --local "$resolved" --output json 2>/dev/null |
+              jq -e --arg id "$resolved" '
+                select(.id == $id and
+                  (.state | IN("starting", "running", "stopped", "error", "orphaned"))) |
+                .error_code as $code |
+                [null, "prepare_failed", "vmm_start_failed", "daemon_access_failed",
+                 "network_worker_failed", "guest_start_failed", "input_cleanup_failed",
+                 "guest_shutdown", "vmm_exit", "direct_share_exit", "network_worker_exit",
+                 "egress_broker_exit", "ingress_forwarder_exit", "mesh_transport_exit",
+                 "mesh_ingress_receiver_exit", "network_stack_failed"] as $codes |
+                ($codes | any(. == $code)) as $recognized |
+                {observation:"observed",id:.id,state:.state,
+                 code_recognized:$recognized,
+                 error_code:(if $recognized then $code else null end)}
+              ' >"$TMPDIR_SMOKE/local-failed-launch.json"; then
+              jq -n '{observation:"unavailable"}' >"$TMPDIR_SMOKE/local-failed-launch.json"
+            fi
+          fi
           cw_with_timeout 180 env rm --local --yes "$resolved" >"$TMPDIR_SMOKE/local-cleanup.out" 2>&1 || rc=1
         else rc=1; fi
       fi
@@ -568,7 +653,7 @@ local_platform_cleanup_environment() {
 local_platform_cleanup() {
   local rc=$? cleanup_rc=0
   trap - EXIT INT TERM HUP
-  local_platform_cleanup_environment || rc=1
+  local_platform_cleanup_environment "$rc" || rc=1
   private_checkout_stop || { rc=1; cleanup_rc=1; }
   if [[ "$LP_NETWORK_NODE_OWNED" == 1 ]]; then
     local network_node_rc=0
@@ -588,6 +673,8 @@ local_platform_cleanup() {
   local_platform_cleanup_network || rc=1
   cleanup_provider_ssh_profile || rc=1
   cleanup_provider_ssh_credential || rc=1
+  cleanup_provider_github_profile || rc=1
+  cleanup_provider_github_credential || rc=1
   cleanup_provider_codex_profile || rc=1
   cleanup_provider_codex_credential || rc=1
   cleanup_provider_anthropic_profile || rc=1
@@ -622,7 +709,9 @@ local_platform_cleanup() {
     [[ "$LP_HOME" == "$TMPDIR_SMOKE/h" && -d "$LP_HOME" && ! -L "$LP_HOME" &&
       "$(stat -c %u "$LP_HOME")" == "$(id -u)" ]] || exit 1
     rm -rf -- "$LP_HOME"
-    if [[ "$LP_LIVE_CODEX" == 1 ]]; then
+    if [[ "$LP_LIVE_GITHUB" == 1 ]]; then
+      log 'PASS: stock gh read-only account request in a Linux VM through freshly enrolled platform GitHub OAuth, with cleanup; private checkout, other providers and hosted placement are not implied'
+    elif [[ "$LP_LIVE_CODEX" == 1 ]]; then
       log 'PASS: stock Codex request in a Linux VM through freshly enrolled platform OAuth, with cleanup; other providers and hosted placement are not implied'
     elif [[ "$LP_LIVE_ANTHROPIC" == 1 ]]; then
       log 'PASS: stock Claude request in a Linux VM through a freshly enrolled platform Anthropic API key, with cleanup; other providers and hosted placement are not implied'
@@ -630,6 +719,8 @@ local_platform_cleanup() {
       log 'PASS: OpenAI Responses HTTP request in a Linux VM through a freshly enrolled platform API key, with cleanup; SDK, streaming, other providers and hosted placement are not implied'
     elif [[ "$LP_INITIAL_PRIVATE_CHECKOUT" == 1 ]]; then
       log 'PASS: local Linux initial private checkout through platform SSH before install, with cleanup; hosted checkout is not implied'
+    elif [[ "$LP_APPLICATION_ONLY" == 1 ]]; then
+      log 'PASS: local Linux VM with actual Dev application sources and no credential profile, transitions and cleanup; provider proof is separate'
     else
       log 'PASS: local Linux VM with actual Dev application sources and platform SSH, transitions and cleanup'
     fi
@@ -694,7 +785,9 @@ main() {
     die 'fresh OAuth login selected a different organization'
   [[ "$(awk '$1 == "Role:" {print $2}' "$TMPDIR_SMOKE/admin-current-organization.out")" == owner ]] ||
     die 'fresh OAuth login must own the selected disposable-test organization'
-  if [[ "$LP_LIVE_CODEX" == 1 ]]; then
+  if [[ "$LP_LIVE_GITHUB" == 1 ]]; then
+    local_platform_github_journey
+  elif [[ "$LP_LIVE_CODEX" == 1 ]]; then
     local_platform_codex_journey
   elif [[ "$LP_LIVE_ANTHROPIC" == 1 ]]; then
     local_platform_anthropic_journey
@@ -706,6 +799,27 @@ main() {
     local_platform_journey
   fi
 }
+
+local_platform_github_journey() {
+  SMOKE_NAME="local-github-$(tr -d '-' </proc/sys/kernel/random/uuid)"
+  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
+  jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
+    "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
+  prepare_provider_github
+  jq --arg image "$LOCAL_PLATFORM_IMAGE" '.image=$image' \
+    "$PROVIDER_GITHUB_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  # Bind ownership in the parent before creation, including an uncertain reply.
+  LP_CREATE_ATTEMPTED=1
+  cw_with_timeout 1500 env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
+    --path "$LP_WORKSPACE" --path-mode copy --file codewire.yaml --yes --output json \
+    >"$TMPDIR_SMOKE/local-create.json" 2>"$TMPDIR_SMOKE/local-create.err" || die 'local VM with platform GitHub failed to start'
+  ENV_ID="$(jq -er '.id | select(. != "00000000-0000-0000-0000-000000000000" and
+    test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))' "$TMPDIR_SMOKE/local-create.json")"
+  cw_with_timeout 30 use --local "$ENV_ID" >"$TMPDIR_SMOKE/local-use.out"
+  run_provider_github_smoke
+  # The EXIT handler owns final PASS, only after VM absence and all cleanup.
+}
+
 
 local_platform_codex_journey() {
   SMOKE_NAME="local-codex-$(tr -d '-' </proc/sys/kernel/random/uuid)"
@@ -772,15 +886,21 @@ local_platform_journey() {
   cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
+  local_platform_prepare_mesh_owner
   local_platform_prepare_network
   local_platform_validate_network
-  prepare_provider_ssh
+  if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then prepare_provider_ssh; fi
   prepare_application_secrets
-  jq --slurpfile provider "$PROVIDER_SSH_DOCUMENT" --arg image "$LOCAL_PLATFORM_IMAGE" '
-    .image=$image | .credentials=$provider[0].credentials |
-    .install_command += "; " + $provider[0].install_command |
-    .startup_script += "; " + $provider[0].startup_script
-  ' "$APP_SECRET_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  if [[ "$LP_APPLICATION_ONLY" == 1 ]]; then
+    jq --arg image "$LOCAL_PLATFORM_IMAGE" '.image=$image' \
+      "$APP_SECRET_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  else
+    jq --slurpfile provider "$PROVIDER_SSH_DOCUMENT" --arg image "$LOCAL_PLATFORM_IMAGE" '
+      .image=$image | .credentials=$provider[0].credentials |
+      .install_command += "; " + $provider[0].install_command |
+      .startup_script += "; " + $provider[0].startup_script
+    ' "$APP_SECRET_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
+  fi
   local_platform_prepare_mesh_listener
   LP_CREATE_ATTEMPTED=1
   local -a LP_NETWORK_ARGS=()
@@ -795,15 +915,18 @@ local_platform_journey() {
   local_platform_network_prove
   local_platform_mesh_probe
   local_platform_application_phase a "platform:id:${APP_SECRET_IDS[0]}" "${APP_SECRET_HASHES[0]}"
-  local_platform_ssh_prove
+  if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then local_platform_ssh_prove; fi
   cw_with_timeout 300 env update --local "$ENV_ID" --secrets "platform:id:${APP_SECRET_IDS[1]}" --yes --output json \
     >"$TMPDIR_SMOKE/local-update.json" 2>"$TMPDIR_SMOKE/local-update.err" || die 'platform source replacement in the local VM failed'
   local_platform_application_phase b "platform:id:${APP_SECRET_IDS[1]}" "${APP_SECRET_HASHES[1]}"
   cw_with_timeout 300 env update --local "$ENV_ID" --clear-secrets --yes --output json \
     >"$TMPDIR_SMOKE/local-clear.json" 2>"$TMPDIR_SMOKE/local-clear.err" || die 'local platform-source clear failed'
   local_platform_application_phase clear '' absent
-  local_platform_ssh_prove
-  local_platform_ssh_revoke
+  if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then
+    local_platform_ssh_reset_target
+    local_platform_ssh_prove
+    local_platform_ssh_revoke
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

@@ -317,6 +317,19 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+assert_managed_run_stderr() {
+  # cw's launch acknowledgement is separate from workload output. Accept only
+  # silence or one exact acknowledgement, including its terminating newline.
+  python3 - "$1" <<'PY'
+import pathlib
+import re
+import sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+pattern = rb"Launched session session-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n"
+sys.exit(0 if data == b"" or re.fullmatch(pattern, data) else 1)
+PY
+}
+
 shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
@@ -1223,7 +1236,11 @@ cleanup_fresh_oauth_login() {
 }
 
 assert_application_artifacts_redacted() {
-  local status
+  local status value
+  ((${#APP_SECRET_VALUES[@]} > 0)) || return 0
+  for value in "${APP_SECRET_VALUES[@]}"; do
+    [[ -n "$value" ]] || die 'application-secret artifact inspection has an empty pattern'
+  done
   # Only synthetic patterns enter this anonymous pipe, never grep argv/files.
   if grep -Fq -f <(printf '%s\n' "${APP_SECRET_VALUES[@]}") -- "$@"; then
     die 'application-secret value entered smoke output or metadata; output suppressed'
