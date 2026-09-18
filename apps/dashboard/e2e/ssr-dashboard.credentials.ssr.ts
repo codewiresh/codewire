@@ -213,8 +213,10 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
       const enrolled = await githubConnectionMetadata(owner);
       expect(enrolled).toHaveLength(1);
+      // App user authorization publishes OAuth material; the separate
+      // github_app auth kind does not describe this user-token connection.
       expect(enrolled[0]).toMatchObject({
-        user_id: owner, organization_id: null, provider: "github", authentication_kind: "github_app",
+        user_id: owner, organization_id: null, provider: "github", authentication_kind: "oauth",
         status: "active", revocation_generation: "1", material_generation: "1", protected_material_present: true,
       });
       // A consumed callback must not publish again or advance either generation.
