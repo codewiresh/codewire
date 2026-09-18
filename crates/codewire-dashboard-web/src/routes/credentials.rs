@@ -20,7 +20,9 @@ use crate::{
     credentials_connect,
     environment_source_forms::exact_id,
     error::WebError,
-    response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
+    response::{
+        error_page, login_redirect, redirect, render_credential_settings_page, two_factor_redirect,
+    },
     security::{
         canonical_cookie, clear_github_app_authorization_cookie, csrf_cookie,
         github_app_authorization_continuation, github_app_authorization_cookie, new_csrf_token,
@@ -122,7 +124,7 @@ pub(super) async fn page(
         error: approved_error(&query.error).into(),
     };
     with_csrf_cookie(
-        render_page(CredentialSettingsTemplate {
+        render_credential_settings_page(CredentialSettingsTemplate {
             view: &dashboard,
             page: &page,
         }),
