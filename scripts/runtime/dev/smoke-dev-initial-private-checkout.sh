@@ -266,7 +266,8 @@ checkout_main() {
   revision="$CHECKOUT_REVISION"
   checkout_build_document >"$CHECKOUT_WORKSPACE/codewire.yaml"
   jq 'del(.credentials)' "$CHECKOUT_WORKSPACE/codewire.yaml" >"$CHECKOUT_WORKSPACE/unselected.json"
-  checkout_reject "$CHECKOUT_WORKSPACE/unselected.json" unselected 'SSH repository checkout requires a selected credential profile'
+  checkout_reject "$CHECKOUT_WORKSPACE/unselected.json" unselected \
+    'SSH repository checkout requires an explicitly selected credential profile containing an SSH identity'
   jq '.repositories[0].known_hosts=[]' "$CHECKOUT_WORKSPACE/codewire.yaml" >"$CHECKOUT_WORKSPACE/untrusted.json"
   checkout_reject "$CHECKOUT_WORKSPACE/untrusted.json" untrusted 'must pin at least one SSH host key'
   checkout_create "$CHECKOUT_WORKSPACE/codewire.yaml" created || die 'hosted private checkout create did not confirm'
