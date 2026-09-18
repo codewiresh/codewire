@@ -72,26 +72,19 @@ pub(super) async fn page(
     Query(query): Query<QueryParameters>,
 ) -> Response {
     let continuation = page_path(&query.org);
-    let mut dashboard = match super::dashboard::dashboard_shell_view(&state, &headers).await {
-        Ok(view) => view,
-        Err(WebError::Unauthorized) => return login_redirect(&continuation, &headers),
-        Err(WebError::TwoFactorRequired) => return two_factor_redirect(&continuation, &headers),
-        Err(error) => return error_page(error),
-    };
+    let dashboard =
+        match super::dashboard::personal_settings_shell_view(&state, &headers, &query.org).await {
+            Ok(view) => view,
+            Err(WebError::Unauthorized) => return login_redirect(&continuation, &headers),
+            Err(WebError::TwoFactorRequired) => {
+                return two_factor_redirect(&continuation, &headers);
+            }
+            Err(error) => return error_page(error),
+        };
     let cookie = match canonical_cookie(&headers) {
         Ok(cookie) => cookie,
         Err(()) => return login_redirect(&continuation, &headers),
     };
-    if let Err(error) = super::dashboard::select_shell_organization(
-        &state,
-        cookie.clone(),
-        &mut dashboard,
-        &query.org,
-    )
-    .await
-    {
-        return error_page(error);
-    }
     let git_identity = match git_identity_data(&state, cookie.clone()).await {
         Ok(identity) => identity,
         Err(WebError::Connect(error)) if error.code == ErrorCode::Unauthenticated => {
@@ -567,7 +560,7 @@ pub(super) async fn github_app_callback(
 ) -> Response {
     let continuation = page_path("");
     let clear = clear_github_app_authorization_cookie(&state.public_origin);
-    match super::dashboard::dashboard_shell_view(&state, &headers).await {
+    match super::dashboard::personal_settings_shell_view(&state, &headers, "").await {
         Ok(_) => {}
         Err(WebError::Unauthorized) => {
             return github_app_callback_response(login_redirect(&continuation, &headers), clear);
@@ -1279,6 +1272,7 @@ mod tests {
             is_admin: false,
             organizations: Vec::new(),
             has_organizations: false,
+            organization_navigation_unavailable: false,
             show_checklist: false,
             new_organization_url: "/organizations/new/".into(),
             settings_url: PATH.into(),

@@ -7,6 +7,8 @@ use crate::error::WebError;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum PageDependency {
     DashboardOrganizations,
+    PersonalSettingsOrganizations,
+    PersonalSettingsSandboxRail,
     SettingsGitIdentity,
     BillingOverview,
     BillingUsage,
@@ -22,8 +24,10 @@ enum Criticality {
 
 impl PageDependency {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::DashboardOrganizations,
+        Self::PersonalSettingsOrganizations,
+        Self::PersonalSettingsSandboxRail,
         Self::SettingsGitIdentity,
         Self::BillingOverview,
         Self::BillingUsage,
@@ -34,11 +38,32 @@ impl PageDependency {
     fn criticality(self) -> Criticality {
         match self {
             Self::DashboardOrganizations | Self::BillingOverview => Criticality::Required,
-            Self::SettingsGitIdentity
+            Self::PersonalSettingsOrganizations
+            | Self::PersonalSettingsSandboxRail
+            | Self::SettingsGitIdentity
             | Self::BillingUsage
             | Self::BillingInvoices
             | Self::BillingEvents => Criticality::Optional,
         }
+    }
+
+    fn degrades(self, code: ErrorCode) -> bool {
+        if matches!(
+            self,
+            Self::PersonalSettingsOrganizations | Self::PersonalSettingsSandboxRail
+        ) {
+            // Personal navigation is optional, but request/contract failures
+            // and every authentication/authorization failure remain explicit.
+            return matches!(
+                code,
+                ErrorCode::Unavailable
+                    | ErrorCode::DeadlineExceeded
+                    | ErrorCode::ResourceExhausted
+                    | ErrorCode::Internal
+                    | ErrorCode::Unknown
+            );
+        }
+        self.criticality() == Criticality::Optional && !is_auth_boundary(code)
     }
 }
 
@@ -66,12 +91,7 @@ pub(crate) fn resolve_connect<T>(
 ) -> Result<DependencyResult<T>, ConnectError> {
     match result {
         Ok(value) => Ok(DependencyResult::Available(value)),
-        Err(error)
-            if dependency.criticality() == Criticality::Optional
-                && !is_auth_boundary(error.code) =>
-        {
-            Ok(DependencyResult::Unavailable)
-        }
+        Err(error) if dependency.degrades(error.code) => Ok(DependencyResult::Unavailable),
         Err(error) => Err(error),
     }
 }
@@ -87,10 +107,7 @@ pub(crate) fn resolve_web<T>(
         Err(WebError::Connect(error)) if error.code == ErrorCode::Unauthenticated => {
             Err(WebError::Unauthorized)
         }
-        Err(WebError::Connect(error))
-            if dependency.criticality() == Criticality::Optional
-                && !is_auth_boundary(error.code) =>
-        {
+        Err(WebError::Connect(error)) if dependency.degrades(error.code) => {
             Ok(DependencyResult::Unavailable)
         }
         Err(error) => Err(error),
@@ -124,6 +141,37 @@ mod tests {
                 .iter()
                 .any(|dependency| dependency.criticality() == Criticality::Optional)
         );
+    }
+
+    #[test]
+    fn personal_navigation_degrades_only_the_closed_operational_set() {
+        for dependency in [
+            PageDependency::PersonalSettingsOrganizations,
+            PageDependency::PersonalSettingsSandboxRail,
+        ] {
+            for code in [
+                ErrorCode::Unavailable,
+                ErrorCode::DeadlineExceeded,
+                ErrorCode::ResourceExhausted,
+                ErrorCode::Internal,
+                ErrorCode::Unknown,
+            ] {
+                assert!(dependency.degrades(code));
+            }
+            for code in [
+                ErrorCode::Unauthenticated,
+                ErrorCode::PermissionDenied,
+                ErrorCode::InvalidArgument,
+                ErrorCode::FailedPrecondition,
+                ErrorCode::NotFound,
+                ErrorCode::Canceled,
+            ] {
+                assert!(!dependency.degrades(code));
+            }
+        }
+        // Existing required and optional policy is unchanged.
+        assert!(!PageDependency::DashboardOrganizations.degrades(ErrorCode::Unavailable));
+        assert!(PageDependency::SettingsGitIdentity.degrades(ErrorCode::NotFound));
     }
 
     #[test]

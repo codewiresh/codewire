@@ -19,6 +19,7 @@ mod environment_source_forms;
 mod environment_sources;
 mod error;
 mod organization_connect;
+mod personal_api_keys_connect;
 mod raw_auth;
 mod response;
 mod routes;

@@ -311,6 +311,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     for (const [route, heading] of [
       ["/settings/", "Account"],
       ["/settings/credentials/", "Credentials"],
+      ["/settings/secrets/", "Secrets"],
       ["/settings/security/", "Security"],
       ["/settings/sessions/", "Active sessions"],
     ] as const) {
@@ -327,7 +328,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
   test("global routes preserve only an accessible organization context", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop global-context contract");
 
-    for (const route of ["/settings/", "/settings/credentials/", "/settings/security/", "/settings/sessions/"]) {
+    for (const route of ["/settings/", "/settings/credentials/", "/settings/secrets/", "/settings/security/", "/settings/sessions/"]) {
       const response = await page.goto(`${route}?org=${cleanRoutesOrgSlug}`);
       expect(response?.status()).toBe(200);
       await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
@@ -346,8 +347,18 @@ test.describe("server-rendered public, auth, and account routes", () => {
     for (const route of [
       "/settings/?org=not-a-member",
       "/settings/credentials/?org=not-a-member",
+      "/settings/secrets/?org=not-a-member",
       "/settings/security/?org=not-a-member",
       "/settings/sessions/?org=not-a-member",
+    ]) {
+      const response = await page.goto(route);
+      expect(response?.status()).toBe(200);
+      await expect(page.locator(".cw-settings-subnav").getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+      await expect(page.locator('.cw-settings-subnav a[href*="not-a-member"]')).toHaveCount(0);
+      await expect(page.locator(".cw-sidebar-slot").getByRole("link", { name: "Settings" }))
+        .toHaveAttribute("href", "/settings/");
+    }
+    for (const route of [
       "/admin/?org=not-a-member",
       "/admin/billing/?org=not-a-member",
       "/admin/audit/?org=not-a-member",

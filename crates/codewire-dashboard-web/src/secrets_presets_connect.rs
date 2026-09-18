@@ -112,6 +112,140 @@ pub(crate) async fn secrets(
     Ok(secrets.into_iter().map(secret_row).collect())
 }
 
+pub(crate) const USER_SECRET_PAGE_SIZE: usize = 100;
+
+pub(crate) struct UserSecretPage {
+    pub(crate) secrets: Vec<SecretRow>,
+    pub(crate) next_cursor: String,
+}
+
+pub(crate) fn valid_user_secret_cursor(cursor: &str) -> bool {
+    cursor.is_empty() || codewire_workload_secrets::validate_workload_secret_key(cursor).is_ok()
+}
+
+/// The current owning RPC returns the complete inventory and ignores page_size.
+/// Keep its empty server token, bounded Connect response read, and metadata-only
+/// semantics. Page the sorted names in the BFF so 101 keys still remain usable
+/// without pretending the backend implements pagination.
+pub(crate) async fn user_secret_page(
+    state: &AppState,
+    cookie: HeaderValue,
+    cursor: &str,
+) -> Result<UserSecretPage, ConnectError> {
+    if !valid_user_secret_cursor(cursor) {
+        return Err(ConnectError::invalid_argument("Invalid secret page"));
+    }
+    let response = secret_client(state, cookie)
+        .list_user_secrets(ListUserSecretsRequest::default())
+        .await?
+        .into_owned();
+    page_complete_user_secret_metadata(response.secrets, &response.next_page_token, cursor)
+}
+
+fn page_complete_user_secret_metadata(
+    mut secrets: Vec<SecretMetadata>,
+    server_next_cursor: &str,
+    cursor: &str,
+) -> Result<UserSecretPage, ConnectError> {
+    let mut keys = std::collections::HashSet::new();
+    if !server_next_cursor.is_empty()
+        || !valid_user_secret_cursor(cursor)
+        || secrets.iter().any(|secret| {
+            codewire_workload_secrets::validate_workload_secret_key(&secret.key).is_err()
+                || !keys.insert(&secret.key)
+        })
+    {
+        return Err(ConnectError::unavailable("Secret metadata is unavailable"));
+    }
+    secrets.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+    let first = secrets.partition_point(|secret| secret.key.as_str() <= cursor);
+    let more = secrets.len().saturating_sub(first) > USER_SECRET_PAGE_SIZE;
+    let page = secrets
+        .into_iter()
+        .skip(first)
+        .take(USER_SECRET_PAGE_SIZE)
+        .map(secret_row)
+        .collect::<Vec<_>>();
+    let next_cursor = if more {
+        page.last()
+            .expect("a following page requires a full current page")
+            .key
+            .clone()
+    } else {
+        String::new()
+    };
+    Ok(UserSecretPage {
+        secrets: page,
+        next_cursor,
+    })
+}
+
+#[cfg(test)]
+mod personal_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn complete_user_inventory_is_paged_by_key_without_dropping_the_101st_row() {
+        let row = || SecretMetadata {
+            key: "DATABASE_URL".into(),
+            ..Default::default()
+        };
+        assert!(
+            page_complete_user_secret_metadata(vec![row()], "unexpected-backend-pagination", "")
+                .is_err()
+        );
+        assert!(page_complete_user_secret_metadata(vec![], "", "PREVIOUS").is_ok());
+        assert!(page_complete_user_secret_metadata(vec![row(), row()], "", "").is_err());
+        assert!(!valid_user_secret_cursor(&"x".repeat(256)));
+        assert!(!valid_user_secret_cursor("line\nfeed"));
+        let rows = || {
+            (0..101)
+                .rev()
+                .map(|n| SecretMetadata {
+                    key: format!("KEY_{n:03}"),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = page_complete_user_secret_metadata(rows(), "", "").unwrap();
+        assert_eq!(first.secrets.len(), 100);
+        assert_eq!(first.secrets[0].key, "KEY_000");
+        assert!(
+            first
+                .secrets
+                .windows(2)
+                .all(|rows| rows[0].key < rows[1].key)
+        );
+        assert_eq!(first.next_cursor, "KEY_099");
+        let second = page_complete_user_secret_metadata(rows(), "", &first.next_cursor).unwrap();
+        assert_eq!(second.secrets.len(), 1);
+        assert_eq!(second.secrets[0].key, "KEY_100");
+        assert!(second.next_cursor.is_empty());
+        let deleted_anchor = rows()
+            .into_iter()
+            .filter(|row| row.key != "KEY_099")
+            .collect();
+        assert_eq!(
+            page_complete_user_secret_metadata(deleted_anchor, "", "KEY_099")
+                .unwrap()
+                .secrets[0]
+                .key,
+            "KEY_100"
+        );
+        assert!(
+            page_complete_user_secret_metadata(
+                vec![SecretMetadata {
+                    key: "not/a/key".into(),
+                    ..Default::default()
+                }],
+                "",
+                ""
+            )
+            .is_err()
+        );
+    }
+}
+
 fn secret_row(secret: SecretMetadata) -> SecretRow {
     let updated = secret
         .updated_at

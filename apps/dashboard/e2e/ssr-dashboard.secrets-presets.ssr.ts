@@ -31,8 +31,9 @@ let ownerId = "";
 let presetId = "";
 let activeEnvironmentId = "";
 
-// The values exercised here are intentionally sent through APIRequestContext.
-// Browser screenshots and traces must never become a second secret store.
+// Values normally use APIRequestContext. The explicit no-JavaScript case uses
+// a synthetic-only value through the actual native form; screenshots and
+// traces remain disabled so neither path becomes a second secret store.
 test.use({ screenshot: "off", trace: "off" });
 
 function secretValue(suffix: string) {
@@ -59,15 +60,18 @@ async function setSecret(
   value: string,
   useHtmx = true,
 ) {
-  const pathname = `/${slug}/secrets/${bucket}`;
+  const pathname = bucket === "user" ? "/settings/secrets" : `/${slug}/secrets/${bucket}`;
   const csrf = await csrfFor(page, pathname);
+  const account: Record<string, string> = bucket === "user"
+    ? { account_id: await page.locator('input[name="account_id"]').first().inputValue(), mode: "add" }
+    : {};
   const headers: Record<string, string> = { Origin: ssrUrl };
   if (useHtmx) {
     headers["HX-Request"] = "true";
     headers["HX-Current-URL"] = `${ssrUrl}${pathname}/`;
   }
   const response = await page.request.post(`${pathname}/_actions/set`, {
-    form: { _csrf: csrf, key, value },
+    form: { _csrf: csrf, key, value, ...account },
     headers,
   });
   expect(response.status()).toBe(200);
@@ -80,6 +84,32 @@ async function setSecret(
 }
 
 async function renameAndDeleteSecret(page: Page, bucket: string, key: string, renamedKey: string) {
+  if (bucket === "user") {
+    await page.goto(`/${slug}/secrets/user/`);
+    await expect(page).toHaveURL("/settings/secrets/");
+    let row = page.locator(".cw-personal-secret-row", { hasText: key });
+    await row.getByRole("button", { name: "Rename", exact: true }).click();
+    const rename = page.getByRole("dialog", { name: `Rename ${key}`, exact: true });
+    await rename.getByLabel("New key").fill(renamedKey);
+    const [request] = await Promise.all([
+      page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/settings/secrets/_actions/rename"),
+      rename.getByRole("button", { name: "Save name", exact: true }).click(),
+    ]);
+    expect(request.headers().origin).toBe(ssrUrl);
+    await expect(page).toHaveURL(`${ssrUrl}/settings/secrets/?message=secret-renamed`);
+    await expect(page.getByRole("status")).toContainText("Secret renamed");
+    row = page.locator(".cw-personal-secret-row", { hasText: renamedKey });
+    await row.getByRole("button", { name: "Delete", exact: true }).click();
+    const deletion = page.getByRole("dialog", { name: `Delete ${renamedKey}?`, exact: true });
+    await expect(deletion.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+    await Promise.all([
+      page.waitForURL(`${ssrUrl}/settings/secrets/?message=secret-deleted`),
+      deletion.getByRole("button", { name: "Delete secret", exact: true }).click(),
+    ]);
+    await expect(page.getByRole("status")).toContainText("Secret deleted");
+    await expect(page.locator(".cw-personal-secret-row", { hasText: renamedKey })).toHaveCount(0);
+    return;
+  }
   const bucketPath = `/${slug}/secrets/${bucket}/`;
   await page.goto(`/${slug}/secrets/${bucket}`);
   let row = page.locator(".cw-list-row", { hasText: key });
@@ -154,7 +184,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
     await expect(page.locator("#organization-content")).toContainText("Write-only application secrets");
     await expect(page.locator("#organization-content")).not.toContainText("Write-only credentials");
     await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(orgName);
-    await expect(page.getByLabel("Organization navigation").getByRole("link", {
+    await expect(page.getByRole("list", { name: `Organization · ${orgName}`, exact: true }).getByRole("link", {
       name: "Secrets",
       exact: true,
     })).toHaveAttribute(
@@ -293,21 +323,40 @@ test.describe.serial("server-rendered secrets and presets", () => {
     });
     const page = await context.newPage();
     const key = `${secretPrefix}_NO_JS`;
+    const renamedKey = `${key}_RENAMED`;
     const value = secretValue("no-js");
-    const pathname = `/${slug}/secrets/user/`;
-    const csrf = await csrfFor(page, pathname);
-    const response = await context.request.post(`${pathname}_actions/set`, {
-      form: { _csrf: csrf, key, value },
-      headers: { Origin: ssrUrl },
-    });
-    expect(response.status()).toBe(200);
-    expect(response.url()).toBe(`${ssrUrl}${pathname}?message=secret-saved`);
-    await responseBodyExcludesSecret(response, value);
-    let body = await response.text();
-    expect(body).toContain("<!doctype html>");
-    expect(body).toContain(key);
-    expect(body).not.toContain(artifactSecretMarker);
+    const pathname = "/settings/secrets/";
+    expect((await page.goto(pathname))?.status()).toBe(200);
+    const add = page.locator("#fallback-add-secret-form");
+    await expect(add).toBeVisible();
+    await add.getByLabel("Key", { exact: true }).fill(key);
+    await add.getByLabel("Value", { exact: true }).fill(value);
+    await add.getByRole("button", { name: "Add secret", exact: true }).click();
+    await expect(page).toHaveURL(`${pathname}?message=secret-saved`);
+    await expect(page.getByRole("status")).toContainText("Secret saved");
+    let body = await page.content();
+    expect(body.includes(value) || page.url().includes(value)).toBe(false);
+    expect(body.includes(artifactSecretMarker)).toBe(false);
     body = "";
+
+    let row = page.locator(".cw-personal-secret-row", {
+      has: page.getByRole("heading", { name: key, exact: true }),
+    });
+    const rename = row.locator('details[id$="-rename"]');
+    await rename.locator("summary").click();
+    await rename.getByLabel("New key", { exact: true }).fill(renamedKey);
+    await rename.getByRole("button", { name: "Save name", exact: true }).click();
+    await expect(page).toHaveURL(`${pathname}?message=secret-renamed`);
+    row = page.locator(".cw-personal-secret-row", {
+      has: page.getByRole("heading", { name: renamedKey, exact: true }),
+    });
+    const remove = row.locator('details[id$="-delete"]');
+    await expect(remove.getByRole("button", { name: "Delete secret", exact: true })).toBeHidden();
+    await remove.locator("summary").click();
+    await expect(remove).toContainText("does not revoke access at an external service");
+    await remove.getByRole("button", { name: "Delete secret", exact: true }).click();
+    await expect(page).toHaveURL(`${pathname}?message=secret-deleted`);
+    await expect(page.getByRole("heading", { name: renamedKey, exact: true })).toHaveCount(0);
     await context.close();
   });
 

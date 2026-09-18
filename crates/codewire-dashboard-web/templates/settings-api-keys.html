@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Personal API Keys · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/settings-v1.css">
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+    <script src="/assets/codewire/organizations-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="dashboard-settings-api-keys" hx-history="false">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span>Codewire</span></a></header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-settings-page">
+        <div class="cw-settings-layout">
+          {% let settings_section = "api-keys" %}{% include "settings-nav.html" %}
+          <div class="cw-settings-content cw-personal-api-keys-page">
+<header class="cw-page-header"><div><p class="cw-eyebrow">Personal</p><h1 class="cw-page-title">API Keys</h1><p class="cw-page-description">Keys you created, grouped by accessible organization. Each key belongs to its organization, not to a global account scope.</p></div></header>
+{% if !page.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ page.message }}</p>{% endif %}
+{% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
+{% if !page.form.error.is_empty() && (!page.organizations_available || page.organizations.is_empty()) %}<p class="cw-alert cw-alert--error" role="alert">{{ page.form.error }}</p>{% endif %}
+{% if !page.one_time_key.is_empty() %}
+<section class="cw-card cw-settings-card" aria-labelledby="personal-key-created-title" data-api-key-reveal>
+<header class="cw-card-header"><h2 id="personal-key-created-title" class="cw-card-title">Save your API key</h2><p class="cw-card-description">Copy this key now. It will not be shown again.</p></header>
+<div class="cw-card-content"><dl class="cw-settings-details"><div><dt>Name</dt><dd>{{ page.one_time_name }}</dd></div><div><dt>Organization</dt><dd>{{ page.one_time_organization }}</dd></div></dl><p class="cw-settings-muted">Treat this key like a password. You can select and copy the text directly.</p><code class="cw-key-secret" data-secret-kind="api-key" data-one-time-api-key tabindex="0">{{ page.one_time_key }}</code><div class="cw-settings-account-links"><button class="cw-button cw-button--outline" type="button" data-copy-api-key>Copy key</button><a class="cw-button" href="{{ page.reload_url }}">Done</a></div></div>
+</section>
+{% else %}
+<section class="cw-card cw-settings-card" aria-labelledby="personal-api-key-list-title">
+<header class="cw-card-header cw-settings-list-heading"><div><h2 id="personal-api-key-list-title" class="cw-card-title">Your organization keys</h2><p class="cw-card-description">Only keys owned by your account appear here. Scope labels are metadata, not enforced permission limits.</p></div><button class="cw-button cw-button--outline" type="button" data-dialog-open="create-personal-api-key" aria-haspopup="dialog" aria-controls="create-personal-api-key"{% if !page.organizations_available || page.organizations.is_empty() %} disabled{% endif %}>Create key</button></header>
+<div class="cw-card-content">
+{% if !page.organizations_available %}
+<p class="cw-alert cw-alert--warning" role="status">Organization navigation is temporarily unavailable. Reload before creating or managing keys; this does not mean you have no API keys.</p><a href="{{ page.reload_url }}">Reload API keys</a>
+{% else %}
+{% if page.organizations.is_empty() %}
+{% if page.first_page_url.is_empty() && page.next_page_url.is_empty() %}<p class="cw-settings-muted">Join or create an organization before creating an API key.</p><a href="{{ view.new_organization_url }}">New organization</a>{% else %}<p class="cw-settings-muted">No organizations on this page. Use the page links to continue.</p>{% endif %}
+{% else %}
+<noscript><details class="cw-credential-secondary" open><summary>Create key</summary><p>Choose the organization this key will belong to. The key will be shown once after creation.</p>{% if !page.form.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.form.error }}</p>{% endif %}<form class="cw-form cw-settings-form" id="fallback-create-personal-api-key-form" aria-label="Create API key" method="post" action="/settings/api-keys/_actions/create{{ page.action_query }}">
+<input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="account_id" value="{{ page.account_id }}">
+<div class="cw-field"><label class="cw-label" for="fallback-create-personal-api-key-org">Organization</label><select class="cw-input" id="fallback-create-personal-api-key-org" name="org_id" required><option value=""{% if page.form.org_id.is_empty() %} selected{% endif %}>Choose an organization</option>{% for organization in page.organizations %}<option value="{{ organization.id }}"{% if page.form.org_id == organization.id %} selected{% endif %}>{{ organization.name }} · {{ organization.slug }}</option>{% endfor %}</select></div>
+<div class="cw-field"><label class="cw-label" for="fallback-create-personal-api-key-name">Name</label><input class="cw-input" id="fallback-create-personal-api-key-name" name="name" value="{{ page.form.name }}" maxlength="128" autocomplete="off" required></div>
+<div class="cw-field"><label class="cw-label" for="fallback-create-personal-api-key-expiration">Expiration</label><select class="cw-input" id="fallback-create-personal-api-key-expiration" name="expiration"><option value="never"{% if page.form.expiration.is_empty() || page.form.expiration == "never" %} selected{% endif %}>Never</option><option value="30"{% if page.form.expiration == "30" %} selected{% endif %}>30 days</option><option value="60"{% if page.form.expiration == "60" %} selected{% endif %}>60 days</option><option value="90"{% if page.form.expiration == "90" %} selected{% endif %}>90 days</option></select></div>
+<button class="cw-button" type="submit">Create key</button></form></details></noscript>
+<ul class="cw-personal-api-key-groups">
+{% for group in page.groups %}{% let group_index = loop.index %}
+<li><section class="cw-personal-api-key-group" aria-labelledby="personal-api-key-group-{{ group_index }}"><header><h3 id="personal-api-key-group-{{ group_index }}">{{ group.organization.name }}</h3><p class="cw-settings-muted">Organization · {{ group.organization.slug }}</p></header>
+{% if !group.available %}<p class="cw-alert cw-alert--warning" role="status">API keys for this organization are temporarily unavailable. This does not mean you have no keys here.</p>
+{% else %}
+{% if group.truncated %}<p class="cw-alert cw-alert--warning" role="status">Showing your first 100 keys for this organization. Open the organization inventory for the remaining keys.</p>{% endif %}
+{% if group.keys.is_empty() %}<p class="cw-settings-muted">You have no API keys in this organization.</p>
+{% else %}
+<ul class="cw-personal-api-keys">
+{% for entry in group.keys %}{% let key_index = loop.index %}
+<li class="cw-personal-api-key-row"><header><h4>{{ entry.key.name }}</h4><span class="cw-credential-status cw-credential-status--{{ entry.key.status_tone }}">{{ entry.key.status }}</span></header>
+<p class="cw-settings-muted">Prefix <code>{{ entry.key.prefix }}</code> · Last used {{ entry.key.last_used }}</p>
+<details class="cw-credential-secondary"><summary>Key details</summary><dl class="cw-settings-details"><div><dt>Created</dt><dd>{{ entry.key.created }}</dd></div><div><dt>Expires</dt><dd>{{ entry.expires }}</dd></div><div><dt>Scope labels</dt><dd>{% if entry.scopes.is_empty() %}None{% else %}<ul>{% for scope in entry.scopes %}<li><code>{{ scope }}</code></li>{% endfor %}</ul>{% endif %}</dd></div></dl></details>
+<ul class="cw-credential-action-list" aria-label="Actions for {{ entry.key.name }}">
+{% if !entry.key.expired %}<li><form method="post" action="/settings/api-keys/_actions/toggle{{ page.action_query }}"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="account_id" value="{{ page.account_id }}"><input type="hidden" name="org_id" value="{{ group.organization.id }}"><input type="hidden" name="key_id" value="{{ entry.key.id }}"><input type="hidden" name="disabled" value="{% if entry.key.disabled %}false{% else %}true{% endif %}"><button class="cw-button cw-button--outline" type="submit">{% if entry.key.disabled %}Enable{% else %}Disable{% endif %}</button></form></li>{% endif %}
+{% if group.organization.can_admin %}<li><button class="cw-button cw-button--outline" type="button" data-dialog-open="api-key-{{ group_index }}-{{ key_index }}-delete" aria-haspopup="dialog" aria-controls="api-key-{{ group_index }}-{{ key_index }}-delete">Delete</button></li>{% endif %}
+</ul>
+{% if group.organization.can_admin %}
+<dialog class="cw-dialog cw-credential-dialog" data-dialog id="api-key-{{ group_index }}-{{ key_index }}-delete" aria-labelledby="api-key-{{ group_index }}-{{ key_index }}-delete-title"><header class="cw-dialog-header"><h2 id="api-key-{{ group_index }}-{{ key_index }}-delete-title">Delete {{ entry.key.name }}?</h2></header><div class="cw-dialog-body"><p>Delete <strong>{{ entry.key.name }}</strong> from <strong>{{ group.organization.name }}</strong>? This permanently removes the key. Future requests using it will fail. This does not stop existing Sandbox processes or connections.</p><form id="api-key-{{ group_index }}-{{ key_index }}-delete-form" method="post" action="/settings/api-keys/_actions/delete{{ page.action_query }}"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="account_id" value="{{ page.account_id }}"><input type="hidden" name="org_id" value="{{ group.organization.id }}"><input type="hidden" name="key_id" value="{{ entry.key.id }}"></form></div><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button cw-danger-button" type="submit" form="api-key-{{ group_index }}-{{ key_index }}-delete-form">Delete key</button></footer></dialog>
+<noscript><details class="cw-credential-secondary" id="fallback-api-key-{{ group_index }}-{{ key_index }}-delete"><summary>Delete</summary><p>Delete <strong>{{ entry.key.name }}</strong> from <strong>{{ group.organization.name }}</strong>? This permanently removes the key. Future requests using it will fail. This does not stop existing Sandbox processes or connections.</p><form aria-label="Delete {{ entry.key.name }}" method="post" action="/settings/api-keys/_actions/delete{{ page.action_query }}"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="account_id" value="{{ page.account_id }}"><input type="hidden" name="org_id" value="{{ group.organization.id }}"><input type="hidden" name="key_id" value="{{ entry.key.id }}"><button class="cw-button cw-danger-button" type="submit">Delete key</button></form></details></noscript>
+{% endif %}
+</li>{% endfor %}</ul>{% endif %}{% endif %}
+{% if !group.organization.can_admin %}<p class="cw-settings-muted">Only an organization owner or admin can delete keys.</p>{% endif %}
+<p><a href="/{{ group.organization.slug }}/api-keys/">Open organization inventory</a></p>
+</section></li>{% endfor %}</ul>
+<dialog class="cw-dialog cw-credential-dialog" data-dialog id="create-personal-api-key" aria-labelledby="create-personal-api-key-title"{% if page.form.expanded %} data-dialog-auto-open{% endif %}><header class="cw-dialog-header"><h2 id="create-personal-api-key-title">Create API key</h2></header><div class="cw-dialog-body"><p>Choose the organization this key will belong to. The key will be shown once after creation.</p>{% if !page.form.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.form.error }}</p>{% endif %}<form data-dirty-guard class="cw-form cw-settings-form" id="create-personal-api-key-form" aria-label="Create API key" method="post" action="/settings/api-keys/_actions/create{{ page.action_query }}">
+<input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="account_id" value="{{ page.account_id }}">
+<div class="cw-field"><label class="cw-label" for="create-personal-api-key-org">Organization</label><select class="cw-input" id="create-personal-api-key-org" name="org_id" required><option value=""{% if page.form.org_id.is_empty() %} selected{% endif %}>Choose an organization</option>{% for organization in page.organizations %}<option value="{{ organization.id }}"{% if page.form.org_id == organization.id %} selected{% endif %}>{{ organization.name }} · {{ organization.slug }}</option>{% endfor %}</select></div>
+<div class="cw-field"><label class="cw-label" for="create-personal-api-key-name">Name</label><input class="cw-input" id="create-personal-api-key-name" name="name" value="{{ page.form.name }}" maxlength="128" autocomplete="off" required></div>
+<div class="cw-field"><label class="cw-label" for="create-personal-api-key-expiration">Expiration</label><select class="cw-input" id="create-personal-api-key-expiration" name="expiration"><option value="never"{% if page.form.expiration.is_empty() || page.form.expiration == "never" %} selected{% endif %}>Never</option><option value="30"{% if page.form.expiration == "30" %} selected{% endif %}>30 days</option><option value="60"{% if page.form.expiration == "60" %} selected{% endif %}>60 days</option><option value="90"{% if page.form.expiration == "90" %} selected{% endif %}>90 days</option></select></div>
+</form></div><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit" form="create-personal-api-key-form">Create key</button></footer></dialog>
+{% endif %}{% endif %}
+</div></section>
+{% if !page.first_page_url.is_empty() || !page.next_page_url.is_empty() %}<nav class="cw-session-pagination" aria-label="Organization pages">{% if !page.first_page_url.is_empty() %}<a href="{{ page.first_page_url }}">First page</a>{% endif %}{% if !page.next_page_url.is_empty() %}<a href="{{ page.next_page_url }}">Next page</a>{% endif %}</nav>{% endif %}
+{% endif %}
+</div></div></div></div></main></div></body></html>

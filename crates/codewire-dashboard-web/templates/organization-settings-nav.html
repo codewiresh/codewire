@@ -1,23 +1,3 @@
-<header class="cw-context-nav-heading">
-  <h2>Settings</h2>
-  <span>{{ organization.slug }} · {{ organization.role }}</span>
-</header>
-<nav class="cw-context-nav-links" aria-label="Organization navigation">
-  <h3 class="cw-context-nav-label">Personal</h3>
-  <ul><li><a href="/settings/{{ view.global_context_query }}">Account</a></li>
-  <li><a href="/settings/credentials/{{ view.global_context_query }}">Credentials</a></li></ul>
-  <h3 class="cw-context-nav-label">Organization</h3>
-  <ul><li><a href="{{ organization.environments_url }}">Sandboxes</a></li>
-  <li><a href="{{ organization.snapshots_url }}">Snapshots <small>Soon</small></a></li>
-  <li><a href="{{ organization.presets_url }}"{% if active_tab == "presets" %} aria-current="page"{% endif %}>Presets</a></li>
-  <li><a href="{{ organization.secrets_url }}"{% if active_tab == "secrets" %} aria-current="page"{% endif %}>Secrets</a></li>
-  <li><a href="{{ organization.api_keys_url }}"{% if active_tab == "api-keys" %} aria-current="page"{% endif %}>API Keys</a></li>
-  <li><a href="{{ organization.members_url }}"{% if active_tab == "members" %} aria-current="page"{% endif %}>Members</a></li>
-  <li><a href="{{ organization.billing_url }}"{% if active_tab == "billing" %} aria-current="page"{% endif %}>Billing</a></li></ul>
-  {% if view.is_admin %}
-  <h3 class="cw-context-nav-label">Admin</h3>
-  <ul><li><a href="/admin/{{ view.global_context_query }}">Overview</a></li>
-  <li><a href="/admin/billing/{{ view.global_context_query }}">Billing catalog</a></li>
-  <li><a href="/admin/audit/{{ view.global_context_query }}">Audit log</a></li></ul>
-  {% endif %}
-</nav>
+{% let settings_personal = false %}
+{% let settings_section = active_tab.to_string() %}
+{% include "settings-navigation.html" %}

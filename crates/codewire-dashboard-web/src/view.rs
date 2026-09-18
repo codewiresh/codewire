@@ -565,12 +565,13 @@ pub(crate) struct GitHubAppAuthorizationSubmission {
     pub(crate) confirm_reconnect: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct DashboardView {
     pub(crate) user_name: String,
     pub(crate) is_admin: bool,
     pub(crate) organizations: Vec<OrganizationRow>,
     pub(crate) has_organizations: bool,
+    pub(crate) organization_navigation_unavailable: bool,
     pub(crate) show_checklist: bool,
     pub(crate) new_organization_url: String,
     pub(crate) settings_url: String,
@@ -651,10 +652,8 @@ pub(crate) struct OrganizationContext {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) slug: String,
-    pub(crate) role: &'static str,
     pub(crate) can_admin: bool,
     pub(crate) environments_url: String,
-    pub(crate) snapshots_url: String,
     pub(crate) presets_url: String,
     pub(crate) secrets_url: String,
     pub(crate) api_keys_url: String,
@@ -669,10 +668,8 @@ impl OrganizationContext {
             id: row.id.clone(),
             name: row.name.clone(),
             slug: row.slug.clone(),
-            role: row.role,
             can_admin: row.can_admin,
             environments_url: format!("{local_base}/"),
-            snapshots_url: format!("{local_base}/snapshots/"),
             presets_url: format!("{local_base}/presets/"),
             secrets_url: format!("{local_base}/secrets/"),
             api_keys_url: format!("{local_base}/api-keys/"),
@@ -1494,6 +1491,51 @@ pub(crate) struct ApiKeysPageView {
 }
 
 #[derive(Debug)]
+pub(crate) struct PersonalApiKeyRow {
+    pub(crate) key: ApiKeyRow,
+    pub(crate) expires: String,
+    pub(crate) scopes: Vec<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PersonalApiKeyGroupView {
+    pub(crate) organization: OrganizationRow,
+    pub(crate) keys: Vec<PersonalApiKeyRow>,
+    pub(crate) available: bool,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct PersonalApiKeyFormView {
+    pub(crate) org_id: String,
+    pub(crate) name: String,
+    pub(crate) expiration: String,
+    pub(crate) error: String,
+    pub(crate) expanded: bool,
+}
+
+// Only a successful Create response can populate one_time_key. Never derive
+// diagnostics for this model or persist it as navigation/history state.
+#[derive(Default)]
+pub(crate) struct PersonalApiKeysPageView {
+    pub(crate) groups: Vec<PersonalApiKeyGroupView>,
+    pub(crate) organizations: Vec<OrganizationRow>,
+    pub(crate) organizations_available: bool,
+    pub(crate) account_id: String,
+    pub(crate) csrf_token: String,
+    pub(crate) form: PersonalApiKeyFormView,
+    pub(crate) one_time_key: String,
+    pub(crate) one_time_name: String,
+    pub(crate) one_time_organization: String,
+    pub(crate) message: String,
+    pub(crate) error: String,
+    pub(crate) action_query: String,
+    pub(crate) reload_url: String,
+    pub(crate) first_page_url: String,
+    pub(crate) next_page_url: String,
+}
+
+#[derive(Debug)]
 pub(crate) struct SecretProjectRow {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -1533,6 +1575,34 @@ pub(crate) struct SecretFormView {
     pub(crate) key_error: String,
     pub(crate) form_error: String,
     pub(crate) expanded: bool,
+}
+
+// Only metadata is retained. Submitted values must never enter a page view.
+#[derive(Default)]
+pub(crate) struct PersonalSecretsPageView {
+    pub(crate) account_id: String,
+    pub(crate) secrets: Vec<SecretRow>,
+    pub(crate) available: bool,
+    pub(crate) form: SecretFormView,
+    pub(crate) new_key: String,
+    pub(crate) csrf_token: String,
+    pub(crate) message: String,
+    pub(crate) error: String,
+    pub(crate) active_dialog: String,
+    pub(crate) first_page_url: String,
+    pub(crate) next_page_url: String,
+    pub(crate) action_query: String,
+}
+
+impl fmt::Debug for PersonalSecretsPageView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PersonalSecretsPageView")
+            .field("account_id", &self.account_id)
+            .field("secret_count", &self.secrets.len())
+            .field("available", &self.available)
+            .field("csrf_token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
