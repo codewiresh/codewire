@@ -199,13 +199,13 @@ test.describe("managed provider credential browser journey", () => {
         await completeGithubAppConnection(page, "kind-synthetic-code-one", alter);
         await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-app-failed&dialog=connect-github`);
         await expect(connection).toBeVisible();
-        await expect(page.locator(".cw-credential-row")).toHaveCount(0);
+        await expect(page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row")).toHaveCount(0);
         expect(await githubConnectionMetadata(owner)).toEqual([]);
       }
       await completeGithubAppConnection(page, "kind-synthetic-code-uninstalled");
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-installation-required&dialog=connect-github`);
       await expect(connection.getByRole("alert")).toContainText("No credential was changed");
-      await expect(page.locator(".cw-credential-row")).toHaveCount(0);
+      await expect(page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row")).toHaveCount(0);
       expect(await githubConnectionMetadata(owner)).toEqual([]);
       // A newly authorized, now-installed account can complete normally.
       const completedCallback = await completeGithubAppConnection(page, "kind-synthetic-code-one");
@@ -230,7 +230,7 @@ test.describe("managed provider credential browser journey", () => {
       expect(rendered?.includes("ghu_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
-      let row = page.locator(".cw-credential-row", { hasText: name });
+      let row = page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row", { hasText: name });
       await expect(row).toHaveCount(1);
       await expect(row).toContainText("GitHub · OAuth");
       await expect(row).toContainText("synthetic-user");
@@ -247,6 +247,9 @@ test.describe("managed provider credential browser journey", () => {
       await completeGithubAppConnection(page, "kind-synthetic-code-two");
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?error=github-app-already-connected&dialog=connect-github`);
       await expect(page.getByRole("alert")).toContainText("This GitHub account is already connected");
+      const savedConnections = page.getByRole("region", { name: "Saved GitHub connections", exact: true });
+      await expect(savedConnections.getByRole("button", { name: "Reconnect synthetic-user", exact: true })).toBeVisible();
+      await expect(savedConnections).toContainText("Active");
       await page.goto("/settings/credentials/");
       await expect(row).toHaveCount(1);
       await expect(row).toContainText("Generation 1");
@@ -327,7 +330,7 @@ test.describe("managed provider credential browser journey", () => {
       await page.getByRole("dialog", { name: `Delete ${profileName}?`, exact: true })
         .getByRole("button", { name: "Delete profile", exact: true }).click();
       await expect(profileRow).toHaveCount(0);
-      row = page.locator(".cw-credential-row", { hasText: name });
+      row = page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row", { hasText: name });
 
       await expect(row).toContainText("Active");
       await expect(row).toContainText("Generation 2");
@@ -338,7 +341,7 @@ test.describe("managed provider credential browser journey", () => {
         .getByRole("button", { name: "Revoke credential", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-revoked`);
       await expect(page.getByRole("status")).toHaveText("Credential revoked.");
-      row = page.locator(".cw-credential-row", { hasText: name });
+      row = page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row", { hasText: name });
       await expect(row).toContainText("Revoked");
       await expect(row).toContainText("Generation 3");
 
@@ -349,7 +352,7 @@ test.describe("managed provider credential browser journey", () => {
         .getByRole("button", { name: "Delete credential", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-deleted`);
       await expect(page.getByRole("status")).toHaveText("Credential deleted.");
-      await expect(page.locator(".cw-credential-row", { hasText: name })).toHaveCount(0);
+      await expect(page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row", { hasText: name })).toHaveCount(0);
     } catch (error) {
       primaryFailure = error;
       throw error;

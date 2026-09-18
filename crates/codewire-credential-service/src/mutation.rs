@@ -57,6 +57,7 @@ pub enum CredentialMutationError {
     EnrollmentFailed,
     EnrollmentUnsupported,
     GitHubInstallationRequired,
+    GitHubAppNotConfigured,
     CleanupFailed,
     PublicationUnknown,
 }
