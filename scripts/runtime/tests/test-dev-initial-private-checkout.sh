@@ -173,7 +173,7 @@ CHECKOUT_ATTEMPTED=1; ENV_ID=''; INVENTORY_STATE=absent
 if checkout_cleanup_environment; then fail 'uncertain create absence was accepted as cleanup'; fi; COUNT=$((COUNT + 1))
 # Rejections must match validation reason, create no object and never authenticate.
 ENV_ID=''; CHECKOUT_ATTEMPTED=0; INVENTORY_STATE=absent; CHECKOUT_AUTHENTICATED=0
-REJECT_REASON='SSH repository checkout requires a selected credential profile'
+REJECT_REASON='SSH repository checkout requires an explicitly selected credential profile containing an SSH identity'
 checkout_create() { CHECKOUT_ATTEMPTED=1; printf '%s\n' "$REJECT_REASON" >"$TMPDIR_SMOKE/checkout-$2.err"; return 1; }
 checkout_fixture_inspect() { return 0; }
 checkout_reject ignored unselected "$REJECT_REASON"; COUNT=$((COUNT + 1))
