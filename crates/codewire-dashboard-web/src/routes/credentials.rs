@@ -1280,7 +1280,7 @@ fn approved_error(code: &str) -> &'static str {
         }
         "credential-request-failed" => "The credential change could not be completed. Try again.",
         "github-app-unavailable" => {
-            "GitHub App authorization is not configured yet. Ask an administrator to finish the GitHub App setup."
+            "GitHub App authorization is not configured yet. No credential was changed. Ask an administrator to finish the GitHub App setup."
         }
         "github-app-cancelled" => {
             "GitHub App authorization was cancelled. No credential was changed."
@@ -1365,6 +1365,23 @@ mod tests {
         error: &str,
         navigation: &str,
     ) -> String {
+        rendered_dialogs_with_data_and_navigation(active_dialog, error, dialog_data(), navigation)
+    }
+
+    fn rendered_dialogs_with_data(
+        active_dialog: &str,
+        error: &str,
+        data: credentials_connect::CredentialSettingsData,
+    ) -> String {
+        rendered_dialogs_with_data_and_navigation(active_dialog, error, data, "?org=sample-org")
+    }
+
+    fn rendered_dialogs_with_data_and_navigation(
+        active_dialog: &str,
+        error: &str,
+        data: credentials_connect::CredentialSettingsData,
+        navigation: &str,
+    ) -> String {
         let view = DashboardView {
             user_name: "Dashboard User".into(),
             is_admin: false,
@@ -1390,7 +1407,6 @@ mod tests {
             provisioned_memory_mb: 0,
             provisioned_disk_gb: 0,
         };
-        let data = dialog_data();
         let page = CredentialSettingsView {
             navigation_query: navigation.into(),
             creation_return_url: String::new(),
@@ -1447,6 +1463,64 @@ mod tests {
             }
         }
         assert!(!html.contains("/settings/?org=sample-org&amp;creation_draft="));
+    }
+
+    #[test]
+    fn github_connect_dialog_shows_saved_accounts_and_exact_reconnect_actions() {
+        let mut data = dialog_data();
+        let mut revoked = dialog_data().credentials.remove(0);
+        revoked.id = "00000000-0000-4000-8000-000000000003".into();
+        revoked.account_hint = "other-user".into();
+        revoked.status = "Revoked";
+        revoked.status_tone = "danger";
+        revoked.revoked = true;
+        data.credentials.push(revoked);
+        let mut key = dialog_data().credentials.remove(0);
+        key.id = "00000000-0000-4000-8000-000000000004".into();
+        key.name = "unrelated-api-key".into();
+        key.oauth_provider = "";
+        key.oauth = false;
+        key.api_key = true;
+        data.credentials.push(key);
+        let html = rendered_dialogs_with_data("connect-github", "", data);
+        let dialog = html
+            .split("id=\"connect-github\"")
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(dialog.contains("Saved GitHub connections"));
+        assert!(dialog.contains("Reconnect verified-user"));
+        assert!(dialog.contains("Reconnect other-user"));
+        assert!(dialog.contains("credential-00000000-0000-4000-8000-000000000003-reconnect"));
+        assert!(dialog.contains("Revoked"));
+        assert!(!dialog.contains("unrelated-api-key"));
+        assert!(dialog.contains("sign in as a different user"));
+        assert!(dialog.contains("/settings/credentials/_actions/github/authorize"));
+    }
+
+    #[test]
+    fn github_connect_dialog_without_saved_accounts_does_not_claim_a_connection() {
+        let mut data = dialog_data();
+        data.credentials.clear();
+        data.profiles.clear();
+        let html = rendered_dialogs_with_data(
+            "connect-github",
+            approved_error("github-app-unavailable"),
+            data,
+        );
+        let dialog = html
+            .split("id=\"connect-github\"")
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(!dialog.contains("Saved GitHub connections"));
+        assert!(dialog.contains("No credential was changed"));
+        assert!(!dialog.contains("may have completed"));
+        assert!(dialog.contains("Continue to GitHub"));
     }
 
     #[test]

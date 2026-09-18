@@ -164,6 +164,7 @@ pub(crate) fn github_authorization_feedback(error: &ConnectError) -> Option<&'st
         return None;
     }
     match enrollment_error_reason(error).ok()?.as_deref()? {
+        "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED" => Some("github-app-unavailable"),
         "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED" => Some("github-installation-required"),
         "CREDENTIAL_ENROLLMENT_FAILED" => Some("github-app-failed"),
         "CREDENTIAL_ENROLLMENT_UNSUPPORTED" => Some("github-app-response-invalid"),
@@ -1360,39 +1361,47 @@ mod tests {
     }
 
     #[test]
-    fn github_installation_recovery_requires_one_closed_domain_bound_reason() {
-        for (domain, code, duplicate, expected) in [
-            ("codewire.sh", ErrorCode::FailedPrecondition, false, true),
+    fn github_recovery_requires_one_closed_domain_bound_reason() {
+        for (reason, feedback) in [
             (
-                "foreign.example",
-                ErrorCode::FailedPrecondition,
-                false,
-                false,
+                "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
+                "github-installation-required",
             ),
-            ("codewire.sh", ErrorCode::Unavailable, false, false),
-            ("codewire.sh", ErrorCode::FailedPrecondition, true, false),
+            (
+                "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED",
+                "github-app-unavailable",
+            ),
         ] {
-            let info = codewire_proto::google::rpc::ErrorInfo {
-                domain: domain.into(),
-                reason: "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED".into(),
-                ..Default::default()
-            };
-            let mut error = ConnectError::new(code, "ignored-upstream-private-marker");
-            error.details.push(connectrpc::ErrorDetail::from_message(
-                "google.rpc.ErrorInfo",
-                &info,
-            ));
-            if duplicate {
-                error.details.push(error.details[0].clone());
-            }
-            assert_eq!(github_authorization_feedback(&error).is_some(), expected);
-            if expected {
-                assert_eq!(
-                    github_authorization_feedback(&error),
-                    Some("github-installation-required")
-                );
-                error.details[0].value = Some("malformed-base64".into());
-                assert_eq!(github_authorization_feedback(&error), None);
+            for (domain, code, duplicate, expected) in [
+                ("codewire.sh", ErrorCode::FailedPrecondition, false, true),
+                (
+                    "foreign.example",
+                    ErrorCode::FailedPrecondition,
+                    false,
+                    false,
+                ),
+                ("codewire.sh", ErrorCode::Unavailable, false, false),
+                ("codewire.sh", ErrorCode::FailedPrecondition, true, false),
+            ] {
+                let info = codewire_proto::google::rpc::ErrorInfo {
+                    domain: domain.into(),
+                    reason: reason.into(),
+                    ..Default::default()
+                };
+                let mut error = ConnectError::new(code, "ignored-upstream-private-marker");
+                error.details.push(connectrpc::ErrorDetail::from_message(
+                    "google.rpc.ErrorInfo",
+                    &info,
+                ));
+                if duplicate {
+                    error.details.push(error.details[0].clone());
+                }
+                assert_eq!(github_authorization_feedback(&error).is_some(), expected);
+                if expected {
+                    assert_eq!(github_authorization_feedback(&error), Some(feedback));
+                    error.details[0].value = Some("malformed-base64".into());
+                    assert_eq!(github_authorization_feedback(&error), None);
+                }
             }
         }
         assert!(
@@ -1403,6 +1412,10 @@ mod tests {
             .is_none()
         );
         for (reason, feedback) in [
+            (
+                "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED",
+                Some("github-app-unavailable"),
+            ),
             ("CREDENTIAL_ENROLLMENT_FAILED", Some("github-app-failed")),
             (
                 "CREDENTIAL_ENROLLMENT_UNSUPPORTED",

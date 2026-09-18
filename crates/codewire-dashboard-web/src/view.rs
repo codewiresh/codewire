@@ -415,6 +415,14 @@ pub(crate) struct CredentialSettingsView {
     pub(crate) error: String,
 }
 
+impl CredentialSettingsView {
+    pub(crate) fn has_github_connections(&self) -> bool {
+        self.credentials
+            .iter()
+            .any(|credential| credential.oauth_provider == "github")
+    }
+}
+
 impl fmt::Debug for CredentialSettingsView {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

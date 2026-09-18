@@ -350,6 +350,10 @@ fn error(error: Error) -> connectrpc::ConnectError {
             ConnectCode::FailedPrecondition,
             "install the GitHub App for this account before connecting",
         ),
+        Error::GitHubAppNotConfigured => (
+            ConnectCode::FailedPrecondition,
+            "GitHub App authorization is not configured; no credential was changed",
+        ),
         Error::CleanupFailed => (
             ConnectCode::Unavailable,
             "enrollment cleanup failed; reconcile stored metadata before retrying; no stored credential was revoked",
@@ -366,6 +370,7 @@ fn error(error: Error) -> connectrpc::ConnectError {
         Error::EnrollmentFailed => "CREDENTIAL_ENROLLMENT_FAILED",
         Error::EnrollmentUnsupported => "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
         Error::GitHubInstallationRequired => "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
+        Error::GitHubAppNotConfigured => "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED",
         Error::CleanupFailed => "CREDENTIAL_ENROLLMENT_CLEANUP_FAILED",
         Error::PublicationUnknown => "CREDENTIAL_MUTATION_UNCERTAIN",
         _ => "",
@@ -412,6 +417,11 @@ mod tests {
             (
                 Error::GitHubInstallationRequired,
                 "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
+                connectrpc::ErrorCode::FailedPrecondition,
+            ),
+            (
+                Error::GitHubAppNotConfigured,
+                "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED",
                 connectrpc::ErrorCode::FailedPrecondition,
             ),
             (

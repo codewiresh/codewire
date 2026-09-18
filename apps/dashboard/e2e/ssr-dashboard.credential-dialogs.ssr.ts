@@ -75,6 +75,10 @@ test("five full-row choices open focused provider editors with Back and one foot
     if (name === "GitHub") {
       await expect(editor.locator('input[name="name"]')).toHaveCount(0);
       await expect(action(editor, primary)).toBeFocused();
+      const saved = editor.getByRole("region", { name: "Saved GitHub connections", exact: true });
+      await expect(action(saved, "Reconnect verified-user")).toBeVisible();
+      await expect(saved).toContainText("Active");
+      await page.screenshot({ path: test.info().outputPath("github-saved-connections.png") });
     }
     if (name.includes("API key")) {
       await expect(editor.getByRole("combobox")).toHaveCount(0);
@@ -91,6 +95,20 @@ test("five full-row choices open focused provider editors with Back and one foot
   await expect(add).toBeFocused();
   expect(posts).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test("saved GitHub connection opens its exact reconnect dialog without submitting", async ({ page }) => {
+  let posts = 0;
+  page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
+  await choose(page, "GitHub");
+  const connect = dialog(page, "Connect GitHub");
+  await action(connect, "Reconnect verified-user").click();
+  const reconnect = dialog(page, "Reconnect verified-user");
+  await expect(reconnect).toBeVisible();
+  await expect(connect).not.toBeVisible();
+  await expect(page.locator("dialog[open]")).toHaveCount(1);
+  await expect(reconnect.locator('[name="credential_id"]')).toHaveValue("fixture-github");
+  expect(posts).toBe(0);
 });
 
 test("SSH chooses Generate or Import and Back clears private values only after discard", async ({ page }) => {
