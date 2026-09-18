@@ -3153,10 +3153,11 @@ mod tests {
                     .is_none()
             );
         }
+        let alternate_project_id = "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76";
         for selection in [
             "secret_project=&credential_profile=".into(),
             format!("credential_profile={id}%408"),
-            "secret_project=315dd4c2-6bf2-4c3b-9d8f-68fc97654a76".into(),
+            format!("secret_project={alternate_project_id}"),
         ] {
             let submission = EnvironmentSubmission::parse(
                 format!("image=example.test%2Fworkspace&{selection}").as_bytes(),

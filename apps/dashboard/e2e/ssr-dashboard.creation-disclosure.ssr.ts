@@ -40,13 +40,14 @@ const draftPrefix = "codewire.create-selections.v1:";
 const actor = "11111111111140008000000000000001";
 const organization = "00000000-0000-4000-8000-000000000002";
 const draftId = "00000000-0000-4000-8000-000000000003";
+const projectId = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
 const profile = "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@9007199254740993";
 const selectionsDraft = () => ({
   version: 1, actor, organization, draft: draftId, saved_at: Date.now(),
   selections: {
     preset_id: "", cpu: "2000", memory: "4096", disk: "20", ttl: "8h",
     isolation_tier: "standard", agents: [] as string[], ports: [] as { port: string; access: string }[],
-    secret_project: "6bf8d155-e84c-4fc5-b479-b17022fe41dd", credential_profile: profile,
+    secret_project: projectId, credential_profile: profile,
     include_org_secrets: true, include_user_secrets: false,
   },
 });
