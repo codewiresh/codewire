@@ -4,7 +4,7 @@ use codewire_proto::codewire::v1::{
     EnrollGithubResponse, GithubDeviceChallenge, enroll_github_response,
 };
 
-use super::enrollment::{Completed, github_error};
+use super::enrollment::{Completed, Outcome, github_error};
 use super::*;
 
 impl CredentialMutationOwner {
@@ -87,7 +87,9 @@ async fn run(
         .finish(publication.outcome)
         .await
         .map_err(|_| Error::CleanupFailed)?;
-    let metadata = publication.result?;
+    let metadata = publication
+        .result
+        .map_err(|error| unpublished_terminal_error(publication.outcome, error))?;
     scope
         .wait(sender.send(Ok(EnrollGithubResponse {
             event: Some(enroll_github_response::Event::Credential(Box::new(
@@ -98,4 +100,56 @@ async fn run(
         .await?
         .map_err(|_| Error::PublicationUnknown)?;
     Ok(())
+}
+
+/// Preserve uncertainty once a COMMIT may have been issued.  `NotPublished`
+/// is different: publication establishes it only on paths that did not issue
+/// the database COMMIT, and cleanup above has completed before this response is
+/// rendered.
+fn unpublished_terminal_error(outcome: Outcome, error: Error) -> Error {
+    if matches!(outcome, Outcome::NotPublished)
+        && matches!(
+            error,
+            Error::Unavailable | Error::Denied | Error::Cancelled | Error::Expired
+        )
+    {
+        Error::EnrollmentNotPublished
+    } else {
+        error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpublished_github_terminal_preserves_commit_uncertainty_and_other_failures() {
+        for error in [
+            Error::Unavailable,
+            Error::Denied,
+            Error::Cancelled,
+            Error::Expired,
+        ] {
+            assert_eq!(
+                unpublished_terminal_error(Outcome::NotPublished, error),
+                Error::EnrollmentNotPublished
+            );
+        }
+        for error in [
+            Error::EnrollmentFailed,
+            Error::EnrollmentUnsupported,
+            Error::CleanupFailed,
+            Error::PublicationUnknown,
+        ] {
+            assert_eq!(
+                unpublished_terminal_error(Outcome::NotPublished, error),
+                error
+            );
+        }
+        assert_eq!(
+            unpublished_terminal_error(Outcome::Unknown, Error::Unavailable),
+            Error::Unavailable
+        );
+    }
 }

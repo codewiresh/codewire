@@ -174,7 +174,10 @@ async fn github_reconnect_rejects_wrong_provider_and_original_oauth_revocation()
             .execute(&h.db.pool)
             .await?;
         h.release()?;
-        stream.error("unauthenticated").await?;
+        // The exact original authority was rejected before publication, so
+        // this is a definite no-store terminal rather than a post-COMMIT
+        // acknowledgement ambiguity.
+        stream.error("failed_precondition").await?;
         h.drained().await?;
         ensure!(h.count().await? == 1 && !h.logged_out());
         Ok(())

@@ -346,6 +346,10 @@ fn error(error: Error) -> connectrpc::ConnectError {
             ConnectCode::FailedPrecondition,
             "isolated provider enrollment version or response is unsupported",
         ),
+        Error::EnrollmentNotPublished => (
+            ConnectCode::FailedPrecondition,
+            "credential enrollment did not reach publication; no platform credential was stored",
+        ),
         Error::GitHubInstallationRequired => (
             ConnectCode::FailedPrecondition,
             "install the GitHub App for this account before connecting",
@@ -369,6 +373,7 @@ fn error(error: Error) -> connectrpc::ConnectError {
         Error::StaleRevision => "CREDENTIAL_REVISION_CHANGED",
         Error::EnrollmentFailed => "CREDENTIAL_ENROLLMENT_FAILED",
         Error::EnrollmentUnsupported => "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
+        Error::EnrollmentNotPublished => "CREDENTIAL_ENROLLMENT_NOT_PUBLISHED",
         Error::GitHubInstallationRequired => "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
         Error::GitHubAppNotConfigured => "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED",
         Error::CleanupFailed => "CREDENTIAL_ENROLLMENT_CLEANUP_FAILED",
@@ -412,6 +417,11 @@ mod tests {
             (
                 Error::EnrollmentUnsupported,
                 "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
+                connectrpc::ErrorCode::FailedPrecondition,
+            ),
+            (
+                Error::EnrollmentNotPublished,
+                "CREDENTIAL_ENROLLMENT_NOT_PUBLISHED",
                 connectrpc::ErrorCode::FailedPrecondition,
             ),
             (

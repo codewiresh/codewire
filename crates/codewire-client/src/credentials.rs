@@ -259,6 +259,12 @@ fn github_enrollment_terminal_error(error: connectrpc::ConnectError) -> ClientEr
                 "isolated GitHub enrollment output is unsupported; no platform credential was stored",
             )
         }
+        (ErrorCode::FailedPrecondition, Some("CREDENTIAL_ENROLLMENT_NOT_PUBLISHED")) => {
+            ClientError::new(
+                ErrorCode::FailedPrecondition,
+                "GitHub enrollment did not reach platform publication; no platform credential was stored",
+            )
+        }
         _ => github_enrollment_unknown(),
     }
 }
@@ -658,6 +664,13 @@ mod tests {
                 "codewire.sh",
                 ErrorCode::FailedPrecondition,
                 "isolated GitHub enrollment output is unsupported; no platform credential was stored",
+            ),
+            (
+                "failed_precondition",
+                "CREDENTIAL_ENROLLMENT_NOT_PUBLISHED",
+                "codewire.sh",
+                ErrorCode::FailedPrecondition,
+                "GitHub enrollment did not reach platform publication; no platform credential was stored",
             ),
             (
                 "failed_precondition",
