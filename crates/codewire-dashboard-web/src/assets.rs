@@ -465,6 +465,41 @@ mod tests {
     }
 
     #[test]
+    fn codex_provider_mark_matches_download_and_both_credential_surfaces() {
+        let original = include_str!("../../../packages/codewire-design/assets/codex.svg");
+        let path = original
+            .split("<path ")
+            .nth(1)
+            .unwrap()
+            .split("</path>")
+            .next()
+            .unwrap();
+        let symbol = ICONS
+            .split("id=\"icon-codex\"")
+            .nth(1)
+            .unwrap()
+            .split("</symbol>")
+            .next()
+            .unwrap();
+        assert!(symbol.contains(path));
+        assert!(symbol.contains("viewBox=\"0 0 24 24\""));
+        assert!(symbol.contains("fill=\"currentColor\""));
+        assert!(symbol.contains("stroke=\"none\""));
+        assert!(symbol.contains("fill-rule=\"evenodd\""));
+        for html in [
+            include_str!("../templates/settings-credentials.html"),
+            include_str!(
+                "../../../packages/codewire-design/reference/fixtures/settings-credentials.html"
+            ),
+        ] {
+            // Inventory and provider chooser, retaining their adjacent text labels.
+            assert_eq!(html.matches("#icon-codex").count(), 2);
+            assert!(html.contains("aria-hidden=\"true\"><use href="));
+            assert!(html.contains("id=\"connect-codex-choice-name\">Codex</strong>"));
+        }
+    }
+
+    #[test]
     fn preview_copy_is_in_the_shared_asset_loaded_by_both_ports_hosts() {
         let controller = include_str!("../../../packages/codewire-design/preview-ports.js");
         assert!(DASHBOARD_SCRIPT.contains(controller));
