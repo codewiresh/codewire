@@ -436,6 +436,7 @@ mod tests {
             sandboxes: Vec::new(),
             recent_sandboxes: Vec::new(),
             sandbox_rail_available: false,
+            sandbox_rail_loading: false,
             sandbox_total: 0,
             sandbox_running: 0,
             sandbox_stopped: 0,

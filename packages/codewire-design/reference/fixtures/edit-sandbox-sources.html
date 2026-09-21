@@ -5,6 +5,7 @@
   <title>Edit Sandbox sources fixture</title>
   <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
   <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/environments.css">
+  <script src="../../dashboard.js" defer></script>
 </head>
 <body class="cw-body" data-dashboard-app data-drawer-open>
   <main><h1>Sandbox sources</h1><a href="index.html">Back to fixtures</a></main>
@@ -17,25 +18,21 @@
           <input type="hidden" name="expected_operation_generation" value="9"><input type="hidden" name="expected_secret_project" value="6bf8d155-e84c-4fc5-b479-b17022fe41dd"><input type="hidden" name="expected_include_user_secrets" value="platform"><input type="hidden" name="expected_credential_profile" value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7">
           <p class="cw-field-help">Design fixture: app-dev. Changing selections restarts a running Sandbox and retains its workspace data. A stopped Sandbox remains stopped.</p>
           <section class="cw-create-panel cw-secret-panel" aria-labelledby="environment-edit-secrets-title">
-            <header class="cw-create-panel-heading"><h3 id="environment-edit-secrets-title">Application secrets</h3></header>
-            <p id="environment-edit-secrets-help" class="cw-panel-help">Selected platform sources become environment variables with their original names. Sandbox processes and root can read these values.</p>
-            <fieldset class="cw-source-fields" aria-describedby="environment-edit-secrets-help"><legend>Platform sources</legend>
+            <header class="cw-create-panel-heading cw-create-panel-heading--help"><h3 id="environment-edit-secrets-title">Application secrets</h3><button class="cw-field-help-trigger" type="button" popovertarget="environment-edit-secrets-help" popovertargetaction="show" aria-label="About application secrets" data-field-help-trigger>i</button><p id="environment-edit-secrets-help" class="cw-field-help-popover" popover="auto" role="tooltip" data-field-help-popover>Selected secrets become environment variables with their original names; Sandbox processes and root can read them. If names overlap, environment configuration wins, followed by personal, project, and organization secrets.</p></header>
+            <fieldset class="cw-source-fields" aria-describedby="environment-edit-secrets-help"><legend class="cw-sr-only">Application secret sources</legend>
               <ul class="cw-source-choices">
-                <li><label class="cw-source-choice"><input type="checkbox" name="include_org_secrets" value="platform"><span>Organization secrets<small>The current platform organization</small></span></label></li>
-                <li><label class="cw-source-choice"><input type="checkbox" name="include_user_secrets" value="platform" checked><span>Personal secrets<small>Your platform account</small></span></label></li>
+                <li><label class="cw-source-choice"><input type="checkbox" name="include_org_secrets" value="platform"><span>Organization secrets</span></label></li>
+                <li><label class="cw-source-choice"><input type="checkbox" name="include_user_secrets" value="platform" checked><span>Personal secrets</span></label></li>
               </ul>
-              <div class="cw-field"><label class="cw-label" for="environment-edit-secret-project">Secret project</label><select class="cw-select" id="environment-edit-secret-project" name="secret_project" aria-describedby="environment-edit-project-help"><option value="">No project secrets</option><option value="6bf8d155-e84c-4fc5-b479-b17022fe41dd" selected>development</option></select><p id="environment-edit-project-help" class="cw-field-help">A named collection on the platform, not a deployment stage.</p></div>
+              <div class="cw-field"><label class="cw-label" for="environment-edit-secret-project">Secret project</label><select class="cw-select" id="environment-edit-secret-project" name="secret_project" aria-describedby="environment-edit-secrets-help"><option value="">No project secrets</option><option value="6bf8d155-e84c-4fc5-b479-b17022fe41dd" selected>development</option></select></div>
             </fieldset>
-            <p class="cw-field-help">When names overlap: organization, then project, then personal. Ordinary environment configuration wins over all three.</p>
-            <nav aria-label="Manage application secrets"><ul class="cw-source-choices"><li><a href="application-secrets.html">Add or manage personal secrets</a></li><li><a href="application-secrets.html">Manage organization secrets</a></li><li><a href="application-secrets.html">Manage secret projects</a></li></ul></nav>
+            <nav aria-label="Manage application secrets"><ul class="cw-source-choices"><li><a href="application-secrets.html">Manage personal secrets</a></li><li><a href="application-secrets.html">Manage organization secrets</a></li><li><a href="application-secrets.html">Manage secret projects</a></li></ul></nav>
           </section>
           <section class="cw-create-panel cw-credential-panel" aria-labelledby="environment-edit-credentials-title">
-            <header class="cw-create-panel-heading"><h3 id="environment-edit-credentials-title">Provider credentials</h3></header>
-            <p id="environment-edit-credentials-help" class="cw-panel-help">A profile selects named provider identities. Private keys and tokens stay outside the Sandbox behind a proxy, signer, or repository executor.</p>
-            <fieldset class="cw-source-fields" aria-describedby="environment-edit-credentials-help"><legend>Platform credential profile</legend>
-              <div class="cw-field"><label class="cw-label" for="environment-edit-credential-profile">Credential profile</label><select class="cw-select" id="environment-edit-credential-profile" name="credential_profile" aria-describedby="environment-edit-profile-help"><option value="">No provider credentials</option><option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7" selected>work · revision 7 · current bound revision</option><option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@8">work · revision 8 · 3 identities</option></select><p id="environment-edit-profile-help" class="cw-field-help">Choose a specific profile revision for provider access.</p></div>
+            <header class="cw-create-panel-heading cw-create-panel-heading--help"><h3 id="environment-edit-credentials-title">Provider credentials</h3><button class="cw-field-help-trigger" type="button" popovertarget="environment-edit-credentials-help" popovertargetaction="show" aria-label="About provider credentials" data-field-help-trigger>i</button><p id="environment-edit-credentials-help" class="cw-field-help-popover" popover="auto" role="tooltip" data-field-help-popover>A profile selects provider identities. Private keys and tokens stay outside the Sandbox behind a proxy, signer, or repository executor. Existing Sandboxes keep their bound profile revision until updated; choosing no profile removes access on the next managed launch.</p></header>
+            <fieldset class="cw-source-fields" aria-describedby="environment-edit-credentials-help"><legend class="cw-sr-only">Provider credential profile</legend>
+              <div class="cw-field"><label class="cw-label" for="environment-edit-credential-profile">Credential profile</label><select class="cw-select" id="environment-edit-credential-profile" name="credential_profile" aria-describedby="environment-edit-credentials-help"><option value="">No provider credentials</option><option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@7" selected>work · revision 7 · current bound revision</option><option value="315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@8">work · revision 8 · 3 identities</option></select></div>
             </fieldset>
-            <p class="cw-field-help">Editing a profile does not change an existing Sandbox's bound revision. Selecting no profile removes provider access on the next managed launch.</p>
             <nav aria-label="Manage provider credentials"><ul class="cw-source-choices"><li><a href="settings-credentials.html">Manage personal credentials and profiles</a></li></ul></nav>
           </section>
 <label class="cw-source-choice"><input type="checkbox" name="allow_restart" value="true"><span>I confirm the managed restart and interruption of current sessions.</span></label>

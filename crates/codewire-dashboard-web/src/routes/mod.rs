@@ -276,6 +276,11 @@ pub(crate) fn router() -> Router<AppState> {
                 .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
         )
         .route(
+            "/{slug}/_fragments/create-options",
+            post(environments::create_options_fragment)
+                .layer(axum::extract::DefaultBodyLimit::max(1024)),
+        )
+        .route(
             "/{slug}/_actions/sandboxes/create",
             post(environments::create),
         )

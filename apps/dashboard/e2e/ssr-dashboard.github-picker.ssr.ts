@@ -26,18 +26,39 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
       name: "codewire.session_token", value: session.token, url: ssrUrl,
       httpOnly: true, sameSite: "Lax",
     }]);
-    const response = await page.goto(`/${slug}/new/`);
-    expect(response?.status()).toBe(200);
+    const settingsBeforeCreate = await page.goto(`/settings/credentials/?org=${slug}`);
+    expect(settingsBeforeCreate?.status()).toBe(200);
+    let releaseOptions!: () => void;
+    const delayedOptions = new Promise<void>((resolve) => { releaseOptions = resolve; });
+    await page.route(`**/${slug}/_fragments/create-options`, async (route) => {
+      await delayedOptions;
+      await route.continue();
+    });
+    const createLink = page.getByRole("link", { name: "Create Sandbox", exact: true }).first();
+    if (!(await createLink.isVisible())) {
+      await page.getByRole("button", { name: "Toggle sidebar" }).click();
+    }
+    await createLink.click();
+    await expect(page).toHaveURL(new RegExp(`/${slug}/new/`));
+    const createForm = page.locator("[data-environment-form]");
+    await expect(createForm).toBeVisible();
+    await expect(createForm).toHaveAttribute("data-create-options-loading", "true");
     await page.getByRole("textbox", { name: "Name", exact: true }).fill("my-new-sandbox");
-    await page.getByRole("button", { name: "Choose from GitHub", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Choose a GitHub repository", exact: true });
-    await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("status")).toContainText("Choose a profile with a GitHub connection");
+    await page.getByLabel("Workspace image").fill("registry.example.test/custom:stable");
+    const optionsResponse = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-options`));
+    releaseOptions();
+    expect((await optionsResponse).status()).toBe(200);
+    await expect(createForm).toHaveAttribute("data-create-options-loading", "false");
+    await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("my-new-sandbox");
+    await expect(page.getByLabel("Workspace image")).toHaveValue("registry.example.test/custom:stable");
+    await page.unroute(`**/${slug}/_fragments/create-options`);
+    const browser = page.locator("[data-github-browser]");
+    await expect(browser).toBeVisible();
+    await expect(browser.getByRole("status")).toContainText("Choose a GitHub connection");
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
-    await expect(dialog.getByRole("link", { name: "Connect GitHub or create a profile in Settings" }))
+    await expect(browser.getByRole("link", { name: "Connect GitHub" }))
       .toHaveAttribute("href", `/settings/credentials/?org=${slug}&creation_draft=${draft}`);
-    await page.keyboard.press("Escape");
-    await expect(dialog).not.toBeVisible();
+    await expect(browser.getByRole("searchbox", { name: "Find a repository" })).toBeDisabled();
     await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("my-new-sandbox");
 
     const form = page.locator("[data-environment-form]");
@@ -118,9 +139,15 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
     await expect(discard).not.toBeVisible();
     expect(credentialMutations).toBe(0);
   } finally {
-    if (!page.isClosed()) await page.close();
-    await page.context().clearCookies();
-    await cleanupTestOrg(slug);
-    await cleanupUser(email);
+    try {
+      if (!page.isClosed()) await page.close();
+      await page.context().clearCookies();
+    } finally {
+      try {
+        await cleanupTestOrg(slug);
+      } finally {
+        await cleanupUser(email);
+      }
+    }
   }
 });

@@ -5,8 +5,11 @@ use std::{
 
 use axum::{
     Form,
-    extract::{Path, Query, RawForm, RawQuery, State, rejection::QueryRejection},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    extract::{
+        Path, Query, RawForm, RawQuery, State,
+        rejection::{QueryRejection, RawFormRejection},
+    },
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse as _, Response},
 };
 use codewire_project::{
@@ -21,6 +24,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::{
+    auth::{authenticated_identity, enforce_two_factor},
     environment_connect::{self, EnvironmentCreateOptions},
     error::WebError,
     response::{
@@ -28,12 +32,15 @@ use crate::{
         render_template, render_template_with_connect_origin,
     },
     routes::organization_governance::{
-        action_context, connect_page_error, get_context, mutation_redirect, valid_identifier,
+        action_context, action_context_without_rail, connect_page_error, get_context,
+        get_context_without_rail, mutation_redirect, valid_identifier,
     },
-    security::{csrf_cookie, csrf_cookie_value, new_csrf_token, with_csrf_cookie},
+    security::{
+        canonical_cookie, csrf_cookie, csrf_cookie_value, new_csrf_token, with_csrf_cookie,
+    },
     state::AppState,
     templates::{
-        EnvironmentListTemplate, EnvironmentResizeOperationTemplate,
+        EnvironmentCreateFormTemplate, EnvironmentListTemplate, EnvironmentResizeOperationTemplate,
         OrganizationEnvironmentsContentTemplate, OrganizationEnvironmentsTemplate,
         SandboxRailTemplate,
     },
@@ -76,6 +83,16 @@ pub(super) struct EnvironmentsQuery {
     message: String,
     #[serde(default)]
     error: String,
+}
+
+impl EnvironmentsQuery {
+    fn has_detail_selector(&self) -> bool {
+        !self.ports.is_empty()
+            || !self.sources.is_empty()
+            || !self.trust.is_empty()
+            || !self.resize_environment.is_empty()
+            || !self.resize_operation.is_empty()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +270,7 @@ impl EnvironmentSubmission {
             draft_return: crate::environment_drafts::DraftReturn::default(),
             draft_restore_allowed: false,
             draft_restored: false,
+            options_loading: false,
             expanded: true,
             name: self.name.trim().to_owned(),
             preset_id: self.preset_id.trim().to_owned(),
@@ -698,11 +716,14 @@ async fn render_page(
     } else {
         environments_path(&slug)
     };
-    let (dashboard, organization, cookie) =
-        match get_context(&state, &headers, &slug, &continuation).await {
-            Ok(context) => context,
-            Err(response) => return response,
-        };
+    let (dashboard, organization, cookie) = match if create_open && !query.has_detail_selector() {
+        get_context_without_rail(&state, &headers, &slug, &continuation).await
+    } else {
+        get_context(&state, &headers, &slug, &continuation).await
+    } {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
     if canonicalize {
         return redirect(
             format!("/{}/new/{}", organization.slug, draft_return.query()),
@@ -715,18 +736,43 @@ async fn render_page(
         form.draft_id.clone_from(id);
     }
     form.draft_return = draft_return;
-    let page = match build_page(
-        &state,
-        cookie,
-        &organization,
-        &query,
-        form,
-        dashboard.is_admin,
-    )
-    .await
-    {
-        Ok(page) => page,
-        Err(error) => return connect_page_error(error, &continuation, &headers),
+    let page = if create_open && !query.has_detail_selector() {
+        form.draft_actor = match crate::environment_drafts::actor(&state, cookie).await {
+            Ok(actor) => actor,
+            Err(error) => return connect_page_error(error, &continuation, &headers),
+        };
+        form.draft_organization.clone_from(&organization.id);
+        form.options_loading = true;
+        form.show_confidential_controls = state.confidential_storage_enabled
+            && (!state.confidential_admin_only || dashboard.is_admin);
+        EnvironmentsPageView {
+            environments: Vec::new(),
+            environments_loading: true,
+            create_form: form,
+            source_editor: None,
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: bounded_query(&query.search),
+            state: allowlisted_state(&query.state).to_owned(),
+            message: page_message(&query.message).to_owned(),
+            error: page_error(&query.error).to_owned(),
+        }
+    } else {
+        match build_page(
+            &state,
+            cookie,
+            &organization,
+            &query,
+            form,
+            dashboard.is_admin,
+        )
+        .await
+        {
+            Ok(page) => page,
+            Err(error) => return connect_page_error(error, &continuation, &headers),
+        }
     };
     let websocket_origin = match crate::routes::terminal::browser_websocket_origin(
         &state.public_origin,
@@ -756,7 +802,7 @@ pub(super) async fn list_fragment(
 ) -> Response {
     let continuation = environments_path(&slug);
     let (dashboard, organization, cookie) =
-        match get_context(&state, &headers, &slug, &continuation).await {
+        match get_context_without_rail(&state, &headers, &slug, &continuation).await {
             Ok(context) => context,
             Err(response) => return response,
         };
@@ -771,6 +817,7 @@ pub(super) async fn list_fragment(
     let token = csrf_cookie_value(&headers).unwrap_or_default().to_owned();
     let page = EnvironmentsPageView {
         environments,
+        environments_loading: false,
         create_form: default_create_form(token, false),
         source_editor: None,
         port_panel: None,
@@ -804,6 +851,137 @@ pub(super) async fn rail_fragment(
     render_template(StatusCode::OK, SandboxRailTemplate { view: &dashboard })
 }
 
+struct CreateOptionsRequest {
+    csrf: String,
+    actor: String,
+    organization: String,
+    draft_id: String,
+    draft_return: crate::environment_drafts::DraftReturn,
+}
+
+impl CreateOptionsRequest {
+    fn parse(bytes: &[u8]) -> Result<Self, ()> {
+        if bytes.len() > 1024 {
+            return Err(());
+        }
+        let mut values = BTreeMap::new();
+        for (key, value) in url::form_urlencoded::parse(bytes) {
+            if !matches!(
+                key.as_ref(),
+                "_csrf" | "actor" | "organization" | "draft_id" | "draft_return"
+            ) || values
+                .insert(key.into_owned(), value.into_owned())
+                .is_some()
+            {
+                return Err(());
+            }
+        }
+        let csrf = values.remove("_csrf").ok_or(())?;
+        let actor = values.remove("actor").ok_or(())?;
+        let organization = values.remove("organization").ok_or(())?;
+        let draft_id = values.remove("draft_id").ok_or(())?;
+        let raw_return = values.remove("draft_return").ok_or(())?;
+        let draft_return =
+            crate::environment_drafts::DraftReturn::parse(Some(raw_return.trim_start_matches('?')));
+        if !values.is_empty()
+            || csrf.len() > 64
+            || !crate::environment_drafts::actor_id(&actor)
+            || !crate::environment_drafts::canonical_id(&organization)
+            || !crate::environment_drafts::canonical_id(&draft_id)
+            || draft_return.query() != raw_return
+            || matches!(&draft_return, crate::environment_drafts::DraftReturn::Exact(id) if id != &draft_id)
+        {
+            return Err(());
+        }
+        Ok(Self {
+            csrf,
+            actor,
+            organization,
+            draft_id,
+            draft_return,
+        })
+    }
+}
+
+fn create_options_error(status: StatusCode) -> Response {
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "private, no-store"),
+            (header::VARY, "Cookie"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        "Sandbox choices could not be loaded. Retry without leaving this form.",
+    )
+        .into_response()
+}
+
+/// Fetch optional choices after the editable Create shell has rendered. This
+/// endpoint does not create anything and never trusts the submitted identity.
+pub(super) async fn create_options_fragment(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    body: Result<RawForm, RawFormRejection>,
+) -> Response {
+    let request = match body
+        .ok()
+        .and_then(|body| CreateOptionsRequest::parse(&body.0).ok())
+    {
+        Some(request) => request,
+        None => return create_options_error(StatusCode::BAD_REQUEST),
+    };
+    if !super::environment_drafts::valid_authority(&headers, &state.public_origin, &request.csrf) {
+        return create_options_error(StatusCode::FORBIDDEN);
+    }
+    let identity = match authenticated_identity(&state, &headers).await {
+        Ok(identity) => identity,
+        Err(WebError::Unauthorized) => return create_options_error(StatusCode::UNAUTHORIZED),
+        Err(_) => return create_options_error(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    if enforce_two_factor(&identity).is_err() || identity.id != request.actor {
+        return create_options_error(StatusCode::FORBIDDEN);
+    }
+    let cookie = canonical_cookie(&headers).expect("options authority validated canonical cookie");
+    let organizations = match crate::connect::organizations(&state, cookie.clone()).await {
+        Ok(organizations) => organizations,
+        Err(_) => return create_options_error(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    let Some(row) = organizations.iter().find(|row| row.slug == slug) else {
+        return create_options_error(StatusCode::NOT_FOUND);
+    };
+    if row.id != request.organization {
+        return create_options_error(StatusCode::FORBIDDEN);
+    }
+    let organization = OrganizationContext::from_row(row);
+    let options = match environment_connect::create_options(&state, cookie, &organization.id).await
+    {
+        Ok(options) => options,
+        Err(_) => return create_options_error(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    let mut form = default_create_form(request.csrf, true);
+    form.draft_actor = identity.id;
+    form.draft_organization.clone_from(&organization.id);
+    form.draft_id = request.draft_id;
+    form.draft_return = request.draft_return;
+    form.show_confidential_controls =
+        state.confidential_storage_enabled && (!state.confidential_admin_only || identity.is_admin);
+    hydrate_options(&mut form, options);
+    form.confidential_available &= form.show_confidential_controls;
+    let mut response = render_template(
+        StatusCode::OK,
+        EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        },
+    );
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Cookie"));
+    response
+}
+
 pub(super) async fn create(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -814,7 +992,7 @@ pub(super) async fn create(
         Ok(submission) => submission,
         Err(()) => return error_page(WebError::CsrfRejected),
     };
-    let (dashboard, organization, cookie) = match action_context(
+    let (dashboard, organization, cookie) = match action_context_without_rail(
         &state,
         &headers,
         &slug,
@@ -835,7 +1013,7 @@ pub(super) async fn create(
     let mut form = submission.form_view(submission.csrf.clone());
     hydrate_options(&mut form, options);
     let Some(draft) = submission.validate_and_draft(&organization.id, &mut form) else {
-        return render_action_page(
+        return render_create_action_page(
             &state,
             &headers,
             dashboard,
@@ -853,7 +1031,7 @@ pub(super) async fn create(
         Ok(create) => create,
         Err(message) => {
             form.form_error = message.to_owned();
-            return render_action_page(
+            return render_create_action_page(
                 &state,
                 &headers,
                 dashboard,
@@ -878,7 +1056,7 @@ pub(super) async fn create(
         }
         Err(error) => {
             apply_create_error(&mut form, &error);
-            render_action_page(
+            render_create_action_page(
                 &state,
                 &headers,
                 dashboard,
@@ -1764,6 +1942,7 @@ async fn build_page(
     };
     Ok(EnvironmentsPageView {
         environments,
+        environments_loading: false,
         create_form: form,
         source_editor,
         port_panel,
@@ -1802,30 +1981,38 @@ async fn filtered_environments(
     Ok(environments)
 }
 
-async fn render_action_page(
+async fn render_create_action_page(
     state: &AppState,
     headers: &HeaderMap,
     dashboard: crate::view::DashboardView,
     organization: OrganizationContext,
     cookie: HeaderValue,
-    form: EnvironmentCreateFormView,
+    mut form: EnvironmentCreateFormView,
     status: StatusCode,
 ) -> Response {
-    let query = EnvironmentsQuery::default();
-    let page = match build_page(
-        state,
-        cookie,
-        &organization,
-        &query,
-        form,
-        dashboard.is_admin,
-    )
-    .await
-    {
-        Ok(page) => page,
+    form.draft_actor = match crate::environment_drafts::actor(state, cookie).await {
+        Ok(actor) => actor,
         Err(error) => {
             return connect_page_error(error, &environments_path(&organization.slug), headers);
         }
+    };
+    form.draft_organization.clone_from(&organization.id);
+    form.show_confidential_controls = state.confidential_storage_enabled
+        && (!state.confidential_admin_only || dashboard.is_admin);
+    form.confidential_available &= form.show_confidential_controls;
+    let page = EnvironmentsPageView {
+        environments: Vec::new(),
+        environments_loading: true,
+        create_form: form,
+        source_editor: None,
+        port_panel: None,
+        trust_summary: None,
+        resize_confirmation: None,
+        resize_operation: None,
+        search: String::new(),
+        state: String::new(),
+        message: String::new(),
+        error: String::new(),
     };
     let websocket_origin = match crate::routes::terminal::browser_websocket_origin(
         &state.public_origin,
@@ -1900,6 +2087,7 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         draft_return: crate::environment_drafts::DraftReturn::default(),
         draft_restore_allowed: true,
         draft_restored: false,
+        options_loading: false,
         expanded,
         name: String::new(),
         preset_id: String::new(),
@@ -2345,7 +2533,7 @@ mod tests {
             .render()
             .unwrap();
             let hrefs = setup_hrefs(&html);
-            assert_eq!(hrefs.len(), 6);
+            assert_eq!(hrefs.len(), 5);
             for href in hrefs {
                 assert!(href.ends_with("creation_draft=00000000-0000-4000-8000-000000000003"));
                 assert!(!href.contains("not-navigation"));
@@ -2395,6 +2583,7 @@ mod tests {
         let organization = test_organization();
         let page = EnvironmentsPageView {
             environments: vec![],
+            environments_loading: false,
             create_form: default_create_form("current-csrf".into(), false),
             source_editor: Some(crate::view::EnvironmentSourcesEditView {
                 environment_id: "00000000-0000-4000-8000-000000000004".into(),
@@ -2458,6 +2647,7 @@ mod tests {
             form.draft_return = navigation.clone();
             let page = EnvironmentsPageView {
                 environments: Vec::new(),
+                environments_loading: false,
                 create_form: form,
                 source_editor: None,
                 port_panel: None,
@@ -2933,6 +3123,7 @@ mod tests {
                 ports: Vec::new(),
                 sources: None,
             }],
+            environments_loading: false,
             create_form: default_create_form("csrf".into(), false),
             source_editor: None,
             port_panel: None,
@@ -3081,6 +3272,9 @@ mod tests {
                     bound_revision: false,
                     synthetic: false,
                     selected: false,
+                    github_credential_id: String::new(),
+                    github_account: String::new(),
+                    github_connection: crate::view::GithubProfileConnection::NotConfigured,
                 }],
                 ..Default::default()
             },
@@ -3130,6 +3324,9 @@ mod tests {
                     bound_revision: false,
                     synthetic: false,
                     selected: false,
+                    github_credential_id: String::new(),
+                    github_account: String::new(),
+                    github_connection: crate::view::GithubProfileConnection::NotConfigured,
                 }],
                 ..Default::default()
             },
@@ -3196,6 +3393,7 @@ mod tests {
         fields.select_bound(&selection);
         let mut page = EnvironmentsPageView {
             environments: vec![],
+            environments_loading: false,
             create_form: default_create_form("csrf-token".into(), false),
             source_editor: Some(crate::view::EnvironmentSourcesEditView {
                 environment_id: id.into(),
@@ -3573,6 +3771,7 @@ mod tests {
         };
         let page = EnvironmentsPageView {
             environments: Vec::new(),
+            environments_loading: false,
             create_form: default_create_form("csrf-token".to_owned(), false),
             source_editor: None,
             port_panel: None,
@@ -3706,12 +3905,11 @@ mod tests {
         .render()
         .expect("environment form");
 
-        let (manual_form, picker) = html.split_once("<dialog ").expect("native GitHub dialog");
-        assert!(manual_form.contains("Repository URL"));
-        assert!(manual_form.contains("Branch"));
-        assert!(manual_form.contains("Mount path"));
-        assert!(manual_form.contains("data-manual-repositories"));
-        assert!(manual_form.contains("Custom Git URL"));
+        assert!(html.contains("Repository URL"));
+        assert!(html.contains("Branch"));
+        assert!(html.contains("Mount path"));
+        assert!(html.contains("data-manual-repositories"));
+        assert!(html.contains("Add custom Git URL"));
         let index = form.repositories[0].index;
         for (name_prefix, id_prefix) in [
             ("repo_url", "repo-url"),
@@ -3720,8 +3918,8 @@ mod tests {
         ] {
             let name = format!("{name_prefix}_{index}");
             let id = format!("{id_prefix}-{index}");
-            assert!(manual_form.contains(&format!("for=\"{id}\"")));
-            let input = manual_form
+            assert!(html.contains(&format!("for=\"{id}\"")));
+            let input = html
                 .split("<input ")
                 .skip(1)
                 .filter_map(|element| element.split('>').next())
@@ -3732,31 +3930,15 @@ mod tests {
                 attribute == "disabled" || attribute.starts_with("disabled=")
             }));
         }
-        assert!(manual_form.contains("type=\"button\" data-open-github-repositories aria-haspopup=\"dialog\" aria-controls=\"github-repository-picker\""));
-        assert!(manual_form.contains(&format!(
-            "<a href=\"/settings/credentials/?org=organization&amp;{}\">Connect GitHub</a>",
+        assert!(html.contains(&format!(
+            "<a href=\"/settings/credentials/?org=organization&amp;{}\" data-github-setup-link data-create-draft-setup>Connect GitHub</a>",
             form.creation_draft_parameter()
         )));
-        let dialog = picker.split('>').next().expect("dialog opening tag");
-        assert!(dialog.contains("id=\"github-repository-picker\""));
-        assert!(dialog.contains("aria-labelledby=\"github-repository-picker-title\""));
-        assert!(dialog.contains("data-github-repository-picker"));
-        assert!(
-            dialog
-                .contains("data-repositories-url=\"/organization/_fragments/github-repositories\"")
-        );
-        assert!(
-            !dialog
-                .split_ascii_whitespace()
-                .any(|attribute| attribute == "open" || attribute.starts_with("open="))
-        );
-        assert!(
-            picker.contains(
-                "<h2 id=\"github-repository-picker-title\">Choose a GitHub repository</h2>"
-            )
-        );
+        assert!(html.contains("data-github-browser data-repositories-url=\"/organization/_fragments/github-repositories\""));
+        assert!(html.contains("<h4 id=\"github-browser-title\""));
+        assert!(!html.contains("data-github-repository-picker"));
         assert!(!form.sources.credential_selection_enabled);
-        let profile_select = picker
+        let profile_select = html
             .split("data-github-profile")
             .nth(1)
             .unwrap()

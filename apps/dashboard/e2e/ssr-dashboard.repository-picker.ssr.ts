@@ -11,36 +11,28 @@ test.beforeEach(async ({ page }) => {
   await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
 });
 
-test("GitHub dialog preserves the Sandbox draft and supports keyboard, cancel and backdrop dismissal", async ({ page }) => {
+test("inline GitHub browser adds a repository without changing the runtime profile or draft", async ({ page }) => {
   const drawer = page.locator("[data-drawer-panel]");
-  const dialog = page.getByRole("dialog", { name: "Choose a GitHub repository", exact: true });
-  const opener = page.getByRole("button", { name: "Choose from GitHub", exact: true });
+  const browser = page.locator("[data-github-browser]");
   await page.getByRole("textbox", { name: "Name", exact: true }).fill("keep-my-sandbox-draft");
-  await opener.click();
-  await expect(dialog).toBeVisible();
-  expect(await dialog.evaluate((element) => element.matches(":modal"))).toBe(true);
-  await expect(dialog.getByRole("combobox", { name: "GitHub credential profile" })).toBeFocused();
-  await expect(dialog.getByRole("status")).toContainText("Choose a profile with a GitHub connection");
-  await expect(dialog.getByRole("link", { name: "Connect GitHub or create a profile in Settings" })).toHaveAttribute("href", "settings-credentials.html");
-  await page.keyboard.press("Escape");
-  await expect(dialog).not.toBeVisible();
-  await expect(drawer).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("keep-my-sandbox-draft");
-  await expect(opener).toBeFocused();
-
-  await opener.click();
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(dialog).not.toBeVisible();
-  await opener.click();
-  // The native dialog fills the top layer; a viewport corner is its backdrop.
-  await page.mouse.click(2, 2);
-  await expect(dialog).not.toBeVisible();
+  await expect(browser).toBeVisible();
+  await expect(browser.getByRole("combobox", { name: "GitHub account" })).toContainText("synthetic-user");
+  await expect(browser.getByText("Connected as @synthetic-user")).toBeVisible();
+  await expect(browser.getByRole("link", { name: "Manage GitHub connection" })).toHaveAttribute("href", /settings-credentials\.html/);
+  const addDocs = browser.getByRole("button", { name: /codewiresh\/docs.*Add/ });
+  await expect(addDocs).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await addDocs.click();
+  const added = page.locator("[data-repository-row]").last();
+  await expect(added.getByRole("textbox", { name: "Repository URL" })).toHaveValue("https://github.com/codewiresh/docs.git");
+  await expect(added.getByRole("textbox", { name: "Branch" })).toBeFocused();
+  await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
   await expect(drawer).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("keep-my-sandbox-draft");
 });
 
 test("custom Git URLs remain editable with unique, labelled repository rows", async ({ page }) => {
-  await page.getByRole("button", { name: "Custom Git URL", exact: true }).click();
+  await page.getByRole("button", { name: "Add custom Git URL", exact: true }).click();
   const rows = page.locator("[data-repository-row]");
   await expect(rows).toHaveCount(2);
   const added = rows.nth(1);
@@ -51,4 +43,26 @@ test("custom Git URLs remain editable with unique, labelled repository rows", as
   await added.getByRole("button", { name: "Remove repository" }).click();
   await expect(rows).toHaveCount(1);
   await expect(rows.first().getByRole("textbox", { name: "Repository URL", exact: true })).toHaveValue("https://github.com/codewiresh/codewire");
+  await rows.first().getByRole("button", { name: "Remove repository" }).click();
+  await expect(rows).toHaveCount(0);
+});
+
+test("repository search checks later pages before reporting no matches", async ({ page }) => {
+  const browser = page.locator("[data-github-browser]");
+  const profile = await browser.getByRole("combobox", { name: "GitHub account" }).inputValue();
+  const visited: string[] = [];
+  await page.route("**/fixture/_fragments/github-repositories", async (route) => {
+    const token = new URLSearchParams(route.request().postData() || "").get("page_token") || "";
+    visited.push(token);
+    const next = token ? "" : '<button type="button" data-github-next data-page-token="second-page">Next page</button>';
+    const name = token ? "synthetic-user/later-repository" : "synthetic-user/earlier-repository";
+    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: `<section data-github-results-page data-github-profile="${profile}"><ul class="cw-github-repository-list"><li><button type="button" data-select-github-repository data-repository-url="https://github.com/${name}.git" data-repository-branch="main" data-repository-name="${name}"><strong>${name}</strong><small>Public</small></button></li></ul>${next}</section>` });
+  });
+  await browser.getByRole("searchbox", { name: "Find a repository" }).fill("later-repository");
+  await expect(browser.getByRole("status")).toContainText("1 matching repositories found across 2 pages");
+  expect(visited).toEqual(["", "second-page"]);
+  await expect(browser.locator("[data-select-github-repository]")).toHaveCount(1);
+  await browser.getByRole("button", { name: /synthetic-user\/later-repository/ }).click();
+  await expect(page.locator("[data-repository-row]").last().getByRole("textbox", { name: "Repository URL" }))
+    .toHaveValue("https://github.com/synthetic-user/later-repository.git");
 });

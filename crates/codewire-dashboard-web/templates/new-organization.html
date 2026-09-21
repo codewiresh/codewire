@@ -32,14 +32,10 @@
               <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-left"/></svg>
               Back to Dashboard
             </a>
-            <section class="cw-card">
-              <div class="cw-card-header cw-form-header">
-                <span class="cw-form-icon" aria-hidden="true">
-                  <svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-building"/></svg>
-                </span>
-                <h1 class="cw-page-title">Create Organization</h1>
-                <p class="cw-card-description">Organizations group your Sandboxes and team members together</p>
-              </div>
+            <section class="cw-card" aria-labelledby="create-organization-title">
+              <header class="cw-card-header cw-form-header">
+                <h1 id="create-organization-title" class="cw-page-title">Create Organization</h1>
+              </header>
               {% include "organization-form.html" %}
             </section>
           </div>

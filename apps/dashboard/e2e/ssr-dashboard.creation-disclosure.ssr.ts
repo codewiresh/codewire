@@ -23,7 +23,7 @@ test("creation keeps sources visible and closed advanced fields remain native fo
   await page.getByLabel("Disk", { exact: true }).selectOption("20");
   await expect(page.getByLabel("CPU", { exact: true }).locator("option:checked")).toHaveText("2 vCPU");
   await expect(page.getByLabel("Memory", { exact: true }).locator("option:checked")).toHaveText("4 GiB");
-  await expect(page.getByLabel("TTL")).toHaveAccessibleDescription(/automatic deletion.*not an idle timeout/);
+  await expect(page.getByLabel("Delete after")).toHaveAccessibleDescription(/automatic deletion.*not an idle timeout/);
   await resources.locator("summary").click();
   await runtime.locator("summary").click();
   await page.getByLabel("Install Command", { exact: true }).fill("bun install");
@@ -59,16 +59,245 @@ const fixtureUrl = () => {
   return `${origin}/reference/fixtures/create-sandbox.html`;
 };
 
-test("dirty Create Close keeps inputs and authority until explicit Discard, without overwriting saved selections", async ({ page }) => {
+function loadingCreateFixture(hydratedHtml: string) {
+  const start = hydratedHtml.indexOf("<div data-create-optional-options>");
+  const end = hydratedHtml.indexOf('<details class="cw-create-panel cw-runtime-options', start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  return `${hydratedHtml.slice(0, start)}<div data-create-optional-options><p role="status">Loading provider, secret, agent, and isolation choices…</p><button type="button" data-retry-create-options hidden>Retry loading choices</button><input type="hidden" name="isolation_tier" value="standard"></div>\n${hydratedHtml.slice(end)}`
+    .replace('data-create-options-loading="false"', 'data-create-options-loading="true"')
+    .replace(/<p class="cw-field-help" data-create-preview-hint>.*?<\/p>/, '<p class="cw-field-help" data-create-preview-hint>Loading preview URL details…</p>');
+}
+
+function hydratedCreateCard(hydratedHtml: string) {
+  const start = hydratedHtml.indexOf('<section id="environment-create-card"');
+  const end = hydratedHtml.indexOf("<template data-repository-template>", start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  return hydratedHtml.slice(start, end);
+}
+
+test("late Create choices preserve edited core fields, focus, rows, and profile selectors", async ({ page }) => {
+  const url = fixtureUrl();
+  let hydratedHtml = "";
+  let releaseOptions!: () => void;
+  const heldOptions = new Promise<void>((resolve) => { releaseOptions = resolve; });
+  await page.route(url, async (route) => {
+    const original = await route.fetch();
+    hydratedHtml = await original.text();
+    await route.fulfill({ response: original, body: loadingCreateFixture(hydratedHtml) });
+  });
+  await page.route("**/fixture/_fragments/create-options", async (route) => {
+    await heldOptions;
+    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: hydratedCreateCard(hydratedHtml) });
+  });
+  const pending = page.waitForRequest((request) => request.url().endsWith("/fixture/_fragments/create-options"));
+  await page.goto(url);
+  await pending;
+  const form = page.locator("[data-environment-form]");
+  const originalForm = await form.elementHandle();
+  const draft = await form.getAttribute("data-create-draft-id");
+  await page.getByLabel("Workspace image").fill("registry.example.test/custom:stable");
+  await page.getByLabel("Repository URL").fill("https://example.test/owner/repo");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByLabel("Internal port").fill("3000");
+  await page.getByLabel("Preview label").fill("web");
+  await page.locator("[data-create-runtime] summary").click();
+  await page.getByLabel("Startup Script").fill("bun run dev\necho ready");
+  await page.getByLabel("Name", { exact: true }).fill("typing-survives-options");
+  await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
+  releaseOptions();
+  await expect(form).toHaveAttribute("data-create-options-loading", "false");
+  expect(await originalForm?.evaluate((node) => node.isConnected)).toBe(true);
+  await expect(form).toHaveAttribute("data-create-draft-id", draft!);
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("typing-survives-options");
+  await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
+  await expect(page.getByLabel("Workspace image")).toHaveValue("registry.example.test/custom:stable");
+  await expect(page.getByLabel("Repository URL")).toHaveValue("https://example.test/owner/repo");
+  await expect(page.getByLabel("Internal port")).toHaveValue("3000");
+  await expect(page.getByLabel("Preview label")).toHaveValue("web");
+  await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev\necho ready");
+  await expect(page.getByLabel("Credential profile", { exact: true })).toBeVisible();
+  const formProfiles = await form.locator('[name="credential_profile"] option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
+  const browserProfiles = await page.locator('[data-github-profile] option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
+  expect(browserProfiles).toEqual(formProfiles);
+  await expect(page.locator("[data-github-browser]")).toBeVisible();
+});
+
+test("Create rejects choices returned for another organization without losing input", async ({ page }) => {
+  const url = fixtureUrl();
+  let hydratedHtml = "";
+  let releaseOptions!: () => void;
+  const heldOptions = new Promise<void>((resolve) => { releaseOptions = resolve; });
+  await page.route(url, async (route) => {
+    const original = await route.fetch();
+    hydratedHtml = await original.text();
+    await route.fulfill({ response: original, body: loadingCreateFixture(hydratedHtml) });
+  });
+  await page.route("**/fixture/_fragments/create-options", async (route) => {
+    await heldOptions;
+    const foreign = hydratedCreateCard(hydratedHtml).replace(
+      `data-create-draft-organization="${organization}"`,
+      'data-create-draft-organization="00000000-0000-4000-8000-000000000099"',
+    );
+    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: foreign });
+  });
+  const pending = page.waitForRequest((request) => request.url().endsWith("/fixture/_fragments/create-options"));
+  await page.goto(url);
+  await pending;
+  await page.getByLabel("Name", { exact: true }).fill("never-apply-foreign-options");
+  const originalForm = await page.locator("[data-environment-form]").elementHandle();
+  releaseOptions();
+  await expect(page.locator("[data-create-optional-options] [role=alert]")).toContainText("Choices could not be loaded");
+  await expect(page.getByRole("button", { name: "Retry loading choices" })).toBeVisible();
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("never-apply-foreign-options");
+  await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-organization", organization);
+  expect(await originalForm?.evaluate((node) => node.isConnected)).toBe(true);
+});
+
+test("Create choices resume after a cached-page return and ignore the canceled response", async ({ page }) => {
+  const url = fixtureUrl();
+  let hydratedHtml = "";
+  let releaseFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let firstStarted!: () => void;
+  const firstRequest = new Promise<void>((resolve) => { firstStarted = resolve; });
+  let secondStarted!: () => void;
+  const secondRequest = new Promise<void>((resolve) => { secondStarted = resolve; });
+  let attempts = 0;
+  await page.route(url, async (route) => {
+    const original = await route.fetch();
+    hydratedHtml = await original.text();
+    await route.fulfill({ response: original, body: loadingCreateFixture(hydratedHtml) });
+  });
+  await page.route("**/fixture/_fragments/create-options", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      firstStarted();
+      await firstHeld;
+      await route.fulfill({ status: 200, contentType: "text/html", body: "<p>stale response</p>" }).catch(() => {});
+      return;
+    }
+    secondStarted();
+    await route.fulfill({ status: 200, contentType: "text/html", body: hydratedCreateCard(hydratedHtml) });
+  });
+  try {
+    await page.goto(url);
+    await firstRequest;
+    await page.getByLabel("Name", { exact: true }).fill("still-here-after-return");
+    await page.evaluate(() => {
+      window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
+    await secondRequest;
+    await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-options-loading", "false");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("still-here-after-return");
+    releaseFirst();
+    await expect(page.locator("[data-create-optional-options]")).toContainText("Provider credentials");
+    expect(attempts).toBe(2);
+  } finally {
+    releaseFirst();
+  }
+});
+
+test("inventory load failure becomes unavailable and later recovery preserves rows", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.evaluate(() => {
+    const list = document.createElement("div");
+    list.id = "environment-list";
+    list.dataset.environmentsLoading = "true";
+    list.innerHTML = '<p role="status">Loading Sandboxes…</p>';
+    const error = document.createElement("p");
+    error.dataset.environmentListError = "";
+    error.hidden = true;
+    error.textContent = "Sandbox list could not be refreshed. Retrying…";
+    document.body.append(list, error);
+    list.dispatchEvent(new CustomEvent("htmx:responseError", { bubbles: true }));
+  });
+  await expect(page.locator("#environment-list")).toContainText("unavailable");
+  await expect(page.locator("[data-environment-list-error]")).toBeVisible();
+  await page.evaluate(() => {
+    const list = document.querySelector("#environment-list")!;
+    list.innerHTML = "<ul><li>Recovered Sandbox</li></ul>";
+    list.dispatchEvent(new CustomEvent("htmx:afterSwap", { bubbles: true }));
+    list.dispatchEvent(new CustomEvent("htmx:responseError", { bubbles: true }));
+  });
+  await expect(page.locator("#environment-list")).toContainText("Recovered Sandbox");
+  await expect(page.locator("[data-environment-list-error]")).toBeVisible();
+  await page.locator("#environment-list").evaluate((list) => list.dispatchEvent(new CustomEvent("htmx:afterSwap", { bubbles: true })));
+  await expect(page.locator("[data-environment-list-error]")).toBeHidden();
+});
+
+test("optional-choice failure offers retry without clearing the Create form", async ({ page }) => {
+  const url = fixtureUrl();
+  let hydratedHtml = "";
+  let attempts = 0;
+  await page.route(url, async (route) => {
+    const original = await route.fetch();
+    hydratedHtml = await original.text();
+    await route.fulfill({ response: original, body: loadingCreateFixture(hydratedHtml) });
+  });
+  await page.route("**/fixture/_fragments/create-options", async (route) => {
+    attempts += 1;
+    if (attempts === 1) await route.fulfill({ status: 503, contentType: "text/plain", body: "unavailable" });
+    else await route.fulfill({ status: 200, contentType: "text/html", body: hydratedCreateCard(hydratedHtml) });
+  });
+  await page.goto(url);
+  const form = page.locator("[data-environment-form]");
+  await expect(page.getByRole("button", { name: "Retry loading choices" })).toBeVisible();
+  await expect(page.locator("[data-github-status]")).toContainText("GitHub connections could not be loaded");
+  const originalForm = await form.elementHandle();
+  await page.getByLabel("Name", { exact: true }).fill("retry-keeps-my-name");
+  await page.getByRole("button", { name: "Retry loading choices" }).click();
+  await expect(form).toHaveAttribute("data-create-options-loading", "false");
+  await expect(page.locator("[data-github-status]")).toContainText("Repositories available through this connection");
+  expect(await originalForm?.evaluate((node) => node.isConnected)).toBe(true);
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("retry-keeps-my-name");
+  expect(attempts).toBe(2);
+});
+
+test("busy repository loading cannot bypass dirty Create navigation", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("busy-navigation-canary");
+  await page.locator("[data-github-results]").evaluate((node) => node.setAttribute("aria-busy", "true"));
+  await page.getByRole("link", { name: "Manage personal secrets", exact: true }).click();
+  const prompt = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("button", { name: "Save draft and leave", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Application secrets" })).toBeVisible();
+});
+
+test("Create submission has bounded pending feedback and recovers from BFCache", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  const form = page.locator("[data-environment-form]");
+  await form.evaluate((node: HTMLFormElement) => {
+    node.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  await expect(form).toHaveAttribute("data-create-submitting", "true");
+  await expect(form.locator('[type="submit"]')).toHaveAttribute("aria-busy", "true");
+  await expect(form.locator(".cw-submit-busy")).toBeVisible();
+  expect(await form.evaluate((node: HTMLFormElement) => {
+    let prevented = false;
+    node.addEventListener("submit", (event) => { prevented = event.defaultPrevented; }, { once: true });
+    node.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    return prevented;
+  })).toBe(true);
+  await page.evaluate(() => globalThis.dispatchEvent(new Event("pageshow")));
+  await expect(form).not.toHaveAttribute("data-create-submitting");
+  await expect(form.locator('[type="submit"]')).not.toHaveAttribute("aria-busy");
+  await expect(form.locator(".cw-submit-idle")).toBeVisible();
+});
+
+test("dirty Create Close keeps inputs and saved draft until explicit Discard", async ({ page }) => {
   await page.goto(fixtureUrl());
   await page.locator("[data-create-resources] summary").click();
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Name", { exact: true }).fill("unsaved-name-canary");
   const form = page.locator("[data-environment-form]");
   const csrf = await form.locator('[name="_csrf"]').inputValue();
-  await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+  await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
   const saved = await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()));
-  expect(saved).not.toContain("unsaved-name-canary");
+  expect(JSON.parse(saved!).authored.name).toBe("unsaved-name-canary");
   await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
   const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
   await expect(prompt.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
@@ -79,15 +308,15 @@ test("dirty Create Close keeps inputs and authority until explicit Discard, with
   await page.keyboard.press("Escape");
   await expect(page.locator("[data-drawer]")).toBeVisible();
   await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
-  // Blur may legitimately refresh saved_at. Discard itself must change neither
-  // the saved metadata nor selections; reset must never trigger autosave.
+  // Blur may legitimately refresh saved_at. Discard must remove this draft;
+  // resetting the form must never trigger a new autosave.
   const beforeDiscard = await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()));
   expect(JSON.parse(beforeDiscard!).selections).toEqual(JSON.parse(saved!).selections);
   await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
   await expect(page.locator("[data-drawer]")).toBeHidden();
   await expect(form.locator('[name="name"]')).toHaveValue("");
   await expect(form.locator('[name="_csrf"]')).toHaveValue(csrf);
-  expect(await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()))).toBe(beforeDiscard);
+  expect(await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()))).toBeNull();
 });
 
 test("dirty app-owned Create Back reconciles URL before Keep or explicit Discard", async ({ page }) => {
@@ -131,7 +360,7 @@ test("structural Create edits are dirty without snapshots and the next opener fe
   await page.goto(fixtureUrl());
   const rows = page.locator("[data-repository-row]");
   const initial = await rows.count();
-  await page.getByRole("button", { name: "Custom Git URL", exact: true }).click();
+  await page.getByRole("button", { name: "Add custom Git URL", exact: true }).click();
   await expect(rows).toHaveCount(initial + 1);
   await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
   const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
@@ -148,7 +377,7 @@ test("Forward after structural Discard fetches a fresh authoritative Create form
   await page.locator("[data-drawer-trigger]").click();
   const rows = page.locator("[data-repository-row]");
   const initial = await rows.count();
-  await page.getByRole("button", { name: "Custom Git URL", exact: true }).click();
+  await page.getByRole("button", { name: "Add custom Git URL", exact: true }).click();
   await expect(rows).toHaveCount(initial + 1);
   await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
   await page.getByRole("dialog", { name: "Discard changes?", exact: true }).getByRole("button", { name: "Discard changes", exact: true }).click();
@@ -186,29 +415,54 @@ test("a Create trigger requiring a different server form still guards dirty navi
   await expect(page).toHaveURL(fixtureUrl());
 });
 
-test("dirty Create setup navigation offers Keep and Discard while preserving the exact saved draft", async ({ page }) => {
+test("dirty Create setup navigation offers Keep or saved-draft navigation", async ({ page }) => {
   await page.goto(fixtureUrl());
   let creates = 0;
   page.on("request", (request) => { if (/PrepareEnvironment|\/_actions\/sandboxes\/create/.test(request.url())) creates += 1; });
   await page.locator("[data-create-resources] summary").click();
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Name", { exact: true }).fill("setup-private-canary");
-  const link = page.getByRole("link", { name: "Connect GitHub", exact: true });
+  const link = page.locator("[data-github-setup-link]");
   const destination = new URL((await link.getAttribute("href"))!, page.url()).href;
   await link.click();
-  const prompt = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+  const prompt = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
   await expect(prompt).toBeVisible();
   await prompt.getByRole("button", { name: "Keep editing", exact: true }).click();
   await expect(page).toHaveURL(fixtureUrl());
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("setup-private-canary");
   await link.click();
-  await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await prompt.getByRole("button", { name: "Save draft and leave", exact: true }).click();
   await expect(page).toHaveURL(destination);
   expect(new URL(page.url()).searchParams.get("creation_draft")).toBe(draftId);
   const saved = await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()));
   expect(JSON.parse(saved!).selections.cpu).toBe("2000");
-  expect(saved).not.toContain("setup-private-canary");
+  expect(JSON.parse(saved!).authored.name).toBe("setup-private-canary");
   expect(creates).toBe(0);
+});
+
+test("Create setup navigation explains when a repository URL cannot be retained", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Repository URL", { exact: true }).fill("https://user:private-canary@git.example.test/team/repo.git");
+  await page.locator("[data-github-setup-link]").click();
+  const prompt = page.getByRole("dialog", { name: "Leave Create Sandbox?" });
+  await expect(prompt).toContainText("You will need to re-enter that URL");
+  await prompt.getByRole("button", { name: "Keep editing" }).click();
+  await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("https://user:private-canary@git.example.test/team/repo.git");
+  await page.locator("[data-github-setup-link]").click();
+  await prompt.getByRole("button", { name: "Leave without repository URL" }).click();
+  const bytes = await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()));
+  expect(bytes).not.toContain("private-canary");
+});
+
+test("Create setup navigation keeps the form open if its draft cannot be saved", async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(window, "sessionStorage", { get() { throw new Error("synthetic storage refusal"); } }));
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("must-stay-here");
+  await page.locator("[data-github-setup-link]").click();
+  await expect(page).toHaveURL(fixtureUrl());
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("must-stay-here");
+  await expect(page.getByRole("dialog", { name: "Leave Create Sandbox?" })).toHaveCount(0);
+  await expect(page.locator("[data-create-draft-status]")).toContainText("draft cannot be saved");
 });
 
 test("native reload warns about dirty Create input and Cancel keeps the form", async ({ page }) => {
@@ -288,7 +542,7 @@ test("Create setup links carry only the current draft handle and Edit links stay
   await page.getByLabel("Name", { exact: true }).fill("name-never-navigation");
   await page.getByLabel("Repository URL", { exact: true }).fill("https://canary.invalid/private-repository");
   const links = page.locator('a[href*="settings-credentials.html"], a[href*="settings-secrets.html"], a[href*="application-secrets.html"]');
-  await expect(links).toHaveCount(6);
+  await expect(links).toHaveCount(5);
   for (const link of await links.all()) {
     const href = await link.getAttribute("href");
     const target = new URL(href!, page.url());
@@ -314,7 +568,7 @@ test("explicit return offers the requested older draft, never the newer draft", 
   page.on("request", (request) => { if (/PrepareEnvironment|\/_actions\/sandboxes\/create/.test(request.url())) creates.push(request.url()); });
   await exactReturnFixture(page);
   await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-  await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
   const html = await restoredCard(page, requested);
   await page.route("**/fixture/_fragments/create-draft", async (route) => {
     restores += 1;
@@ -324,16 +578,16 @@ test("explicit return offers the requested older draft, never the newer draft", 
     await route.fulfill({ status: 200, contentType: "text/html", body: html });
   });
   expect(restores).toBe(0);
-  await page.getByRole("button", { name: "Restore saved selections" }).click();
+  await page.getByRole("button", { name: "Restore saved draft" }).click();
   await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
   expect(restores).toBe(1);
   expect(creates).toEqual([]);
 });
 
-for (const unavailable of ["missing", "expired", "foreign actor", "foreign organization", "unavailable marker"] as const) {
+for (const unavailable of ["missing", "future timestamp", "foreign actor", "foreign organization", "unavailable marker"] as const) {
   test(`explicit ${unavailable} return does not substitute another saved draft`, async ({ page }) => {
     const requested = { ...selectionsDraft(), saved_at: Date.now() - 1000 };
-    if (unavailable === "expired") requested.saved_at = Date.now() - 30 * 60 * 1000;
+    if (unavailable === "future timestamp") requested.saved_at = Date.now() + 30 * 60 * 1000;
     if (unavailable === "foreign actor") requested.actor = "22222222222240008000000000000002";
     if (unavailable === "foreign organization") requested.organization = "00000000-0000-4000-8000-000000000005";
     const newer = { ...selectionsDraft(), draft: "00000000-0000-4000-8000-000000000004", saved_at: Date.now() - 100 };
@@ -343,8 +597,8 @@ for (const unavailable of ["missing", "expired", "foreign actor", "foreign organ
     let mutations = 0;
     page.on("request", (request) => { if (/\/_fragments\/create-draft|PrepareEnvironment|\/_actions\/sandboxes\/create/.test(request.url())) mutations += 1; });
     await exactReturnFixture(page, unavailable === "unavailable marker" ? "00000000-0000-4000-8000-000000000006" : draftId);
-    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
-    await expect(page.locator("[data-create-draft-status]")).toContainText("requested saved selections are unavailable");
+    await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
+    await expect(page.locator("[data-create-draft-status]")).toContainText("requested draft is unavailable");
     await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
     await page.getByLabel("Name", { exact: true }).fill("still-editable");
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("still-editable");
@@ -355,37 +609,161 @@ for (const unavailable of ["missing", "expired", "foreign actor", "foreign organ
 test("explicit return with unavailable storage keeps a usable native form", async ({ page }) => {
   await page.addInitScript(() => Object.defineProperty(window, "sessionStorage", { get() { throw new Error("synthetic storage refusal"); } }));
   await exactReturnFixture(page);
-  await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
-  await expect(page.locator("[data-create-draft-status]")).toContainText("Selections cannot be saved");
+  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
+  await expect(page.locator("[data-create-draft-status]")).toContainText("draft cannot be saved");
   await page.getByLabel("Name", { exact: true }).fill("still-editable");
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("still-editable");
 });
 
-test("Create drafts save only bounded selections and offer explicit recovery after reload", async ({ page }) => {
+test("Create drafts save bounded authored fields and offer explicit recovery after reload", async ({ page }) => {
   await page.goto(fixtureUrl());
   await page.locator("[data-create-resources] summary").click();
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Memory", { exact: true }).selectOption("4096");
   await page.getByLabel("Disk", { exact: true }).selectOption("20");
-  await page.getByLabel("TTL").fill("8h");
-  await page.getByLabel("Name", { exact: true }).fill("never-save-name-canary");
+  await page.getByLabel("Delete after").fill("8h");
+  await page.getByLabel("Name", { exact: true }).fill("saved-name-canary");
   await page.getByLabel("Repository URL", { exact: true }).fill("https://canary.invalid/private-repository");
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByLabel("Internal port", { exact: true }).fill("3000");
-  await page.getByLabel("Preview label", { exact: true }).fill("never-save-label");
-  await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+  await page.getByLabel("Preview label", { exact: true }).fill("saved-label");
+  await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
   const bytes = await page.evaluate((prefix) => {
     const key = Object.keys(sessionStorage).find((key) => key.startsWith(prefix));
     return key ? sessionStorage.getItem(key)! : "";
   }, draftPrefix);
-  expect(Buffer.byteLength(bytes)).toBeLessThanOrEqual(8192);
-  for (const forbidden of ["never-save-name-canary", "canary.invalid", "never-save-label", "synthetic-csrf", "repo_url", "install_command", "startup_script"]) expect(bytes).not.toContain(forbidden);
+  expect(Buffer.byteLength(bytes)).toBeLessThanOrEqual(512 * 1024);
+  expect(bytes).not.toContain("synthetic-csrf");
   expect(JSON.parse(bytes).selections.ports).toEqual([{ port: "3000", access: "creator" }]);
+  expect(JSON.parse(bytes).authored).toMatchObject({
+    name: "saved-name-canary", repositories: [{ url: "https://canary.invalid/private-repository", branch: "main", mount: "codewire" }], port_rows: [{ port: "3000", label: "saved-label", access: "creator" }],
+  });
   await page.reload();
-  await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
   await page.locator("[data-create-resources] summary").click();
   await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+  const draft = JSON.parse(bytes) as Draft;
+  await page.route("**/fixture/_fragments/create-draft", async (route) => {
+    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await restoredCard(page, draft) });
+  });
+  await page.getByRole("button", { name: "Restore saved draft" }).click();
+  await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "true");
+  await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("2000");
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("saved-name-canary");
+  await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("https://canary.invalid/private-repository");
+  await expect(page.getByLabel("Preview label", { exact: true })).toHaveValue("saved-label");
+});
+
+test("Create drafts do not store credential-bearing repository URLs", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  const field = page.getByLabel("Repository URL", { exact: true });
+  for (const unsafe of [
+    "https://user:private-canary@git.example.test/team/repo.git",
+    "https://git.example.test/team/repo.git?token=private-canary",
+    "https://git.example.test/team/repo.git#private-canary",
+  ]) {
+    await field.fill(unsafe);
+    await expect(page.locator("[data-create-draft-status]")).toContainText("repository URL containing credentials or query data was not saved");
+    const stored = await page.evaluate((key) => JSON.parse(sessionStorage.getItem(key)!), keyForDraft(selectionsDraft()));
+    expect(stored.authored.repositories[0].url).toBe("");
+    expect(JSON.stringify(stored)).not.toContain("private-canary");
+  }
+  await field.fill("https://git.example.test/team/repo.git");
+  await expect(page.locator("[data-create-draft-status]")).toHaveText("Draft saved in this tab.");
+  const stored = await page.evaluate((key) => JSON.parse(sessionStorage.getItem(key)!), keyForDraft(selectionsDraft()));
+  expect(stored.authored.repositories[0].url).toBe("https://git.example.test/team/repo.git");
+});
+
+test("Create drafts are removed after account change and sign-out", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("account-bound-canary");
+  const key = keyForDraft(selectionsDraft());
+  await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
+  expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), key)).not.toBeNull();
+  await page.route(fixtureUrl(), async (route) => {
+    const response = await route.fetch();
+    const html = (await response.text()).replace(`data-create-draft-actor="${actor}"`, 'data-create-draft-actor="22222222222240008000000000000002"');
+    await route.fulfill({ response, body: html });
+  });
+  await page.reload();
+  expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), key)).toBeNull();
+  await page.getByLabel("Name", { exact: true }).fill("signout-canary");
+  const secondKey = await page.locator("[data-environment-form]").getAttribute("data-create-draft-actor");
+  const actorKey = `${draftPrefix}${secondKey}:${organization}:${draftId}`;
+  expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), actorKey)).not.toBeNull();
+  await page.goto(fixtureUrl().replace("create-sandbox.html", "settings-account.html"));
+  await page.locator("form#sign-out").evaluate((form) => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), actorKey)).toBeNull();
+});
+
+test("acknowledged Sandbox creation removes only the submitted draft", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.getByLabel("Name", { exact: true }).fill("created-canary");
+  const key = keyForDraft(selectionsDraft());
+  const unrelated = { ...selectionsDraft(), draft: "00000000-0000-4000-8000-000000000004" };
+  await page.evaluate(({ otherKey, bytes }) => sessionStorage.setItem(otherKey, bytes), { otherKey: keyForDraft(unrelated), bytes: JSON.stringify(unrelated) });
+  await page.locator("[data-environment-form]").evaluate((form: HTMLFormElement) => {
+    form.action = `${location.origin}/fixture-org/_actions/sandboxes/create`;
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  await page.route("**/fixture-org/?message=environment-created", (route) => route.fulfill({
+    status: 200, contentType: "text/html", body: '<!doctype html><html><head><script defer src="/environments.js"></script></head><body><main>Sandbox creation started.</main></body></html>',
+  }));
+  await page.goto(new URL("/fixture-org/?message=environment-created", fixtureUrl()).href);
+  expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), key)).toBeNull();
+  expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), keyForDraft(unrelated))).not.toBeNull();
+});
+
+test("Create recovery restores authored values only after current selections are checked", async ({ page }) => {
+  const draft = {
+    ...selectionsDraft(),
+    authored: {
+      name: "saved-sandbox", image: "registry.example.test/workspace:stable",
+      install_command: "bun install", startup_script: "bun run dev",
+      repositories: [{ url: "https://git.example.test/team/repository.git", branch: "feature", mount: "repository" }],
+      port_rows: [{ port: "", label: "web", access: "creator" }], ttl: "not-a-duration",
+    },
+  };
+  await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
+  await page.goto(fixtureUrl());
+  const html = await restoredCard(page, draft);
+  await page.route("**/fixture/_fragments/create-draft", async (route) => {
+    const body = new URLSearchParams(route.request().postData()!);
+    const metadata = JSON.parse(body.get("metadata")!);
+    expect(metadata.authored).toBeUndefined();
+    expect(metadata.selections.credential_profile).toBe(profile);
+    expect(metadata.selections.ports).toEqual([]);
+    await route.fulfill({ status: 200, contentType: "text/html", body: html });
+  });
+  await page.getByRole("button", { name: "Restore saved draft" }).click();
+  await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "true");
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("saved-sandbox");
+  await expect(page.getByLabel("Workspace image")).toHaveValue("registry.example.test/workspace:stable");
+  await expect(page.getByLabel("Repository URL")).toHaveValue("https://git.example.test/team/repository.git");
+  await expect(page.getByLabel("Branch", { exact: true })).toHaveValue("feature");
+  await expect(page.getByLabel("Mount path", { exact: true })).toHaveValue("repository");
+  await page.locator("[data-create-resources] summary").click();
+  await expect(page.getByLabel("Delete after")).toHaveValue("not-a-duration");
+  await expect(page.getByLabel("Internal port")).toHaveValue("");
+  await expect(page.getByLabel("Preview label")).toHaveValue("web");
+  await page.locator("[data-create-runtime] summary").click();
+  await expect(page.getByLabel("Install Command")).toHaveValue("bun install");
+  await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
+});
+
+test("Create draft retains in-progress preview and lifetime text", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  await page.locator("[data-create-resources] summary").click();
+  await page.getByLabel("Delete after").fill("not-a-duration");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByLabel("Preview label").fill("web");
+  await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
+  const stored = await page.evaluate((key) => JSON.parse(sessionStorage.getItem(key)!), keyForDraft(selectionsDraft()));
+  expect(stored.authored.ttl).toBe("not-a-duration");
+  expect(stored.authored.port_rows).toEqual([{ port: "", label: "web", access: "creator" }]);
+  expect(stored.selections.ttl).toBe("infinity");
+  expect(stored.selections.ports).toEqual([]);
 });
 
 test("explicit Create recovery keeps exact large revision bytes and makes no Create dispatch", async ({ page }) => {
@@ -410,7 +788,7 @@ test("explicit Create recovery keeps exact large revision bytes and makes no Cre
     expect(JSON.parse(body.get("metadata")!).selections.credential_profile).toBe(profile);
     await route.fulfill({ status: 200, contentType: "text/html", body: html });
   });
-  await page.getByRole("button", { name: "Restore saved selections" }).click();
+  await page.getByRole("button", { name: "Restore saved draft" }).click();
   await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "true");
   await expect(page.locator('[name="credential_profile"]')).toHaveValue(profile);
   await expect(page.locator('[name="credential_profile"] option:checked')).toBeEnabled();
@@ -440,7 +818,7 @@ for (const interruption of ["edit", "property edit", "close", "discard", "replac
       completed();
     });
     try {
-      await page.getByRole("button", { name: "Restore saved selections" }).click();
+      await page.getByRole("button", { name: "Restore saved draft" }).click();
       await requested;
       if (interruption === "edit") await page.getByLabel("Name", { exact: true }).fill("keep-this-input");
       else if (interruption === "property edit") await page.getByLabel("Name", { exact: true }).evaluate((input: HTMLInputElement) => { input.value = "keep-this-input"; });
@@ -463,13 +841,13 @@ for (const interruption of ["edit", "property edit", "close", "discard", "replac
     if (interruption === "property edit" || interruption === "close") {
       await expect(page.locator("[data-create-draft-status]")).not.toContainText("Checking current options");
     }
-    if (interruption === "property edit") await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeDisabled();
+    if (interruption === "property edit") await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeDisabled();
     await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "false");
     if (interruption === "edit" || interruption === "property edit") await expect(page.getByLabel("Name", { exact: true })).toHaveValue("keep-this-input");
   });
 }
 
-test("Create recovery expires invalid entries and bounds history across organizations", async ({ page }) => {
+test("Create recovery rejects invalid entries and preserves valid history across organizations", async ({ page }) => {
   const url = fixtureUrl();
   await page.goto(url);
   const drafts = Array.from({ length: 7 }, (_, index) => ({ ...selectionsDraft(), saved_at: Date.now() - index, draft: `00000000-0000-4000-8000-${String(index + 10).padStart(12, "0")}`, organization: index % 2 ? "00000000-0000-4000-8000-000000000004" : organization }));
@@ -477,32 +855,37 @@ test("Create recovery expires invalid entries and bounds history across organiza
     drafts.forEach((draft) => sessionStorage.setItem(`${prefix}${draft.actor}:${draft.organization}:${draft.draft}`, JSON.stringify(draft)));
   }, { drafts, prefix: draftPrefix });
   await page.reload();
-  expect(await page.evaluate((prefix) => Object.keys(sessionStorage).filter((key) => key.startsWith(prefix)).length, draftPrefix)).toBe(5);
-  for (const invalid of ["malformed", "expired", "oversize", "unknown field", "revision alias"] as const) {
-    const draft = selectionsDraft();
+  expect(await page.evaluate((prefix) => Object.keys(sessionStorage).filter((key) => key.startsWith(prefix)).length, draftPrefix)).toBe(7);
+  for (const invalid of ["malformed", "future", "oversize", "unknown field", "revision alias", "stored credential URL"] as const) {
+    const draft = { ...selectionsDraft(), draft: "00000000-0000-4000-8000-000000000009" };
     let bytes = JSON.stringify(draft);
     if (invalid === "malformed") bytes = "not-json";
-    if (invalid === "expired") bytes = JSON.stringify({ ...draft, saved_at: Date.now() - 30 * 60 * 1000 });
-    if (invalid === "oversize") bytes = " ".repeat(8193);
+    if (invalid === "future") bytes = JSON.stringify({ ...draft, saved_at: Date.now() + 30 * 60 * 1000 });
+    if (invalid === "oversize") bytes = " ".repeat(512 * 1024 + 1);
     if (invalid === "unknown field") bytes = JSON.stringify({ ...draft, password: "private-canary" });
     if (invalid === "revision alias") bytes = JSON.stringify({ ...draft, selections: { ...draft.selections, credential_profile: "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@0007" } });
+    if (invalid === "stored credential URL") bytes = JSON.stringify({ ...draft, authored: {
+      name: "stored-canary", image: "", install_command: "", startup_script: "",
+      repositories: [{ url: "https://user:private-canary@git.example.test/team/repo.git", branch: "", mount: "" }],
+      port_rows: [], ttl: "",
+    } });
     await page.evaluate(({ key, bytes, prefix }) => {
-      Object.keys(sessionStorage).filter((key) => key.startsWith(prefix)).forEach((key) => sessionStorage.removeItem(key));
       sessionStorage.setItem(key, bytes);
     }, { key: keyForDraft(draft), bytes, prefix: draftPrefix });
     await page.reload();
-    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
-    expect(await page.evaluate((prefix) => Object.keys(sessionStorage).filter((key) => key.startsWith(prefix)).length, draftPrefix)).toBe(0);
+    expect(await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(draft))).toBeNull();
+    expect(await page.evaluate((prefix) => Object.keys(sessionStorage).filter((key) => key.startsWith(prefix)).length, draftPrefix)).toBe(7);
+    await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
   }
 });
 
 test("unavailable draft storage leaves the native Create form usable", async ({ page }) => {
   await page.addInitScript(() => Object.defineProperty(window, "sessionStorage", { get() { throw new Error("synthetic storage refusal"); } }));
   await page.goto(fixtureUrl());
-  await expect(page.locator("[data-create-draft-status]")).toContainText("Selections cannot be saved");
+  await expect(page.locator("[data-create-draft-status]")).toContainText("draft cannot be saved");
   await page.getByLabel("Name", { exact: true }).fill("still-editable");
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("still-editable");
-  await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
 });
 
 test("edited and server-rejected Create forms do not offer usable restoration", async ({ page }) => {
@@ -513,13 +896,13 @@ test("edited and server-rejected Create forms do not offer usable restoration", 
   page.on("request", (request) => { if (request.url().endsWith("/_fragments/create-draft")) restores += 1; });
   await page.goto(url);
   await page.getByLabel("Name", { exact: true }).fill("keep-current-edits");
-  await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeDisabled();
   await page.route("**/reference/fixtures/create-sandbox.html", async (route) => {
     const response = await route.fetch();
     const html = (await response.text()).replace('data-create-draft-fresh="true"', 'data-create-draft-fresh="false"');
     await route.fulfill({ response, body: html });
   });
   await page.reload();
-  await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
   expect(restores).toBe(0);
 });

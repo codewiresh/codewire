@@ -53,7 +53,7 @@ impl Submission {
     }
 }
 
-fn valid_authority(headers: &HeaderMap, origin: &str, csrf: &str) -> bool {
+pub(super) fn valid_authority(headers: &HeaderMap, origin: &str, csrf: &str) -> bool {
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let origin_matches = origins
         .next()
@@ -100,7 +100,7 @@ fn response(status: StatusCode, body: String) -> Response {
 }
 
 fn unavailable(status: StatusCode) -> Response {
-    response(status, "<p role=\"alert\">Saved selections could not be restored. Reload, sign in if needed, and review current options. No Sandbox was created.</p>".into())
+    response(status, "<p role=\"alert\">The draft could not be restored. Reload, sign in if needed, and review current options. No Sandbox was created.</p>".into())
 }
 
 pub(super) async fn restore(
@@ -407,7 +407,7 @@ mod tests {
                 "{}/synthetic/_fragments/create-draft",
                 dashboard.origin
             ))
-            .headers(headers)
+            .headers(headers.clone())
             .form(&[
                 ("_csrf", csrf),
                 ("creation_draft", DRAFT.into()),
@@ -444,6 +444,137 @@ mod tests {
                 "unexpected upstream operation {path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn create_shell_is_editable_before_optional_services_and_options_are_scoped() {
+        let (upstream, calls) = fixture("normal").await;
+        let dashboard = serve(crate::app(fixture_config(&upstream.origin))).await;
+        let (headers, csrf) = authority();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("{}/synthetic/new/", dashboard.origin))
+            .headers(headers.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response.text().await.unwrap();
+        assert!(html.contains("data-create-options-loading=\"true\""));
+        assert!(html.contains("name=\"name\"") && html.contains("name=\"image\""));
+        assert!(html.contains("name=\"repo_url_100\""));
+        assert!(html.contains("data-add-app-port") && html.contains("name=\"startup_script\""));
+        assert!(html.contains("Loading Sandboxes") && html.contains("Loading provider, secret"));
+        assert!(
+            !html.contains("No Sandboxes yet") && !html.contains("Preview URLs are unavailable")
+        );
+        let initial_calls = calls.lock().unwrap().clone();
+        assert!(initial_calls.iter().all(|path| path == "/api/auth/get-session" || path.ends_with("/ListOrganizations")), "unexpected Create-shell dependencies: {initial_calls:?}");
+        let draft_id = html
+            .split("data-create-draft-id=\"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .unwrap()
+            .to_owned();
+        assert!(crate::environment_drafts::canonical_id(&draft_id));
+        let options = client
+            .post(format!(
+                "{}/synthetic/_fragments/create-options",
+                dashboard.origin
+            ))
+            .headers(headers.clone())
+            .form(&[
+                ("_csrf", csrf.as_str()),
+                ("actor", ACTOR),
+                ("organization", ORG),
+                ("draft_id", draft_id.as_str()),
+                ("draft_return", ""),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(options.status(), StatusCode::OK);
+        assert_eq!(
+            options.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        assert_eq!(options.headers()[header::VARY], "Cookie");
+        let options_html = options.text().await.unwrap();
+        assert!(options_html.contains("data-create-options-loading=\"false\""));
+        assert!(
+            options_html.contains("cwpreview.sh")
+                && options_html.contains("data-create-optional-options")
+        );
+        let after_options = calls.lock().unwrap().clone();
+        assert!(
+            after_options
+                .iter()
+                .any(|path| path.ends_with("/GetEnvironmentCreateOptions"))
+        );
+        let rejected = client
+            .post(format!(
+                "{}/synthetic/_fragments/create-options",
+                dashboard.origin
+            ))
+            .headers(headers.clone())
+            .form(&[
+                ("_csrf", csrf.as_str()),
+                ("actor", "different_actor"),
+                ("organization", ORG),
+                ("draft_id", draft_id.as_str()),
+                ("draft_return", ""),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        assert_eq!(calls.lock().unwrap().len(), after_options.len() + 1);
+
+        let mut missing_origin = headers.clone();
+        missing_origin.remove(header::ORIGIN);
+        let forbidden_create = client
+            .post(format!(
+                "{}/synthetic/_actions/sandboxes/create",
+                dashboard.origin
+            ))
+            .headers(missing_origin)
+            .form(&[("_csrf", csrf.as_str())])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forbidden_create.status(), StatusCode::FORBIDDEN);
+
+        let invalid_create = client
+            .post(format!(
+                "{}/synthetic/_actions/sandboxes/create",
+                dashboard.origin
+            ))
+            .headers(headers)
+            .form(&[
+                ("_csrf", csrf.as_str()),
+                ("name", "submit-without-inventory"),
+                ("cpu", "not-a-number"),
+                ("application_previews_explicit", "true"),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid_create.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let create_error_html = invalid_create.text().await.unwrap();
+        assert!(create_error_html.contains("data-environments-loading=\"true\""));
+        assert!(create_error_html.contains("CPU must be"));
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.ends_with("/ListEnvironments")),
+            "Create submission must not wait for unrelated Sandbox inventory"
+        );
     }
 
     #[tokio::test]
@@ -492,7 +623,7 @@ mod tests {
             assert!(html.contains("data-create-draft-restored=\"true\""));
             assert!(html.contains(&format!("value=\"{DRAFT}@9007199254740993\"")));
             assert!(html.contains(&format!("value=\"{ORG}\"")));
-            assert!(html.contains("not saved") && html.contains("preview labels"));
+            assert!(html.contains("Draft restored. Review current choices"));
             assert!(
                 calls
                     .iter()

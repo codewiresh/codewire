@@ -13,7 +13,6 @@ use crate::{
 };
 
 pub(crate) const MAX_BYTES: usize = 8 * 1024;
-pub(crate) const MAX_AGE_MS: u64 = 30 * 60 * 1000;
 
 /// A Create navigation convenience, never a source selector or authorization.
 /// Rejected input is replaced by a fixed marker, not retained or displayed.
@@ -167,7 +166,6 @@ impl SelectionDraft {
                 .into_iter()
                 .all(|id| canonical_id(id))
             || draft.saved_at > now
-            || now - draft.saved_at >= MAX_AGE_MS
         {
             return Err(());
         }
@@ -451,9 +449,8 @@ mod tests {
     }
 
     #[test]
-    fn expiry_future_versions_oversize_and_noncanonical_identities_fail_closed() {
-        assert!(parse(&metadata(), NOW + MAX_AGE_MS - 1).is_ok());
-        assert!(parse(&metadata(), NOW + MAX_AGE_MS).is_err());
+    fn future_versions_oversize_and_noncanonical_identities_fail_closed() {
+        assert!(parse(&metadata(), NOW + 30 * 24 * 60 * 60 * 1000).is_ok());
         assert!(parse(&metadata(), NOW - 1).is_err());
         assert!(SelectionDraft::parse(&vec![b' '; MAX_BYTES + 1], NOW).is_err());
         for (key, value) in [
