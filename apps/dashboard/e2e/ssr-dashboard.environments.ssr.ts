@@ -92,10 +92,10 @@ async function assertExplicitCreateRecovery(page: Page) {
       await page.locator("[data-create-resources] > summary").click();
     }
     await page.getByLabel("CPU", { exact: true }).selectOption("2000");
-    await page.getByLabel("TTL").fill("8h");
-    await page.getByLabel("Name", { exact: true }).fill("draft-name-not-persisted");
+    await page.getByLabel("Delete after").fill("8h");
+    await page.getByLabel("Name", { exact: true }).fill("draft-name-restored");
     await page.getByLabel("Repository URL", { exact: true }).fill("https://draft-canary.invalid/private-repository");
-    await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
     const requestedDraft = await form.getAttribute("data-create-draft-id");
     expect(requestedDraft).toMatch(/^[0-9a-f-]{36}$/);
     // A second real Create draft is newer. Returning must not offer it in
@@ -104,7 +104,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(form).not.toHaveAttribute("data-create-draft-id", requestedDraft!);
     await page.locator("[data-create-resources] > summary").click();
     await page.getByLabel("CPU", { exact: true }).selectOption("4000");
-    await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
     for (const suffix of [
       "creation_draft=unavailable",
       `creation_draft=${requestedDraft}&%63reation_draft=${requestedDraft}`,
@@ -113,7 +113,7 @@ async function assertExplicitCreateRecovery(page: Page) {
       await page.goto(`/${slug}/new/?${suffix}`);
       await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=unavailable`);
       await expect(form).toHaveAttribute("data-create-draft-exact", "true");
-      await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeHidden();
+      await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
       await expect(page.locator("[data-create-draft-status]")).toContainText("requested saved selections are unavailable");
       await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
     }
@@ -137,7 +137,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     await page.goto(`/${slug}/new/?creation_draft=${requestedDraft}`);
     await expect(page.locator("[data-drawer]")).toBeVisible();
     await page.reload();
-    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
     // Exercise the actual native Settings detour, not a direct fabricated
     // return URL: validation, mutation, and explicit Return retain this exact
     // older draft while the new source remains available but unattached.
@@ -167,7 +167,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
     await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
     await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-    await expect(page.getByRole("button", { name: "Restore saved selections" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
     await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
     await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
@@ -176,7 +176,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     // through cancellation, server validation and a real native secret write.
     // Owning tests disable trace/video/failure screenshots around these inputs.
     const personalPath = `/settings/secrets/?org=${slug}&creation_draft=${requestedDraft}`;
-    await page.getByRole("link", { name: "Add or manage personal secrets", exact: true }).click();
+    await page.getByRole("link", { name: "Manage personal secrets", exact: true }).click();
     await expect(page).toHaveURL(`${ssrUrl}${personalPath}`);
     const personalReturn = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
     await expect(personalReturn).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
@@ -216,7 +216,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     const csrf = await form.locator('[name="_csrf"]').inputValue();
     const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
-    await page.getByRole("button", { name: "Restore saved selections" }).click();
+    await page.getByRole("button", { name: "Restore saved draft" }).click();
     const response = await responsePromise;
     expect(response.status()).toBe(200);
     expect(response.headers()["cache-control"]).toBe("private, no-store");
@@ -227,8 +227,8 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
-    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
-    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("draft-name-restored");
+    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("https://draft-canary.invalid/private-repository");
     await expect(form.locator('[name="_csrf"]')).toHaveValue(csrf);
     await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
@@ -377,7 +377,7 @@ async function openConfiguredImageForm(page: Page) {
   await page.locator("[data-create-resources] > summary").click();
   await page.getByLabel("Install Command").fill("printf 'configured-explicitly\\n'");
   await page.getByLabel("Startup Script").fill("printf 'started-explicitly\\n'");
-  await page.getByLabel("TTL").fill("3600s");
+  await page.getByLabel("Delete after").fill("3600s");
   await page.locator('input[name="agent"][value="codex"]').check();
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByLabel("Internal port", { exact: true }).fill("3000");
@@ -417,10 +417,10 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Branch", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Mount path", { exact: true })).toBeVisible();
-    await expect(page.locator("[data-github-repository-picker]")).toHaveCount(1);
-    await expect(page.locator("[data-github-repository-picker]")).not.toBeVisible();
-    await expect(page.getByRole("button", { name: "Choose from GitHub" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Custom Git URL" })).toBeVisible();
+    await expect(page.locator("[data-github-browser]")).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "GitHub account" })).toBeVisible();
+    await expect(page.getByRole("searchbox", { name: "Find a repository" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Add custom Git URL" })).toBeVisible();
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
     await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?org=${slug}&creation_draft=${draft}`);
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
@@ -459,7 +459,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(drawer).toHaveAttribute("aria-modal", "true");
     await expect(drawer).toHaveCSS("transform", "none");
     await expect(page.locator("#environment-name")).toBeFocused();
-    const ttl = page.getByLabel("TTL");
+    const ttl = page.getByLabel("Delete after");
     await expect(ttl).toHaveValue("infinity");
     await page.locator("[data-create-resources] > summary").click();
     await ttl.fill("0");
@@ -566,7 +566,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
     await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
     await expect(page.getByLabel("Disk", { exact: true })).toHaveValue("10");
-    await expect(page.getByLabel("TTL")).toHaveValue("infinity");
+    await expect(page.getByLabel("Delete after")).toHaveValue("infinity");
     await expect(page.getByLabel("Workspace image")).toHaveValue(
       "registry.example.test/team/workspace:v1",
     );
@@ -617,7 +617,7 @@ test.describe.serial("server-rendered environments", () => {
     test.skip(!isMobile, "mobile responsive and visual contract");
     await page.goto(`/${slug}/new/`);
     await expect(page.getByRole("heading", { name: "Create Sandbox" })).toBeVisible();
-    await expect(page.getByLabel("TTL")).toHaveValue("infinity");
+    await expect(page.getByLabel("Delete after")).toHaveValue("infinity");
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await page.locator(".cw-drawer-body").evaluate((element) => { element.scrollTop = 0; });
     expect(await page.locator("#environment-create-card").evaluate((element) => element.getBoundingClientRect().top)).toBe(0);
@@ -654,15 +654,18 @@ test.describe.serial("server-rendered environments", () => {
     secretProjectId = project.id;
     await openConfiguredImageForm(page);
     await page.getByLabel("Secret project", { exact: true }).selectOption(secretProjectId);
-    await page.getByLabel("TTL").fill("invalid-ttl");
+    await page.getByLabel("Delete after").fill("invalid-ttl");
     const response = page.waitForResponse((candidate) => candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`) && candidate.request().method() === "POST");
     await page.getByRole("button", { name: "Create Sandbox" }).click();
     expect((await response).status()).toBe(422);
+    const ttl = page.getByLabel("Delete after");
+    await expect(ttl).toHaveAttribute("aria-invalid", "true");
+    await expect(ttl).toHaveAccessibleDescription(/TTL must be infinity or 60 seconds to 365 days/);
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     await expect(page.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
-    await expect(page.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}&creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}&creation_draft=${draft}`);
     await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/?creation_draft=${draft}`);
     await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/?creation_draft=${draft}`);
     await expect(page.locator(`a[href="/settings/credentials/?org=${slug}&creation_draft=${draft}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
@@ -703,7 +706,7 @@ test.describe.serial("server-rendered environments", () => {
     // A separate ordinary validation error proves recovery without creating
     // another Sandbox or allowing stale metadata to silently attach resources.
     await page.locator("[data-create-resources] > summary").click();
-    await page.getByLabel("TTL").fill("invalid-ttl");
+    await page.getByLabel("Delete after").fill("invalid-ttl");
     const recovered = page.waitForResponse((candidate) => (
       candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`)
       && candidate.request().method() === "POST"
@@ -713,7 +716,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(project).toHaveValue("");
     await expect(project).not.toHaveAttribute("aria-invalid", "true");
     await expect(project.locator(`option[value="${staleProjectId}"]`)).toHaveCount(0);
-    await expect(page.getByLabel("TTL")).toHaveValue("invalid-ttl");
+    await expect(page.getByLabel("Delete after")).toHaveValue("invalid-ttl");
     const [stillNotCreated] = await sql`
       SELECT COUNT(*)::int AS count FROM environments WHERE org_id = ${orgId} AND name = ${name}
     `;
@@ -1239,7 +1242,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(sourceEditor.locator('[name="expected_secret_project"]')).toHaveValue(secretProjectId);
     await expect(sourceEditor.locator('[name="confirm_personal_secrets"]')).toHaveCount(0);
     await expect(sourceEditor.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
-    await expect(sourceEditor.getByRole("link", { name: "Add or manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}`);
+    await expect(sourceEditor.getByRole("link", { name: "Manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}`);
     await expect(sourceEditor.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
     await expect(sourceEditor.locator(`a[href="/settings/credentials/?org=${slug}"]`)).toBeVisible();
     await sourceEditor.getByLabel("Secret project", { exact: true }).selectOption("");

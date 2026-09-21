@@ -9,8 +9,15 @@ test("preview choices show an unassigned URL pattern and native labeled rows", a
   const ports = page.locator('section[aria-labelledby="ports-title"]');
   await expect(ports.locator(".cw-preview-pattern")).toHaveText("https://{label}-{sandbox-id-prefix}-example.preview.example.test");
   await expect(ports.locator("a")).toHaveCount(0);
-  await expect(ports).toContainText("not an assigned URL");
-  await expect(ports).toContainText("does not block every other form of network access");
+  await expect(ports.locator(":scope > p")).toHaveCount(1);
+  await expect(ports.locator("ul[data-app-port-rows] + p[data-create-preview-hint]"))
+    .toContainText("HTTP on each internal port opens at a preview URL like");
+  await expect(ports.locator("[data-create-preview-hint]")).toContainText("with the access selected above");
+  await ports.getByRole("button", { name: "About preview access" }).click();
+  await expect(ports.locator("#create-ports-help")).toContainText("not an assigned URL");
+  await expect(ports.locator("#create-ports-help")).toContainText("does not block every other form of network access");
+  await page.keyboard.press("Escape");
+  await expect(ports.locator("#create-ports-help")).not.toBeVisible();
   await ports.getByRole("button", { name: "Add", exact: true }).click();
   const row = ports.locator("li[data-app-port-row]");
   await row.getByLabel("Internal port", { exact: true }).fill("3000");

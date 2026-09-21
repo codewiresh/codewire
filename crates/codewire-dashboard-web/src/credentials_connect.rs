@@ -695,7 +695,7 @@ pub(crate) async fn settings_data(
     build_settings_data(credentials, profiles)
 }
 
-async fn list_credentials(
+pub(crate) async fn list_credentials(
     state: &AppState,
     cookie: HeaderValue,
 ) -> Result<Vec<Credential>, ConnectError> {
@@ -999,7 +999,7 @@ fn credential_display_name(credential: &Credential) -> &str {
     }
 }
 
-fn validate_credential_metadata(credential: &Credential) -> Result<(), ConnectError> {
+pub(crate) fn validate_credential_metadata(credential: &Credential) -> Result<(), ConnectError> {
     let slot = credential_slot(credential)?;
     if exact_id(&credential.id).is_err()
         || credential.name.is_empty()
@@ -1149,7 +1149,7 @@ fn validate_profile_ack(
     Ok(())
 }
 
-fn credential_slot(credential: &Credential) -> Result<&'static str, ConnectError> {
+pub(crate) fn credential_slot(credential: &Credential) -> Result<&'static str, ConnectError> {
     match (credential.provider.as_str(), credential.authentication_kind) {
         ("openai", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("codex"),
         ("openai", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("openai"),

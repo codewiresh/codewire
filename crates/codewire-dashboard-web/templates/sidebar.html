@@ -36,7 +36,7 @@
         <li><button type="button" disabled title="Rail sorting is coming soon" aria-label="Sort Sandbox list"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-sort"/></svg></button></li>
       </menu>
     </header>
-    <div class="cw-console-rail" hx-get="/{{ view.selected_organization_slug }}/_fragments/sandbox-rail" hx-trigger="every 10s" hx-swap="innerHTML">
+    <div class="cw-console-rail" hx-get="/{{ view.selected_organization_slug }}/_fragments/sandbox-rail" hx-trigger="{% if view.sandbox_rail_loading %}load, {% endif %}every 10s" hx-swap="innerHTML">
       {% include "sandbox-rail.html" %}
     </div>
   </section>

@@ -593,6 +593,7 @@ pub(crate) struct DashboardView {
     pub(crate) sandboxes: Vec<EnvironmentRow>,
     pub(crate) recent_sandboxes: Vec<EnvironmentRow>,
     pub(crate) sandbox_rail_available: bool,
+    pub(crate) sandbox_rail_loading: bool,
     pub(crate) sandbox_total: usize,
     pub(crate) sandbox_running: usize,
     pub(crate) sandbox_stopped: usize,
@@ -1100,6 +1101,49 @@ pub(crate) struct EnvironmentCredentialProfileOption {
     pub(crate) bound_revision: bool,
     pub(crate) synthetic: bool,
     pub(crate) selected: bool,
+    // Account-owned metadata for Create presentation only. Discovery and
+    // checkout still recheck the current exact profile and provider access.
+    pub(crate) github_credential_id: String,
+    pub(crate) github_account: String,
+    pub(crate) github_connection: GithubProfileConnection,
+}
+
+impl EnvironmentCredentialProfileOption {
+    pub(crate) fn has_github(&self) -> bool {
+        !self.github_credential_id.is_empty() || self.synthetic
+    }
+
+    pub(crate) fn github_state(&self) -> &'static str {
+        match self.github_connection {
+            GithubProfileConnection::NotConfigured => "not-configured",
+            GithubProfileConnection::MetadataUnavailable => "unavailable",
+            GithubProfileConnection::Inactive => "inactive",
+            GithubProfileConnection::Connected => "connected",
+        }
+    }
+}
+
+impl EnvironmentSourceFieldsView {
+    pub(crate) fn has_connected_github(&self) -> bool {
+        self.profiles
+            .iter()
+            .any(|profile| profile.github_connection == GithubProfileConnection::Connected)
+    }
+
+    pub(crate) fn has_github_profile(&self) -> bool {
+        self.profiles
+            .iter()
+            .any(EnvironmentCredentialProfileOption::has_github)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum GithubProfileConnection {
+    #[default]
+    NotConfigured,
+    MetadataUnavailable,
+    Inactive,
+    Connected,
 }
 
 #[derive(Clone, Debug)]
@@ -1111,6 +1155,7 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) draft_return: crate::environment_drafts::DraftReturn,
     pub(crate) draft_restore_allowed: bool,
     pub(crate) draft_restored: bool,
+    pub(crate) options_loading: bool,
     pub(crate) expanded: bool,
     pub(crate) name: String,
     pub(crate) preset_id: String,
@@ -1237,6 +1282,7 @@ impl EnvironmentPortPanelView {
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentsPageView {
     pub(crate) environments: Vec<EnvironmentRow>,
+    pub(crate) environments_loading: bool,
     pub(crate) create_form: EnvironmentCreateFormView,
     pub(crate) source_editor: Option<EnvironmentSourcesEditView>,
     pub(crate) port_panel: Option<EnvironmentPortPanelView>,

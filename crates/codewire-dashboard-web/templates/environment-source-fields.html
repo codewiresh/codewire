@@ -1,6 +1,5 @@
 <section class="cw-create-panel cw-secret-panel" aria-labelledby="{{ source_fields_id }}-secrets-title">
-  <header class="cw-create-panel-heading"><h3 id="{{ source_fields_id }}-secrets-title">Application secrets</h3></header>
-  <p id="{{ source_fields_id }}-secrets-help" class="cw-panel-help">Selected platform sources become environment variables with their original names. Sandbox processes and root can read these values.</p>
+  <header class="cw-create-panel-heading cw-create-panel-heading--help"><h3 id="{{ source_fields_id }}-secrets-title">Application secrets</h3><button class="cw-field-help-trigger" type="button" popovertarget="{{ source_fields_id }}-secrets-help" popovertargetaction="show" aria-label="About application secrets" data-field-help-trigger>i</button><p id="{{ source_fields_id }}-secrets-help" class="cw-field-help-popover" popover="auto" role="tooltip" data-field-help-popover>Selected secrets become environment variables with their original names; Sandbox processes and root can read them. If names overlap, environment configuration wins, followed by personal, project, and organization secrets.</p></header>
   {% if !sources.application_selection_enabled %}<p class="cw-field-help">Application-secret selection is not available in this dashboard yet.</p>{% endif %}
   {% if !sources.application_selection_enabled %}
   {% if sources.organization_selected %}<input type="hidden" name="include_org_secrets" value="platform">{% endif %}
@@ -10,58 +9,55 @@
   {% for project in sources.projects %}{% if project.selected %}<input type="hidden" name="secret_project" value="{{ project.id }}">{% endif %}{% endfor %}
   {% endif %}
   <fieldset class="cw-source-fields" aria-describedby="{{ source_fields_id }}-secrets-help"{% if !sources.application_selection_enabled %} disabled{% endif %}>
-    <legend>Platform sources</legend>
+    <legend class="cw-sr-only">Application secret sources</legend>
     <ul class="cw-source-choices">
-      <li><label class="cw-source-choice"><input type="checkbox" name="include_org_secrets" value="platform"{% if sources.organization_selected %} checked{% endif %}><span>Organization secrets<small>The current platform organization</small></span></label></li>
-      <li><label class="cw-source-choice"><input type="checkbox" name="include_user_secrets" value="platform"{% if sources.personal_selected %} checked{% endif %}><span>Personal secrets<small>Your platform account</small></span></label></li>
+      <li><label class="cw-source-choice"><input type="checkbox" name="include_org_secrets" value="platform"{% if sources.organization_selected %} checked{% endif %}><span>Organization secrets</span></label></li>
+      <li><label class="cw-source-choice"><input type="checkbox" name="include_user_secrets" value="platform"{% if sources.personal_selected %} checked{% endif %}><span>Personal secrets</span></label></li>
     </ul>
     <div class="cw-field">
       <label class="cw-label" for="{{ source_fields_id }}-secret-project">Secret project</label>
-      <select class="cw-select" id="{{ source_fields_id }}-secret-project" name="secret_project" aria-describedby="{{ source_fields_id }}-project-help"{% if !sources.project_selection_error.is_empty() %} aria-invalid="true"{% endif %}{% if !sources.project_error.is_empty() %} disabled{% endif %}>
+      <select class="cw-select" id="{{ source_fields_id }}-secret-project" name="secret_project" aria-describedby="{{ source_fields_id }}-secrets-help{% if !sources.project_selection_error.is_empty() %} {{ source_fields_id }}-project-help{% endif %}"{% if !sources.project_selection_error.is_empty() %} aria-invalid="true"{% endif %}{% if !sources.project_error.is_empty() %} disabled{% endif %}>
         <option value="">No project secrets</option>
         {% for project in sources.projects %}<option value="{{ project.id }}"{% if project.selected %} selected{% endif %}>{{ project.name }}</option>{% endfor %}
       </select>
-      <p id="{{ source_fields_id }}-project-help" class="cw-field-help">{% if !sources.project_selection_error.is_empty() %}{{ sources.project_selection_error }}{% else %}A named collection on the platform, not a deployment stage.{% endif %}</p>
+      {% if !sources.project_selection_error.is_empty() %}<p id="{{ source_fields_id }}-project-help" class="cw-field-error" role="alert">{{ sources.project_selection_error }}</p>{% endif %}
       {% if !sources.project_error.is_empty() %}<p class="cw-field-error" role="alert">{{ sources.project_error }}</p>{% endif %}
       {% if sources.application_selection_enabled && sources.project_error.is_empty() && sources.projects.is_empty() %}<p class="cw-field-help">No secret projects are available in this organization. An organization administrator can create one.</p>{% endif %}
     </div>
   </fieldset>
-  <p class="cw-field-help">When names overlap: organization, then project, then personal. Ordinary environment configuration wins over all three.</p>
   <nav aria-label="Manage application secrets">
     <ul class="cw-source-choices">
-      <li><a href="/settings/secrets/?org={{ organization.slug }}{% if !source_creation_draft_parameter.is_empty() %}&amp;{{ source_creation_draft_parameter }}{% endif %}">Add or manage personal secrets</a></li>
-      <li><a href="/{{ organization.slug }}/secrets/organization/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}">Manage organization secrets</a></li>
-      <li><a href="{{ organization.secrets_url }}{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}">Manage secret projects</a></li>
+      <li><a href="/settings/secrets/?org={{ organization.slug }}{% if !source_creation_draft_parameter.is_empty() %}&amp;{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage personal secrets</a></li>
+      <li><a href="/{{ organization.slug }}/secrets/organization/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage organization secrets</a></li>
+      <li><a href="{{ organization.secrets_url }}{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage secret projects</a></li>
     </ul>
   </nav>
 </section>
 
 <section class="cw-create-panel cw-credential-panel" aria-labelledby="{{ source_fields_id }}-credentials-title">
-  <header class="cw-create-panel-heading"><h3 id="{{ source_fields_id }}-credentials-title">Provider credentials</h3></header>
-  <p id="{{ source_fields_id }}-credentials-help" class="cw-panel-help">A profile selects named provider identities. Private keys and tokens stay outside the Sandbox behind a proxy, signer, or repository executor.</p>
+  <header class="cw-create-panel-heading cw-create-panel-heading--help"><h3 id="{{ source_fields_id }}-credentials-title">Provider credentials</h3><button class="cw-field-help-trigger" type="button" popovertarget="{{ source_fields_id }}-credentials-help" popovertargetaction="show" aria-label="About provider credentials" data-field-help-trigger>i</button><p id="{{ source_fields_id }}-credentials-help" class="cw-field-help-popover" popover="auto" role="tooltip" data-field-help-popover>{% if source_fields_id == "environment-create" %}A profile selects provider identities for this Sandbox. Private keys and tokens stay outside the Sandbox behind a proxy, signer, or repository executor; choosing no profile gives it no provider credentials.{% else %}A profile selects provider identities. Private keys and tokens stay outside the Sandbox behind a proxy, signer, or repository executor. Existing Sandboxes keep their bound profile revision until updated; choosing no profile removes access on the next managed launch.{% endif %}</p></header>
   {% if !sources.credential_selection_enabled %}<p class="cw-field-help">Credential-profile selection is not available in this dashboard yet.</p>{% endif %}
   {% if !sources.credential_selection_enabled || !sources.profile_error.is_empty() %}
   {% for profile in sources.profiles %}{% if profile.selected %}<input type="hidden" name="credential_profile" value="{{ profile.id }}@{{ profile.revision }}">{% endif %}{% endfor %}
   {% endif %}
   <fieldset class="cw-source-fields" aria-describedby="{{ source_fields_id }}-credentials-help"{% if !sources.credential_selection_enabled || !sources.profile_error.is_empty() %} disabled{% endif %}>
-    <legend>Platform credential profile</legend>
+    <legend class="cw-sr-only">Provider credential profile</legend>
     <div class="cw-field">
       <label class="cw-label" for="{{ source_fields_id }}-credential-profile">Credential profile</label>
-      <select class="cw-select" id="{{ source_fields_id }}-credential-profile" name="credential_profile" aria-describedby="{{ source_fields_id }}-profile-help"{% if !sources.profile_selection_error.is_empty() %} aria-invalid="true"{% endif %}>
+      <select class="cw-select" id="{{ source_fields_id }}-credential-profile" name="credential_profile" aria-describedby="{{ source_fields_id }}-credentials-help{% if !sources.profile_selection_error.is_empty() %} {{ source_fields_id }}-profile-help{% endif %}"{% if !sources.profile_selection_error.is_empty() %} aria-invalid="true"{% endif %}>
         <option value="">No provider credentials</option>
         {% for profile in sources.profiles %}<option value="{{ profile.id }}@{{ profile.revision }}"{% if profile.selected %} selected{% endif %}>{{ profile.name }} · revision {{ profile.revision }} · {% if profile.bound_revision %}current bound revision{% else if profile.synthetic %}{% if !sources.credential_selection_enabled || !sources.profile_error.is_empty() %}selection metadata unavailable{% else %}unavailable selection{% endif %}{% else %}{{ profile.identity_count }} identit{% if profile.identity_count == 1 %}y{% else %}ies{% endif %}{% endif %}</option>{% endfor %}
       </select>
-      <p id="{{ source_fields_id }}-profile-help" class="cw-field-help">{% if !sources.profile_selection_error.is_empty() %}{{ sources.profile_selection_error }}{% else %}Choose a specific profile revision for provider access.{% endif %}</p>
+      {% if !sources.profile_selection_error.is_empty() %}<p id="{{ source_fields_id }}-profile-help" class="cw-field-error" role="alert">{{ sources.profile_selection_error }}</p>{% endif %}
       {% if !sources.profile_error.is_empty() %}<p class="cw-field-error" role="alert">{{ sources.profile_error }}</p>{% endif %}
     </div>
   </fieldset>
-  <p class="cw-field-help">Editing a profile does not change an existing Sandbox's bound revision. Selecting no profile removes provider access on the next managed launch.</p>
   {% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}
   <p class="cw-field-help">You have no credential profiles yet. Create a profile in Settings, then select it here.</p>
   {% endif %}
   <nav aria-label="Manage provider credentials">
     <ul class="cw-source-choices">
-      <li><a href="/settings/credentials/?org={{ organization.slug }}{% if !source_creation_draft_parameter.is_empty() %}&amp;{{ source_creation_draft_parameter }}{% endif %}">{% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}Add credentials and create a profile{% else %}Manage personal credentials and profiles{% endif %}</a></li>
+      <li><a href="/settings/credentials/?org={{ organization.slug }}{% if !source_creation_draft_parameter.is_empty() %}&amp;{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>{% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}Add credentials and create a profile{% else %}Manage personal credentials and profiles{% endif %}</a></li>
     </ul>
   </nav>
 </section>

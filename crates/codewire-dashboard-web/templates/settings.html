@@ -56,7 +56,7 @@
                 <dialog class="cw-dialog" data-dialog id="revoke-session-{{ session.id }}" aria-labelledby="revoke-title-{{ session.id }}">
                   <header class="cw-dialog-header"><h2 id="revoke-title-{{ session.id }}">Sign out {% if session.current %}this browser{% else %}session{% endif %}?</h2></header>
                   <div class="cw-dialog-body"><p>Sign out <code>{{ session.id }}</code>{% if session.current %}, the browser you are using now{% endif %}? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div>
-                  <form method="post" action="/settings/_actions/sessions/revoke{{ view.global_context_query }}">
+                  <form method="post" action="/settings/_actions/sessions/revoke{{ view.global_context_query }}"{% if session.current %} data-sign-out-current{% endif %}>
                     <input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="account_id" value="{{ settings.account_id }}"><input type="hidden" name="session_id" value="{{ session.id }}">
                     <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out {% if session.current %}this browser{% else %}session{% endif %}</button></footer>
                   </form>

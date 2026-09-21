@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Create Organization fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css">
+  <script src="../../dashboard.js" defer></script><script src="../../organizations.js" defer></script>
+</head>
+<body class="cw-body" data-route="organization-create" data-dashboard-app>
+<main class="cw-main"><div class="cw-main-inner"><div class="cw-page cw-form-page">
+  <a class="cw-back-link" href="/dashboard/">Back to Dashboard</a>
+  <section class="cw-card" aria-labelledby="create-organization-title">
+    <header class="cw-card-header cw-form-header"><h1 id="create-organization-title" class="cw-page-title">Create Organization</h1></header>
+    <form id="organization-form" class="cw-card-content cw-form" method="post" action="/organizations/_actions/create">
+      <div class="cw-field"><label class="cw-label" for="organization-name">Organization name</label><input class="cw-input" id="organization-name" name="name" type="text" placeholder="Acme Corp" autocomplete="organization" data-slug-source aria-describedby="organization-name-help" required><p class="cw-field-help" id="organization-name-help">A display name for your organization</p></div>
+      <div class="cw-field"><label class="cw-label" for="organization-slug">Slug</label><input class="cw-input cw-input--mono" id="organization-slug" name="slug" type="text" placeholder="acme-corp" pattern="[a-z0-9]+(-[a-z0-9]+)*" minlength="3" maxlength="48" data-slug-target aria-describedby="organization-slug-help" required><p class="cw-field-help" id="organization-slug-help">URL-safe identifier. Used in organization URLs and API calls.</p></div>
+      <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="/dashboard/">Cancel</a><button class="cw-button" type="submit">Create Organization</button></div>
+    </form>
+  </section>
+</div></div></main>
+</body>
+</html>

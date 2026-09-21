@@ -2,6 +2,88 @@ const app = document.querySelector("[data-dashboard-app]");
 
 (() => {
   "use strict";
+  document.addEventListener("submit", (event) => {
+    if (!(event.target instanceof HTMLFormElement) || !event.target.matches("form#sign-out, form[data-sign-out-current]")) return;
+    try {
+      const storage = window.sessionStorage;
+      const keys = [];
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (key?.startsWith("codewire.create-selections.v1:")) keys.push(key);
+      }
+      keys.forEach((key) => storage.removeItem(key));
+      storage.removeItem("codewire.create-draft-actor.v1");
+    } catch { /* Signing out must remain possible when storage is denied. */ }
+  }, true);
+  const fieldHelp = (trigger) => {
+    if (!(trigger instanceof HTMLButtonElement)) return null;
+    const target = document.getElementById(trigger.getAttribute("popovertarget") || "");
+    return target instanceof HTMLElement && target.matches("[data-field-help-popover]") ? target : null;
+  };
+  const positionFieldHelp = (trigger, help) => {
+    const bounds = trigger.getBoundingClientRect();
+    const width = Math.min(288, window.innerWidth - 16);
+    help.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - width - 8))}px`;
+    help.style.top = `${bounds.bottom + 8}px`;
+    if (help.matches(":popover-open")) {
+      const height = help.getBoundingClientRect().height;
+      if (bounds.bottom + 8 + height > window.innerHeight - 8) {
+        help.style.top = `${Math.max(8, bounds.top - height - 8)}px`;
+      }
+    }
+  };
+  const showFieldHelp = (trigger) => {
+    const help = fieldHelp(trigger);
+    if (!help || typeof help.showPopover !== "function") return;
+    help.dataset.fieldHelpTrigger = trigger.id;
+    positionFieldHelp(trigger, help);
+    if (!help.matches(":popover-open")) help.showPopover();
+    positionFieldHelp(trigger, help);
+  };
+  let fieldHelpHideTimer;
+  const hideFieldHelpAfterPointerExit = (help) => {
+    window.clearTimeout(fieldHelpHideTimer);
+    fieldHelpHideTimer = window.setTimeout(() => {
+      const trigger = document.getElementById(help.dataset.fieldHelpTrigger || "");
+      if (help.matches(":popover-open") && !help.matches(":hover") &&
+          !trigger?.matches(":hover") && !trigger?.matches(":focus-visible")) help.hidePopover();
+    }, 120);
+  };
+  document.addEventListener("pointerover", (event) => {
+    if (event.pointerType !== "mouse" || !(event.target instanceof Element)) return;
+    const trigger = event.target.closest("[data-field-help-trigger]");
+    if (trigger && !(event.relatedTarget instanceof Node && trigger.contains(event.relatedTarget))) showFieldHelp(trigger);
+  });
+  document.addEventListener("pointerout", (event) => {
+    if (event.pointerType !== "mouse" || !(event.target instanceof Element)) return;
+    const target = event.target.closest("[data-field-help-trigger], [data-field-help-popover]");
+    const help = target?.matches("[data-field-help-trigger]") ? fieldHelp(target) : target;
+    if (help && !(event.relatedTarget instanceof Node && target.contains(event.relatedTarget))) hideFieldHelpAfterPointerExit(help);
+  });
+  document.addEventListener("focusin", (event) => {
+    const trigger = event.target instanceof Element && event.target.closest("[data-field-help-trigger]");
+    if (trigger?.matches(":focus-visible")) showFieldHelp(trigger);
+  });
+  document.addEventListener("focusout", (event) => {
+    const trigger = event.target instanceof Element && event.target.closest("[data-field-help-trigger]");
+    const help = fieldHelp(trigger);
+    if (help) hideFieldHelpAfterPointerExit(help);
+  });
+  document.addEventListener("click", (event) => {
+    const trigger = event.target instanceof Element && event.target.closest("[data-field-help-trigger]");
+    const help = fieldHelp(trigger);
+    if (!help) return;
+    help.dataset.fieldHelpTrigger = trigger.id;
+    positionFieldHelp(trigger, help);
+    window.requestAnimationFrame(() => { if (help.matches(":popover-open")) positionFieldHelp(trigger, help); });
+  });
+  document.addEventListener("scroll", () => {
+    const help = document.querySelector("[data-field-help-popover]:popover-open");
+    if (!help) return;
+    const trigger = document.getElementById(help.dataset.fieldHelpTrigger || "");
+    if (trigger?.getClientRects().length) positionFieldHelp(trigger, help);
+    else help.hidePopover();
+  }, true);
   // Native dialogs own focus trapping and Escape. Keep only presentation state
   // here: no form values, credentials, terminal output or capabilities.
   const dialogOpeners = new WeakMap();
@@ -35,9 +117,9 @@ const app = document.querySelector("[data-dashboard-app]");
     if (["checkbox", "radio"].includes(control.type)) return control.checked !== control.defaultChecked;
     return control.value !== control.defaultValue;
   });
-  const discardEdits = (dialog) => {
+  const discardEdits = (dialog, preserveDraft = false) => {
     // Invalidate asynchronous Restore/autosave before making the DOM pristine.
-    dialog.dispatchEvent(new Event("codewire:discard-edits", { bubbles: true }));
+    dialog.dispatchEvent(new CustomEvent("codewire:discard-edits", { bubbles: true, detail: { preserveDraft } }));
     const affectedDialogs = Array.from(dialog.querySelectorAll("dialog[data-dialog]"));
     if (dialog instanceof HTMLDialogElement) affectedDialogs.push(dialog);
     affectedDialogs.forEach((owner) => dialogVersions.set(owner, (dialogVersions.get(owner) || 0) + 1));
@@ -76,7 +158,7 @@ const app = document.querySelector("[data-dashboard-app]");
     || records.some((record) => owner.contains(record.target)
       && [...record.addedNodes, ...record.removedNodes].some((node) => node instanceof Element
         && (node.matches(draftNodes) || node.querySelector(draftNodes))));
-  const guardClose = (owner, perform) => {
+  const guardClose = (owner, perform, preserveDraft = false, incompleteDraft = false) => {
     if (!isDirty(owner)) { perform(); return; }
     if (pendingDiscard) return;
     if (!discardPrompt) {
@@ -129,7 +211,7 @@ const app = document.querySelector("[data-dashboard-app]");
         pending.observer.disconnect();
         discardPrompt.close();
         if (pending?.owner.isConnected && (pending.owner.open || pending.owner.matches("[data-drawer]:not([hidden])"))) {
-          discardEdits(pending.owner);
+          discardEdits(pending.owner, pending.preserveDraft);
           pending.perform();
         }
       });
@@ -137,16 +219,28 @@ const app = document.querySelector("[data-dashboard-app]");
       discardPrompt.append(header, description, actions);
       document.body.append(discardPrompt);
     }
+    const title = discardPrompt.querySelector(".cw-dialog-header h2");
+    const description = discardPrompt.querySelector(".cw-dialog-body");
+    const confirm = discardPrompt.querySelector(".cw-danger-button");
+    const heading = preserveDraft ? "Leave Create Sandbox?" : "Discard changes?";
+    discardPrompt.setAttribute("aria-label", heading);
+    if (title) title.textContent = heading;
+    if (description) description.textContent = preserveDraft
+      ? (incompleteDraft
+        ? "Your draft is saved in this tab, except a repository URL that may contain credentials. You will need to re-enter that URL when you return."
+        : "Your draft is saved in this tab. Return here to restore it after managing settings.")
+      : "Your changes will be discarded. Keep editing to return to the form.";
+    if (confirm) confirm.textContent = preserveDraft ? (incompleteDraft ? "Leave without repository URL" : "Save draft and leave") : "Discard changes";
     const observer = new MutationObserver((records) => {
       if (pendingDiscard?.owner === owner && replacesDraft(owner, records)) cancelDiscard();
     });
-    pendingDiscard = { owner, perform, focus: document.activeElement, observer };
+    pendingDiscard = { owner, perform, preserveDraft, focus: document.activeElement, observer };
     observer.observe(document.body, { childList: true, subtree: true });
     discardPrompt.showModal();
   };
   const closeDialog = (dialog) => guardClose(dialog, () => { clearPrivate(dialog); dialog.close(); });
   const navigationEligible = (owner) => owner?.isConnected
-    && !owner.querySelector('[aria-busy="true"]')
+    && owner.getAttribute("aria-busy") !== "true"
     && !Array.from(owner.querySelectorAll("form[data-dirty-guard]")).some((form) => submittedForms.has(form));
   const navigationOwner = () => {
     const owners = document.querySelectorAll("dialog[data-dialog][open], [data-drawer]:not([hidden])");
@@ -164,7 +258,11 @@ const app = document.querySelector("[data-dashboard-app]");
     const owner = event.detail?.owner || navigationOwner();
     if (navigationEligible(owner) && isDirty(owner)) {
       event.preventDefault();
-      guardClose(owner, event.detail.perform);
+      const save = { saved: false };
+      if (event.detail?.preserveCreateDraft && owner.querySelector("[data-environment-form]"))
+        owner.dispatchEvent(new CustomEvent("codewire:save-create-draft", { bubbles: true, detail: save }));
+      if (event.detail?.preserveCreateDraft && !save.saved) return;
+      guardClose(owner, event.detail.perform, save.saved, save.incomplete);
     }
   });
   document.addEventListener("submit", (event) => {
@@ -197,7 +295,7 @@ const app = document.querySelector("[data-dashboard-app]");
     if (!["http:", "https:"].includes(target.protocol)
       || (target.hash && target.origin === location.origin && target.pathname === location.pathname && target.search === location.search)) return;
     if (!document.dispatchEvent(new CustomEvent("codewire:guard-navigation", {
-      cancelable: true, detail: { perform: () => location.assign(target.href) },
+      cancelable: true, detail: { perform: () => location.assign(target.href), preserveCreateDraft: link.hasAttribute("data-create-draft-setup") },
     }))) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -533,6 +631,7 @@ if (app) {
     // Native modal dialogs own Escape, focus and keyboard interaction above a
     // drawer. Do not close the underlying Create Sandbox draft as well.
     if (document.querySelector("dialog:modal")) return;
+    if (event.key === "Escape" && document.querySelector("[data-field-help-popover]:popover-open")) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     const isEditing = target?.matches("input, textarea, select, [contenteditable='true']");
     if (event.key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey && !isEditing) {
@@ -608,7 +707,7 @@ if (app) {
   });
   document.addEventListener("codewire:drawer-replaced", () => setDrawerOpen(true));
   document.addEventListener("htmx:afterSwap", () => {
-    if (!historyRollback && allowedTraversal === null && !document.querySelector('dialog[aria-label="Discard changes?"][open]')) setDrawerOpen(drawerPathMatches(currentDrawer()), false);
+    if (!historyRollback && allowedTraversal === null && !document.querySelector('dialog.cw-discard-dialog[open]')) setDrawerOpen(drawerPathMatches(currentDrawer()), false);
   });
   document.addEventListener("keydown", (event) => {
     if (document.querySelector("dialog:modal")) return;

@@ -1,20 +1,24 @@
 //! Read-only platform source options. Hosted pages never probe local stores.
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use axum::http::HeaderValue;
 use codewire_proto::codewire::v1::{
-    AccessProfile, AccessProfileServiceClient, ListAccessProfilesRequest,
-    ListSecretProjectsRequest, SecretServiceClient,
+    AccessProfile, AccessProfileServiceClient, Credential, CredentialStatus,
+    ListAccessProfilesRequest, ListSecretProjectsRequest, SecretServiceClient,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
 use crate::{
+    credentials_connect,
     state::AppState,
     transport::BrowserTransport,
     view::{
         EnvironmentCredentialProfileOption, EnvironmentSecretProjectOption,
-        EnvironmentSourceFieldsView,
+        EnvironmentSourceFieldsView, GithubProfileConnection,
     },
 };
 
@@ -41,7 +45,7 @@ pub(crate) async fn options(
 ) -> EnvironmentSourceFieldsView {
     let (projects, profiles) = tokio::join!(
         tokio::time::timeout(LOAD_TIMEOUT, projects(state, cookie.clone(), org_id)),
-        tokio::time::timeout(LOAD_TIMEOUT, profiles(state, cookie)),
+        tokio::time::timeout(LOAD_TIMEOUT, profiles(state, cookie.clone())),
     );
     let mut options = EnvironmentSourceFieldsView {
         application_selection_enabled: true,
@@ -63,7 +67,72 @@ pub(crate) async fn options(
                     .to_owned()
         }
     }
+    if options
+        .profiles
+        .iter()
+        .any(|profile| !profile.github_credential_id.is_empty())
+    {
+        let credentials = tokio::time::timeout(
+            LOAD_TIMEOUT,
+            credentials_connect::list_credentials(state, cookie),
+        )
+        .await;
+        let metadata_available = match credentials {
+            Ok(Ok(credentials)) => {
+                enrich_github_profiles(&mut options.profiles, credentials).is_ok()
+            }
+            _ => false,
+        };
+        if !metadata_available {
+            options
+                .profiles
+                .iter_mut()
+                .filter(|profile| !profile.github_credential_id.is_empty())
+                .for_each(|profile| {
+                    profile.github_connection = GithubProfileConnection::MetadataUnavailable
+                });
+        }
+    }
     options
+}
+
+fn enrich_github_profiles(
+    profiles: &mut [EnvironmentCredentialProfileOption],
+    credentials: Vec<Credential>,
+) -> Result<(), ConnectError> {
+    let mut by_id = BTreeMap::new();
+    for credential in credentials {
+        credentials_connect::validate_credential_metadata(&credential)?;
+        if by_id.insert(credential.id.clone(), credential).is_some() {
+            return Err(invalid_options());
+        }
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| invalid_options())?
+        .as_secs();
+    for profile in profiles {
+        if profile.github_credential_id.is_empty() {
+            continue;
+        }
+        let Some(credential) = by_id.get(&profile.github_credential_id) else {
+            profile.github_connection = GithubProfileConnection::MetadataUnavailable;
+            continue;
+        };
+        if credentials_connect::credential_slot(credential)? != "github" {
+            profile.github_connection = GithubProfileConnection::MetadataUnavailable;
+            continue;
+        }
+        profile.github_connection = if credential.status == CredentialStatus::Active
+            && credential.expires_at_unix.is_none_or(|expiry| expiry > now)
+        {
+            profile.github_account = credential.account_hint.clone().unwrap_or_default();
+            GithubProfileConnection::Connected
+        } else {
+            GithubProfileConnection::Inactive
+        };
+    }
+    Ok(())
 }
 
 async fn projects(
@@ -163,6 +232,24 @@ fn profile_option(
     {
         return Err(invalid_options());
     }
+    let mut slots = BTreeSet::new();
+    let mut github_credential_id = String::new();
+    if profile.entries.len() > 5 {
+        return Err(invalid_options());
+    }
+    for entry in &profile.entries {
+        if !matches!(
+            entry.capability_slot.as_str(),
+            "codex" | "openai" | "github" | "anthropic" | "ssh"
+        ) || !slots.insert(entry.capability_slot.as_str())
+            || crate::environment_source_forms::exact_id(&entry.credential_id).is_err()
+        {
+            return Err(invalid_options());
+        }
+        if entry.capability_slot == "github" {
+            github_credential_id = entry.credential_id.clone();
+        }
+    }
     Ok(EnvironmentCredentialProfileOption {
         id: profile.id,
         name: profile.name,
@@ -176,6 +263,13 @@ fn profile_option(
         bound_revision: false,
         synthetic: false,
         selected: false,
+        github_connection: if github_credential_id.is_empty() {
+            GithubProfileConnection::NotConfigured
+        } else {
+            GithubProfileConnection::MetadataUnavailable
+        },
+        github_credential_id,
+        github_account: String::new(),
     })
 }
 
@@ -294,6 +388,9 @@ impl EnvironmentSourceFieldsView {
                 bound_revision: already_bound,
                 synthetic: true,
                 selected: true,
+                github_credential_id: String::new(),
+                github_account: String::new(),
+                github_connection: GithubProfileConnection::MetadataUnavailable,
             });
         }
         // Consent is not inferred from the stored selection.
@@ -372,6 +469,101 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn github_profile_identity_uses_only_its_exact_current_account_metadata() {
+        use codewire_proto::codewire::v1::{AccessProfileEntry, CredentialAuthenticationKind};
+
+        let github_id = "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76";
+        let other_id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let profile = AccessProfile {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            name: "work".into(),
+            revision: 7,
+            entries: vec![
+                AccessProfileEntry {
+                    capability_slot: "codex".into(),
+                    credential_id: other_id.into(),
+                    ..Default::default()
+                },
+                AccessProfileEntry {
+                    capability_slot: "github".into(),
+                    credential_id: github_id.into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let option = profile_option(profile.clone()).expect("profile");
+        assert_eq!(option.github_credential_id, github_id);
+        assert_eq!(
+            option.github_connection,
+            GithubProfileConnection::MetadataUnavailable
+        );
+        let github = Credential {
+            id: github_id.into(),
+            name: "verified-user".into(),
+            provider: "github".into(),
+            authentication_kind: CredentialAuthenticationKind::Oauth.into(),
+            account_hint: Some("verified-user".into()),
+            status: CredentialStatus::Active.into(),
+            revocation_generation: 1,
+            ..Default::default()
+        };
+        let codex = Credential {
+            id: other_id.into(),
+            name: "not-the-github-account".into(),
+            provider: "openai".into(),
+            authentication_kind: CredentialAuthenticationKind::Oauth.into(),
+            status: CredentialStatus::Active.into(),
+            revocation_generation: 1,
+            ..Default::default()
+        };
+        let mut options = vec![option.clone()];
+        enrich_github_profiles(&mut options, vec![codex.clone(), github.clone()])
+            .expect("metadata");
+        assert_eq!(
+            options[0].github_connection,
+            GithubProfileConnection::Connected
+        );
+        assert_eq!(options[0].github_account, "verified-user");
+
+        let mut absent = vec![option.clone()];
+        enrich_github_profiles(&mut absent, vec![codex])
+            .expect("missing metadata is not a connection");
+        assert_eq!(
+            absent[0].github_connection,
+            GithubProfileConnection::MetadataUnavailable
+        );
+        assert!(absent[0].github_account.is_empty());
+
+        let mut revoked = github.clone();
+        revoked.status = CredentialStatus::Revoked.into();
+        let mut inactive = vec![option.clone()];
+        enrich_github_profiles(&mut inactive, vec![revoked]).expect("revoked metadata");
+        assert_eq!(
+            inactive[0].github_connection,
+            GithubProfileConnection::Inactive
+        );
+        assert!(inactive[0].github_account.is_empty());
+
+        let mut wrong_provider = github;
+        wrong_provider.provider = "openai".into();
+        let mut mismatched = vec![option];
+        enrich_github_profiles(&mut mismatched, vec![wrong_provider]).expect("mismatched slot");
+        assert_eq!(
+            mismatched[0].github_connection,
+            GithubProfileConnection::MetadataUnavailable
+        );
+
+        let mut duplicated_slot = profile;
+        duplicated_slot.entries.push(AccessProfileEntry {
+            capability_slot: "github".into(),
+            credential_id: other_id.into(),
+            ..Default::default()
+        });
+        assert!(profile_option(duplicated_slot).is_err());
     }
 
     #[test]
@@ -610,6 +802,9 @@ mod tests {
                 bound_revision: false,
                 synthetic: false,
                 selected: true,
+                github_credential_id: String::new(),
+                github_account: String::new(),
+                github_connection: GithubProfileConnection::NotConfigured,
             }],
             application_selection_enabled: true,
             credential_selection_enabled: true,
@@ -673,7 +868,7 @@ mod tests {
         }
         .render()
         .expect("unavailable fields");
-        assert!(body.contains("aria-describedby=\"edit-project-help\" disabled>"));
+        assert!(body.contains("aria-describedby=\"edit-secrets-help\" disabled>"));
         assert!(body.contains("aria-describedby=\"edit-credentials-help\" disabled>"));
         assert!(body.contains("role=\"alert\">Project names could not be loaded."));
         assert!(!body.contains("No secret projects are available"));

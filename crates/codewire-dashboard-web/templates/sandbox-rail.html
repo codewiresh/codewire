@@ -1,4 +1,6 @@
-{% if !view.sandbox_rail_available %}
+{% if view.sandbox_rail_loading %}
+<p class="cw-rail-status" role="status">Loading Sandboxes…</p>
+{% else if !view.sandbox_rail_available %}
 <p class="cw-rail-status" role="status">Sandbox status is temporarily unavailable.</p>
 {% else if view.sandboxes.is_empty() %}
 <p class="cw-rail-status">No Sandboxes yet.</p>

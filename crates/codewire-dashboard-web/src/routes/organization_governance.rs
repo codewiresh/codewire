@@ -559,6 +559,25 @@ pub(super) async fn get_context(
     slug: &str,
     continuation: &str,
 ) -> Result<(DashboardView, OrganizationContext, HeaderValue), Response> {
+    let (mut dashboard, organization, cookie) =
+        get_context_without_rail(state, headers, slug, continuation).await?;
+    let rail =
+        crate::environment_connect::environments(state, cookie.clone(), &organization.id, false)
+            .await;
+    let rail_available = rail.is_ok();
+    dashboard.select_organization(&organization, rail.unwrap_or_default(), rail_available);
+    dashboard.sandbox_rail_loading = false;
+    Ok((dashboard, organization, cookie))
+}
+
+/// Resolve current identity and organization without waiting for Sandbox
+/// inventory. Create and inventory fragments load the rail independently.
+pub(super) async fn get_context_without_rail(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    continuation: &str,
+) -> Result<(DashboardView, OrganizationContext, HeaderValue), Response> {
     let mut dashboard = dashboard_shell_view(state, headers)
         .await
         .map_err(|error| route_error(error, continuation, headers))?;
@@ -569,11 +588,8 @@ pub(super) async fn get_context(
         .ok_or_else(|| error_page(WebError::NotFound))?;
     let organization = OrganizationContext::from_row(row);
     let cookie = canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))?;
-    let rail =
-        crate::environment_connect::environments(state, cookie.clone(), &organization.id, false)
-            .await;
-    let rail_available = rail.is_ok();
-    dashboard.select_organization(&organization, rail.unwrap_or_default(), rail_available);
+    dashboard.select_organization(&organization, Vec::new(), false);
+    dashboard.sandbox_rail_loading = true;
     Ok((dashboard, organization, cookie))
 }
 
@@ -588,6 +604,20 @@ pub(super) async fn action_context(
         return Err(error_page(WebError::CsrfRejected));
     }
     get_context(state, headers, slug, &continuation).await
+}
+
+/// Authority for a Create mutation without the unrelated Sandbox inventory.
+pub(super) async fn action_context_without_rail(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    csrf: &str,
+    continuation: String,
+) -> Result<(DashboardView, OrganizationContext, HeaderValue), Response> {
+    if !request_has_same_origin(headers, &state.public_origin) || !valid_csrf_token(headers, csrf) {
+        return Err(error_page(WebError::CsrfRejected));
+    }
+    get_context_without_rail(state, headers, slug, &continuation).await
 }
 
 async fn render_members_form_error(

@@ -25,9 +25,8 @@ async function fits(page: Page, owner?: Locator): Promise<void> {
 
 async function credentials(page: Page, slug: string): Promise<void> {
   await visit(page, `/settings/credentials/?org=${slug}`);
-  for (const title of ["Credentials", "Profiles"]) {
-    await expect(page.getByRole("heading", { name: title, exact: true, level: 2 })).toBeVisible();
-  }
+  await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Profiles", exact: true, level: 2 })).toBeVisible();
   const add = button(page, "Add credential");
   await add.click();
   const chooser = dialog(page, "Add credential");
@@ -72,7 +71,7 @@ async function settings(page: Page, slug: string): Promise<void> {
       await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
     }
     await fits(page);
-    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API Keys"]]) {
+    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API keys"]]) {
       await visit(page, `/settings/${path}/${query}`);
       await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
       await fits(page);
@@ -85,17 +84,19 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
   const form = page.locator("[data-environment-form]");
   await expect(form).toHaveAttribute("data-create-draft-actor", userId);
   await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+  await expect(form).toHaveAttribute("data-create-options-loading", "false", { timeout: 30_000 });
   await expect(form.locator('[name="confirm_personal_credentials"], [name="confirm_personal_secrets"]')).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "Add or manage personal secrets", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Manage personal secrets", exact: true })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link")).toBeVisible();
-  await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toBeVisible();
+  const github = page.locator("[data-github-browser]");
+  await expect(github.getByRole("heading", { name: "From GitHub", exact: true })).toBeVisible();
+  await expect(github.getByLabel("GitHub account", { exact: true })).toBeVisible();
+  await expect(github.getByRole("searchbox", { name: "Find a repository" })).toBeVisible();
+  await expect(github.locator("[data-github-setup-link]")).toHaveText(/^(Connect|Check|Manage) GitHub connection$/);
   await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
   await expect(page.locator(".cw-preview-pattern")).toContainText("https://{label}-{sandbox-id-prefix}-");
-  await button(page, "Choose from GitHub").click();
-  const picker = dialog(page, "Choose a GitHub repository");
-  await expect(picker).toBeVisible();
-  await expect(picker.getByRole("link", { name: "Connect GitHub or create a profile in Settings" })).toBeVisible();
-  await button(picker, "Close GitHub repositories").click();
+  await expect(dialog(page, "Choose a GitHub repository")).toHaveCount(0);
+  await fits(page, github);
   await fits(page, page.locator("#environment-create-card"));
   // Read-only setup detours: do not create credentials or application secrets.
   for (const destination of ["secrets", "credentials"]) {
@@ -103,12 +104,13 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
       await page.locator("[data-create-resources] > summary").click();
     }
     await page.getByLabel("CPU", { exact: true }).selectOption("2000");
-    await page.getByLabel("Delete after (TTL)", { exact: true }).fill("8h");
-    await expect(page.locator("[data-create-draft-status]")).toContainText("Selections saved");
+    await page.getByLabel("Delete after", { exact: true }).fill("8h");
+    await page.getByLabel("Name", { exact: true }).fill(`dev-ux-draft-${destination}`);
+    await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
     const draft = await form.getAttribute("data-create-draft-id");
     expect(draft).toMatch(/^[0-9a-f-]{36}$/);
     const setup = destination === "secrets"
-      ? page.getByRole("link", { name: "Add or manage personal secrets", exact: true })
+      ? page.getByRole("link", { name: "Manage personal secrets", exact: true })
       : page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link");
     await setup.click();
     await expect(page).toHaveURL(`${ORIGIN}/settings/${destination}/?org=${slug}&creation_draft=${draft}`);
@@ -119,11 +121,11 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
     await expect(form).toHaveAttribute("data-create-draft-actor", userId);
     await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
     await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-    await button(page, "Restore saved selections").click();
+    await button(page, "Restore saved draft").click();
     await expect(form).toHaveAttribute("data-create-draft-restored", "true");
     await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
     await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
-    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue(`dev-ux-draft-${destination}`);
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
     await fits(page, page.locator("#environment-create-card"));
   }
@@ -153,7 +155,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await page.getByLabel("CPU", { exact: true }).selectOption("1000");
     await page.getByLabel("Memory", { exact: true }).selectOption("2048");
     await page.getByLabel("Disk", { exact: true }).selectOption("10");
-    await page.getByLabel("Delete after (TTL)", { exact: true }).fill("1h");
+    await page.getByLabel("Delete after", { exact: true }).fill("1h");
     // Use the product's configured default image. Never inherit a saved source
     // selection or attach the dedicated account's existing secrets/providers.
     await page.locator("[data-reset-workspace-image]").click();

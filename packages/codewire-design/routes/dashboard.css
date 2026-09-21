@@ -57,6 +57,8 @@
 [data-dashboard-app] .cw-main-inner { padding: 0 1.25rem; }
 [data-dashboard-app] .cw-page { max-width: 80rem; padding-block: 1.375rem 2rem; animation: none; }
 [data-dashboard-app] .cw-page--wide { max-width: none; }
+[data-dashboard-app] .cw-form-page { width: 100%; max-width: 32rem; }
+[data-dashboard-app] .cw-form-page .cw-page-title { font: 650 clamp(1.5rem, 2vw, 1.875rem)/1.2 var(--font-sans); letter-spacing: normal; text-transform: none; }
 [data-dashboard-app] .cw-page-header { margin-bottom: 1.125rem; }
 [data-dashboard-app] .cw-page-title { font: 500 12px/16px var(--font-mono); letter-spacing: .13em; text-transform: uppercase; }
 [data-dashboard-app] .cw-page-description { margin-top: 6px; color: #737373; font-size: 12.5px; line-height: 18px; }
