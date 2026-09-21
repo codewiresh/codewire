@@ -65,17 +65,21 @@ async function credentials(page: Page, slug: string): Promise<void> {
   await button(profile, "Cancel").click();
 }
 
-async function settings(page: Page, slug: string): Promise<void> {
-  for (const query of [`?org=${slug}`, ""]) {
-    await visit(page, `/settings/${query}`);
-    for (const title of ["Account details", "Security", "Active sessions"]) {
-      await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
-    }
-    await fits(page);
-    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API keys"]]) {
-      await visit(page, `/settings/${path}/${query}`);
-      await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
+async function settings(page: Page, slug: string, width: number): Promise<void> {
+  for (const [scope, query] of [["organization", `?org=${slug}`], ["personal", ""]] as const) {
+    await stage(`settings-account-${scope}-${width}`, async () => {
+      await visit(page, `/settings/${query}`);
+      for (const title of ["Account details", "Security", "Active sessions"]) {
+        await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+      }
       await fits(page);
+    });
+    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API keys"]]) {
+      await stage(`settings-${path}-${scope}-${width}`, async () => {
+        await visit(page, `/settings/${path}/${query}`);
+        await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
+        await fits(page);
+      });
     }
   }
 }
@@ -143,7 +147,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     await stage(`credentials-${width}`, () => credentials(page, slug));
-    await stage(`settings-${width}`, () => settings(page, slug));
+    await settings(page, slug, width);
     if (width === 1440) {
       await stage("settings-to-create-1440", async () => {
         await page.getByRole("link", { name: "Create Sandbox", exact: true }).first().click();
