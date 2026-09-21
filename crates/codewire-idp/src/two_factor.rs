@@ -61,11 +61,6 @@ pub(crate) struct VerifyResponse {
     enabled: bool,
 }
 
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct DisableResponse {
-    disabled: bool,
-}
-
 #[derive(sqlx::FromRow)]
 struct TwoFactorUser {
     id: String,
@@ -311,54 +306,13 @@ async fn verify(
     Ok(Json(VerifyResponse { enabled: true }))
 }
 
-async fn disable(
-    State(state): State<TwoFactorState>,
-    auth: AuthUser,
-    headers: HeaderMap,
-) -> Result<Json<DisableResponse>, AppError> {
-    let mut tx = state.pool.begin().await?;
-    let user: TwoFactorUser = sqlx::query_as(
-        r#"
-        SELECT id, email, two_factor_enabled
-        FROM users WHERE id = $1 AND enabled
-        FOR UPDATE
-        "#,
-    )
-    .bind(&auth.user_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(AppError::Unauthorized)?;
-    sqlx::query("DELETE FROM two_factor WHERE user_id = $1")
-        .bind(&user.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to disable 2FA");
-            AppError::InternalMsg("Failed to disable 2FA".into())
-        })?;
-    sqlx::query("UPDATE users SET two_factor_enabled = false, updated_at = NOW() WHERE id = $1")
-        .bind(&user.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to update 2FA user");
-            AppError::InternalMsg("Failed to update user".into())
-        })?;
-    tx.commit().await?;
-
-    let (ip, ua) = request_info(&headers);
-    crate::auth_session::log_audit(
-        &state.pool,
-        "user.2fa.disabled",
-        &user.id,
-        &ip,
-        &ua,
-        json!(null),
-        "warn",
-    )
-    .await;
-
-    Ok(Json(DisableResponse { disabled: true }))
+async fn disable(_auth: AuthUser) -> Result<StatusCode, AppError> {
+    // A browser session alone cannot turn off an enrolled factor. Keep the
+    // existing public path fail-closed while replacement uses fresh proof and
+    // leaves the current factor active until the new one is verified.
+    Err(AppError::Precondition(
+        "Direct two-factor disable is unavailable; replace the authenticator instead".into(),
+    ))
 }
 
 async fn complete_login(

@@ -3714,8 +3714,8 @@ async fn two_factor_flow_against_postgres() {
     assert_eq!(st, 401, "re-enabling revived a 2FA challenge");
     assert!(cookie.is_none(), "revived 2FA challenge minted a session");
 
-    // A fresh post-reenable session may make a deliberate 2FA configuration
-    // change, while the original challenge/session remain unusable.
+    // Even a fresh post-reenable session cannot remove the factor; the
+    // original challenge/session also remain unusable.
     let renewed_session = "sess_2fa_e2e_after_reenable";
     sqlx::query(
         "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
@@ -3727,7 +3727,7 @@ async fn two_factor_flow_against_postgres() {
     .await
     .unwrap();
 
-    // 6. disable → row removed and users.two_factor_enabled false.
+    // 6. A session alone must not disable the enrolled factor.
     let (st, body, _) = sess_req(
         &app,
         "POST",
@@ -3736,20 +3736,19 @@ async fn two_factor_flow_against_postgres() {
         "",
     )
     .await;
-    assert_eq!(st, 200, "disable: {body}");
-    assert_eq!(body["disabled"], true);
+    assert_eq!(st, 400, "session-only disable: {body}");
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM two_factor WHERE user_id=$1")
         .bind(user)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(rows, 0);
+    assert_eq!(rows, 1);
     let enabled: bool = sqlx::query_scalar("SELECT two_factor_enabled FROM users WHERE id=$1")
         .bind(user)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(!enabled);
+    assert!(enabled);
 
     cleanup(pool.clone()).await;
 }
