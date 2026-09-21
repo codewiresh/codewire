@@ -8,8 +8,9 @@ const button = (owner: Page | Locator, name: string) => owner.getByRole("button"
 const dialog = (page: Page, name: string) => page.getByRole("dialog", { name, exact: true });
 
 async function stage(name: string, operation: () => Promise<void>): Promise<void> {
+  const started = Date.now();
   try { await operation(); } catch { throw new DevUxError(name); }
-  console.error(`[dev-ux] ${name}:passed`);
+  console.error(`[dev-ux] ${name}:passed duration_ms=${Date.now() - started}`);
 }
 
 async function visit(page: Page, path: string): Promise<void> {
@@ -79,11 +80,13 @@ async function settings(page: Page, slug: string): Promise<void> {
   }
 }
 
-async function createForm(page: Page, slug: string, userId: string, orgId: string): Promise<void> {
+async function createForm(page: Page, slug: string, userId: string, orgId: string, width: number): Promise<void> {
+  const navigationStarted = Date.now();
   await visit(page, `/${slug}/new/`);
   const form = page.locator("[data-environment-form]");
   await expect(form).toHaveAttribute("data-create-draft-actor", userId);
   await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+  console.error(`[dev-ux] create-editable-${width}:passed duration_ms=${Date.now() - navigationStarted}`);
   await expect(form).toHaveAttribute("data-create-options-loading", "false", { timeout: 30_000 });
   await expect(form.locator('[name="confirm_personal_credentials"], [name="confirm_personal_secrets"]')).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Manage personal secrets", exact: true })).toBeVisible();
@@ -141,7 +144,15 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await page.setViewportSize({ width, height: 900 });
     await stage(`credentials-${width}`, () => credentials(page, slug));
     await stage(`settings-${width}`, () => settings(page, slug));
-    await stage(`create-form-${width}`, () => createForm(page, slug, userId, orgId));
+    if (width === 1440) {
+      await stage("settings-to-create-1440", async () => {
+        await page.getByRole("link", { name: "Create Sandbox", exact: true }).first().click();
+        const form = page.locator("[data-environment-form]");
+        await expect(form).toHaveAttribute("data-create-draft-actor", userId);
+        await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+      });
+    }
+    await stage(`create-form-${width}`, () => createForm(page, slug, userId, orgId, width));
   }
   await page.setViewportSize({ width: 1440, height: 900 });
   let previewPattern = "";
