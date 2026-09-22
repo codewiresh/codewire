@@ -7,7 +7,7 @@ use codewire_platform_credentials::{
     CredentialRegistration, PreparedCredentialCreation, PreparedCredentialReplacement,
 };
 use codewire_protected_store::ProtectedValue;
-use sqlx::{Acquire, Postgres, Transaction};
+use sqlx::{Acquire, PgConnection, Postgres, Transaction};
 use tokio::time::Instant;
 
 use super::enrollment::{Completed, Outcome};
@@ -255,54 +255,56 @@ async fn publish(
             };
         }
     };
-    let mut commit_issued = false;
-    let result = tokio::time::timeout_at(deadline, async {
-        // Borrow from our connection, not pool.begin(): the driver retains the
-        // exact connection after a cancelled query/COMMIT future is dropped.
-        let mut tx = connection.begin().await.map_err(|_| Error::Unavailable)?;
-        let applied = async {
-            scope.check()?;
-            scope
-                .authority
-                .lock_for_publication(&mut tx)
-                .await
-                .map_err(authority_error)?;
-            apply(shared, scope, &mut tx, mutation).await
-        }
+    let metadata;
+    let transaction = {
+        let prepared = tokio::time::timeout_at(
+            deadline,
+            prepare_publication(
+                &mut connection,
+                shared,
+                scope,
+                completed,
+                mutation,
+                deadline,
+            ),
+        )
         .await;
-        let metadata = match applied {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                let _ = tx.rollback().await;
-                return Err(error);
+        match prepared {
+            Ok(Ok((transaction, committed_metadata))) => {
+                metadata = committed_metadata;
+                transaction
             }
-        };
-        // There is no await between these final original-authority checks and
-        // issuing COMMIT. A cancellation after issuance cannot uncommit it.
-        let admitted = scope.check().and_then(|()| {
-            if let Some(completed) = completed {
-                completed.check_active()?;
+            result => {
+                let error = Err(match result {
+                    Ok(Err(error)) => error,
+                    _ => Error::Unavailable,
+                });
+                // SQLx 0.8.6 close_hard() flushes its buffered stream. Do not
+                // use it here: a cancelled transaction may have queued
+                // ROLLBACK before COMMIT was issued. Detach and drop the raw
+                // connection/socket without returning it to the pool or
+                // flushing more SQL.
+                drop(result);
+                drop(connection.detach());
+                return Publication {
+                    outcome: Outcome::NotPublished,
+                    result: error,
+                };
             }
-            if Instant::now() >= deadline {
-                return Err(Error::Expired);
-            }
-            Ok(())
-        });
-        if let Err(error) = admitted {
-            let _ = tx.rollback().await;
-            return Err(error);
         }
-        commit_issued = true;
-        tx.commit().await.map_err(|_| Error::PublicationUnknown)?;
-        Ok(metadata)
-    })
-    .await;
+    };
+
+    // COMMIT is irrevocable. Everything above remains bounded by the mutation
+    // deadline, but dropping this future after issuing COMMIT cannot turn an
+    // in-flight server result into a safe rollback. Keep the owned worker and
+    // connection alive until PostgreSQL returns a terminal commit result.
+    let result = transaction.commit().await;
     match result {
-        Ok(Ok(metadata)) => Publication {
+        Ok(()) => Publication {
             outcome: Outcome::Published,
             result: Ok(metadata),
         },
-        result => {
+        Err(_) => {
             // SQLx 0.8.6 close_hard() flushes its buffered stream. Do not use
             // it here: a cancelled transaction may have queued COMMIT/ROLLBACK.
             // Detach and drop the raw connection/socket without returning it
@@ -312,22 +314,64 @@ async fn publish(
             // idle timeout does not apply to an active deferred trigger.
             // The server may still commit after this socket has been dropped.
             drop(connection.detach());
-            if commit_issued {
-                Publication {
-                    outcome: Outcome::Unknown,
-                    result: Err(Error::PublicationUnknown),
-                }
-            } else {
-                Publication {
-                    outcome: Outcome::NotPublished,
-                    result: Err(match result {
-                        Ok(Err(error)) => error,
-                        _ => Error::Unavailable,
-                    }),
-                }
+            Publication {
+                outcome: Outcome::Unknown,
+                result: Err(Error::PublicationUnknown),
             }
         }
     }
+}
+
+async fn prepare_publication<'connection>(
+    connection: &'connection mut PgConnection,
+    shared: &Shared,
+    scope: &Scope,
+    completed: Option<&Completed>,
+    mutation: Mutation,
+    deadline: Instant,
+) -> Result<
+    (
+        Transaction<'connection, Postgres>,
+        Option<CredentialMetadata>,
+    ),
+    Error,
+> {
+    // Borrow from our connection, not pool.begin(): the driver retains the
+    // exact connection after a cancelled query/COMMIT future is dropped.
+    let mut tx = connection.begin().await.map_err(|_| Error::Unavailable)?;
+    let applied = async {
+        scope.check()?;
+        scope
+            .authority
+            .lock_for_publication(&mut tx)
+            .await
+            .map_err(authority_error)?;
+        apply(shared, scope, &mut tx, mutation).await
+    }
+    .await;
+    let metadata = match applied {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            return Err(error);
+        }
+    };
+    // There is no await between these final original-authority checks and
+    // issuing COMMIT. A cancellation after issuance cannot uncommit it.
+    let admitted = scope.check().and_then(|()| {
+        if let Some(completed) = completed {
+            completed.check_active()?;
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Expired);
+        }
+        Ok(())
+    });
+    if let Err(error) = admitted {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    Ok((tx, metadata))
 }
 
 async fn apply(

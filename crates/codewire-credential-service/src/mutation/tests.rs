@@ -374,6 +374,57 @@ pub(crate) async fn install_commit_barrier(pool: &PgPool, key: i32) -> Result<()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn generated_slow_commit_outlives_mutation_deadline_and_publishes() -> Result<()> {
+    let h = Harness::new().await?;
+    let result = async {
+        install_commit_barrier(&h.db.pool, 4191904).await?;
+        let mut blocker = h.db.pool.begin().await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(4191904)")
+            .execute(&mut *blocker)
+            .await?;
+        let mut response = h.rpc.enroll(Auth::Alice, "slow-commit").await?;
+        response.challenge().await?;
+        h.release()?;
+        let pid = blocked_by(&h.db.pool, blocker_pid).await?;
+        let query: String = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE pid=$1")
+            .bind(pid)
+            .fetch_one(&h.db.pool)
+            .await?;
+        ensure!(query == "COMMIT", "barrier does not prove COMMIT phase");
+
+        // The mutation deadline expires while COMMIT is blocked. It must not
+        // cancel or detach the irrevocable operation.
+        tokio::time::sleep(MUTATION_TIMEOUT + Duration::from_millis(250)).await;
+        let still_committing: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND query='COMMIT')",
+        )
+        .bind(pid)
+        .fetch_one(&h.db.pool)
+        .await?;
+        ensure!(
+            still_committing,
+            "slow COMMIT was cancelled before its terminal result"
+        );
+        ensure!(h.count().await? == 0);
+
+        blocker.rollback().await?;
+        let metadata = tokio::time::timeout(TIMEOUT, response.committed())
+            .await
+            .context("slow COMMIT did not publish after its barrier cleared")??;
+        h.drained().await?;
+        ensure!(metadata["name"] == "slow-commit" && h.count().await? == 1);
+        ensure!(!h.logged_out());
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn generated_publication_cancellation_before_commit_rolls_back_after_issue_retains()
 -> Result<()> {
     // Each half has its own owner because explicit shutdown is irreversible.
@@ -438,7 +489,7 @@ async fn generated_publication_cancellation_before_commit_rolls_back_after_issue
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
-async fn generated_late_commit_preserves_unknown_disposition_and_disposes_original_connection()
+async fn generated_late_commit_continues_after_client_disconnect_and_disposes_no_early_result()
 -> Result<()> {
     let h = Harness::new().await?;
     let result = async {
@@ -466,22 +517,17 @@ async fn generated_late_commit_preserves_unknown_disposition_and_disposes_origin
             .fetch_one(&h.db.pool)
             .await?;
         ensure!(query == "COMMIT");
-        response.error("unknown").await?;
-        h.drained().await?;
-        ensure!(
-            !h.logged_out(),
-            "unknown COMMIT outcome triggered provider logout"
-        );
-        ensure!(h.owner.capacity.available_permits() == MAX_OPERATIONS);
+        drop(response);
 
-        // Hold every pool slot simultaneously, not just one spare connection.
-        // The original connection must be locally disposed even though its
-        // remote backend can still finish the already-issued COMMIT later.
+        // Hold every remaining pool slot. The original worker intentionally
+        // retains exactly one checked-out connection until the already-issued
+        // COMMIT returns its terminal result.
         let capacity = h.pool.options().get_max_connections();
+        ensure!(capacity > 1, "fixture pool must have a commit connection");
         let replacements = tokio::time::timeout(TIMEOUT, async {
             let mut connections = Vec::new();
             let mut pids = BTreeSet::new();
-            for _ in 0..capacity {
+            for _ in 0..(capacity - 1) {
                 let mut connection = h.pool.acquire().await?;
                 let replacement: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                     .fetch_one(&mut *connection)
@@ -505,26 +551,21 @@ async fn generated_late_commit_preserves_unknown_disposition_and_disposes_origin
         ensure!(h.provider.generate_calls.load(Ordering::SeqCst) == 1);
         drop(replacements);
 
-        // PostgreSQL may commit after the local timeout. Release the exact
-        // deferred-trigger barrier, then prove that this late durable result
-        // remains encrypted and usable instead of being logged out or replayed.
+        // Release the exact deferred-trigger barrier. The disconnected client
+        // cannot turn an issued COMMIT into rollback; the durable result must
+        // remain encrypted and usable instead of being logged out or replayed.
         blocker.rollback().await?;
-        tokio::time::timeout(TIMEOUT, async {
-            loop {
-                let exists: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)",
-                )
+        h.drained().await?;
+        let commit_state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM pg_stat_activity WHERE pid=$1")
                 .bind(pid)
-                .fetch_one(&h.db.pool)
+                .fetch_optional(&h.db.pool)
                 .await?;
-                if !exists {
-                    return Ok::<_, anyhow::Error>(());
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .context("late COMMIT backend did not finish after barrier release")??;
+        ensure!(
+            commit_state.as_deref() != Some("active"),
+            "late COMMIT worker drained while its backend remained active"
+        );
+        ensure!(h.owner.capacity.available_permits() == MAX_OPERATIONS);
         ensure!(h.count().await? == 1);
         let stored_id: String = sqlx::query_scalar(
             "SELECT id FROM public.platform_credentials WHERE user_id=$1 AND display_name='late-commit'",
