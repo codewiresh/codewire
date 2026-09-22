@@ -93,11 +93,10 @@ impl AccessProfiles {
         user: &AuthUser,
         name: &str,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
-        include_github: bool,
     ) -> AppResult<AccessProfile> {
         let owner = personal_owner(user)?;
         self.profiles
-            .create_with_github(&owner, profile_name(name)?, entries, include_github)
+            .create(&owner, profile_name(name)?, entries)
             .await
             .map_err(profile_error)
     }
@@ -108,18 +107,11 @@ impl AccessProfiles {
         id: &str,
         expected_revision: u64,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
-        include_github: bool,
     ) -> AppResult<AccessProfile> {
         let owner = personal_owner(user)?;
         positive_revision(expected_revision)?;
         self.profiles
-            .update_with_github(
-                &owner,
-                &profile_id(id)?,
-                expected_revision,
-                entries,
-                include_github,
-            )
+            .update(&owner, &profile_id(id)?, expected_revision, entries)
             .await
             .map_err(profile_error)
     }
@@ -163,30 +155,30 @@ pub enum ProfileSelector<'a> {
 }
 
 /// Preserve duplicate detection before constructing the canonical entry map.
+/// Every personal profile includes the owner's one GitHub connection, so a
+/// legacy client's `github` entry is accepted and its credential ID discarded.
 pub fn profile_entries<'a>(
     entries: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> AppResult<(BTreeMap<CapabilitySlot, CredentialId>, bool)> {
+) -> AppResult<BTreeMap<CapabilitySlot, CredentialId>> {
     let mut parsed = BTreeMap::new();
-    let mut include_github = false;
-    let mut slots = BTreeSet::new();
+    let mut github = false;
     for (slot, id) in entries {
         if parsed.len() >= 128 {
             return Err(invalid_profile());
         }
         let slot = CapabilitySlot::parse(slot).map_err(|_| invalid_profile())?;
-        if !slots.insert(slot.clone()) {
-            return Err(invalid_profile());
-        }
+        let id = CredentialId::parse(id).map_err(|_| invalid_profile())?;
         if slot == CapabilitySlot::github() {
-            include_github = true;
+            if std::mem::replace(&mut github, true) {
+                return Err(invalid_profile());
+            }
             continue;
         }
-        let id = CredentialId::parse(id).map_err(|_| invalid_profile())?;
         if parsed.insert(slot, id).is_some() {
             return Err(invalid_profile());
         }
     }
-    Ok((parsed, include_github))
+    Ok(parsed)
 }
 
 pub fn parse_binding(
@@ -379,8 +371,10 @@ mod tests {
     fn entries_revisions_and_pagination_are_bounded_and_explicit() {
         assert!(profile_entries([("codex", "first"), ("codex", "second")]).is_err());
         assert!(profile_entries([("codex", "has spaces")]).is_err());
-        let (entries, include_github) = profile_entries([]).unwrap();
-        assert!(entries.is_empty() && !include_github);
+        assert!(profile_entries([]).unwrap().is_empty());
+        // A legacy GitHub entry is discarded; GitHub is always included.
+        assert!(profile_entries([("github", "legacy")]).unwrap().is_empty());
+        assert!(profile_entries([("github", "one"), ("github", "two")]).is_err());
         assert!(positive_revision(0).is_err());
         assert!(positive_revision(u64::MAX).is_err());
         assert!(positive_revision(1).is_ok());

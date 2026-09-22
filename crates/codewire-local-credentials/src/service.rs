@@ -1290,11 +1290,9 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
     ) -> Result<Response<v1::AccessProfileRevision>, Status> {
         let request = request.into_inner();
         let name = AccessProfileName::parse(request.name).map_err(status_for_access_error)?;
-        let (entries, legacy_github) = profile_entries(request.entries)?;
-        let include_github = request.include_github || legacy_github;
+        let entries = profile_entries(request.entries)?;
         let authority = Arc::clone(&self.authority);
-        let profile =
-            run_blocking(move || authority.create_profile(name, entries, include_github)).await?;
+        let profile = run_blocking(move || authority.create_profile(name, entries)).await?;
         Ok(Response::new(profile_record_to_proto(profile)))
     }
 
@@ -1304,13 +1302,11 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
     ) -> Result<Response<v1::AccessProfileRevision>, Status> {
         let request = request.into_inner();
         let id = profile_id(request.profile_id)?;
-        let (entries, legacy_github) = profile_entries(request.entries)?;
-        let include_github = request.include_github || legacy_github;
+        let entries = profile_entries(request.entries)?;
         let authority = Arc::clone(&self.authority);
-        let profile = run_blocking(move || {
-            authority.update_profile(&id, request.expected_revision, entries, include_github)
-        })
-        .await?;
+        let profile =
+            run_blocking(move || authority.update_profile(&id, request.expected_revision, entries))
+                .await?;
         Ok(Response::new(profile_record_to_proto(profile)))
     }
 
@@ -1869,12 +1865,11 @@ fn broker_lease_audit_event_to_proto(
     }
 }
 
-/// Parse entries. A legacy client's `github` entry is accepted as
-/// `include_github` and its credential ID is discarded: GitHub always resolves
-/// to the store's one current connection.
+/// Parse entries. Every profile includes the store's one GitHub connection, so
+/// a legacy client's `github` entry is accepted and its credential ID discarded.
 fn profile_entries(
     entries: Vec<v1::AccessProfileEntry>,
-) -> Result<(BTreeMap<CapabilitySlot, CredentialId>, bool), Status> {
+) -> Result<BTreeMap<CapabilitySlot, CredentialId>, Status> {
     let mut parsed = BTreeMap::new();
     let mut github = false;
     for entry in entries {
@@ -1895,7 +1890,7 @@ fn profile_entries(
             ));
         }
     }
-    Ok((parsed, github))
+    Ok(parsed)
 }
 
 fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
@@ -1999,7 +1994,6 @@ fn profile_to_proto(
             .collect(),
         profile_created_at_unix_ms,
         revision_created_at_unix_ms,
-        include_github: profile.include_github,
     }
 }
 

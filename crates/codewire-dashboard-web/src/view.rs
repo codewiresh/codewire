@@ -392,7 +392,6 @@ pub(crate) struct CredentialProfileRowView {
     pub(crate) name: String,
     pub(crate) revision: u64,
     pub(crate) entries: Vec<CredentialProfileEntryView>,
-    pub(crate) include_github: bool,
     pub(crate) codex: String,
     pub(crate) openai: String,
     pub(crate) anthropic: String,
@@ -445,8 +444,6 @@ pub(crate) struct CredentialProfileCreateSubmission {
     #[serde(default)]
     pub(crate) openai: String,
     #[serde(default)]
-    pub(crate) include_github: bool,
-    #[serde(default)]
     pub(crate) anthropic: String,
     #[serde(default)]
     pub(crate) ssh: String,
@@ -462,8 +459,6 @@ pub(crate) struct CredentialProfileUpdateSubmission {
     pub(crate) codex: String,
     #[serde(default)]
     pub(crate) openai: String,
-    #[serde(default)]
-    pub(crate) include_github: bool,
     #[serde(default)]
     pub(crate) anthropic: String,
     #[serde(default)]
@@ -1102,7 +1097,6 @@ pub(crate) struct EnvironmentCredentialProfileOption {
     pub(crate) bound_revision: bool,
     pub(crate) synthetic: bool,
     pub(crate) selected: bool,
-    pub(crate) include_github: bool,
 }
 
 #[derive(Clone, Debug)]

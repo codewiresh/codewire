@@ -118,13 +118,10 @@ test("late Create choices preserve edited core fields, focus, rows, and profile 
   await expect(page.getByLabel("Preview label")).toHaveValue("web");
   await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev\necho ready");
   await expect(page.getByLabel("Credential profile", { exact: true })).toBeVisible();
-  // Browsing uses the account's one GitHub connection: there is no GitHub
-  // selector, and each profile only says whether it includes GitHub.
+  // Browsing uses the account's one GitHub connection, which every profile
+  // includes: there is no GitHub selector and no per-profile GitHub choice.
   await expect(page.locator("[data-github-connection]")).toHaveCount(0);
-  const includeGithub = await form.locator('[name="credential_profile"] option[value]:not([value=""])')
-    .evaluateAll((options) => options.map((option) => option.getAttribute("data-include-github")));
-  expect(includeGithub.length).toBeGreaterThan(0);
-  expect(includeGithub.every((value) => value === "true" || value === "false")).toBe(true);
+  await expect(form.locator("[data-include-github]")).toHaveCount(0);
   await expect(page.locator("[data-github-browser]")).toBeVisible();
 });
 

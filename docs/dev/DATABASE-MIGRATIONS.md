@@ -537,61 +537,57 @@ and instructions authorize no live reset;
 authored fixtures are not acceptance evidence until executed against the
 checked-in disposable PostgreSQL topology.
 
-### GitHub singleton and profile Include GitHub
+### GitHub singleton included in every personal profile
 
 Migration `0029_github_singleton_profiles.sql` makes GitHub one account-level
-connection. Each user has at most one active GitHub App OAuth credential, and an
-access profile revision stores only `include_github`. A profile never stores a
-GitHub credential ID. Launch authority resolves the user's current active,
-unexpired connection at use time. When none exists, GitHub is omitted rather
-than fabricated, and a later reconnect restores every `include_github=true`
-profile without a new revision.
+connection. Each user has at most one active GitHub App OAuth credential, and
+every personal access profile includes it. A profile never stores a GitHub
+credential ID. Launch authority resolves the user's current active, unexpired
+connection at use time. When none exists, GitHub is omitted rather than
+fabricated and the product shows it as missing; a later reconnect restores it
+for every profile without a new revision. Organization profiles cannot hold a
+GitHub connection.
 
 The migration runs in one transaction:
 
 1. It fails closed with SQLSTATE `23514` when any user has more than one active
    GitHub OAuth credential. It never chooses a winner, and nothing is rewritten.
-2. It adds `include_github boolean NOT NULL DEFAULT false` to
-   `platform_access_profile_revisions`.
-3. It sets `include_github` on every current or historical revision that had a
-   `github` entry, then deletes those entries and adds a check constraint so no
-   future entry can use the `github` slot.
-4. It deletes obsolete non-active GitHub OAuth credentials. Their protected
+2. It deletes every `github` profile entry on current and historical revisions
+   and adds a check constraint so no future entry can use the `github` slot.
+   No revision is created.
+3. It deletes obsolete non-active GitHub OAuth credentials. Their protected
    material and refresh rows go through the existing `ON DELETE CASCADE`
    foreign keys. Profile entries carry no credential foreign key, and none
    remain for GitHub.
-5. It adds the partial unique index
+4. It adds the partial unique index
    `platform_credentials_user_github_singleton_key` on active user-owned GitHub
    OAuth credentials.
 
-Deployment must extend the restricted reader's column grant on
-`platform_access_profile_revisions` with `include_github`, matching
-`tests/e2e/kind/credential-broker.sql`, before the new services start. The
-reader already selects `platform_credentials` provider and authentication
-columns.
+No new column or grant is required: the restricted reader already selects the
+`platform_credentials` provider and authentication columns.
 
 This staged 28→29 change does not rewrite versions 1–28. Its upgrade fixture
 independently pins migration 28's SHA-384 from accepted canonical
 `01c315c18bd48dd4a0b80226f32d904ee311cfab`; that is a staged predecessor-byte
 boundary, not a claim that version 28 alone was deployed. The fixture seeds
 legacy `github` entries on current and historical revisions, one revoked and one
-active GitHub credential, and an unrelated Codex entry. It proves the exact
-`include_github` backfill, that no revision is created, that only non-GitHub
-entries remain, that the revoked row is removed and the active one kept, that a
-new `github` entry and a second active connection are both rejected, and that
-the second startup is a no-op. A separate fixture seeds two active connections
-for one user and proves the migration fails, leaves the ledger, entries and
-credentials unchanged, and succeeds once the ambiguity is resolved.
+active GitHub credential, and an unrelated Codex entry. It proves that only the
+non-GitHub entries remain, that no revision is created, that the revoked row is
+removed and the active one kept, that a new `github` entry and a second active
+connection are both rejected, and that the second startup is a no-op. A separate
+fixture seeds two active connections for one user and proves the migration
+fails, leaves the ledger, entries and credentials unchanged, and succeeds once
+the ambiguity is resolved.
 
 There is no in-place downgrade. After stopping new profile and credential
 writers, rollback replays the selected version-28 source into only an empty,
 disposable application `public` schema. The fixture proves the ledger and
-migration 28 checksum are restored, the `include_github` column and singleton
-index are absent, credential records are discarded, and a separate schema
-survives. Replaying version 28 restores the pre-0029 table fingerprint pinned
-as `ACCEPTED_PRE_GITHUB_SINGLETON_SCHEMA_FINGERPRINT`. Other schemas,
-databases, cluster roles and external OpenBao key material remain outside this
-boundary. These tests and instructions authorize no live reset.
+migration 28 checksum are restored, the singleton index is absent, credential
+records are discarded, and a separate schema survives. Replaying version 28
+restores the pre-0029 table fingerprint pinned as
+`ACCEPTED_PRE_GITHUB_SINGLETON_SCHEMA_FINGERPRINT`. Other schemas, databases,
+cluster roles and external OpenBao key material remain outside this boundary.
+These tests and instructions authorize no live reset.
 
 ## Mesh Database
 

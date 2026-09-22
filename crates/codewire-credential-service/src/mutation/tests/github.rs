@@ -164,7 +164,7 @@ async fn github_reconnect_rejects_wrong_provider_and_original_oauth_revocation()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
-async fn github_delete_is_direct_keeps_include_github_and_reconnect_restores_use() -> Result<()> {
+async fn github_delete_is_direct_keeps_profiles_and_reconnect_restores_use() -> Result<()> {
     let h = Harness::new().await?;
     let result = async {
         let owner = Owner::User(OwnerId::parse(ALICE)?);
@@ -177,7 +177,7 @@ async fn github_delete_is_direct_keeps_include_github_and_reconnect_restores_use
         let manager =
             PlatformAccessProfileStore::new(h.db.pool.clone(), builtin_provider_catalog());
         let profile = manager
-            .create_with_github(&owner, AccessProfileName::parse("work")?, BTreeMap::new(), true)
+            .create(&owner, AccessProfileName::parse("work")?, BTreeMap::new())
             .await?;
         ensure!(
             codewire_platform_credentials::active_github_connection(&h.db.pool, &owner)
@@ -196,7 +196,7 @@ async fn github_delete_is_direct_keeps_include_github_and_reconnect_restores_use
         ensure!(h.count().await? == 0 && !h.logged_out());
         ensure!(material_count(&h.db.pool, &first).await? == 0);
         let kept = manager.get(&owner, &profile.id).await?;
-        ensure!(kept.revision == profile.revision && kept.include_github);
+        ensure!(kept.revision == profile.revision && kept.includes_github());
         ensure!(
             codewire_platform_credentials::active_github_connection(&h.db.pool, &owner)
                 .await?
@@ -220,7 +220,7 @@ async fn github_delete_is_direct_keeps_include_github_and_reconnect_restores_use
                 == Some(second)
         );
         let restored = manager.get(&owner, &profile.id).await?;
-        ensure!(restored.revision == profile.revision && restored.include_github);
+        ensure!(restored.revision == profile.revision && restored.includes_github());
         Ok(())
     }
     .await;

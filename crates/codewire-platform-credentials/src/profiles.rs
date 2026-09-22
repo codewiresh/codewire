@@ -118,19 +118,6 @@ impl PlatformAccessProfileStore {
         name: AccessProfileName,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
     ) -> Result<AccessProfile, Error> {
-        self.create_with_github(owner, name, entries, false).await
-    }
-
-    pub async fn create_with_github(
-        &self,
-        owner: &Owner,
-        name: AccessProfileName,
-        entries: BTreeMap<CapabilitySlot, CredentialId>,
-        include_github: bool,
-    ) -> Result<AccessProfile, Error> {
-        if include_github && owner.is_organization() {
-            return Err(Error::UnsupportedEntry);
-        }
         let profile = AccessProfile {
             id: AccessProfileId::parse(Uuid::new_v4().to_string())
                 .map_err(|_| Error::InvalidInput)?,
@@ -138,7 +125,6 @@ impl PlatformAccessProfileStore {
             owner: owner.clone(),
             name,
             revision: 1,
-            include_github,
             entries,
         };
         let mut tx = self.begin_transaction().await?;
@@ -298,21 +284,6 @@ impl PlatformAccessProfileStore {
         expected_revision: u64,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
     ) -> Result<AccessProfile, Error> {
-        self.update_with_github(owner, id, expected_revision, entries, false)
-            .await
-    }
-
-    pub async fn update_with_github(
-        &self,
-        owner: &Owner,
-        id: &AccessProfileId,
-        expected_revision: u64,
-        entries: BTreeMap<CapabilitySlot, CredentialId>,
-        include_github: bool,
-    ) -> Result<AccessProfile, Error> {
-        if include_github && owner.is_organization() {
-            return Err(Error::UnsupportedEntry);
-        }
         let expected = generation(expected_revision)?;
         let next = expected.checked_add(1).ok_or(Error::InvalidInput)?;
         let mut tx = self.begin_transaction().await?;
@@ -323,7 +294,6 @@ impl PlatformAccessProfileStore {
         }
         let profile = AccessProfile {
             revision: next as u64,
-            include_github,
             entries,
             ..current
         };
@@ -760,18 +730,18 @@ async fn load_profile(
         .ok_or(Error::NotFound)?;
     let current: i64 = row.try_get("current_revision").map_err(database_error)?;
     let revision = revision.unwrap_or(positive(current)?);
-    let revision_row: Option<bool> = sqlx::query_scalar(
-        "SELECT include_github FROM platform_access_profile_revisions \
-         WHERE profile_id=$1 AND revision=$2",
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM platform_access_profile_revisions \
+         WHERE profile_id=$1 AND revision=$2)",
     )
     .bind(id.as_str())
     .bind(generation(revision)?)
-    .fetch_optional(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(database_error)?;
-    let Some(include_github) = revision_row else {
+    if !exists {
         return Err(Error::NotFound);
-    };
+    }
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT capability_slot,credential_id FROM platform_access_profile_entries \
          WHERE profile_id=$1 AND revision=$2 ORDER BY capability_slot",
@@ -795,7 +765,6 @@ async fn load_profile(
         name: AccessProfileName::parse(row.try_get::<String, _>("name").map_err(database_error)?)
             .map_err(|_| Error::CorruptRecord)?,
         revision,
-        include_github,
         entries,
     })
 }
@@ -805,12 +774,10 @@ async fn insert_revision(
     profile: &AccessProfile,
 ) -> Result<(), Error> {
     sqlx::query(
-        "INSERT INTO platform_access_profile_revisions \
-         (profile_id,revision,include_github) VALUES ($1,$2,$3)",
+        "INSERT INTO platform_access_profile_revisions(profile_id,revision) VALUES ($1,$2)",
     )
     .bind(profile.id.as_str())
     .bind(generation(profile.revision)?)
-    .bind(profile.include_github)
     .execute(&mut **tx)
     .await
     .map_err(database_error)?;
@@ -841,17 +808,15 @@ async fn load_credentials(
         let metadata = lock_credential(tx, &profile.owner, id).await?;
         credentials.insert(id.clone(), metadata);
     }
-    if profile.include_github {
-        if !matches!(profile.owner, Owner::User(_)) {
-            return Err(Error::UnsupportedEntry);
-        }
-        if let Some(id) = crate::store::active_github_connection(&mut **tx, &profile.owner)
+    // Every personal profile includes the owner's one GitHub connection when
+    // it can be used now; a missing connection is omitted.
+    if profile.includes_github()
+        && let Some(id) = crate::store::active_github_connection(&mut **tx, &profile.owner)
             .await
             .map_err(credential_error)?
-        {
-            let metadata = lock_credential(tx, &profile.owner, &id).await?;
-            credentials.insert(id, metadata);
-        }
+    {
+        let metadata = lock_credential(tx, &profile.owner, &id).await?;
+        credentials.insert(id, metadata);
     }
     Ok(credentials)
 }

@@ -108,8 +108,7 @@ pub(super) async fn enroll(
             };
         }
     };
-    let github_create =
-        completed.provider() == "github" && matches!(prepared, Mutation::Create(_));
+    let github_create = completed.provider() == "github" && matches!(prepared, Mutation::Create(_));
     let result = publish(shared, scope, Some(completed), prepared).await;
     Publication {
         outcome: result.outcome,
@@ -443,7 +442,7 @@ async fn apply(
             } else if github {
                 // GitHub is one account-level connection with no user-visible
                 // revoke step. Revoke and forget it in this same fenced
-                // transaction; profiles keep their include_github selection.
+                // transaction; profiles are unchanged and include it again on reconnect.
                 shared
                     .store
                     .revoke_in(tx, &scope.owner, &id, record.version)

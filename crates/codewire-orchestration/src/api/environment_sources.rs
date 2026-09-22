@@ -9,8 +9,7 @@ use std::collections::BTreeSet;
 
 use codewire_access::{
     AccessProfile, AccessProfileId, AccessProfileName, CredentialId, EnvironmentAccessBinding,
-    EnvironmentId,
-    GrantContext, GrantPlacement, Owner, OwnerId,
+    EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId,
 };
 use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformProfileError};
 use codewire_project::{CredentialBinding, ProjectSpec, SecretBindings};
@@ -517,14 +516,14 @@ fn confirm_sources(
     Ok(())
 }
 
-/// Include GitHub selects the account's current connection, resolved at
-/// binding time. A disconnected account omits GitHub instead of fabricating it.
+/// Every personal profile includes the account's current GitHub connection,
+/// resolved at binding time. A missing one is omitted instead of fabricated.
 async fn github_connection_in(
     tx: &mut Transaction<'_, Postgres>,
     profile: Option<&AccessProfile>,
 ) -> AppResult<Option<CredentialId>> {
     match profile {
-        Some(profile) if profile.include_github => {
+        Some(profile) if profile.includes_github() => {
             codewire_platform_credentials::active_github_connection(&mut **tx, &profile.owner)
                 .await
                 .map_err(|_| unavailable())

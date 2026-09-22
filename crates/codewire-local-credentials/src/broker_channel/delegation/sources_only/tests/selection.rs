@@ -25,7 +25,7 @@ fn profile(f: &Fixture, name: &str) -> EnvironmentAccessBinding {
         .authority
         .create_profile(
             AccessProfileName::parse(name).unwrap(),
-            [(CapabilitySlot::codex(), credential.metadata.id)].into(), false,
+            [(CapabilitySlot::codex(), credential.metadata.id)].into(),
         )
         .unwrap()
         .profile;

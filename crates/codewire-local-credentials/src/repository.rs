@@ -1129,7 +1129,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("github-work").unwrap(),
-                BTreeMap::new(), true,
+                BTreeMap::new(),
             )
             .unwrap();
         let authorization = RepositoryCredentialLeaseRequest {

@@ -1721,7 +1721,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("synthetic").unwrap(),
-                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
             )
             .unwrap();
         let environment_id = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
@@ -1837,7 +1837,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("synthetic-oauth").unwrap(),
-                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
             )
             .unwrap();
         let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
@@ -2157,7 +2157,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("synthetic-oauth").unwrap(),
-                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
             )
             .unwrap();
         let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
@@ -2256,7 +2256,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("synthetic-oauth").unwrap(),
-                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
             )
             .unwrap();
         let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
@@ -2359,7 +2359,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("synthetic-oauth").unwrap(),
-                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
             )
             .unwrap();
         let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
@@ -2632,7 +2632,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("synthetic").unwrap(),
-                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id)]), false,
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id)]),
             )
             .unwrap();
         let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();

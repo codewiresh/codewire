@@ -107,18 +107,18 @@ const DATABASE_SCHEMA_VERSION: i64 = 5;
 /// Adds typed SSH public-key metadata.
 const SSH_DATABASE_SCHEMA_VERSION: i64 = 4;
 const PREVIOUS_DATABASE_SCHEMA_VERSION: i64 = 3;
-/// GitHub is one connection per local store. Profiles select it with
-/// `include_github` and never store a GitHub credential ID.
+/// GitHub is one connection per local store. Every profile includes it and
+/// never stores a GitHub credential ID.
 const GITHUB_SINGLETON_SCHEMA: &str = "
     CREATE UNIQUE INDEX credentials_github_oauth_singleton
       ON credentials(provider, authentication_kind)
       WHERE provider = 'github' AND authentication_kind = 'oauth' AND status = 'active';
     CREATE TRIGGER profile_entries_github_insert BEFORE INSERT ON profile_entries
       WHEN NEW.capability_slot = 'github'
-      BEGIN SELECT RAISE(ABORT, 'GitHub is selected with include_github'); END;
+      BEGIN SELECT RAISE(ABORT, 'GitHub is always included, never an entry'); END;
     CREATE TRIGGER profile_entries_github_update BEFORE UPDATE OF capability_slot ON profile_entries
       WHEN NEW.capability_slot = 'github'
-      BEGIN SELECT RAISE(ABORT, 'GitHub is selected with include_github'); END;";
+      BEGIN SELECT RAISE(ABORT, 'GitHub is always included, never an entry'); END;";
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1410,17 +1410,14 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 CapabilitySlot::parse("ssh").expect("canonical SSH capability slot")
             }
         };
-        // GitHub checkout uses the store's one current connection when the
-        // pinned revision includes GitHub; it never falls back to another
-        // credential. Other transports use the revision's exact entry.
+        // GitHub checkout uses the store's one current connection, which every
+        // profile includes; it never falls back to another credential. Other
+        // transports use the revision's exact entry.
         let credential_id = match transport {
             crate::repository::LocalRepositoryTransport::GitHubOAuth => {
-                if !profile.include_github {
-                    return Err(LocalCredentialError::CredentialOperationLeaseDenied);
-                }
                 match active_github_connection(&connection)? {
                     Some(id) => id,
-                    // An included but inactive connection needs reconnecting.
+                    // An inactive connection needs reconnecting.
                     None if github_connection_exists(&connection)? => {
                         return Err(LocalCredentialError::CredentialInactive);
                     }
@@ -1558,13 +1555,12 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .ok_or(LocalCredentialError::CredentialMaterialMissing)
     }
 
-    /// Publish a profile's complete entry set and GitHub selection. GitHub is
-    /// never an entry; `include_github` selects the store's one connection.
+    /// Publish a profile's complete entry set. GitHub is never an entry: every
+    /// profile includes the store's one connection.
     pub fn create_profile(
         &self,
         name: AccessProfileName,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
-        include_github: bool,
     ) -> Result<AccessProfileRecord, LocalCredentialError> {
         let mut connection = self.connection()?;
         let profile = AccessProfile {
@@ -1573,7 +1569,6 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             owner: Owner::User(self.owner_id.clone()),
             name,
             revision: 1,
-            include_github,
             entries,
         };
         validate_profile_entries(
@@ -1602,14 +1597,11 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         load_profile(&connection, &profile.id)
     }
 
-    /// Replace the complete entry set and explicit GitHub selection at the
-    /// exact expected revision.
     pub fn update_profile(
         &self,
         id: &AccessProfileId,
         expected_revision: u64,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
-        include_github: bool,
     ) -> Result<AccessProfileRecord, LocalCredentialError> {
         let mut connection = self.connection()?;
         let current = load_profile(&connection, id)?;
@@ -1621,7 +1613,6 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .ok_or(LocalCredentialError::CorruptMetadata)?;
         let profile = AccessProfile {
             revision,
-            include_github,
             entries,
             ..current.profile
         };
@@ -2283,7 +2274,6 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
                profile_id TEXT NOT NULL,
                revision INTEGER NOT NULL CHECK(revision > 0),
                created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
-               include_github INTEGER NOT NULL DEFAULT 0 CHECK(include_github IN (0, 1)),
                PRIMARY KEY(profile_id, revision),
                FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
              ) STRICT;
@@ -2370,17 +2360,15 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
     }
     let github_schema: i64 = connection
         .query_row(
-            "SELECT (SELECT COUNT(*) FROM pragma_table_info('profile_revisions')
-                     WHERE name = 'include_github')
-                  + (SELECT COUNT(*) FROM sqlite_schema
-                     WHERE (type = 'index' AND name = 'credentials_github_oauth_singleton')
-                        OR (type = 'trigger' AND name IN (
-                            'profile_entries_github_insert', 'profile_entries_github_update')))",
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE (type = 'index' AND name = 'credentials_github_oauth_singleton')
+                OR (type = 'trigger' AND name IN (
+                    'profile_entries_github_insert', 'profile_entries_github_update'))",
             [],
             |row| row.get(0),
         )
         .map_err(database_error)?;
-    if github_schema != 4 {
+    if github_schema != 3 {
         return Err(LocalCredentialError::InvalidDatabase);
     }
     Ok(())
@@ -2396,7 +2384,9 @@ fn validate_openable_schema(connection: &Connection) -> Result<(), LocalCredenti
     if application_id != DATABASE_APPLICATION_ID
         || !matches!(
             schema_version,
-            PREVIOUS_DATABASE_SCHEMA_VERSION | SSH_DATABASE_SCHEMA_VERSION | DATABASE_SCHEMA_VERSION
+            PREVIOUS_DATABASE_SCHEMA_VERSION
+                | SSH_DATABASE_SCHEMA_VERSION
+                | DATABASE_SCHEMA_VERSION
         )
     {
         return Err(LocalCredentialError::UnsupportedSchema);
@@ -2476,10 +2466,10 @@ fn upgrade_ssh_schema(connection: &Connection) -> Result<(), LocalCredentialErro
     transaction.commit().map_err(database_error)
 }
 
-/// Version 4 to 5: GitHub becomes one connection. Every revision that pinned a
-/// GitHub credential keeps the choice as `include_github`, and the credential
-/// ID is discarded. More than one active GitHub connection is ambiguous: the
-/// upgrade fails and leaves version 4 unchanged rather than choosing one.
+/// Version 4 to 5: GitHub becomes one connection that every profile includes,
+/// so pinned GitHub credential IDs are discarded without new revisions. More
+/// than one active GitHub connection is ambiguous: the upgrade fails and
+/// leaves version 4 unchanged rather than choosing one.
 /// Revoked GitHub rows are kept; their protected material is not in SQLite.
 fn upgrade_github_singleton_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
     let transaction = connection.unchecked_transaction().map_err(database_error)?;
@@ -2496,15 +2486,7 @@ fn upgrade_github_singleton_schema(connection: &Connection) -> Result<(), LocalC
     }
     transaction
         .execute_batch(&format!(
-            "ALTER TABLE profile_revisions ADD COLUMN include_github INTEGER NOT NULL DEFAULT 0
-               CHECK(include_github IN (0, 1));
-             UPDATE profile_revisions SET include_github = 1
-              WHERE EXISTS (
-                SELECT 1 FROM profile_entries AS entry
-                 WHERE entry.profile_id = profile_revisions.profile_id
-                   AND entry.revision = profile_revisions.revision
-                   AND entry.capability_slot = 'github');
-             DELETE FROM profile_entries WHERE capability_slot = 'github';
+            "DELETE FROM profile_entries WHERE capability_slot = 'github';
              {GITHUB_SINGLETON_SCHEMA}"
         ))
         .map_err(database_error)?;
@@ -3309,7 +3291,7 @@ fn derive_local_environment_grants(
             .entries
             .values()
             .cloned()
-            .chain(if profile.include_github {
+            .chain(if profile.includes_github() {
                 active_github_connection(connection)?
             } else {
                 None
@@ -3340,8 +3322,8 @@ fn github_connection_exists(connection: &Connection) -> Result<bool, LocalCreden
 }
 
 /// The store's one GitHub connection when it can be used now. A missing,
-/// inactive or expired connection yields `None`, so an `include_github`
-/// profile omits GitHub instead of fabricating access.
+/// inactive or expired connection yields `None`, so a profile omits GitHub
+/// instead of fabricating access.
 fn active_github_connection(
     connection: &Connection,
 ) -> Result<Option<CredentialId>, LocalCredentialError> {
@@ -3399,14 +3381,13 @@ fn insert_profile_revision(
 ) -> Result<(), LocalCredentialError> {
     transaction
         .execute(
-            "INSERT INTO profile_revisions(profile_id, revision, created_at_unix_ms, include_github)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO profile_revisions(profile_id, revision, created_at_unix_ms)
+             VALUES (?1, ?2, ?3)",
             params![
                 profile.id.as_str(),
                 i64::try_from(profile.revision)
                     .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-                i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?,
-                i64::from(profile.include_github)
+                i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?
             ],
         )
         .map_err(database_error)?;
@@ -3434,11 +3415,8 @@ fn load_profile(
 ) -> Result<AccessProfileRecord, LocalCredentialError> {
     let raw = connection
         .query_row(
-            "SELECT p.owner_id, p.name, p.current_revision, p.created_at_unix_ms,
-                    p.updated_at_unix_ms, r.include_github
-             FROM profiles p
-             JOIN profile_revisions r ON r.profile_id = p.id AND r.revision = p.current_revision
-             WHERE p.id = ?1",
+            "SELECT owner_id, name, current_revision, created_at_unix_ms, updated_at_unix_ms
+             FROM profiles WHERE id = ?1",
             [id.as_str()],
             |row| {
                 Ok((
@@ -3447,7 +3425,6 @@ fn load_profile(
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
                 ))
             },
         )
@@ -3466,7 +3443,6 @@ fn load_profile(
         owner: Owner::User(owner),
         name: AccessProfileName::parse(raw.1).map_err(|_| LocalCredentialError::CorruptMetadata)?,
         revision,
-        include_github: stored_bool(raw.5)?,
         entries,
     };
     profile
@@ -3479,14 +3455,6 @@ fn load_profile(
         updated_at_unix_ms: u64::try_from(raw.4)
             .map_err(|_| LocalCredentialError::CorruptMetadata)?,
     })
-}
-
-fn stored_bool(value: i64) -> Result<bool, LocalCredentialError> {
-    match value {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(LocalCredentialError::CorruptMetadata),
-    }
 }
 
 fn profile_exists(
@@ -3512,7 +3480,7 @@ fn load_profile_revision(
     }
     let raw = connection
         .query_row(
-            "SELECT p.owner_id, p.name, p.created_at_unix_ms, r.created_at_unix_ms, r.include_github
+            "SELECT p.owner_id, p.name, p.created_at_unix_ms, r.created_at_unix_ms
              FROM profiles p
              JOIN profile_revisions r ON r.profile_id = p.id
              WHERE p.id = ?1 AND r.revision = ?2",
@@ -3526,7 +3494,6 @@ fn load_profile_revision(
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
                 ))
             },
         )
@@ -3549,7 +3516,6 @@ fn load_profile_revision(
         owner: Owner::User(owner),
         name: AccessProfileName::parse(raw.1).map_err(|_| LocalCredentialError::CorruptMetadata)?,
         revision,
-        include_github: stored_bool(raw.4)?,
         entries: load_profile_entries(connection, id, revision)?,
     };
     profile

@@ -980,7 +980,7 @@ fn profile_errors_have_no_value_or_upstream_source() {
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn include_github_is_an_immutable_revision_choice_never_an_entry() -> Result<()> {
+async fn personal_profiles_include_github_without_ever_pinning_it() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         let user = db.user("github-owner").await?;
@@ -991,27 +991,19 @@ async fn include_github_is_an_immutable_revision_choice_never_an_entry() -> Resu
             .create(&user, registration("Codex", Kind::OAuth), &value(OLD_VALUE))
             .await?;
         let profiles = profiles(&db);
-        let first = profiles
-            .create_with_github(&user, name("work"), entries(&codex.metadata.id), true)
+        let personal = profiles
+            .create(&user, name("work"), entries(&codex.metadata.id))
             .await?;
-        ensure!(first.include_github && first.revision == 1);
-        let cleared = profiles
-            .update_with_github(&user, &first.id, 1, entries(&codex.metadata.id), false)
+        ensure!(personal.includes_github() && personal.revision == 1);
+        let empty = profiles
+            .update(&user, &personal.id, 1, BTreeMap::new())
             .await?;
-        ensure!(!cleared.include_github && cleared.revision == 2);
-        // Historical revisions keep their own choice.
-        ensure!(profiles.get_revision(&user, &first.id, 1).await?.include_github);
-        let restored = profiles
-            .update_with_github(&user, &first.id, 2, BTreeMap::new(), true)
+        ensure!(empty.includes_github() && empty.entries.is_empty() && empty.revision == 2);
+        let shared = profiles
+            .create(&org, name("shared"), BTreeMap::new())
             .await?;
-        ensure!(restored.include_github && restored.entries.is_empty() && restored.revision == 3);
-        // GitHub is a per-user connection and never a pinned entry.
-        ensure!(
-            profiles
-                .create_with_github(&org, name("shared"), BTreeMap::new(), true)
-                .await
-                == Err(Error::UnsupportedEntry)
-        );
+        ensure!(!shared.includes_github());
+        // GitHub is the account's one connection, never a pinned entry.
         ensure!(
             profiles
                 .create(

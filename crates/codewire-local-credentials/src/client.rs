@@ -605,28 +605,23 @@ impl LocalCredentialClient {
         &mut self,
         name: &AccessProfileName,
         entries: &BTreeMap<CapabilitySlot, CredentialId>,
-        include_github: bool,
     ) -> Result<AccessProfileRecord, Status> {
         profile_record_from_proto(
             self.inner
                 .create_access_profile(v1::CreateAccessProfileRequest {
                     name: name.to_string(),
                     entries: profile_entries_to_proto(entries),
-                    include_github,
                 })
                 .await?
                 .into_inner(),
         )
     }
 
-    /// Replace the entries and the explicit GitHub selection at an exact
-    /// revision. Callers preserve `include_github` unless changing it.
     pub async fn update_profile(
         &mut self,
         id: &AccessProfileId,
         expected_revision: u64,
         entries: &BTreeMap<CapabilitySlot, CredentialId>,
-        include_github: bool,
     ) -> Result<AccessProfileRecord, Status> {
         profile_record_from_proto(
             self.inner
@@ -634,7 +629,6 @@ impl LocalCredentialClient {
                     profile_id: id.to_string(),
                     expected_revision,
                     entries: profile_entries_to_proto(entries),
-                    include_github,
                 })
                 .await?
                 .into_inner(),
@@ -1528,7 +1522,6 @@ fn profile_from_proto(value: v1::AccessProfileRevision) -> Result<AccessProfile,
         owner: Owner::User(OwnerId::parse(LOCAL_OWNER_ID).map_err(data_loss)?),
         name: AccessProfileName::parse(value.name).map_err(data_loss)?,
         revision: value.revision,
-        include_github: value.include_github,
         entries,
     };
     profile.validate().map_err(data_loss)?;

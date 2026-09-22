@@ -175,13 +175,12 @@ pub fn derive_grants(
     validate_profile_owner(context, &profile.owner)?;
 
     let mut grants =
-        Vec::with_capacity(profile.entries.len() + usize::from(profile.include_github));
-    if profile.include_github {
-        if let Some(grant) =
+        Vec::with_capacity(profile.entries.len() + usize::from(profile.includes_github()));
+    if profile.includes_github()
+        && let Some(grant) =
             derive_github_singleton_grant(context, profile, credentials, catalog, now_unix)?
-        {
-            grants.push(grant);
-        }
+    {
+        grants.push(grant);
     }
     for (slot, credential_id) in &profile.entries {
         if !context.authorized_credentials.contains(credential_id) {

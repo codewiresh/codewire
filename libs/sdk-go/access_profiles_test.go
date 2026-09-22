@@ -165,25 +165,19 @@ func TestAccessProfilesMutationAndBindingMetadata(t *testing.T) {
 	client, fixture := testAccessProfileServer(t)
 	ctx := context.Background()
 	entry := codewire.AccessProfileEntry{CapabilitySlot: "codex", CredentialID: "credential-one"}
-	if _, err := client.AccessProfiles.Create(ctx, "personal", []codewire.AccessProfileEntry{entry}, true); err != nil {
+	if _, err := client.AccessProfiles.Create(ctx, "personal", []codewire.AccessProfileEntry{entry}); err != nil {
 		t.Fatal(err)
 	}
 	create := fixture.last().(*codewirev1.CreateAccessProfileRequest)
-	if create.Name != "personal" || len(create.Entries) != 1 || create.Entries[0].CredentialId != entry.CredentialID || !create.IncludeGithub {
-		t.Fatal("credential metadata reference or GitHub selection changed")
+	if create.Name != "personal" || len(create.Entries) != 1 || create.Entries[0].CredentialId != entry.CredentialID {
+		t.Fatal("credential metadata reference changed")
 	}
-	if _, err := client.AccessProfiles.Update(ctx, "profile-one", accessExact, nil, true); err != nil {
+	if _, err := client.AccessProfiles.Update(ctx, "profile-one", accessExact, nil); err != nil {
 		t.Fatal(err)
 	}
 	update := fixture.last().(*codewirev1.UpdateAccessProfileRequest)
-	if update.ExpectedRevision != accessExact || len(update.Entries) != 0 || !update.IncludeGithub {
-		t.Fatal("exact CAS/empty replacement dropped the GitHub selection")
-	}
-	if _, err := client.AccessProfiles.Update(ctx, "profile-one", accessExact, nil, false); err != nil {
-		t.Fatal(err)
-	}
-	if fixture.last().(*codewirev1.UpdateAccessProfileRequest).IncludeGithub {
-		t.Fatal("explicit GitHub removal was not sent")
+	if update.ExpectedRevision != accessExact || len(update.Entries) != 0 {
+		t.Fatal("exact CAS/empty replacement changed")
 	}
 	if err := client.AccessProfiles.Delete(ctx, "profile-one", ^uint64(0)); err != nil {
 		t.Fatal(err)
@@ -205,14 +199,14 @@ func TestAccessProfilesRejectDuplicateSlotsAndZeroRevisionWithoutTransport(t *te
 	client, fixture := testAccessProfileServer(t)
 	ctx := context.Background()
 	entries := []codewire.AccessProfileEntry{{CapabilitySlot: "codex", CredentialID: "one"}, {CapabilitySlot: "codex", CredentialID: "two"}}
-	if _, err := client.AccessProfiles.Create(ctx, "personal", entries, false); err == nil || !strings.Contains(err.Error(), "duplicate") {
+	if _, err := client.AccessProfiles.Create(ctx, "personal", entries); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatal("duplicate create was not rejected")
 	}
-	if _, err := client.AccessProfiles.Update(ctx, "profile-one", accessExact, entries, false); err == nil || !strings.Contains(err.Error(), "duplicate") {
+	if _, err := client.AccessProfiles.Update(ctx, "profile-one", accessExact, entries); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatal("duplicate update was not rejected")
 	}
 	github := []codewire.AccessProfileEntry{{CapabilitySlot: "github", CredentialID: "one"}}
-	if _, err := client.AccessProfiles.Create(ctx, "personal", github, false); err == nil || !strings.Contains(err.Error(), "includeGitHub") {
+	if _, err := client.AccessProfiles.Create(ctx, "personal", github); err == nil || !strings.Contains(err.Error(), "never an entry") {
 		t.Fatal("GitHub profile entry was not rejected")
 	}
 	zero := uint64(0)
@@ -230,7 +224,7 @@ func TestAccessProfilesRejectDuplicateSlotsAndZeroRevisionWithoutTransport(t *te
 func TestAccessProfilesErrorMappingAndNoStaleCASRetry(t *testing.T) {
 	client, fixture := testAccessProfileServer(t)
 	ctx := context.Background()
-	_, err := client.AccessProfiles.Update(ctx, "stale", accessExact, nil, false)
+	_, err := client.AccessProfiles.Update(ctx, "stale", accessExact, nil)
 	var sdkError *codewire.Error
 	if !errors.As(err, &sdkError) || sdkError.StatusCode != 409 || fixture.count() != 1 {
 		t.Fatalf("stale CAS retried or wrong error: %v", err)

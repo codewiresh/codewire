@@ -160,7 +160,7 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
     let profile = owner
         .create_profile(
             &AccessProfileName::parse("work").unwrap(),
-            &[(CapabilitySlot::codex(), credential.metadata.id.clone())].into(), false,
+            &[(CapabilitySlot::codex(), credential.metadata.id.clone())].into(),
         )
         .await
         .unwrap();

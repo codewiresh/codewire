@@ -3,9 +3,7 @@ use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::sync::Mutex;
 
-use codewire_access::{
-    AccessProfileName, CredentialAuthKind, CredentialId, ProviderId,
-};
+use codewire_access::{AccessProfileName, CredentialAuthKind, CredentialId, ProviderId};
 use codewire_protected_store::{ProtectedStorePersistence, ProtectedValue};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -167,7 +165,7 @@ impl Fixture {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("checkout").unwrap(),
-                BTreeMap::new(), true,
+                BTreeMap::new(),
             )
             .unwrap();
         let request = RepositoryCredentialLeaseRequest {

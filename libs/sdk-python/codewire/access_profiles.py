@@ -16,13 +16,12 @@ class AccessProfileEntry(TypedDict):
 
 
 class AccessProfile(TypedDict):
-    """One immutable revision. GitHub is never an entry: ``include_github``
-    selects the account's one GitHub connection, resolved at launch time."""
+    """One immutable revision. Every profile includes the account's one GitHub
+    connection; GitHub is never an entry."""
 
     id: str
     name: str
     revision: int
-    include_github: bool
     entries: list[AccessProfileEntry]
 
 
@@ -52,7 +51,7 @@ def _entries(entries: Sequence[AccessProfileEntry]) -> list[pb.AccessProfileEntr
     for entry in entries:
         slot = entry["capability_slot"]
         if slot == "github":
-            raise ValueError("select GitHub with include_github, not a profile entry")
+            raise ValueError("every profile includes the account's GitHub connection; it is never an entry")
         if slot in slots:
             raise ValueError("duplicate access profile capability slot")
         slots.add(slot)
@@ -62,18 +61,11 @@ def _entries(entries: Sequence[AccessProfileEntry]) -> list[pb.AccessProfileEntr
     return result
 
 
-def _include_github(value: bool) -> bool:
-    if type(value) is not bool:
-        raise ValueError("include_github must be an explicit bool")
-    return value
-
-
 def _profile(value: pb.AccessProfile) -> AccessProfile:
     return {
         "id": value.id,
         "name": value.name,
         "revision": _revision(value.revision),
-        "include_github": value.include_github,
         "entries": [{"capability_slot": entry.capability_slot,
                      "credential_id": entry.credential_id} for entry in value.entries],
     }
@@ -128,30 +120,23 @@ class AccessProfiles:
             raise RuntimeError("access profile response omitted access_profile")
         return _profile(response.access_profile)
 
-    def create(self, name: str, entries: Sequence[AccessProfileEntry], *,
-               include_github: bool) -> AccessProfile:
+    def create(self, name: str, entries: Sequence[AccessProfileEntry]) -> AccessProfile:
         response = self._context.unary(
             self._client.create_access_profile,
-            pb.CreateAccessProfileRequest(
-                name=name, entries=_entries(entries),
-                include_github=_include_github(include_github),
-            ),
+            pb.CreateAccessProfileRequest(name=name, entries=_entries(entries)),
         )
         if not response.HasField("access_profile"):
             raise RuntimeError("access profile response omitted access_profile")
         return _profile(response.access_profile)
 
     def update(self, profile_id: str, expected_revision: int,
-               entries: Sequence[AccessProfileEntry], *,
-               include_github: bool) -> AccessProfile:
-        """Replace the complete entry set, including an explicitly empty set,
-        and the explicit GitHub selection."""
+               entries: Sequence[AccessProfileEntry]) -> AccessProfile:
+        """Replace the complete entry set, including an explicitly empty set."""
         response = self._context.unary(
             self._client.update_access_profile,
             pb.UpdateAccessProfileRequest(
                 access_profile_id=profile_id,
                 expected_revision=_revision(expected_revision), entries=_entries(entries),
-                include_github=_include_github(include_github),
             ),
         )
         if not response.HasField("access_profile"):

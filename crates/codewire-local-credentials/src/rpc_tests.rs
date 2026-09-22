@@ -508,7 +508,7 @@ async fn rotation_rpc_requires_an_exact_positive_revision_and_clears_account_hin
     let profile = client
         .create_profile(
             &AccessProfileName::parse("reconnect-profile").unwrap(),
-            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
         )
         .await
         .unwrap();
@@ -912,7 +912,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
     let profile = client
         .create_profile(
             &AccessProfileName::parse("work").unwrap(),
-            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
         )
         .await
         .unwrap();
@@ -935,7 +935,6 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
                 CapabilitySlot::parse("anthropic").unwrap(),
                 credential.metadata.id.clone(),
             )]),
-            false,
         )
         .await
         .unwrap_err();
@@ -1069,7 +1068,7 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
     let profile = client
         .create_profile(
             &AccessProfileName::parse("github-work").unwrap(),
-            &BTreeMap::new(), true,
+            &BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1125,7 +1124,7 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
         .unwrap();
     let entries = BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]);
     let profile = client
-        .create_profile(&AccessProfileName::parse("bound").unwrap(), &entries, false)
+        .create_profile(&AccessProfileName::parse("bound").unwrap(), &entries)
         .await
         .unwrap();
     let environment_id = EnvironmentId::parse("env-bound").unwrap();
@@ -1200,7 +1199,7 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
     assert!(!rendered.contains("protected_entry"));
 
     let updated = client
-        .update_profile(&profile.profile.id, profile.profile.revision, &entries, false)
+        .update_profile(&profile.profile.id, profile.profile.revision, &entries)
         .await
         .unwrap();
     let updated_binding = EnvironmentAccessBinding {
@@ -1501,7 +1500,7 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
     let profile = owner
         .create_profile(
             &AccessProfileName::parse("broker").unwrap(),
-            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
         )
         .await
         .unwrap();

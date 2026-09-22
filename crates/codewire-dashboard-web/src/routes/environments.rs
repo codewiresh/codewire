@@ -3272,7 +3272,6 @@ mod tests {
                     bound_revision: false,
                     synthetic: false,
                     selected: false,
-                    include_github: false,
                 }],
                 ..Default::default()
             },
@@ -3322,7 +3321,6 @@ mod tests {
                     bound_revision: false,
                     synthetic: false,
                     selected: false,
-                    include_github: false,
                 }],
                 ..Default::default()
             },
@@ -3931,7 +3929,9 @@ mod tests {
             form.creation_draft_parameter()
         )));
         assert!(html.contains("data-github-browser data-github-state=\"not-configured\""));
-        assert!(html.contains("data-repositories-url=\"/organization/_fragments/github-repositories\""));
+        assert!(
+            html.contains("data-repositories-url=\"/organization/_fragments/github-repositories\"")
+        );
         assert!(html.contains("<h4 id=\"github-browser-title\""));
         assert!(!html.contains("data-github-repository-picker"));
         assert!(!form.sources.credential_selection_enabled);

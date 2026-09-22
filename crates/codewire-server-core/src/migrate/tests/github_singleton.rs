@@ -1,4 +1,4 @@
-//! Proof for the account-level GitHub singleton and profile `include_github`.
+//! Proof for the account-level GitHub singleton that every personal profile includes.
 
 use super::*;
 
@@ -26,12 +26,7 @@ fn github_singleton_upgrade_retains_accepted_staged28() -> anyhow::Result<()> {
     assert_accepted_staged28()
 }
 
-async fn seed_github(
-    pool: &PgPool,
-    id: &str,
-    user_id: &str,
-    status: &str,
-) -> anyhow::Result<()> {
+async fn seed_github(pool: &PgPool, id: &str, user_id: &str, status: &str) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO platform_credentials \
          (id, user_id, organization_id, provider, authentication_kind, display_name, \
@@ -90,11 +85,9 @@ async fn seed_profile(
     Ok(())
 }
 
-async fn include_github_column_present(pool: &PgPool) -> anyhow::Result<bool> {
+async fn singleton_index_present(pool: &PgPool) -> anyhow::Result<bool> {
     Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
-          WHERE table_schema='public' AND table_name='platform_access_profile_revisions' \
-            AND column_name='include_github')",
+        "SELECT to_regclass('public.platform_credentials_user_github_singleton_key') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?)
@@ -127,13 +120,19 @@ async fn seed_legacy_github(pool: &PgPool) -> anyhow::Result<()> {
         ],
     )
     .await?;
-    seed_profile(pool, "plain", "credential-user-a", &[&[("codex", "codex-a")]]).await?;
+    seed_profile(
+        pool,
+        "plain",
+        "credential-user-a",
+        &[&[("codex", "codex-a")]],
+    )
+    .await?;
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
-async fn github_singleton_staged_upgrade_converts_entries_and_enforces_one_connection()
+async fn github_singleton_staged_upgrade_drops_pinned_entries_and_enforces_one_connection()
 -> anyhow::Result<()> {
     let admin = std::env::var("TEST_DATABASE_URL").context("TEST_DATABASE_URL required")?;
     let db = TestDatabase::create(&admin).await?;
@@ -159,24 +158,7 @@ async fn github_singleton_staged_upgrade_converts_entries_and_enforces_one_conne
                 && after[..28] == before
                 && after[28].0 == VERSION
         );
-        // Every revision that selected GitHub keeps the choice; no revision
-        // retains a GitHub credential ID.
-        let toggles: Vec<(String, i64, bool)> = sqlx::query_as(
-            "SELECT profile_id, revision, include_github \
-               FROM platform_access_profile_revisions ORDER BY 1, 2",
-        )
-        .fetch_all(&pool)
-        .await?;
-        anyhow::ensure!(
-            toggles
-                == vec![
-                    ("plain".into(), 1, false),
-                    ("work".into(), 1, true),
-                    ("work".into(), 2, false),
-                    ("work".into(), 3, true),
-                ],
-            "unexpected include_github backfill: {toggles:?}"
-        );
+        // Pinned GitHub credential IDs are discarded; other entries remain.
         anyhow::ensure!(
             entries(&pool).await?
                 == vec![
@@ -242,13 +224,16 @@ async fn github_singleton_staged_upgrade_converts_entries_and_enforces_one_conne
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
-async fn github_singleton_fails_closed_on_ambiguous_connections_then_retries()
--> anyhow::Result<()> {
+async fn github_singleton_fails_closed_on_ambiguous_connections_then_retries() -> anyhow::Result<()>
+{
     let admin = std::env::var("TEST_DATABASE_URL").context("TEST_DATABASE_URL required")?;
     let db = TestDatabase::create(&admin).await?;
     let result = async {
         apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db.url)
+            .await?;
         seed_legacy_github(&pool).await?;
         // A second active connection for one user is ambiguous. The migration
         // must never choose a winner.
@@ -262,15 +247,17 @@ async fn github_singleton_fails_closed_on_ambiguous_connections_then_retries()
             .err()
             .context("ambiguous GitHub connections were migrated")?;
         anyhow::ensure!(format!("{error:#}").contains("multiple active GitHub credentials"));
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db.url)
+            .await?;
         anyhow::ensure!(applied_migrations(&pool).await? == before);
-        anyhow::ensure!(!include_github_column_present(&pool).await?);
+        anyhow::ensure!(!singleton_index_present(&pool).await?);
         anyhow::ensure!(entries(&pool).await? == entries_before);
-        let github: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM platform_credentials WHERE provider='github'",
-        )
-        .fetch_one(&pool)
-        .await?;
+        let github: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM platform_credentials WHERE provider='github'")
+                .fetch_one(&pool)
+                .await?;
         anyhow::ensure!(github == 3, "failed migration removed GitHub rows");
 
         // The operator resolves the ambiguity explicitly, then retries.
@@ -279,8 +266,11 @@ async fn github_singleton_fails_closed_on_ambiguous_connections_then_retries()
             .await?;
         pool.close().await;
         ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(include_github_column_present(&pool).await?);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db.url)
+            .await?;
+        anyhow::ensure!(singleton_index_present(&pool).await?);
         anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
         pool.close().await;
         Ok(())
@@ -298,7 +288,7 @@ async fn github_singleton_rollback_replays_staged28_only_in_disposable_applicati
     let result = async {
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(include_github_column_present(&pool).await?);
+        anyhow::ensure!(singleton_index_present(&pool).await?);
         seed_platform_credential_owners(&pool).await?;
         seed_github(&pool, "github-discarded", "credential-user-a", "active").await?;
         sqlx::raw_sql(
@@ -319,11 +309,10 @@ async fn github_singleton_rollback_replays_staged28_only_in_disposable_applicati
         .fetch_one(&pool)
         .await?;
         anyhow::ensure!(prior_checksum == ACCEPTED_STAGED28);
-        anyhow::ensure!(!include_github_column_present(&pool).await?);
+        anyhow::ensure!(!singleton_index_present(&pool).await?);
         anyhow::ensure!(
             sqlx::query_scalar::<_, bool>(
-                "SELECT to_regclass('public.platform_credentials_user_github_singleton_key') IS NULL \
-                 AND NOT EXISTS(SELECT 1 FROM public.platform_credentials)",
+                "SELECT NOT EXISTS(SELECT 1 FROM public.platform_credentials)",
             )
             .fetch_one(&pool)
             .await?

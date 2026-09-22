@@ -296,7 +296,7 @@ fn bind_credential(
     let profile = authority
         .create_profile(
             AccessProfileName::parse("work").expect("profile name"),
-            profile_entries(credential_id), false,
+            profile_entries(credential_id),
         )
         .expect("create profile");
     authority
@@ -328,13 +328,13 @@ fn multiple_credentials_are_selected_by_profiles_without_material_in_metadata() 
     let work_profile = authority
         .create_profile(
             AccessProfileName::parse("work").expect("profile name"),
-            profile_entries(&work.metadata.id), false,
+            profile_entries(&work.metadata.id),
         )
         .expect("create work profile");
     let personal_profile = authority
         .create_profile(
             AccessProfileName::parse("personal").expect("profile name"),
-            profile_entries(&personal.metadata.id), false,
+            profile_entries(&personal.metadata.id),
         )
         .expect("create personal profile");
 
@@ -433,7 +433,7 @@ fn repository_lease_binds_exact_github_profile_revision_and_route() {
     let profile = authority
         .create_profile(
             AccessProfileName::parse("github-work").unwrap(),
-            BTreeMap::new(), true,
+            BTreeMap::new(),
         )
         .expect("create GitHub profile");
     let request = RepositoryCredentialLeaseRequest {
@@ -521,7 +521,7 @@ fn repository_ssh_admission_is_metadata_only_exact_and_revocation_aware() {
     let profile = authority
         .create_profile(
             AccessProfileName::parse("repository-ssh").unwrap(),
-            BTreeMap::from([(ssh_slot, credential.metadata.id.clone())]), false,
+            BTreeMap::from([(ssh_slot, credential.metadata.id.clone())]),
         )
         .unwrap();
     let request = RepositoryCredentialLeaseRequest {
@@ -1045,7 +1045,7 @@ fn oauth_refresh_start_rechecks_binding_and_hard_expiry_after_reservation() {
             let replacement = authority
                 .create_profile(
                     AccessProfileName::parse("other").unwrap(),
-                    BTreeMap::from([(CapabilitySlot::codex(), other.metadata.id)]), false,
+                    BTreeMap::from([(CapabilitySlot::codex(), other.metadata.id)]),
                 )
                 .unwrap();
             authority
@@ -1118,7 +1118,7 @@ fn oauth_refresh_attempt_id_cannot_alias_another_credential_after_rebind() {
     let replacement = authority
         .create_profile(
             AccessProfileName::parse("second").unwrap(),
-            BTreeMap::from([(CapabilitySlot::codex(), second.metadata.id.clone())]), false,
+            BTreeMap::from([(CapabilitySlot::codex(), second.metadata.id.clone())]),
         )
         .unwrap();
     authority
@@ -1464,7 +1464,7 @@ fn profile_revisions_are_immutable_and_only_current_references_block_deletion() 
     let profile = authority
         .create_profile(
             AccessProfileName::parse("work").expect("profile name"),
-            profile_entries(&first.metadata.id), false,
+            profile_entries(&first.metadata.id),
         )
         .expect("create profile");
     assert_eq!(
@@ -1473,7 +1473,7 @@ fn profile_revisions_are_immutable_and_only_current_references_block_deletion() 
     );
 
     let revision_two = authority
-        .update_profile(&profile.profile.id, 1, profile_entries(&second.metadata.id), false)
+        .update_profile(&profile.profile.id, 1, profile_entries(&second.metadata.id))
         .expect("update profile");
     assert_eq!(revision_two.profile.revision, 2);
     let revisions = authority
@@ -1500,7 +1500,7 @@ fn profile_revisions_are_immutable_and_only_current_references_block_deletion() 
         Err(LocalCredentialError::ProfileRevisionNotFound)
     );
     assert_eq!(
-        authority.update_profile(&profile.profile.id, 1, profile_entries(&first.metadata.id), false),
+        authority.update_profile(&profile.profile.id, 1, profile_entries(&first.metadata.id)),
         Err(LocalCredentialError::StaleProfileRevision)
     );
     authority
@@ -1542,7 +1542,7 @@ fn environment_bindings_pin_revisions_survive_restart_and_guard_deletion() {
     let profile = authority
         .create_profile(
             AccessProfileName::parse("work").expect("profile name"),
-            profile_entries(&first.metadata.id), false,
+            profile_entries(&first.metadata.id),
         )
         .expect("create profile");
     let environment_id = environment("env-one");
@@ -1564,7 +1564,7 @@ fn environment_bindings_pin_revisions_survive_restart_and_guard_deletion() {
         .update_profile(
             &profile.profile.id,
             profile.profile.revision,
-            profile_entries(&second.metadata.id), false,
+            profile_entries(&second.metadata.id),
         )
         .expect("update profile");
     let grants = authority
@@ -1694,7 +1694,7 @@ fn environment_binding_rejects_missing_revisions_and_zero_generations() {
     let profile = authority
         .create_profile(
             AccessProfileName::parse("work").expect("profile name"),
-            profile_entries(&credential.metadata.id), false,
+            profile_entries(&credential.metadata.id),
         )
         .expect("create profile");
     let environment_id = environment("env-one");
@@ -1735,7 +1735,7 @@ fn corrupt_environment_binding_metadata_fails_authority_restart() {
     let profile = authority
         .create_profile(
             AccessProfileName::parse("work").expect("profile name"),
-            profile_entries(&credential.metadata.id), false,
+            profile_entries(&credential.metadata.id),
         )
         .expect("create profile");
     authority
@@ -2306,7 +2306,7 @@ fn local_profiles_reject_organization_scope_and_incompatible_credentials() {
     assert!(matches!(
         authority.create_profile(
             AccessProfileName::parse("invalid").expect("profile name"),
-            profile_entries(&credential.metadata.id), false
+            profile_entries(&credential.metadata.id)
         ),
         Err(LocalCredentialError::Access(
             AccessError::UnsupportedCapability { .. }
@@ -2732,7 +2732,7 @@ fn generic_operation_lease_rejects_runnable_ssh_before_store_read() {
     let profile = authority
         .create_profile(
             AccessProfileName::parse("ssh-generic").unwrap(),
-            BTreeMap::from([(ssh_slot.clone(), credential.metadata.id)]), false,
+            BTreeMap::from([(ssh_slot.clone(), credential.metadata.id)]),
         )
         .unwrap();
     authority
@@ -2763,7 +2763,6 @@ fn downgrade_to_schema_four(connection: &Connection) {
             "DROP INDEX credentials_github_oauth_singleton;
              DROP TRIGGER profile_entries_github_insert;
              DROP TRIGGER profile_entries_github_update;
-             ALTER TABLE profile_revisions DROP COLUMN include_github;
              PRAGMA user_version = 4;",
         )
         .expect("construct exact schema-four fixture");
@@ -2800,13 +2799,21 @@ fn new_github_credential(name: &str) -> NewCredential {
 }
 
 #[test]
-fn schema_four_moves_github_entries_to_include_github_without_new_revisions() {
+fn schema_four_drops_pinned_github_entries_without_new_revisions() {
     let temp = TempDir::new().expect("temporary directory");
     let root = authority_root(&temp);
     let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
-    let authority = LocalCredentialAuthority::open(&root, store.clone(), codewire_access::builtin_provider_catalog()).unwrap();
+    let authority = LocalCredentialAuthority::open(
+        &root,
+        store.clone(),
+        codewire_access::builtin_provider_catalog(),
+    )
+    .unwrap();
     let github = authority
-        .add_credential(new_github_credential("github-work"), material(b"synthetic-github"))
+        .add_credential(
+            new_github_credential("github-work"),
+            material(b"synthetic-github"),
+        )
         .unwrap();
     let codex = authority
         .add_credential(new_credential("codex-work"), material(b"synthetic-codex"))
@@ -2815,7 +2822,6 @@ fn schema_four_moves_github_entries_to_include_github_without_new_revisions() {
         .create_profile(
             AccessProfileName::parse("work").unwrap(),
             BTreeMap::from([(CapabilitySlot::codex(), codex.metadata.id.clone())]),
-            false,
         )
         .unwrap();
     let work = authority
@@ -2823,14 +2829,12 @@ fn schema_four_moves_github_entries_to_include_github_without_new_revisions() {
             &work.profile.id,
             1,
             BTreeMap::from([(CapabilitySlot::codex(), codex.metadata.id.clone())]),
-            false,
         )
         .unwrap();
     let plain = authority
         .create_profile(
             AccessProfileName::parse("plain").unwrap(),
             BTreeMap::from([(CapabilitySlot::codex(), codex.metadata.id.clone())]),
-            false,
         )
         .unwrap();
     drop(authority);
@@ -2844,25 +2848,46 @@ fn schema_four_moves_github_entries_to_include_github_without_new_revisions() {
             .execute(
                 "INSERT INTO profile_entries(profile_id, revision, capability_slot, credential_id)
                  VALUES (?1, ?2, 'github', ?3)",
-                params![work.profile.id.as_str(), revision, github.metadata.id.as_str()],
+                params![
+                    work.profile.id.as_str(),
+                    revision,
+                    github.metadata.id.as_str()
+                ],
             )
             .unwrap();
     }
     drop(connection);
 
     for _ in 0..2 {
-        let authority = LocalCredentialAuthority::open(&root, store.clone(), codewire_access::builtin_provider_catalog())
-            .expect("open upgraded authority");
+        let authority = LocalCredentialAuthority::open(
+            &root,
+            store.clone(),
+            codewire_access::builtin_provider_catalog(),
+        )
+        .expect("open upgraded authority");
         let current = authority.get_profile(&work.profile.id).unwrap();
-        assert_eq!(current.profile.revision, 2, "the upgrade must not create revisions");
-        assert!(current.profile.include_github);
+        assert_eq!(
+            current.profile.revision, 2,
+            "the upgrade must not create revisions"
+        );
+        assert!(current.profile.includes_github());
         assert_eq!(
             current.profile.entries,
             BTreeMap::from([(CapabilitySlot::codex(), codex.metadata.id.clone())])
         );
         let historical = authority.get_profile_revision(&work.profile.id, 1).unwrap();
-        assert!(historical.profile.include_github);
-        assert!(!authority.get_profile(&plain.profile.id).unwrap().profile.include_github);
+        assert_eq!(
+            historical.profile.entries,
+            BTreeMap::from([(CapabilitySlot::codex(), codex.metadata.id.clone())])
+        );
+        assert_eq!(
+            authority
+                .get_profile(&plain.profile.id)
+                .unwrap()
+                .profile
+                .entries,
+            BTreeMap::from([(CapabilitySlot::codex(), codex.metadata.id.clone())])
+        );
         drop(authority);
         let connection = Connection::open(root.join(DATABASE_FILE)).unwrap();
         let version: i64 = connection
@@ -2895,9 +2920,17 @@ fn schema_four_with_two_active_github_connections_fails_closed_and_stays_version
     let temp = TempDir::new().expect("temporary directory");
     let root = authority_root(&temp);
     let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
-    let authority = LocalCredentialAuthority::open(&root, store.clone(), codewire_access::builtin_provider_catalog()).unwrap();
+    let authority = LocalCredentialAuthority::open(
+        &root,
+        store.clone(),
+        codewire_access::builtin_provider_catalog(),
+    )
+    .unwrap();
     let github = authority
-        .add_credential(new_github_credential("github-work"), material(b"synthetic-github"))
+        .add_credential(
+            new_github_credential("github-work"),
+            material(b"synthetic-github"),
+        )
         .unwrap();
     drop(authority);
     let connection = Connection::open(root.join(DATABASE_FILE)).unwrap();
@@ -2906,37 +2939,52 @@ fn schema_four_with_two_active_github_connections_fails_closed_and_stays_version
     drop(connection);
 
     assert!(matches!(
-        LocalCredentialAuthority::open(&root, store.clone(), codewire_access::builtin_provider_catalog()),
+        LocalCredentialAuthority::open(
+            &root,
+            store.clone(),
+            codewire_access::builtin_provider_catalog()
+        ),
         Err(LocalCredentialError::AmbiguousGitHubConnections)
     ));
     let connection = Connection::open(root.join(DATABASE_FILE)).unwrap();
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4, "a failed upgrade must leave version 4 unchanged");
-    let include_github: i64 = connection
+    assert_eq!(
+        version, 4,
+        "a failed upgrade must leave version 4 unchanged"
+    );
+    let singleton_index: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('profile_revisions')
-             WHERE name = 'include_github'",
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'index' AND name = 'credentials_github_oauth_singleton'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(include_github, 0);
+    assert_eq!(singleton_index, 0);
 }
 
 #[test]
-fn one_github_connection_per_store_and_include_github_follows_reconnect_and_delete() {
+fn one_github_connection_per_store_follows_reconnect_and_delete_in_every_profile() {
     let temp = TempDir::new().expect("temporary directory");
     let root = authority_root(&temp);
     let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
-    let authority = LocalCredentialAuthority::open(&root, store, codewire_access::builtin_provider_catalog()).unwrap();
+    let authority =
+        LocalCredentialAuthority::open(&root, store, codewire_access::builtin_provider_catalog())
+            .unwrap();
     let github = authority
-        .add_credential(new_github_credential("github-work"), material(b"synthetic-github"))
+        .add_credential(
+            new_github_credential("github-work"),
+            material(b"synthetic-github"),
+        )
         .unwrap();
     // A second connection fails closed, whatever its name.
     assert!(matches!(
-        authority.add_credential(new_github_credential("github-other"), material(b"synthetic-other")),
+        authority.add_credential(
+            new_github_credential("github-other"),
+            material(b"synthetic-other")
+        ),
         Err(LocalCredentialError::GitHubAlreadyConnected)
     ));
     // GitHub is never a profile entry.
@@ -2945,12 +2993,11 @@ fn one_github_connection_per_store_and_include_github_follows_reconnect_and_dele
             .create_profile(
                 AccessProfileName::parse("pinned").unwrap(),
                 BTreeMap::from([(CapabilitySlot::github(), github.metadata.id.clone())]),
-                false,
             )
             .is_err()
     );
     let profile = authority
-        .create_profile(AccessProfileName::parse("work").unwrap(), BTreeMap::new(), true)
+        .create_profile(AccessProfileName::parse("work").unwrap(), BTreeMap::new())
         .unwrap();
     let request = RepositoryCredentialLeaseRequest {
         request_id: Uuid::new_v4(),
@@ -2961,14 +3008,17 @@ fn one_github_connection_per_store_and_include_github_follows_reconnect_and_dele
         revision: String::new(),
         known_hosts: Vec::new(),
     };
-    assert!(authority.admit_repository_credential_operation(&request).is_ok());
+    assert!(
+        authority
+            .admit_repository_credential_operation(&request)
+            .is_ok()
+    );
 
     // Delete forgets the connection and leaves the profile untouched.
     authority.revoke_credential(&github.metadata.id).unwrap();
     authority.delete_credential(&github.metadata.id).unwrap();
     let after_delete = authority.get_profile(&profile.profile.id).unwrap();
     assert_eq!(after_delete.profile.revision, 1);
-    assert!(after_delete.profile.include_github);
     assert!(matches!(
         authority.admit_repository_credential_operation(&request),
         Err(LocalCredentialError::CredentialOperationLeaseDenied)
@@ -2976,15 +3026,26 @@ fn one_github_connection_per_store_and_include_github_follows_reconnect_and_dele
 
     // Reconnect restores use without a new profile revision.
     let reconnected = authority
-        .add_credential(new_github_credential("github-work"), material(b"synthetic-github-2"))
+        .add_credential(
+            new_github_credential("github-work"),
+            material(b"synthetic-github-2"),
+        )
         .unwrap();
-    let RepositoryCredentialAdmission::GitHubOAuth(admission) =
-        authority.admit_repository_credential_operation(&request).unwrap()
+    let RepositoryCredentialAdmission::GitHubOAuth(admission) = authority
+        .admit_repository_credential_operation(&request)
+        .unwrap()
     else {
         panic!("expected GitHub OAuth admission");
     };
     assert_eq!(admission.credential.metadata.id, reconnected.metadata.id);
-    assert_eq!(authority.get_profile(&profile.profile.id).unwrap().profile.revision, 1);
+    assert_eq!(
+        authority
+            .get_profile(&profile.profile.id)
+            .unwrap()
+            .profile
+            .revision,
+        1
+    );
 }
 
 #[test]

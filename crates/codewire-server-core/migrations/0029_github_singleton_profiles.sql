@@ -1,5 +1,5 @@
--- GitHub is one account-level connection. Profiles retain only a boolean
--- capability selection and never retain the connection's credential ID.
+-- GitHub is one account-level connection. Every personal profile includes it,
+-- so profiles never retain the connection's credential ID.
 
 -- Fail before rewriting any profile if the existing data does not have an
 -- unambiguous active GitHub singleton for each user. This is deliberately not
@@ -22,22 +22,8 @@ BEGIN
 END;
 $$;
 
-ALTER TABLE public.platform_access_profile_revisions
-    ADD COLUMN include_github boolean NOT NULL DEFAULT false;
-
--- Every historical revision that selected GitHub keeps that selection. The
--- credential ID is intentionally discarded: runtime resolves the current
--- user-owned singleton and rechecks its active provider access.
-UPDATE public.platform_access_profile_revisions AS revision
-   SET include_github = true
- WHERE EXISTS (
-    SELECT 1
-      FROM public.platform_access_profile_entries AS entry
-     WHERE entry.profile_id = revision.profile_id
-       AND entry.revision = revision.revision
-       AND entry.capability_slot = 'github'
-);
-
+-- Every personal profile includes the owner's one GitHub connection, resolved
+-- at launch. A pinned GitHub credential ID is discarded; no revision changes.
 DELETE FROM public.platform_access_profile_entries
  WHERE capability_slot = 'github';
 

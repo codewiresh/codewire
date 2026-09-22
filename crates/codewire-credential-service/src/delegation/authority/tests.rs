@@ -114,7 +114,8 @@ impl KekProvider for TaggedApplicationKek {
 mod public_wire;
 
 fn platform_selection() -> PlatformProjectionSelection {
-    let mut reserved_keys = platform_projection_reserved_keys([]).unwrap();
+    // Every personal profile includes GitHub, so its keys are always reserved.
+    let mut reserved_keys = platform_projection_reserved_keys(["github"]).unwrap();
     reserved_keys.insert(NATIVE_CODEX_HOME_KEY.into());
     PlatformProjectionSelection {
         creator: "owner-user".into(),
@@ -225,7 +226,7 @@ async fn setup_owner_sources_with_entries(
             .await?;
     }
 
-    let mut reserved = platform_projection_reserved_keys([])?;
+    let mut reserved = platform_projection_reserved_keys(["github"])?;
     reserved.extend([NATIVE_CODEX_HOME_KEY.into(), "SSH_AUTH_SOCK".into()]);
     let platform = PlatformProjectionSelection {
         creator: ALICE.into(),

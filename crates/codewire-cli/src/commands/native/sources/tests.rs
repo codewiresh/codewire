@@ -627,7 +627,8 @@ async fn platform_metadata_resolution_is_authenticated_exact_and_material_free()
     assert_eq!(
         resolved.profile,
         Some(ResolvedProfile {
-            profile_slots: BTreeSet::from(["codex".into(), "openai".into()]),
+            // Every personal profile includes the account's GitHub connection.
+            profile_slots: BTreeSet::from(["codex".into(), "github".into(), "openai".into()]),
             ..profile()
         })
     );
@@ -635,7 +636,7 @@ async fn platform_metadata_resolution_is_authenticated_exact_and_material_free()
     assert_eq!(bound.server_url, server.uri());
     assert_eq!(bound.organization_id, "org_test");
     assert_eq!(bound.user_id, "user_test");
-    assert_eq!(bound.profile_slots, ["codex", "openai"]);
+    assert_eq!(bound.profile_slots, ["codex", "github", "openai"]);
     assert_eq!(
         server.received_requests().await.unwrap().len(),
         4,

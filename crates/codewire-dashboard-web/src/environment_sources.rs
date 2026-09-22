@@ -221,7 +221,7 @@ fn profile_option(
         return Err(invalid_options());
     }
     let mut slots = BTreeSet::new();
-    let mut identity_count = profile
+    let identity_count = profile
         .entries
         .iter()
         .map(|entry| &entry.credential_id)
@@ -240,9 +240,6 @@ fn profile_option(
             return Err(invalid_options());
         }
     }
-    if profile.include_github {
-        identity_count += 1;
-    }
     Ok(EnvironmentCredentialProfileOption {
         id: profile.id,
         name: profile.name,
@@ -251,7 +248,6 @@ fn profile_option(
         bound_revision: false,
         synthetic: false,
         selected: false,
-        include_github: profile.include_github,
     })
 }
 
@@ -370,7 +366,6 @@ impl EnvironmentSourceFieldsView {
                 bound_revision: already_bound,
                 synthetic: true,
                 selected: true,
-                include_github: false,
             });
         }
         // Consent is not inferred from the stored selection.
@@ -466,11 +461,10 @@ mod tests {
                 credential_id: other_id.into(),
                 ..Default::default()
             }],
-            include_github: true,
             ..Default::default()
         };
         let option = profile_option(profile.clone()).expect("profile");
-        assert!(option.include_github);
+        assert_eq!(option.identity_count, 1);
         let github = Credential {
             id: github_id.into(),
             name: "verified-user".into(),
@@ -516,8 +510,10 @@ mod tests {
         });
         assert!(profile_option(duplicated_slot).is_err());
 
-        let mut repeated = Credential::default();
-        repeated.id = github_id.into();
+        let repeated = Credential {
+            id: github_id.into(),
+            ..Default::default()
+        };
         let mut duplicate = Vec::new();
         assert!(github_connections(vec![repeated.clone(), repeated], &mut duplicate).is_err());
     }
@@ -628,7 +624,7 @@ mod tests {
             }
             .render()
             .unwrap();
-            assert!(body.contains("data-include-github=\"false\" selected"));
+            assert!(body.contains(&format!("value=\"{id}@7\" selected")));
             assert!(body.contains("revision 7 · unavailable selection"));
             assert!(body.contains("aria-invalid=\"true\""));
             assert!(!body.contains(" disabled"));
@@ -758,7 +754,6 @@ mod tests {
                 bound_revision: false,
                 synthetic: false,
                 selected: true,
-                include_github: false,
             }],
             application_selection_enabled: true,
             credential_selection_enabled: true,
@@ -776,7 +771,7 @@ mod tests {
             assert!(body.contains(&format!("id=\"{source_fields_id}-secret-project\"")));
             assert!(body.contains("name=\"include_user_secrets\" value=\"platform\" checked"));
             assert!(body.contains("value=\"project-id\" selected"));
-            assert!(body.contains("value=\"profile-id@7\" data-include-github=\"false\" selected"));
+            assert!(body.contains("value=\"profile-id@7\" selected"));
             assert!(body.contains("revision 7"));
             assert!(!body.contains("<unsafe-"));
             assert!(!body.contains(" disabled"));

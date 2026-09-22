@@ -214,9 +214,9 @@ impl OwnerLocalSource {
                 }
                 validate_reserved_keys(&self.selection.platform, selected.selected_slots())?;
                 let mut authorized: BTreeSet<_> = selected.entries.values().cloned().collect();
-                // Include GitHub selects the account's current connection; a
-                // disconnected account omits GitHub instead of fabricating it.
-                if selected.include_github
+                // Every personal profile includes the account's current GitHub
+                // connection; a missing one is omitted instead of fabricated.
+                if selected.includes_github()
                     && let Some(github) =
                         codewire_platform_credentials::active_github_connection(&mut **tx, &owner)
                             .await

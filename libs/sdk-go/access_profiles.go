@@ -15,15 +15,13 @@ type AccessProfileEntry struct {
 	CredentialID   string `json:"credential_id"`
 }
 
-// AccessProfile is one immutable revision of a personal platform profile.
-// GitHub is never an entry: IncludeGitHub selects the account's one GitHub
-// connection, resolved at launch time.
+// AccessProfile is one immutable revision of a personal platform profile. Every
+// profile includes the account's one GitHub connection; GitHub is never an entry.
 type AccessProfile struct {
-	ID            string               `json:"id"`
-	Name          string               `json:"name"`
-	Revision      uint64               `json:"revision"`
-	IncludeGitHub bool                 `json:"include_github"`
-	Entries       []AccessProfileEntry `json:"entries"`
+	ID       string               `json:"id"`
+	Name     string               `json:"name"`
+	Revision uint64               `json:"revision"`
+	Entries  []AccessProfileEntry `json:"entries"`
 }
 
 // EnvironmentAccessProfileBinding is an exact selection, not an access grant
@@ -58,7 +56,7 @@ func accessProfileEntries(entries []AccessProfileEntry) ([]*codewirev1.AccessPro
 	slots := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		if entry.CapabilitySlot == "github" {
-			return nil, fmt.Errorf("codewire: select GitHub with includeGitHub, not a profile entry")
+			return nil, fmt.Errorf("codewire: every profile includes the account's GitHub connection; it is never an entry")
 		}
 		if slots[entry.CapabilitySlot] {
 			return nil, fmt.Errorf("codewire: duplicate access profile capability slot")
@@ -76,7 +74,7 @@ func fromProtoAccessProfile(profile *codewirev1.AccessProfile) (*AccessProfile, 
 	if err := accessProfileRevision(profile.GetRevision()); err != nil {
 		return nil, err
 	}
-	result := &AccessProfile{ID: profile.GetId(), Name: profile.GetName(), Revision: profile.GetRevision(), IncludeGitHub: profile.GetIncludeGithub(), Entries: make([]AccessProfileEntry, 0, len(profile.GetEntries()))}
+	result := &AccessProfile{ID: profile.GetId(), Name: profile.GetName(), Revision: profile.GetRevision(), Entries: make([]AccessProfileEntry, 0, len(profile.GetEntries()))}
 	for _, entry := range profile.GetEntries() {
 		if entry == nil {
 			return nil, fmt.Errorf("codewire: access profile response omitted entry")
@@ -143,24 +141,22 @@ func (s *AccessProfileService) get(ctx context.Context, request *codewirev1.GetA
 	return fromProtoAccessProfile(response.Msg.GetAccessProfile())
 }
 
-// Create publishes the supplied complete entry set and GitHub selection as a
-// new personal profile.
-func (s *AccessProfileService) Create(ctx context.Context, name string, entries []AccessProfileEntry, includeGitHub bool) (*AccessProfile, error) {
+// Create publishes the supplied complete entry set as a new personal profile.
+func (s *AccessProfileService) Create(ctx context.Context, name string, entries []AccessProfileEntry) (*AccessProfile, error) {
 	values, err := accessProfileEntries(entries)
 	if err != nil {
 		return nil, err
 	}
-	response, err := s.client.accessProfiles.CreateAccessProfile(ctx, connect.NewRequest(&codewirev1.CreateAccessProfileRequest{Name: name, Entries: values, IncludeGithub: includeGitHub}))
+	response, err := s.client.accessProfiles.CreateAccessProfile(ctx, connect.NewRequest(&codewirev1.CreateAccessProfileRequest{Name: name, Entries: values}))
 	if err != nil {
 		return nil, connectSDKError(err)
 	}
 	return fromProtoAccessProfile(response.Msg.GetAccessProfile())
 }
 
-// Update replaces every entry and the GitHub selection at the exact expected
-// revision. Empty entries explicitly remove every slot, and includeGitHub is
-// always explicit; existing environment bindings remain pinned.
-func (s *AccessProfileService) Update(ctx context.Context, id string, expectedRevision uint64, entries []AccessProfileEntry, includeGitHub bool) (*AccessProfile, error) {
+// Update replaces every entry at the exact expected revision. Empty entries
+// explicitly remove every slot; existing environment bindings remain pinned.
+func (s *AccessProfileService) Update(ctx context.Context, id string, expectedRevision uint64, entries []AccessProfileEntry) (*AccessProfile, error) {
 	if err := accessProfileRevision(expectedRevision); err != nil {
 		return nil, err
 	}
@@ -168,7 +164,7 @@ func (s *AccessProfileService) Update(ctx context.Context, id string, expectedRe
 	if err != nil {
 		return nil, err
 	}
-	response, err := s.client.accessProfiles.UpdateAccessProfile(ctx, connect.NewRequest(&codewirev1.UpdateAccessProfileRequest{AccessProfileId: id, ExpectedRevision: expectedRevision, Entries: values, IncludeGithub: includeGitHub}))
+	response, err := s.client.accessProfiles.UpdateAccessProfile(ctx, connect.NewRequest(&codewirev1.UpdateAccessProfileRequest{AccessProfileId: id, ExpectedRevision: expectedRevision, Entries: values}))
 	if err != nil {
 		return nil, connectSDKError(err)
 	}

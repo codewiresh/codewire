@@ -764,7 +764,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("test").expect("profile name"),
-                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id)]), false,
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id)]),
             )
             .expect("create profile");
         let environment_id = EnvironmentId::parse("environment-test").expect("environment ID");

@@ -227,7 +227,7 @@ async fn database_capture_pins_binding_revision_and_keeps_cleanup_rows_loadable(
         .await?;
         sqlx::query(
             "INSERT INTO platform_access_profile_entries \
-             (profile_id,revision,capability_slot,credential_id) VALUES ($1,2,'github',$2)",
+             (profile_id,revision,capability_slot,credential_id) VALUES ($1,2,'ssh',$2)",
         )
         .bind(PROFILE)
         .bind(credential_v2)

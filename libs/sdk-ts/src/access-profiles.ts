@@ -11,15 +11,13 @@ export interface AccessProfileEntry {
   credential_id: string;
 }
 
-/** One immutable personal profile revision; no protected material. GitHub is
- * never an entry: `include_github` selects the account's one GitHub connection,
- * resolved at launch time. */
+/** One immutable personal profile revision; no protected material. Every
+ * profile includes the account's one GitHub connection; GitHub is never an entry. */
 export interface AccessProfile {
   id: string;
   name: string;
   /** Lossless uint64; never convert this CAS coordinate to number. */
   revision: bigint;
-  include_github: boolean;
   entries: AccessProfileEntry[];
 }
 
@@ -46,7 +44,7 @@ function toEntries(entries: readonly AccessProfileEntry[]) {
   const slots = new Set<string>();
   return entries.map((entry) => {
     if (entry.capability_slot === "github") {
-      throw new Error("select GitHub with includeGitHub, not a profile entry");
+      throw new Error("every profile includes the account's GitHub connection; it is never an entry");
     }
     if (slots.has(entry.capability_slot)) {
       throw new Error("duplicate access profile capability slot");
@@ -56,18 +54,12 @@ function toEntries(entries: readonly AccessProfileEntry[]) {
   });
 }
 
-function includeGitHub(value: boolean): boolean {
-  if (typeof value !== "boolean") throw new Error("includeGitHub must be an explicit boolean");
-  return value;
-}
-
 function fromProfile(profile: ProtoAccessProfile | undefined): AccessProfile {
   if (!profile) throw new Error("access profile response omitted access_profile");
   return {
     id: profile.id,
     name: profile.name,
     revision: revision(profile.revision),
-    include_github: profile.includeGithub,
     entries: profile.entries.map((entry) => ({
       capability_slot: entry.capabilitySlot,
       credential_id: entry.credentialId,
@@ -124,25 +116,18 @@ export class AccessProfiles {
     } catch (error) { throw mapConnectError(error); }
   }
 
-  /** Publish a complete entry set and explicit GitHub selection. */
-  async create(name: string, entries: readonly AccessProfileEntry[], includeGithub: boolean): Promise<AccessProfile> {
+  async create(name: string, entries: readonly AccessProfileEntry[]): Promise<AccessProfile> {
     try {
-      const response = await this.client.createAccessProfile({
-        name, entries: toEntries(entries), includeGithub: includeGitHub(includeGithub),
-      });
+      const response = await this.client.createAccessProfile({ name, entries: toEntries(entries) });
       return fromProfile(response.accessProfile);
     } catch (error) { throw mapConnectError(error); }
   }
 
-  /** Replace the entire entry set, including an explicitly empty set, and the
-   * explicit GitHub selection. */
-  async update(
-    id: string, expectedRevision: bigint, entries: readonly AccessProfileEntry[], includeGithub: boolean,
-  ): Promise<AccessProfile> {
+  /** Replace the entire entry set, including an explicitly empty set. */
+  async update(id: string, expectedRevision: bigint, entries: readonly AccessProfileEntry[]): Promise<AccessProfile> {
     try {
       const response = await this.client.updateAccessProfile({
         accessProfileId: id, expectedRevision: revision(expectedRevision), entries: toEntries(entries),
-        includeGithub: includeGitHub(includeGithub),
       });
       return fromProfile(response.accessProfile);
     } catch (error) { throw mapConnectError(error); }

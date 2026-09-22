@@ -591,7 +591,7 @@
   const updateConnectionStatus = (browser) => {
     const message = browser.querySelector("[data-github-connection-status]");
     if (!message) return;
-    const profileHint = " To start a Sandbox with private repository access, choose a profile with Include GitHub.";
+    const profileHint = " Every credential profile includes it for private repository checkout.";
     const account = browser.dataset.githubAccount;
     if (browserForm(browser)?.dataset.createOptionsLoading === "true") message.textContent = "Loading GitHub account…";
     else message.textContent = `${githubStateMessage(browser, account ? `Connected as @${account}.` : "GitHub connected.")}${profileHint}`;
@@ -784,8 +784,8 @@
     if (mount && !mount.value) mount.value = repository.dataset.repositoryName?.split("/").at(-1) || "";
     form.dispatchEvent(new Event("codewire:form-structure-edited", { bubbles: true }));
     editDraft(form);
-    const includeGithub = selectedProfile(browser)?.selectedOptions[0]?.dataset.includeGithub === "true";
-    if (!includeGithub && repository.dataset.repositoryPrivate === "true") setStatus(browser, "Repository added. Select a profile with Include GitHub for private checkout.");
+    // Every profile includes the account's GitHub connection for checkout.
+    if (!selectedProfile(browser)?.value && repository.dataset.repositoryPrivate === "true") setStatus(browser, "Repository added. Select a credential profile for private checkout.");
     row.querySelector('[name^="repo_branch_"]')?.focus();
   });
   clearAcknowledgedCreate();

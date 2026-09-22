@@ -141,7 +141,7 @@ fn fixture(signer: Arc<Signer>) -> Fixture {
             BTreeMap::from([(
                 CapabilitySlot::parse("ssh").unwrap(),
                 credential.metadata.id,
-            )]), false,
+            )]),
         )
         .unwrap();
     let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
@@ -499,7 +499,7 @@ async fn profile_replacement_cannot_retarget_an_existing_ssh_channel() {
         .authority
         .create_profile(
             AccessProfileName::parse("replacement").unwrap(),
-            profile.profile.entries, false,
+            profile.profile.entries,
         )
         .unwrap()
         .profile;

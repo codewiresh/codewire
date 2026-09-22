@@ -44,9 +44,9 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod github_singleton;
     mod owner_sources;
     mod projection;
-    mod github_singleton;
     mod session_mutation;
     mod ssh;
     use std::{borrow::Cow, time::Duration};
@@ -58,9 +58,9 @@ mod tests {
 
     // Measured in isolated PostgreSQL after composing account access,
     // environment projection, typed SSH metadata, and the GitHub singleton
-    // with profile include_github through version29.
+    // that every personal profile includes, through version29.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "d062298e24d7bd655fee2bd468874520dad0f81b3cb684bee0d0ddc80e1fd451";
+        "ec5d038ddeb65b6a54b1ecfb9ad19bef30df062d557d6e23b4f4e3fd4a613c86";
     // Accepted table schema through version28, before the GitHub singleton.
     // Versions 27 and 28 changed only functions, so a replay to version26 or
     // later but before version29 measures this value.

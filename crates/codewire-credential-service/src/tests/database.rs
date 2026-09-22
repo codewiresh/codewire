@@ -68,7 +68,7 @@ impl Fixture {
                 "SELECT (id,org_id,user_id,role) ON public.org_members",
                 "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name) ON public.sandbox_environment_backend",
                 "SELECT (id,user_id,organization_id) ON public.platform_access_profiles",
-                "SELECT (profile_id,revision,include_github) ON public.platform_access_profile_revisions",
+                "SELECT (profile_id,revision) ON public.platform_access_profile_revisions",
                 "SELECT (profile_id,revision,capability_slot,credential_id) ON public.platform_access_profile_entries",
                 "SELECT (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) ON public.platform_environment_access_bindings",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text)",

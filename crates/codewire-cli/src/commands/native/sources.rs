@@ -304,13 +304,11 @@ async fn profile_candidates(
                     .iter()
                     .map(|entry| entry.capability_slot.clone())
                     .collect::<BTreeSet<_>>();
-                // GitHub is never a profile entry: Include GitHub selects the
-                // account's one connection, resolved by launch authority.
+                // GitHub is never a profile entry: every personal profile
+                // includes the account's one connection, resolved at launch.
                 let exact_entries = profile_slots.len() == profile.entries.len()
                     && !profile_slots.contains("github");
-                if profile.include_github {
-                    profile_slots.insert("github".to_owned());
-                }
+                profile_slots.insert("github".to_owned());
                 anyhow::ensure!(
                     profile.revision > 0
                         && exact_entries

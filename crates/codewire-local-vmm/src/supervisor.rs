@@ -7005,7 +7005,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 &codewire_access::AccessProfileName::parse("work").unwrap(),
-                &BTreeMap::new(), false,
+                &BTreeMap::new(),
             )
             .await
             .unwrap();

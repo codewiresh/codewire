@@ -120,7 +120,6 @@ fn profile(id: &str, owner: Owner, credential: &str) -> AccessProfile {
         owner,
         name: AccessProfileName::parse(id).expect("profile name"),
         revision: 1,
-        include_github: false,
         entries: [(slot("codex"), credential_id(credential))]
             .into_iter()
             .collect(),
@@ -644,14 +643,13 @@ fn github_connection(id: &str, owner: Owner, status: CredentialStatus) -> Creden
 
 fn github_profile(owner: Owner) -> AccessProfile {
     AccessProfile {
-        include_github: true,
         entries: BTreeMap::new(),
         ..profile("github-work", owner, "unused")
     }
 }
 
 #[test]
-fn github_is_selected_by_include_github_and_never_pinned_by_entry() {
+fn every_personal_profile_includes_github_and_never_pins_it() {
     let user = Owner::User(owner_id("user-one"));
     let mut pinned = profile("pinned", user.clone(), "github-one");
     pinned.entries = [(CapabilitySlot::github(), credential_id("github-one"))]
@@ -659,19 +657,30 @@ fn github_is_selected_by_include_github_and_never_pinned_by_entry() {
         .collect();
     assert!(pinned.validate().is_err());
 
-    let included = github_profile(user);
-    included.validate().unwrap();
-    assert_eq!(included.selected_slots().collect::<Vec<_>>(), vec!["github"]);
-    let mut both = profile("both", Owner::User(owner_id("user-one")), "codex-work");
-    both.include_github = true;
+    let empty = github_profile(user.clone());
+    empty.validate().unwrap();
+    assert!(empty.includes_github());
+    assert_eq!(empty.selected_slots().collect::<Vec<_>>(), vec!["github"]);
+    let codex = profile("codex", user, "codex-work");
     assert_eq!(
-        both.selected_slots().collect::<Vec<_>>(),
+        codex.selected_slots().collect::<Vec<_>>(),
         vec!["codex", "github"]
+    );
+    // Organizations cannot hold a GitHub connection.
+    let organization = profile(
+        "shared",
+        Owner::Organization(owner_id("org-one")),
+        "codex-org",
+    );
+    assert!(!organization.includes_github());
+    assert_eq!(
+        organization.selected_slots().collect::<Vec<_>>(),
+        vec!["codex"]
     );
 }
 
 #[test]
-fn include_github_grants_only_the_authorized_current_connection() {
+fn profiles_grant_only_the_authorized_current_github_connection() {
     let user = Owner::User(owner_id("user-one"));
     let catalog = builtin_provider_catalog();
     let github_profile = github_profile(user.clone());

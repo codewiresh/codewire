@@ -9,8 +9,8 @@ use codewire_project::{
 };
 
 // ProjectSpec, its binding and the pinned revision's slots share one PostgreSQL
-// statement snapshot. GitHub is a slot when the pinned revision includes it;
-// the account's current connection is resolved later by launch authority. Do not replace this with independent reads or a lookup of
+// statement snapshot. Every personal profile selects GitHub; the account's
+// current connection is resolved later by launch authority. Do not replace this with independent reads or a lookup of
 // the profile's current_revision/name. Slot allocation is capped at 64; a
 // separate bounded existence probe rejects, rather than truncates, excess rows.
 pub(super) const ENVIRONMENT_QUERY: &str = r#"
@@ -26,7 +26,7 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
                    FROM platform_access_profile_entries AS entry
                    WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
                    UNION ALL
-                   SELECT 'github' WHERE r.include_github
+                   SELECT 'github' WHERE p.user_id IS NOT NULL
                ) AS selected
                ORDER BY selected.slot LIMIT 64
            ) AS profile_slots,
@@ -36,7 +36,7 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
                    FROM platform_access_profile_entries AS entry
                    WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
                    UNION ALL
-                   SELECT 'github' WHERE r.include_github
+                   SELECT 'github' WHERE p.user_id IS NOT NULL
                ) AS selected
                OFFSET 64 LIMIT 1
            ) AS profile_slots_overflow
@@ -44,6 +44,7 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
     LEFT JOIN platform_environment_access_bindings AS b ON b.environment_id = e.id
     LEFT JOIN platform_access_profile_revisions AS r
         ON r.profile_id = b.profile_id AND r.revision = b.profile_revision
+    LEFT JOIN platform_access_profiles AS p ON p.id = r.profile_id
     WHERE e.id = $1
 "#;
 

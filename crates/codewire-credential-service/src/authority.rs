@@ -407,16 +407,16 @@ impl AuthoritySource {
                 .map_err(profile_error)?;
             if profile.owner != owner
                 || profile.placement != Placement::Platform
-                || profile.entries.is_empty() && !profile.include_github
+                || profile.entries.is_empty() && !profile.includes_github()
                 || profile.entries.len() > 64
             {
                 return Err(Error::Denied);
             }
             let mut authorized: BTreeSet<codewire_access::CredentialId> =
                 profile.entries.values().cloned().collect();
-            // Include GitHub selects the account's current connection. When it
-            // is disconnected, GitHub is omitted rather than fabricated.
-            if profile.include_github
+            // Every personal profile includes the account's current GitHub
+            // connection. When it is missing, GitHub is omitted, not fabricated.
+            if profile.includes_github()
                 && let Some(github) =
                     codewire_platform_credentials::active_github_connection(&self.pool, &owner)
                         .await

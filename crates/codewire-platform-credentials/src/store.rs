@@ -865,7 +865,7 @@ pub(crate) fn validate_wrapper(
 
 /// The account's one GitHub App OAuth connection, when it can be used now.
 ///
-/// A profile selects GitHub with `include_github`, never with a credential ID.
+/// Every personal profile includes GitHub and never stores its credential ID.
 /// Launch authority resolves the connection at use time: a missing, revoked or
 /// expired connection yields `None`, so the profile's choice is omitted rather
 /// than fabricated, and a later reconnect restores it without a new revision.

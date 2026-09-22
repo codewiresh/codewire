@@ -222,15 +222,7 @@ pub(super) async fn create_profile_action(
         Ok(entries) => entries,
         Err(()) => return page_error_redirect("profile-invalid", dialog, &query, &headers),
     };
-    match credentials_connect::create_profile(
-        &state,
-        cookie,
-        name.into(),
-        entries,
-        form.include_github,
-    )
-    .await
-    {
+    match credentials_connect::create_profile(&state, cookie, name.into(), entries).await {
         Ok(()) => page_redirect("profile-created", false, &query, &headers),
         Err(error) => mutation_error(error.code, false, dialog, &query, &headers),
     }
@@ -260,7 +252,6 @@ pub(super) async fn update_profile_action(
         form.profile_id,
         form.expected_revision,
         entries,
-        form.include_github,
     )
     .await
     {
@@ -1338,13 +1329,12 @@ mod tests {
                 revision: 9,
                 entries: vec![CredentialProfileEntryView {
                     slot: "GitHub",
-                    credential: "included".into(),
+                    credential: "@verified-user".into(),
                     status: "Active",
                     status_tone: "success",
                 }],
                 codex: String::new(),
                 openai: String::new(),
-                include_github: true,
                 anthropic: String::new(),
                 ssh: String::new(),
             }],

@@ -6,9 +6,7 @@ use crate::mutation::tests::support::{
 use crate::platform_test_support::TIMEOUT;
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use codewire_access::{
-    AccessProfile, AccessProfileName, ProviderId, builtin_provider_catalog,
-};
+use codewire_access::{AccessProfile, AccessProfileName, ProviderId, builtin_provider_catalog};
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
     GitHubAppAuthorizationConfig, GitHubAppAuthorizationOwner,
@@ -391,16 +389,15 @@ impl Fixture {
         Ok(record)
     }
 
-    /// A profile that includes GitHub. It never names the connection.
+    /// A personal profile; it includes GitHub without naming the connection.
     async fn github_profile(&self) -> Result<AccessProfile> {
         let owner = Owner::User(OwnerId::parse(ALICE)?);
         Ok(self
             .profiles()
-            .create_with_github(
+            .create(
                 &owner,
                 AccessProfileName::parse(uuid::Uuid::new_v4().to_string())?,
                 BTreeMap::new(),
-                true,
             )
             .await?)
     }
@@ -568,21 +565,31 @@ async fn exact_account_origin_credential_and_cursor_admission_use_restricted_rol
         ensure!(f.h.provider.unwrap_calls.load(Ordering::SeqCst) == before);
         // After Delete the continuation cannot survive: the account has no
         // GitHub connection, and nothing falls back to another credential.
-        let current = f
-            .h
-            .store
-            .record(&original.metadata.owner, &original.metadata.id)
-            .await?;
-        let revoked = f
-            .h
-            .store
-            .revoke(&original.metadata.owner, &original.metadata.id, current.version)
-            .await?;
+        let current =
+            f.h.store
+                .record(&original.metadata.owner, &original.metadata.id)
+                .await?;
+        let revoked =
+            f.h.store
+                .revoke(
+                    &original.metadata.owner,
+                    &original.metadata.id,
+                    current.version,
+                )
+                .await?;
         f.h.store
-            .delete_revoked(&original.metadata.owner, &original.metadata.id, revoked.version)
+            .delete_revoked(
+                &original.metadata.owner,
+                &original.metadata.id,
+                revoked.version,
+            )
             .await?;
         error(page_request(), "failed_precondition").await?;
-        error(f.post(&original).bearer_auth(oauth(ALICE)), "failed_precondition").await?;
+        error(
+            f.post(&original).bearer_auth(oauth(ALICE)),
+            "failed_precondition",
+        )
+        .await?;
         ensure!(f.h.provider.unwrap_calls.load(Ordering::SeqCst) == before);
         Ok(())
     }
