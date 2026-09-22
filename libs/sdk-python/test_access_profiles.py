@@ -109,20 +109,34 @@ class AccessProfilesTestCase(unittest.TestCase):
         self.assertEqual(request.revision, EXACT)
 
     def test_create_update_delete_preserve_uint64_and_empty_replacement(self):
-        self.cw.access_profiles.create("personal", [ENTRY])
+        self.cw.access_profiles.create("personal", [ENTRY], include_github=True)
         self.assertEqual(self.fixture.calls[-1][1].name, "personal")
         self.assertEqual(self.fixture.calls[-1][1].entries[0].credential_id, "credential-one")
-        self.cw.access_profiles.update("profile-one", EXACT, [])
+        self.assertTrue(self.fixture.calls[-1][1].include_github)
+        self.cw.access_profiles.update("profile-one", EXACT, [], include_github=True)
         self.assertEqual(self.fixture.calls[-1][1].expected_revision, EXACT)
         self.assertEqual(len(self.fixture.calls[-1][1].entries), 0)
+        # An empty replacement keeps GitHub only because it is explicit.
+        self.assertTrue(self.fixture.calls[-1][1].include_github)
         self.cw.access_profiles.delete("profile-one", MAXIMUM)
         self.assertEqual(self.fixture.calls[-1][1].expected_revision, MAXIMUM)
         self.assertEqual(self.paths, [f"/codewire.v1.AccessProfileService/{method}" for method in
                                     ["CreateAccessProfile", "UpdateAccessProfile", "DeleteAccessProfile"]])
 
+    def test_github_is_an_explicit_toggle_never_an_entry(self):
+        github = {"capability_slot": "github", "credential_id": "credential-one"}
+        with self.assertRaisesRegex(ValueError, "include_github"):
+            self.cw.access_profiles.create("personal", [github], include_github=False)
+        with self.assertRaises(TypeError):
+            self.cw.access_profiles.update("profile-one", EXACT, [])
+        for value in [1, None, "true"]:
+            with self.assertRaisesRegex(ValueError, "explicit bool"):
+                self.cw.access_profiles.update("profile-one", EXACT, [], include_github=value)
+        self.assertEqual(self.fixture.calls, [])
+
     def test_duplicate_slots_and_invalid_revisions_fail_before_transport(self):
-        for invoke in [lambda: self.cw.access_profiles.create("personal", [ENTRY, ENTRY]),
-                       lambda: self.cw.access_profiles.update("profile-one", EXACT, [ENTRY, ENTRY])]:
+        for invoke in [lambda: self.cw.access_profiles.create("personal", [ENTRY, ENTRY], include_github=False),
+                       lambda: self.cw.access_profiles.update("profile-one", EXACT, [ENTRY, ENTRY], include_github=False)]:
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 invoke()
         for revision in [0, -1, MAXIMUM + 1, True, 1.5]:
@@ -144,7 +158,7 @@ class AccessProfilesTestCase(unittest.TestCase):
 
     def test_stale_cas_and_not_found_map_without_automatic_retry(self):
         with self.assertRaises(CodewireError) as stale:
-            self.cw.access_profiles.update("stale", EXACT, [])
+            self.cw.access_profiles.update("stale", EXACT, [], include_github=False)
         self.assertEqual(stale.exception.status, 409)
         self.assertEqual(len(self.fixture.calls), 1)
         with self.assertRaises(CodewireError) as missing:

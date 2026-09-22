@@ -147,20 +147,18 @@ class CredentialsTestCase(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "omitted credential"):
             self.cw.credentials.get("missing")
 
-    def test_repository_page_keeps_exact_profile_and_allowlisted_metadata(self):
-        page = self.cw.credentials.list_github_repositories("profile-one", EXACT, page_size=50, page_token="opaque-page")
+    def test_repository_page_keeps_owner_singleton_and_allowlisted_metadata(self):
+        page = self.cw.credentials.list_github_repositories(page_size=50, page_token="opaque-page")
         self.assertEqual(page, {"repositories": [{"repository_id":"42", "full_name":"owner/private", "default_branch":"main",
             "clone_url":"https://github.com/owner/private.git", "is_private":True, "archived":False, "disabled":False}],
             "next_page_token":"opaque-next"})
         request = self.fixture.calls[0][1]
-        self.assertEqual((request.profile_id,request.profile_revision,request.page_size,request.page_token),
-                         ("profile-one",EXACT,50,"opaque-page"))
+        self.assertEqual((request.page_size,request.page_token), (50,"opaque-page"))
         self.assertEqual(self.paths,["/codewire.v1.GithubRepositoryService/ListGithubRepositories"])
         self.assertEqual(set(pb.GithubRepository.DESCRIPTOR.fields_by_name), set(page["repositories"][0]))
-        for kwargs in [{"profile_revision":0}, {"profile_revision":EXACT,"page_size":101},
-                       {"profile_revision":EXACT,"page_token":"x"*129}]:
+        for kwargs in [{"page_size":101}, {"page_token":"x"*129}]:
             with self.assertRaises(ValueError):
-                self.cw.credentials.list_github_repositories("profile-one",**kwargs)
+                self.cw.credentials.list_github_repositories(**kwargs)
         self.assertEqual(len(self.fixture.calls),1)
 
     def test_ssh_metadata_preserves_public_registration_data(self):

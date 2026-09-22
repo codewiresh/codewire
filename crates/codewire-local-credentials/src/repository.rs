@@ -805,7 +805,7 @@ mod tests {
 
     use super::executor::*;
 
-    use codewire_access::{AccessProfileName, CapabilitySlot, ProviderId};
+    use codewire_access::{AccessProfileName, ProviderId};
     use codewire_protected_store::{ProtectedStorePersistence, ProtectedValue};
     use tempfile::TempDir;
 
@@ -1114,7 +1114,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let credential = authority
+        let _connection = authority
             .add_credential(
                 NewCredential {
                     provider: ProviderId::parse("github").unwrap(),
@@ -1129,7 +1129,7 @@ mod tests {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("github-work").unwrap(),
-                BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+                BTreeMap::new(), true,
             )
             .unwrap();
         let authorization = RepositoryCredentialLeaseRequest {

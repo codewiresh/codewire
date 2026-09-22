@@ -8,7 +8,8 @@
 use std::collections::BTreeSet;
 
 use codewire_access::{
-    AccessProfile, AccessProfileId, AccessProfileName, EnvironmentAccessBinding, EnvironmentId,
+    AccessProfile, AccessProfileId, AccessProfileName, CredentialId, EnvironmentAccessBinding,
+    EnvironmentId,
     GrantContext, GrantPlacement, Owner, OwnerId,
 };
 use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformProfileError};
@@ -198,7 +199,8 @@ pub async fn admit_create_sources_in(
         body.confirm_personal_secrets,
         body.confirm_personal_credentials,
     )?;
-    let context = context(user, organization, environment, 0, profile.as_ref())?;
+    let github = github_connection_in(tx, profile.as_ref()).await?;
+    let context = context(user, organization, environment, 0, profile.as_ref(), github)?;
     if let Some(profile) = profile {
         profiles
             .create_pending_binding_in(
@@ -335,12 +337,14 @@ pub async fn replace_environment_sources_in(
         body.confirm_personal_secrets,
         body.confirm_personal_credentials,
     )?;
+    let github = github_connection_in(tx, profile.as_ref()).await?;
     let context = context(
         user,
         organization,
         environment,
         body.expected_operation_generation,
         profile.as_ref(),
+        github,
     )?;
     let expected_binding = current_binding
         .map(|(id, revision)| {
@@ -513,12 +517,29 @@ fn confirm_sources(
     Ok(())
 }
 
+/// Include GitHub selects the account's current connection, resolved at
+/// binding time. A disconnected account omits GitHub instead of fabricating it.
+async fn github_connection_in(
+    tx: &mut Transaction<'_, Postgres>,
+    profile: Option<&AccessProfile>,
+) -> AppResult<Option<CredentialId>> {
+    match profile {
+        Some(profile) if profile.include_github => {
+            codewire_platform_credentials::active_github_connection(&mut **tx, &profile.owner)
+                .await
+                .map_err(|_| unavailable())
+        }
+        _ => Ok(None),
+    }
+}
+
 fn context(
     user: &AuthUser,
     organization: &str,
     environment: &str,
     generation: u64,
     profile: Option<&AccessProfile>,
+    github: Option<CredentialId>,
 ) -> AppResult<GrantContext> {
     Ok(GrantContext {
         environment_id: EnvironmentId::parse(environment).map_err(|_| invalid())?,
@@ -529,7 +550,10 @@ fn context(
         allow_personal_credentials: true,
         authorized_credentials: profile
             .map(|profile| profile.entries.values().cloned().collect::<BTreeSet<_>>())
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into_iter()
+            .chain(github)
+            .collect(),
     })
 }
 

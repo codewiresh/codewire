@@ -218,17 +218,19 @@ pub(super) async fn create_profile_action(
     if !valid_name(name) {
         return page_error_redirect("profile-invalid", dialog, &query, &headers);
     }
-    let entries = match entries(
-        form.codex,
-        form.openai,
-        form.github,
-        form.anthropic,
-        form.ssh,
-    ) {
+    let entries = match entries(form.codex, form.openai, form.anthropic, form.ssh) {
         Ok(entries) => entries,
         Err(()) => return page_error_redirect("profile-invalid", dialog, &query, &headers),
     };
-    match credentials_connect::create_profile(&state, cookie, name.into(), entries).await {
+    match credentials_connect::create_profile(
+        &state,
+        cookie,
+        name.into(),
+        entries,
+        form.include_github,
+    )
+    .await
+    {
         Ok(()) => page_redirect("profile-created", false, &query, &headers),
         Err(error) => mutation_error(error.code, false, dialog, &query, &headers),
     }
@@ -248,13 +250,7 @@ pub(super) async fn update_profile_action(
     if exact_id(&form.profile_id).is_err() || !valid_revision(form.expected_revision) {
         return page_error_redirect("profile-invalid", &dialog, &query, &headers);
     }
-    let entries = match entries(
-        form.codex,
-        form.openai,
-        form.github,
-        form.anthropic,
-        form.ssh,
-    ) {
+    let entries = match entries(form.codex, form.openai, form.anthropic, form.ssh) {
         Ok(entries) => entries,
         Err(()) => return page_error_redirect("profile-invalid", &dialog, &query, &headers),
     };
@@ -264,6 +260,7 @@ pub(super) async fn update_profile_action(
         form.profile_id,
         form.expected_revision,
         entries,
+        form.include_github,
     )
     .await
     {
@@ -997,7 +994,6 @@ async fn mutation_cookie(
 fn entries(
     codex: String,
     openai: String,
-    github: String,
     anthropic: String,
     ssh: String,
 ) -> Result<Vec<AccessProfileEntry>, ()> {
@@ -1005,7 +1001,6 @@ fn entries(
     for (slot, credential_id) in [
         ("codex", codex),
         ("openai", openai),
-        ("github", github),
         ("anthropic", anthropic),
         ("ssh", ssh),
     ] {
@@ -1222,8 +1217,9 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
                         && credential.api_key
                     || requested == row_action_dialog("credential", id, "revoke")
                         && !credential.revoked
+                        && credential.oauth_provider != "github"
                     || requested == row_action_dialog("credential", id, "delete")
-                        && credential.revoked)
+                        && (credential.revoked || credential.oauth_provider == "github"))
         })
     }) || requested_row_id(requested, "profile")
         .is_some_and(|id| data.profiles.iter().any(|profile| profile.id == id));
@@ -1342,13 +1338,13 @@ mod tests {
                 revision: 9,
                 entries: vec![CredentialProfileEntryView {
                     slot: "GitHub",
-                    credential: "verified-user".into(),
+                    credential: "included".into(),
                     status: "Active",
                     status_tone: "success",
                 }],
                 codex: String::new(),
                 openai: String::new(),
-                github: "00000000-0000-4000-8000-000000000001".into(),
+                include_github: true,
                 anthropic: String::new(),
                 ssh: String::new(),
             }],
@@ -1467,15 +1463,8 @@ mod tests {
     }
 
     #[test]
-    fn github_connect_dialog_shows_saved_accounts_and_exact_reconnect_actions() {
+    fn github_connect_dialog_shows_the_one_connection_instead_of_a_new_authorization() {
         let mut data = dialog_data();
-        let mut revoked = dialog_data().credentials.remove(0);
-        revoked.id = "00000000-0000-4000-8000-000000000003".into();
-        revoked.account_hint = "other-user".into();
-        revoked.status = "Revoked";
-        revoked.status_tone = "danger";
-        revoked.revoked = true;
-        data.credentials.push(revoked);
         let mut key = dialog_data().credentials.remove(0);
         key.id = "00000000-0000-4000-8000-000000000004".into();
         key.name = "unrelated-api-key".into();
@@ -1491,14 +1480,14 @@ mod tests {
             .split("</dialog>")
             .next()
             .unwrap();
-        assert!(dialog.contains("Saved GitHub connections"));
+        assert!(dialog.contains("Your GitHub connection"));
         assert!(dialog.contains("Reconnect verified-user"));
-        assert!(dialog.contains("Reconnect other-user"));
-        assert!(dialog.contains("credential-00000000-0000-4000-8000-000000000003-reconnect"));
-        assert!(dialog.contains("Revoked"));
+        assert!(dialog.contains("credential-00000000-0000-4000-8000-000000000001-reconnect"));
+        assert!(dialog.contains("Each account has one GitHub connection"));
         assert!(!dialog.contains("unrelated-api-key"));
-        assert!(dialog.contains("sign in as a different user"));
-        assert!(dialog.contains("/settings/credentials/_actions/github/authorize"));
+        // A second authorization is never offered while one connection exists.
+        assert!(!dialog.contains("Continue to GitHub"));
+        assert!(!dialog.contains("connect-github-form"));
     }
 
     #[test]
@@ -1540,7 +1529,7 @@ mod tests {
             "credential-00000000-0000-4000-8000-000000000001",
             "profile-00000000-0000-4000-8000-000000000002",
             "credential-00000000-0000-4000-8000-000000000001-reconnect",
-            "credential-00000000-0000-4000-8000-000000000001-revoke",
+            "credential-00000000-0000-4000-8000-000000000001-delete",
             "profile-00000000-0000-4000-8000-000000000002-edit",
             "profile-00000000-0000-4000-8000-000000000002-delete",
         ] {
@@ -1558,7 +1547,8 @@ mod tests {
             "credential-00000000-0000-4000-8000-000000000001-edit",
             "credential-00000000-0000-4000-8000-000000000001-rename",
             "credential-00000000-0000-4000-8000-000000000001-rotate",
-            "credential-00000000-0000-4000-8000-000000000001-delete",
+            // GitHub has no user-visible revoke step; Delete replaces it.
+            "credential-00000000-0000-4000-8000-000000000001-revoke",
             "profile-00000000-0000-4000-8000-000000000002-reconnect",
             "profile-00000000-0000-4000-8000-000000000002-edit-delete",
             "add-api-key",
@@ -1591,12 +1581,13 @@ mod tests {
         assert!(!credential_primary.contains("Generation"));
         assert!(!credential_primary.contains("Expires"));
         assert!(credential_primary.contains("Active"));
+        // The GitHub connection dialog carries no Details or Generation copy.
         assert!(
-            credential_dialog
+            !credential_dialog
                 .split("</dialog>")
                 .next()
                 .unwrap()
-                .contains("Generation 7")
+                .contains("Generation")
         );
         let profile_row = html.split("class=\"cw-profile-row\"").nth(1).unwrap();
         let (profile_primary, profile_dialog) = profile_row.split_once("<dialog").unwrap();
@@ -1646,12 +1637,15 @@ mod tests {
             .unwrap();
         assert!(!github.contains("name=\"name\""));
         assert!(!github.contains("name=\"provider\""));
-        assert!(html.contains("/settings/credentials/_actions/github/authorize?org=sample-org"));
-        assert!(github.contains("Your verified GitHub username names this connection"));
-        assert!(github.contains("https://github.com/apps/codewire-synthetic/installations/new"));
-        assert!(github.contains("Continue to GitHub"));
+        // The fixture account already has its one GitHub connection, so the
+        // connect dialog routes to Reconnect instead of a second authorization.
+        assert!(github.contains("Your GitHub connection"));
+        assert!(!github.contains("Continue to GitHub"));
         assert!(!github.contains("one-time code"));
-        assert!(github.contains("icons-v2.svg#icon-github"));
+        // Reconnect keeps the verified-account authorization and install link.
+        assert!(html.contains("/settings/credentials/_actions/github/authorize?org=sample-org"));
+        assert!(html.contains("https://github.com/apps/codewire-synthetic/installations/new"));
+        assert!(html.contains("icons-v2.svg#icon-github"));
     }
 
     #[test]
@@ -1730,14 +1724,8 @@ mod tests {
     #[test]
     fn entries_are_closed_and_use_exact_credential_ids() {
         let id = "00000000-0000-4000-8000-000000000001";
-        let profile_entries = entries(
-            id.into(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        )
-        .unwrap();
+        let profile_entries =
+            entries(id.into(), String::new(), String::new(), String::new()).unwrap();
         assert_eq!(profile_entries.len(), 1);
         assert_eq!(profile_entries[0].capability_slot, "codex");
         assert_eq!(profile_entries[0].credential_id, id);
@@ -1747,7 +1735,6 @@ mod tests {
                 String::new(),
                 String::new(),
                 String::new(),
-                String::new()
             )
             .is_err()
         );

@@ -36,6 +36,8 @@ message AccessProfile {
   string name = 2;
   uint64 revision = 3;
   repeated AccessProfileEntry entries = 4;
+  // Selects the owner's current GitHub singleton without storing its ID.
+  bool include_github = 5;
 }
 
 message ListAccessProfilesRequest {
@@ -65,6 +67,7 @@ message CreateAccessProfileRequest {
   string name = 1;
   // Duplicate capability slots are invalid, never last-writer-wins.
   repeated AccessProfileEntry entries = 2;
+  bool include_github = 3;
 }
 
 message CreateAccessProfileResponse {
@@ -76,6 +79,7 @@ message UpdateAccessProfileRequest {
   uint64 expected_revision = 2;
   // Replaces the complete entry set. Empty explicitly removes every slot.
   repeated AccessProfileEntry entries = 3;
+  bool include_github = 4;
 }
 
 message UpdateAccessProfileResponse {

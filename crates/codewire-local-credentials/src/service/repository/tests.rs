@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::sync::Mutex;
 
 use codewire_access::{
-    AccessProfileName, CapabilitySlot, CredentialAuthKind, CredentialId, ProviderId,
+    AccessProfileName, CredentialAuthKind, CredentialId, ProviderId,
 };
 use codewire_protected_store::{ProtectedStorePersistence, ProtectedValue};
 use tempfile::TempDir;
@@ -167,7 +167,7 @@ impl Fixture {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("checkout").unwrap(),
-                BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+                BTreeMap::new(), true,
             )
             .unwrap();
         let request = RepositoryCredentialLeaseRequest {

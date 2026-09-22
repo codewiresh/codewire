@@ -16,7 +16,9 @@ test("inline GitHub browser adds a repository without changing the runtime profi
   const browser = page.locator("[data-github-browser]");
   await page.getByRole("textbox", { name: "Name", exact: true }).fill("keep-my-sandbox-draft");
   await expect(browser).toBeVisible();
-  await expect(browser.getByRole("combobox", { name: "GitHub account" })).toContainText("synthetic-user");
+  // The account's one GitHub connection is shown, never chosen.
+  await expect(browser).toHaveAttribute("data-github-state", "connected");
+  await expect(browser.getByRole("combobox", { name: "GitHub account" })).toHaveCount(0);
   await expect(browser.getByText("Connected as @synthetic-user")).toBeVisible();
   await expect(browser.getByRole("link", { name: "Manage GitHub connection" })).toHaveAttribute("href", /settings-credentials\.html/);
   const addDocs = browser.getByRole("button", { name: /codewiresh\/docs.*Add/ });
@@ -49,18 +51,22 @@ test("custom Git URLs remain editable with unique, labelled repository rows", as
 
 test("repository search checks later pages before reporting no matches", async ({ page }) => {
   const browser = page.locator("[data-github-browser]");
-  const profile = await browser.getByRole("combobox", { name: "GitHub account" }).inputValue();
   const visited: string[] = [];
+  const fields = new Set<string>();
   await page.route("**/fixture/_fragments/github-repositories", async (route) => {
-    const token = new URLSearchParams(route.request().postData() || "").get("page_token") || "";
+    const body = new URLSearchParams(route.request().postData() || "");
+    body.forEach((_value, key) => fields.add(key));
+    const token = body.get("page_token") || "";
     visited.push(token);
     const next = token ? "" : '<button type="button" data-github-next data-page-token="second-page">Next page</button>';
     const name = token ? "synthetic-user/later-repository" : "synthetic-user/earlier-repository";
-    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: `<section data-github-results-page data-github-profile="${profile}"><ul class="cw-github-repository-list"><li><button type="button" data-select-github-repository data-repository-url="https://github.com/${name}.git" data-repository-branch="main" data-repository-name="${name}"><strong>${name}</strong><small>Public</small></button></li></ul>${next}</section>` });
+    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: `<section data-github-results-page><ul class="cw-github-repository-list"><li><button type="button" data-select-github-repository data-repository-url="https://github.com/${name}.git" data-repository-branch="main" data-repository-name="${name}"><strong>${name}</strong><small>Public</small></button></li></ul>${next}</section>` });
   });
   await browser.getByRole("searchbox", { name: "Find a repository" }).fill("later-repository");
   await expect(browser.getByRole("status")).toContainText("1 matching repositories found across 2 pages");
   expect(visited).toEqual(["", "second-page"]);
+  // Discovery is owner-scoped: no credential or profile selector is sent.
+  expect([...fields].sort()).toEqual(["_csrf", "page_token"]);
   await expect(browser.locator("[data-select-github-repository]")).toHaveCount(1);
   await browser.getByRole("button", { name: /synthetic-user\/later-repository/ }).click();
   await expect(page.locator("[data-repository-row]").last().getByRole("textbox", { name: "Repository URL" }))

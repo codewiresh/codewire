@@ -93,10 +93,11 @@ impl AccessProfiles {
         user: &AuthUser,
         name: &str,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
+        include_github: bool,
     ) -> AppResult<AccessProfile> {
         let owner = personal_owner(user)?;
         self.profiles
-            .create(&owner, profile_name(name)?, entries)
+            .create_with_github(&owner, profile_name(name)?, entries, include_github)
             .await
             .map_err(profile_error)
     }
@@ -107,11 +108,18 @@ impl AccessProfiles {
         id: &str,
         expected_revision: u64,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
+        include_github: bool,
     ) -> AppResult<AccessProfile> {
         let owner = personal_owner(user)?;
         positive_revision(expected_revision)?;
         self.profiles
-            .update(&owner, &profile_id(id)?, expected_revision, entries)
+            .update_with_github(
+                &owner,
+                &profile_id(id)?,
+                expected_revision,
+                entries,
+                include_github,
+            )
             .await
             .map_err(profile_error)
     }
@@ -157,19 +165,28 @@ pub enum ProfileSelector<'a> {
 /// Preserve duplicate detection before constructing the canonical entry map.
 pub fn profile_entries<'a>(
     entries: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> AppResult<BTreeMap<CapabilitySlot, CredentialId>> {
+) -> AppResult<(BTreeMap<CapabilitySlot, CredentialId>, bool)> {
     let mut parsed = BTreeMap::new();
+    let mut include_github = false;
+    let mut slots = BTreeSet::new();
     for (slot, id) in entries {
         if parsed.len() >= 128 {
             return Err(invalid_profile());
         }
         let slot = CapabilitySlot::parse(slot).map_err(|_| invalid_profile())?;
+        if !slots.insert(slot.clone()) {
+            return Err(invalid_profile());
+        }
+        if slot == CapabilitySlot::github() {
+            include_github = true;
+            continue;
+        }
         let id = CredentialId::parse(id).map_err(|_| invalid_profile())?;
         if parsed.insert(slot, id).is_some() {
             return Err(invalid_profile());
         }
     }
-    Ok(parsed)
+    Ok((parsed, include_github))
 }
 
 pub fn parse_binding(
@@ -362,7 +379,8 @@ mod tests {
     fn entries_revisions_and_pagination_are_bounded_and_explicit() {
         assert!(profile_entries([("codex", "first"), ("codex", "second")]).is_err());
         assert!(profile_entries([("codex", "has spaces")]).is_err());
-        assert!(profile_entries([]).unwrap().is_empty());
+        let (entries, include_github) = profile_entries([]).unwrap();
+        assert!(entries.is_empty() && !include_github);
         assert!(positive_revision(0).is_err());
         assert!(positive_revision(u64::MAX).is_err());
         assert!(positive_revision(1).is_ok());

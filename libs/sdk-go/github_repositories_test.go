@@ -26,7 +26,7 @@ func (f *githubRepositoryFixture) ListGithubRepositories(_ context.Context, requ
 	}}, NextPageToken: "opaque-next"}), nil
 }
 
-func TestGithubRepositoriesExactProfileAndAllowlistedMetadata(t *testing.T) {
+func TestGithubRepositoriesExactCredentialAndAllowlistedMetadata(t *testing.T) {
 	fixture := &githubRepositoryFixture{}
 	path, handler := codewirev1connect.NewGithubRepositoryServiceHandler(fixture)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +37,7 @@ func TestGithubRepositoriesExactProfileAndAllowlistedMetadata(t *testing.T) {
 	}))
 	defer server.Close()
 	client := codewire.New("synthetic-opaque-oauth", codewire.WithBaseURL(server.URL))
-	page, err := client.Credentials.ListGithubRepositories(context.Background(), "profile-one", accessExact, 50, "opaque-page")
+	page, err := client.Credentials.ListGithubRepositories(context.Background(), 50, "opaque-page")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,15 +47,14 @@ func TestGithubRepositoriesExactProfileAndAllowlistedMetadata(t *testing.T) {
 		t.Fatalf("wrong allowlisted metadata: %#v", page)
 	}
 	request := fixture.calls[0]
-	if request.ProfileId != "profile-one" || request.ProfileRevision != accessExact || request.PageSize != 50 || request.PageToken != "opaque-page" {
-		t.Fatal("selected profile/revision/page changed")
+	if request.PageSize != 50 || request.PageToken != "opaque-page" {
+		t.Fatal("selected owner/page changed")
 	}
 	for _, invalid := range []struct {
-		revision uint64
-		size     int32
-		token    string
-	}{{0, 50, ""}, {accessExact, 101, ""}, {accessExact, 50, strings.Repeat("x", 129)}} {
-		if _, err := client.Credentials.ListGithubRepositories(context.Background(), "profile-one", invalid.revision, invalid.size, invalid.token); err == nil {
+		size  int32
+		token string
+	}{{101, ""}, {50, strings.Repeat("x", 129)}} {
+		if _, err := client.Credentials.ListGithubRepositories(context.Background(), invalid.size, invalid.token); err == nil {
 			t.Fatal("invalid page accepted")
 		}
 	}

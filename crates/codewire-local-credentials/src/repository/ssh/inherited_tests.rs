@@ -118,7 +118,7 @@ impl Fixture {
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("repository-ssh").unwrap(),
-                BTreeMap::from([(CapabilitySlot::parse("ssh").unwrap(), credential_id.clone())]),
+                BTreeMap::from([(CapabilitySlot::parse("ssh").unwrap(), credential_id.clone())]), false,
             )
             .unwrap();
         Self {

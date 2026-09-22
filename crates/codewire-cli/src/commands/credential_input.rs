@@ -284,6 +284,22 @@ fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// The credential a `profile set` selects. GitHub is never a profile entry:
+/// `set PROFILE github` includes the account's one GitHub connection and takes
+/// no selector, while every other slot names exactly one credential.
+pub(super) fn profile_set_credential(
+    args: &super::CredentialProfileSetArgs,
+) -> anyhow::Result<Option<&str>> {
+    match (args.slot.as_str(), args.credential.as_deref()) {
+        ("github", None) => Ok(None),
+        ("github", Some(_)) => anyhow::bail!(
+            "profiles include your one GitHub connection; run `profile set PROFILE github` without a credential"
+        ),
+        (_, Some(credential)) => Ok(Some(credential)),
+        (_, None) => anyhow::bail!("select a credential for this provider"),
+    }
+}
+
 pub(super) fn supported_profile_slot(
     value: &str,
     provider: &ProviderId,

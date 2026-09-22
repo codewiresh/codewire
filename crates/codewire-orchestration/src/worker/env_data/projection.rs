@@ -9,7 +9,8 @@ use codewire_project::{
 };
 
 // ProjectSpec, its binding and the pinned revision's slots share one PostgreSQL
-// statement snapshot. Do not replace this with independent reads or a lookup of
+// statement snapshot. GitHub is a slot when the pinned revision includes it;
+// the account's current connection is resolved later by launch authority. Do not replace this with independent reads or a lookup of
 // the profile's current_revision/name. Slot allocation is capped at 64; a
 // separate bounded existence probe rejects, rather than truncates, excess rows.
 pub(super) const ENVIRONMENT_QUERY: &str = r#"
@@ -20,14 +21,23 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
            b.profile_id, b.profile_revision,
            r.profile_id IS NOT NULL AS profile_revision_exists,
            ARRAY(
-               SELECT entry.capability_slot
-               FROM platform_access_profile_entries AS entry
-               WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
-               ORDER BY entry.capability_slot LIMIT 64
+               SELECT selected.slot FROM (
+                   SELECT entry.capability_slot AS slot
+                   FROM platform_access_profile_entries AS entry
+                   WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
+                   UNION ALL
+                   SELECT 'github' WHERE r.include_github
+               ) AS selected
+               ORDER BY selected.slot LIMIT 64
            ) AS profile_slots,
            EXISTS(
-               SELECT 1 FROM platform_access_profile_entries AS entry
-               WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
+               SELECT 1 FROM (
+                   SELECT entry.capability_slot
+                   FROM platform_access_profile_entries AS entry
+                   WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
+                   UNION ALL
+                   SELECT 'github' WHERE r.include_github
+               ) AS selected
                OFFSET 64 LIMIT 1
            ) AS profile_slots_overflow
     FROM environments AS e

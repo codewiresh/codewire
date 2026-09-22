@@ -118,9 +118,13 @@ test("late Create choices preserve edited core fields, focus, rows, and profile 
   await expect(page.getByLabel("Preview label")).toHaveValue("web");
   await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev\necho ready");
   await expect(page.getByLabel("Credential profile", { exact: true })).toBeVisible();
-  const formProfiles = await form.locator('[name="credential_profile"] option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
-  const browserProfiles = await page.locator('[data-github-profile] option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
-  expect(browserProfiles).toEqual(formProfiles);
+  // Browsing uses the account's one GitHub connection: there is no GitHub
+  // selector, and each profile only says whether it includes GitHub.
+  await expect(page.locator("[data-github-connection]")).toHaveCount(0);
+  const includeGithub = await form.locator('[name="credential_profile"] option[value]:not([value=""])')
+    .evaluateAll((options) => options.map((option) => option.getAttribute("data-include-github")));
+  expect(includeGithub.length).toBeGreaterThan(0);
+  expect(includeGithub.every((value) => value === "true" || value === "false")).toBe(true);
   await expect(page.locator("[data-github-browser]")).toBeVisible();
 });
 
@@ -245,7 +249,7 @@ test("optional-choice failure offers retry without clearing the Create form", as
   await page.goto(url);
   const form = page.locator("[data-environment-form]");
   await expect(page.getByRole("button", { name: "Retry loading choices" })).toBeVisible();
-  await expect(page.locator("[data-github-status]")).toContainText("GitHub connections could not be loaded");
+  await expect(page.locator("[data-github-status]")).toContainText("Repository access unavailable");
   const originalForm = await form.elementHandle();
   await page.getByLabel("Name", { exact: true }).fill("retry-keeps-my-name");
   await page.getByRole("button", { name: "Retry loading choices" }).click();

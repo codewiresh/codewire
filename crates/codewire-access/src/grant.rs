@@ -174,7 +174,15 @@ pub fn derive_grants(
     }
     validate_profile_owner(context, &profile.owner)?;
 
-    let mut grants = Vec::with_capacity(profile.entries.len());
+    let mut grants =
+        Vec::with_capacity(profile.entries.len() + usize::from(profile.include_github));
+    if profile.include_github {
+        if let Some(grant) =
+            derive_github_singleton_grant(context, profile, credentials, catalog, now_unix)?
+        {
+            grants.push(grant);
+        }
+    }
     for (slot, credential_id) in &profile.entries {
         if !context.authorized_credentials.contains(credential_id) {
             return Err(AccessError::CredentialNotAuthorized {
@@ -258,6 +266,91 @@ pub fn derive_grants(
         });
     }
     Ok(grants)
+}
+
+fn derive_github_singleton_grant(
+    context: &GrantContext,
+    profile: &AccessProfile,
+    credentials: &BTreeMap<CredentialId, CredentialMetadata>,
+    catalog: &ProviderCatalog,
+    now_unix: u64,
+) -> Result<Option<DerivedGrant>, AccessError> {
+    // Launch authority resolves and authorizes the account's one current
+    // connection. Any other GitHub row (revoked, expired, or absent) is simply
+    // not selected: the profile's choice is omitted, never fabricated.
+    let Some(credential) = credentials.values().find(|credential| {
+        credential.provider.as_str() == "github"
+            && credential.authentication_kind == crate::CredentialAuthKind::OAuth
+            && credential.owner == profile.owner
+            && context.authorized_credentials.contains(&credential.id)
+    }) else {
+        // The profile choice remains stable while GitHub is disconnected. A
+        // later reconnect restores it without creating a profile revision.
+        return Ok(None);
+    };
+    credential.validate()?;
+    if credential.placement != context.placement.credential_storage() {
+        return Err(AccessError::PlacementMismatch {
+            subject: "credential",
+        });
+    }
+    validate_credential_owner(context, &profile.owner, credential)?;
+    match credential.status {
+        CredentialStatus::Active => {}
+        CredentialStatus::Expired => {
+            return Err(AccessError::CredentialExpired {
+                credential: credential.id.clone(),
+            });
+        }
+        CredentialStatus::RefreshFailed | CredentialStatus::Revoked => {
+            return Err(AccessError::CredentialInactive {
+                credential: credential.id.clone(),
+            });
+        }
+    }
+    if credential
+        .expires_at_unix
+        .is_some_and(|expires_at| expires_at <= now_unix)
+    {
+        return Err(AccessError::CredentialExpired {
+            credential: credential.id.clone(),
+        });
+    }
+    let slot = CapabilitySlot::github();
+    let provider =
+        catalog
+            .get(&credential.provider)
+            .ok_or_else(|| AccessError::ProviderUnavailable {
+                provider: credential.provider.clone(),
+            })?;
+    let policy =
+        provider
+            .capabilities
+            .get(&slot)
+            .ok_or_else(|| AccessError::UnsupportedCapability {
+                provider: credential.provider.clone(),
+                slot: slot.clone(),
+            })?;
+    if !policy
+        .authentication_kinds
+        .contains(&credential.authentication_kind)
+    {
+        return Err(AccessError::UnsupportedCapability {
+            provider: credential.provider.clone(),
+            slot,
+        });
+    }
+    Ok(Some(DerivedGrant {
+        environment_id: context.environment_id.clone(),
+        environment_generation: context.environment_generation,
+        profile_id: profile.id.clone(),
+        profile_revision: profile.revision,
+        capability_slot: slot,
+        credential_id: credential.id.clone(),
+        credential_revocation_generation: credential.revocation_generation,
+        expires_at_unix: credential.expires_at_unix,
+        permissions: policy.permissions.clone(),
+    }))
 }
 
 fn validate_profile_owner(context: &GrantContext, owner: &Owner) -> Result<(), AccessError> {

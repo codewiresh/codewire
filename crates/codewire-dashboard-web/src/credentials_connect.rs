@@ -613,7 +613,8 @@ pub(crate) async fn revoke_credential(
     expected_generation: u64,
 ) -> Result<(), ConnectError> {
     let current = get_exact_credential(state, cookie.clone(), &credential_id).await?;
-    if current.revocation_generation != expected_generation {
+    if current.revocation_generation != expected_generation || is_github_connection(&current) {
+        // GitHub has no user-visible revoke step; Delete replaces it.
         return Err(ConnectError::aborted("credential metadata changed"));
     }
     let mut expected = current;
@@ -640,8 +641,10 @@ pub(crate) async fn delete_credential(
     expected_generation: u64,
 ) -> Result<(), ConnectError> {
     let current = get_exact_credential(state, cookie.clone(), &credential_id).await?;
+    // GitHub is the account's one connection and is deleted directly; the
+    // service revokes and forgets it in one fenced mutation.
     if current.revocation_generation != expected_generation
-        || current.status != CredentialStatus::Revoked
+        || current.status != CredentialStatus::Revoked && !is_github_connection(&current)
     {
         return Err(ConnectError::aborted("credential metadata changed"));
     }
@@ -653,6 +656,11 @@ pub(crate) async fn delete_credential(
         })
         .await?;
     Ok(())
+}
+
+fn is_github_connection(credential: &Credential) -> bool {
+    credential.provider == "github"
+        && credential.authentication_kind == CredentialAuthenticationKind::Oauth
 }
 
 async fn get_exact_credential(
@@ -764,12 +772,14 @@ pub(crate) async fn create_profile(
     cookie: HeaderValue,
     name: String,
     entries: Vec<AccessProfileEntry>,
+    include_github: bool,
 ) -> Result<(), ConnectError> {
     let expected_entries = canonical_entries(&entries)?;
     let response = profile_client(state, cookie)
         .create_access_profile(CreateAccessProfileRequest {
             name: name.clone(),
             entries,
+            include_github,
             ..Default::default()
         })
         .await?
@@ -778,7 +788,14 @@ pub(crate) async fn create_profile(
         .access_profile
         .into_option()
         .ok_or_else(invalid_metadata)?;
-    validate_profile_ack(&profile, None, Some(&name), 1, &expected_entries)?;
+    validate_profile_ack(
+        &profile,
+        None,
+        Some(&name),
+        1,
+        &expected_entries,
+        include_github,
+    )?;
     Ok(())
 }
 
@@ -788,6 +805,7 @@ pub(crate) async fn update_profile(
     profile_id: String,
     expected_revision: u64,
     entries: Vec<AccessProfileEntry>,
+    include_github: bool,
 ) -> Result<(), ConnectError> {
     let expected_entries = canonical_entries(&entries)?;
     if expected_revision == 0 || expected_revision >= i64::MAX as u64 {
@@ -801,6 +819,7 @@ pub(crate) async fn update_profile(
             access_profile_id: profile_id.clone(),
             expected_revision,
             entries,
+            include_github,
             ..Default::default()
         })
         .await?
@@ -815,6 +834,7 @@ pub(crate) async fn update_profile(
         None,
         next_revision,
         &expected_entries,
+        include_github,
     )?;
     Ok(())
 }
@@ -893,7 +913,7 @@ fn build_settings_data(
         match slot {
             "codex" => choices.codex.push(choice),
             "openai" => choices.openai.push(choice),
-            "github" => choices.github.push(choice),
+            "github" => {}
             "anthropic" => choices.anthropic.push(choice),
             "ssh" => choices.ssh.push(choice),
             _ => unreachable!("credential_slot returns a closed slot"),
@@ -933,6 +953,10 @@ fn build_settings_data(
     }
 
     let mut seen_profiles = BTreeSet::new();
+    let github_connection = credential_index
+        .values()
+        .find(|(_, slot, _, _)| *slot == "github")
+        .map(|(_, _, status, tone)| (*status, *tone));
     let mut profile_rows = Vec::with_capacity(profiles.len());
     for profile in profiles {
         if exact_id(&profile.id).is_err()
@@ -940,7 +964,7 @@ fn build_settings_data(
             || codewire_access::AccessProfileName::parse(&profile.name).is_err()
             || profile.revision == 0
             || profile.revision > i64::MAX as u64
-            || profile.entries.len() > 5
+            || profile.entries.len() > 4
         {
             return Err(invalid_metadata());
         }
@@ -966,15 +990,29 @@ fn build_settings_data(
                 status_tone,
             });
         }
+        if profile.include_github {
+            // The profile selects GitHub, not a credential. Show whether the
+            // account's one GitHub connection can currently satisfy it.
+            let (credential, status, status_tone) = github_connection.map_or(
+                ("included — connect GitHub", "", ""),
+                |(status, status_tone)| ("included", status, status_tone),
+            );
+            entries.push(CredentialProfileEntryView {
+                slot: "GitHub",
+                credential: credential.to_owned(),
+                status,
+                status_tone,
+            });
+        }
         entries.sort_by(|a, b| a.slot.cmp(b.slot));
         profile_rows.push(CredentialProfileRowView {
             id: profile.id,
             name: profile.name,
             revision: profile.revision,
             entries,
+            include_github: profile.include_github,
             codex: selected.remove("codex").unwrap_or_default(),
             openai: selected.remove("openai").unwrap_or_default(),
-            github: selected.remove("github").unwrap_or_default(),
             anthropic: selected.remove("anthropic").unwrap_or_default(),
             ssh: selected.remove("ssh").unwrap_or_default(),
         });
@@ -1136,12 +1174,14 @@ fn validate_profile_ack(
     expected_name: Option<&str>,
     expected_revision: u64,
     expected_entries: &BTreeMap<String, String>,
+    expected_include_github: bool,
 ) -> Result<(), ConnectError> {
     if exact_id(&profile.id).is_err()
         || expected_id.is_some_and(|id| profile.id != id)
         || expected_name.is_some_and(|name| profile.name != name)
         || codewire_access::AccessProfileName::parse(&profile.name).is_err()
         || profile.revision != expected_revision
+        || profile.include_github != expected_include_github
         || canonical_entries(&profile.entries)? != *expected_entries
     {
         return Err(invalid_metadata());
@@ -1304,19 +1344,16 @@ mod tests {
                 id: "00000000-0000-4000-8000-000000000002".into(),
                 name: "work".into(),
                 revision: 1,
-                entries: vec![AccessProfileEntry {
-                    capability_slot: "github".into(),
-                    credential_id: id.into(),
-                    ..Default::default()
-                }],
+                entries: Vec::new(),
+                include_github: true,
                 ..Default::default()
             }],
         )
         .unwrap();
         assert_eq!(data.credentials[0].display_name(), "verified-user");
         assert_eq!(data.credentials[0].name, "legacy-reference");
-        assert_eq!(data.choices.github[0].name, "verified-user");
-        assert_eq!(data.profiles[0].entries[0].credential, "verified-user");
+        assert_eq!(data.profiles[0].include_github, true);
+        assert_eq!(data.profiles[0].entries[0].credential, "included");
         assert_eq!(
             data.profiles[0].entries[0].status,
             data.credentials[0].status
@@ -1325,7 +1362,26 @@ mod tests {
             data.profiles[0].entries[0].status_tone,
             data.credentials[0].status_tone
         );
-        assert_eq!(data.profiles[0].github, id);
+    }
+
+    #[test]
+    fn github_profile_without_connection_asks_to_connect_without_status_badge() {
+        let data = build_settings_data(
+            Vec::new(),
+            vec![AccessProfile {
+                id: "00000000-0000-4000-8000-000000000002".into(),
+                name: "work".into(),
+                revision: 1,
+                include_github: true,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let entry = &data.profiles[0].entries[0];
+        assert_eq!(entry.slot, "GitHub");
+        assert_eq!(entry.credential, "included — connect GitHub");
+        assert!(entry.status.is_empty());
+        assert!(entry.status_tone.is_empty());
     }
 
     #[test]
@@ -1455,16 +1511,19 @@ mod tests {
             entries,
             ..Default::default()
         };
-        validate_profile_ack(&profile, Some(profile_id), None, 2, &expected).unwrap();
+        validate_profile_ack(&profile, Some(profile_id), None, 2, &expected, false).unwrap();
 
         let mut wrong_revision = profile.clone();
         wrong_revision.revision = 3;
         assert!(
-            validate_profile_ack(&wrong_revision, Some(profile_id), None, 2, &expected).is_err()
+            validate_profile_ack(&wrong_revision, Some(profile_id), None, 2, &expected, false)
+                .is_err()
         );
         let mut incomplete = profile;
         incomplete.entries.clear();
-        assert!(validate_profile_ack(&incomplete, Some(profile_id), None, 2, &expected).is_err());
+        assert!(
+            validate_profile_ack(&incomplete, Some(profile_id), None, 2, &expected, false).is_err()
+        );
 
         let create_ack = AccessProfile {
             id: profile_id.into(),
@@ -1477,18 +1536,20 @@ mod tests {
             }],
             ..Default::default()
         };
-        validate_profile_ack(&create_ack, None, Some("work"), 1, &expected).unwrap();
-        assert!(validate_profile_ack(&create_ack, None, Some("other"), 1, &expected).is_err());
+        validate_profile_ack(&create_ack, None, Some("work"), 1, &expected, false).unwrap();
+        assert!(
+            validate_profile_ack(&create_ack, None, Some("other"), 1, &expected, false).is_err()
+        );
 
         let mut invalid_name = create_ack.clone();
         invalid_name.name = "GitHub repository browser".into();
-        assert!(validate_profile_ack(&invalid_name, None, None, 1, &expected).is_err());
+        assert!(validate_profile_ack(&invalid_name, None, None, 1, &expected, false).is_err());
         invalid_name.entries.clear();
         assert!(build_settings_data(Vec::new(), vec![invalid_name]).is_err());
 
         let mut malformed = create_ack;
         malformed.id = "not-an-id".into();
-        assert!(validate_profile_ack(&malformed, None, Some("work"), 1, &expected).is_err());
+        assert!(validate_profile_ack(&malformed, None, Some("work"), 1, &expected, false).is_err());
     }
 
     #[test]

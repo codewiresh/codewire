@@ -155,7 +155,7 @@ async fn owner_selection_is_restricted_material_free_and_pins_exact_immutable_pr
         let (reader, role) = db.metadata_pool().await?;
         let result = async {
             for grant in [
-                "SELECT (profile_id,revision) ON public.platform_access_profile_revisions",
+                "SELECT (profile_id,revision,include_github) ON public.platform_access_profile_revisions",
                 "SELECT ON public.platform_access_profile_entries",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_profile(text,text,text)",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_credential(text,text,text)",

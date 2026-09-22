@@ -143,14 +143,13 @@ class Credentials:
         self._repositories = context.transport.client(GithubRepositoryServiceClientSync)
 
     def list_github_repositories(
-        self, profile_id: str, profile_revision: int, *, page_size: int = 50, page_token: str = "",
+        self, *, page_size: int = 50, page_token: str = "",
     ) -> GithubRepositoryPage:
-        """One page for the exact selected profile, without attaching or advancing it."""
-        _generation(profile_revision)
-        if not profile_id or type(page_size) is not int or not 0 <= page_size <= 100 or len(page_token) > 128:
+        """One page for the owner's current GitHub singleton, without attaching a profile."""
+        if type(page_size) is not int or not 0 <= page_size <= 100 or len(page_token) > 128:
             raise ValueError("invalid GitHub repository selection or page")
         response = self._context.unary(self._repositories.list_github_repositories,
-            pb.ListGithubRepositoriesRequest(profile_id=profile_id, profile_revision=profile_revision,
+            pb.ListGithubRepositoriesRequest(
                 page_size=page_size, page_token=page_token))
         return {"repositories": [{
             "repository_id": value.repository_id, "full_name": value.full_name,

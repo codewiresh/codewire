@@ -344,7 +344,6 @@ pub(crate) struct CredentialChoiceView {
 pub(crate) struct CredentialChoicesView {
     pub(crate) codex: Vec<CredentialChoiceView>,
     pub(crate) openai: Vec<CredentialChoiceView>,
-    pub(crate) github: Vec<CredentialChoiceView>,
     pub(crate) anthropic: Vec<CredentialChoiceView>,
     pub(crate) ssh: Vec<CredentialChoiceView>,
 }
@@ -393,9 +392,9 @@ pub(crate) struct CredentialProfileRowView {
     pub(crate) name: String,
     pub(crate) revision: u64,
     pub(crate) entries: Vec<CredentialProfileEntryView>,
+    pub(crate) include_github: bool,
     pub(crate) codex: String,
     pub(crate) openai: String,
-    pub(crate) github: String,
     pub(crate) anthropic: String,
     pub(crate) ssh: String,
 }
@@ -446,7 +445,7 @@ pub(crate) struct CredentialProfileCreateSubmission {
     #[serde(default)]
     pub(crate) openai: String,
     #[serde(default)]
-    pub(crate) github: String,
+    pub(crate) include_github: bool,
     #[serde(default)]
     pub(crate) anthropic: String,
     #[serde(default)]
@@ -464,7 +463,7 @@ pub(crate) struct CredentialProfileUpdateSubmission {
     #[serde(default)]
     pub(crate) openai: String,
     #[serde(default)]
-    pub(crate) github: String,
+    pub(crate) include_github: bool,
     #[serde(default)]
     pub(crate) anthropic: String,
     #[serde(default)]
@@ -1072,8 +1071,10 @@ pub(crate) struct EnvironmentSourceFieldsView {
     pub(crate) organization_selected: bool,
     pub(crate) projects: Vec<EnvironmentSecretProjectOption>,
     pub(crate) profiles: Vec<EnvironmentCredentialProfileOption>,
+    pub(crate) github_connections: Vec<EnvironmentGithubConnectionOption>,
     pub(crate) project_error: String,
     pub(crate) profile_error: String,
+    pub(crate) github_connection_error: String,
     pub(crate) project_selection_error: String,
     pub(crate) profile_selection_error: String,
     // Readable metadata is not proof that a placement can deliver it. The
@@ -1101,47 +1102,53 @@ pub(crate) struct EnvironmentCredentialProfileOption {
     pub(crate) bound_revision: bool,
     pub(crate) synthetic: bool,
     pub(crate) selected: bool,
-    // Account-owned metadata for Create presentation only. Discovery and
-    // checkout still recheck the current exact profile and provider access.
-    pub(crate) github_credential_id: String,
-    pub(crate) github_account: String,
-    pub(crate) github_connection: GithubProfileConnection,
+    pub(crate) include_github: bool,
 }
 
-impl EnvironmentCredentialProfileOption {
-    pub(crate) fn has_github(&self) -> bool {
-        !self.github_credential_id.is_empty() || self.synthetic
-    }
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentGithubConnectionOption {
+    pub(crate) account: String,
+    pub(crate) connection: GithubConnectionState,
+}
 
-    pub(crate) fn github_state(&self) -> &'static str {
-        match self.github_connection {
-            GithubProfileConnection::NotConfigured => "not-configured",
-            GithubProfileConnection::MetadataUnavailable => "unavailable",
-            GithubProfileConnection::Inactive => "inactive",
-            GithubProfileConnection::Connected => "connected",
+impl EnvironmentGithubConnectionOption {
+    pub(crate) fn state(&self) -> &'static str {
+        match self.connection {
+            GithubConnectionState::Inactive => "inactive",
+            GithubConnectionState::Connected => "connected",
         }
     }
 }
 
 impl EnvironmentSourceFieldsView {
     pub(crate) fn has_connected_github(&self) -> bool {
-        self.profiles
+        self.github_connections
             .iter()
-            .any(|profile| profile.github_connection == GithubProfileConnection::Connected)
+            .any(|connection| connection.connection == GithubConnectionState::Connected)
     }
 
-    pub(crate) fn has_github_profile(&self) -> bool {
-        self.profiles
-            .iter()
-            .any(EnvironmentCredentialProfileOption::has_github)
+    pub(crate) fn github_connection(&self) -> Option<&EnvironmentGithubConnectionOption> {
+        self.github_connections.first()
+    }
+
+    /// One of `connected`, `inactive` (reconnect required), `unavailable`
+    /// (the connection could not be loaded) or `not-configured`.
+    pub(crate) fn github_connection_state(&self) -> &'static str {
+        if !self.github_connection_error.is_empty() {
+            return "unavailable";
+        }
+        self.github_connection()
+            .map_or("not-configured", EnvironmentGithubConnectionOption::state)
+    }
+
+    pub(crate) fn github_connection_account(&self) -> &str {
+        self.github_connection()
+            .map_or("", |connection| connection.account.as_str())
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum GithubProfileConnection {
-    #[default]
-    NotConfigured,
-    MetadataUnavailable,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GithubConnectionState {
     Inactive,
     Connected,
 }

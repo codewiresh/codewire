@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_access::{
-    AccessProfileId, CapabilitySlot, CredentialAuthKind, CredentialMetadata, CredentialStatus,
-    Owner, OwnerId, PROVIDER_REFRESH_TIMEOUT_SECONDS, builtin_provider_catalog,
+    CredentialAuthKind, CredentialId, CredentialMetadata, CredentialStatus, Owner, OwnerId,
+    PROVIDER_REFRESH_TIMEOUT_SECONDS,
 };
 use codewire_credential_broker::github::repositories::{
     self as github, GithubRepositoryAccountLease, RepositoryDiscoveryError,
@@ -20,8 +20,7 @@ use codewire_credential_broker::{
     GitHubAppUserOAuthBundle,
 };
 use codewire_platform_credentials::{
-    CredentialRecord, OAuthRefreshState, PlatformAccessProfileStore, PlatformCredentialError,
-    PlatformCredentialStore, PlatformProfileError,
+    CredentialRecord, OAuthRefreshState, PlatformCredentialError, PlatformCredentialStore,
 };
 use codewire_protected_store::ProtectedValue;
 use codewire_proto::codewire::v1::{
@@ -47,7 +46,6 @@ enum Error {
     InvalidInput,
     Denied,
     NotFound,
-    ProfileChanged,
     NotConnected,
     CredentialChanged,
     ProviderDenied,
@@ -331,9 +329,8 @@ async fn resolve_record(
     store: &PlatformCredentialStore,
     authority: &CredentialMutationAuthority,
     owner: &Owner,
-    selection: &Selection,
+    _selection: &Selection,
 ) -> Result<CredentialRecord, Error> {
-    let profiles = PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog());
     let mut tx = pool.begin().await.map_err(|_| Error::Unavailable)?;
     // Existing restricted security-definer helper rechecks the original exact
     // session row or OAuth subject/client/token, never just expiry.
@@ -341,19 +338,24 @@ async fn resolve_record(
         .lock_for_publication(&mut tx)
         .await
         .map_err(authority_error)?;
-    let profile = profiles
-        .get_in(&mut tx, owner, &selection.profile_id, None)
-        .await
-        .map_err(profile_error)?;
-    if profile.revision != selection.profile_revision {
-        return Err(Error::ProfileChanged);
-    }
-    let credential_id = profile
-        .entries
-        .get(&CapabilitySlot::github())
-        .ok_or(Error::NotConnected)?;
+    let Owner::User(user_id) = owner else {
+        return Err(Error::NotConnected);
+    };
+    let singleton_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM platform_credentials \
+         WHERE user_id=$1 AND provider='github' AND authentication_kind='oauth' \
+           AND status='active' ORDER BY id",
+    )
+    .bind(user_id.as_str())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| Error::Unavailable)?;
+    let [credential_id] = singleton_ids.as_slice() else {
+        return Err(Error::NotConnected);
+    };
+    let credential_id = CredentialId::parse(credential_id).map_err(|_| Error::NotConnected)?;
     let record = store
-        .record_for_update_in(&mut tx, owner, credential_id)
+        .record_for_update_in(&mut tx, owner, &credential_id)
         .await
         .map_err(credential_error)?;
     let now = unix_now()?;
@@ -384,7 +386,7 @@ fn github_app_bundle(material: &ProtectedValue) -> Result<Option<GitHubAppUserOA
 
 /// State that is immutable for one durable GitHub App refresh. It is carried
 /// intact into promotion so the successor is re-admitted against precisely
-/// the same owner, profile revision, and original record.
+/// the same owner, credential, and original record.
 struct GitHubAppRefreshContext {
     pool: PgPool,
     store: Arc<PlatformCredentialStore>,
@@ -654,8 +656,6 @@ impl GithubRepositoryAccountLease for AccountLease {
 
 #[derive(Clone)]
 struct Selection {
-    profile_id: AccessProfileId,
-    profile_revision: u64,
     page_size: u16,
     page: u32,
     page_token: String,
@@ -663,14 +663,7 @@ struct Selection {
 
 impl Selection {
     fn parse(request: ListGithubRepositoriesRequest) -> Result<Self, Error> {
-        let profile_id = uuid::Uuid::parse_str(&request.profile_id)
-            .ok()
-            .filter(|id| !id.is_nil() && id.to_string() == request.profile_id)
-            .and_then(|_| AccessProfileId::parse(request.profile_id).ok())
-            .ok_or(Error::InvalidInput)?;
-        if request.profile_revision == 0
-            || request.profile_revision > i64::MAX as u64
-            || request.page_size < 0
+        if request.page_size < 0
             || request.page_size > i32::from(github::MAX_PAGE_SIZE)
             || request.page_token.len() > MAX_PAGE_TOKEN_BYTES
         {
@@ -686,7 +679,7 @@ impl Selection {
         } else {
             let fields: Vec<_> = request.page_token.split('.').collect();
             if fields.len() != 4
-                || fields[0] != "v1"
+                || fields[0] != "v2"
                 || fields[2] != page_size.to_string()
                 || fields[3].len() != 64
                 || !fields[3]
@@ -702,8 +695,6 @@ impl Selection {
             page
         };
         Ok(Self {
-            profile_id,
-            profile_revision: request.profile_revision,
             page_size,
             page,
             page_token: request.page_token,
@@ -712,17 +703,14 @@ impl Selection {
 
     fn cursor(&self, owner: &Owner, record: &CredentialRecord, page: u32) -> String {
         let mut hash = Sha256::new();
-        hash.update(b"codewire-github-repositories-v1");
-        for value in [
-            owner.id().as_str(),
-            self.profile_id.as_str(),
-            record.metadata.id.as_str(),
-        ] {
+        hash.update(b"codewire-github-repositories-v2");
+        for value in [owner.id().as_str(), record.metadata.id.as_str()] {
             hash.update((value.len() as u64).to_be_bytes());
             hash.update(value.as_bytes());
         }
-        hash.update(self.profile_revision.to_be_bytes());
         hash.update(record.metadata.revocation_generation.to_be_bytes());
+        hash.update(record.version.revocation_generation.to_be_bytes());
+        hash.update(record.version.material_generation.to_be_bytes());
         let binding = hash
             .finalize()
             .iter()
@@ -731,7 +719,7 @@ impl Selection {
         // This opaque continuation is not a grant or a secret. Recompute its
         // binding from current authorized records on EVERY request. It contains
         // no provider cursor, internal material version or protected-store path.
-        format!("v1.{page}.{}.{binding}", self.page_size)
+        format!("v2.{page}.{}.{binding}", self.page_size)
     }
 
     fn check_cursor(&self, owner: &Owner, record: &CredentialRecord) -> Result<(), Error> {
@@ -751,7 +739,7 @@ fn same_record(before: &CredentialRecord, after: &CredentialRecord) -> Result<()
 }
 
 /// A successful refresh replaces exactly one material/revocation generation.
-/// It must not turn an account, profile binding, display identity, or hard
+/// It must not turn an account, display identity, or hard
 /// lifetime change into permission to retry the original discovery request.
 fn same_refreshed_record(before: &CredentialRecord, after: &CredentialRecord) -> Result<(), Error> {
     let revocation_generation = before
@@ -791,17 +779,9 @@ fn authority_error(error: CredentialMutationAuthorityError) -> Error {
     }
 }
 
-fn profile_error(error: PlatformProfileError) -> Error {
-    match error {
-        PlatformProfileError::NotFound => Error::NotFound,
-        PlatformProfileError::StaleRevision => Error::ProfileChanged,
-        _ => Error::Unavailable,
-    }
-}
-
 fn credential_error(error: PlatformCredentialError) -> Error {
     match error {
-        PlatformCredentialError::NotFound => Error::NotConnected,
+        PlatformCredentialError::NotFound => Error::NotFound,
         PlatformCredentialError::StaleVersion => Error::CredentialChanged,
         PlatformCredentialError::Inactive | PlatformCredentialError::Expired => Error::NotConnected,
         _ => Error::Unavailable,

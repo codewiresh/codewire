@@ -38,7 +38,7 @@ pub use refresh::{
 };
 pub use store::{
     CredentialMetadataReader, PlatformCredentialStore, PreparedCredentialCreation,
-    PreparedCredentialReplacement,
+    PreparedCredentialReplacement, active_github_connection,
 };
 
 /// Closed, value-blind errors. SQL/provider errors are deliberately discarded:

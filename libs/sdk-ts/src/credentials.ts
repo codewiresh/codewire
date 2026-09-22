@@ -113,7 +113,7 @@ export function assertCredentialConverterCoverage(): void {
     [5, "is_private"], [6, "archived"], [7, "disabled"],
   ]));
   assertFields("GitHub repository request", ListGithubRepositoriesRequestSchema.fields, new Map([
-    [1, "profile_id"], [2, "profile_revision"], [3, "page_size"], [4, "page_token"],
+    [3, "page_size"], [4, "page_token"],
   ]));
   assertFields("GitHub repository response", ListGithubRepositoriesResponseSchema.fields, new Map([
     [1, "repositories"], [2, "next_page_token"],
@@ -178,17 +178,16 @@ export class Credentials {
   constructor(private client: CredentialClient, private mutations: CredentialMutationClient,
     private repositories?: GithubRepositoryClient) {}
 
-  /** Fetch one page without silently advancing the selected profile revision. */
+  /** Fetch one page for the authenticated owner's GitHub singleton. */
   async listGithubRepositories(
-    profileId: string, profileRevision: bigint, pageSize = 50, pageToken = "",
+    pageSize = 50, pageToken = "",
   ): Promise<GithubRepositoryPage> {
-    generation(profileRevision);
-    if (!profileId || !Number.isInteger(pageSize) || pageSize < 0 || pageSize > 100 || pageToken.length > 128) {
+    if (!Number.isInteger(pageSize) || pageSize < 0 || pageSize > 100 || pageToken.length > 128) {
       throw new Error("invalid GitHub repository selection or page");
     }
     if (!this.repositories) throw new Error("GitHub repository client is not configured");
     try {
-      const response = await this.repositories.listGithubRepositories({ profileId, profileRevision, pageSize, pageToken });
+      const response = await this.repositories.listGithubRepositories({ pageSize, pageToken });
       return {
         repositories: response.repositories.map((value) => ({
           repository_id: value.repositoryId, full_name: value.fullName, default_branch: value.defaultBranch,

@@ -118,6 +118,19 @@ impl PlatformAccessProfileStore {
         name: AccessProfileName,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
     ) -> Result<AccessProfile, Error> {
+        self.create_with_github(owner, name, entries, false).await
+    }
+
+    pub async fn create_with_github(
+        &self,
+        owner: &Owner,
+        name: AccessProfileName,
+        entries: BTreeMap<CapabilitySlot, CredentialId>,
+        include_github: bool,
+    ) -> Result<AccessProfile, Error> {
+        if include_github && owner.is_organization() {
+            return Err(Error::UnsupportedEntry);
+        }
         let profile = AccessProfile {
             id: AccessProfileId::parse(Uuid::new_v4().to_string())
                 .map_err(|_| Error::InvalidInput)?,
@@ -125,6 +138,7 @@ impl PlatformAccessProfileStore {
             owner: owner.clone(),
             name,
             revision: 1,
+            include_github,
             entries,
         };
         let mut tx = self.begin_transaction().await?;
@@ -284,6 +298,21 @@ impl PlatformAccessProfileStore {
         expected_revision: u64,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
     ) -> Result<AccessProfile, Error> {
+        self.update_with_github(owner, id, expected_revision, entries, false)
+            .await
+    }
+
+    pub async fn update_with_github(
+        &self,
+        owner: &Owner,
+        id: &AccessProfileId,
+        expected_revision: u64,
+        entries: BTreeMap<CapabilitySlot, CredentialId>,
+        include_github: bool,
+    ) -> Result<AccessProfile, Error> {
+        if include_github && owner.is_organization() {
+            return Err(Error::UnsupportedEntry);
+        }
         let expected = generation(expected_revision)?;
         let next = expected.checked_add(1).ok_or(Error::InvalidInput)?;
         let mut tx = self.begin_transaction().await?;
@@ -294,6 +323,7 @@ impl PlatformAccessProfileStore {
         }
         let profile = AccessProfile {
             revision: next as u64,
+            include_github,
             entries,
             ..current
         };
@@ -730,18 +760,18 @@ async fn load_profile(
         .ok_or(Error::NotFound)?;
     let current: i64 = row.try_get("current_revision").map_err(database_error)?;
     let revision = revision.unwrap_or(positive(current)?);
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM platform_access_profile_revisions \
-         WHERE profile_id=$1 AND revision=$2)",
+    let revision_row: Option<bool> = sqlx::query_scalar(
+        "SELECT include_github FROM platform_access_profile_revisions \
+         WHERE profile_id=$1 AND revision=$2",
     )
     .bind(id.as_str())
     .bind(generation(revision)?)
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(database_error)?;
-    if !exists {
+    let Some(include_github) = revision_row else {
         return Err(Error::NotFound);
-    }
+    };
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT capability_slot,credential_id FROM platform_access_profile_entries \
          WHERE profile_id=$1 AND revision=$2 ORDER BY capability_slot",
@@ -765,6 +795,7 @@ async fn load_profile(
         name: AccessProfileName::parse(row.try_get::<String, _>("name").map_err(database_error)?)
             .map_err(|_| Error::CorruptRecord)?,
         revision,
+        include_github,
         entries,
     })
 }
@@ -774,10 +805,12 @@ async fn insert_revision(
     profile: &AccessProfile,
 ) -> Result<(), Error> {
     sqlx::query(
-        "INSERT INTO platform_access_profile_revisions(profile_id,revision) VALUES ($1,$2)",
+        "INSERT INTO platform_access_profile_revisions \
+         (profile_id,revision,include_github) VALUES ($1,$2,$3)",
     )
     .bind(profile.id.as_str())
     .bind(generation(profile.revision)?)
+    .bind(profile.include_github)
     .execute(&mut **tx)
     .await
     .map_err(database_error)?;
@@ -801,70 +834,91 @@ async fn load_credentials(
     tx: &mut Transaction<'_, Postgres>,
     profile: &AccessProfile,
 ) -> Result<BTreeMap<CredentialId, CredentialMetadata>, Error> {
-    let (user_id, organization_id) = owner_columns(&profile.owner);
     let mut credentials = BTreeMap::new();
     // A shared lock fences replacement/revocation/deletion through admission.
     // Deterministic order avoids opposite-order locks across multi-slot profiles.
     for id in profile.entries.values().collect::<BTreeSet<_>>() {
-        let row = sqlx::query(
-            "SELECT provider,authentication_kind,display_name,account_hint,status, \
-             expires_at_unix,revocation_generation FROM \
-             public.codewire_platform_lock_credential($1::text,$2::text,$3::text)",
-        )
-        .bind(id.as_str())
-        .bind(user_id)
-        .bind(organization_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)?
-        .ok_or(Error::NotFound)?;
-        // Retain the applied helper's exact signature and SHARE fence. Only
-        // after it has locked this owner-scoped identity may the existing
-        // metadata SELECT authority read the additive public fields.
-        let (ssh_public_key, ssh_fingerprint): (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT ssh_public_key,ssh_fingerprint FROM public.platform_credentials \
-                 WHERE id=$1 AND (user_id=$2 OR organization_id=$3)",
-        )
-        .bind(id.as_str())
-        .bind(user_id)
-        .bind(organization_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)?
-        .ok_or(Error::NotFound)?;
-        let expires: Option<i64> = row.try_get("expires_at_unix").map_err(database_error)?;
-        let metadata = CredentialMetadata {
-            id: id.clone(),
-            placement: Placement::Platform,
-            owner: profile.owner.clone(),
-            provider: ProviderId::parse(
-                row.try_get::<String, _>("provider")
-                    .map_err(database_error)?,
-            )
-            .map_err(|_| Error::CorruptRecord)?,
-            authentication_kind: parse_auth_kind(
-                &row.try_get::<String, _>("authentication_kind")
-                    .map_err(database_error)?,
-            )
-            .map_err(|_| Error::CorruptRecord)?,
-            display_name: row.try_get("display_name").map_err(database_error)?,
-            account_hint: row.try_get("account_hint").map_err(database_error)?,
-            ssh_public_key: parse_ssh_public_key(ssh_public_key, ssh_fingerprint)
-                .map_err(|_| Error::CorruptRecord)?,
-            status: parse_status(&row.try_get::<String, _>("status").map_err(database_error)?)
-                .map_err(|_| Error::CorruptRecord)?,
-            expires_at_unix: expires
-                .map(|value| u64::try_from(value).map_err(|_| Error::CorruptRecord))
-                .transpose()?,
-            revocation_generation: positive(
-                row.try_get("revocation_generation")
-                    .map_err(database_error)?,
-            )?,
-        };
-        metadata.validate().map_err(|_| Error::CorruptRecord)?;
+        let metadata = lock_credential(tx, &profile.owner, id).await?;
         credentials.insert(id.clone(), metadata);
     }
+    if profile.include_github {
+        if !matches!(profile.owner, Owner::User(_)) {
+            return Err(Error::UnsupportedEntry);
+        }
+        if let Some(id) = crate::store::active_github_connection(&mut **tx, &profile.owner)
+            .await
+            .map_err(credential_error)?
+        {
+            let metadata = lock_credential(tx, &profile.owner, &id).await?;
+            credentials.insert(id, metadata);
+        }
+    }
     Ok(credentials)
+}
+
+async fn lock_credential(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: &Owner,
+    id: &CredentialId,
+) -> Result<CredentialMetadata, Error> {
+    let (user_id, organization_id) = owner_columns(owner);
+    let row = sqlx::query(
+        "SELECT provider,authentication_kind,display_name,account_hint,status, \
+             expires_at_unix,revocation_generation FROM \
+             public.codewire_platform_lock_credential($1::text,$2::text,$3::text)",
+    )
+    .bind(id.as_str())
+    .bind(user_id)
+    .bind(organization_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .ok_or(Error::NotFound)?;
+    // Retain the applied helper's exact signature and SHARE fence. Only
+    // after it has locked this owner-scoped identity may the existing
+    // metadata SELECT authority read the additive public fields.
+    let (ssh_public_key, ssh_fingerprint): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT ssh_public_key,ssh_fingerprint FROM public.platform_credentials \
+                 WHERE id=$1 AND (user_id=$2 OR organization_id=$3)",
+    )
+    .bind(id.as_str())
+    .bind(user_id)
+    .bind(organization_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .ok_or(Error::NotFound)?;
+    let expires: Option<i64> = row.try_get("expires_at_unix").map_err(database_error)?;
+    let metadata = CredentialMetadata {
+        id: id.clone(),
+        placement: Placement::Platform,
+        owner: owner.clone(),
+        provider: ProviderId::parse(
+            row.try_get::<String, _>("provider")
+                .map_err(database_error)?,
+        )
+        .map_err(|_| Error::CorruptRecord)?,
+        authentication_kind: parse_auth_kind(
+            &row.try_get::<String, _>("authentication_kind")
+                .map_err(database_error)?,
+        )
+        .map_err(|_| Error::CorruptRecord)?,
+        display_name: row.try_get("display_name").map_err(database_error)?,
+        account_hint: row.try_get("account_hint").map_err(database_error)?,
+        ssh_public_key: parse_ssh_public_key(ssh_public_key, ssh_fingerprint)
+            .map_err(|_| Error::CorruptRecord)?,
+        status: parse_status(&row.try_get::<String, _>("status").map_err(database_error)?)
+            .map_err(|_| Error::CorruptRecord)?,
+        expires_at_unix: expires
+            .map(|value| u64::try_from(value).map_err(|_| Error::CorruptRecord))
+            .transpose()?,
+        revocation_generation: positive(
+            row.try_get("revocation_generation")
+                .map_err(database_error)?,
+        )?,
+    };
+    metadata.validate().map_err(|_| Error::CorruptRecord)?;
+    Ok(metadata)
 }
 
 async fn lock_owner(tx: &mut Transaction<'_, Postgres>, owner: &Owner) -> Result<(), Error> {
@@ -1031,6 +1085,13 @@ fn database_error(error: sqlx::Error) -> Error {
         Error::AlreadyExists
     } else {
         Error::DatabaseUnavailable
+    }
+}
+
+fn credential_error(error: crate::PlatformCredentialError) -> Error {
+    match error {
+        crate::PlatformCredentialError::CorruptRecord => Error::CorruptRecord,
+        _ => Error::DatabaseUnavailable,
     }
 }
 

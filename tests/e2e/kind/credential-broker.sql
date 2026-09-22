@@ -17,7 +17,7 @@ GRANT SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_
     ON public.sandbox_environment_backend TO codewire_credential_broker;
 GRANT SELECT (id,user_id,organization_id,name,current_revision)
     ON public.platform_access_profiles TO codewire_credential_broker;
-GRANT SELECT (profile_id,revision) ON public.platform_access_profile_revisions TO codewire_credential_broker;
+GRANT SELECT (profile_id,revision,include_github) ON public.platform_access_profile_revisions TO codewire_credential_broker;
 GRANT SELECT ON public.platform_access_profile_entries TO codewire_credential_broker;
 GRANT SELECT (environment_id,profile_id,profile_revision,personal_owner_confirmed_by)
     ON public.platform_environment_access_bindings TO codewire_credential_broker;

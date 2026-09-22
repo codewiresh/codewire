@@ -863,6 +863,41 @@ pub(crate) fn validate_wrapper(
     Ok(())
 }
 
+/// The account's one GitHub App OAuth connection, when it can be used now.
+///
+/// A profile selects GitHub with `include_github`, never with a credential ID.
+/// Launch authority resolves the connection at use time: a missing, revoked or
+/// expired connection yields `None`, so the profile's choice is omitted rather
+/// than fabricated, and a later reconnect restores it without a new revision.
+/// Organizations never hold a GitHub connection.
+pub async fn active_github_connection<'e, E: Executor<'e, Database = Postgres>>(
+    executor: E,
+    owner: &Owner,
+) -> Result<Option<CredentialId>, Error> {
+    let Owner::User(user_id) = owner else {
+        return Ok(None);
+    };
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM platform_credentials \
+         WHERE user_id=$1 AND organization_id IS NULL \
+           AND provider='github' AND authentication_kind='oauth' AND status='active' \
+           AND (expires_at_unix IS NULL OR expires_at_unix>extract(epoch FROM clock_timestamp())) \
+         ORDER BY id LIMIT 2",
+    )
+    .bind(user_id.as_str())
+    .fetch_all(executor)
+    .await
+    .map_err(database_error)?;
+    match ids.as_slice() {
+        [] => Ok(None),
+        [id] => CredentialId::parse(id.as_str())
+            .map(Some)
+            .map_err(|_| Error::CorruptRecord),
+        // The singleton index forbids this; never pick a winner.
+        _ => Err(Error::CorruptRecord),
+    }
+}
+
 pub(crate) async fn load_record<'e, E: Executor<'e, Database = Postgres>>(
     executor: E,
     owner: &Owner,

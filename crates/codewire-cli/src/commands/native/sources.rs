@@ -299,14 +299,21 @@ async fn profile_candidates(
             for profile in response.access_profiles {
                 exact_id(&profile.id)?;
                 let name = codewire_access::AccessProfileName::parse(profile.name)?.to_string();
-                let profile_slots = profile
+                let mut profile_slots = profile
                     .entries
                     .iter()
                     .map(|entry| entry.capability_slot.clone())
                     .collect::<BTreeSet<_>>();
+                // GitHub is never a profile entry: Include GitHub selects the
+                // account's one connection, resolved by launch authority.
+                let exact_entries = profile_slots.len() == profile.entries.len()
+                    && !profile_slots.contains("github");
+                if profile.include_github {
+                    profile_slots.insert("github".to_owned());
+                }
                 anyhow::ensure!(
                     profile.revision > 0
-                        && profile_slots.len() == profile.entries.len()
+                        && exact_entries
                         && codewire_access::ManagedCredentialClients::from_profile_slots(
                             profile_slots.iter().map(String::as_str),
                         )

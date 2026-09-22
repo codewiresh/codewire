@@ -557,9 +557,9 @@ pub(crate) struct CredentialProfileSetArgs {
     pub(crate) slot: String,
     #[arg(
         value_name = "CREDENTIAL_SELECTOR",
-        help = "Credential name, name:<name>, or id:<canonical-uuid>"
+        help = "Credential name, name:<name>, or id:<canonical-uuid>; omit for github, which includes your one GitHub connection"
     )]
-    pub(crate) credential: String,
+    pub(crate) credential: Option<String>,
 }
 
 #[derive(Debug, Args)]

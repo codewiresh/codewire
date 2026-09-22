@@ -212,11 +212,19 @@ impl OwnerLocalSource {
                 {
                     return Err(Error::Denied);
                 }
-                validate_reserved_keys(
-                    &self.selection.platform,
-                    selected.entries.keys().map(|slot| slot.as_str()),
-                )?;
-                context.authorized_credentials = selected.entries.values().cloned().collect();
+                validate_reserved_keys(&self.selection.platform, selected.selected_slots())?;
+                let mut authorized: BTreeSet<_> = selected.entries.values().cloned().collect();
+                // Include GitHub selects the account's current connection; a
+                // disconnected account omits GitHub instead of fabricating it.
+                if selected.include_github
+                    && let Some(github) =
+                        codewire_platform_credentials::active_github_connection(&mut **tx, &owner)
+                            .await
+                            .map_err(|_| Error::Unavailable)?
+                {
+                    authorized.insert(github);
+                }
+                context.authorized_credentials = authorized;
                 let binding = EnvironmentAccessBinding {
                     environment_id: context.environment_id.clone(),
                     profile_id,

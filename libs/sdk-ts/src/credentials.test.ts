@@ -47,7 +47,6 @@ export async function runCredentialTests(): Promise<void> {
 
 async function checkGithubRepositoryTransport(): Promise<void> {
   const calls: Record<string, unknown>[] = [];
-  const revision = 9_007_199_254_741_009n;
   const cw = new Codewire({ apiKey: "synthetic-opaque-oauth", baseUrl: "https://sdk.example.test",
     fetch: async (input, init) => {
       const request = new Request(input, init);
@@ -61,13 +60,12 @@ async function checkGithubRepositoryTransport(): Promise<void> {
         {headers:{"Content-Type":"application/json"}});
     },
   });
-  const page = await cw.credentials.listGithubRepositories("profile-one", revision, 50, "opaque-page");
-  assert.deepEqual(calls, [{profileId:"profile-one",profileRevision:revision.toString(),pageSize:50,pageToken:"opaque-page"}]);
+  const page = await cw.credentials.listGithubRepositories(50, "opaque-page");
+  assert.deepEqual(calls, [{pageSize:50,pageToken:"opaque-page"}]);
   assert.deepEqual(page, { repositories: [{repository_id:"42",full_name:"owner/private",default_branch:"main",
     clone_url:"https://github.com/owner/private.git",is_private:true,archived:false,disabled:false}],next_page_token:"opaque-next" });
-  await assert.rejects(cw.credentials.listGithubRepositories("profile-one", 0n));
-  await assert.rejects(cw.credentials.listGithubRepositories("profile-one", revision, 101));
-  await assert.rejects(cw.credentials.listGithubRepositories("profile-one", revision, 50, "x".repeat(129)));
+  await assert.rejects(cw.credentials.listGithubRepositories(101));
+  await assert.rejects(cw.credentials.listGithubRepositories(50, "x".repeat(129)));
   assert.equal(calls.length,1,"invalid selections must not call the provider or advance the profile");
 }
 

@@ -508,7 +508,7 @@ async fn rotation_rpc_requires_an_exact_positive_revision_and_clears_account_hin
     let profile = client
         .create_profile(
             &AccessProfileName::parse("reconnect-profile").unwrap(),
-            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
         )
         .await
         .unwrap();
@@ -912,7 +912,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
     let profile = client
         .create_profile(
             &AccessProfileName::parse("work").unwrap(),
-            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
         )
         .await
         .unwrap();
@@ -931,14 +931,18 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
         .update_profile(
             &profile.profile.id,
             profile.profile.revision,
-            &BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+            &BTreeMap::from([(
+                CapabilitySlot::parse("anthropic").unwrap(),
+                credential.metadata.id.clone(),
+            )]),
+            false,
         )
         .await
         .unwrap_err();
     assert_eq!(incompatible.code(), Code::FailedPrecondition);
     assert_eq!(
         incompatible.message(),
-        "provider openai does not support slot github with this authentication kind"
+        "provider openai does not support slot anthropic with this authentication kind"
     );
     assert!(!incompatible.message().contains("synthetic"));
 
@@ -1049,7 +1053,7 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
         start_server_with_repository_spawner(config.clone(), store, spawner).await;
     let mut client = connect_when_ready(&config).await;
     let token = b"synthetic-private-github-token";
-    let credential = client
+    let _connection = client
         .add_credential(
             NewCredential {
                 provider: provider("github"),
@@ -1065,7 +1069,7 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
     let profile = client
         .create_profile(
             &AccessProfileName::parse("github-work").unwrap(),
-            &BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+            &BTreeMap::new(), true,
         )
         .await
         .unwrap();
@@ -1121,7 +1125,7 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
         .unwrap();
     let entries = BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]);
     let profile = client
-        .create_profile(&AccessProfileName::parse("bound").unwrap(), &entries)
+        .create_profile(&AccessProfileName::parse("bound").unwrap(), &entries, false)
         .await
         .unwrap();
     let environment_id = EnvironmentId::parse("env-bound").unwrap();
@@ -1196,7 +1200,7 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
     assert!(!rendered.contains("protected_entry"));
 
     let updated = client
-        .update_profile(&profile.profile.id, profile.profile.revision, &entries)
+        .update_profile(&profile.profile.id, profile.profile.revision, &entries, false)
         .await
         .unwrap();
     let updated_binding = EnvironmentAccessBinding {
@@ -1497,7 +1501,7 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
     let profile = owner
         .create_profile(
             &AccessProfileName::parse("broker").unwrap(),
-            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]), false,
         )
         .await
         .unwrap();

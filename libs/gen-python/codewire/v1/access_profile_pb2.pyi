@@ -15,16 +15,18 @@ class AccessProfileEntry(_message.Message):
     def __init__(self, capability_slot: _Optional[str] = ..., credential_id: _Optional[str] = ...) -> None: ...
 
 class AccessProfile(_message.Message):
-    __slots__ = ("id", "name", "revision", "entries")
+    __slots__ = ("id", "name", "revision", "entries", "include_github")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     REVISION_FIELD_NUMBER: _ClassVar[int]
     ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    INCLUDE_GITHUB_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     revision: int
     entries: _containers.RepeatedCompositeFieldContainer[AccessProfileEntry]
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., revision: _Optional[int] = ..., entries: _Optional[_Iterable[_Union[AccessProfileEntry, _Mapping]]] = ...) -> None: ...
+    include_github: bool
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., revision: _Optional[int] = ..., entries: _Optional[_Iterable[_Union[AccessProfileEntry, _Mapping]]] = ..., include_github: _Optional[bool] = ...) -> None: ...
 
 class ListAccessProfilesRequest(_message.Message):
     __slots__ = ("page_size", "page_token")
@@ -59,12 +61,14 @@ class GetAccessProfileResponse(_message.Message):
     def __init__(self, access_profile: _Optional[_Union[AccessProfile, _Mapping]] = ...) -> None: ...
 
 class CreateAccessProfileRequest(_message.Message):
-    __slots__ = ("name", "entries")
+    __slots__ = ("name", "entries", "include_github")
     NAME_FIELD_NUMBER: _ClassVar[int]
     ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    INCLUDE_GITHUB_FIELD_NUMBER: _ClassVar[int]
     name: str
     entries: _containers.RepeatedCompositeFieldContainer[AccessProfileEntry]
-    def __init__(self, name: _Optional[str] = ..., entries: _Optional[_Iterable[_Union[AccessProfileEntry, _Mapping]]] = ...) -> None: ...
+    include_github: bool
+    def __init__(self, name: _Optional[str] = ..., entries: _Optional[_Iterable[_Union[AccessProfileEntry, _Mapping]]] = ..., include_github: _Optional[bool] = ...) -> None: ...
 
 class CreateAccessProfileResponse(_message.Message):
     __slots__ = ("access_profile",)
@@ -73,14 +77,16 @@ class CreateAccessProfileResponse(_message.Message):
     def __init__(self, access_profile: _Optional[_Union[AccessProfile, _Mapping]] = ...) -> None: ...
 
 class UpdateAccessProfileRequest(_message.Message):
-    __slots__ = ("access_profile_id", "expected_revision", "entries")
+    __slots__ = ("access_profile_id", "expected_revision", "entries", "include_github")
     ACCESS_PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
     EXPECTED_REVISION_FIELD_NUMBER: _ClassVar[int]
     ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    INCLUDE_GITHUB_FIELD_NUMBER: _ClassVar[int]
     access_profile_id: str
     expected_revision: int
     entries: _containers.RepeatedCompositeFieldContainer[AccessProfileEntry]
-    def __init__(self, access_profile_id: _Optional[str] = ..., expected_revision: _Optional[int] = ..., entries: _Optional[_Iterable[_Union[AccessProfileEntry, _Mapping]]] = ...) -> None: ...
+    include_github: bool
+    def __init__(self, access_profile_id: _Optional[str] = ..., expected_revision: _Optional[int] = ..., entries: _Optional[_Iterable[_Union[AccessProfileEntry, _Mapping]]] = ..., include_github: _Optional[bool] = ...) -> None: ...
 
 class UpdateAccessProfileResponse(_message.Message):
     __slots__ = ("access_profile",)

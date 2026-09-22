@@ -87,14 +87,23 @@ impl AccessProfileService for ProfileConnectService {
     ) -> ServiceResult<CreateAccessProfileResponse> {
         let user = account_user(&ctx)?;
         let request = request.to_owned_message();
-        let entries = profile_entries(
+        let (entries, include_github) = profile_entries(
             request
                 .entries
                 .iter()
                 .map(|entry| (entry.capability_slot.as_str(), entry.credential_id.as_str())),
         )
         .map_err(|error| rpc_app_error(&error, &ctx))?;
-        let profile = bounded(&ctx, self.profiles.create(&user, &request.name, entries)).await?;
+        let profile = bounded(
+            &ctx,
+            self.profiles.create(
+                &user,
+                &request.name,
+                entries,
+                include_github || request.include_github,
+            ),
+        )
+        .await?;
         connectrpc::Response::ok(CreateAccessProfileResponse {
             access_profile: Some(proto_profile(profile)).into(),
             ..Default::default()
@@ -108,7 +117,7 @@ impl AccessProfileService for ProfileConnectService {
     ) -> ServiceResult<UpdateAccessProfileResponse> {
         let user = account_user(&ctx)?;
         let request = request.to_owned_message();
-        let entries = profile_entries(
+        let (entries, include_github) = profile_entries(
             request
                 .entries
                 .iter()
@@ -122,6 +131,7 @@ impl AccessProfileService for ProfileConnectService {
                 &request.access_profile_id,
                 request.expected_revision,
                 entries,
+                include_github || request.include_github,
             ),
         )
         .await?;
@@ -204,6 +214,7 @@ fn proto_profile(profile: codewire_access::AccessProfile) -> AccessProfile {
         id: profile.id.as_str().to_owned(),
         name: profile.name.as_str().to_owned(),
         revision: profile.revision,
+        include_github: profile.include_github,
         entries: profile
             .entries
             .into_iter()

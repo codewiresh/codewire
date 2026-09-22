@@ -120,6 +120,7 @@ fn profile(id: &str, owner: Owner, credential: &str) -> AccessProfile {
         owner,
         name: AccessProfileName::parse(id).expect("profile name"),
         revision: 1,
+        include_github: false,
         entries: [(slot("codex"), credential_id(credential))]
             .into_iter()
             .collect(),
@@ -631,4 +632,110 @@ fn duplicate_and_empty_provider_definitions_fail_closed() {
             ..
         })
     ));
+}
+
+fn github_connection(id: &str, owner: Owner, status: CredentialStatus) -> CredentialMetadata {
+    CredentialMetadata {
+        provider: provider_id("github"),
+        status,
+        ..credential(id, owner)
+    }
+}
+
+fn github_profile(owner: Owner) -> AccessProfile {
+    AccessProfile {
+        include_github: true,
+        entries: BTreeMap::new(),
+        ..profile("github-work", owner, "unused")
+    }
+}
+
+#[test]
+fn github_is_selected_by_include_github_and_never_pinned_by_entry() {
+    let user = Owner::User(owner_id("user-one"));
+    let mut pinned = profile("pinned", user.clone(), "github-one");
+    pinned.entries = [(CapabilitySlot::github(), credential_id("github-one"))]
+        .into_iter()
+        .collect();
+    assert!(pinned.validate().is_err());
+
+    let included = github_profile(user);
+    included.validate().unwrap();
+    assert_eq!(included.selected_slots().collect::<Vec<_>>(), vec!["github"]);
+    let mut both = profile("both", Owner::User(owner_id("user-one")), "codex-work");
+    both.include_github = true;
+    assert_eq!(
+        both.selected_slots().collect::<Vec<_>>(),
+        vec!["codex", "github"]
+    );
+}
+
+#[test]
+fn include_github_grants_only_the_authorized_current_connection() {
+    let user = Owner::User(owner_id("user-one"));
+    let catalog = builtin_provider_catalog();
+    let github_profile = github_profile(user.clone());
+    let active = github_connection("github-one", user.clone(), CredentialStatus::Active);
+    let credentials = [(active.id.clone(), active.clone())]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+    // Launch authority authorized the connection: exactly one GitHub grant.
+    let grants = derive_grants(
+        &context([active.id.clone()]),
+        &binding(&github_profile),
+        &github_profile,
+        &credentials,
+        &catalog,
+        1_800_000_000,
+    )
+    .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].capability_slot, CapabilitySlot::github());
+    assert_eq!(grants[0].credential_id, active.id);
+
+    // Not authorized (for example disconnected or expired at launch): GitHub
+    // is omitted, never fabricated and never a launch failure.
+    let omitted = derive_grants(
+        &context([]),
+        &binding(&github_profile),
+        &github_profile,
+        &credentials,
+        &catalog,
+        1_800_000_000,
+    )
+    .unwrap();
+    assert!(omitted.is_empty());
+
+    // No connection at all: omitted as well.
+    let none = derive_grants(
+        &context([]),
+        &binding(&github_profile),
+        &github_profile,
+        &BTreeMap::new(),
+        &catalog,
+        1_800_000_000,
+    )
+    .unwrap();
+    assert!(none.is_empty());
+
+    // Another user's connection is never selected.
+    let other = github_connection(
+        "github-other",
+        Owner::User(owner_id("user-two")),
+        CredentialStatus::Active,
+    );
+    let foreign = [(other.id.clone(), other.clone())]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let cross_user = derive_grants(
+        &context([other.id.clone()]),
+        &binding(&github_profile),
+        &github_profile,
+        &foreign,
+        &catalog,
+        1_800_000_000,
+    )
+    .unwrap();
+    assert!(cross_user.is_empty());
 }

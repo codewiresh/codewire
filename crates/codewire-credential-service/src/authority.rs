@@ -407,18 +407,24 @@ impl AuthoritySource {
                 .map_err(profile_error)?;
             if profile.owner != owner
                 || profile.placement != Placement::Platform
-                || profile.entries.is_empty()
+                || profile.entries.is_empty() && !profile.include_github
                 || profile.entries.len() > 64
             {
                 return Err(Error::Denied);
             }
-            let ids: Vec<String> = profile
-                .entries
-                .values()
-                .map(ToString::to_string)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
+            let mut authorized: BTreeSet<codewire_access::CredentialId> =
+                profile.entries.values().cloned().collect();
+            // Include GitHub selects the account's current connection. When it
+            // is disconnected, GitHub is omitted rather than fabricated.
+            if profile.include_github
+                && let Some(github) =
+                    codewire_platform_credentials::active_github_connection(&self.pool, &owner)
+                        .await
+                        .map_err(|_| Error::Unavailable)?
+            {
+                authorized.insert(github);
+            }
+            let ids: Vec<String> = authorized.iter().map(ToString::to_string).collect();
             let owned: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM public.platform_credentials WHERE \
              ((user_id=$1 AND organization_id IS NULL) OR (organization_id=$2 AND user_id IS NULL)) \
@@ -434,16 +440,13 @@ impl AuthoritySource {
             if owned.into_iter().collect::<BTreeSet<_>>() != ids.into_iter().collect() {
                 return Err(Error::Denied);
             }
-            context.authorized_credentials = profile.entries.values().cloned().collect();
+            context.authorized_credentials = authorized;
             (Some(binding), Some(profile))
         } else {
             (None, None)
         };
         let reserved_keys = codewire_project::platform_projection_reserved_keys(
-            profile
-                .iter()
-                .flat_map(|profile| profile.entries.keys())
-                .map(|slot| slot.as_str()),
+            profile.iter().flat_map(|profile| profile.selected_slots()),
         )
         .map_err(|_| Error::Denied)?;
         let selection = metadata.selection(&scope, reserved_keys)?;

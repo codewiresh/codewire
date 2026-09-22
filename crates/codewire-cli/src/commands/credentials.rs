@@ -33,8 +33,8 @@ use super::CredentialsArgs;
 use super::credential_input::{
     CODEX_DEVICE_AUTHORIZATION_GUIDANCE, CredentialOperation, ParsedCredentialSelector,
     ParsedProfileSelector, parse_credential_selector, parse_profile_selector,
-    prompt_credential_material, read_ssh_import, supported_profile_slot, validate_ssh_generation,
-    validate_ssh_import,
+    profile_set_credential, prompt_credential_material, read_ssh_import, supported_profile_slot,
+    validate_ssh_generation, validate_ssh_import,
 };
 #[cfg(test)]
 use super::credential_input::{
@@ -283,6 +283,26 @@ fn select_oauth_connection_target(
     provider: &str,
 ) -> anyhow::Result<OAuthConnectionTarget> {
     let provider = ProviderId::parse(provider)?;
+    // GitHub is one connection per store: reconnect it in place whatever name
+    // was supplied, keeping its identity and name. Only create when absent.
+    if provider.as_str() == "github" {
+        let mut connections = records.iter().filter(|record| {
+            record.metadata.provider == provider
+                && record.metadata.authentication_kind == CredentialAuthKind::OAuth
+        });
+        if let Some(record) = connections.next() {
+            anyhow::ensure!(
+                connections.next().is_none(),
+                "more than one local GitHub connection exists; delete all but one before reconnecting"
+            );
+            record.metadata.validate()?;
+            return Ok(OAuthConnectionTarget {
+                provider,
+                display_name: record.metadata.display_name.clone(),
+                existing: Some(record.clone()),
+            });
+        }
+    }
     let mut matches = records.into_iter().filter(|record| {
         record
             .metadata
@@ -796,7 +816,10 @@ async fn set_profile_entry(
     client: &mut LocalCredentialClient,
     args: CredentialProfileSetArgs,
 ) -> anyhow::Result<()> {
-    let credential = resolve_credential(client, &args.credential).await?;
+    let Some(selector) = profile_set_credential(&args)? else {
+        return set_local_github(client, &args.profile, true).await;
+    };
+    let credential = resolve_credential(client, selector).await?;
     let slot = supported_profile_slot(
         &args.slot,
         &credential.metadata.provider,
@@ -809,12 +832,13 @@ async fn set_profile_entry(
         .unwrap_or_default();
     entries.insert(slot, credential.metadata.id);
     // Creation publishes the first complete selection atomically. An existing
-    // profile gets exactly one immutable CAS update, with no conflict retry.
+    // profile gets exactly one immutable CAS update, with no conflict retry,
+    // and keeps its GitHub selection.
     let updated = match existing {
         Some(profile) => client
-            .update_profile(&profile.profile.id, profile.profile.revision, &entries)
+            .update_profile(&profile.profile.id, profile.profile.revision, &entries, profile.profile.include_github)
             .await.context("update exact local access profile revision")?,
-        None => client.create_profile(&name.context("new profiles require a name")?, &entries)
+        None => client.create_profile(&name.context("new profiles require a name")?, &entries, false)
             .await.context("create local profile with its first selection; inspect before retrying an uncertain result")?,
     };
     eprintln!(
@@ -852,10 +876,57 @@ async fn local_profile_for_set(
     Ok((profile, Some(name)))
 }
 
+/// Include or remove the store's one GitHub connection. The profile never
+/// names a GitHub credential; launch resolves the current connection.
+async fn set_local_github(
+    client: &mut LocalCredentialClient,
+    selector: &str,
+    include: bool,
+) -> anyhow::Result<()> {
+    let updated = if include {
+        let (existing, name) = local_profile_for_set(client, selector).await?;
+        match existing {
+            Some(profile) => {
+                anyhow::ensure!(
+                    !profile.profile.include_github,
+                    "local access profile already includes GitHub"
+                );
+                client
+                    .update_profile(&profile.profile.id, profile.profile.revision, &profile.profile.entries, true)
+                    .await
+                    .context("update exact local access profile revision")?
+            }
+            None => client
+                .create_profile(&name.context("new profiles require a name")?, &BTreeMap::new(), true)
+                .await
+                .context("create local profile that includes GitHub; inspect before retrying an uncertain result")?,
+        }
+    } else {
+        let profile = resolve_profile(client, selector).await?;
+        anyhow::ensure!(
+            profile.profile.include_github,
+            "local access profile does not include GitHub"
+        );
+        client
+            .update_profile(&profile.profile.id, profile.profile.revision, &profile.profile.entries, false)
+            .await
+            .context("update local access profile")?
+    };
+    eprintln!(
+        "Local access profile {:?} updated to revision {}.",
+        updated.profile.name.to_string(),
+        updated.profile.revision
+    );
+    Ok(())
+}
+
 async fn unset_profile_entry(
     client: &mut LocalCredentialClient,
     args: CredentialProfileSlotArgs,
 ) -> anyhow::Result<()> {
+    if args.slot == "github" {
+        return set_local_github(client, &args.profile, false).await;
+    }
     let profile = resolve_profile(client, &args.profile).await?;
     let slot = CapabilitySlot::parse(trimmed_required(&args.slot, "capability slot")?)
         .context("invalid capability slot")?;
@@ -867,7 +938,7 @@ async fn unset_profile_entry(
         );
     }
     let updated = client
-        .update_profile(&profile.profile.id, profile.profile.revision, &entries)
+        .update_profile(&profile.profile.id, profile.profile.revision, &entries, profile.profile.include_github)
         .await
         .context("update local access profile")?;
     eprintln!(
@@ -1285,6 +1356,7 @@ mod tests {
                 owner: Owner::User(OwnerId::parse("local-user").unwrap()),
                 name: AccessProfileName::parse(name).unwrap(),
                 revision: 1,
+                include_github: false,
                 entries: BTreeMap::new(),
             },
             created_at_unix_ms: 10,
@@ -1458,7 +1530,7 @@ mod tests {
             let profile = client
                 .create_profile(
                     &AccessProfileName::parse(&name).unwrap(),
-                    &BTreeMap::from([(slot, created.metadata.id.clone())]),
+                    &BTreeMap::from([(slot, created.metadata.id.clone())]), false,
                 )
                 .await
                 .unwrap();

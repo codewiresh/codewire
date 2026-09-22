@@ -379,7 +379,7 @@
       if (retry) retry.hidden = false;
       const browser = form.querySelector("[data-github-browser]");
       if (browser) {
-        setStatus(browser, "GitHub connections could not be loaded. Retry loading choices.");
+        setStatus(browser, "Repository access unavailable. Retry loading choices.");
         const connection = browser.querySelector("[data-github-connection-status]");
         if (connection) connection.textContent = "GitHub connections are unavailable until choices load.";
       }
@@ -580,31 +580,26 @@
     const status = browser.querySelector("[data-github-status]");
     if (status) status.textContent = message;
   };
-  const browserChoice = (browser) => browser.querySelector("[data-github-profile]");
-  const connectionState = (browser) => browserChoice(browser)?.selectedOptions[0]?.dataset.githubState || "not-configured";
+  const connectionState = (browser) => browser.dataset.githubState || "not-configured";
+  // The account's one GitHub connection is connected, needs reconnecting,
+  // could not be loaded, or does not exist yet.
+  const githubStateMessage = (browser, connected) => ({
+    connected,
+    inactive: "Reconnect required. Reconnect GitHub in Settings.",
+    unavailable: "Repository access unavailable. Retry loading choices.",
+  })[connectionState(browser)] || "Connect GitHub to browse repositories.";
   const updateConnectionStatus = (browser) => {
-    const choice = browserChoice(browser);
-    const option = choice?.selectedOptions[0];
     const message = browser.querySelector("[data-github-connection-status]");
     if (!message) return;
-    if (choice?.disabled) message.textContent = browserForm(browser)?.dataset.createOptionsLoading === "true" ? "Loading GitHub connections…" : "GitHub connections are unavailable. Retry loading choices.";
-    else if (!option?.value) message.textContent = "Choose a GitHub connection to browse repositories.";
-    else if (connectionState(browser) === "inactive") message.textContent = "This GitHub connection is inactive. Reconnect it in Settings.";
-    else if (connectionState(browser) !== "connected") message.textContent = "GitHub connection details are unavailable. Check this profile in Settings.";
-    else {
-      const account = option.dataset.githubAccount;
-      const profile = option.textContent?.split(" · ")[0] || "this profile";
-      const runtime = selectedProfile(browser)?.value === option.value
-        ? "This profile is selected for Sandbox provider access."
-        : "Select this profile under Provider credentials for private checkout.";
-      message.textContent = `${account ? `Connected as @${account}` : "GitHub account connected"} through ${profile}. ${runtime}`;
-    }
+    const profileHint = " To start a Sandbox with private repository access, choose a profile with Include GitHub.";
+    const account = browser.dataset.githubAccount;
+    if (browserForm(browser)?.dataset.createOptionsLoading === "true") message.textContent = "Loading GitHub account…";
+    else message.textContent = `${githubStateMessage(browser, account ? `Connected as @${account}.` : "GitHub connected.")}${profileHint}`;
     const setup = browser.querySelector("[data-github-setup-link]");
-    if (setup) setup.textContent = connectionState(browser) === "connected" ? "Manage GitHub connection"
-      : choice?.options.length > 1 ? "Check GitHub connection" : "Connect GitHub";
+    if (setup) setup.textContent = { connected: "Manage GitHub connection", inactive: "Reconnect GitHub" }[connectionState(browser)] || "Connect GitHub";
   };
   const browserCurrent = (browser, state, sequence) => browser.isConnected
-    && state.sequence === sequence && state.profile === browserChoice(browser)?.value
+    && state.sequence === sequence
     && browserForm(browser)?.isConnected && draftIsOpen(browserForm(browser));
   const cancelBrowser = (state) => {
     state.sequence += 1;
@@ -615,7 +610,6 @@
   };
   const resetBrowser = (browser, state) => {
     cancelBrowser(state);
-    state.profile = browserChoice(browser)?.value || "";
     state.query = browser.querySelector("[data-github-filter]")?.value.trim().toLowerCase().slice(0, 128) || "";
     state.nextToken = "";
     state.seenTokens = new Set();
@@ -630,13 +624,12 @@
     browser.querySelector("[data-github-next]")?.setAttribute("hidden", "");
     updateConnectionStatus(browser);
     const filter = browser.querySelector("[data-github-filter]");
-    if (filter) filter.disabled = !state.profile || connectionState(browser) !== "connected";
-    if (browserChoice(browser)?.disabled) setStatus(browser, browserForm(browser)?.dataset.createOptionsLoading === "true" ? "Loading GitHub connections…" : "GitHub connections are unavailable. Retry loading choices.");
-    else if (!state.profile) setStatus(browser, "Choose a GitHub connection to browse repositories.");
-    else if (connectionState(browser) !== "connected") setStatus(browser, "Check this GitHub connection in Settings before browsing repositories.");
+    if (filter) filter.disabled = connectionState(browser) !== "connected";
+    if (browserForm(browser)?.dataset.createOptionsLoading === "true") setStatus(browser, "Loading GitHub account…");
+    else if (connectionState(browser) !== "connected") setStatus(browser, githubStateMessage(browser, ""));
   };
   const loadRepositories = async (browser, state) => {
-    if (state.loading || state.complete || !state.profile || connectionState(browser) !== "connected") return;
+    if (state.loading || state.complete || connectionState(browser) !== "connected") return;
     if (state.pages >= 10_000 || state.seenTokens.has(state.nextToken)) {
       setStatus(browser, "Repository paging did not finish safely. Refine the search or retry from the beginning.");
       browser.querySelector("[data-github-retry]").hidden = false;
@@ -658,15 +651,15 @@
       const response = await fetch(endpoint, {
         method: "POST", credentials: "same-origin", redirect: "error", signal: controller.signal,
         headers: { Accept: "text/html" },
-        body: new URLSearchParams({ _csrf: browserForm(browser)?.querySelector('[name="_csrf"]')?.value || "", credential_profile: state.profile, page_token: token }),
+        body: new URLSearchParams({ _csrf: browserForm(browser)?.querySelector('[name="_csrf"]')?.value || "", page_token: token }),
       });
       if (!response.headers.get("content-type")?.startsWith("text/html")) throw new Error("invalid content type");
       const html = await readDraftHtml(response);
       if (!browserCurrent(browser, state, sequence) || controller.signal.aborted) return;
       const parsed = new DOMParser().parseFromString(html, "text/html");
       const pages = parsed.querySelectorAll("[data-github-results-page]");
-      if (pages.length !== 1 || parsed.querySelector("script") || pages[0].dataset.githubProfile !== state.profile) throw new Error("invalid repository response");
-      if (!response.ok) throw new Error(pages[0].querySelector(".cw-field-error")?.textContent?.trim().slice(0, 240) || "GitHub repositories are unavailable. Try again.");
+      if (pages.length !== 1 || parsed.querySelector("script")) throw new Error("invalid repository response");
+      if (!response.ok) throw new Error(pages[0].querySelector(".cw-field-error")?.textContent?.trim().slice(0, 240) || "Repository access unavailable. Try again.");
       const next = pages[0].querySelector("[data-github-next]")?.getAttribute("data-page-token") || "";
       if (next && (next === token || state.seenTokens.has(next))) throw new Error("Repository paging returned a repeated page. Retry from the beginning.");
       const page = document.importNode(pages[0], true);
@@ -709,7 +702,7 @@
         : state.complete ? `${state.pages} pages loaded. Choose a repository to add.${state.pruned ? " Earlier rows can be found with search." : ""}` : `${state.pages} pages loaded. Scroll or load more.${state.pruned ? " Earlier rows can be found with search." : ""}`);
     } catch (error) {
       if (browserCurrent(browser, state, sequence)) {
-        setStatus(browser, error?.message && !["invalid endpoint", "invalid content type", "invalid repository response", "draft response limit"].includes(error.message) ? error.message : "GitHub repositories could not be loaded. Check this connection and retry.");
+        setStatus(browser, error?.message && !["invalid endpoint", "invalid content type", "invalid repository response", "draft response limit"].includes(error.message) ? error.message : "Repository access unavailable. Retry loading repositories.");
         browser.querySelector("[data-github-retry]").hidden = false;
       }
     } finally {
@@ -725,15 +718,14 @@
   const wireGithubBrowsers = () => {
     document.querySelectorAll("[data-github-browser]").forEach((browser) => {
       if (browsers.has(browser)) return;
-      const state = { sequence: 0, controller: null, queryTimer: 0, profile: "", query: "", nextToken: "", seenTokens: new Set(), pages: 0, matches: 0, rendered: 0, pruned: false, complete: false, loading: false };
+      const state = { sequence: 0, controller: null, queryTimer: 0, query: "", nextToken: "", seenTokens: new Set(), pages: 0, matches: 0, rendered: 0, pruned: false, complete: false, loading: false };
       browsers.set(browser, state);
       if (browser.querySelector("[data-github-results-page]")) {
-        state.profile = browserChoice(browser)?.value || "";
         state.complete = true; // Static design fixture already contains its example rows.
         updateConnectionStatus(browser);
       } else {
         resetBrowser(browser, state);
-        if (state.profile && connectionState(browser) === "connected") void loadRepositories(browser, state);
+        if (connectionState(browser) === "connected") void loadRepositories(browser, state);
       }
       const owner = browser.closest("[data-drawer]") || browserForm(browser)?.parentElement;
       if (owner) {
@@ -745,21 +737,13 @@
       }
     });
   };
-  document.addEventListener("change", (event) => {
-    if (!(event.target instanceof HTMLSelectElement) || !event.target.matches("[data-github-profile]")) return;
-    const browser = event.target.closest("[data-github-browser]");
-    const state = browsers.get(browser);
-    if (!state) return;
-    resetBrowser(browser, state);
-    if (state.profile && connectionState(browser) === "connected") void loadRepositories(browser, state);
-  });
   document.addEventListener("input", (event) => {
     if (!(event.target instanceof HTMLInputElement) || !event.target.matches("[data-github-filter]")) return;
     const browser = event.target.closest("[data-github-browser]");
     const state = browsers.get(browser);
     if (!state) return;
     resetBrowser(browser, state);
-    if (state.profile && connectionState(browser) === "connected") state.queryTimer = window.setTimeout(() => void loadRepositories(browser, state), 250);
+    if (connectionState(browser) === "connected") state.queryTimer = window.setTimeout(() => void loadRepositories(browser, state), 250);
   });
   document.addEventListener("submit", (event) => {
     if (event.submitter?.closest?.("[data-github-browser]")) event.preventDefault();
@@ -786,7 +770,7 @@
       return;
     }
     const repository = event.target.closest("[data-select-github-repository]");
-    if (!(repository instanceof HTMLButtonElement) || repository.disabled || !state.profile || state.profile !== repository.closest("[data-github-results-page]")?.dataset.githubProfile) return;
+    if (!(repository instanceof HTMLButtonElement) || repository.disabled) return;
     const form = browserForm(browser);
     if (!(form instanceof HTMLFormElement) || !draftIsOpen(form)) return;
     const existing = Array.from(form.querySelectorAll("[data-repository-row]"));
@@ -800,7 +784,8 @@
     if (mount && !mount.value) mount.value = repository.dataset.repositoryName?.split("/").at(-1) || "";
     form.dispatchEvent(new Event("codewire:form-structure-edited", { bubbles: true }));
     editDraft(form);
-    if (selectedProfile(browser)?.value !== state.profile && repository.dataset.repositoryPrivate === "true") setStatus(browser, "Repository added. Select this same profile under Provider credentials for private checkout.");
+    const includeGithub = selectedProfile(browser)?.selectedOptions[0]?.dataset.includeGithub === "true";
+    if (!includeGithub && repository.dataset.repositoryPrivate === "true") setStatus(browser, "Repository added. Select a profile with Include GitHub for private checkout.");
     row.querySelector('[name^="repo_branch_"]')?.focus();
   });
   clearAcknowledgedCreate();

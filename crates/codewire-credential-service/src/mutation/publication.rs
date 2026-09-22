@@ -108,12 +108,19 @@ pub(super) async fn enroll(
             };
         }
     };
+    let github_create =
+        completed.provider() == "github" && matches!(prepared, Mutation::Create(_));
     let result = publish(shared, scope, Some(completed), prepared).await;
     Publication {
         outcome: result.outcome,
         result: result
             .result
-            .and_then(|metadata| metadata.ok_or(Error::PublicationUnknown)),
+            .and_then(|metadata| metadata.ok_or(Error::PublicationUnknown))
+            .map_err(|error| match error {
+                // The singleton index rejected a concurrent second connection.
+                Error::AlreadyExists if github_create => Error::GitHubAlreadyConnected,
+                error => error,
+            }),
     }
 }
 
@@ -429,12 +436,26 @@ async fn apply(
             if record.metadata.revocation_generation != revision {
                 return Err(Error::StaleRevision);
             }
-            if record.metadata.status != CredentialStatus::Revoked {
+            let github = record.metadata.provider.as_str() == "github"
+                && record.metadata.authentication_kind == CredentialAuthKind::OAuth;
+            let version = if record.metadata.status == CredentialStatus::Revoked {
+                record.version
+            } else if github {
+                // GitHub is one account-level connection with no user-visible
+                // revoke step. Revoke and forget it in this same fenced
+                // transaction; profiles keep their include_github selection.
+                shared
+                    .store
+                    .revoke_in(tx, &scope.owner, &id, record.version)
+                    .await
+                    .map_err(store_error)?
+                    .version
+            } else {
                 return Err(Error::MustBeRevoked);
-            }
+            };
             shared
                 .store
-                .delete_revoked_in(tx, &scope.owner, &id, record.version)
+                .delete_revoked_in(tx, &scope.owner, &id, version)
                 .await
                 .map_err(store_error)?;
             Ok(None)

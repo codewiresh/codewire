@@ -58,6 +58,7 @@ pub enum CredentialMutationError {
     EnrollmentUnsupported,
     EnrollmentNotPublished,
     GitHubInstallationRequired,
+    GitHubAlreadyConnected,
     GitHubAppNotConfigured,
     CleanupFailed,
     PublicationUnknown,
@@ -440,6 +441,33 @@ async fn enrollment_target(
         EnrollmentTarget::Create(name)
     };
     Ok(target)
+}
+
+/// Refuse to start a second GitHub connection before any provider challenge
+/// or code exchange. Publication still relies on the database's singleton
+/// index, so a concurrent enrollment cannot slip past this early answer.
+async fn ensure_github_unconnected(shared: &Shared, scope: &Scope) -> Result<(), Error> {
+    scope.check()?;
+    // GitHub is a per-user connection; organizations cannot hold one.
+    let Owner::User(user_id) = &scope.owner else {
+        return Err(Error::InvalidInput);
+    };
+    let exists: bool = scope
+        .wait(
+            sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM platform_credentials \
+                  WHERE user_id=$1 AND provider='github' AND authentication_kind='oauth')",
+            )
+            .bind(user_id.as_str())
+            .fetch_one(&shared.pool),
+        )
+        .await?
+        .map_err(|_| Error::Unavailable)?;
+    if exists {
+        Err(Error::GitHubAlreadyConnected)
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_name(name: &str) -> Result<(), Error> {

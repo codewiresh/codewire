@@ -171,6 +171,8 @@ pub struct AccessProfile {
     pub owner: Owner,
     pub name: AccessProfileName,
     pub revision: u64,
+    #[serde(default)]
+    pub include_github: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub entries: BTreeMap<CapabilitySlot, CredentialId>,
 }
@@ -182,7 +184,24 @@ impl AccessProfile {
                 field: "access profile revision",
             });
         }
+        // GitHub is the account's one connection. A profile selects it with
+        // `include_github` and never pins a GitHub credential ID.
+        if self.entries.contains_key(&CapabilitySlot::github()) {
+            return Err(AccessError::InvalidField {
+                field: "access profile GitHub entry",
+            });
+        }
         Ok(())
+    }
+
+    /// Every capability slot this profile selects: its credential entries and,
+    /// when included, GitHub. GitHub is resolved from the account's current
+    /// connection at use time, so it is selected even while disconnected.
+    pub fn selected_slots(&self) -> impl Iterator<Item = &str> {
+        self.entries
+            .keys()
+            .map(CapabilitySlot::as_str)
+            .chain(self.include_github.then_some("github"))
     }
 }
 

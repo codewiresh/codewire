@@ -50,18 +50,13 @@ pub(super) fn error(error: Error) -> connectrpc::ConnectError {
         ),
         Error::NotFound => (
             ConnectCode::NotFound,
-            "GITHUB_PROFILE_NOT_FOUND",
-            "selected profile is unavailable",
-        ),
-        Error::ProfileChanged => (
-            ConnectCode::Aborted,
-            "GITHUB_PROFILE_CHANGED",
-            "selected profile revision changed",
+            "GITHUB_CREDENTIAL_NOT_FOUND",
+            "selected GitHub connection is unavailable",
         ),
         Error::NotConnected => (
             ConnectCode::FailedPrecondition,
             "GITHUB_NOT_CONNECTED",
-            "selected profile has no active GitHub connection",
+            "selected GitHub connection is inactive",
         ),
         Error::CredentialChanged => (
             ConnectCode::Aborted,

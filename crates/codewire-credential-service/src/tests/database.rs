@@ -63,12 +63,12 @@ impl Fixture {
             let role_ident=quote_ident(&role);
             sqlx::query(&format!("REVOKE SELECT ON public.platform_credentials FROM {role_ident}")).execute(&db.pool).await?;
             for grant in [
-                "SELECT (id,user_id,organization_id,status,expires_at_unix) ON public.platform_credentials",
+                "SELECT (id,user_id,organization_id,provider,authentication_kind,status,expires_at_unix) ON public.platform_credentials",
                 "SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_at,environment_operation_generation) ON public.environments",
                 "SELECT (id,org_id,user_id,role) ON public.org_members",
                 "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name) ON public.sandbox_environment_backend",
                 "SELECT (id,user_id,organization_id) ON public.platform_access_profiles",
-                "SELECT (profile_id,revision) ON public.platform_access_profile_revisions",
+                "SELECT (profile_id,revision,include_github) ON public.platform_access_profile_revisions",
                 "SELECT (profile_id,revision,capability_slot,credential_id) ON public.platform_access_profile_entries",
                 "SELECT (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) ON public.platform_environment_access_bindings",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text)",

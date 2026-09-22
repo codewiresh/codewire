@@ -7,7 +7,8 @@ use codewire_access::{AccessProfileScope, CredentialAuthKind, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
-    CredentialOperation, ParsedProfileSelector, parse_profile_selector, supported_profile_slot,
+    CredentialOperation, ParsedProfileSelector, parse_profile_selector, profile_set_credential,
+    supported_profile_slot,
 };
 use super::*;
 
@@ -44,7 +45,10 @@ async fn handle_profile(
             args.output,
         ),
         CredentialProfileCommand::Set(args) => {
-            let credential = super::platform_credentials::resolve(client, &args.credential).await?;
+            let Some(selector) = profile_set_credential(&args)? else {
+                return include_github(client, &args.profile, true).await;
+            };
+            let credential = super::platform_credentials::resolve(client, selector).await?;
             let kind = platform_authentication_kind(&credential)?;
             let slot = supported_profile_slot(
                 &args.slot,
@@ -80,6 +84,9 @@ async fn handle_profile(
                     OutputFormat::Text,
                 )
             }
+        }
+        CredentialProfileCommand::Unset(args) if args.slot == "github" => {
+            include_github(client, &args.profile, false).await
         }
         CredentialProfileCommand::Unset(args) => {
             let mut profile = resolve_profile(client, &args.profile, None).await?;
@@ -261,17 +268,55 @@ async fn get_exact_profile(
     Ok(profile)
 }
 
+/// Include or remove the account's one GitHub connection. The profile never
+/// names a GitHub credential; launch resolves the current connection.
+async fn include_github(
+    client: &CodewireClient,
+    selector: &str,
+    include: bool,
+) -> anyhow::Result<()> {
+    if !include {
+        let mut profile = resolve_profile(client, selector, None).await?;
+        anyhow::ensure!(profile.include_github, "platform profile does not include GitHub");
+        profile.include_github = false;
+        return update_profile(client, profile).await;
+    }
+    let (profile, name) = profile_for_set(client, selector).await?;
+    if let Some(mut profile) = profile {
+        anyhow::ensure!(!profile.include_github, "platform profile already includes GitHub");
+        profile.include_github = true;
+        return update_profile(client, profile).await;
+    }
+    let response = client
+        .create_access_profile(rpc::CreateAccessProfileRequest {
+            name: name.context("new profiles require a name")?,
+            include_github: true,
+            ..Default::default()
+        })
+        .await
+        .context("create platform profile that includes GitHub; inspect before retrying an uncertain result")?;
+    print_profiles(
+        &[response
+            .access_profile
+            .into_option()
+            .context("platform returned no profile")?],
+        OutputFormat::Text,
+    )
+}
+
 async fn update_profile(
     client: &CodewireClient,
     profile: rpc::AccessProfile,
 ) -> anyhow::Result<()> {
-    // Exactly one read/modify/CAS attempt; preserve every other selected slot.
-    // A conflict is returned, never refetched and silently overwritten.
+    // Exactly one read/modify/CAS attempt; preserve every other selected slot
+    // and the GitHub selection. A conflict is returned, never refetched and
+    // silently overwritten.
     let response = client
         .update_access_profile(rpc::UpdateAccessProfileRequest {
             access_profile_id: profile.id,
             expected_revision: profile.revision,
             entries: profile.entries,
+            include_github: profile.include_github,
             ..Default::default()
         })
         .await?;
@@ -295,6 +340,9 @@ fn print_profiles(profiles: &[rpc::AccessProfile], output: OutputFormat) -> anyh
                 );
                 for entry in &profile.entries {
                     println!("  {}\t{}", entry.capability_slot, entry.credential_id);
+                }
+                if profile.include_github {
+                    println!("  github\tincluded");
                 }
             }
         }
@@ -350,8 +398,9 @@ mod tests {
             id: PROFILE.into(),
             name: "work".into(),
             revision: REVISION,
+            include_github: true,
             entries: vec![rpc::AccessProfileEntry {
-                capability_slot: "github".into(),
+                capability_slot: "ssh".into(),
                 credential_id: "other-existing-credential".into(),
                 ..Default::default()
             }],
@@ -363,7 +412,7 @@ mod tests {
         CredentialProfileCommand::Set(CredentialProfileSetArgs {
             profile: "user/work".into(),
             slot: "codex".into(),
-            credential: "name:codex-work".into(),
+            credential: Some("name:codex-work".into()),
         })
     }
 
@@ -486,6 +535,8 @@ mod tests {
                 access_profile_id: PROFILE.into(),
                 expected_revision: REVISION,
                 entries,
+                // A slot edit keeps the profile's GitHub selection.
+                include_github: true,
                 ..Default::default()
             },
             rpc::UpdateAccessProfileResponse {
@@ -506,8 +557,12 @@ mod tests {
     #[tokio::test]
     async fn last_unset_sends_explicit_empty_complete_set() {
         let server = MockServer::start().await;
-        expect_list(&server, vec![profile()]).await;
-        expect_exact(&server, None, profile()).await;
+        let ssh_only = rpc::AccessProfile {
+            include_github: false,
+            ..profile()
+        };
+        expect_list(&server, vec![ssh_only.clone()]).await;
+        expect_exact(&server, None, ssh_only.clone()).await;
         unary(
             &server,
             "AccessProfileService",
@@ -522,6 +577,46 @@ mod tests {
                 access_profile: Some(rpc::AccessProfile {
                     revision: REVISION + 1,
                     entries: vec![],
+                    ..ssh_only
+                })
+                .into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        handle_profile(
+            &client(&server),
+            CredentialProfileCommand::Unset(CredentialProfileSlotArgs {
+                profile: "work".into(),
+                slot: "ssh".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn unset_github_turns_off_include_github_and_keeps_entries() {
+        let server = MockServer::start().await;
+        expect_list(&server, vec![profile()]).await;
+        expect_exact(&server, None, profile()).await;
+        unary(
+            &server,
+            "AccessProfileService",
+            "UpdateAccessProfile",
+            rpc::UpdateAccessProfileRequest {
+                access_profile_id: PROFILE.into(),
+                expected_revision: REVISION,
+                entries: profile().entries,
+                include_github: false,
+                ..Default::default()
+            },
+            rpc::UpdateAccessProfileResponse {
+                access_profile: Some(rpc::AccessProfile {
+                    revision: REVISION + 1,
+                    include_github: false,
                     ..profile()
                 })
                 .into(),
@@ -540,6 +635,62 @@ mod tests {
         .unwrap();
         server.verify().await;
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn set_github_takes_no_credential_and_includes_the_connection() {
+        let server = MockServer::start().await;
+        let without_github = rpc::AccessProfile {
+            include_github: false,
+            ..profile()
+        };
+        expect_list(&server, vec![without_github.clone()]).await;
+        unary(
+            &server,
+            "AccessProfileService",
+            "UpdateAccessProfile",
+            rpc::UpdateAccessProfileRequest {
+                access_profile_id: PROFILE.into(),
+                expected_revision: REVISION,
+                entries: profile().entries,
+                include_github: true,
+                ..Default::default()
+            },
+            rpc::UpdateAccessProfileResponse {
+                access_profile: Some(rpc::AccessProfile {
+                    revision: REVISION + 1,
+                    ..profile()
+                })
+                .into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        handle_profile(
+            &client(&server),
+            CredentialProfileCommand::Set(CredentialProfileSetArgs {
+                profile: "user/work".into(),
+                slot: "github".into(),
+                credential: None,
+            }),
+        )
+        .await
+        .unwrap();
+        server.verify().await;
+        // A GitHub credential selector is refused before any request.
+        let before = server.received_requests().await.unwrap().len();
+        let refused = handle_profile(
+            &client(&server),
+            CredentialProfileCommand::Set(CredentialProfileSetArgs {
+                profile: "user/work".into(),
+                slot: "github".into(),
+                credential: Some("name:github-work".into()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.to_string().contains("without a credential"));
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
     }
 
     #[tokio::test]

@@ -67,7 +67,10 @@ async fn run(
 ) -> Result<CredentialMetadata, Error> {
     let target = match replacement {
         Some((id, revision)) => reconnect_target(&shared, scope, id, revision).await?,
-        None => EnrollmentTarget::CreateGithubAccount,
+        None => {
+            ensure_github_unconnected(&shared, scope).await?;
+            EnrollmentTarget::CreateGithubAccount
+        }
     };
     let owner = shared
         .github_app_authorization

@@ -97,6 +97,7 @@
 [data-dashboard-app] .cw-credential-secondary summary { cursor: pointer; padding-block: .35rem; }
 [data-dashboard-app] .cw-credential-secondary p { margin: .5rem 0 0; overflow-wrap: anywhere; }
 [data-dashboard-app] .cw-credential-consent { display: flex; align-items: start; gap: .5rem; font-size: .8rem; line-height: 1.5; }
+[data-dashboard-app] fieldset.cw-field { min-width: 0; margin: 0; padding: 0; border: 0; }
 [data-dashboard-app] .cw-personal-secrets-page > .cw-card { margin-top: 1rem; }
 [data-dashboard-app] .cw-personal-secrets-page .cw-card-content { display: grid; gap: .75rem; }
 [data-dashboard-app] .cw-personal-secrets { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }

@@ -52,22 +52,30 @@ export async function runAccessProfileTests(): Promise<void> {
   assert.equal(calls.at(-1)!.body.revision, exact.toString());
   assert.ok(!("accessProfileId" in calls.at(-1)!.body));
   const entries = [{ capability_slot: "codex", credential_id: "credential-one" }];
-  await cw.accessProfiles.create("personal", entries);
+  await cw.accessProfiles.create("personal", entries, true);
   assert.equal(calls.at(-1)!.body.name, "personal");
   assert.deepEqual(calls.at(-1)!.body.entries, [{ capabilitySlot: "codex", credentialId: "credential-one" }]);
-  await cw.accessProfiles.update("profile-one", exact, []);
+  assert.equal(calls.at(-1)!.body.includeGithub, true);
+  await cw.accessProfiles.update("profile-one", exact, [], true);
   assert.equal(calls.at(-1)!.body.expectedRevision, exact.toString());
   assert.deepEqual(calls.at(-1)!.body.entries ?? [], []);
+  // An empty replacement keeps GitHub only because the selection is explicit.
+  assert.equal(calls.at(-1)!.body.includeGithub, true);
   await cw.accessProfiles.delete("profile-one", exact);
   assert.equal(calls.at(-1)!.body.expectedRevision, exact.toString());
   assert.equal((await cw.accessProfiles.getEnvironmentBinding("environment-one")).personal_credentials_confirmed, true);
   assert.deepEqual(await cw.accessProfiles.getEnvironmentBinding("unbound"), { binding: undefined, personal_credentials_confirmed: false });
   const beforeErrors = calls.length;
-  await assert.rejects(cw.accessProfiles.update("stale", exact, []), (error: unknown) => error instanceof CodewireError && error.status === 409);
+  await assert.rejects(cw.accessProfiles.update("stale", exact, [], false), (error: unknown) => error instanceof CodewireError && error.status === 409);
   assert.equal(calls.length, beforeErrors + 1, "stale CAS must not fetch and retry");
   const callsBeforeValidation = calls.length;
-  await assert.rejects(cw.accessProfiles.create("duplicate", [entries[0], entries[0]]), /duplicate/);
-  await assert.rejects(cw.accessProfiles.update("profile-one", exact, [entries[0], entries[0]]), /duplicate/);
+  await assert.rejects(cw.accessProfiles.create("duplicate", [entries[0], entries[0]], false), /duplicate/);
+  await assert.rejects(cw.accessProfiles.update("profile-one", exact, [entries[0], entries[0]], false), /duplicate/);
+  await assert.rejects(
+    cw.accessProfiles.create("github", [{ capability_slot: "github", credential_id: "credential-one" }], false),
+    /includeGitHub/,
+  );
+  await assert.rejects(cw.accessProfiles.update("profile-one", exact, [], 1 as unknown as boolean), /explicit boolean/);
   await assert.rejects(cw.accessProfiles.get("profile-one", 0n), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", 42 as unknown as bigint), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", maximum + 1n), /positive uint64 bigint/);
