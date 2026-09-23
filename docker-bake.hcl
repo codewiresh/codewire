@@ -138,10 +138,10 @@ variable "KIND_DEV_FEATURES" {
 }
 
 target "kind-dev-binary" {
-  context    = "."
+  inherits   = ["_rust-product"]
   dockerfile = "deployments/docker/kind-dev-binary.Dockerfile"
-  contexts = {
-    codewire-rust-base = "target:rust-base"
+  labels = {
+    "dev.codewire.promotable" = "false"
   }
   args = {
     KIND_DEV_CRATE    = KIND_DEV_CRATE
