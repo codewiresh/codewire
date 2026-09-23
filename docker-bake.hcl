@@ -137,6 +137,10 @@ variable "KIND_DEV_FEATURES" {
   default = ""
 }
 
+variable "KIND_DEV_BIN" {
+  default = ""
+}
+
 target "kind-dev-binary" {
   inherits   = ["_rust-product"]
   dockerfile = "deployments/docker/kind-dev-binary.Dockerfile"
@@ -146,6 +150,7 @@ target "kind-dev-binary" {
   args = {
     KIND_DEV_CRATE    = KIND_DEV_CRATE
     KIND_DEV_FEATURES = KIND_DEV_FEATURES
+    KIND_DEV_BIN      = KIND_DEV_BIN
   }
 }
 
