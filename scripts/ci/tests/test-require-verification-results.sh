@@ -16,6 +16,8 @@ green_results=(
   VERIFICATION_RUST_TRANSPORT_EXPECTED=true
   VERIFICATION_RUST_TRANSPORT_RESULT=success
   VERIFICATION_RUST_COMPILE_RESULT=success
+  VERIFICATION_RUST_PACKAGES_RESULT=success
+  VERIFICATION_RUST_FEATURES_RESULT=success
   VERIFICATION_DATABASE_EXPECTED=true
   VERIFICATION_DATABASE_RESULT=success
   VERIFICATION_SERVICES_CONTROL_EXPECTED=true
@@ -40,6 +42,8 @@ unselected_results=(
   VERIFICATION_RUST_TRANSPORT_EXPECTED=false
   VERIFICATION_RUST_TRANSPORT_RESULT=skipped
   VERIFICATION_RUST_COMPILE_RESULT=skipped
+  VERIFICATION_RUST_PACKAGES_RESULT=skipped
+  VERIFICATION_RUST_FEATURES_RESULT=skipped
   VERIFICATION_DATABASE_EXPECTED=false
   VERIFICATION_DATABASE_RESULT=skipped
   VERIFICATION_SERVICES_CONTROL_EXPECTED=false
@@ -104,6 +108,11 @@ expect_failure rust_compile_failure \
   'rust-compile selected capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_RUST_COMPILE_RESULT=failure
+
+expect_failure rust_features_failure \
+  'rust-features selected capability group concluded failure' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
+  VERIFICATION_RUST_FEATURES_RESULT=failure
 
 expect_failure database_skip \
   'database selected capability group concluded skipped' \

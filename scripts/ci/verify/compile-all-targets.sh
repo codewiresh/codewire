@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Compile every Rust target the product and its images build, in minutes:
-# the root workspace with all targets and all features (feature-gated
-# binaries, smokes and test modules included), then each curated image
-# workspace exactly as its image stages it. CI runs this beside the heavy
-# jobs so a compile error fails fast; developers run the same script locally.
+# Compile and lint every Rust target the product and its images build, in
+# minutes: root workspace clippy over all targets with default and with all
+# features (feature-gated binaries, smokes and test modules included), then
+# each curated image workspace exactly as its image stages it. CI runs this
+# beside the heavy jobs so a compile or lint error fails fast; developers run
+# the same script locally.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -25,7 +26,12 @@ phase() {
 }
 
 cd "$ROOT"
-phase root "$CARGO_BIN" check --locked --workspace --all-targets --all-features
+# Clippy compiles every target and lints it: once with default features and
+# once with all features, so feature-gated and default-only code are linted.
+phase "root clippy (default features)" \
+  "$CARGO_BIN" clippy --locked --workspace --all-targets -- -D warnings
+phase "root clippy (all features)" \
+  "$CARGO_BIN" clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 shopt -s nullglob
 manifests=("$MANIFEST_DIR"/*.Cargo.toml)

@@ -641,6 +641,122 @@ jobs:
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
+  rust-packages:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
+    name: Rust / transport packages
+    runs-on: ci-heavy
+    enable-openid-connect: true
+    timeout-minutes: 30
+    needs: [verification-selection]
+    if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
+    env:
+      CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'Rust packages shard verification inherited from the exact tested PR-head tree'
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - name: Verify sealed Rust toolchain
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Verify Rust cache capacity
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
+
+      - name: Install pinned protoc for Rust builds
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
+          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
+            | sha256sum -c -
+          rm -rf "$HOME/.proto-tools/protoc"
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Run the Rust packages shard
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          RUST_TRANSPORT_SHARD: packages
+        run: scripts/ci/verify/run-product-verification.sh rust-transport
+
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+  rust-features:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
+    name: Rust / transport feature graphs
+    runs-on: ci-heavy
+    enable-openid-connect: true
+    timeout-minutes: 30
+    needs: [verification-selection]
+    if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
+    env:
+      CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'Rust features shard verification inherited from the exact tested PR-head tree'
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      - name: Verify sealed Rust toolchain
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Verify Rust cache capacity
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
+
+      - name: Install pinned protoc for Rust builds
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
+          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
+            | sha256sum -c -
+          rm -rf "$HOME/.proto-tools/protoc"
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Run the Rust features shard
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          RUST_TRANSPORT_SHARD: features
+        run: scripts/ci/verify/run-product-verification.sh rust-transport
+
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
   rust-transport:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport verification
@@ -727,6 +843,8 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          # Package graphs and explicit feature graphs run in their own jobs.
+          RUST_TRANSPORT_SHARD: local-vmm
         run: scripts/ci/verify/run-product-verification.sh rust-transport
 
       - name: Run artifact-selected desktop package
@@ -1494,6 +1612,8 @@ jobs:
       - standard
       - tooling
       - rust-compile
+      - rust-packages
+      - rust-features
       - rust-transport
       - database
       - services-control
@@ -1520,6 +1640,8 @@ jobs:
           VERIFICATION_RUST_TRANSPORT_EXPECTED: ${{ needs.verification-selection.outputs.rust_transport_expected }}
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
           VERIFICATION_RUST_COMPILE_RESULT: ${{ needs.rust-compile.result }}
+          VERIFICATION_RUST_PACKAGES_RESULT: ${{ needs.rust-packages.result }}
+          VERIFICATION_RUST_FEATURES_RESULT: ${{ needs.rust-features.result }}
           VERIFICATION_DATABASE_EXPECTED: ${{ needs.verification-selection.outputs.database_expected }}
           VERIFICATION_DATABASE_RESULT: ${{ needs.database.result }}
           VERIFICATION_SERVICES_CONTROL_EXPECTED: ${{ needs.verification-selection.outputs.services_control_expected }}

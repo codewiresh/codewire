@@ -179,7 +179,7 @@ environment = dict(PATH=f'{binary}:{os.environ["PATH"]}',
                    RUST_COMPOSE_FORMAT='true', RUST_COMPOSE_FORMAT_DONE='true')
 cases = 0
 
-def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None, fail_feature=None, fail_args=None):
+def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None, fail_feature=None, fail_args=None, shard=None):
     global cases
     cases += 1
     trace.write_text('')
@@ -192,6 +192,8 @@ def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None,
         env['COMPOSITION_FAIL_FEATURE'] = fail_feature
     if fail_args:
         env['COMPOSITION_FAIL_ARGS'] = json.dumps(fail_args)
+    if shard:
+        env['RUST_TRANSPORT_SHARD'] = shard
     result = subprocess.run(['bash', str(runner), family], env=env,
                             text=True, capture_output=True)
     records = [json.loads(line) for line in trace.read_text().splitlines()]
@@ -204,8 +206,8 @@ def generic(records):
             and '--features' not in r['args'] and '--manifest-path' not in r['args']]
 
 def expected(*arguments):
+    # Workspace clippy runs once in the fast compile job, not per package graph.
     return [['build', '--locked', *arguments],
-            ['clippy', *arguments, '--all-targets', '--', '-D', 'warnings'],
             ['test', *arguments, '--all-targets']]
 
 both = ['rust', 'transport', 'rust_pkg_codewire_alpha', 'transport_pkg_codewire_beta']
@@ -231,6 +233,16 @@ special = ['rust', 'transport', 'rust_pkg_codewire_alpha', 'transport_pkg_codewi
            'transport_pkg_codewire_vmm_guest_probe', 'rust_pkg_codewire_desktop']
 records, _ = run(special)
 assert generic(records) == expected('-p', 'codewire-alpha') + expected('-p', 'codewire-local-vmm', '-p', 'codewire-vmm-guest-probe')
+# The three CI shards together run exactly the single-job composition, and
+# formatting still runs once per shard that verifies package graphs.
+def comparable(trace_records):
+    return sorted(json.dumps(r, sort_keys=True) for r in trace_records)
+sharded = []
+for shard in ('packages', 'features', 'local-vmm'):
+    shard_records, _ = run(special, shard=shard)
+    sharded += shard_records
+assert comparable(sharded) == comparable(records), 'Rust/transport shards diverged from the single job'
+_, invalid_shard_output = run(special, shard='everything', status=2)
 assert sum(r['tool'] == 'package-codewire-desktop.sh' for r in records) == 1
 assert sum(r['tool'] == 'build-local-vmm-initramfs.sh' for r in records) == 1
 assert sum(r['tool'] == 'test_ipc_system.sh' for r in records) == 1
@@ -303,7 +315,7 @@ assert records[-1]['tool'] == 'test_console_pair_static_contract.py'
 records, _ = run(special, fail_feature=product_feature, status=45)
 assert records[-1]['args'] == product_test
 
-for command in ('fmt', 'build', 'clippy', 'test'):
+for command in ('fmt', 'build', 'test'):
     records, _ = run(both, fail=command)
     assert records[-1]['args'][0] == command
 

@@ -2236,7 +2236,7 @@ mod enabled {
                 2,
                 Duration::from_millis(1),
                 Duration::ZERO,
-                || std::future::pending(),
+                std::future::pending,
             )
             .await
             .unwrap_err();
