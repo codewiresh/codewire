@@ -17,7 +17,14 @@ cat >"$work/bin/sccache" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
-  --zero-stats|--show-stats|--stop-server) exit 0 ;;
+  --zero-stats)
+    # Model a server that cannot start because its backend is unreachable.
+    [[ "${FAKE_SCCACHE_START:-ok}" == ok ]] || {
+      printf 'sccache: error: Timed out waiting for server startup\n' >&2
+      exit 2
+    }
+    ;;
+  --show-stats|--stop-server) ;;
   *) exit 64 ;;
 esac
 EOF
@@ -71,3 +78,29 @@ printf '[test-run-rust-build] local fallback is disk-only\n'
 CODEWIRE_SCCACHE_MODE=disabled RUSTC_WRAPPER=/must-not-run RUSTC_WORKSPACE_WRAPPER=/must-not-run \
   "$RUNNER" bash -eu -c '[[ ! -v RUSTC_WRAPPER && ! -v RUSTC_WORKSPACE_WRAPPER ]]' >/dev/null
 printf '[test-run-rust-build] disabled mode clears inherited wrappers\n'
+
+fallback_log="$work/fallback.log"
+env \
+  PATH="$work/bin:$PATH" \
+  FAKE_SCCACHE_START=timeout \
+  CODEWIRE_SCCACHE_MODE=local \
+  "$RUNNER" bash -eu -c '[[ ! -v RUSTC_WRAPPER && ! -v RUSTC_WORKSPACE_WRAPPER ]]' \
+  >"$fallback_log" 2>&1 || {
+    cat "$fallback_log" >&2
+    printf 'an sccache startup failure failed the build\n' >&2
+    exit 1
+  }
+grep -qF 'sccache did not start; compiling without it' "$fallback_log"
+grep -qF 'CODEWIRE_CI_PHASE name=rust-compile-link mode=unavailable' "$fallback_log"
+printf '[test-run-rust-build] an sccache startup failure compiles without the cache\n'
+
+set +e
+env PATH="$work/bin:$PATH" FAKE_SCCACHE_START=timeout CODEWIRE_SCCACHE_MODE=local \
+  "$RUNNER" bash -c 'exit 7' >/dev/null 2>&1
+failed_status=$?
+set -e
+[[ "$failed_status" -eq 7 ]] || {
+  printf 'a failing build after an sccache fallback returned %s, not 7\n' "$failed_status" >&2
+  exit 1
+}
+printf '[test-run-rust-build] the build status survives the fallback\n'
