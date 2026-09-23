@@ -1641,6 +1641,8 @@ policy|Policy verification|ci-lite|policy
 standard|Standard verification|ci-heavy|standard
 tooling|Tooling / delivery contract verification|ci-heavy|tooling
 rust-compile|Compile every Rust target|ci-heavy|rust_transport
+rust-packages|Rust / transport packages|ci-heavy|rust_transport
+rust-features|Rust / transport feature graphs|ci-heavy|rust_transport
 rust-transport|Rust / transport verification|ci-heavy|rust_transport
 database|Database verification|ci-heavy|database
 services-control|Service control-plane verification|ci-heavy|services_control
@@ -1691,7 +1693,7 @@ done
 # desktop compiler cache. Those two jobs retain 55-minute ceilings. The full
 # Kind gate additionally owns real token rotation and integrated runtime tests;
 # its 85-minute ceiling leaves five minutes below the 90-minute heavy budget.
-for job_id in cw-release-assets standard tooling rust-compile database services-control services-runtime; do
+for job_id in cw-release-assets standard tooling rust-compile rust-packages rust-features database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -1769,7 +1771,7 @@ grep -qF '    timeout-minutes: 13' "$TMP/policy.yaml" || {
   exit 1
 }
 
-for job_id in policy standard tooling rust-compile rust-transport database services-control services-runtime edge-kind; do
+for job_id in policy standard tooling rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
   block="$TMP/${job_id}.yaml"
   grep -qF 'name: Reuse exact PR-head content verification' "$block"
   grep -qF "if: \${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}" \
@@ -1903,8 +1905,8 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 15 ]] || {
-  echo 'Codewire CI requires ten ordinary heavy groups, three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 17 ]] || {
+  echo 'Codewire CI requires twelve ordinary heavy groups, three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
@@ -1990,8 +1992,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 18 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, nine groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
+if [ "$top_level_jobs" != 20 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -2474,14 +2476,15 @@ grep -qF '    runs-on: ci-lite' "$required_block" || {
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in cw-release-assets workspace-image standard rust-compile rust-transport database services-control services-runtime edge-kind; do
+for group in cw-release-assets workspace-image standard rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
   grep -qF "      - ${group}" "$required_block" || {
     echo "required CI does not wait on ${group}" >&2
     exit 1
   }
 done
 for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT \
-    VERIFICATION_RUST_COMPILE_RESULT VERIFICATION_RUST_TRANSPORT_RESULT \
+    VERIFICATION_RUST_COMPILE_RESULT VERIFICATION_RUST_PACKAGES_RESULT \
+    VERIFICATION_RUST_FEATURES_RESULT VERIFICATION_RUST_TRANSPORT_RESULT \
     VERIFICATION_DATABASE_RESULT \
     VERIFICATION_SERVICES_CONTROL_RESULT VERIFICATION_SERVICES_RUNTIME_RESULT \
     VERIFICATION_EDGE_KIND_RESULT VERIFICATION_WORKSPACE_IMAGE_RESULT; do
@@ -2682,10 +2685,15 @@ run_admin_static_negative admin_descriptor_billing \
 
 primitive_rust_body="$primitive_probe/run-rust.sh"
 awk '
-  /^run_rust\(\) \{/ { capture = 1 }
+  /^(rust_shard|run_rust)\(\) \{/ { capture = 1 }
   capture { print }
-  capture && /^}$/ { exit }
+  capture && /^}$/ { capture = 0 }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$primitive_rust_body"
+if ! grep -q '^rust_shard() {' "$primitive_rust_body" \
+    || ! grep -q '^run_rust() {' "$primitive_rust_body"; then
+  echo 'primitive Rust dispatch must capture rust_shard and run_rust' >&2
+  exit 1
+fi
 cat > "$primitive_probe/dispatch.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

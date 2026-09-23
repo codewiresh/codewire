@@ -534,7 +534,7 @@ class WorkflowTests(unittest.TestCase):
         needs = ordinary.split("    needs:\n", 1)[1].split("    steps:\n", 1)[0]
         self.assertEqual(re.findall(r"^      - (.*)$", needs, re.M), [
             "verification-selection", "cw-release-assets", "workspace-image", "policy", "standard", "tooling",
-            "rust-compile", "rust-transport", "database", "services-control", "services-runtime", "edge-kind"])
+            "rust-compile", "rust-packages", "rust-features", "rust-transport", "database", "services-control", "services-runtime", "edge-kind"])
         for owner in ("workspace-image", "kind-workspace"):
             self.assertIn("prepare-workspace-cache-measurement.sh seed", workflow_job(owner))
             self.assertIn("success() &&", workflow_job(owner))

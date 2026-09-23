@@ -131,6 +131,8 @@ cache_jobs=(
   workspace-image
   standard
   rust-compile
+  rust-packages
+  rust-features
   rust-transport
   database
   services-control

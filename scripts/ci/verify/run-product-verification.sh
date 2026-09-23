@@ -82,8 +82,17 @@ run_rust_packages() {
     RUST_COMPOSE_FORMAT_DONE=true
   fi
   cargo build --locked "${RUST_PACKAGE_ARGS[@]}" || return $?
-  cargo clippy "${RUST_PACKAGE_ARGS[@]}" --all-targets -- -D warnings || return $?
+  # Workspace clippy (default and all features) runs once in the fast compile
+  # job; package graphs here only build and test.
   cargo test "${RUST_PACKAGE_ARGS[@]}" --all-targets || return $?
+}
+
+# Rust/transport verification runs as parallel CI shards: packages (the
+# selected package graphs), features (explicit feature graphs), and local-vmm
+# (VM fixtures, guest probe, DERP contract and desktop, which need the extra
+# toolchains). "all", the default, runs every shard in order as one job.
+rust_shard() {
+  [ "${RUST_TRANSPORT_SHARD:-all}" = all ] || [ "${RUST_TRANSPORT_SHARD:-all}" = "$1" ]
 }
 
 run_rust_transport() {
@@ -91,6 +100,13 @@ run_rust_transport() {
     echo '::error::Rust/transport composition selected without either capability' >&2
     return 1
   fi
+  case "${RUST_TRANSPORT_SHARD:-all}" in
+    all|packages|features|local-vmm) ;;
+    *)
+      echo "::error::unknown RUST_TRANSPORT_SHARD: ${RUST_TRANSPORT_SHARD}" >&2
+      return 2
+      ;;
+  esac
   RUST_COMPOSE_FORMAT=true
   RUST_COMPOSE_FORMAT_DONE=false
   if selected rust; then
@@ -488,12 +504,13 @@ run_runtime_dev_smoke() {
 }
 
 run_rust() {
-  if selected rust_pkg_codewire_desktop; then
+  if rust_shard local-vmm && selected rust_pkg_codewire_desktop; then
     run_detached_desktop
   fi
-  if has_root_rust_selection; then
+  if rust_shard packages && has_root_rust_selection; then
     run_rust_packages rust_pkg_
   fi
+  rust_shard features || return 0
   if selected rust_workspace || selected rust_pkg_codewire_cli \
       || selected rust_pkg_codewire_cli_bin || selected rust_pkg_codewire_admin_proto \
       || selected rust_pkg_codewire_proto; then
@@ -591,7 +608,10 @@ run_derp_contract() {
 }
 
 run_transport() {
-  run_rust_packages transport_pkg_
+  if rust_shard packages; then
+    run_rust_packages transport_pkg_
+  fi
+  rust_shard local-vmm || return 0
   if selected transport_pkg_codewire_local_vmm; then
     crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
     python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
