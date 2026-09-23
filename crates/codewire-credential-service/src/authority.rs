@@ -187,7 +187,7 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
             .identities
             .bounded(self.authority.resolve(&self.identities))
             .await?;
-        if current != self.initial {
+        if !self.initial.same_authority(&current) {
             return Err(Error::Denied);
         }
         self.identities.ensure_live()?;
@@ -332,6 +332,29 @@ pub(crate) struct Resolved {
     binding: Option<PlatformBindingMetadata>,
     profile: Option<AccessProfile>,
     lineage: Lineage,
+}
+
+impl Resolved {
+    /// Everything resolved at admission stays fixed except the authorized
+    /// credentials, which follow the owner's current connections.
+    fn same_authority(&self, current: &Self) -> bool {
+        let Self {
+            session,
+            scope,
+            metadata,
+            selection,
+            binding,
+            profile,
+            lineage,
+        } = self;
+        session.same_authority(&current.session)
+            && *scope == current.scope
+            && *metadata == current.metadata
+            && *selection == current.selection
+            && *binding == current.binding
+            && *profile == current.profile
+            && *lineage == current.lineage
+    }
 }
 
 // The exact same scope query is used inside projection capture/final locks.

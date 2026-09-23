@@ -571,3 +571,61 @@ async fn connected_owner_local_session_clamps_original_and_newly_shorter_expiry(
     assert_eq!(fixture.kek.unwrap_calls.load(Ordering::SeqCst), 0);
     assert!(fixture.pool.is_closed());
 }
+
+#[test]
+fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
+    let local = owner_local(true);
+    let (gateway, workspace) = hosted_pods();
+    let context = GrantContext {
+        placement: GrantPlacement::Platform,
+        ..local.context.clone()
+    };
+    let session = PlatformRuntimeSession::new(
+        gateway,
+        workspace,
+        context,
+        local.credential_owner.clone(),
+        local.identity_expires_at_unix,
+    )
+    .unwrap();
+    // Deleting and reconnecting GitHub changes only the authorized set.
+    let mut reconnected = session.clone();
+    reconnected.context.authorized_credentials =
+        [CredentialId::parse(Uuid::new_v4().to_string()).unwrap()]
+            .into_iter()
+            .collect();
+    assert!(session.same_authority(&reconnected));
+    let mut deleted = session.clone();
+    deleted.context.authorized_credentials.clear();
+    assert!(session.same_authority(&deleted));
+    for attack in [
+        "environment",
+        "generation",
+        "user",
+        "organization",
+        "personal",
+        "gateway",
+        "owner",
+    ] {
+        let mut changed = session.clone();
+        match attack {
+            "environment" => {
+                changed.context.environment_id =
+                    EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap()
+            }
+            "generation" => changed.context.environment_generation += 1,
+            "user" => changed.context.user_id = OwnerId::parse("changed-owner").unwrap(),
+            "organization" => {
+                changed.context.organization_id = Some(OwnerId::parse("changed-org").unwrap())
+            }
+            "personal" => {
+                changed.context.allow_personal_credentials =
+                    !changed.context.allow_personal_credentials
+            }
+            "gateway" => changed.gateway_mut().uid = Uuid::new_v4(),
+            "owner" => changed.credential_owner = Owner::User(OwnerId::parse("other").unwrap()),
+            _ => unreachable!(),
+        }
+        assert!(!session.same_authority(&changed), "{attack}");
+    }
+}
