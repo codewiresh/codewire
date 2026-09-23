@@ -145,15 +145,17 @@ fi
 
 case "${FAKE_SHELLCHECK_MODE:-baseline}" in
   baseline)
-    jq -cn '
+    # Report the reviewed findings only for files this batch analyzes.
+    printf '%s\n' "$@" | jq -Rn '
       def findings($count; $file; $code):
         [range(0; $count) | {file: $file, code: $code}];
-      {comments: (
-        findings(2; "scripts/ci/select/select-verification.sh"; 2221) +
-        findings(2; "scripts/ci/select/select-verification.sh"; 2222) +
-        findings(9; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 1090) +
-        findings(12; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 2034)
-      )}
+      [inputs] as $files
+      | {comments: ([
+          findings(2; "scripts/ci/select/select-verification.sh"; 2221),
+          findings(2; "scripts/ci/select/select-verification.sh"; 2222),
+          findings(9; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 1090),
+          findings(12; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 2034)
+        ] | add | map(select(.file as $file | $files | index($file))))}
     '
     exit 1
     ;;
@@ -172,7 +174,7 @@ FAKE_SHELLCHECK
 chmod +x "$fake_shellcheck"
 
 run_checker() {
-  env -u SHELLCHECK_TIMEOUT_SECONDS \
+  env -u SHELLCHECK_TIMEOUT_SECONDS -u SHELLCHECK_JOBS \
     FAKE_SHELLCHECK_LOG="$fake_log" \
     SHELLCHECK_BIN="$fake_shellcheck" \
     "$@" \
@@ -180,7 +182,7 @@ run_checker() {
 }
 
 : > "$fake_log"
-baseline_output="$(run_checker 2>&1)" \
+baseline_output="$(run_checker SHELLCHECK_JOBS=1 2>&1)" \
   || fail 'matching fake ShellCheck baseline was rejected'
 grep -Fq 'ShellCheck analysis: start (' <<<"$baseline_output" \
   || fail 'ShellCheck start timing is absent'
@@ -193,12 +195,36 @@ grep -Fq 'ShellCheck warning ratchet: OK' <<<"$baseline_output" \
 
 mapfile -t tracked_shell_files < <(cd "$ROOT" && git ls-files -- '*.sh')
 expected_invocation='analysis'
-expected_invocation+=$'\t--severity=warning\t--format=json1'
+expected_invocation+=$'\t--external-sources\t--severity=warning\t--format=json1'
 for tracked_shell_file in "${tracked_shell_files[@]}"; do
   expected_invocation+=$'\t'"$tracked_shell_file"
 done
 [[ "$(cat "$fake_log")" == "$expected_invocation" ]] \
   || fail 'ShellCheck arguments or tracked file order changed'
+
+# Parallel batches analyze every tracked file exactly once, with the same
+# arguments, and their merged findings meet the same reviewed baseline.
+: > "$fake_log"
+parallel_output="$(run_checker SHELLCHECK_JOBS=3 2>&1)" \
+  || fail 'parallel ShellCheck batches did not meet the reviewed baseline'
+grep -Fq 'jobs=3 ' <<<"$parallel_output" \
+  || fail 'ShellCheck start did not report its batch count'
+[[ "$(wc -l < "$fake_log")" -eq 3 ]] \
+  || fail 'ShellCheck did not run exactly three batches'
+if grep -v $'^analysis\t--external-sources\t--severity=warning\t--format=json1\t' "$fake_log"; then
+  fail 'a ShellCheck batch changed its analysis arguments'
+fi
+[[ "$(cut -f5- "$fake_log" | tr '\t' '\n' | LC_ALL=C sort)" \
+    == "$(printf '%s\n' "${tracked_shell_files[@]}" | LC_ALL=C sort)" ]] \
+  || fail 'ShellCheck batches did not analyze each tracked file exactly once'
+
+set +e
+invalid_jobs_output="$(run_checker SHELLCHECK_JOBS=0 2>&1)"
+invalid_jobs_status=$?
+set -e
+[[ "$invalid_jobs_status" -eq 2 ]] || fail 'invalid ShellCheck job count was accepted'
+grep -Fq 'SHELLCHECK_JOBS must be an integer from 1 through 64' \
+  <<<"$invalid_jobs_output" || fail 'invalid ShellCheck job count was not diagnosed'
 
 : > "$fake_log"
 set +e
