@@ -51,15 +51,17 @@ load_kind_github_app() {
   done
 }
 
-# Rewrite only the credential-service container: drop the fixture command,
-# arguments and markers, then add the given environment entries.
+# Rewrite only the credential-service container: restore the production
+# entrypoint (the fixture patch replaced it), drop the fixture arguments and
+# markers, then add the given environment entries.
 patch_kind_credential_container() {
   local env_json="$1"
   kubectl -n "$NS" get deployment codewire-credential-service -o json |
     jq --argjson add "$env_json" '
       .spec.template.spec.containers |= map(
         if .name == "credential-service" then
-          del(.command, .args)
+          .command = ["/codewire-credential-service"]
+          | del(.args)
           | .env |= (map(select(.name as $n | [
               "CODEWIRE_KIND_CREDENTIAL_FIXTURE",
               "CODEWIRE_KIND_CREDENTIAL_TEST_KEK",
@@ -67,6 +69,23 @@ patch_kind_credential_container() {
             ] | index($n) | not)) + $add)
         else . end)' |
     kubectl replace -f - >/dev/null
+}
+
+# The browser origin the IdP, orchestration and billing accept (terminal
+# attach, redirects). Real mode serves the owner at KIND_PUBLIC_ORIGIN; the gate
+# keeps its ingress origin.
+set_kind_frontend_url() {
+  local current
+  current="$(kubectl -n "$NS" get configmap codewire-config -o 'jsonpath={.data.FRONTEND_URL}')"
+  [ "$current" != "$1" ] || return 0
+  log "setting the cluster frontend origin to $1"
+  kubectl -n "$NS" patch configmap codewire-config --type=merge \
+    -p "$(jq -cn --arg url "$1" '{data: {FRONTEND_URL: $url}}')" >/dev/null
+  kubectl -n "$NS" rollout restart deployment/codewire-orchestration deployment/codewire-idp \
+    deployment/codewire-billing >/dev/null
+  kubectl -n "$NS" rollout status deployment/codewire-orchestration --timeout=180s
+  kubectl -n "$NS" rollout status deployment/codewire-idp --timeout=180s
+  kubectl -n "$NS" rollout status deployment/codewire-billing --timeout=180s
 }
 
 switch_kind_credentials_real() {
@@ -90,6 +109,7 @@ switch_kind_credentials_real() {
     '[{name: "CODEWIRE_KIND_CREDENTIAL_TEST_KEK", value: "true"},
       {name: "CREDENTIAL_PUBLIC_ORIGIN", value: $origin}]')"
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
+  set_kind_frontend_url "$KIND_PUBLIC_ORIGIN"
   log "credential-service is real; use the dashboard at ${KIND_PUBLIC_ORIGIN}"
 }
 
@@ -101,6 +121,7 @@ switch_kind_credentials_fake() {
   kubectl -n "$NS" patch deployment codewire-credential-service --type=strategic \
     --patch-file "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
+  set_kind_frontend_url "$KIND_INGRESS_URL"
 }
 
 run_retained_credential_mode() {
@@ -108,7 +129,9 @@ run_retained_credential_mode() {
   require_tool kind
   require_tool kubectl
   trap retained_suite_cleanup EXIT
-  validate_retained_cluster || return $?
+  # Switching modes uses no workspace image, so it needs the cluster's identity
+  # and runtime, not a verified-source receipt matching this worktree.
+  validate_retained_cluster_identity || return $?
   case "$1" in
     real) switch_kind_credentials_real ;;
     fake) switch_kind_credentials_fake ;;

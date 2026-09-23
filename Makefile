@@ -191,6 +191,8 @@ dashboard-watch-kind:
 # as the GitHub App callback origin; the default is the owner workstation's
 # Tailnet URL, served by `tailscale serve` from the watcher on 127.0.0.1:5182.
 KIND_PUBLIC_ORIGIN ?= http://nj.example.invalid:4174
+# The cluster ingress on the same host, for browser terminals and streams.
+KIND_BROWSER_API_ORIGIN ?= http://nj.example.invalid:8090
 
 # Create and deploy a new retained cluster without running the test suites.
 kind-up:
@@ -217,7 +219,7 @@ kind-seed-login:
 	./scripts/dev/kind/dev-loop.sh seed-login
 
 kind-watch:
-	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" ./scripts/dev/kind/dev-loop.sh watch
+	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" KIND_BROWSER_API_ORIGIN="$(KIND_BROWSER_API_ORIGIN)" ./scripts/dev/kind/dev-loop.sh watch
 
 kind-status:
 	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" ./scripts/dev/kind/dev-loop.sh status

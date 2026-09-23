@@ -18,6 +18,10 @@ WATCH_ADDR="${KIND_WATCH_ADDR:-127.0.0.1:5182}"
 # Dashboard source to serve; set to another worktree to review stacked UI work.
 SOURCE_ROOT="${KIND_WATCH_SOURCE_ROOT:-$ROOT}"
 INGRESS="http://127.0.0.1:8090"
+# Where the browser reaches the cluster API (terminals, streams). It must share
+# KIND_PUBLIC_ORIGIN's host; expose the ingress there over the Tailnet with
+# `sudo tailscale serve --bg --http=8090 http://127.0.0.1:8090`.
+BROWSER_API="${KIND_BROWSER_API_ORIGIN:-$INGRESS}"
 CONTEXT="kind-${KIND_CLUSTER_NAME}"
 NAMESPACE=codewire-e2e
 
@@ -46,7 +50,7 @@ credential_mode() {
     -o 'jsonpath={.spec.template.spec.containers[?(@.name=="credential-service")].command[0]}')"
   case "$command" in
     /codewire-kind-fixtures/credential-service) echo fake ;;
-    "") echo real ;;
+    /codewire-credential-service) echo real ;;
     *) echo "unknown (${command})" ;;
   esac
 }
@@ -98,7 +102,7 @@ cmd_watch() {
   if [ "$(credential_mode)" = real ] && [ "$(credential_origin)" != "$KIND_PUBLIC_ORIGIN" ]; then
     die "credential-service origin $(credential_origin) differs from KIND_PUBLIC_ORIGIN ${KIND_PUBLIC_ORIGIN}"
   fi
-  log "dashboard ${WATCH_ADDR} for ${KIND_PUBLIC_ORIGIN}/ (source ${SOURCE_ROOT}), credential-service $(credential_mode)"
+  log "dashboard ${WATCH_ADDR} for ${KIND_PUBLIC_ORIGIN}/ (source ${SOURCE_ROOT}), credential-service $(credential_mode), browser API ${BROWSER_API}"
   log "login e2e-owner@codewire.sh / SecureTestPass9#"
   export CODEWIRE_DASHBOARD_LISTEN_ADDR="$WATCH_ADDR"
   export CODEWIRE_PUBLIC_ORIGIN="$KIND_PUBLIC_ORIGIN"
@@ -106,7 +110,7 @@ cmd_watch() {
   export CODEWIRE_CREDENTIAL_ORIGIN="$INGRESS"
   export CODEWIRE_IDENTITY_ORIGIN="$INGRESS"
   export CODEWIRE_BILLING_ORIGIN="$INGRESS"
-  export CODEWIRE_BROWSER_API_ORIGIN="$INGRESS"
+  export CODEWIRE_BROWSER_API_ORIGIN="$BROWSER_API"
   GITHUB_APP_CLIENT_ID="$(app_public_value client-id)"
   GITHUB_APP_SLUG="$(app_public_value slug)"
   export GITHUB_APP_CLIENT_ID GITHUB_APP_SLUG
