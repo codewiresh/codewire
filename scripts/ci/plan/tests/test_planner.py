@@ -986,7 +986,7 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(capabilities_after["selector_version"], "v3")
         self.assertEqual(
             capabilities_after["selection"],
-            "|valid:v3|deploy|edge_kind|go_consumer_interop|go_support|policy|"
+            "|valid:v3|deploy|go_consumer_interop|go_support|policy|"
             "policy_shell_omittable|release|runtime_confidential|complete|",
         )
 
