@@ -38,17 +38,16 @@ impl Lineage {
 }
 
 /// The managed clients orchestration rendered into the workspace container.
-/// Absent means none; a malformed or duplicated value is denied.
+/// Absent (no such container or variable) means none, which never authorizes
+/// a client; a malformed or duplicated value is denied.
 fn rendered_managed_clients(workspace: &Pod) -> Result<ManagedCredentialClients, Error> {
-    let container = workspace
-        .spec
-        .as_ref()
-        .and_then(|spec| {
-            spec.containers
-                .iter()
-                .find(|container| container.name == "workspace")
-        })
-        .ok_or(Error::Denied)?;
+    let Some(container) = workspace.spec.as_ref().and_then(|spec| {
+        spec.containers
+            .iter()
+            .find(|container| container.name == "workspace")
+    }) else {
+        return Ok(ManagedCredentialClients::default());
+    };
     let mut values = container
         .env
         .iter()
@@ -466,8 +465,16 @@ mod tests {
                 Err(Error::Denied)
             );
         }
-        let no_workspace: Pod =
-            serde_json::from_value(serde_json::json!({"spec": {"containers": []}})).unwrap();
-        assert_eq!(rendered_managed_clients(&no_workspace), Err(Error::Denied));
+        // A Pod without the workspace container carries no managed clients.
+        for pod in [
+            serde_json::json!({"spec": {"containers": []}}),
+            serde_json::json!({}),
+        ] {
+            let pod: Pod = serde_json::from_value(pod).unwrap();
+            assert_eq!(
+                rendered_managed_clients(&pod),
+                Ok(ManagedCredentialClients::default())
+            );
+        }
     }
 }
