@@ -461,7 +461,10 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-select-verification.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/verify/check-curated-rust-locks.sh|\
-      scripts/ci/tests/test-curated-rust-locks.sh)
+      scripts/ci/tests/test-curated-rust-locks.sh|\
+      scripts/ci/verify/curated_rust_locks.py|\
+      scripts/dev/sync-curated-rust-locks.sh|\
+      scripts/ci/verify/compile-all-targets.sh)
         select_token rust_curated_locks
         recognized=true
         ;;
@@ -1672,6 +1675,13 @@ fi
 # it, so candidate runners must keep executing ShellCheck for legacy output.
 if token_selected policy; then
   select_token policy_shell_omittable
+fi
+
+# Kind takes over an hour. A pull request runs it only when opted in
+# ([kind-e2e] in its title or body, or the kind-e2e label); pushes to main and
+# dispatched runs keep it as the post-merge gate.
+if [ "$event" = pull_request ] && [ "$pr_kind_opt_in" != true ]; then
+  unset 'selected[kind]' 'selected[edge_kind]'
 fi
 
 for token in "${!selected[@]}"; do

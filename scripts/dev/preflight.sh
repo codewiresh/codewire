@@ -316,6 +316,13 @@ fi
 run_selected_family policy policy "policy verification"
 
 run_selected_family contracts contracts "contract verification"
+# The same fast compile CI runs beside its heavy jobs: every target and
+# feature, and each curated image workspace, before the long Rust suites.
+# These tokens are the CI selection's rust_transport_expected rule.
+if selection_has_any rust rust_curated_locks transport transport_derp_contract; then
+  run_step "every Rust target compiles" env VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
+    "$PRODUCT_RUNNER" rust-compile
+fi
 run_selected_family rust rust "Rust verification"
 run_selected_family rust_curated_locks rust-curated-locks \
   "curated Rust workspace lock verification"

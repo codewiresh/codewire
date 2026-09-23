@@ -68,10 +68,6 @@ test.describe.serial("server-rendered billing and administration", () => {
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
     expect(browserRequests.some((url) => new URL(url).pathname.includes("BillingService"))).toBe(false);
 
-    await expect(page).toHaveScreenshot(
-      isMobile ? "billing-mobile.png" : "billing-desktop.png",
-      { fullPage: !isMobile },
-    );
   });
 
   test("redirects a non-admin before rendering privileged pages", async ({ page }) => {
@@ -90,13 +86,6 @@ test.describe.serial("server-rendered billing and administration", () => {
     await page.goto("/admin/");
     await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
     await expect(page.getByText("Total Sandboxes")).toBeVisible();
-    await expect(page).toHaveScreenshot(
-      isMobile ? "admin-overview-mobile.png" : "admin-overview-desktop.png",
-      {
-        fullPage: true,
-        mask: [page.locator(".cw-admin-stat strong")],
-      },
-    );
 
     await followAdminNavigation(page, isMobile, "Audit Log");
     await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible();

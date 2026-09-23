@@ -130,6 +130,7 @@ cache_jobs=(
   cw-release-assets
   workspace-image
   standard
+  rust-compile
   rust-transport
   database
   services-control

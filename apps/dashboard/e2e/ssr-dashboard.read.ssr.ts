@@ -87,7 +87,6 @@ test.describe("server-rendered dashboard", () => {
     await page.keyboard.press("Escape");
 
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
-    await expect(page).toHaveScreenshot("dashboard-desktop.png", { fullPage: true });
   });
 
   test("sends an unauthenticated visitor to the local server-rendered login", async ({ browser, isMobile }) => {
@@ -117,11 +116,9 @@ test.describe("server-rendered dashboard", () => {
       }]);
       await page.goto("/dashboard/");
       await expect(page).toHaveURL(/\/dashboard\/$/);
-      await expect(page).toHaveScreenshot("dashboard-mobile.png", { fullPage: true });
       await page.getByRole("button", { name: "Toggle sidebar" }).click();
       await expect(page.locator("[data-dashboard-app]")).toHaveAttribute("data-mobile-open", "true");
       await expect(page.locator(".cw-mobile-drawer")).toBeVisible();
-      await expect(page).toHaveScreenshot("dashboard-mobile-drawer.png", { fullPage: true });
       await page.getByRole("button", { name: "Close sidebar" }).click({ position: { x: 300, y: 400 } });
       await expect(page.locator("[data-dashboard-app]")).toHaveAttribute("data-mobile-open", "false");
     } finally {

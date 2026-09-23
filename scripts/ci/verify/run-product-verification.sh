@@ -539,6 +539,10 @@ run_rust_curated_locks() {
   scripts/ci/tests/test-curated-rust-locks.sh
 }
 
+run_rust_compile() {
+  scripts/ci/verify/compile-all-targets.sh
+}
+
 run_derp_contract() {
   local port=$((61000 + (${GITHUB_RUN_ID:-$$} % 4000)))
   local log_dir="${RUNNER_TEMP:-$ROOT/.tmp}/codewire-derp-contract-${GITHUB_RUN_ID:-$$}"
@@ -675,7 +679,6 @@ run_edge() {
   done
   python3 scripts/checks/repo_checks.py connect-edge-routing --self-test
   scripts/ci/tests/test-kind-e2e-cleanup.sh
-  scripts/ci/tests/test-kind-e2e-ubuntu-snapshot-runner.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
   scripts/ci/tests/test-kind-forwards.sh
   python3 -B scripts/ci/tests/test-kind-codex-session.py
@@ -896,13 +899,14 @@ case "$FAMILY" in
   rust) run_rust ;;
   rust-transport) run_rust_transport ;;
   rust-curated-locks) run_rust_curated_locks ;;
+  rust-compile) run_rust_compile ;;
   transport) run_transport ;;
   edge) run_edge ;;
   release) run_release ;;
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-core|policy-shell|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-core|policy-shell|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac

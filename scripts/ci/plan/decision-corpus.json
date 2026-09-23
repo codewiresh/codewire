@@ -93,7 +93,7 @@
       "paths": ["proto/codewire/v1/environment.proto"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["contracts", "contracts_proto", "edge_kind", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "rust", "rust_pkg_codewire_cli", "rust_pkg_codewire_client", "rust_pkg_codewire_dashboard_web", "rust_pkg_codewire_orchestration", "rust_pkg_codewire_proto", "sdk_go", "sdk_python", "sdk_ts", "transport", "transport_pkg_codewire_local_vmm", "web"],
+        "selection_tokens": ["contracts", "contracts_proto", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "rust", "rust_pkg_codewire_cli", "rust_pkg_codewire_client", "rust_pkg_codewire_dashboard_web", "rust_pkg_codewire_orchestration", "rust_pkg_codewire_proto", "sdk_go", "sdk_python", "sdk_ts", "transport", "transport_pkg_codewire_local_vmm", "web"],
         "required_local_mode": "default"
       }
     },
@@ -117,7 +117,7 @@
       "paths": ["deployments/docker/gateway.Dockerfile"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["deploy", "edge_kind", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "runtime_confidential"],
+        "selection_tokens": ["deploy", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "runtime_confidential"],
         "required_local_mode": "kind"
       }
     },
@@ -141,7 +141,7 @@
       "paths": ["unexplained/new-surface.txt"],
       "expected": {
         "classification": "unclassified",
-        "selection_tokens": ["contracts", "contracts_proto", "database", "deploy", "edge_kind", "go_consumer_interop", "go_support", "go_tailnet", "kind", "policy", "policy_shell", "policy_shell_omittable", "release", "runtime_confidential", "runtime_dev_smoke", "rust", "rust_curated_locks", "rust_workspace", "sdk_go", "sdk_python", "sdk_ts", "security", "security_dev_smoke_auth", "security_go", "security_idp_kek", "security_js", "service_apikey_smoke", "service_billing", "service_connectcore", "service_coordinator", "service_idp", "service_integration", "service_nats", "service_orchestration", "service_temporal", "transport", "transport_derp_contract", "transport_pkg_codewire_coordinator", "transport_pkg_codewire_daemon", "transport_pkg_codewire_derp", "transport_pkg_codewire_gateway", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_mesh", "transport_pkg_codewire_netstack", "transport_pkg_codewire_tailnet", "transport_pkg_codewire_udp_relay", "transport_pkg_codewire_vmm_guest_probe", "web"],
+        "selection_tokens": ["contracts", "contracts_proto", "database", "deploy", "go_consumer_interop", "go_support", "go_tailnet", "policy", "policy_shell", "policy_shell_omittable", "release", "runtime_confidential", "runtime_dev_smoke", "rust", "rust_curated_locks", "rust_workspace", "sdk_go", "sdk_python", "sdk_ts", "security", "security_dev_smoke_auth", "security_go", "security_idp_kek", "security_js", "service_apikey_smoke", "service_billing", "service_connectcore", "service_coordinator", "service_idp", "service_integration", "service_nats", "service_orchestration", "service_temporal", "transport", "transport_derp_contract", "transport_pkg_codewire_coordinator", "transport_pkg_codewire_daemon", "transport_pkg_codewire_derp", "transport_pkg_codewire_gateway", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_mesh", "transport_pkg_codewire_netstack", "transport_pkg_codewire_tailnet", "transport_pkg_codewire_udp_relay", "transport_pkg_codewire_vmm_guest_probe", "web"],
         "required_local_mode": "full"
       }
     }

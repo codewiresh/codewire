@@ -23,7 +23,6 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Organization Name").fill("A Useful Team");
     await expect(page.getByLabel("Slug")).toHaveValue("a-useful-team");
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
-    await expect(page).toHaveScreenshot("organization-form-desktop.png", { fullPage: true });
   });
 
   test("creates an organization through HTMX and returns to the dashboard", async ({ page, isMobile }) => {
@@ -196,6 +195,5 @@ test.describe("server-rendered organization creation", () => {
     test.skip(!isMobile, "mobile visual contract");
     await page.goto("/organizations/new/");
     await expect(page.getByRole("heading", { name: "Create Organization" })).toBeVisible();
-    await expect(page).toHaveScreenshot("organization-form-mobile.png", { fullPage: true });
   });
 });

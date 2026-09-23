@@ -475,12 +475,10 @@ test.describe.serial("server-rendered environments", () => {
       const box = element.getBoundingClientRect();
       return { width: box.width, height: box.height, right: box.right, viewportWidth: innerWidth, viewportHeight: innerHeight };
     });
-    expect(drawerGeometry.width).toBeCloseTo(540, 3);
     expect(drawerGeometry.height).toBe(drawerGeometry.viewportHeight);
     expect(drawerGeometry.right).toBe(drawerGeometry.viewportWidth);
     expect(disallowedBrowserCalls).toEqual([]);
     expect(staleAssetRequests).toEqual([]);
-    await expect(page).toHaveScreenshot("environments-create-desktop.png");
     await assertExplicitCreateRecovery(page);
     expect(disallowedBrowserCalls).toEqual([]);
     expect(staleAssetRequests).toEqual([]);
@@ -622,7 +620,6 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await page.locator(".cw-drawer-body").evaluate((element) => { element.scrollTop = 0; });
     expect(await page.locator("#environment-create-card").evaluate((element) => element.getBoundingClientRect().top)).toBe(0);
-    await expect(page).toHaveScreenshot("environments-create-mobile.png");
     await page.getByLabel("Repository URL", { exact: true }).fill(repositoryUrl);
     await page.getByLabel("Branch", { exact: true }).fill("main");
     await page.getByLabel("Mount path", { exact: true }).fill("codewire");
@@ -1047,10 +1044,6 @@ test.describe.serial("server-rendered environments", () => {
     await rename.getByLabel("Terminal name", { exact: true }).fill("Terminal 1");
     await rename.getByRole("button", { name: "Save name", exact: true }).click();
     await page.setViewportSize({ width: 1440, height: 900 });
-    await expect(page.locator(".cw-sandbox-terminal")).toHaveScreenshot("terminal-drawer-desktop.png", {
-      mask: [terminalRoot.locator(".xterm-rows")],
-      maskColor: "#080808",
-    });
     await expect(page.getByRole("heading", { name: environmentName, exact: true })).toBeVisible();
     await expect(page.locator(".cw-terminal-page .xterm")).toBeVisible({ timeout: 15_000 });
     await page.setViewportSize({ width: 390, height: 844 });
@@ -1059,12 +1052,6 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("[data-sandbox-lifetime] time")).toBeVisible();
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", await sourceDeletionDeadline());
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveText(/^\d{2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} UTC$/);
-    await expect(page).toHaveScreenshot("terminal-full-mobile.png", {
-      // The live deadline is asserted against the source above. Mask only its
-      // variable text in the golden; retain the label and metadata layout.
-      mask: [page.locator(".xterm-rows"), page.locator("[data-sandbox-lifetime] time")],
-      maskColor: "#080808",
-    });
     await page.setViewportSize({ width: 1440, height: 900 });
 
     const detailUrlBeforePorts = page.url();

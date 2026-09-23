@@ -325,7 +325,8 @@ assert 'scripts/dev/test-macos-vz-workload-network.py' in policy_helpers
 assert 'scripts/ci/tests/test-darwin-cross-check.sh' in policy_helpers
 canary_guard = 'crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py'
 assert canary_guard in policy_helpers, 'composition fixture omitted the actual crate-local policy guard'
-for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh']:
+for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
+               'scripts/ci/verify/compile-all-targets.sh']:
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.suffix == '.sh':

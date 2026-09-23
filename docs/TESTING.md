@@ -174,7 +174,6 @@ Before paying the cost of Kind, run the wiring guards and enumerate the suite:
 
 ```bash
 scripts/ci/tests/test-dashboard-browser-gate.sh
-scripts/ci/tests/test-kind-e2e-ubuntu-snapshot-runner.sh
 scripts/ci/tests/test-kind-e2e-suites.sh
 bun run --cwd apps/dashboard typecheck
 ./apps/dashboard/node_modules/.bin/playwright test \
@@ -187,42 +186,12 @@ Kind ordering, invalid Playwright discovery, and dependency/source-policy
 violations. They do not prove login or environment creation; only execution
 against the coherent full stack does that.
 
-## Updating Ubuntu Playwright snapshots
+## Browser assertions
 
-Files ending in `-linux.png` are developer-platform snapshots. Files ending in
-`-ubuntu24-cft145.png` are runner-equivalent snapshots: Ubuntu 24.04, the pinned
-font inventory, and Chrome for Testing 145. Update the latter only with the
-repository-owned renderer:
-
-```bash
-scripts/ci/verify/update-playwright-ubuntu24-snapshots.sh \
-  --chromium-archive /absolute/path/to/chrome-linux64.zip
-```
-
-A compatible local `kind-codewire` stack must already be running before the
-updater starts.
-
-The archive must match the checksum in
-`install-pinned-playwright-chromium.sh`. On the host, the updater verifies the
-local Kind deployments and starts the managed loopback-only Postgres forward.
-It then builds from the public immutable runner base with only four
-checksum-pinned Ubuntu packages, reproducing the renderer from the exact
-`ci-heavy` runner without requiring access to the private image.
-
-Before mounting the source projection read-only, the updater installs the frozen
-workspace dependencies into that private projection with lifecycle scripts and
-browser downloads disabled. The install runs with an empty environment, private
-home, cache, XDG, and temporary directories, and no ambient credential or proxy
-configuration; host `node_modules` directories are never mounted.
-
-The renderer receives the populated read-only tracked-source projection, the
-verified Chromium archive, and one writable staging mount for exactly five
-allowlisted dashboard snapshots: environment creation on desktop and mobile,
-management settings on desktop and mobile, and the desktop dashboard. It
-receives no owner home directory, credentials, Docker socket, or kubeconfig. A
-`kubectl` sentinel rejects the run if browser setup unexpectedly tries to use
-Kubernetes. Successful output is validated and promoted only after the real
-snapshot tree is proven unchanged since the run began.
+Browser tests assert behavior, state and accessible structure, not pixels:
+there are no screenshot goldens. A layout regression that matters gets a
+specific behavioral assertion (for example no page overflow or a visible
+control), not a full-page image comparison.
 
 ## Helpers
 
