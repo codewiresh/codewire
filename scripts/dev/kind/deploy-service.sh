@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 SERVICE="${1:-}"
 IMAGE="codewire-services:e2e"
+# Local tag for the gate-built base; a bare image ID is not a FROM reference.
+BASE_IMAGE="codewire-services:kind-dev-base"
 BUILDER="codewire-kind-dev"
 NAMESPACE=codewire-e2e
 BASE_LABEL="dev.codewire.kind-dev-base"
@@ -58,8 +60,9 @@ KIND_DEV_CRATE="$crate" KIND_DEV_FEATURES="$features" \
 install -m 0755 "$out/$crate" "$STATE/bin/$crate"
 
 log "layering $(cd "$STATE/bin" && echo *) onto the base image"
+docker tag "$base" "$BASE_IMAGE"
 {
-  printf 'FROM %s\n' "$base"
+  printf 'FROM %s\n' "$BASE_IMAGE"
   for binary in "$STATE/bin/"*; do
     printf 'COPY %s /%s\n' "$(basename "$binary")" "$(basename "$binary")"
   done
