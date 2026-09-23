@@ -155,7 +155,7 @@ run_paths_case license_texts pull_request refs/pull/1011/head false "$policy" \
   crates/codewire-cli/LICENSE packages/codewire-proto-ts/LICENSE-APACHE \
   proto/LICENSE-APACHE tests/contract/LICENSE
 run_paths_case local_compose pull_request refs/pull/11/head false \
-  'database deploy edge_kind policy web' docker-compose.yml
+  'database deploy policy web' docker-compose.yml
 run_paths_case local_compose_kind_opt_in pull_request refs/pull/111/head true \
   'database deploy edge_kind kind policy web' docker-compose.yml
 run_paths_case ci_self pull_request refs/pull/2/head false \
@@ -218,7 +218,7 @@ run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head fa
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
   'deploy policy policy_shell' scripts/ci/tests/test-ci-tool-downloads.sh
 run_paths_case product_image_build_graph pull_request refs/pull/2003/head false \
-  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential' \
   docker-bake.hcl scripts/ci/images/build-kind-images.sh \
   scripts/ci/images/run-rust-build.sh
 run_paths_case product_image_build_graph_kind pull_request refs/pull/2004/head true \
@@ -242,18 +242,18 @@ run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   scripts/ci/tests/test-resolve-published-support-pair.sh \
   scripts/ci/tests/test-resolve-deployed-source.sh
 run_paths_case repo_checks pull_request refs/pull/21/head false \
-  'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_checks.py
 run_paths_case repo_policy_modules pull_request refs/pull/22/head false \
-  'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_policy/mesh.py
 run_paths_case repo_license_inventory pull_request refs/pull/2201/head false \
   'policy' scripts/checks/repo_policy/licensing.py
 run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head false \
-  'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_policy/licensing.py scripts/checks/repo_policy/mesh.py
 run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
-  'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/ci/tests/test-repo-checks-modules.py
 run_paths_case service_ssh_image_verifier pull_request refs/pull/1922/head false \
   'policy' scripts/ci/tests/test-service-ssh-image-verifier.sh \
@@ -306,10 +306,10 @@ run_paths_case protected_delivery_credentials pull_request refs/pull/31/head fal
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh \
   scripts/ci/tests/test-mint-github-app-token.sh
 run_paths_case sccache_r2_consumer pull_request refs/pull/1749/head false \
-  'edge_kind policy security' \
+  'policy security' \
   scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh
 run_paths_case sccache_r2_consumer_fixture pull_request refs/pull/1750/head false \
-  'edge_kind policy security' \
+  'policy security' \
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
 run_paths_case sccache_host_selector pull_request refs/pull/1751/head false \
   'policy rust rust_workspace security' \
@@ -484,10 +484,10 @@ run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head fals
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml
 run_paths_case curated_gateway_lock pull_request refs/pull/503/head false \
-  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
   deployments/docker/gateway.Cargo.lock
 run_paths_case curated_derp_lock pull_request refs/pull/504/head false \
-  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
   deployments/docker/derp.Cargo.lock
 run_paths_case curated_lock_guard pull_request refs/pull/505/head false \
   'policy rust_curated_locks' \
@@ -516,7 +516,7 @@ run_paths_case private_broker_proto_source pull_request refs/pull/6011/head fals
   'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   libs/gateway-proto/proto/broker/v1/broker.proto
 run_paths_case neutral_credential_bridge_proto_source pull_request refs/pull/6011/head false \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service rust_pkg_codewire_daemon rust_pkg_codewire_gateway rust_pkg_codewire_gateway_proto rust_pkg_codewire_local_credentials rust_pkg_codewire_local_vmm rust_pkg_codewire_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service rust_pkg_codewire_daemon rust_pkg_codewire_gateway rust_pkg_codewire_gateway_proto rust_pkg_codewire_local_credentials rust_pkg_codewire_local_vmm rust_pkg_codewire_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   proto/codewire/bridge/v1/bridge.proto
 run_paths_case private_broker_proto_rust_module pull_request refs/pull/6011/head false \
   'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto rust_pkg_codewire_server_core transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
@@ -531,7 +531,7 @@ run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/authority.rs
 run_paths_case credential_service_kind_runtime_without_opt_in pull_request refs/pull/6011/head false \
-  'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
+  'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/runtime/kind/provider.rs
 run_paths_case credential_service_kind_runtime_with_opt_in pull_request refs/pull/6011/head true \
   'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
@@ -587,7 +587,7 @@ for profile_input in src/access_profiles.rs src/connect/access_profiles.rs tests
     "crates/codewire-orchestration/$profile_input"
 done
 run_paths_case credential_kind_fixtures pull_request refs/pull/721/head false \
-  'edge_kind policy' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-credentials.py
+  'policy' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-credentials.py
 run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/tests/wire_contract.rs \
@@ -632,16 +632,16 @@ run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
   crates/codewire-orchestration/src/worker/create.rs
 run_paths_case temporal_fencing_kind_driver pull_request refs/pull/842/head false \
-  'edge_kind kind policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+  'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/bin/temporal-fencing-smoke.rs
 run_paths_case file_service_kind_driver pull_request refs/pull/843/head false \
-  'edge_kind kind policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+  'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/bin/file-service-smoke.rs
 run_paths_case reconciler_ttl_kind_driver pull_request refs/pull/844/head false \
-  'edge_kind kind policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+  'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs
 run_paths_case kind_harness pull_request refs/pull/845/head false \
-  'edge_kind policy' \
+  'policy' \
   scripts/ci/verify/kind-e2e.sh \
   scripts/ci/verify/kind/common.sh \
   scripts/ci/verify/kind/suites/integrated.sh \
@@ -655,7 +655,7 @@ run_paths_case kind_harness_opt_in pull_request refs/pull/846/head true \
   scripts/ci/verify/kind/suites/final-fencing.sh \
   scripts/ci/verify/kind/suites/environment-session.sh
 run_paths_case kind_fixture_only pull_request refs/pull/847/head false \
-  'edge_kind policy' \
+  'policy' \
   scripts/ci/tests/test-kind-e2e-suites.sh \
   scripts/ci/tests/test-kind-forwards.sh
 run_paths_case temporal_shared_fixture pull_request refs/pull/841/head false \
@@ -686,16 +686,16 @@ run_paths_case derp_contract pull_request refs/pull/101/head false \
   'policy transport transport_derp_contract transport_pkg_codewire_derp' \
   tests/contract/derp/derp_test.go
 run_paths_case proto pull_request refs/pull/11/head false \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
+  'contracts contracts_proto go_consumer_interop go_support policy' \
   proto/codewire/v1/api_key.proto
 run_paths_case common_proto pull_request refs/pull/109/head false \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
+  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
   proto/codewire/v1/common.proto
 run_paths_case environment_proto pull_request refs/pull/110/head false \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm web' \
+  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm web' \
   proto/codewire/v1/environment.proto
 run_paths_case preset_proto pull_request refs/pull/1101/head false \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_proto sdk_go sdk_python sdk_ts web' \
+  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_proto sdk_go sdk_python sdk_ts web' \
   proto/codewire/v1/preset.proto
 run_paths_case admin_rust_proto_boundary pull_request refs/pull/1111/head false \
   'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto rust_pkg_codewire_cli_bin' \
@@ -715,13 +715,13 @@ run_paths_case customer_proto_crate pull_request refs/pull/11112/head false \
   'contracts contracts_proto policy rust rust_pkg_codewire_proto' \
   crates/codewire-proto/build.rs
 run_paths_case google_rpc_ts_template pull_request refs/pull/1114/head false \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
+  'contracts contracts_proto go_consumer_interop go_support policy' \
   proto/buf.gen.google-rpc-ts.yaml
 run_paths_case google_rpc_python_template pull_request refs/pull/1115/head false \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
+  'contracts contracts_proto go_consumer_interop go_support policy' \
   proto/buf.gen.google-rpc-python.yaml
 run_paths_case edge_ownership pull_request refs/pull/114/head false \
-  'contracts contracts_proto edge_kind policy' scripts/checks/contracts/connect-edge-ownership.json
+  'contracts contracts_proto policy' scripts/checks/contracts/connect-edge-ownership.json
 run_paths_case proto_breaking_policy pull_request refs/pull/1141/head false \
   'contracts contracts_proto policy' \
   scripts/checks/proto_breaking.py \
@@ -780,21 +780,21 @@ run_paths_case dashboard_design_preview pull_request refs/pull/120/head false \
 run_paths_case marketing_brand_assets pull_request refs/pull/1201/head false \
   'policy web' favicon.svg logo/wordmark.svg
 run_paths_case dashboard_runtime_inventory pull_request refs/pull/121/head false \
-  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security web' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security web' \
   apps/dashboard/runtime-inventory.json
 run_paths_case dashboard_rust_route pull_request refs/pull/122/head false \
-  'deploy edge_kind policy rust rust_pkg_codewire_dashboard_web web' \
+  'deploy policy rust rust_pkg_codewire_dashboard_web web' \
   crates/codewire-dashboard-web/src/docs.rs
 run_paths_case dashboard_rust_surface pull_request refs/pull/1221/head false \
-  'deploy edge_kind policy rust rust_pkg_codewire_dashboard_web web' \
+  'deploy policy rust rust_pkg_codewire_dashboard_web web' \
   crates/codewire-dashboard-web/src/routes/environments.rs \
   crates/codewire-dashboard-web/templates/dashboard.html \
   crates/codewire-dashboard-web/assets/htmx-2.0.10.min.js
 run_paths_case dashboard_image_verifier pull_request refs/pull/123/head false \
-  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security web' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security web' \
   scripts/ci/verify/dashboard-image.sh
 run_paths_case dashboard_sandbox_image_inputs pull_request refs/pull/1231/head false \
-  'edge_kind policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+  'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/sandbox/mod.rs \
   crates/codewire-orchestration/src/sandbox/template.rs \
   crates/codewire-orchestration/src/sandbox/template/network.rs
@@ -877,7 +877,7 @@ run_paths_case runtime_confidential pull_request refs/pull/1518/head false \
 run_paths_case makefile_only pull_request refs/pull/152/head false \
   'policy' Makefile
 run_paths_case buildx_two_file_replay pull_request refs/pull/1520/head false \
-  'deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
   Makefile scripts/checks/security/audit-runtime-images.sh
 [ ! -e "$ROOT/.gitea/workflows/desktop-package.yaml" ] || {
   echo 'standalone desktop package workflow still exists' >&2
@@ -900,7 +900,7 @@ run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   apps/cli/Makefile
 run_paths_case edge_harness pull_request refs/pull/153/head false \
-  'edge_kind policy' scripts/ci/verify/kind-e2e.sh
+  'policy' scripts/ci/verify/kind-e2e.sh
 run_paths_case edge_host_runtime pull_request refs/pull/1529/head true \
   'edge_kind kind policy' scripts/ci/verify/kind-host-runtime.sh
 run_paths_case edge_browser_runtime pull_request refs/pull/1530/head true \
@@ -911,11 +911,11 @@ run_paths_case mixed_sdk_and_runtime pull_request refs/pull/154/head false \
   'policy rust rust_pkg_codewire_server_core sdk_python service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   libs/sdk-python/codewire/client.py crates/codewire-server-core/src/lib.rs
 run_paths_case edge_without_kind pull_request refs/pull/16/head false \
-  'edge_kind policy' Caddyfile
+  'policy' Caddyfile
 run_paths_case edge_with_kind pull_request refs/pull/17/head true \
   'edge_kind kind policy' Caddyfile
 run_paths_case temporal_installer_without_kind pull_request refs/pull/171/head false \
-  'edge_kind policy' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
+  'policy' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case temporal_installer_with_kind pull_request refs/pull/172/head true \
   'edge_kind kind policy' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
@@ -1019,6 +1019,8 @@ run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
 all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+# A pull request without the Kind opt-in never selects Kind.
+all_product_pr='contracts contracts_proto database deploy go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
@@ -1029,33 +1031,33 @@ run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pul
   'policy transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
 run_present_paths_case macos_formatter_unknown pull_request refs/pull/2064/head false \
-  "$all_product" scripts/dev/macos-ext4-tool-future.py
+  "$all_product_pr" scripts/dev/macos-ext4-tool-future.py
 run_present_paths_case darwin_cross_check pull_request refs/pull/20655/head false \
   'policy policy_shell transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/check-darwin-cross.sh
 run_present_paths_case darwin_cross_check_tests pull_request refs/pull/20656/head false \
   "$policy policy_shell" scripts/ci/tests/test-darwin-cross-check.sh
 run_present_paths_case darwin_cross_test_unknown pull_request refs/pull/20656/head false \
-  "$all_product" scripts/ci/tests/test-darwin-cross-check-future.sh
+  "$all_product_pr" scripts/ci/tests/test-darwin-cross-check-future.sh
 run_present_paths_case mesh_ingress_protocol_guard pull_request refs/pull/1902/head false \
   'deploy policy policy_shell' scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
 run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902/head false \
-  "$all_product" scripts/ci/tests/test-mesh-ingress-protocol-future.sh
+  "$all_product_pr" scripts/ci/tests/test-mesh-ingress-protocol-future.sh
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
 run_present_paths_case macos_console_pair_unknown pull_request refs/pull/20642/head false \
-  "$all_product" scripts/dev/macos-vz-console-pair-future.py
+  "$all_product_pr" scripts/dev/macos-vz-console-pair-future.py
 run_present_paths_case macos_product_network pull_request refs/pull/20644/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-product-network.py scripts/dev/test-macos-vz-product-network.py
 run_present_paths_case macos_product_network_unknown pull_request refs/pull/20645/head false \
-  "$all_product" scripts/dev/macos-vz-product-network-future.py
+  "$all_product_pr" scripts/dev/macos-vz-product-network-future.py
 run_present_paths_case macos_workload_network pull_request refs/pull/20646/head true \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-workload-network.py scripts/dev/test-macos-vz-workload-network.py
 run_present_paths_case macos_workload_network_unknown pull_request refs/pull/20647/head false \
-  "$all_product" scripts/dev/macos-vz-workload-network-future.py
+  "$all_product_pr" scripts/dev/macos-vz-workload-network-future.py
 run_present_paths_case macos_workspace_inputs_parent pull_request refs/pull/20652/head true \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-workspace-inputs.py
@@ -1063,7 +1065,7 @@ run_present_paths_case macos_workspace_inputs_tests pull_request refs/pull/20653
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/test-macos-vz-workspace-inputs.py
 run_present_paths_case macos_workspace_inputs_unknown pull_request refs/pull/20654/head false \
-  "$all_product" scripts/dev/macos-vz-workspace-inputs-future.py
+  "$all_product_pr" scripts/dev/macos-vz-workspace-inputs-future.py
 run_paths_case macos_workload_network_rust pull_request refs/pull/20648/head true \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/src/bin/codewire-macos-workload-network-fixture.rs \
@@ -1097,7 +1099,7 @@ run_present_paths_case macos_vz_production_boot pull_request refs/pull/2064/head
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-production-boot.py scripts/dev/test-macos-vz-production-boot.py
 run_present_paths_case dashboard_watch_unlisted pull_request refs/pull/2003/head false \
-  "$all_product" scripts/dev/unlisted-dashboard-helper.py
+  "$all_product_pr" scripts/dev/unlisted-dashboard-helper.py
 if grep -Fq 'scripts/ci/cache/*.sh' "$SELECTOR"; then
   echo 'Rust cache policy must not admit future cache helpers by wildcard' >&2
   exit 1
@@ -1106,13 +1108,13 @@ fi
   || { echo "negative cache fixture path already exists: $NEGATIVE_CACHE_PATH" >&2; exit 1; }
 mkdir -p "${NEGATIVE_CACHE_PATH%/*}"
 : > "$NEGATIVE_CACHE_PATH"
-run_paths_case rust_cache_unlisted pull_request refs/pull/201/head false "$all_product" \
+run_paths_case rust_cache_unlisted pull_request refs/pull/201/head false "$all_product_pr" \
   scripts/ci/cache/unlisted-cache-helper.sh
 rm -f "$NEGATIVE_CACHE_PATH"
 rmdir "$ROOT/scripts/ci/cache" 2>/dev/null || true
-run_paths_case unknown pull_request refs/pull/18/head false "$all_product" \
+run_paths_case unknown pull_request refs/pull/18/head false "$all_product_pr" \
   unexplained/new-surface.txt
-run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product" \
+run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product_pr" \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   unexplained/new-surface.txt
 run_paths_case empty pull_request refs/pull/19/head false "$policy" ''
@@ -1540,7 +1542,7 @@ printf '%s\n' proto/codewire/v1/common.proto > "$paths_file"
 GITHUB_OUTPUT="$output_file" GITHUB_EVENT_NAME=pull_request \
   "$SELECTOR" "$paths_file" >/dev/null
 assert_tokens github_output \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
+  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
   "$(cat "$output_file")"
 
 # Exercise changed-range discovery, including fail-closed missing PR state.

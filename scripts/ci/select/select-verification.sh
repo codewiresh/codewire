@@ -1677,6 +1677,13 @@ if token_selected policy; then
   select_token policy_shell_omittable
 fi
 
+# Kind takes over an hour. A pull request runs it only when opted in
+# ([kind-e2e] in its title or body, or the kind-e2e label); pushes to main and
+# dispatched runs keep it as the post-merge gate.
+if [ "$event" = pull_request ] && [ "$pr_kind_opt_in" != true ]; then
+  unset 'selected[kind]' 'selected[edge_kind]'
+fi
+
 for token in "${!selected[@]}"; do
   printf '%s\n' "$token"
 done | LC_ALL=C sort > "$tokens_tmp"
