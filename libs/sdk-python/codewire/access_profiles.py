@@ -16,6 +16,9 @@ class AccessProfileEntry(TypedDict):
 
 
 class AccessProfile(TypedDict):
+    """One immutable revision. Every profile includes the account's one GitHub
+    connection; GitHub is never an entry."""
+
     id: str
     name: str
     revision: int
@@ -47,6 +50,8 @@ def _entries(entries: Sequence[AccessProfileEntry]) -> list[pb.AccessProfileEntr
     result = []
     for entry in entries:
         slot = entry["capability_slot"]
+        if slot == "github":
+            raise ValueError("every profile includes the account's GitHub connection; it is never an entry")
         if slot in slots:
             raise ValueError("duplicate access profile capability slot")
         slots.add(slot)

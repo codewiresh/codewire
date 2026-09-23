@@ -68,6 +68,10 @@ export async function runAccessProfileTests(): Promise<void> {
   const callsBeforeValidation = calls.length;
   await assert.rejects(cw.accessProfiles.create("duplicate", [entries[0], entries[0]]), /duplicate/);
   await assert.rejects(cw.accessProfiles.update("profile-one", exact, [entries[0], entries[0]]), /duplicate/);
+  await assert.rejects(
+    cw.accessProfiles.create("github", [{ capability_slot: "github", credential_id: "credential-one" }]),
+    /never an entry/,
+  );
   await assert.rejects(cw.accessProfiles.get("profile-one", 0n), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", 42 as unknown as bigint), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", maximum + 1n), /positive uint64 bigint/);

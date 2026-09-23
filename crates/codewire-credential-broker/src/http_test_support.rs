@@ -8,7 +8,7 @@ use crate::BrokerCredentialLease;
 use codewire_access::{
     AccessProfileId, BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentId,
-    GrantPermission, Owner, OwnerId, Placement, ProviderId,
+    GrantPermission, GrantProfile, Owner, OwnerId, Placement, ProviderId,
 };
 use zeroize::Zeroizing;
 
@@ -52,8 +52,10 @@ impl Lease {
             grant: DerivedGrant {
                 environment_id: EnvironmentId::parse("synthetic-environment").unwrap(),
                 environment_generation: 3,
-                profile_id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
-                profile_revision: 4,
+                profile: Some(GrantProfile {
+                    id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                    revision: 4,
+                }),
                 capability_slot: CapabilitySlot::parse(slot).unwrap(),
                 credential_id: id,
                 credential_revocation_generation: 7,

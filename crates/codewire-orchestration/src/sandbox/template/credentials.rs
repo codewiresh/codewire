@@ -17,7 +17,7 @@ const GATEWAY_TOKEN_DIRECTORY: &str = "/run/codewire-credentials/gateway";
 const GATEWAY_TLS_DIRECTORY: &str = "/run/codewire-credentials/gateway-tls";
 const BROKER_ROOTS_DIRECTORY: &str = "/run/codewire-credentials/broker-roots";
 const PROJECTION_SHA256_ENV: &str = "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256";
-pub const MANAGED_CREDENTIAL_CLIENTS_ENV: &str = "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS";
+pub use codewire_access::MANAGED_CREDENTIAL_CLIENTS_ENV;
 
 pub(super) fn projection_environment(opts: &TemplateOpts) -> Option<Value> {
     let digest = opts.projection_selection_sha256?;

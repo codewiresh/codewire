@@ -361,7 +361,7 @@ fn public_metadata() -> (CredentialMetadata, SshPublicKey) {
 
 #[tokio::test]
 async fn rechecked_session_expiry_narrows_the_retained_result_deadline() {
-    use codewire_access::{AccessProfileId, EnvironmentId};
+    use codewire_access::{AccessProfileId, EnvironmentId, GrantProfile};
     let (_root, service) = service();
     let epoch = service.epoch();
     let (metadata, _) = public_metadata();
@@ -376,8 +376,10 @@ async fn rechecked_session_expiry_narrows_the_retained_result_deadline() {
         grant: DerivedGrant {
             environment_id: EnvironmentId::parse("synthetic-environment").unwrap(),
             environment_generation: 1,
-            profile_id: AccessProfileId::parse("synthetic-profile").unwrap(),
-            profile_revision: 1,
+            profile: Some(GrantProfile {
+                id: AccessProfileId::parse("synthetic-profile").unwrap(),
+                revision: 1,
+            }),
             capability_slot: CapabilitySlot::parse("ssh").unwrap(),
             credential_id: metadata.id.clone(),
             credential_revocation_generation: 1,

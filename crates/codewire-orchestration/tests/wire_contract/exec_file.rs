@@ -352,17 +352,19 @@ async fn assert_file_gates_and_protocol(harness: &Harness) {
         assert_rpc_bad_request(&path, &["path"]);
 
         let empty = client
-            .upload_file(std::iter::empty::<UploadFileRequest>())
+            .upload_file(futures_util::stream::iter(std::iter::empty::<
+                UploadFileRequest,
+            >()))
             .await
             .expect_err("empty UploadFile stream must fail");
         assert_rpc_error(&empty, ErrorCode::InvalidArgument, "validation failed");
         assert_rpc_bad_request(&empty, &["payload"]);
 
         let chunk_first = client
-            .upload_file([UploadFileRequest {
+            .upload_file(futures_util::stream::iter([UploadFileRequest {
                 payload: Some(upload_file_request::Payload::Chunk(b"invalid".to_vec())),
                 ..Default::default()
-            }])
+            }]))
             .await
             .expect_err("chunk-first UploadFile must fail");
         assert_rpc_error(
@@ -373,10 +375,10 @@ async fn assert_file_gates_and_protocol(harness: &Harness) {
         assert_rpc_bad_request(&chunk_first, &["payload"]);
 
         let empty_header = client
-            .upload_file([UploadFileRequest {
+            .upload_file(futures_util::stream::iter([UploadFileRequest {
                 payload: Some(upload_file_request::Payload::Header(Box::default())),
                 ..Default::default()
-            }])
+            }]))
             .await
             .expect_err("empty UploadFile header must fail");
         assert_rpc_error(

@@ -187,7 +187,7 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
             .identities
             .bounded(self.authority.resolve(&self.identities))
             .await?;
-        if current != self.initial {
+        if !self.initial.same_authority(&current) {
             return Err(Error::Denied);
         }
         self.identities.ensure_live()?;
@@ -334,6 +334,29 @@ pub(crate) struct Resolved {
     lineage: Lineage,
 }
 
+impl Resolved {
+    /// Everything resolved at admission stays fixed except the authorized
+    /// credentials, which follow the owner's current connections.
+    fn same_authority(&self, current: &Self) -> bool {
+        let Self {
+            session,
+            scope,
+            metadata,
+            selection,
+            binding,
+            profile,
+            lineage,
+        } = self;
+        session.same_authority(&current.session)
+            && *scope == current.scope
+            && *metadata == current.metadata
+            && *selection == current.selection
+            && *binding == current.binding
+            && *profile == current.profile
+            && *lineage == current.lineage
+    }
+}
+
 // The exact same scope query is used inside projection capture/final locks.
 // Membership remains mandatory even for the creator. Optional provider binding
 // does not relax environment state, generation or backend/Pod identity.
@@ -407,18 +430,24 @@ impl AuthoritySource {
                 .map_err(profile_error)?;
             if profile.owner != owner
                 || profile.placement != Placement::Platform
-                || profile.entries.is_empty()
+                || profile.entries.is_empty() && !profile.includes_github()
                 || profile.entries.len() > 64
             {
                 return Err(Error::Denied);
             }
-            let ids: Vec<String> = profile
-                .entries
-                .values()
-                .map(ToString::to_string)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
+            let mut authorized: BTreeSet<codewire_access::CredentialId> =
+                profile.entries.values().cloned().collect();
+            // Every personal profile includes the account's current GitHub
+            // connection. When it is missing, GitHub is omitted, not fabricated.
+            if profile.includes_github()
+                && let Some(github) =
+                    codewire_platform_credentials::active_github_connection(&self.pool, &owner)
+                        .await
+                        .map_err(|_| Error::Unavailable)?
+            {
+                authorized.insert(github);
+            }
+            let ids: Vec<String> = authorized.iter().map(ToString::to_string).collect();
             let owned: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM public.platform_credentials WHERE \
              ((user_id=$1 AND organization_id IS NULL) OR (organization_id=$2 AND user_id IS NULL)) \
@@ -434,21 +463,34 @@ impl AuthoritySource {
             if owned.into_iter().collect::<BTreeSet<_>>() != ids.into_iter().collect() {
                 return Err(Error::Denied);
             }
-            context.authorized_credentials = profile.entries.values().cloned().collect();
+            context.authorized_credentials = authorized;
             (Some(binding), Some(profile))
         } else {
             (None, None)
         };
+        // The selection digest was captured when the environment was created
+        // and binds reserved names, not connection state: connecting or
+        // deleting GitHub later changes only the authorized credentials above.
         let reserved_keys = codewire_project::platform_projection_reserved_keys(
-            profile
-                .iter()
-                .flat_map(|profile| profile.entries.keys())
-                .map(|slot| slot.as_str()),
+            profile.iter().flat_map(|profile| profile.reserved_slots()),
         )
         .map_err(|_| Error::Denied)?;
         let selection = metadata.selection(&scope, reserved_keys)?;
         let lineage =
             validate_lineage(&self.client, &scope, &gateway, &identities.workspace).await?;
+        // Selecting a GitHub repository needs no profile. Orchestration records
+        // that choice once, when it renders the verified workspace Pod with the
+        // GitHub client; only then is the creator's active connection
+        // authorized. A missing connection is omitted, never fabricated.
+        if profile.is_none()
+            && lineage.managed_github()
+            && let Some(github) =
+                codewire_platform_credentials::active_github_connection(&self.pool, &owner)
+                    .await
+                    .map_err(|_| Error::Unavailable)?
+        {
+            context.authorized_credentials.insert(github);
+        }
         // No profile/Kube await follows the final database scope reread. A
         // different binding with identical entry IDs still changes Scope.
         if self.scope(&environment).await? != scope

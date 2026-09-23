@@ -307,8 +307,8 @@ mod tests {
         use codewire_proto::codewire::{
             console::v1::GetEnvironmentCreateOptionsResponse,
             v1::{
-                ListAccessProfilesResponse, ListOrganizationsResponse, ListSecretProjectsResponse,
-                Organization, OrganizationMembership,
+                ListAccessProfilesResponse, ListCredentialsResponse, ListOrganizationsResponse,
+                ListSecretProjectsResponse, Organization, OrganizationMembership,
             },
         };
         let calls = Calls::default();
@@ -348,6 +348,11 @@ mod tests {
                 } else if path.ends_with("/ListAccessProfiles") {
                     if mode == "source catalogs unavailable" { return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
                     ListAccessProfilesResponse::default().encode_to_vec()
+                } else if path.ends_with("/ListCredentials") {
+                    // The Create form reads the account's GitHub connection
+                    // state; it never selects a credential.
+                    if mode == "source catalogs unavailable" { return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
+                    ListCredentialsResponse::default().encode_to_vec()
                 } else {
                     // Billing failure is supported by create_options; unexpected
                     // operations are rejected and detected in the recorded calls.
@@ -437,7 +442,8 @@ mod tests {
                         "/GetBillingOverview",
                         "/ListResourcePlans",
                         "/ListSecretProjects",
-                        "/ListAccessProfiles"
+                        "/ListAccessProfiles",
+                        "/ListCredentials"
                     ]
                     .iter()
                     .any(|suffix| path.ends_with(suffix)),

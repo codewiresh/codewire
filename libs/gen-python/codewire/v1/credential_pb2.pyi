@@ -36,16 +36,12 @@ CREDENTIAL_STATUS_EXPIRED: CredentialStatus
 CREDENTIAL_STATUS_REFRESH_FAILED: CredentialStatus
 
 class ListGithubRepositoriesRequest(_message.Message):
-    __slots__ = ("profile_id", "profile_revision", "page_size", "page_token")
-    PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
-    PROFILE_REVISION_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("page_size", "page_token")
     PAGE_SIZE_FIELD_NUMBER: _ClassVar[int]
     PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
-    profile_id: str
-    profile_revision: int
     page_size: int
     page_token: str
-    def __init__(self, profile_id: _Optional[str] = ..., profile_revision: _Optional[int] = ..., page_size: _Optional[int] = ..., page_token: _Optional[str] = ...) -> None: ...
+    def __init__(self, page_size: _Optional[int] = ..., page_token: _Optional[str] = ...) -> None: ...
 
 class GithubRepository(_message.Message):
     __slots__ = ("repository_id", "full_name", "default_branch", "clone_url", "is_private", "archived", "disabled")

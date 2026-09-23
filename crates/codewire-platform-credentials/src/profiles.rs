@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use codewire_access::{
     AccessError, AccessProfile, AccessProfileId, AccessProfileName, CapabilitySlot, CredentialId,
     CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, GrantContext,
-    GrantPlacement, Owner, OwnerId, Placement, ProviderCatalog, ProviderId, derive_grants,
-    validate_profile_entries,
+    GrantPlacement, Owner, OwnerId, Placement, ProviderCatalog, ProviderId,
+    derive_account_github_grant, derive_grants, validate_profile_entries,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -597,17 +597,44 @@ impl PlatformAccessProfileStore {
     ) -> Result<Vec<DerivedGrant>, Error> {
         let mut tx = self.begin_transaction().await?;
         lock_environment(&mut tx, context, true, false).await?;
-        let binding = load_binding(&mut tx, context).await?;
-        let grants = self
-            .admit_binding(
-                &mut tx,
-                context,
-                &binding.binding,
-                binding.personal_owner_confirmed_by.as_ref(),
-            )
-            .await?;
+        let grants = match find_binding(&mut tx, context).await? {
+            Some(binding) => {
+                self.admit_binding(
+                    &mut tx,
+                    context,
+                    &binding.binding,
+                    binding.personal_owner_confirmed_by.as_ref(),
+                )
+                .await?
+            }
+            // Selecting a GitHub repository needs no profile: without a
+            // binding, the creator's one GitHub connection is the only grant.
+            None => self.admit_account_github(&mut tx, context).await?,
+        };
         tx.commit().await.map_err(database_error)?;
         Ok(grants)
+    }
+
+    async fn admit_account_github(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+    ) -> Result<Vec<DerivedGrant>, Error> {
+        let owner = Owner::User(context.user_id.clone());
+        let mut credentials = BTreeMap::new();
+        if let Some(id) = crate::store::active_github_connection(&mut **tx, &owner)
+            .await
+            .map_err(credential_error)?
+        {
+            let metadata = lock_credential(tx, &owner, &id).await?;
+            credentials.insert(id, metadata);
+        }
+        Ok(
+            derive_account_github_grant(context, &credentials, &self.catalog, unix_now()?)
+                .map_err(access_error)?
+                .into_iter()
+                .collect(),
+        )
     }
 
     /// Admit an explicit platform credential selection for owner-authenticated
@@ -801,70 +828,89 @@ async fn load_credentials(
     tx: &mut Transaction<'_, Postgres>,
     profile: &AccessProfile,
 ) -> Result<BTreeMap<CredentialId, CredentialMetadata>, Error> {
-    let (user_id, organization_id) = owner_columns(&profile.owner);
     let mut credentials = BTreeMap::new();
     // A shared lock fences replacement/revocation/deletion through admission.
     // Deterministic order avoids opposite-order locks across multi-slot profiles.
     for id in profile.entries.values().collect::<BTreeSet<_>>() {
-        let row = sqlx::query(
-            "SELECT provider,authentication_kind,display_name,account_hint,status, \
-             expires_at_unix,revocation_generation FROM \
-             public.codewire_platform_lock_credential($1::text,$2::text,$3::text)",
-        )
-        .bind(id.as_str())
-        .bind(user_id)
-        .bind(organization_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)?
-        .ok_or(Error::NotFound)?;
-        // Retain the applied helper's exact signature and SHARE fence. Only
-        // after it has locked this owner-scoped identity may the existing
-        // metadata SELECT authority read the additive public fields.
-        let (ssh_public_key, ssh_fingerprint): (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT ssh_public_key,ssh_fingerprint FROM public.platform_credentials \
-                 WHERE id=$1 AND (user_id=$2 OR organization_id=$3)",
-        )
-        .bind(id.as_str())
-        .bind(user_id)
-        .bind(organization_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)?
-        .ok_or(Error::NotFound)?;
-        let expires: Option<i64> = row.try_get("expires_at_unix").map_err(database_error)?;
-        let metadata = CredentialMetadata {
-            id: id.clone(),
-            placement: Placement::Platform,
-            owner: profile.owner.clone(),
-            provider: ProviderId::parse(
-                row.try_get::<String, _>("provider")
-                    .map_err(database_error)?,
-            )
-            .map_err(|_| Error::CorruptRecord)?,
-            authentication_kind: parse_auth_kind(
-                &row.try_get::<String, _>("authentication_kind")
-                    .map_err(database_error)?,
-            )
-            .map_err(|_| Error::CorruptRecord)?,
-            display_name: row.try_get("display_name").map_err(database_error)?,
-            account_hint: row.try_get("account_hint").map_err(database_error)?,
-            ssh_public_key: parse_ssh_public_key(ssh_public_key, ssh_fingerprint)
-                .map_err(|_| Error::CorruptRecord)?,
-            status: parse_status(&row.try_get::<String, _>("status").map_err(database_error)?)
-                .map_err(|_| Error::CorruptRecord)?,
-            expires_at_unix: expires
-                .map(|value| u64::try_from(value).map_err(|_| Error::CorruptRecord))
-                .transpose()?,
-            revocation_generation: positive(
-                row.try_get("revocation_generation")
-                    .map_err(database_error)?,
-            )?,
-        };
-        metadata.validate().map_err(|_| Error::CorruptRecord)?;
+        let metadata = lock_credential(tx, &profile.owner, id).await?;
         credentials.insert(id.clone(), metadata);
     }
+    // Every personal profile includes the owner's one GitHub connection when
+    // it can be used now; a missing connection is omitted.
+    if profile.includes_github()
+        && let Some(id) = crate::store::active_github_connection(&mut **tx, &profile.owner)
+            .await
+            .map_err(credential_error)?
+    {
+        let metadata = lock_credential(tx, &profile.owner, &id).await?;
+        credentials.insert(id, metadata);
+    }
     Ok(credentials)
+}
+
+async fn lock_credential(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: &Owner,
+    id: &CredentialId,
+) -> Result<CredentialMetadata, Error> {
+    let (user_id, organization_id) = owner_columns(owner);
+    let row = sqlx::query(
+        "SELECT provider,authentication_kind,display_name,account_hint,status, \
+             expires_at_unix,revocation_generation FROM \
+             public.codewire_platform_lock_credential($1::text,$2::text,$3::text)",
+    )
+    .bind(id.as_str())
+    .bind(user_id)
+    .bind(organization_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .ok_or(Error::NotFound)?;
+    // Retain the applied helper's exact signature and SHARE fence. Only
+    // after it has locked this owner-scoped identity may the existing
+    // metadata SELECT authority read the additive public fields.
+    let (ssh_public_key, ssh_fingerprint): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT ssh_public_key,ssh_fingerprint FROM public.platform_credentials \
+                 WHERE id=$1 AND (user_id=$2 OR organization_id=$3)",
+    )
+    .bind(id.as_str())
+    .bind(user_id)
+    .bind(organization_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .ok_or(Error::NotFound)?;
+    let expires: Option<i64> = row.try_get("expires_at_unix").map_err(database_error)?;
+    let metadata = CredentialMetadata {
+        id: id.clone(),
+        placement: Placement::Platform,
+        owner: owner.clone(),
+        provider: ProviderId::parse(
+            row.try_get::<String, _>("provider")
+                .map_err(database_error)?,
+        )
+        .map_err(|_| Error::CorruptRecord)?,
+        authentication_kind: parse_auth_kind(
+            &row.try_get::<String, _>("authentication_kind")
+                .map_err(database_error)?,
+        )
+        .map_err(|_| Error::CorruptRecord)?,
+        display_name: row.try_get("display_name").map_err(database_error)?,
+        account_hint: row.try_get("account_hint").map_err(database_error)?,
+        ssh_public_key: parse_ssh_public_key(ssh_public_key, ssh_fingerprint)
+            .map_err(|_| Error::CorruptRecord)?,
+        status: parse_status(&row.try_get::<String, _>("status").map_err(database_error)?)
+            .map_err(|_| Error::CorruptRecord)?,
+        expires_at_unix: expires
+            .map(|value| u64::try_from(value).map_err(|_| Error::CorruptRecord))
+            .transpose()?,
+        revocation_generation: positive(
+            row.try_get("revocation_generation")
+                .map_err(database_error)?,
+        )?,
+    };
+    metadata.validate().map_err(|_| Error::CorruptRecord)?;
+    Ok(metadata)
 }
 
 async fn lock_owner(tx: &mut Transaction<'_, Postgres>, owner: &Owner) -> Result<(), Error> {
@@ -929,16 +975,26 @@ async fn load_binding(
     tx: &mut Transaction<'_, Postgres>,
     context: &GrantContext,
 ) -> Result<PlatformBindingMetadata, Error> {
-    let (id, revision, confirmed_by): (String, i64, Option<String>) = sqlx::query_as(
-        "SELECT profile_id,profile_revision,personal_owner_confirmed_by FROM platform_environment_access_bindings \
-         WHERE environment_id=$1",
-    )
-    .bind(context.environment_id.as_str())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?
-    .ok_or(Error::NotFound)?;
-    Ok(PlatformBindingMetadata {
+    find_binding(tx, context).await?.ok_or(Error::NotFound)
+}
+
+async fn find_binding(
+    tx: &mut Transaction<'_, Postgres>,
+    context: &GrantContext,
+) -> Result<Option<PlatformBindingMetadata>, Error> {
+    let Some((id, revision, confirmed_by)): Option<(String, i64, Option<String>)> =
+        sqlx::query_as(
+            "SELECT profile_id,profile_revision,personal_owner_confirmed_by FROM platform_environment_access_bindings \
+             WHERE environment_id=$1",
+        )
+        .bind(context.environment_id.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(PlatformBindingMetadata {
         binding: EnvironmentAccessBinding {
             environment_id: context.environment_id.clone(),
             profile_id: AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?,
@@ -947,7 +1003,7 @@ async fn load_binding(
         personal_owner_confirmed_by: confirmed_by
             .map(|id| OwnerId::parse(id).map_err(|_| Error::CorruptRecord))
             .transpose()?,
-    })
+    }))
 }
 
 async fn profile_for_context(
@@ -1031,6 +1087,13 @@ fn database_error(error: sqlx::Error) -> Error {
         Error::AlreadyExists
     } else {
         Error::DatabaseUnavailable
+    }
+}
+
+fn credential_error(error: crate::PlatformCredentialError) -> Error {
+    match error {
+        crate::PlatformCredentialError::CorruptRecord => Error::CorruptRecord,
+        _ => Error::DatabaseUnavailable,
     }
 }
 

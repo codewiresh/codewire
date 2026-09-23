@@ -12,6 +12,7 @@ fn capture() -> ProjectionCapture {
         profile_revision_exists: false,
         profile_slots: Vec::new(),
         profile_slots_overflow: false,
+        github_connected: true,
     }
 }
 
@@ -268,6 +269,42 @@ fn captured_clients_are_exact_slots_not_provider_families_or_global_configuratio
 }
 
 #[test]
+fn github_connection_selects_the_client_but_never_changes_the_bound_digest() {
+    let (project, mut captured) = selected_profile();
+    captured.profile_slots = vec!["codex".into(), "github".into()];
+    let connected = captured
+        .selection(&project, "synthetic-org", 7)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        captured
+            .managed_credential_clients(&project)
+            .unwrap()
+            .encode(),
+        "v2:11"
+    );
+    // A missing connection is omitted from the managed clients, never
+    // fabricated, while GitHub's names stay reserved under the same digest.
+    captured.github_connected = false;
+    let missing = captured
+        .selection(&project, "synthetic-org", 7)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        captured
+            .managed_credential_clients(&project)
+            .unwrap()
+            .encode(),
+        "v1:codex"
+    );
+    assert_eq!(
+        missing.reserved_keys,
+        platform_projection_reserved_keys(["codex", "github"]).unwrap()
+    );
+    assert_eq!(missing.sha256().unwrap(), connected.sha256().unwrap());
+}
+
+#[test]
 fn only_selected_clients_reject_declared_routing_collisions_without_reading_values() {
     for (slot, name) in [
         ("codex", "CODEX_HOME"),
@@ -321,5 +358,71 @@ fn app_only_and_other_clients_preserve_unselected_ordinary_provider_settings() {
             .unwrap()
             .encode(),
         "v1:codex"
+    );
+}
+
+#[test]
+fn a_selected_github_repository_uses_the_creators_connection_without_a_profile() {
+    let repository = |source: &str| codewire_project::RepositorySpec {
+        source: source.into(),
+        destination: "/workspace/repository".into(),
+        ..Default::default()
+    };
+    let project = |source: &str| ProjectSpec {
+        repositories: vec![repository(source)],
+        ..ProjectSpec::default()
+    };
+    let github = project("https://github.com/synthetic-user/private.git");
+    let bare = capture()
+        .selection(&ProjectSpec::default(), "synthetic-org", 7)
+        .unwrap();
+    assert_eq!(bare, None);
+
+    // The selection exists only to carry the GitHub client; it reserves no
+    // GitHub names, so the digest is the same as any other profile-free one.
+    let selected = capture()
+        .selection(&github, "synthetic-org", 7)
+        .unwrap()
+        .expect("account GitHub selection");
+    assert!(selected.profile.is_none());
+    assert_eq!(
+        selected.reserved_keys,
+        platform_projection_reserved_keys([]).unwrap()
+    );
+    assert_eq!(
+        capture().managed_credential_clients(&github).unwrap(),
+        codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap()
+    );
+
+    // No connection, or no GitHub repository selected: no client, no selection.
+    let mut disconnected = capture();
+    disconnected.github_connected = false;
+    for (captured, project) in [
+        (disconnected, github.clone()),
+        (
+            capture(),
+            project("https://gitlab.com/synthetic-user/private.git"),
+        ),
+        (
+            capture(),
+            project("https://github.com.example/synthetic-user/private.git"),
+        ),
+    ] {
+        assert_eq!(captured.selection(&project, "synthetic-org", 7), Ok(None));
+        assert_eq!(
+            captured.managed_credential_clients(&project).unwrap(),
+            Default::default()
+        );
+    }
+
+    // An organization profile never carries the creator's GitHub.
+    let (mut organization_project, mut organization) = selected_profile();
+    organization_project.repositories = github.repositories.clone();
+    organization.github_connected = false;
+    assert!(
+        !organization
+            .managed_credential_clients(&organization_project)
+            .unwrap()
+            .contains(codewire_access::ManagedCredentialClient::GitHub)
     );
 }

@@ -92,14 +92,24 @@ export SCCACHE_SERVER_UDS="${SCCACHE_SERVER_UDS:-/tmp/codewire-sccache.sock}"
 # Cargo pointing at an output that is absent from this executor's target tree.
 export SCCACHE_DIRECT=false
 started_at="$(date +%s)"
+sccache_active=false
 if [ "$mode" != disabled ]; then
-  sccache --zero-stats >/dev/null
+  # Starting the server can time out when the cache backend is unreachable.
+  # A cache outage must not fail the build: compile without the wrapper.
+  if sccache --zero-stats >/dev/null; then
+    sccache_active=true
+  else
+    printf 'codewire-rust-build: warning: sccache did not start; compiling without it\n' >&2
+    sccache --stop-server >/dev/null 2>&1 || true
+    unset RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
+    mode=unavailable
+  fi
 fi
 
 status=0
 "$@" || status=$?
 
-if [ "$mode" != disabled ]; then
+if [ "$sccache_active" = true ]; then
   sccache --show-stats || printf 'codewire-rust-build: warning: sccache statistics unavailable\n' >&2
   sccache --stop-server >/dev/null 2>&1 || true
 fi

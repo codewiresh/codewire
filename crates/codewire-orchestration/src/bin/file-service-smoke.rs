@@ -245,14 +245,18 @@ where
         ))),
         ..Default::default()
     };
-    let chunks = data
-        .chunks(TRANSFER_CHUNK_SIZE)
-        .map(|chunk| UploadFileRequest {
-            payload: Some(upload_file_request::Payload::Chunk(chunk.to_vec())),
-            ..Default::default()
-        });
+    // Client-streaming calls take an owned stream of the chunked file.
+    let requests: Vec<_> = std::iter::once(header)
+        .chain(
+            data.chunks(TRANSFER_CHUNK_SIZE)
+                .map(|chunk| UploadFileRequest {
+                    payload: Some(upload_file_request::Payload::Chunk(chunk.to_vec())),
+                    ..Default::default()
+                }),
+        )
+        .collect();
     let response = client
-        .upload_file(std::iter::once(header).chain(chunks))
+        .upload_file(futures::stream::iter(requests))
         .await
         .context("UploadFile through ingress")?
         .into_owned();

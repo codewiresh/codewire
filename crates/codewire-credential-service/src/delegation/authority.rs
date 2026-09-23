@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use codewire_access::{
     AccessProfileId, DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantContext,
-    GrantPlacement, Owner, OwnerId, Placement,
+    GrantPlacement, HttpProvider, Owner, OwnerId, Placement,
 };
 use codewire_credential_broker::platform::{
     PlatformRuntimeAuthority, PlatformRuntimeError as Error, PlatformRuntimeSession,
@@ -212,11 +212,32 @@ impl OwnerLocalSource {
                 {
                     return Err(Error::Denied);
                 }
+                let mut authorized: BTreeSet<_> = selected.entries.values().cloned().collect();
+                // Every personal profile includes the account's current GitHub
+                // connection; a missing one is omitted instead of fabricated.
+                // The environment's slots were captured when it was created,
+                // so GitHub is authorized only when that capture selected it
+                // and the connection is still active now.
+                let github_captured = HttpProvider::GitHubOAuth
+                    .reserved_environment_keys()
+                    .iter()
+                    .all(|key| self.selection.platform.reserved_keys.contains(*key));
+                let mut github_connected = false;
+                if selected.includes_github()
+                    && github_captured
+                    && let Some(github) =
+                        codewire_platform_credentials::active_github_connection(&mut **tx, &owner)
+                            .await
+                            .map_err(|_| Error::Unavailable)?
+                {
+                    authorized.insert(github);
+                    github_connected = true;
+                }
                 validate_reserved_keys(
                     &self.selection.platform,
-                    selected.entries.keys().map(|slot| slot.as_str()),
+                    selected.launch_slots(github_connected),
                 )?;
-                context.authorized_credentials = selected.entries.values().cloned().collect();
+                context.authorized_credentials = authorized;
                 let binding = EnvironmentAccessBinding {
                     environment_id: context.environment_id.clone(),
                     profile_id,

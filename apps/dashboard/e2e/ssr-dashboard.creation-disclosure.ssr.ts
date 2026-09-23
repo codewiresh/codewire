@@ -118,9 +118,10 @@ test("late Create choices preserve edited core fields, focus, rows, and profile 
   await expect(page.getByLabel("Preview label")).toHaveValue("web");
   await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev\necho ready");
   await expect(page.getByLabel("Credential profile", { exact: true })).toBeVisible();
-  const formProfiles = await form.locator('[name="credential_profile"] option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
-  const browserProfiles = await page.locator('[data-github-profile] option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
-  expect(browserProfiles).toEqual(formProfiles);
+  // Browsing uses the account's one GitHub connection, which every profile
+  // includes: there is no GitHub selector and no per-profile GitHub choice.
+  await expect(page.locator("[data-github-connection]")).toHaveCount(0);
+  await expect(form.locator("[data-include-github]")).toHaveCount(0);
   await expect(page.locator("[data-github-browser]")).toBeVisible();
 });
 
@@ -245,7 +246,7 @@ test("optional-choice failure offers retry without clearing the Create form", as
   await page.goto(url);
   const form = page.locator("[data-environment-form]");
   await expect(page.getByRole("button", { name: "Retry loading choices" })).toBeVisible();
-  await expect(page.locator("[data-github-status]")).toContainText("GitHub connections could not be loaded");
+  await expect(page.locator("[data-github-status]")).toContainText("Repository access unavailable");
   const originalForm = await form.elementHandle();
   await page.getByLabel("Name", { exact: true }).fill("retry-keeps-my-name");
   await page.getByRole("button", { name: "Retry loading choices" }).click();

@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use codewire_access::{
     AccessProfileId, BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentId,
-    GrantPermission, Owner, OwnerId, Placement, ProviderId,
+    GrantPermission, GrantProfile, Owner, OwnerId, Placement, ProviderId,
 };
 use codewire_credential_broker::{BrokerCredentialLease, github::GitHubOAuthAdapter};
 
@@ -43,8 +43,10 @@ impl Lease {
             grant: DerivedGrant {
                 environment_id: EnvironmentId::parse("synthetic-environment").unwrap(),
                 environment_generation: 1,
-                profile_id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
-                profile_revision: 1,
+                profile: Some(GrantProfile {
+                    id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                    revision: 1,
+                }),
                 capability_slot: CapabilitySlot::parse("github").unwrap(),
                 credential_id: id,
                 credential_revocation_generation: 1,

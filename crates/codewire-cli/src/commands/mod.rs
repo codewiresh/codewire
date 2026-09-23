@@ -559,7 +559,7 @@ pub(crate) struct CredentialProfileSetArgs {
         value_name = "CREDENTIAL_SELECTOR",
         help = "Credential name, name:<name>, or id:<canonical-uuid>"
     )]
-    pub(crate) credential: String,
+    pub(crate) credential: Option<String>,
 }
 
 #[derive(Debug, Args)]

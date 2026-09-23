@@ -58,7 +58,9 @@ test("five full-row choices open focused provider editors with Back and one foot
   await fits(page, chooser);
   await page.screenshot({ path: test.info().outputPath("credential-chooser.png") });
   for (const [name, title, primary, provider] of [
-    ["GitHub", "Connect GitHub", "Continue to GitHub", ""],
+    // The fixture account already has its one GitHub connection, so the
+    // connect dialog routes to Reconnect and offers no second authorization.
+    ["GitHub", "Connect GitHub", "", ""],
     ["Codex", "Connect Codex", "Connect Codex", "codex"],
     ["OpenAI API key", "Add OpenAI API key", "Add API key", "openai"],
     ["Anthropic API key", "Add Anthropic API key", "Add API key", "anthropic"],
@@ -69,13 +71,14 @@ test("five full-row choices open focused provider editors with Back and one foot
     await row.locator("span > span").click();
     const editor = dialog(page, title);
     await expect(page.locator("dialog[open]")).toHaveCount(1);
-    await footer(editor, primary);
+    await footer(editor, primary || undefined, name === "GitHub" ? "Done" : "Cancel");
     await expect(action(editor, "Back")).toHaveAttribute("type", "button");
     if (provider) await expect(editor.locator('[name="provider"]')).toHaveValue(provider);
     if (name === "GitHub") {
       await expect(editor.locator('input[name="name"]')).toHaveCount(0);
-      await expect(action(editor, primary)).toBeFocused();
-      const saved = editor.getByRole("region", { name: "Saved GitHub connections", exact: true });
+      await expect(action(editor, "Done")).toBeFocused();
+      await expect(action(editor, "Continue to GitHub")).toHaveCount(0);
+      const saved = editor.getByRole("region", { name: "Your GitHub connection", exact: true });
       await expect(action(saved, "Reconnect verified-user")).toBeVisible();
       await expect(saved).toContainText("Active");
       await page.screenshot({ path: test.info().outputPath("github-saved-connections.png") });
@@ -184,13 +187,15 @@ test("profiles have read-only summary and exact-revision focused editors with na
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
   const create = action(page, "Create profile");
   const row = page.locator(".cw-profile-row");
-  await expect(row.locator(":scope > header")).toContainText("Codex: Work Codex, GitHub: verified-user, SSH: Work SSH");
+  await expect(row.locator(":scope > header")).toContainText("Codex: Work Codex, GitHub: @verified-user, SSH: Work SSH");
   await expect(row.locator(":scope > header")).not.toContainText("Revision");
   await expect(row.locator(":scope > header .cw-credential-status")).toHaveText("Revoked");
   await create.click();
   const editor = dialog(page, "Create profile");
   await footer(editor, "Create profile");
-  await expect(editor.getByRole("combobox")).toHaveCount(5);
+  // Codex, OpenAI, Anthropic and SSH; GitHub is always the account connection.
+  await expect(editor.getByRole("combobox")).toHaveCount(4);
+  await expect(editor.getByRole("combobox", { name: "GitHub", exact: true })).toHaveCount(0);
   await expect(editor.getByLabel("Profile name", { exact: true })).toBeFocused();
   await editor.getByLabel("Profile name", { exact: true }).fill("Not a valid name");
   await action(editor, "Create profile").click();
@@ -209,21 +214,22 @@ test("profiles have read-only summary and exact-revision focused editors with na
   await footer(edit, "Save profile");
   await expect(edit.getByText("Revision 7. Saving creates a new revision; existing Sandboxes keep their bound revision.", { exact: true })).not.toBeVisible();
   await expect(edit.locator('[name="expected_revision"]')).toHaveValue("7");
-  const github = edit.getByRole("combobox", { name: "GitHub", exact: true });
-  await expect(github).toHaveValue("fixture-github");
+  await expect(edit.getByRole("combobox", { name: "GitHub", exact: true })).toHaveCount(0);
+  const codex = edit.getByRole("combobox", { name: "Codex", exact: true });
+  await expect(codex).toHaveValue("fixture-codex");
   // Reverted values are clean; untouched/default selects do not warn.
-  await github.selectOption("");
-  await github.selectOption("fixture-github");
+  await codex.selectOption("");
+  await codex.selectOption("fixture-codex");
   await action(edit, "Back").click();
   await expect(prompt(page)).not.toBeVisible();
   await action(summary, "Edit profile").click();
   await edit.locator('[name="expected_revision"]').evaluate((node: HTMLInputElement) => { node.value = "8"; });
-  await github.selectOption("");
+  await codex.selectOption("");
   await action(edit, "Cancel").click();
   await discard(page);
   await action(row, "Manage profile").click();
   await action(summary, "Edit profile").click();
-  await expect(github).toHaveValue("fixture-github");
+  await expect(codex).toHaveValue("fixture-codex");
   await expect(edit.locator('[name="expected_revision"]')).toHaveValue("8");
   expect(posts).toBe(0);
 });
@@ -304,20 +310,22 @@ test("reconnect consent and destructive confirms preserve exact authority and ne
   await expect(consent).not.toBeChecked();
   await expect(reconnect.locator('[name="expected_revocation_generation"]')).toHaveValue("1");
   await action(reconnect, "Back").click();
-  await action(manage, "Revoke credential").click();
-  const revoke = dialog(page, "Revoke verified-user?");
-  await footer(revoke, "Revoke credential");
-  await expect(action(revoke, "Cancel")).toBeFocused();
-  await expect(revoke).toContainText("Existing Sandbox bindings are not reassigned");
-  await page.screenshot({ path: test.info().outputPath("revoke-confirmation.png") });
-  await fits(page, revoke);
+  // GitHub has no revoke step: one confirmed Delete removes the connection.
+  await expect(action(manage, "Revoke credential")).toHaveCount(0);
+  await action(manage, "Delete GitHub").click();
+  const removal = dialog(page, "Delete GitHub?");
+  await footer(removal, "Delete GitHub");
+  await expect(action(removal, "Cancel")).toBeFocused();
+  await expect(removal).toContainText("Every profile uses GitHub again after you reconnect");
+  await page.screenshot({ path: test.info().outputPath("github-delete-confirmation.png") });
+  await fits(page, removal);
   expect(posts).toEqual([]);
-  await action(revoke, "Revoke credential").click();
+  await action(removal, "Delete GitHub").click();
   await expect.poll(() => posts.length).toBe(1);
-  expect(posts[0]).toEqual({ path: "/settings/credentials/_actions/credentials/revoke", fields: {
+  expect(posts[0]).toEqual({ path: "/settings/credentials/_actions/credentials/delete", fields: {
     _csrf: "design-fixture-only", credential_id: "fixture-github", expected_revocation_generation: "1",
   } });
-  await action(revoke, "Cancel").click();
+  await action(removal, "Cancel").click();
   await action(page, "Manage Old Anthropic").click();
   await action(dialog(page, "Manage Old Anthropic"), "Delete credential").click();
   const deleted = dialog(page, "Delete Old Anthropic?");

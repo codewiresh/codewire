@@ -184,10 +184,38 @@ impl PlatformRuntimeSession {
         Ok(())
     }
 
+    /// Every coordinate of the admitted binding is fixed. For a hosted
+    /// environment the authorized credentials are not: launch authority
+    /// recomputes them from current state on every admission, so deleting or
+    /// reconnecting the account's GitHub connection applies to a running
+    /// sandbox without a new bridge, and a removed credential is never granted.
+    /// An owner-local selection keeps its exact authorized set.
     fn same_binding(&self, other: &Self) -> bool {
+        let GrantContext {
+            environment_id,
+            environment_generation,
+            placement,
+            user_id,
+            organization_id,
+            allow_personal_credentials,
+            authorized_credentials,
+        } = &self.context;
+        let hosted = matches!(self.identity, RuntimeIdentity::Hosted { .. });
         self.identity == other.identity
-            && self.context == other.context
+            && *environment_id == other.context.environment_id
+            && *environment_generation == other.context.environment_generation
+            && *placement == other.context.placement
+            && *user_id == other.context.user_id
+            && *organization_id == other.context.organization_id
+            && *allow_personal_credentials == other.context.allow_personal_credentials
+            && (hosted || *authorized_credentials == other.context.authorized_credentials)
             && self.credential_owner == other.credential_owner
+    }
+
+    /// Whether `current` is still this admitted session's exact binding, as
+    /// [`Self::same_binding`] defines it, for a runtime authority to recheck.
+    pub fn same_authority(&self, current: &Self) -> bool {
+        self.same_binding(current)
     }
 
     #[cfg(test)]
@@ -381,8 +409,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 if grants.iter().any(|grant| {
                     grant.environment_id != session.context.environment_id
                         || grant.environment_generation != session.context.environment_generation
-                        || grant.profile_id != profile.profile_id
-                        || grant.profile_revision != profile.profile_revision
+                        || grant.profile.as_ref().is_none_or(|granted| {
+                            granted.id != profile.profile_id
+                                || granted.revision != profile.profile_revision
+                        })
                         || !session
                             .context
                             .authorized_credentials
@@ -918,8 +948,7 @@ fn has_provider_budget(elapsed: Duration) -> bool {
 fn same_grant_binding(a: &DerivedGrant, b: &DerivedGrant) -> bool {
     a.environment_id == b.environment_id
         && a.environment_generation == b.environment_generation
-        && a.profile_id == b.profile_id
-        && a.profile_revision == b.profile_revision
+        && a.profile == b.profile
         && a.capability_slot == b.capability_slot
         && a.credential_id == b.credential_id
         && a.permissions == b.permissions

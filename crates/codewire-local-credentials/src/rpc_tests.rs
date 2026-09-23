@@ -931,14 +931,17 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
         .update_profile(
             &profile.profile.id,
             profile.profile.revision,
-            &BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+            &BTreeMap::from([(
+                CapabilitySlot::parse("anthropic").unwrap(),
+                credential.metadata.id.clone(),
+            )]),
         )
         .await
         .unwrap_err();
     assert_eq!(incompatible.code(), Code::FailedPrecondition);
     assert_eq!(
         incompatible.message(),
-        "provider openai does not support slot github with this authentication kind"
+        "provider openai does not support slot anthropic with this authentication kind"
     );
     assert!(!incompatible.message().contains("synthetic"));
 
@@ -1049,7 +1052,7 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
         start_server_with_repository_spawner(config.clone(), store, spawner).await;
     let mut client = connect_when_ready(&config).await;
     let token = b"synthetic-private-github-token";
-    let credential = client
+    let _connection = client
         .add_credential(
             NewCredential {
                 provider: provider("github"),
@@ -1065,7 +1068,7 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
     let profile = client
         .create_profile(
             &AccessProfileName::parse("github-work").unwrap(),
-            &BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+            &BTreeMap::new(),
         )
         .await
         .unwrap();

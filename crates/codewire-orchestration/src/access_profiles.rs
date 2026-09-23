@@ -155,16 +155,25 @@ pub enum ProfileSelector<'a> {
 }
 
 /// Preserve duplicate detection before constructing the canonical entry map.
+/// Every personal profile includes the owner's one GitHub connection, so a
+/// legacy client's `github` entry is accepted and its credential ID discarded.
 pub fn profile_entries<'a>(
     entries: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> AppResult<BTreeMap<CapabilitySlot, CredentialId>> {
     let mut parsed = BTreeMap::new();
+    let mut github = false;
     for (slot, id) in entries {
         if parsed.len() >= 128 {
             return Err(invalid_profile());
         }
         let slot = CapabilitySlot::parse(slot).map_err(|_| invalid_profile())?;
         let id = CredentialId::parse(id).map_err(|_| invalid_profile())?;
+        if slot == CapabilitySlot::github() {
+            if std::mem::replace(&mut github, true) {
+                return Err(invalid_profile());
+            }
+            continue;
+        }
         if parsed.insert(slot, id).is_some() {
             return Err(invalid_profile());
         }
@@ -363,6 +372,9 @@ mod tests {
         assert!(profile_entries([("codex", "first"), ("codex", "second")]).is_err());
         assert!(profile_entries([("codex", "has spaces")]).is_err());
         assert!(profile_entries([]).unwrap().is_empty());
+        // A legacy GitHub entry is discarded; GitHub is always included.
+        assert!(profile_entries([("github", "legacy")]).unwrap().is_empty());
+        assert!(profile_entries([("github", "one"), ("github", "two")]).is_err());
         assert!(positive_revision(0).is_err());
         assert!(positive_revision(u64::MAX).is_err());
         assert!(positive_revision(1).is_ok());

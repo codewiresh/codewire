@@ -594,7 +594,7 @@ async fn owner_source_rollback_replays_staged26_only_in_disposable_application_s
         anyhow::ensure!(sqlx::query_scalar::<_, bool>("SELECT NOT EXISTS(SELECT 1 FROM public.platform_credentials) AND NOT EXISTS(SELECT 1 FROM public.platform_credential_material)").fetch_one(&pool).await?);
         anyhow::ensure!(old_functions(&pool).await? == old);
         let fingerprint: String = sqlx::query_scalar(include_str!("../../../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
-        anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+        anyhow::ensure!(fingerprint == ACCEPTED_PRE_GITHUB_SINGLETON_SCHEMA_FINGERPRINT);
         pool.close().await;
         Ok(())
     }.await;

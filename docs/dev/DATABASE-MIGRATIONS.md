@@ -537,6 +537,84 @@ and instructions authorize no live reset;
 authored fixtures are not acceptance evidence until executed against the
 checked-in disposable PostgreSQL topology.
 
+### GitHub singleton included in every personal profile
+
+Migration `0029_github_singleton_profiles.sql` makes GitHub one account-level
+connection. Each user has at most one active GitHub App OAuth credential, and
+every personal access profile includes it. A profile never stores a GitHub
+credential ID. Launch authority resolves the user's current active, unexpired
+connection at use time. When none exists, GitHub is omitted rather than
+fabricated and the product shows it as missing; a later reconnect restores it
+for every profile without a new revision. Organization profiles cannot hold a
+GitHub connection.
+
+The migration runs in one transaction:
+
+1. It fails closed with SQLSTATE `23514` when any user has more than one active
+   GitHub OAuth credential. It never chooses a winner, and nothing is rewritten.
+2. It deletes every `github` profile entry on current and historical revisions
+   and adds a check constraint so no future entry can use the `github` slot.
+   No revision is created.
+3. It deletes obsolete non-active GitHub OAuth credentials. Their protected
+   material and refresh rows go through the existing `ON DELETE CASCADE`
+   foreign keys. Profile entries carry no credential foreign key, and none
+   remain for GitHub.
+4. It adds the partial unique index
+   `platform_credentials_user_github_singleton_key` on active user-owned GitHub
+   OAuth credentials.
+
+No new column or grant is required: the restricted reader already selects the
+`platform_credentials` provider and authentication columns.
+
+This staged 28→29 change does not rewrite versions 1–28. Its upgrade fixture
+independently pins migration 28's SHA-384 from accepted canonical
+`01c315c18bd48dd4a0b80226f32d904ee311cfab`; that is a staged predecessor-byte
+boundary, not a claim that version 28 alone was deployed. The fixture seeds
+legacy `github` entries on current and historical revisions, one revoked and one
+active GitHub credential, and an unrelated Codex entry. It proves that only the
+non-GitHub entries remain, that no revision is created, that the revoked row is
+removed and the active one kept, that a new `github` entry and a second active
+connection are both rejected, and that the second startup is a no-op. A separate
+fixture seeds two active connections for one user and proves the migration
+fails, leaves the ledger, entries and credentials unchanged, and succeeds once
+the ambiguity is resolved.
+
+There is no in-place downgrade. After stopping new profile and credential
+writers, rollback replays the selected version-28 source into only an empty,
+disposable application `public` schema. The fixture proves the ledger and
+migration 28 checksum are restored, the singleton index is absent, credential
+records are discarded, and a separate schema survives. Replaying version 28
+restores the pre-0029 table fingerprint pinned as
+`ACCEPTED_PRE_GITHUB_SINGLETON_SCHEMA_FINGERPRINT`. Other schemas, databases,
+cluster roles and external OpenBao key material remain outside this boundary.
+These tests and instructions authorize no live reset.
+
+### Per-session two-factor setup skip
+
+Migration `0030_two_factor_setup_skip.sql` adds one nullable
+`sessions.two_factor_setup_skipped_at` timestamp. It records that one browser
+session chose **Skip for now** on the two-factor setup page. The choice ends
+with that session: sign-out, revocation, expiry and account disablement delete
+the row, and every newly created session starts with the column unset.
+Enabling a factor clears it for all of the account's sessions. The IdP reports
+`skip_2fa_setup` only for the current session of an account without an enabled
+factor, and the terminal attach and session-control checks accept the same
+session marker. An enrolled factor is never skipped at sign-in.
+
+The upgrade fixture pins migration 29 at W1 branch head
+`5991eabfdafb350c14c3e66960b507cfaf7fc8f6` as `ACCEPTED_STAGED29`, applies
+versions 1–29, and proves the pre-0030 table fingerprint
+`ACCEPTED_PRE_TWO_FACTOR_SKIP_SCHEMA_FINGERPRINT`. Upgrading keeps existing
+sessions with the column unset, records the new application fingerprint, and a
+second startup is a no-op. Services run the migrator at startup, so a version-29
+binary cannot restart against a version-30 ledger.
+
+There is no in-place downgrade. Rollback replays the selected version-29
+source into only an empty, disposable application `public` schema. The fixture
+proves the ledger and migration 29 checksum are restored, the column is absent,
+session records are discarded, the pre-0030 fingerprint returns, and a
+separate schema survives. These tests and instructions authorize no live reset.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

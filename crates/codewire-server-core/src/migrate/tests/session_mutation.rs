@@ -10,7 +10,7 @@ const AUTHENTICATE_SIGNATURE: &str = "public.codewire_authenticate_credential_se
 const LOCK_SIGNATURE: &str =
     "public.codewire_lock_credential_session_authority(text,text,text,timestamp with time zone)";
 
-fn assert_accepted_staged27() -> anyhow::Result<()> {
+pub(super) fn assert_accepted_staged27() -> anyhow::Result<()> {
     let migration = MIGRATOR
         .iter()
         .find(|migration| migration.version == 27)
@@ -51,8 +51,11 @@ async fn retained_rows(pool: &PgPool) -> anyhow::Result<Vec<String>> {
         "platform_credentials",
         "platform_credential_material",
     ] {
+        // Version 30 adds an unset sessions column; retained rows are
+        // compared without it.
         let value: String = sqlx::query_scalar(&format!(
-            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text FROM public.{table} t"
+            "SELECT COALESCE(jsonb_agg(r ORDER BY r::text),'[]'::jsonb)::text \
+             FROM (SELECT to_jsonb(t) - 'two_factor_setup_skipped_at' AS r FROM public.{table} t) AS rows"
         ))
         .fetch_one(pool)
         .await?;
@@ -93,7 +96,7 @@ async fn session_mutation_helpers_are_private_exact_and_logout_fenced() -> anyho
             .max_connections(2)
             .connect(&database.url)
             .await?;
-        anyhow::ensure!(embedded_max_version()? == 28);
+        anyhow::ensure!(embedded_max_version()? >= 28);
         let functions: Vec<(String, bool)> = sqlx::query_as(
             "SELECT p.proname, p.prosecdef AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp','TimeZone=UTC']::text[] AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('codewire_authenticate_credential_session','codewire_lock_credential_session_authority') ORDER BY p.proname",
         )

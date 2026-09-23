@@ -127,6 +127,33 @@ target "dashboard-ci" {
   }
 }
 
+# Local Kind development only: one incrementally compiled service binary,
+# exported to the host by scripts/dev/kind/deploy-service.sh.
+variable "KIND_DEV_CRATE" {
+  default = ""
+}
+
+variable "KIND_DEV_FEATURES" {
+  default = ""
+}
+
+variable "KIND_DEV_BIN" {
+  default = ""
+}
+
+target "kind-dev-binary" {
+  inherits   = ["_rust-product"]
+  dockerfile = "deployments/docker/kind-dev-binary.Dockerfile"
+  labels = {
+    "dev.codewire.promotable" = "false"
+  }
+  args = {
+    KIND_DEV_CRATE    = KIND_DEV_CRATE
+    KIND_DEV_FEATURES = KIND_DEV_FEATURES
+    KIND_DEV_BIN      = KIND_DEV_BIN
+  }
+}
+
 target "services-ci" {
   inherits = ["services"]
   args = {

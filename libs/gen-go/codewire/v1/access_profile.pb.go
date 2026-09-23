@@ -76,7 +76,9 @@ func (x *AccessProfileEntry) GetCredentialId() string {
 }
 
 // An immutable revision. Updating a profile creates a new revision; existing
-// environment bindings keep their explicitly selected revision.
+// environment bindings keep their explicitly selected revision. A personal
+// profile always includes the owner's one GitHub connection, resolved at
+// launch; GitHub is never an entry.
 type AccessProfile struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`

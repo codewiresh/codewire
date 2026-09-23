@@ -168,8 +168,9 @@ async fn owner_selection_is_restricted_material_free_and_pins_exact_immutable_pr
             ensure!(grants.len() == 1);
             let grant = &grants[0];
             ensure!(grant.environment_id == selection.context.environment_id);
-            ensure!(grant.environment_generation == 7 && grant.profile_revision == 1);
-            ensure!(grant.profile_id == selection.profile.id && grant.credential_id == selection.credential.metadata.id);
+            ensure!(grant.environment_generation == 7);
+            ensure!(grant.profile.as_ref().is_some_and(|profile| profile.id == selection.profile.id && profile.revision == 1));
+            ensure!(grant.credential_id == selection.credential.metadata.id);
             ensure!(grant.credential_revocation_generation == selection.credential.metadata.revocation_generation);
             for sql in ["SELECT * FROM public.platform_credential_material", "SELECT * FROM public.environments", "SELECT * FROM public.org_members", "UPDATE public.platform_credentials SET status='revoked'"] {
                 let error = sqlx::query(sql).execute(&reader).await.err().context("metadata authority gained forbidden access")?;

@@ -31,10 +31,10 @@ use zeroize::Zeroizing;
 #[cfg(test)]
 use super::CredentialsArgs;
 use super::credential_input::{
-    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, CredentialOperation, ParsedCredentialSelector,
-    ParsedProfileSelector, parse_credential_selector, parse_profile_selector,
-    prompt_credential_material, read_ssh_import, supported_profile_slot, validate_ssh_generation,
-    validate_ssh_import,
+    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, CredentialOperation, GITHUB_ALWAYS_INCLUDED,
+    ParsedCredentialSelector, ParsedProfileSelector, parse_credential_selector,
+    parse_profile_selector, profile_set_credential, prompt_credential_material, read_ssh_import,
+    supported_profile_slot, validate_ssh_generation, validate_ssh_import,
 };
 #[cfg(test)]
 use super::credential_input::{
@@ -283,6 +283,26 @@ fn select_oauth_connection_target(
     provider: &str,
 ) -> anyhow::Result<OAuthConnectionTarget> {
     let provider = ProviderId::parse(provider)?;
+    // GitHub is one connection per store: reconnect it in place whatever name
+    // was supplied, keeping its identity and name. Only create when absent.
+    if provider.as_str() == "github" {
+        let mut connections = records.iter().filter(|record| {
+            record.metadata.provider == provider
+                && record.metadata.authentication_kind == CredentialAuthKind::OAuth
+        });
+        if let Some(record) = connections.next() {
+            anyhow::ensure!(
+                connections.next().is_none(),
+                "more than one local GitHub connection exists; delete all but one before reconnecting"
+            );
+            record.metadata.validate()?;
+            return Ok(OAuthConnectionTarget {
+                provider,
+                display_name: record.metadata.display_name.clone(),
+                existing: Some(record.clone()),
+            });
+        }
+    }
     let mut matches = records.into_iter().filter(|record| {
         record
             .metadata
@@ -796,7 +816,8 @@ async fn set_profile_entry(
     client: &mut LocalCredentialClient,
     args: CredentialProfileSetArgs,
 ) -> anyhow::Result<()> {
-    let credential = resolve_credential(client, &args.credential).await?;
+    let selector = profile_set_credential(&args)?;
+    let credential = resolve_credential(client, selector).await?;
     let slot = supported_profile_slot(
         &args.slot,
         &credential.metadata.provider,
@@ -856,6 +877,7 @@ async fn unset_profile_entry(
     client: &mut LocalCredentialClient,
     args: CredentialProfileSlotArgs,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(args.slot != "github", GITHUB_ALWAYS_INCLUDED);
     let profile = resolve_profile(client, &args.profile).await?;
     let slot = CapabilitySlot::parse(trimmed_required(&args.slot, "capability slot")?)
         .context("invalid capability slot")?;

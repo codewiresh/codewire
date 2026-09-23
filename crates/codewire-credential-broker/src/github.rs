@@ -404,7 +404,10 @@ fn validate_lease(
         || grant.capability_slot.as_str() != "github"
         || grant.credential_id != metadata.id
         || grant.environment_generation == 0
-        || grant.profile_revision == 0
+        || grant
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.revision == 0)
         || lease.material_generation() == 0
         || permission.operation.as_str() != operation.operation_name()
         || permission.route.as_str() != operation.route_name()

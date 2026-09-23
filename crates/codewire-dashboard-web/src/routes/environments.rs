@@ -3272,9 +3272,6 @@ mod tests {
                     bound_revision: false,
                     synthetic: false,
                     selected: false,
-                    github_credential_id: String::new(),
-                    github_account: String::new(),
-                    github_connection: crate::view::GithubProfileConnection::NotConfigured,
                 }],
                 ..Default::default()
             },
@@ -3324,9 +3321,6 @@ mod tests {
                     bound_revision: false,
                     synthetic: false,
                     selected: false,
-                    github_credential_id: String::new(),
-                    github_account: String::new(),
-                    github_connection: crate::view::GithubProfileConnection::NotConfigured,
                 }],
                 ..Default::default()
             },
@@ -3934,18 +3928,16 @@ mod tests {
             "<a href=\"/settings/credentials/?org=organization&amp;{}\" data-github-setup-link data-create-draft-setup>Connect GitHub</a>",
             form.creation_draft_parameter()
         )));
-        assert!(html.contains("data-github-browser data-repositories-url=\"/organization/_fragments/github-repositories\""));
+        assert!(html.contains("data-github-browser data-github-state=\"not-configured\""));
+        assert!(
+            html.contains("data-repositories-url=\"/organization/_fragments/github-repositories\"")
+        );
         assert!(html.contains("<h4 id=\"github-browser-title\""));
         assert!(!html.contains("data-github-repository-picker"));
         assert!(!form.sources.credential_selection_enabled);
-        let profile_select = html
-            .split("data-github-profile")
-            .nth(1)
-            .unwrap()
-            .split('>')
-            .next()
-            .unwrap();
-        assert!(profile_select.contains(" disabled"));
+        // Browsing uses the account's one GitHub connection; profiles never
+        // select or gate it.
+        assert!(!html.contains("data-github-profile"));
         assert!(!html.contains("data-show-github-repositories"));
         assert!(!html.contains("GitHub connected"));
     }

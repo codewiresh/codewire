@@ -1,8 +1,8 @@
-<section aria-label="GitHub repository results" data-github-results-page data-github-profile="{{ profile }}">
+<section aria-label="GitHub repository results" data-github-results-page>
   {% if !error.is_empty() %}
   <p class="cw-field-error" role="alert">{{ error }}</p>
   {% else %}
-  {% if repositories.is_empty() %}<p role="status">No repositories are available on this page for the selected GitHub account.</p>{% endif %}
+  {% if repositories.is_empty() %}<p role="status">No repositories are available on this page for your GitHub account.</p>{% endif %}
   <ul class="cw-github-repository-list">
     {% for repository in repositories %}
     <li><button type="button" data-select-github-repository data-repository-url="{{ repository.clone_url }}" data-repository-branch="{{ repository.default_branch }}" data-repository-name="{{ repository.full_name }}" data-repository-private="{{ repository.is_private }}"{% if repository.disabled %} disabled{% endif %}><span class="cw-github-repository-copy"><strong>{{ repository.full_name }}</strong><small>{% if repository.is_private %}Private{% else %}Public{% endif %}{% if repository.archived %} · Archived{% endif %}{% if repository.disabled %} · Unavailable{% endif %}</small></span><span class="cw-github-repository-action">Add</span></button></li>

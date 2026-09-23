@@ -617,11 +617,22 @@ build_images_and_smokes() {
 
   prepare_kind_support_images
 
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
+  # `kind-e2e.sh up` deploys for manual testing and runs no smoke suite.
+  if [ "${KIND_BUILD_SMOKES:-1}" = 1 ] \
+      && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
     log "building Rust kind smoke binaries"
     "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
       "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
   fi
+}
+
+# Retained suites rerun gate steps on a kept cluster. `up` builds no smoke
+# binaries, so build them here; cargo makes repeated builds incremental.
+build_retained_kind_smokes() {
+  mkdir -p "$RUN_DIR"
+  log "building Rust kind smoke binaries for the retained suite"
+  "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
+    "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
 }
 
 assert_prebuilt_release_product_images() {
@@ -802,6 +813,15 @@ validate_sealed_kind_images() {
 }
 
 kind_workspace_runtime_image() {
+  # Local development (`make kind-test`) reruns retained suites against the
+  # cluster as deployed, from a worktree that has usually changed since. There
+  # the cluster's recorded workspace image is authoritative; the gate and CI
+  # never set this and keep the verified-source receipt below.
+  if [ "${KIND_RETAINED_USE_CLUSTER_WORKSPACE:-0}" = 1 ]; then
+    kubectl --request-timeout=10s -n "$NS" get "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" \
+      -o jsonpath='{.data.workspace-image}'
+    return $?
+  fi
   local sealed_status=0
   validate_sealed_kind_images || sealed_status=$?
   [ "$sealed_status" -le 1 ] || return "$sealed_status"

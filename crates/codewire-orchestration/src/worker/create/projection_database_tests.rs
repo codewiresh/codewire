@@ -227,7 +227,7 @@ async fn database_capture_pins_binding_revision_and_keeps_cleanup_rows_loadable(
         .await?;
         sqlx::query(
             "INSERT INTO platform_access_profile_entries \
-             (profile_id,revision,capability_slot,credential_id) VALUES ($1,2,'github',$2)",
+             (profile_id,revision,capability_slot,credential_id) VALUES ($1,2,'ssh',$2)",
         )
         .bind(PROFILE)
         .bind(credential_v2)
@@ -274,6 +274,168 @@ async fn database_capture_pins_binding_revision_and_keeps_cleanup_rows_loadable(
             .await?;
         let generation_zero = load_environment(&db.pool, ENVIRONMENT).await?;
         ensure!(generation_zero.projection_selection.is_err());
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn database_capture_selects_github_client_only_while_connected() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_environment(&db).await?;
+        let codex = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO platform_credentials \
+             (id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) \
+             VALUES ($1,$2,'openai','oauth','Synthetic Codex','active',1,1)",
+        )
+        .bind(&codex)
+        .bind(CREATOR)
+        .execute(&db.pool)
+        .await?;
+        let mut tx = db.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profiles(id,user_id,name,current_revision) \
+             VALUES ($1,$2,'synthetic',1)",
+        )
+        .bind(PROFILE)
+        .bind(CREATOR)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profile_revisions(profile_id,revision) VALUES ($1,1)",
+        )
+        .bind(PROFILE)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profile_entries \
+             (profile_id,revision,capability_slot,credential_id) VALUES ($1,1,'codex',$2)",
+        )
+        .bind(PROFILE)
+        .bind(&codex)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO platform_environment_access_bindings \
+             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) \
+             VALUES ($1,$2,1,$3)",
+        )
+        .bind(ENVIRONMENT)
+        .bind(PROFILE)
+        .bind(CREATOR)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        store_project(
+            &db,
+            &ProjectSpec {
+                credentials: Some(CredentialBinding {
+                    profile: format!("platform:id:{PROFILE}"),
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let capture = |label: &'static str| {
+            let pool = db.pool.clone();
+            async move {
+                let row = load_environment(&pool, ENVIRONMENT).await?;
+                let selection = row
+                    .projection_selection
+                    .map_err(|_| anyhow::anyhow!("{label}: selection was rejected"))?
+                    .with_context(|| format!("{label}: profile produced no selection"))?;
+                let clients = row
+                    .managed_credential_clients
+                    .map_err(|_| anyhow::anyhow!("{label}: managed clients were rejected"))?
+                    .encode();
+                anyhow::Ok((selection.sha256()?, selection.reserved_keys, clients))
+            }
+        };
+        let reserved = codewire_project::platform_projection_reserved_keys(["codex", "github"])?;
+
+        // A personal profile without a connection omits the managed GitHub
+        // client but still reserves GitHub's names under the bound digest.
+        let (missing_digest, missing_reserved, missing_clients) = capture("missing").await?;
+        ensure!(missing_clients == "v1:codex", "missing: {missing_clients}");
+        ensure!(missing_reserved == reserved);
+
+        let github = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO platform_credentials \
+             (id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) \
+             VALUES ($1,$2,'github','oauth','Synthetic GitHub','active',1,1)",
+        )
+        .bind(&github)
+        .bind(CREATOR)
+        .execute(&db.pool)
+        .await?;
+        let (connected_digest, connected_reserved, connected_clients) =
+            capture("connected").await?;
+        ensure!(
+            connected_clients == "v2:11",
+            "connected: {connected_clients}"
+        );
+        ensure!(connected_reserved == reserved);
+        ensure!(connected_digest == missing_digest);
+
+        sqlx::query(
+            "UPDATE platform_credentials \
+             SET expires_at_unix=floor(extract(epoch FROM clock_timestamp()))::bigint-60 \
+             WHERE id=$1",
+        )
+        .bind(&github)
+        .execute(&db.pool)
+        .await?;
+        let (expired_digest, _, expired_clients) = capture("expired").await?;
+        ensure!(expired_clients == "v1:codex", "expired: {expired_clients}");
+        ensure!(expired_digest == missing_digest);
+
+        sqlx::query("DELETE FROM platform_credentials WHERE id=$1")
+            .bind(&github)
+            .execute(&db.pool)
+            .await?;
+        let (deleted_digest, _, deleted_clients) = capture("deleted").await?;
+        ensure!(deleted_clients == "v1:codex", "deleted: {deleted_clients}");
+        ensure!(deleted_digest == missing_digest);
+
+        // Without a profile, a selected GitHub repository uses the creator's
+        // connection while it is active, and reserves no GitHub names.
+        sqlx::query("DELETE FROM platform_environment_access_bindings WHERE environment_id=$1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        store_project(
+            &db,
+            &ProjectSpec {
+                repositories: vec![codewire_project::RepositorySpec {
+                    source: "https://github.com/synthetic-user/private.git".into(),
+                    destination: "/workspace/private".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await?;
+        let disconnected = load_environment(&db.pool, ENVIRONMENT).await?;
+        ensure!(matches!(disconnected.projection_selection, Ok(None)));
+        ensure!(disconnected.managed_credential_clients == Ok(Default::default()));
+        sqlx::query(
+            "INSERT INTO platform_credentials \
+             (id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) \
+             VALUES ($1,$2,'github','oauth','Synthetic GitHub','active',1,1)",
+        )
+        .bind(&github)
+        .bind(CREATOR)
+        .execute(&db.pool)
+        .await?;
+        let (_, account_reserved, account_clients) = capture("account").await?;
+        ensure!(account_clients == "v2:10", "account: {account_clients}");
+        ensure!(account_reserved == codewire_project::platform_projection_reserved_keys([])?);
         Ok(())
     }
     .await;

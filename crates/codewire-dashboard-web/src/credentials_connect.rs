@@ -613,7 +613,8 @@ pub(crate) async fn revoke_credential(
     expected_generation: u64,
 ) -> Result<(), ConnectError> {
     let current = get_exact_credential(state, cookie.clone(), &credential_id).await?;
-    if current.revocation_generation != expected_generation {
+    if current.revocation_generation != expected_generation || is_github_connection(&current) {
+        // GitHub has no user-visible revoke step; Delete replaces it.
         return Err(ConnectError::aborted("credential metadata changed"));
     }
     let mut expected = current;
@@ -640,8 +641,10 @@ pub(crate) async fn delete_credential(
     expected_generation: u64,
 ) -> Result<(), ConnectError> {
     let current = get_exact_credential(state, cookie.clone(), &credential_id).await?;
+    // GitHub is the account's one connection and is deleted directly; the
+    // service revokes and forgets it in one fenced mutation.
     if current.revocation_generation != expected_generation
-        || current.status != CredentialStatus::Revoked
+        || current.status != CredentialStatus::Revoked && !is_github_connection(&current)
     {
         return Err(ConnectError::aborted("credential metadata changed"));
     }
@@ -653,6 +656,11 @@ pub(crate) async fn delete_credential(
         })
         .await?;
     Ok(())
+}
+
+fn is_github_connection(credential: &Credential) -> bool {
+    credential.provider == "github"
+        && credential.authentication_kind == CredentialAuthenticationKind::Oauth
 }
 
 async fn get_exact_credential(
@@ -893,7 +901,7 @@ fn build_settings_data(
         match slot {
             "codex" => choices.codex.push(choice),
             "openai" => choices.openai.push(choice),
-            "github" => choices.github.push(choice),
+            "github" => {}
             "anthropic" => choices.anthropic.push(choice),
             "ssh" => choices.ssh.push(choice),
             _ => unreachable!("credential_slot returns a closed slot"),
@@ -933,6 +941,10 @@ fn build_settings_data(
     }
 
     let mut seen_profiles = BTreeSet::new();
+    let github_connection = credential_index
+        .values()
+        .find(|(_, slot, _, _)| *slot == "github")
+        .map(|(name, _, status, tone)| (name.clone(), *status, *tone));
     let mut profile_rows = Vec::with_capacity(profiles.len());
     for profile in profiles {
         if exact_id(&profile.id).is_err()
@@ -940,7 +952,7 @@ fn build_settings_data(
             || codewire_access::AccessProfileName::parse(&profile.name).is_err()
             || profile.revision == 0
             || profile.revision > i64::MAX as u64
-            || profile.entries.len() > 5
+            || profile.entries.len() > 4
         {
             return Err(invalid_metadata());
         }
@@ -966,6 +978,18 @@ fn build_settings_data(
                 status_tone,
             });
         }
+        // Every profile includes the account's one GitHub connection. Show it,
+        // or show it as missing until the account connects GitHub.
+        let (credential, status, status_tone) = github_connection.as_ref().map_or_else(
+            || ("missing".to_owned(), "Connect GitHub", "warning"),
+            |(account, status, status_tone)| (format!("@{account}"), *status, *status_tone),
+        );
+        entries.push(CredentialProfileEntryView {
+            slot: "GitHub",
+            credential,
+            status,
+            status_tone,
+        });
         entries.sort_by(|a, b| a.slot.cmp(b.slot));
         profile_rows.push(CredentialProfileRowView {
             id: profile.id,
@@ -974,7 +998,6 @@ fn build_settings_data(
             entries,
             codex: selected.remove("codex").unwrap_or_default(),
             openai: selected.remove("openai").unwrap_or_default(),
-            github: selected.remove("github").unwrap_or_default(),
             anthropic: selected.remove("anthropic").unwrap_or_default(),
             ssh: selected.remove("ssh").unwrap_or_default(),
         });
@@ -1285,7 +1308,14 @@ mod tests {
         assert_eq!(data.profiles[0].revision, 7);
         assert_eq!(data.profiles[0].codex, codex_id);
         assert_eq!(data.profiles[0].ssh, ssh_id);
-        assert_eq!(data.profiles[0].entries.len(), 2);
+        // Codex, SSH, and the account GitHub connection every profile includes.
+        assert_eq!(data.profiles[0].entries.len(), 3);
+        assert!(
+            data.profiles[0]
+                .entries
+                .iter()
+                .any(|entry| entry.slot == "GitHub")
+        );
     }
 
     #[test]
@@ -1304,19 +1334,16 @@ mod tests {
                 id: "00000000-0000-4000-8000-000000000002".into(),
                 name: "work".into(),
                 revision: 1,
-                entries: vec![AccessProfileEntry {
-                    capability_slot: "github".into(),
-                    credential_id: id.into(),
-                    ..Default::default()
-                }],
+                entries: Vec::new(),
                 ..Default::default()
             }],
         )
         .unwrap();
         assert_eq!(data.credentials[0].display_name(), "verified-user");
         assert_eq!(data.credentials[0].name, "legacy-reference");
-        assert_eq!(data.choices.github[0].name, "verified-user");
-        assert_eq!(data.profiles[0].entries[0].credential, "verified-user");
+        // Every profile shows the account's one GitHub connection.
+        assert_eq!(data.profiles[0].entries[0].slot, "GitHub");
+        assert_eq!(data.profiles[0].entries[0].credential, "@verified-user");
         assert_eq!(
             data.profiles[0].entries[0].status,
             data.credentials[0].status
@@ -1325,7 +1352,25 @@ mod tests {
             data.profiles[0].entries[0].status_tone,
             data.credentials[0].status_tone
         );
-        assert_eq!(data.profiles[0].github, id);
+    }
+
+    #[test]
+    fn profile_without_github_connection_shows_it_as_missing() {
+        let data = build_settings_data(
+            Vec::new(),
+            vec![AccessProfile {
+                id: "00000000-0000-4000-8000-000000000002".into(),
+                name: "work".into(),
+                revision: 1,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let entry = &data.profiles[0].entries[0];
+        assert_eq!(entry.slot, "GitHub");
+        assert_eq!(entry.credential, "missing");
+        assert_eq!(entry.status, "Connect GitHub");
+        assert_eq!(entry.status_tone, "warning");
     }
 
     #[test]

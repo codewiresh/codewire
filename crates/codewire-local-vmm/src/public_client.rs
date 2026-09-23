@@ -334,14 +334,18 @@ impl NativePublicDataClient {
             ))),
             ..Default::default()
         };
-        let chunks = data
-            .chunks(FILE_CHUNK_BYTES)
-            .map(|chunk| UploadFileRequest {
-                payload: Some(upload_file_request::Payload::Chunk(chunk.to_vec())),
-                ..Default::default()
-            });
+        // Client-streaming calls take an owned stream of the chunked file.
+        let requests: Vec<_> = std::iter::once(header)
+            .chain(
+                data.chunks(FILE_CHUNK_BYTES)
+                    .map(|chunk| UploadFileRequest {
+                        payload: Some(upload_file_request::Payload::Chunk(chunk.to_vec())),
+                        ..Default::default()
+                    }),
+            )
+            .collect();
         self.files
-            .upload_file(std::iter::once(header).chain(chunks))
+            .upload_file(futures::stream::iter(requests))
             .await
             .map(|response| response.into_owned())
             .map_err(NativePublicClientError::Rpc)

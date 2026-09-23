@@ -103,8 +103,22 @@ pub const AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES: [&str; 2] =
 
 const AUTHORITY_LOCK_FILE: &str = "authority.lock";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_4352; // "CWCR"
-const DATABASE_SCHEMA_VERSION: i64 = 4;
+const DATABASE_SCHEMA_VERSION: i64 = 5;
+/// Adds typed SSH public-key metadata.
+const SSH_DATABASE_SCHEMA_VERSION: i64 = 4;
 const PREVIOUS_DATABASE_SCHEMA_VERSION: i64 = 3;
+/// GitHub is one connection per local store. Every profile includes it and
+/// never stores a GitHub credential ID.
+const GITHUB_SINGLETON_SCHEMA: &str = "
+    CREATE UNIQUE INDEX credentials_github_oauth_singleton
+      ON credentials(provider, authentication_kind)
+      WHERE provider = 'github' AND authentication_kind = 'oauth' AND status = 'active';
+    CREATE TRIGGER profile_entries_github_insert BEFORE INSERT ON profile_entries
+      WHEN NEW.capability_slot = 'github'
+      BEGIN SELECT RAISE(ABORT, 'GitHub is always included, never an entry'); END;
+    CREATE TRIGGER profile_entries_github_update BEFORE UPDATE OF capability_slot ON profile_entries
+      WHEN NEW.capability_slot = 'github'
+      BEGIN SELECT RAISE(ABORT, 'GitHub is always included, never an entry'); END;";
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -557,6 +571,14 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         // serialization lock is held. Once the pending row exists, journal
         // disposition must finish even if the RPC waiter disappears.
         publication_check()?;
+        // GitHub is one connection per store. A second one fails closed; the
+        // existing connection is reconnected in place or deleted first.
+        if metadata.provider.as_str() == "github"
+            && metadata.authentication_kind == CredentialAuthKind::OAuth
+            && github_connection_exists(&connection)?
+        {
+            return Err(LocalCredentialError::GitHubAlreadyConnected);
+        }
         let inserted = connection.execute(
             "INSERT INTO credentials(
                id, provider, authentication_kind, display_name, account_hint,
@@ -1388,12 +1410,28 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 CapabilitySlot::parse("ssh").expect("canonical SSH capability slot")
             }
         };
-        let credential_id = profile
-            .entries
-            .get(&capability_slot)
-            .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)?;
+        // GitHub checkout uses the store's one current connection, which every
+        // profile includes; it never falls back to another credential. Other
+        // transports use the revision's exact entry.
+        let credential_id = match transport {
+            crate::repository::LocalRepositoryTransport::GitHubOAuth => {
+                match active_github_connection(&connection)? {
+                    Some(id) => id,
+                    // An inactive connection needs reconnecting.
+                    None if github_connection_exists(&connection)? => {
+                        return Err(LocalCredentialError::CredentialInactive);
+                    }
+                    None => return Err(LocalCredentialError::CredentialOperationLeaseDenied),
+                }
+            }
+            crate::repository::LocalRepositoryTransport::Ssh => profile
+                .entries
+                .get(&capability_slot)
+                .cloned()
+                .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)?,
+        };
         let record =
-            load_internal_credential(&connection, credential_id, Some(MaterialState::Ready))?;
+            load_internal_credential(&connection, &credential_id, Some(MaterialState::Ready))?;
         let permissions = match transport {
             crate::repository::LocalRepositoryTransport::GitHubOAuth => vec![GrantPermission {
                 operation: BrokerOperationId::parse("git-fetch")
@@ -1517,6 +1555,8 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .ok_or(LocalCredentialError::CredentialMaterialMissing)
     }
 
+    /// Publish a profile's complete entry set. GitHub is never an entry: every
+    /// profile includes the store's one connection.
     pub fn create_profile(
         &self,
         name: AccessProfileName,
@@ -2289,9 +2329,11 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
                protected_entry_id TEXT NOT NULL UNIQUE,
                created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
                FOREIGN KEY(secret_id) REFERENCES workload_secrets(id) ON DELETE CASCADE
-             ) STRICT;
-             COMMIT;",
+             ) STRICT;",
         )
+        .map_err(database_error)?;
+    connection
+        .execute_batch(&format!("{GITHUB_SINGLETON_SCHEMA} COMMIT;"))
         .map_err(database_error)?;
     connection
         .pragma_update(None, "application_id", DATABASE_APPLICATION_ID)
@@ -2316,6 +2358,19 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
     if ssh_columns != 2 {
         return Err(LocalCredentialError::InvalidDatabase);
     }
+    let github_schema: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE (type = 'index' AND name = 'credentials_github_oauth_singleton')
+                OR (type = 'trigger' AND name IN (
+                    'profile_entries_github_insert', 'profile_entries_github_update'))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if github_schema != 3 {
+        return Err(LocalCredentialError::InvalidDatabase);
+    }
     Ok(())
 }
 
@@ -2329,7 +2384,9 @@ fn validate_openable_schema(connection: &Connection) -> Result<(), LocalCredenti
     if application_id != DATABASE_APPLICATION_ID
         || !matches!(
             schema_version,
-            PREVIOUS_DATABASE_SCHEMA_VERSION | DATABASE_SCHEMA_VERSION
+            PREVIOUS_DATABASE_SCHEMA_VERSION
+                | SSH_DATABASE_SCHEMA_VERSION
+                | DATABASE_SCHEMA_VERSION
         )
     {
         return Err(LocalCredentialError::UnsupportedSchema);
@@ -2380,22 +2437,63 @@ fn upgrade_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
         DATABASE_SCHEMA_VERSION => validate_schema(connection),
         PREVIOUS_DATABASE_SCHEMA_VERSION => {
             validate_schema_tables(connection)?;
-            let transaction = connection.unchecked_transaction().map_err(database_error)?;
-            transaction
-                .execute_batch(
-                    "ALTER TABLE credentials ADD COLUMN ssh_public_key_openssh TEXT NULL;
-                     ALTER TABLE credentials ADD COLUMN ssh_public_key_fingerprint TEXT NULL
-                       CHECK((ssh_public_key_openssh IS NULL) = (ssh_public_key_fingerprint IS NULL));",
-                )
-                .map_err(database_error)?;
-            transaction
-                .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
-                .map_err(database_error)?;
-            transaction.commit().map_err(database_error)?;
+            upgrade_ssh_schema(connection)?;
+            upgrade_github_singleton_schema(connection)?;
+            validate_schema(connection)
+        }
+        SSH_DATABASE_SCHEMA_VERSION => {
+            validate_schema_tables(connection)?;
+            upgrade_github_singleton_schema(connection)?;
             validate_schema(connection)
         }
         _ => Err(LocalCredentialError::UnsupportedSchema),
     }
+}
+
+/// Version 3 to 4: typed SSH public-key metadata. One atomic step.
+fn upgrade_ssh_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
+    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE credentials ADD COLUMN ssh_public_key_openssh TEXT NULL;
+             ALTER TABLE credentials ADD COLUMN ssh_public_key_fingerprint TEXT NULL
+               CHECK((ssh_public_key_openssh IS NULL) = (ssh_public_key_fingerprint IS NULL));",
+        )
+        .map_err(database_error)?;
+    transaction
+        .pragma_update(None, "user_version", SSH_DATABASE_SCHEMA_VERSION)
+        .map_err(database_error)?;
+    transaction.commit().map_err(database_error)
+}
+
+/// Version 4 to 5: GitHub becomes one connection that every profile includes,
+/// so pinned GitHub credential IDs are discarded without new revisions. More
+/// than one active GitHub connection is ambiguous: the upgrade fails and
+/// leaves version 4 unchanged rather than choosing one.
+/// Revoked GitHub rows are kept; their protected material is not in SQLite.
+fn upgrade_github_singleton_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
+    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let active: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM credentials
+             WHERE provider = 'github' AND authentication_kind = 'oauth' AND status = 'active'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if active > 1 {
+        return Err(LocalCredentialError::AmbiguousGitHubConnections);
+    }
+    transaction
+        .execute_batch(&format!(
+            "DELETE FROM profile_entries WHERE capability_slot = 'github';
+             {GITHUB_SINGLETON_SCHEMA}"
+        ))
+        .map_err(database_error)?;
+    transaction
+        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .map_err(database_error)?;
+    transaction.commit().map_err(database_error)
 }
 
 fn validate_schema_identity(connection: &Connection) -> Result<(), LocalCredentialError> {
@@ -2560,7 +2658,11 @@ fn load_credential_refresh_marker(
                 || permit.request_id.is_nil()
                 || permit.grant.credential_id != *credential_id
                 || permit.grant.environment_generation == 0
-                || permit.grant.profile_revision == 0
+                || permit
+                    .grant
+                    .profile
+                    .as_ref()
+                    .is_none_or(|profile| profile.revision == 0)
                 || permit.grant.credential_revocation_generation == 0
                 || permit.current_material_generation == 0
                 || permit.current_material_generation.checked_add(1)
@@ -3189,7 +3291,16 @@ fn derive_local_environment_grants(
         user_id: owner_id.clone(),
         organization_id: None,
         allow_personal_credentials: false,
-        authorized_credentials: profile.entries.values().cloned().collect::<BTreeSet<_>>(),
+        authorized_credentials: profile
+            .entries
+            .values()
+            .cloned()
+            .chain(if profile.includes_github() {
+                active_github_connection(connection)?
+            } else {
+                None
+            })
+            .collect::<BTreeSet<_>>(),
     };
     derive_grants(
         &context,
@@ -3200,6 +3311,49 @@ fn derive_local_environment_grants(
         unix_seconds()?,
     )
     .map_err(Into::into)
+}
+
+/// Whether the store already holds a GitHub connection in any state.
+fn github_connection_exists(connection: &Connection) -> Result<bool, LocalCredentialError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM credentials
+                           WHERE provider = 'github' AND authentication_kind = 'oauth')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)
+}
+
+/// The store's one GitHub connection when it can be used now. A missing,
+/// inactive or expired connection yields `None`, so a profile omits GitHub
+/// instead of fabricating access.
+fn active_github_connection(
+    connection: &Connection,
+) -> Result<Option<CredentialId>, LocalCredentialError> {
+    let now = i64::try_from(unix_seconds()?).map_err(|_| LocalCredentialError::InvalidTime)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id FROM credentials
+             WHERE provider = 'github' AND authentication_kind = 'oauth' AND status = 'active'
+               AND material_state = 'ready'
+               AND (expires_at_unix IS NULL OR expires_at_unix > ?1)
+             ORDER BY id LIMIT 2",
+        )
+        .map_err(database_error)?;
+    let ids = statement
+        .query_map([now], |row| row.get::<_, String>(0))
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+    match ids.as_slice() {
+        [] => Ok(None),
+        [id] => CredentialId::parse(id.as_str())
+            .map(Some)
+            .map_err(|_| LocalCredentialError::CorruptMetadata),
+        // The singleton index forbids this; never pick a winner.
+        _ => Err(LocalCredentialError::CorruptMetadata),
+    }
 }
 
 fn validate_environment_access_bindings(
@@ -3534,6 +3688,12 @@ pub enum LocalCredentialError {
         "a local credential, access profile, secret project, or workload-secret key already exists"
     )]
     AlreadyExists,
+    #[error("a local GitHub connection already exists; reconnect or delete it")]
+    GitHubAlreadyConnected,
+    #[error(
+        "local credential metadata has more than one active GitHub connection; keep one before upgrading"
+    )]
+    AmbiguousGitHubConnections,
     #[error("local credential was not found")]
     CredentialNotFound,
     #[error("local credential is not available")]

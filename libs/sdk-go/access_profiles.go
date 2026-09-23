@@ -15,7 +15,8 @@ type AccessProfileEntry struct {
 	CredentialID   string `json:"credential_id"`
 }
 
-// AccessProfile is one immutable revision of a personal platform profile.
+// AccessProfile is one immutable revision of a personal platform profile. Every
+// profile includes the account's one GitHub connection; GitHub is never an entry.
 type AccessProfile struct {
 	ID       string               `json:"id"`
 	Name     string               `json:"name"`
@@ -54,6 +55,9 @@ func accessProfileEntries(entries []AccessProfileEntry) ([]*codewirev1.AccessPro
 	result := make([]*codewirev1.AccessProfileEntry, 0, len(entries))
 	slots := make(map[string]bool, len(entries))
 	for _, entry := range entries {
+		if entry.CapabilitySlot == "github" {
+			return nil, fmt.Errorf("codewire: every profile includes the account's GitHub connection; it is never an entry")
+		}
 		if slots[entry.CapabilitySlot] {
 			return nil, fmt.Errorf("codewire: duplicate access profile capability slot")
 		}

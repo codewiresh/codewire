@@ -44,10 +44,12 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod github_singleton;
     mod owner_sources;
     mod projection;
     mod session_mutation;
     mod ssh;
+    mod two_factor_setup_skip;
     use std::{borrow::Cow, time::Duration};
 
     use sha2::{Digest, Sha384};
@@ -56,8 +58,18 @@ mod tests {
     use super::*;
 
     // Measured in isolated PostgreSQL after composing account access,
-    // environment projection, and typed SSH metadata through version28.
+    // environment projection, typed SSH metadata, the GitHub singleton that
+    // every personal profile includes, and the per-session two-factor setup
+    // skip, through version30.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "334e2acdf542843ab58f93c3961eca0c18e070e7c6dfc007f7e1d5d272eb3d86";
+    // Accepted table schema through version29, before the two-factor setup skip.
+    const ACCEPTED_PRE_TWO_FACTOR_SKIP_SCHEMA_FINGERPRINT: &str =
+        "ec5d038ddeb65b6a54b1ecfb9ad19bef30df062d557d6e23b4f4e3fd4a613c86";
+    // Accepted table schema through version28, before the GitHub singleton.
+    // Versions 27 and 28 changed only functions, so a replay to version26 or
+    // later but before version29 measures this value.
+    const ACCEPTED_PRE_GITHUB_SINGLETON_SCHEMA_FINGERPRINT: &str =
         "8b3dbe164a9ef7e31d44c3e3322433b7021a919ddc7525325540505dac04d45a";
     // Canonical version24 account-access schema before the function-only
     // projection migration and new SSH columns.

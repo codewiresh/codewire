@@ -2006,7 +2006,9 @@ fn public_resize_operation(
     })
 }
 
-fn poll_interval(operation: &OperationRecord) -> buffa::MessageField<ProtoDuration> {
+fn poll_interval(
+    operation: &OperationRecord,
+) -> buffa::MessageField<ProtoDuration, buffa::Inline<ProtoDuration>> {
     (!operation.phase.terminal())
         .then(|| ProtoDuration::from_secs(1))
         .into()

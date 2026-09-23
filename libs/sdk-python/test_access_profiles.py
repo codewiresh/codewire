@@ -125,6 +125,9 @@ class AccessProfilesTestCase(unittest.TestCase):
                        lambda: self.cw.access_profiles.update("profile-one", EXACT, [ENTRY, ENTRY])]:
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 invoke()
+        with self.assertRaisesRegex(ValueError, "never an entry"):
+            self.cw.access_profiles.create(
+                "personal", [{"capability_slot": "github", "credential_id": "credential-one"}])
         for revision in [0, -1, MAXIMUM + 1, True, 1.5]:
             with self.assertRaisesRegex(ValueError, "positive uint64"):
                 self.cw.access_profiles.get("profile-one", revision=revision)

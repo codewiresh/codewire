@@ -69,16 +69,26 @@ impl GrantContext {
     }
 }
 
-/// Material-free grant evaluated for one exact environment and profile
-/// generation. The broker resolves the credential ID inside its own trust
-/// boundary and applies the named route/operation policy.
+/// The exact profile revision a grant was derived from.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GrantProfile {
+    pub id: AccessProfileId,
+    pub revision: u64,
+}
+
+/// Material-free grant evaluated for one exact environment and, when the
+/// environment has one, its profile revision. The account's one GitHub
+/// connection needs no profile: without a binding its grant names none. The
+/// broker resolves the credential ID inside its own trust boundary and applies
+/// the named route/operation policy.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DerivedGrant {
     pub environment_id: EnvironmentId,
     pub environment_generation: u64,
-    pub profile_id: AccessProfileId,
-    pub profile_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<GrantProfile>,
     pub capability_slot: CapabilitySlot,
     pub credential_id: CredentialId,
     pub credential_revocation_generation: u64,
@@ -174,7 +184,14 @@ pub fn derive_grants(
     }
     validate_profile_owner(context, &profile.owner)?;
 
-    let mut grants = Vec::with_capacity(profile.entries.len());
+    let mut grants =
+        Vec::with_capacity(profile.entries.len() + usize::from(profile.includes_github()));
+    if profile.includes_github()
+        && let Some(grant) =
+            derive_github_singleton_grant(context, profile, credentials, catalog, now_unix)?
+    {
+        grants.push(grant);
+    }
     for (slot, credential_id) in &profile.entries {
         if !context.authorized_credentials.contains(credential_id) {
             return Err(AccessError::CredentialNotAuthorized {
@@ -248,8 +265,10 @@ pub fn derive_grants(
         grants.push(DerivedGrant {
             environment_id: context.environment_id.clone(),
             environment_generation: context.environment_generation,
-            profile_id: profile.id.clone(),
-            profile_revision: profile.revision,
+            profile: Some(GrantProfile {
+                id: profile.id.clone(),
+                revision: profile.revision,
+            }),
             capability_slot: slot.clone(),
             credential_id: credential_id.clone(),
             credential_revocation_generation: credential.revocation_generation,
@@ -258,6 +277,137 @@ pub fn derive_grants(
         });
     }
     Ok(grants)
+}
+
+/// The account GitHub grant for a platform environment with no profile
+/// binding. Selecting a GitHub repository needs no profile: launch authority
+/// authorizes the creator's one connection only when the environment was
+/// rendered with the GitHub client, the creator's recorded choice. This is the
+/// creator's own connection, not a profile's personal-credential policy. A
+/// missing connection is omitted, never fabricated.
+pub fn derive_account_github_grant(
+    context: &GrantContext,
+    credentials: &BTreeMap<CredentialId, CredentialMetadata>,
+    catalog: &ProviderCatalog,
+    now_unix: u64,
+) -> Result<Option<DerivedGrant>, AccessError> {
+    context.validate()?;
+    if context.placement != GrantPlacement::Platform {
+        return Err(AccessError::PlacementMismatch {
+            subject: "account GitHub connection",
+        });
+    }
+    let owner = Owner::User(context.user_id.clone());
+    let Some(credential) = authorized_github_connection(context, &owner, credentials) else {
+        return Ok(None);
+    };
+    github_grant(context, credential, None, catalog, now_unix).map(Some)
+}
+
+fn derive_github_singleton_grant(
+    context: &GrantContext,
+    profile: &AccessProfile,
+    credentials: &BTreeMap<CredentialId, CredentialMetadata>,
+    catalog: &ProviderCatalog,
+    now_unix: u64,
+) -> Result<Option<DerivedGrant>, AccessError> {
+    // The profile choice remains stable while GitHub is disconnected. A later
+    // reconnect restores it without creating a profile revision.
+    let Some(credential) = authorized_github_connection(context, &profile.owner, credentials)
+    else {
+        return Ok(None);
+    };
+    validate_credential_owner(context, &profile.owner, credential)?;
+    github_grant(context, credential, Some(profile), catalog, now_unix).map(Some)
+}
+
+/// Launch authority resolves and authorizes the account's one current
+/// connection. Any other GitHub row (revoked, expired, or absent) is simply
+/// not selected: the choice is omitted, never fabricated.
+fn authorized_github_connection<'a>(
+    context: &GrantContext,
+    owner: &Owner,
+    credentials: &'a BTreeMap<CredentialId, CredentialMetadata>,
+) -> Option<&'a CredentialMetadata> {
+    credentials.values().find(|credential| {
+        credential.provider.as_str() == "github"
+            && credential.authentication_kind == crate::CredentialAuthKind::OAuth
+            && &credential.owner == owner
+            && context.authorized_credentials.contains(&credential.id)
+    })
+}
+
+fn github_grant(
+    context: &GrantContext,
+    credential: &CredentialMetadata,
+    profile: Option<&AccessProfile>,
+    catalog: &ProviderCatalog,
+    now_unix: u64,
+) -> Result<DerivedGrant, AccessError> {
+    credential.validate()?;
+    if credential.placement != context.placement.credential_storage() {
+        return Err(AccessError::PlacementMismatch {
+            subject: "credential",
+        });
+    }
+    match credential.status {
+        CredentialStatus::Active => {}
+        CredentialStatus::Expired => {
+            return Err(AccessError::CredentialExpired {
+                credential: credential.id.clone(),
+            });
+        }
+        CredentialStatus::RefreshFailed | CredentialStatus::Revoked => {
+            return Err(AccessError::CredentialInactive {
+                credential: credential.id.clone(),
+            });
+        }
+    }
+    if credential
+        .expires_at_unix
+        .is_some_and(|expires_at| expires_at <= now_unix)
+    {
+        return Err(AccessError::CredentialExpired {
+            credential: credential.id.clone(),
+        });
+    }
+    let slot = CapabilitySlot::github();
+    let provider =
+        catalog
+            .get(&credential.provider)
+            .ok_or_else(|| AccessError::ProviderUnavailable {
+                provider: credential.provider.clone(),
+            })?;
+    let policy =
+        provider
+            .capabilities
+            .get(&slot)
+            .ok_or_else(|| AccessError::UnsupportedCapability {
+                provider: credential.provider.clone(),
+                slot: slot.clone(),
+            })?;
+    if !policy
+        .authentication_kinds
+        .contains(&credential.authentication_kind)
+    {
+        return Err(AccessError::UnsupportedCapability {
+            provider: credential.provider.clone(),
+            slot,
+        });
+    }
+    Ok(DerivedGrant {
+        environment_id: context.environment_id.clone(),
+        environment_generation: context.environment_generation,
+        profile: profile.map(|profile| GrantProfile {
+            id: profile.id.clone(),
+            revision: profile.revision,
+        }),
+        capability_slot: slot,
+        credential_id: credential.id.clone(),
+        credential_revocation_generation: credential.revocation_generation,
+        expires_at_unix: credential.expires_at_unix,
+        permissions: policy.permissions.clone(),
+    })
 }
 
 fn validate_profile_owner(context: &GrantContext, owner: &Owner) -> Result<(), AccessError> {

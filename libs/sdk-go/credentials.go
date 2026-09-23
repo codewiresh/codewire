@@ -73,17 +73,17 @@ type GithubRepositoryPage struct {
 	NextPageToken string             `json:"next_page_token"`
 }
 
-// ListGithubRepositories fetches one page for the exact selected personal profile.
-// It never advances the profile revision or attaches credentials to an environment.
-func (s *CredentialService) ListGithubRepositories(ctx context.Context, profileID string, profileRevision uint64, pageSize int32, pageToken string) (*GithubRepositoryPage, error) {
+// ListGithubRepositories fetches one page for the authenticated owner's GitHub singleton.
+// It never attaches credentials to an environment.
+func (s *CredentialService) ListGithubRepositories(ctx context.Context, pageSize int32, pageToken string) (*GithubRepositoryPage, error) {
 	if err := ensureCredentialConverterCoverage(); err != nil {
 		return nil, err
 	}
-	if profileID == "" || profileRevision == 0 || pageSize < 0 || pageSize > 100 || len(pageToken) > 128 {
+	if pageSize < 0 || pageSize > 100 || len(pageToken) > 128 {
 		return nil, fmt.Errorf("codewire: invalid GitHub repository selection or page")
 	}
 	response, err := s.client.githubRepositories.ListGithubRepositories(ctx, connect.NewRequest(&codewirev1.ListGithubRepositoriesRequest{
-		ProfileId: profileID, ProfileRevision: profileRevision, PageSize: pageSize, PageToken: pageToken,
+		PageSize: pageSize, PageToken: pageToken,
 	}))
 	if err != nil {
 		return nil, connectSDKError(err)

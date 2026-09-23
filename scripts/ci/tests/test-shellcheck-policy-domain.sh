@@ -184,7 +184,7 @@ baseline_output="$(run_checker 2>&1)" \
   || fail 'matching fake ShellCheck baseline was rejected'
 grep -Fq 'ShellCheck analysis: start (' <<<"$baseline_output" \
   || fail 'ShellCheck start timing is absent'
-grep -Fq 'timeout_seconds=300)' <<<"$baseline_output" \
+grep -Fq 'timeout_seconds=600)' <<<"$baseline_output" \
   || fail 'ShellCheck default deadline does not allow bounded full-analysis headroom'
 grep -Eq 'ShellCheck analysis: finish \(status=1 elapsed_seconds=[0-9]+\)' \
   <<<"$baseline_output" || fail 'ShellCheck finish timing is absent'

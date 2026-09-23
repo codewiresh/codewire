@@ -284,6 +284,20 @@ fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// Every profile includes the account's one GitHub connection, so GitHub is
+/// never set or unset on a profile.
+pub(super) const GITHUB_ALWAYS_INCLUDED: &str = "every profile includes your one GitHub connection; connect or reconnect it with `credentials connect github`";
+
+/// The credential a `profile set` selects; every slot names exactly one.
+pub(super) fn profile_set_credential(
+    args: &super::CredentialProfileSetArgs,
+) -> anyhow::Result<&str> {
+    anyhow::ensure!(args.slot != "github", GITHUB_ALWAYS_INCLUDED);
+    args.credential
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("select a credential for this provider"))
+}
+
 pub(super) fn supported_profile_slot(
     value: &str,
     provider: &ProviderId,

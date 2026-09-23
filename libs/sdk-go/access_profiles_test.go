@@ -205,6 +205,10 @@ func TestAccessProfilesRejectDuplicateSlotsAndZeroRevisionWithoutTransport(t *te
 	if _, err := client.AccessProfiles.Update(ctx, "profile-one", accessExact, entries); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatal("duplicate update was not rejected")
 	}
+	github := []codewire.AccessProfileEntry{{CapabilitySlot: "github", CredentialID: "one"}}
+	if _, err := client.AccessProfiles.Create(ctx, "personal", github); err == nil || !strings.Contains(err.Error(), "never an entry") {
+		t.Fatal("GitHub profile entry was not rejected")
+	}
 	zero := uint64(0)
 	if _, err := client.AccessProfiles.Get(ctx, "profile-one", &zero); err == nil {
 		t.Fatal("zero revision accepted")

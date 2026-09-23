@@ -22,6 +22,9 @@ pub const SSH_NATIVE_AUTH_SOCK: &str = "/run/codewire-host/ssh-agent.sock";
 pub const SSH_PLATFORM_AUTH_SOCK: &str = "/codewire/run/ssh-agent.sock";
 /// Fixed per-environment HTTP ingress; callers own listener authentication and readiness.
 pub const MANAGED_HTTP_PORT: u16 = 38_081;
+/// Workspace environment variable carrying the managed clients orchestration
+/// rendered for one Pod, in [`ManagedCredentialClients::encode`] form.
+pub const MANAGED_CREDENTIAL_CLIENTS_ENV: &str = "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS";
 /// Base-URL path for the distinct OpenAI API-key profile slot. Only POST
 /// responses is admitted; ordinary Codex configuration retains its own route.
 pub const MANAGED_OPENAI_API_PREFIX: &str = "/_codewire/openai/v1";

@@ -92,7 +92,9 @@ deploy_kind_credential_issuers() {
     certificate/codewire-kind-credential-gateway-root issuer/codewire-credential-gateway
   kubectl -n "$NS" wait --for=condition=Ready --timeout=120s \
     certificate/codewire-kind-credential-broker-root issuer/codewire-credential-broker \
-    certificate/codewire-credential-broker
+    certificate/codewire-credential-broker \
+    certificate/codewire-kind-postgres-root issuer/codewire-kind-postgres \
+    certificate/codewire-kind-postgres-tls
   local gateway_roots broker_roots
   # Only public certificates leave these synthetic controller-owned Secrets.
   # No private key is copied into the host, workspace, ConfigMap or log.

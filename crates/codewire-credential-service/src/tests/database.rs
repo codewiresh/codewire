@@ -63,7 +63,7 @@ impl Fixture {
             let role_ident=quote_ident(&role);
             sqlx::query(&format!("REVOKE SELECT ON public.platform_credentials FROM {role_ident}")).execute(&db.pool).await?;
             for grant in [
-                "SELECT (id,user_id,organization_id,status,expires_at_unix) ON public.platform_credentials",
+                "SELECT (id,user_id,organization_id,provider,authentication_kind,status,expires_at_unix) ON public.platform_credentials",
                 "SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_at,environment_operation_generation) ON public.environments",
                 "SELECT (id,org_id,user_id,role) ON public.org_members",
                 "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name) ON public.sandbox_environment_backend",

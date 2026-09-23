@@ -55,6 +55,9 @@ async fn run(
     } else {
         enrollment_target(&shared, scope, "github", name, replacement).await?
     };
+    if !matches!(target, EnrollmentTarget::Reconnect(_)) {
+        ensure_github_unconnected(&shared, scope).await?;
+    }
     let mut pending = shared.github_enrollment.start().map_err(github_error)?;
     let challenge = scope
         .wait(pending.challenge())

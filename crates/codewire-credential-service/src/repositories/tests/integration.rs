@@ -6,12 +6,13 @@ use crate::mutation::tests::support::{
 use crate::platform_test_support::TIMEOUT;
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use codewire_access::{AccessProfile, AccessProfileName, ProviderId};
+use codewire_access::{AccessProfile, AccessProfileName, ProviderId, builtin_provider_catalog};
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
     GitHubAppAuthorizationConfig, GitHubAppAuthorizationOwner,
 };
 use codewire_platform_credentials::CredentialRegistration;
+use codewire_platform_credentials::PlatformAccessProfileStore;
 use codewire_server_core::auth::{
     AuthState, SESSION_COOKIE_NAME, authenticate_headers_with_context, hash_oauth_token,
     hash_session_token,
@@ -322,16 +323,18 @@ impl Fixture {
         })
     }
 
-    fn post(&self, profile: &AccessProfile) -> reqwest::RequestBuilder {
-        self.client.post(&self.url).header("connect-protocol-version", "1")
-            .json(&json!({"profileId":profile.id.as_str(),"profileRevision":profile.revision.to_string(),"pageSize":1}))
+    fn post(&self, _credential: &CredentialRecord) -> reqwest::RequestBuilder {
+        self.client
+            .post(&self.url)
+            .header("connect-protocol-version", "1")
+            .json(&json!({"pageSize":1}))
     }
 
     fn profiles(&self) -> PlatformAccessProfileStore {
         PlatformAccessProfileStore::new(self.h.db.pool.clone(), builtin_provider_catalog())
     }
 
-    async fn profile(&self, connected: bool) -> Result<(AccessProfile, Option<CredentialRecord>)> {
+    async fn credential(&self, connected: bool) -> Result<Option<CredentialRecord>> {
         let owner = Owner::User(OwnerId::parse(ALICE)?);
         let record = if connected {
             Some(
@@ -353,22 +356,10 @@ impl Fixture {
         } else {
             None
         };
-        let entries = record
-            .as_ref()
-            .map(|record| BTreeMap::from([(CapabilitySlot::github(), record.metadata.id.clone())]))
-            .unwrap_or_default();
-        let profile = self
-            .profiles()
-            .create(
-                &owner,
-                AccessProfileName::parse(uuid::Uuid::new_v4().to_string())?,
-                entries,
-            )
-            .await?;
-        Ok((profile, record))
+        Ok(record)
     }
 
-    async fn app_profile(&self) -> Result<(AccessProfile, CredentialRecord)> {
+    async fn app_credential(&self) -> Result<CredentialRecord> {
         let github = self
             .github_app_authorization
             .as_ref()
@@ -395,15 +386,20 @@ impl Fixture {
                 &protected,
             )
             .await?;
-        let profile = self
+        Ok(record)
+    }
+
+    /// A personal profile; it includes GitHub without naming the connection.
+    async fn github_profile(&self) -> Result<AccessProfile> {
+        let owner = Owner::User(OwnerId::parse(ALICE)?);
+        Ok(self
             .profiles()
             .create(
                 &owner,
                 AccessProfileName::parse(uuid::Uuid::new_v4().to_string())?,
-                BTreeMap::from([(CapabilitySlot::github(), record.metadata.id.clone())]),
+                BTreeMap::new(),
             )
-            .await?;
-        Ok((profile, record))
+            .await?)
     }
 
     async fn authority(&self) -> Result<CredentialMutationAuthority> {
@@ -465,44 +461,42 @@ async fn error(request: reqwest::RequestBuilder, expected: &str) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
-async fn exact_account_origin_profile_and_cursor_admission_use_restricted_role() -> Result<()> {
+async fn exact_account_origin_credential_and_cursor_admission_use_restricted_role() -> Result<()> {
     let f = Fixture::new().await?;
     let result = async {
-        let (profile, original) = f.profile(true).await?;
+        let original = f.credential(true).await?.context("GitHub record")?;
         for request in [
-            f.post(&profile),
-            f.post(&profile).bearer_auth(api_key()),
-            f.post(&profile)
+            f.post(&original),
+            f.post(&original).bearer_auth(api_key()),
+            f.post(&original)
                 .bearer_auth("invalid")
                 .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}")),
         ] {
             error(request, "unauthenticated").await?;
         }
         error(
-            f.post(&profile)
+            f.post(&original)
                 .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}")),
             "permission_denied",
         )
         .await?;
         error(
-            f.post(&profile)
+            f.post(&original)
                 .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}"))
                 .header("origin", "https://attacker.example"),
             "permission_denied",
         )
         .await?;
-        error(f.post(&profile).bearer_auth(oauth(BOB)), "not_found").await?;
         error(
-            f.post(&profile)
-                .bearer_auth(oauth(ALICE))
-                .json(&json!({"profileId":profile.id.as_str(),"profileRevision":"2"})),
-            "aborted",
+            f.post(&original).bearer_auth(oauth(BOB)),
+            "failed_precondition",
         )
         .await?;
-        let (empty, _) = f.profile(false).await?;
         error(
-            f.post(&empty).bearer_auth(oauth(ALICE)),
-            "failed_precondition",
+            f.post(&original)
+                .bearer_auth(oauth(ALICE))
+                .json(&json!({"pageSize":1,"pageToken":"not-a-cursor"})),
+            "invalid_argument",
         )
         .await?;
         ensure!(f.h.provider.unwrap_calls.load(Ordering::SeqCst) == 0);
@@ -519,8 +513,6 @@ async fn exact_account_origin_profile_and_cursor_admission_use_restricted_role()
         )?;
         let generated = rust_client
             .list_github_repositories(ListGithubRepositoriesRequest {
-                profile_id: profile.id.as_str().into(),
-                profile_revision: profile.revision,
                 page_size: 50,
                 ..Default::default()
             })
@@ -530,7 +522,7 @@ async fn exact_account_origin_profile_and_cursor_admission_use_restricted_role()
                 && generated.repositories[0].full_name == "synthetic/private-repo"
         );
         ensure!(generated.repositories[0].is_private && generated.next_page_token.is_empty());
-        let (status, page) = response(f.post(&profile).bearer_auth(oauth(ALICE))).await?;
+        let (status, page) = response(f.post(&original).bearer_auth(oauth(ALICE))).await?;
         ensure!(
             status == StatusCode::OK
                 && page["repositories"][0]["cloneUrl"]
@@ -539,7 +531,7 @@ async fn exact_account_origin_profile_and_cursor_admission_use_restricted_role()
         let cursor = page["nextPageToken"].as_str().context("bounded cursor")?;
         ensure!(cursor.len() <= MAX_PAGE_TOKEN_BYTES);
         let (status, page) = response(
-            f.post(&profile)
+            f.post(&original)
                 .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}"))
                 .header("origin", "https://codewire.example"),
         )
@@ -553,17 +545,15 @@ async fn exact_account_origin_profile_and_cursor_admission_use_restricted_role()
                     == 1
         );
         let page_request = || {
-            f.post(&profile)
+            f.post(&original)
                 .bearer_auth(oauth(ALICE))
-                .json(&json!({"profileId":profile.id.as_str(),
-            "profileRevision":profile.revision.to_string(),"pageSize":1,"pageToken":cursor}))
+                .json(&json!({"pageSize":1,"pageToken":cursor}))
         };
         let (_, last) = response(page_request()).await?;
         ensure!(last.get("nextPageToken").is_none_or(|value| value == ""));
-        let original = original.context("GitHub record")?;
         f.h.store
             .replace(
-                &profile.owner,
+                &original.metadata.owner,
                 &original.metadata.id,
                 original.version,
                 &ProtectedValue::new(GITHUB_TOKEN.as_bytes().to_vec())?,
@@ -573,6 +563,34 @@ async fn exact_account_origin_profile_and_cursor_admission_use_restricted_role()
         let before = f.h.provider.unwrap_calls.load(Ordering::SeqCst);
         error(page_request(), "aborted").await?;
         ensure!(f.h.provider.unwrap_calls.load(Ordering::SeqCst) == before);
+        // After Delete the continuation cannot survive: the account has no
+        // GitHub connection, and nothing falls back to another credential.
+        let current =
+            f.h.store
+                .record(&original.metadata.owner, &original.metadata.id)
+                .await?;
+        let revoked =
+            f.h.store
+                .revoke(
+                    &original.metadata.owner,
+                    &original.metadata.id,
+                    current.version,
+                )
+                .await?;
+        f.h.store
+            .delete_revoked(
+                &original.metadata.owner,
+                &original.metadata.id,
+                revoked.version,
+            )
+            .await?;
+        error(page_request(), "failed_precondition").await?;
+        error(
+            f.post(&original).bearer_auth(oauth(ALICE)),
+            "failed_precondition",
+        )
+        .await?;
+        ensure!(f.h.provider.unwrap_calls.load(Ordering::SeqCst) == before);
         Ok(())
     }
     .await;
@@ -581,21 +599,18 @@ async fn exact_account_origin_profile_and_cursor_admission_use_restricted_role()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
-async fn original_authority_profile_and_credential_races_never_release_metadata() -> Result<()> {
+async fn original_authority_and_credential_races_never_release_metadata() -> Result<()> {
     for scenario in [
-        "profile-unwrap",
         "credential-unwrap",
         "session-unwrap",
         "oauth-unwrap",
-        "profile-provider",
         "credential-provider",
         "session-provider",
         "oauth-provider",
     ] {
         let f = Fixture::new().await?;
         let result = async {
-            let (profile, record) = f.profile(true).await?;
-            let record = record.context("GitHub record")?;
+            let record = f.credential(true).await?.context("GitHub record")?;
             let unwrap = scenario.ends_with("unwrap");
             if unwrap {
                 f.h.provider.unwrap_gate.arm();
@@ -603,11 +618,11 @@ async fn original_authority_profile_and_credential_races_never_release_metadata(
                 f.provider.hold.store(true, Ordering::SeqCst);
             }
             let request = if scenario.starts_with("session") {
-                f.post(&profile)
+                f.post(&record)
                     .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}"))
                     .header("origin", "https://codewire.example")
             } else {
-                f.post(&profile).bearer_auth(oauth(ALICE))
+                f.post(&record).bearer_auth(oauth(ALICE))
             };
             let task = tokio::spawn(response(request));
             if unwrap {
@@ -615,19 +630,9 @@ async fn original_authority_profile_and_credential_races_never_release_metadata(
             } else {
                 tokio::time::timeout(TIMEOUT, f.provider.entered.notified()).await?;
             }
-            let expected = if scenario.starts_with("profile") {
-                f.profiles()
-                    .update(
-                        &profile.owner,
-                        &profile.id,
-                        profile.revision,
-                        BTreeMap::new(),
-                    )
-                    .await?;
-                "aborted"
-            } else if scenario.starts_with("credential") {
+            let expected = if scenario.starts_with("credential") {
                 f.h.store
-                    .revoke(&profile.owner, &record.metadata.id, record.version)
+                    .revoke(&record.metadata.owner, &record.metadata.id, record.version)
                     .await?;
                 if unwrap {
                     "aborted"
@@ -674,22 +679,53 @@ async fn original_authority_profile_and_credential_races_never_release_metadata(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_discovery_does_not_require_a_credential_profile() -> Result<()> {
+    let f = Fixture::new().await?;
+    let result = async {
+        let credential = f.credential(true).await?.context("GitHub record")?;
+        let profile = f.github_profile().await?;
+        f.provider.hold.store(true, Ordering::SeqCst);
+        let task = tokio::spawn(response(f.post(&credential).bearer_auth(oauth(ALICE))));
+        tokio::time::timeout(TIMEOUT, f.provider.entered.notified()).await?;
+        f.profiles()
+            .update(
+                &profile.owner,
+                &profile.id,
+                profile.revision,
+                BTreeMap::new(),
+            )
+            .await?;
+        f.provider.released.notify_one();
+        let (status, page) = tokio::time::timeout(TIMEOUT, task).await???;
+        ensure!(
+            status == StatusCode::OK
+                && page["repositories"]
+                    .as_array()
+                    .is_some_and(|repositories| repositories.len() == 1),
+            "profile removal changed direct GitHub discovery: {status} {page}"
+        );
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn github_app_repository_picker_refreshes_once_and_never_rebinds_a_cursor() -> Result<()> {
     let f = Fixture::app().await?;
     let result = async {
-        let (profile, original) = f.app_profile().await?;
+        let original = f.app_credential().await?;
         let stale_cursor = Selection::parse(ListGithubRepositoriesRequest {
-            profile_id: profile.id.as_str().into(),
-            profile_revision: profile.revision,
             page_size: 1,
             ..Default::default()
         })
         .map_err(|_| anyhow::anyhow!("synthetic repository selection must be valid"))?
-        .cursor(&profile.owner, &original, 2);
+        .cursor(&original.metadata.owner, &original, 2);
         f.provider
             .reject_first_app_repository
             .store(true, Ordering::SeqCst);
-        let (status, page) = response(f.post(&profile).bearer_auth(oauth(ALICE))).await?;
+        let (status, page) = response(f.post(&original).bearer_auth(oauth(ALICE))).await?;
         ensure!(
             status == StatusCode::OK
                 && page["repositories"]
@@ -700,15 +736,13 @@ async fn github_app_repository_picker_refreshes_once_and_never_rebinds_a_cursor(
         ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
         let current =
             f.h.store
-                .record(&profile.owner, &original.metadata.id)
+                .record(&original.metadata.owner, &original.metadata.id)
                 .await?;
         ensure!(same_refreshed_record(&original, &current).is_ok());
 
         let calls_before_cursor = f.provider.calls.load(Ordering::SeqCst);
         error(
-            f.post(&profile).bearer_auth(oauth(ALICE)).json(&json!({
-                "profileId": profile.id.as_str(),
-                "profileRevision": profile.revision.to_string(),
+            f.post(&original).bearer_auth(oauth(ALICE)).json(&json!({
                 "pageSize": 1,
                 "pageToken": stale_cursor,
             })),
@@ -734,12 +768,12 @@ async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() 
         f.provider
             .initial_app_access_lifetime
             .store(60, Ordering::SeqCst);
-        let (profile, original) = f.app_profile().await?;
+        let original = f.app_credential().await?;
         f.provider
             .reject_first_refreshed_app_repository
             .store(true, Ordering::SeqCst);
         error(
-            f.post(&profile).bearer_auth(oauth(ALICE)),
+            f.post(&original).bearer_auth(oauth(ALICE)),
             "permission_denied",
         )
         .await?;
@@ -747,7 +781,7 @@ async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() 
         ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
         let current =
             f.h.store
-                .record(&profile.owner, &original.metadata.id)
+                .record(&original.metadata.owner, &original.metadata.id)
                 .await?;
         ensure!(same_refreshed_record(&original, &current).is_ok());
         Ok(())
@@ -761,12 +795,10 @@ async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() 
 async fn drop_and_shutdown_release_finite_account_capacity() -> Result<()> {
     let f = Fixture::new().await?;
     let result = async {
-        let (profile, _) = f.profile(true).await?;
+        let _credential = f.credential(true).await?.context("GitHub record")?;
         for stop in [false, true] {
             let authority = f.authority().await?;
             let request = ListGithubRepositoriesRequest {
-                profile_id: profile.id.as_str().into(),
-                profile_revision: profile.revision,
                 ..Default::default()
             };
             f.provider.hold.store(true, Ordering::SeqCst);
@@ -800,10 +832,10 @@ async fn drop_and_shutdown_release_finite_account_capacity() -> Result<()> {
 async fn deadline_releases_finite_account_capacity() -> Result<()> {
     let f = Fixture::new().await?;
     let result = async {
-        let (profile, _) = f.profile(true).await?;
+        let _credential = f.credential(true).await?.context("GitHub record")?;
         let authority = f.authority().await?;
         let request = ListGithubRepositoriesRequest {
-            profile_id:profile.id.as_str().into(), profile_revision:profile.revision,..Default::default()
+..Default::default()
         };
         f.provider.hold.store(true,Ordering::SeqCst);
         let owner = f.owner.clone();

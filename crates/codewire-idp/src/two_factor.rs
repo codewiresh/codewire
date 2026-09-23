@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use base64::Engine;
 use chrono::{NaiveDateTime, Utc};
 use codewire_server_core::auth::hash_session_token;
-use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
+use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth, session_cookie};
 use codewire_server_core::{AppError, ValidatedJson};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,17 @@ pub(crate) struct EnableResponse {
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct VerifyResponse {
     enabled: bool,
+}
+
+/// An empty JSON object. Requiring a JSON body keeps this state change out of
+/// reach of plain cross-origin form posts, as for the other factor endpoints.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SkipSetupRequest {}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SkipSetupResponse {
+    skipped: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -289,6 +300,15 @@ async fn verify(
             tracing::error!(error = %e, "failed to enable 2FA");
             AppError::InternalMsg("Failed to enable 2FA".into())
         })?;
+    // An enabled factor supersedes any skipped setup; clear it so no later
+    // factor change can revive an old session's skip.
+    sqlx::query(
+        "UPDATE sessions SET two_factor_setup_skipped_at = NULL \
+         WHERE user_id = $1 AND two_factor_setup_skipped_at IS NOT NULL",
+    )
+    .bind(&user.id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     let (ip, ua) = request_info(&headers);
@@ -304,6 +324,64 @@ async fn verify(
     .await;
 
     Ok(Json(VerifyResponse { enabled: true }))
+}
+
+/// Skip two-factor setup for the caller's current browser session only. An
+/// account with an enabled factor cannot skip; its sign-in still requires the
+/// factor. The next sign-in creates a new session and asks again.
+async fn skip_setup(
+    State(state): State<TwoFactorState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    ValidatedJson(SkipSetupRequest {}): ValidatedJson<SkipSetupRequest>,
+) -> Result<Json<SkipSetupResponse>, AppError> {
+    let token = session_cookie(&headers).ok_or(AppError::Unauthorized)?;
+    let skipped: Option<String> = sqlx::query_scalar(
+        r#"
+        UPDATE sessions AS session
+           SET two_factor_setup_skipped_at =
+                   COALESCE(session.two_factor_setup_skipped_at, NOW()),
+               updated_at = NOW()
+          FROM users AS user_account
+         WHERE session.token_hash = $1
+           AND session.expires_at > NOW()
+           AND session.user_id = $2
+           AND user_account.id = session.user_id
+           AND user_account.enabled
+           AND NOT COALESCE(user_account.two_factor_enabled, false)
+        RETURNING session.id
+        "#,
+    )
+    .bind(hash_session_token(token))
+    .bind(&auth.user_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if skipped.is_none() {
+        let enabled: Option<bool> = sqlx::query_scalar(
+            "SELECT COALESCE(two_factor_enabled, false) FROM users WHERE id = $1 AND enabled",
+        )
+        .bind(&auth.user_id)
+        .fetch_optional(&state.pool)
+        .await?;
+        return Err(match enabled {
+            Some(true) => AppError::BadRequest("2FA is already enabled".into()),
+            _ => AppError::Unauthorized,
+        });
+    }
+
+    let (ip, ua) = request_info(&headers);
+    crate::auth_session::log_audit(
+        &state.pool,
+        "user.2fa.setup_skipped",
+        &auth.user_id,
+        &ip,
+        &ua,
+        json!(null),
+        "info",
+    )
+    .await;
+
+    Ok(Json(SkipSetupResponse { skipped: true }))
 }
 
 async fn disable(_auth: AuthUser) -> Result<StatusCode, AppError> {
@@ -559,6 +637,7 @@ pub fn router(pool: PgPool, session_secret: String, secure: bool, auth: AuthStat
     let required = Router::new()
         .route("/api/auth/two-factor/enable", post(enable))
         .route("/api/auth/two-factor/verify", post(verify))
+        .route("/api/auth/two-factor/skip-setup", post(skip_setup))
         .route("/api/auth/two-factor/disable", post(disable))
         .route_layer(middleware::from_fn_with_state(auth, require_session_auth));
 

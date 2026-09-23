@@ -176,7 +176,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 49
+  assert_passed_count "server-core migration matrix" "$logfile" 54
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
@@ -192,7 +192,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 12
+  assert_passed_count "platform access profile matrix" "$logfile" 13
 
   logfile="$RUN_DIR/platform-owner-source-authority.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -220,7 +220,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib mutation::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "public credential mutation matrix" "$logfile" 25
+  assert_passed_count "public credential mutation matrix" "$logfile" 26
 
   logfile="$RUN_DIR/isolated-credential-runtime.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -232,7 +232,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib repositories::tests::integration:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "GitHub repository discovery matrix" "$logfile" 6
+  assert_passed_count "GitHub repository discovery matrix" "$logfile" 7
 
   logfile="$RUN_DIR/kind-credential-effective-acl.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -251,7 +251,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test authority \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential restricted-role matrix" "$logfile" 9
+  assert_passed_count "platform credential restricted-role matrix" "$logfile" 10
 
   logfile="$RUN_DIR/platform-broker-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -292,7 +292,7 @@ run_database() {
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib delegation::authority::tests:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "owner-local delegation authority matrix" "$logfile" 6
+  assert_passed_count "owner-local delegation authority matrix" "$logfile" 7
 
   logfile="$RUN_DIR/oauth-bearer-identity.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -365,7 +365,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'worker::create::projection_database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment projection capture matrix" "$logfile" 3
+  assert_passed_count "environment projection capture matrix" "$logfile" 4
 
   logfile="$RUN_DIR/organization-tenant-secret-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

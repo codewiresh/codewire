@@ -1,3 +1,6 @@
+use codewire_access::{
+    MANAGED_CREDENTIAL_CLIENTS_ENV, ManagedCredentialClient, ManagedCredentialClients,
+};
 use codewire_credential_broker::platform::PlatformRuntimeError as Error;
 use codewire_server_core::pod_identity::VerifiedPodIdentity;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
@@ -23,6 +26,44 @@ pub(crate) struct Lineage {
     deployment_uid: String,
     sandbox_uid: String,
     claim_uid: String,
+    managed_github: bool,
+}
+
+impl Lineage {
+    /// Whether orchestration rendered the verified workspace with the managed
+    /// GitHub client: the creator's recorded choice, fixed for this Pod.
+    pub(crate) fn managed_github(&self) -> bool {
+        self.managed_github
+    }
+}
+
+/// The managed clients orchestration rendered into the workspace container.
+/// Absent (no such container or variable) means none, which never authorizes
+/// a client; a malformed or duplicated value is denied.
+fn rendered_managed_clients(workspace: &Pod) -> Result<ManagedCredentialClients, Error> {
+    let Some(container) = workspace.spec.as_ref().and_then(|spec| {
+        spec.containers
+            .iter()
+            .find(|container| container.name == "workspace")
+    }) else {
+        return Ok(ManagedCredentialClients::default());
+    };
+    let mut values = container
+        .env
+        .iter()
+        .flatten()
+        .filter(|variable| variable.name == MANAGED_CREDENTIAL_CLIENTS_ENV);
+    let clients = match (values.next(), values.next()) {
+        (None, _) => ManagedCredentialClients::default(),
+        (Some(variable), None) if variable.value_from.is_none() => variable
+            .value
+            .as_deref()
+            .map(ManagedCredentialClients::decode)
+            .ok_or(Error::Denied)?
+            .map_err(|_| Error::Denied)?,
+        _ => return Err(Error::Denied),
+    };
+    Ok(clients)
 }
 
 pub(crate) fn valid_name(value: &str, namespace: bool) -> bool {
@@ -371,10 +412,69 @@ pub(crate) async fn validate_lineage(
         .map_err(kube_error)?;
     live_pod(&workspace, workspace_identity)?;
     let (claim_uid, sandbox_uid) = workspace_chain(scope, &claim, &sandbox, &workspace)?;
+    let managed_github =
+        rendered_managed_clients(&workspace)?.contains(ManagedCredentialClient::GitHub);
     Ok(Lineage {
         replica_set_uid,
         deployment_uid,
         sandbox_uid,
         claim_uid,
+        managed_github,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace(environment: Value) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "spec": {"containers": [
+                {"name": "codewire-gateway", "env": [
+                    {"name": MANAGED_CREDENTIAL_CLIENTS_ENV, "value": "v2:10"}]},
+                {"name": "workspace", "env": environment},
+            ]}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_the_workspace_containers_rendered_clients_select_github() {
+        let github = ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
+        let rendered = workspace(serde_json::json!([
+            {"name": MANAGED_CREDENTIAL_CLIENTS_ENV, "value": github.encode()}
+        ]));
+        assert_eq!(rendered_managed_clients(&rendered), Ok(github));
+        // Absent means none, even when another container names GitHub.
+        assert_eq!(
+            rendered_managed_clients(&workspace(serde_json::json!([]))),
+            Ok(ManagedCredentialClients::default())
+        );
+        for environment in [
+            serde_json::json!([{"name": MANAGED_CREDENTIAL_CLIENTS_ENV, "value": "github"}]),
+            serde_json::json!([{"name": MANAGED_CREDENTIAL_CLIENTS_ENV}]),
+            serde_json::json!([
+                {"name": MANAGED_CREDENTIAL_CLIENTS_ENV, "value": "v1:codex"},
+                {"name": MANAGED_CREDENTIAL_CLIENTS_ENV, "value": github.encode()},
+            ]),
+            serde_json::json!([{"name": MANAGED_CREDENTIAL_CLIENTS_ENV,
+                "valueFrom": {"configMapKeyRef": {"name": "clients", "key": "value"}}}]),
+        ] {
+            assert_eq!(
+                rendered_managed_clients(&workspace(environment)),
+                Err(Error::Denied)
+            );
+        }
+        // A Pod without the workspace container carries no managed clients.
+        for pod in [
+            serde_json::json!({"spec": {"containers": []}}),
+            serde_json::json!({}),
+        ] {
+            let pod: Pod = serde_json::from_value(pod).unwrap();
+            assert_eq!(
+                rendered_managed_clients(&pod),
+                Ok(ManagedCredentialClients::default())
+            );
+        }
+    }
 }

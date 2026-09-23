@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
-use buffa::MessageField;
 use buffa_types::Duration;
 use codewire_proto::codewire::v1 as proto;
 use connectrpc::{InboundStream, RequestContext, ServiceRequest, ServiceResult, ServiceStream};
@@ -99,7 +98,7 @@ where
         if !violations.is_empty() {
             return Err(self.backend.validation_error(violations, request_id));
         }
-        let timeout = exec_timeout(request.timeout)
+        let timeout = exec_timeout(request.timeout.into_option())
             .map_err(|violations| self.backend.validation_error(violations, request_id))?;
         let daemon = self
             .backend
@@ -254,7 +253,7 @@ where
                 .backend
                 .validation_error(violations, request_id.as_deref()));
         }
-        let timeout = run_timeout(start.timeout.clone()).map_err(|violations| {
+        let timeout = run_timeout(start.timeout.clone().into_option()).map_err(|violations| {
             self.backend
                 .validation_error(violations, request_id.as_deref())
         })?;
@@ -448,8 +447,8 @@ fn exec_violations(
     violations
 }
 
-fn exec_timeout(timeout: MessageField<Duration>) -> Result<StdDuration, Vec<FieldViolation>> {
-    let Some(timeout) = timeout.into_option() else {
+fn exec_timeout(timeout: Option<Duration>) -> Result<StdDuration, Vec<FieldViolation>> {
+    let Some(timeout) = timeout else {
         return Ok(DEFAULT_EXEC_TIMEOUT);
     };
     let timeout = StdDuration::try_from(timeout).map_err(|_| {
@@ -465,10 +464,8 @@ fn exec_timeout(timeout: MessageField<Duration>) -> Result<StdDuration, Vec<Fiel
     })
 }
 
-fn run_timeout(
-    timeout: MessageField<Duration>,
-) -> Result<Option<StdDuration>, Vec<FieldViolation>> {
-    let Some(timeout) = timeout.into_option() else {
+fn run_timeout(timeout: Option<Duration>) -> Result<Option<StdDuration>, Vec<FieldViolation>> {
+    let Some(timeout) = timeout else {
         return Ok(None);
     };
     let timeout = StdDuration::try_from(timeout).map_err(|_| {

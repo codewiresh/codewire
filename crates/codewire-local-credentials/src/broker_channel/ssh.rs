@@ -536,8 +536,15 @@ async fn record_admission(
                 }
             },
             credential_id: admission.map(|value| value.credential.metadata.id.clone()),
-            profile_id: admission.map(|value| value.grant.profile_id.clone()),
-            profile_revision: admission.map(|value| value.grant.profile_revision),
+            profile_id: admission.and_then(|value| {
+                value
+                    .grant
+                    .profile
+                    .as_ref()
+                    .map(|profile| profile.id.clone())
+            }),
+            profile_revision: admission
+                .and_then(|value| value.grant.profile.as_ref().map(|profile| profile.revision)),
             credential_revocation_generation: admission
                 .map(|value| value.grant.credential_revocation_generation),
         })

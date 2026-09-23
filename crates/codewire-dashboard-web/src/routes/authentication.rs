@@ -153,6 +153,12 @@ struct EnabledResponse {
     enabled: bool,
 }
 
+#[derive(Deserialize)]
+struct SkipSetupResponse {
+    #[allow(dead_code)]
+    skipped: bool,
+}
+
 pub(super) async fn login(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
@@ -644,6 +650,42 @@ pub(super) async fn setup_two_factor_action(
             user_message(response.status, "two-factor-setup").to_owned(),
         ),
         Err(()) => error_page(WebError::IdentityUnavailable),
+    }
+}
+
+/// Skip two-factor setup for this browser session only. The IdP refuses an
+/// account that already has a factor, and the next sign-in asks again.
+pub(super) async fn skip_two_factor_setup_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<AuthFormSubmission>,
+) -> Response {
+    if !valid_form_request(&state, &headers, &form.csrf) {
+        return error_page(WebError::CsrfRejected);
+    }
+    let cookie = match canonical_cookie(&headers) {
+        Ok(cookie) => cookie,
+        Err(()) => return redirect(auth_url_for_target("/login", &form.return_to), &headers),
+    };
+    match post_json::<_, SkipSetupResponse>(
+        &state,
+        "/api/auth/two-factor/skip-setup",
+        Some(cookie),
+        &EmptyRequest {},
+    )
+    .await
+    {
+        Ok(response) if response.status.is_success() => {
+            redirect(safe_target(&form.return_to), &headers)
+        }
+        Ok(response) if response.status == StatusCode::UNAUTHORIZED => {
+            redirect(auth_url_for_target("/login", &form.return_to), &headers)
+        }
+        // An account that enabled a factor meanwhile continues normally.
+        Ok(response) if response.status == StatusCode::BAD_REQUEST => {
+            redirect(safe_target(&form.return_to), &headers)
+        }
+        _ => error_page(WebError::IdentityUnavailable),
     }
 }
 

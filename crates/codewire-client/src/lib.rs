@@ -1252,6 +1252,8 @@ impl CodewireClient {
         &self,
         requests: impl IntoIterator<Item = UploadFileRequest>,
     ) -> Result<UploadFileResponse, ClientError> {
+        // Client-streaming calls take a stream; the chunks are already owned.
+        let requests = futures_util::stream::iter(requests.into_iter().collect::<Vec<_>>());
         self.files
             .upload_file_with_options(requests, self.auth_options().await?)
             .await

@@ -1865,14 +1865,25 @@ fn broker_lease_audit_event_to_proto(
     }
 }
 
+/// Parse entries. Every profile includes the store's one GitHub connection, so
+/// a legacy client's `github` entry is accepted and its credential ID discarded.
 fn profile_entries(
     entries: Vec<v1::AccessProfileEntry>,
 ) -> Result<BTreeMap<CapabilitySlot, CredentialId>, Status> {
     let mut parsed = BTreeMap::new();
+    let mut github = false;
     for entry in entries {
         let slot = CapabilitySlot::parse(entry.capability_slot).map_err(status_for_access_error)?;
         let credential =
             CredentialId::parse(entry.credential_id).map_err(status_for_access_error)?;
+        if slot == CapabilitySlot::github() {
+            if std::mem::replace(&mut github, true) {
+                return Err(Status::invalid_argument(
+                    "duplicate access profile capability slot",
+                ));
+            }
+            continue;
+        }
         if parsed.insert(slot, credential).is_some() {
             return Err(Status::invalid_argument(
                 "duplicate access profile capability slot",
@@ -2002,8 +2013,14 @@ pub(crate) fn derived_grant_to_proto(grant: DerivedGrant) -> v1::DerivedGrant {
     v1::DerivedGrant {
         environment_id: grant.environment_id.to_string(),
         environment_generation: grant.environment_generation,
-        profile_id: grant.profile_id.to_string(),
-        profile_revision: grant.profile_revision,
+        // Local grants always name their profile; a missing one encodes as
+        // revision 0, which every decoder rejects.
+        profile_id: grant
+            .profile
+            .as_ref()
+            .map(|profile| profile.id.to_string())
+            .unwrap_or_default(),
+        profile_revision: grant.profile.as_ref().map_or(0, |profile| profile.revision),
         capability_slot: grant.capability_slot.to_string(),
         credential_id: grant.credential_id.to_string(),
         credential_revocation_generation: grant.credential_revocation_generation,
@@ -2034,6 +2051,12 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::EnvironmentBindingAlreadyExists => {
             Status::already_exists("local environment access binding already exists")
         }
+        LocalCredentialError::GitHubAlreadyConnected => Status::already_exists(
+            "a local GitHub connection already exists; reconnect or delete it",
+        ),
+        LocalCredentialError::AmbiguousGitHubConnections => Status::failed_precondition(
+            "local credential metadata has more than one active GitHub connection",
+        ),
         LocalCredentialError::CredentialNotFound
         | LocalCredentialError::ProfileNotFound
         | LocalCredentialError::ProfileRevisionNotFound

@@ -11,7 +11,8 @@ export interface AccessProfileEntry {
   credential_id: string;
 }
 
-/** One immutable personal profile revision; no protected material. */
+/** One immutable personal profile revision; no protected material. Every
+ * profile includes the account's one GitHub connection; GitHub is never an entry. */
 export interface AccessProfile {
   id: string;
   name: string;
@@ -42,6 +43,9 @@ function revision(value: bigint): bigint {
 function toEntries(entries: readonly AccessProfileEntry[]) {
   const slots = new Set<string>();
   return entries.map((entry) => {
+    if (entry.capability_slot === "github") {
+      throw new Error("every profile includes the account's GitHub connection; it is never an entry");
+    }
     if (slots.has(entry.capability_slot)) {
       throw new Error("duplicate access profile capability slot");
     }

@@ -173,6 +173,7 @@ import tomllib
 root = Path.cwd()
 protected = tomllib.loads((root / "crates/codewire-protected-store/Cargo.toml").read_text())
 orchestration = tomllib.loads((root / "crates/codewire-orchestration/Cargo.toml").read_text())
+credential_service = tomllib.loads((root / "crates/codewire-credential-service/Cargo.toml").read_text())
 broker = tomllib.loads((root / "crates/codewire-credential-broker/Cargo.toml").read_text())
 assert protected["features"]["default"] == []
 assert protected["features"]["platform-test-support"] == ["platform"]
@@ -180,6 +181,9 @@ assert all(feature.startswith("dep:") for feature in protected["features"]["plat
 assert orchestration["dependencies"]["codewire-protected-store"]["features"] == ["platform"]
 assert orchestration["dev-dependencies"]["codewire-protected-store"]["features"] == ["platform-test-support"]
 assert orchestration["features"]["kind-e2e"].count("codewire-protected-store/platform-test-support") == 1
+# The production credential-service may use the synthetic KEK only through the
+# same non-promotable Kind feature (`kind-e2e.sh credentials real`).
+assert credential_service["features"]["kind-e2e"] == ["codewire-protected-store/platform-test-support"]
 assert broker["features"]["default"] == ["local"]
 assert set(broker["features"]["platform"]) == {"dep:codewire-platform-credentials", "dep:codewire-protected-store", "dep:tonic"}
 assert broker["dependencies"]["codewire-platform-credentials"]["optional"] is True
@@ -195,7 +199,10 @@ for path in manifests:
                     assert "platform-test-support" not in dependency.get("features", []), path
     for feature, members in manifest.get("features", {}).items():
         if any("platform-test-support" in member for member in members):
-            assert path == root / "crates/codewire-orchestration/Cargo.toml" and feature == "kind-e2e", path
+            assert feature == "kind-e2e" and path in {
+                root / "crates/codewire-orchestration/Cargo.toml",
+                root / "crates/codewire-credential-service/Cargo.toml",
+            }, path
 
 envelope = (root / "crates/codewire-protected-store/src/secret_envelope.rs").read_text()
 identity = (root / "crates/codewire-protected-store/src/openbao_workload_identity.rs").read_text()

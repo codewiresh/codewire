@@ -32,7 +32,8 @@ pub struct EnvironmentRow {
     pub projection_selection:
         Result<Option<PlatformProjectionSelection>, PlatformProjectionSelectionError>,
     /// Exact pinned profile slots from the same SQL capture, not provider DNS
-    /// families or process-wide administrator configuration.
+    /// families or process-wide administrator configuration. GitHub is a
+    /// managed client only while its owner's connection is active.
     pub managed_credential_clients:
         Result<codewire_access::ManagedCredentialClients, PlatformProjectionSelectionError>,
 }
@@ -77,6 +78,7 @@ fn decode_environment(row: sqlx::postgres::PgRow) -> anyhow::Result<EnvironmentR
         profile_revision_exists: row.try_get("profile_revision_exists")?,
         profile_slots: row.try_get("profile_slots")?,
         profile_slots_overflow: row.try_get("profile_slots_overflow")?,
+        github_connected: row.try_get("github_connected")?,
     };
     let projection_selection = captured.selection(&project_spec, &org_id, operation_generation);
     let managed_credential_clients = projection_selection

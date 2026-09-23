@@ -58,7 +58,7 @@ where
         connectrpc::Router::new().add_service(service),
         ConnectAuthLayer::oauth_bearer_only(AuthState { pool }),
         ProtocolPolicy::ConnectAndGrpc,
-        connectrpc::Limits::default().max_message_size(MAX_ENVELOPE_BYTES),
+        connectrpc::Limits::default().with_max_message_size(MAX_ENVELOPE_BYTES),
     )
     .layer(axum::middleware::from_fn(lifetime::bind))
 }

@@ -1,6 +1,6 @@
 //! Owner-scoped, metadata-only GitHub picker. The browser calls this BFF, never
-//! the provider or credential service directly. Selection stays at the exact
-//! profile revision already present in the Create Sandbox form.
+//! the provider or credential service directly. The authenticated owner selects
+//! their current GitHub singleton implicitly.
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -18,15 +18,10 @@ use codewire_proto::codewire::v1::{
 use connectrpc::{ConnectError, ErrorCode, client::ClientConfig};
 use serde::Deserialize;
 
-use crate::{
-    environment_source_forms::{SourceSubmission, exact_reference},
-    response::render_template,
-    state::AppState,
-    transport::BrowserTransport,
-};
+use crate::{response::render_template, state::AppState, transport::BrowserTransport};
 
 const PAGE_SIZE: i32 = 50;
-const MAX_PAGE_TOKEN: usize = 2048;
+const MAX_PAGE_TOKEN: usize = 128;
 const TIMEOUT: Duration = Duration::from_secs(35);
 
 // No Debug: form authority is not a diagnostic source.
@@ -35,7 +30,6 @@ const TIMEOUT: Duration = Duration::from_secs(35);
 pub(super) struct Submission {
     #[serde(rename = "_csrf")]
     csrf: String,
-    credential_profile: String,
     #[serde(default)]
     page_token: String,
 }
@@ -43,7 +37,6 @@ pub(super) struct Submission {
 #[derive(Template)]
 #[template(path = "github-repositories.html")]
 struct RepositoriesTemplate<'a> {
-    profile: &'a str,
     repositories: &'a [GithubRepository],
     next_page_token: &'a str,
     error: &'a str,
@@ -72,8 +65,7 @@ pub(super) async fn repositories(
         Err(()) => {
             return error_fragment(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "",
-                "Choose a current credential profile with a GitHub connection before browsing repositories.",
+                "The repository list is out of date. Reload repositories.",
             );
         }
     };
@@ -97,14 +89,12 @@ pub(super) async fn repositories(
             if !valid_response(&response, &form.page_token) {
                 return error_fragment(
                     StatusCode::BAD_GATEWAY,
-                    &form.credential_profile,
                     "The repository service returned an invalid response. Try again later.",
                 );
             }
             render_template(
                 StatusCode::OK,
                 RepositoriesTemplate {
-                    profile: &form.credential_profile,
                     repositories: &response.repositories,
                     next_page_token: &response.next_page_token,
                     error: "",
@@ -113,31 +103,40 @@ pub(super) async fn repositories(
         }
         Err(error) => {
             let (status, message) = error_message(&error);
-            error_fragment(status, &form.credential_profile, message)
+            error_fragment(status, message)
         }
     }
 }
 
 fn request(form: &Submission) -> Result<ListGithubRepositoriesRequest, ()> {
-    if form.credential_profile.len() > 128 || !valid_page_token(&form.page_token) {
+    if !valid_page_token(&form.page_token) {
         return Err(());
     }
-    let encoded = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("credential_profile", &form.credential_profile)
-        .finish();
-    let source = SourceSubmission::parse(encoded.as_bytes())?;
-    let profile = source.selection.credentials.as_option().ok_or(())?;
     Ok(ListGithubRepositoriesRequest {
-        profile_id: exact_reference(&profile.profile)?.into(),
-        profile_revision: source.selection.profile_revision.ok_or(())?,
         page_size: PAGE_SIZE,
         page_token: form.page_token.clone(),
         ..Default::default()
     })
 }
 
+/// Mirror the service's opaque continuation shape so a malformed browser value
+/// never reaches it: `v2.<page>.<size>.<64 lowercase hex>`. The service still
+/// recomputes the owner/connection binding on every request.
 fn valid_page_token(token: &str) -> bool {
-    token.len() <= MAX_PAGE_TOKEN && !token.chars().any(char::is_control)
+    if token.is_empty() {
+        return true;
+    }
+    let fields: Vec<_> = token.split('.').collect();
+    token.len() <= MAX_PAGE_TOKEN
+        && fields.len() == 4
+        && fields[0] == "v2"
+        && [fields[1], fields[2]].iter().all(|field| {
+            !field.is_empty() && field.len() <= 10 && field.bytes().all(|b| b.is_ascii_digit())
+        })
+        && fields[3].len() == 64
+        && fields[3]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn valid_response(response: &ListGithubRepositoriesResponse, previous: &str) -> bool {
@@ -184,19 +183,16 @@ fn error_message(error: &ConnectError) -> (StatusCode, &'static str) {
     match error.code {
         ErrorCode::Unauthenticated => (
             StatusCode::FORBIDDEN,
-            "Your session no longer permits this request. Sign in again and check the selected profile.",
+            "Your session no longer permits this request. Sign in again.",
         ),
-        ErrorCode::PermissionDenied => (
-            StatusCode::FORBIDDEN,
-            "Repository access was denied. Check the selected GitHub connection and its repository permissions in Settings.",
+        // GitHub still rejected the connection after one bounded refresh.
+        ErrorCode::PermissionDenied | ErrorCode::FailedPrecondition => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Reconnect required. Reconnect GitHub in Settings to browse repositories.",
         ),
         ErrorCode::Aborted | ErrorCode::NotFound => (
             StatusCode::CONFLICT,
-            "The selected profile or GitHub connection changed. Reload and select its current revision.",
-        ),
-        ErrorCode::FailedPrecondition => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "This profile needs an active GitHub connection. Connect GitHub and add it to the profile in Settings.",
+            "Your GitHub connection changed. Reload repositories.",
         ),
         ErrorCode::ResourceExhausted => (
             StatusCode::TOO_MANY_REQUESTS,
@@ -204,20 +200,19 @@ fn error_message(error: &ConnectError) -> (StatusCode, &'static str) {
         ),
         ErrorCode::InvalidArgument => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            "The repository request is no longer valid. Close the picker and start again.",
+            "The repository list is out of date. Reload repositories.",
         ),
         _ => (
             StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub repositories are temporarily unavailable. Try again later or enter a custom Git URL.",
+            "Repository access unavailable. Try again later or enter a custom Git URL.",
         ),
     }
 }
 
-fn error_fragment(status: StatusCode, profile: &str, error: &str) -> Response {
+fn error_fragment(status: StatusCode, error: &str) -> Response {
     render_template(
         status,
         RepositoriesTemplate {
-            profile,
             repositories: &[],
             next_page_token: "",
             error,
@@ -241,23 +236,27 @@ mod tests {
     }
 
     #[test]
-    fn request_keeps_exact_profile_revision_and_rejects_ambiguous_inputs() {
+    fn request_uses_owner_scope_and_rejects_invalid_cursors() {
         let mut form = Submission {
             csrf: "synthetic".into(),
-            credential_profile: "00000000-0000-4000-8000-000000000001@7".into(),
             page_token: String::new(),
         };
         let request = request(&form).unwrap();
-        assert_eq!(request.profile_id, "00000000-0000-4000-8000-000000000001");
-        assert_eq!(request.profile_revision, 7);
+        assert_eq!(request.page_size, PAGE_SIZE);
+        assert!(request.page_token.is_empty());
+        form.page_token = "not-a-cursor".into();
+        assert!(super::request(&form).is_err());
+        form.page_token = format!("v2.2.50.{}", "a".repeat(64));
+        assert_eq!(super::request(&form).unwrap().page_token, form.page_token);
         for invalid in [
-            "",
-            "name@7",
-            "00000000-0000-4000-8000-000000000001@0",
-            "00000000-0000-4000-8000-000000000001@7@8",
+            format!("v1.2.50.{}", "a".repeat(64)),
+            format!("v2.2.50.{}", "A".repeat(64)),
+            format!("v2..50.{}", "a".repeat(64)),
+            format!("v2.2.50.{}", "a".repeat(63)),
+            format!("v2.2.50.{}.extra", "a".repeat(64)),
         ] {
-            form.credential_profile = invalid.into();
-            assert!(super::request(&form).is_err());
+            form.page_token = invalid;
+            assert!(super::request(&form).is_err(), "{}", form.page_token);
         }
     }
 
@@ -288,7 +287,6 @@ mod tests {
     #[test]
     fn renders_selectable_metadata_and_closed_errors_only() {
         let html = RepositoriesTemplate {
-            profile: "profile@7",
             repositories: &[repo()],
             next_page_token: "next",
             error: "",
@@ -307,7 +305,6 @@ mod tests {
         let mut repository = repo();
         repository.default_branch = "main\"><script>alert(1)</script>".into();
         let html = RepositoriesTemplate {
-            profile: "profile@7",
             repositories: &[repository.clone()],
             next_page_token: "",
             error: "",

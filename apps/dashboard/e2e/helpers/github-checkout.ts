@@ -79,6 +79,15 @@ async function waitForGithubCheckoutSetup(environmentId: string) {
   throw new Error("GitHub checkout setup did not complete within 180000ms");
 }
 
+/** A profile's current revision; connecting or deleting GitHub never changes it. */
+export async function profileCurrentRevision(profileId: string): Promise<number> {
+  const [profile] = await sql`
+    SELECT current_revision FROM platform_access_profiles WHERE id = ${profileId}
+  `;
+  expect(profile).toBeTruthy();
+  return Number(profile.current_revision);
+}
+
 export async function githubGitCounters(): Promise<GitCounters> {
   const context = process.env.PLAYWRIGHT_KUBE_CONTEXT;
   if (process.env.PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE !== "1" || !context?.startsWith("kind-")) {
@@ -127,16 +136,16 @@ export async function githubGitCounters(): Promise<GitCounters> {
   return counters;
 }
 
-export async function verifyGithubCheckout(page: Page, orgId: string, profileId: string, before: GitCounters) {
+export async function verifyGithubCheckout(page: Page, orgId: string, before: GitCounters) {
+  // The checkout uses the account's GitHub connection; no profile is bound.
   const [created] = await sql`
-    SELECT e.id, e.project_spec, b.profile_id, b.profile_revision
+    SELECT e.id, e.project_spec, b.profile_id
     FROM environments e
-    JOIN platform_environment_access_bindings b ON b.environment_id = e.id
+    LEFT JOIN platform_environment_access_bindings b ON b.environment_id = e.id
     WHERE e.org_id = ${orgId} AND e.name = ${githubCheckoutName}
   `;
   expect(created?.id).toBeTruthy();
-  expect(created.profile_id).toBe(profileId);
-  expect(Number(created.profile_revision)).toBe(1);
+  expect(created.profile_id).toBeNull();
   expect(created.project_spec.install_command).toBe(githubCheckoutInstall);
   expect(created.project_spec.repositories).toEqual([{
     source: githubCheckoutUrl, branch: "main", destination: "/workspace/repository-01",

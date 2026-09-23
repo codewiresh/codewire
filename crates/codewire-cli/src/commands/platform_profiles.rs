@@ -7,7 +7,8 @@ use codewire_access::{AccessProfileScope, CredentialAuthKind, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
-    CredentialOperation, ParsedProfileSelector, parse_profile_selector, supported_profile_slot,
+    CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedProfileSelector, parse_profile_selector,
+    profile_set_credential, supported_profile_slot,
 };
 use super::*;
 
@@ -44,7 +45,8 @@ async fn handle_profile(
             args.output,
         ),
         CredentialProfileCommand::Set(args) => {
-            let credential = super::platform_credentials::resolve(client, &args.credential).await?;
+            let selector = profile_set_credential(&args)?;
+            let credential = super::platform_credentials::resolve(client, selector).await?;
             let kind = platform_authentication_kind(&credential)?;
             let slot = supported_profile_slot(
                 &args.slot,
@@ -80,6 +82,9 @@ async fn handle_profile(
                     OutputFormat::Text,
                 )
             }
+        }
+        CredentialProfileCommand::Unset(args) if args.slot == "github" => {
+            anyhow::bail!(GITHUB_ALWAYS_INCLUDED)
         }
         CredentialProfileCommand::Unset(args) => {
             let mut profile = resolve_profile(client, &args.profile, None).await?;
@@ -296,6 +301,8 @@ fn print_profiles(profiles: &[rpc::AccessProfile], output: OutputFormat) -> anyh
                 for entry in &profile.entries {
                     println!("  {}\t{}", entry.capability_slot, entry.credential_id);
                 }
+                // Every personal profile includes the account's GitHub connection.
+                println!("  github\taccount connection");
             }
         }
     }
@@ -351,7 +358,7 @@ mod tests {
             name: "work".into(),
             revision: REVISION,
             entries: vec![rpc::AccessProfileEntry {
-                capability_slot: "github".into(),
+                capability_slot: "ssh".into(),
                 credential_id: "other-existing-credential".into(),
                 ..Default::default()
             }],
@@ -363,7 +370,7 @@ mod tests {
         CredentialProfileCommand::Set(CredentialProfileSetArgs {
             profile: "user/work".into(),
             slot: "codex".into(),
-            credential: "name:codex-work".into(),
+            credential: Some("name:codex-work".into()),
         })
     }
 
@@ -533,13 +540,38 @@ mod tests {
             &client(&server),
             CredentialProfileCommand::Unset(CredentialProfileSlotArgs {
                 profile: "work".into(),
-                slot: "github".into(),
+                slot: "ssh".into(),
             }),
         )
         .await
         .unwrap();
         server.verify().await;
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn github_is_always_included_and_never_set_or_unset() {
+        let server = MockServer::start().await;
+        for command in [
+            CredentialProfileCommand::Set(CredentialProfileSetArgs {
+                profile: "user/work".into(),
+                slot: "github".into(),
+                credential: None,
+            }),
+            CredentialProfileCommand::Set(CredentialProfileSetArgs {
+                profile: "user/work".into(),
+                slot: "github".into(),
+                credential: Some("name:github-work".into()),
+            }),
+            CredentialProfileCommand::Unset(CredentialProfileSlotArgs {
+                profile: "work".into(),
+                slot: "github".into(),
+            }),
+        ] {
+            let error = handle_profile(&client(&server), command).await.unwrap_err();
+            assert!(error.to_string().contains("credentials connect github"));
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

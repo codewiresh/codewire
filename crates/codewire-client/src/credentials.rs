@@ -3,8 +3,8 @@
 use crate::*;
 
 impl CodewireClient {
-    /// One account-scoped repository page for an exact selected profile revision.
-    /// No provider material or runtime grant is returned. Never advances a profile.
+    /// One account-scoped repository page for an exact GitHub credential.
+    /// No provider material or runtime grant is returned.
     pub async fn list_github_repositories(
         &self,
         request: ListGithubRepositoriesRequest,

@@ -57,8 +57,10 @@ fn three_closed_placements_derive_exact_material_free_grants() {
             vec![DerivedGrant {
                 environment_id: context.environment_id.clone(),
                 environment_generation: 7,
-                profile_id: profile.id.clone(),
-                profile_revision: 3,
+                profile: Some(GrantProfile {
+                    id: profile.id.clone(),
+                    revision: 3,
+                }),
                 capability_slot: slot("codex"),
                 credential_id: selected.id.clone(),
                 credential_revocation_generation: 4,

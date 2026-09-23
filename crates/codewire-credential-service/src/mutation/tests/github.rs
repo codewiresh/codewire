@@ -84,15 +84,23 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
                     .any(|value| value == GITHUB_TOKEN.as_bytes())
             );
         }
-        // Connecting an account twice is create-only, never implicit upsert.
+        // GitHub is one account-level connection. A second connection fails
+        // closed before any provider challenge, never as an implicit upsert.
         h.reset_login().await?;
         let mut duplicate = h.rpc.enroll_github_request(Auth::Alice, json!({})).await?;
-        github_challenge(&mut duplicate).await?;
-        h.release()?;
         duplicate.error("already_exists").await?;
         h.drained().await?;
         ensure!(h.count().await? == 1 && !h.logged_out());
         ensure!(h.store.record(&owner, &credential_id).await? == original);
+        // A legacy named create is still a second connection.
+        let mut legacy = h
+            .rpc
+            .enroll_github_request(Auth::Alice, json!({"name":"work-github"}))
+            .await?;
+        legacy.error("already_exists").await?;
+        h.drained().await?;
+        ensure!(h.count().await? == 1 && !h.logged_out());
+        // Reconnect replaces the one connection in place.
         h.reset_login().await?;
         let mut stream = h
             .rpc
@@ -113,38 +121,6 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
         ensure!(h.count().await? == 1 && !h.logged_out());
         let stored = h.store.record(&owner, &credential_id).await?;
         ensure!(stored.version.material_generation == original.version.material_generation + 1);
-        // Legacy named clients still create and reconnect the same identity,
-        // even when its canonical reference is not the verified account name.
-        h.reset_login().await?;
-        let mut legacy = h
-            .rpc
-            .enroll_github_request(Auth::Alice, json!({"name":"work-github"}))
-            .await?;
-        github_challenge(&mut legacy).await?;
-        h.release()?;
-        let legacy_metadata = legacy.committed().await?;
-        h.drained().await?;
-        ensure!(legacy_metadata["name"] == "work-github");
-        ensure!(legacy_metadata["accountHint"] == "synthetic-user");
-        h.reset_login().await?;
-        let mut reconnect = h
-            .rpc
-            .enroll_github_request(
-                Auth::Alice,
-                json!({
-                    "name":"work-github", "credentialId":id(&legacy_metadata)?,
-                    "expectedRevocationGeneration":"1"
-                }),
-            )
-            .await?;
-        github_challenge(&mut reconnect).await?;
-        h.release()?;
-        let legacy_replaced = reconnect.committed().await?;
-        h.drained().await?;
-        ensure!(legacy_replaced["id"] == legacy_metadata["id"]);
-        ensure!(legacy_replaced["name"] == "work-github");
-        ensure!(legacy_replaced["revocationGeneration"] == "2");
-        ensure!(h.count().await? == 2 && !h.logged_out());
         Ok(())
     }
     .await;
@@ -180,6 +156,71 @@ async fn github_reconnect_rejects_wrong_provider_and_original_oauth_revocation()
         stream.error("failed_precondition").await?;
         h.drained().await?;
         ensure!(h.count().await? == 1 && !h.logged_out());
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_delete_is_direct_keeps_profiles_and_reconnect_restores_use() -> Result<()> {
+    let h = Harness::new().await?;
+    let result = async {
+        let owner = Owner::User(OwnerId::parse(ALICE)?);
+        let mut stream = h.rpc.enroll_github_request(Auth::Alice, json!({})).await?;
+        github_challenge(&mut stream).await?;
+        h.release()?;
+        let metadata = stream.committed().await?;
+        h.drained().await?;
+        let first = id(&metadata)?.to_owned();
+        let manager =
+            PlatformAccessProfileStore::new(h.db.pool.clone(), builtin_provider_catalog());
+        let profile = manager
+            .create(&owner, AccessProfileName::parse("work")?, BTreeMap::new())
+            .await?;
+        ensure!(
+            codewire_platform_credentials::active_github_connection(&h.db.pool, &owner)
+                .await?
+                .map(|id| id.to_string())
+                == Some(first.clone())
+        );
+
+        // GitHub has no user-visible revoke step: Delete removes the active
+        // connection and its protected material in one mutation.
+        let (status, value) = h
+            .rpc
+            .lifecycle("DeleteCredential", Auth::Cookie, &first, 1)
+            .await?;
+        ensure!(status.is_success(), "direct GitHub delete failed: {value}");
+        ensure!(h.count().await? == 0 && !h.logged_out());
+        ensure!(material_count(&h.db.pool, &first).await? == 0);
+        let kept = manager.get(&owner, &profile.id).await?;
+        ensure!(kept.revision == profile.revision && kept.includes_github());
+        ensure!(
+            codewire_platform_credentials::active_github_connection(&h.db.pool, &owner)
+                .await?
+                .is_none()
+        );
+
+        // Reconnect creates the one connection again; every profile that
+        // includes GitHub resolves it without a new revision.
+        h.reset_login().await?;
+        let mut stream = h.rpc.enroll_github_request(Auth::Alice, json!({})).await?;
+        github_challenge(&mut stream).await?;
+        h.release()?;
+        let reconnected = stream.committed().await?;
+        h.drained().await?;
+        let second = id(&reconnected)?.to_owned();
+        ensure!(second != first);
+        ensure!(
+            codewire_platform_credentials::active_github_connection(&h.db.pool, &owner)
+                .await?
+                .map(|id| id.to_string())
+                == Some(second)
+        );
+        let restored = manager.get(&owner, &profile.id).await?;
+        ensure!(restored.revision == profile.revision && restored.includes_github());
         Ok(())
     }
     .await;

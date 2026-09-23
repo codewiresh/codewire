@@ -18,7 +18,7 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codewire_gateway_proto::daemon::v1;
-use codewire_server_core::auth::{SESSION_COOKIE_NAME, authenticate};
+use codewire_server_core::auth::{SESSION_COOKIE_NAME, authenticate, hash_session_token};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -213,12 +213,18 @@ pub(super) async fn websocket(
         // attach a previous account's saved shell under the successor account,
         // even if both accounts can operate this environment.
         require_account(&coordinates.account_id, &user.user_id)?;
-        // The existing IdP always returns skip_2fa_setup=false. Match the
-        // dashboard's mandatory setup boundary without reading factor secrets.
+        // Match the dashboard's two-factor setup boundary without reading
+        // factor secrets: an enabled factor, or setup skipped by this same
+        // unexpired browser session.
         let eligible: bool = sqlx::query_scalar(
-            "SELECT COALESCE(two_factor_enabled, false) FROM users WHERE id = $1 AND enabled",
+            "SELECT COALESCE(u.two_factor_enabled, false) OR EXISTS ( \
+                 SELECT 1 FROM sessions AS s \
+                  WHERE s.token_hash = $2 AND s.user_id = u.id AND s.expires_at > NOW() \
+                    AND s.two_factor_setup_skipped_at IS NOT NULL) \
+             FROM users AS u WHERE u.id = $1 AND u.enabled",
         )
         .bind(&user.user_id)
+        .bind(hash_session_token(&cookie))
         .fetch_optional(&state.pool)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?

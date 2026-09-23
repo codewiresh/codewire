@@ -285,9 +285,9 @@ impl fmt::Debug for CreatedSession {
     }
 }
 
-/// Mirrors `auth.AuthResponse`. `skip_2fa_setup` is `omitempty` on the
-/// Go side and the idp service has no `Skip2FASetup` config, so it is
-/// always `false` here and omitted from the body.
+/// Mirrors `auth.AuthResponse`. `skip_2fa_setup` is omitted unless the
+/// current browser session skipped two-factor setup and the account has no
+/// enabled factor.
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct AuthResponse {
     pub(crate) user: UserResponse,
@@ -1378,7 +1378,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
 
     // Sliding-expiry bump + fetch (mirrors auth.GetSessionByToken).
     let token_hash = hash_session_token(&token);
-    let row: Option<(String, String, NaiveDateTime)> = match sqlx::query_as(
+    let row: Option<(String, String, NaiveDateTime, bool)> = match sqlx::query_as(
         r#"
         UPDATE sessions AS session
            SET expires_at = GREATEST(session.expires_at, NOW() + ($2::bigint * interval '1 second')),
@@ -1388,7 +1388,8 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
            AND session.expires_at > NOW()
            AND session.user_id = user_account.id
            AND user_account.enabled
-        RETURNING session.id, session.user_id, session.expires_at
+        RETURNING session.id, session.user_id, session.expires_at,
+                  session.two_factor_setup_skipped_at IS NOT NULL
         "#,
     )
     .bind(&token_hash)
@@ -1403,7 +1404,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
         }
     };
 
-    let Some((session_id, user_id, expires_at)) = row else {
+    let Some((session_id, user_id, expires_at, setup_skipped)) = row else {
         return Json(serde_json::Value::Null).into_response();
     };
 
@@ -1428,6 +1429,9 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
     let Some(user) = user else {
         return Json(serde_json::Value::Null).into_response();
     };
+    // Skipping setup applies only to this session and never to an account
+    // with an enabled factor.
+    let skip_2fa_setup = setup_skipped && !user.two_factor_enabled.unwrap_or(false);
 
     Json(AuthResponse {
         user: user_response(user),
@@ -1435,7 +1439,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             id: session_id,
             expires_at: format_time(expires_at),
         },
-        skip_2fa_setup: false,
+        skip_2fa_setup,
     })
     .into_response()
 }
