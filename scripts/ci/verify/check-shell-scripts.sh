@@ -59,40 +59,6 @@ self_test() {
   printf 'ShellCheck warning-ratchet self-test: OK\n'
 }
 
-# Internal: analyze the given files in SHELLCHECK_JOBS round-robin batches in
-# parallel, write each batch's json1 report under the output directory, and exit
-# with the first batch error (> 1), else 1 when any batch found warnings, else 0.
-# The caller bounds this whole analysis with one deadline.
-if [[ "${1:-}" == --analyze-batches ]]; then
-  output_dir="$2"
-  jobs="$3"
-  shellcheck_bin="$4"
-  shift 4
-  files=("$@")
-  pids=()
-  trap 'kill "${pids[@]}" 2>/dev/null; exit 143' TERM INT
-  for ((batch = 0; batch < jobs && batch < ${#files[@]}; batch++)); do
-    batch_files=()
-    for ((index = batch; index < ${#files[@]}; index += jobs)); do
-      batch_files+=("${files[index]}")
-    done
-    "$shellcheck_bin" --external-sources --severity=warning --format=json1 "${batch_files[@]}" \
-      >"$output_dir/$batch.json" &
-    pids+=("$!")
-  done
-  combined=0
-  for pid in "${pids[@]}"; do
-    status=0
-    wait "$pid" || status=$?
-    if (( status > 1 )); then
-      (( combined > 1 )) || combined=$status
-    elif (( status == 1 && combined == 0 )); then
-      combined=1
-    fi
-  done
-  exit "$combined"
-fi
-
 if [[ "${1:-}" == --self-test ]]; then
   [[ $# -eq 1 ]] || {
     printf 'usage: check-shell-scripts.sh [--self-test]\n' >&2
@@ -107,26 +73,17 @@ fi
 }
 
 cd "$ROOT"
-# One ShellCheck process over every tracked script took about four minutes on
-# CI workers. Batches run across the available cores under one bounded
-# deadline; SHELLCHECK_JOBS=1 is the single-process analysis.
-shellcheck_timeout_seconds="${SHELLCHECK_TIMEOUT_SECONDS:-300}"
+# The full tracked-script analysis takes four to five minutes on loaded CI
+# workers and outgrew a 300-second deadline. Keep a bounded deadline with
+# headroom; one process keeps memory bounded (parallel batches that follow
+# sourced files exceeded worker memory).
+shellcheck_timeout_seconds="${SHELLCHECK_TIMEOUT_SECONDS:-600}"
 if [[ ! "$shellcheck_timeout_seconds" =~ ^[0-9]+$ ]] \
     || (( 10#$shellcheck_timeout_seconds < 1 )) \
     || (( 10#$shellcheck_timeout_seconds > 900 )); then
   printf 'SHELLCHECK_TIMEOUT_SECONDS must be an integer from 1 through 900\n' >&2
   exit 2
 fi
-default_jobs="$(nproc 2>/dev/null || printf '1')"
-(( default_jobs <= 16 )) || default_jobs=16
-shellcheck_jobs="${SHELLCHECK_JOBS:-$default_jobs}"
-if [[ ! "$shellcheck_jobs" =~ ^[0-9]+$ ]] \
-    || (( 10#$shellcheck_jobs < 1 )) \
-    || (( 10#$shellcheck_jobs > 64 )); then
-  printf 'SHELLCHECK_JOBS must be an integer from 1 through 64\n' >&2
-  exit 2
-fi
-shellcheck_jobs=$((10#$shellcheck_jobs))
 shellcheck_bin="$(scripts/ci/setup/setup-shellcheck.sh)"
 mapfile -d '' shell_files < <(
   git ls-files -z -- '*.sh'
@@ -136,16 +93,13 @@ mapfile -d '' shell_files < <(
   exit 1
 }
 
-printf 'ShellCheck analysis: start (scripts=%s jobs=%s timeout_seconds=%s)\n' \
-  "${#shell_files[@]}" "$shellcheck_jobs" "$shellcheck_timeout_seconds"
-shellcheck_reports="$(mktemp -d "${TMPDIR:-/tmp}/codewire-shellcheck.XXXXXX")"
-trap 'rm -rf -- "$shellcheck_reports"' EXIT
+printf 'ShellCheck analysis: start (scripts=%s timeout_seconds=%s)\n' \
+  "${#shell_files[@]}" "$shellcheck_timeout_seconds"
 shellcheck_started_at=$SECONDS
 set +e
-timeout --foreground --signal=TERM --kill-after=5s \
+findings_json="$(timeout --foreground --signal=TERM --kill-after=5s \
   "${shellcheck_timeout_seconds}s" \
-  "$0" --analyze-batches "$shellcheck_reports" "$shellcheck_jobs" "$shellcheck_bin" \
-  "${shell_files[@]}"
+  "$shellcheck_bin" --severity=warning --format=json1 "${shell_files[@]}")"
 shellcheck_status=$?
 set -e
 shellcheck_elapsed_seconds=$((SECONDS - shellcheck_started_at))
@@ -161,8 +115,6 @@ if [[ "$shellcheck_status" -gt 1 ]]; then
   exit "$shellcheck_status"
 fi
 
-findings_json="$(jq -s '{comments: (map(.comments) | add // [])}' \
-  "$shellcheck_reports"/*.json)"
 expected_findings="$(printf '%s\n' "$SHELLCHECK_BASELINE_TSV" | normalize_baseline)"
 actual_findings="$(printf '%s\n' "$findings_json" | group_findings)"
 compare_findings "$expected_findings" "$actual_findings" || {
