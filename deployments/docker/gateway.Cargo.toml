@@ -54,8 +54,8 @@ axum = { version = "0.8", features = ["macros", "json"] }
 base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-connectrpc = { git = "https://github.com/connectrpc/connect-rust.git", rev = "4da239d7a18b7dfeb40002b00f1f37e93891db17" }
-connectrpc-build = "=0.8.0"
+connectrpc = "=0.9.1"
+connectrpc-build = "=0.9.0"
 crc32fast = "1"
 ed25519-dalek = "2"
 futures = "0.3"
@@ -89,8 +89,8 @@ secret-service = "5.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-buffa = { version = "=0.8.1", features = ["json"] }
-buffa-types = { version = "=0.8.1", features = ["json"] }
+buffa = { version = "=0.9.1", features = ["json"] }
+buffa-types = { version = "=0.9.1", features = ["json"] }
 shell-words = "1"
 sha2 = "0.10"
 ssh-key = { version = "0.7.0-rc.10", features = ["ed25519"] }
