@@ -93,7 +93,9 @@ for suite in "${!wanted[@]}"; do
 done
 log "suites: ${selected[*]}"
 for suite in "${selected[@]}"; do
-  KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" "$ROOT/scripts/ci/verify/kind-e2e.sh" suite "$suite" \
-    || die "suite ${suite} failed"
+  # Test the current source against the cluster as deployed, not only an
+  # unchanged tree that matches the image receipt.
+  KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" KIND_RETAINED_USE_CLUSTER_WORKSPACE=1 \
+    "$ROOT/scripts/ci/verify/kind-e2e.sh" suite "$suite" || die "suite ${suite} failed"
 done
 log "all selected suites green"

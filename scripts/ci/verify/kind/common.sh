@@ -813,6 +813,15 @@ validate_sealed_kind_images() {
 }
 
 kind_workspace_runtime_image() {
+  # Local development (`make kind-test`) reruns retained suites against the
+  # cluster as deployed, from a worktree that has usually changed since. There
+  # the cluster's recorded workspace image is authoritative; the gate and CI
+  # never set this and keep the verified-source receipt below.
+  if [ "${KIND_RETAINED_USE_CLUSTER_WORKSPACE:-0}" = 1 ]; then
+    kubectl --request-timeout=10s -n "$NS" get "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" \
+      -o jsonpath='{.data.workspace-image}'
+    return $?
+  fi
   local sealed_status=0
   validate_sealed_kind_images || sealed_status=$?
   [ "$sealed_status" -le 1 ] || return "$sealed_status"
