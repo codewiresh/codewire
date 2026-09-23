@@ -313,108 +313,114 @@ async fn profiles_are_exact_owner_scoped_and_use_only_explicit_catalog_metadata(
 async fn concurrent_profile_cas_preserves_immutable_bound_revision_until_explicit_rebind()
 -> Result<()> {
     let db = TestDatabase::create().await?;
-    let result =
-        async {
-            let user = db.user("revision-user").await?;
-            let org = db.organization("revision-org").await?;
-            let store = db.store(Arc::new(SyntheticKek::default()));
-            let first = store
-                .create(&user, registration("First", Kind::OAuth), &value(OLD_VALUE))
-                .await?;
-            let second = store
-                .create(
-                    &user,
-                    registration("Second", Kind::OAuth),
-                    &value(NEW_VALUE),
-                )
-                .await?;
-            let context = environment(
-                &db,
+    let result = async {
+        let user = db.user("revision-user").await?;
+        let org = db.organization("revision-org").await?;
+        let store = db.store(Arc::new(SyntheticKek::default()));
+        let first = store
+            .create(&user, registration("First", Kind::OAuth), &value(OLD_VALUE))
+            .await?;
+        let second = store
+            .create(
                 &user,
-                &org,
-                "revision-env",
-                &[first.metadata.id.clone(), second.metadata.id.clone()],
+                registration("Second", Kind::OAuth),
+                &value(NEW_VALUE),
             )
             .await?;
-            let profiles = profiles(&db);
-            let original = profiles
-                .create(&user, name("work"), entries(&first.metadata.id))
-                .await?;
-            let selected = profiles
-                .create_binding(
-                    &context,
-                    binding(&context, &original),
-                    Some(&context.user_id),
-                )
-                .await?;
-            let (left, right) = tokio::join!(
-                profiles.update(&user, &original.id, 1, entries(&second.metadata.id)),
-                profiles.update(&user, &original.id, 1, BTreeMap::new()),
-            );
-            ensure!(left.is_ok() != right.is_ok());
-            let updated = match (left, right) {
-                (Ok(profile), Err(Error::StaleRevision))
-                | (Err(Error::StaleRevision), Ok(profile)) => profile,
-                _ => anyhow::bail!("profile CAS did not have exactly one winner"),
-            };
-            ensure!(updated.revision == 2);
-            ensure!(profiles.get(&user, &original.id).await? == updated);
-            ensure!(profiles.get_revision(&user, &original.id, 1).await? == original);
-            ensure!(profiles.get_revision(&user, &original.id, 3).await == Err(Error::NotFound));
-            ensure!(profiles.get_binding(&context).await? == selected);
-            let old_grants = profiles.evaluate_grants(&context).await?;
-            ensure!(
-                old_grants.len() == 1
-                    && old_grants[0].credential_id == first.metadata.id
-                    && old_grants[0].profile_revision == 1
-            );
-            let replacement = binding(&context, &updated);
+        let context = environment(
+            &db,
+            &user,
+            &org,
+            "revision-env",
+            &[first.metadata.id.clone(), second.metadata.id.clone()],
+        )
+        .await?;
+        let profiles = profiles(&db);
+        let original = profiles
+            .create(&user, name("work"), entries(&first.metadata.id))
+            .await?;
+        let selected = profiles
+            .create_binding(
+                &context,
+                binding(&context, &original),
+                Some(&context.user_id),
+            )
+            .await?;
+        let (left, right) = tokio::join!(
+            profiles.update(&user, &original.id, 1, entries(&second.metadata.id)),
+            profiles.update(&user, &original.id, 1, BTreeMap::new()),
+        );
+        ensure!(left.is_ok() != right.is_ok());
+        let updated = match (left, right) {
+            (Ok(profile), Err(Error::StaleRevision)) | (Err(Error::StaleRevision), Ok(profile)) => {
+                profile
+            }
+            _ => anyhow::bail!("profile CAS did not have exactly one winner"),
+        };
+        ensure!(updated.revision == 2);
+        ensure!(profiles.get(&user, &original.id).await? == updated);
+        ensure!(profiles.get_revision(&user, &original.id, 1).await? == original);
+        ensure!(profiles.get_revision(&user, &original.id, 3).await == Err(Error::NotFound));
+        ensure!(profiles.get_binding(&context).await? == selected);
+        let old_grants = profiles.evaluate_grants(&context).await?;
+        ensure!(
+            old_grants.len() == 1
+                && old_grants[0].credential_id == first.metadata.id
+                && old_grants[0]
+                    .profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.revision == 1)
+        );
+        let replacement = binding(&context, &updated);
+        profiles
+            .replace_binding(
+                &context,
+                &selected,
+                replacement.clone(),
+                Some(&context.user_id),
+            )
+            .await?;
+        ensure!(profiles.get_binding(&context).await? == replacement);
+        let new_grants = profiles.evaluate_grants(&context).await?;
+        ensure!(new_grants.len() == updated.entries.len());
+        ensure!(new_grants.iter().all(|grant| {
+            grant
+                .profile
+                .as_ref()
+                .is_some_and(|profile| profile.revision == 2)
+                && grant.credential_id == second.metadata.id
+        }));
+        ensure!(
             profiles
                 .replace_binding(
                     &context,
                     &selected,
-                    replacement.clone(),
-                    Some(&context.user_id),
+                    selected.clone(),
+                    Some(&context.user_id)
                 )
-                .await?;
-            ensure!(profiles.get_binding(&context).await? == replacement);
-            let new_grants = profiles.evaluate_grants(&context).await?;
-            ensure!(new_grants.len() == updated.entries.len());
-            ensure!(
-                new_grants.iter().all(|grant| grant.profile_revision == 2
-                    && grant.credential_id == second.metadata.id)
-            );
-            ensure!(
-                profiles
-                    .replace_binding(
-                        &context,
-                        &selected,
-                        selected.clone(),
-                        Some(&context.user_id)
-                    )
-                    .await
-                    == Err(Error::StaleBinding)
-            );
-            ensure!(profiles.delete_binding(&context, &selected).await == Err(Error::StaleBinding));
-            profiles.delete_binding(&context, &replacement).await?;
-            // An explicit old revision selection is supported, never an implicit rebind.
-            profiles
-                .create_binding(&context, selected.clone(), Some(&context.user_id))
-                .await?;
-            ensure!(profiles.evaluate_grants(&context).await? == old_grants);
-            let generations: (i64, i64) = sqlx::query_as(
-                "SELECT environment_operation_generation, \
+                .await
+                == Err(Error::StaleBinding)
+        );
+        ensure!(profiles.delete_binding(&context, &selected).await == Err(Error::StaleBinding));
+        profiles.delete_binding(&context, &replacement).await?;
+        // An explicit old revision selection is supported, never an implicit rebind.
+        profiles
+            .create_binding(&context, selected.clone(), Some(&context.user_id))
+            .await?;
+        ensure!(profiles.evaluate_grants(&context).await? == old_grants);
+        let generations: (i64, i64) = sqlx::query_as(
+            "SELECT environment_operation_generation, \
              (SELECT count(*) FROM platform_access_profile_revisions WHERE profile_id=$2) \
              FROM environments WHERE id=$1",
-            )
-            .bind(context.environment_id.as_str())
-            .bind(original.id.as_str())
-            .fetch_one(&db.pool)
-            .await?;
-            ensure!(generations == (7, 2));
-            Ok(())
-        }
-        .await;
+        )
+        .bind(context.environment_id.as_str())
+        .bind(original.id.as_str())
+        .fetch_one(&db.pool)
+        .await?;
+        ensure!(generations == (7, 2));
+        Ok(())
+    }
+    .await;
     db.finish(result).await
 }
 

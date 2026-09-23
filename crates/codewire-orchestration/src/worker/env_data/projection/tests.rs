@@ -360,3 +360,69 @@ fn app_only_and_other_clients_preserve_unselected_ordinary_provider_settings() {
         "v1:codex"
     );
 }
+
+#[test]
+fn a_selected_github_repository_uses_the_creators_connection_without_a_profile() {
+    let repository = |source: &str| codewire_project::RepositorySpec {
+        source: source.into(),
+        destination: "/workspace/repository".into(),
+        ..Default::default()
+    };
+    let project = |source: &str| ProjectSpec {
+        repositories: vec![repository(source)],
+        ..ProjectSpec::default()
+    };
+    let github = project("https://github.com/synthetic-user/private.git");
+    let bare = capture()
+        .selection(&ProjectSpec::default(), "synthetic-org", 7)
+        .unwrap();
+    assert_eq!(bare, None);
+
+    // The selection exists only to carry the GitHub client; it reserves no
+    // GitHub names, so the digest is the same as any other profile-free one.
+    let selected = capture()
+        .selection(&github, "synthetic-org", 7)
+        .unwrap()
+        .expect("account GitHub selection");
+    assert!(selected.profile.is_none());
+    assert_eq!(
+        selected.reserved_keys,
+        platform_projection_reserved_keys([]).unwrap()
+    );
+    assert_eq!(
+        capture().managed_credential_clients(&github).unwrap(),
+        codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap()
+    );
+
+    // No connection, or no GitHub repository selected: no client, no selection.
+    let mut disconnected = capture();
+    disconnected.github_connected = false;
+    for (captured, project) in [
+        (disconnected, github.clone()),
+        (
+            capture(),
+            project("https://gitlab.com/synthetic-user/private.git"),
+        ),
+        (
+            capture(),
+            project("https://github.com.example/synthetic-user/private.git"),
+        ),
+    ] {
+        assert_eq!(captured.selection(&project, "synthetic-org", 7), Ok(None));
+        assert_eq!(
+            captured.managed_credential_clients(&project).unwrap(),
+            Default::default()
+        );
+    }
+
+    // An organization profile never carries the creator's GitHub.
+    let (mut organization_project, mut organization) = selected_profile();
+    organization_project.repositories = github.repositories.clone();
+    organization.github_connected = false;
+    assert!(
+        !organization
+            .managed_credential_clients(&organization_project)
+            .unwrap()
+            .contains(codewire_access::ManagedCredentialClient::GitHub)
+    );
+}

@@ -898,8 +898,7 @@ fn validate_request_binding(
     let now = current_unix_time()?;
     if current.environment_id != admitted.environment_id
         || current.environment_generation != admitted.environment_generation
-        || current.profile_id != admitted.profile_id
-        || current.profile_revision != admitted.profile_revision
+        || current.profile != admitted.profile
         || current.capability_slot != admitted.capability_slot
         || current.credential_id != admitted.credential_id
         || admitted.expires_at_unix.is_some_and(|expiry| expiry <= now)
@@ -2663,7 +2662,10 @@ mod tests {
             // The selected credential is valid under the new revision;
             // failures below must be continuity denial, not missing access.
             let grant = self.current_grant();
-            assert_eq!(grant.profile_revision, binding.profile_revision + 1);
+            assert_eq!(
+                grant.profile.as_ref().map(|profile| profile.revision),
+                Some(binding.profile_revision + 1)
+            );
             assert_eq!(&grant.credential_id, credential_id);
         }
 

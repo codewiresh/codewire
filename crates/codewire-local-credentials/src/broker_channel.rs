@@ -1209,8 +1209,16 @@ where
                         route,
                         decision: BrokerLeaseAuditDecision::Admitted,
                         credential_id: Some(admission.credential.metadata.id.clone()),
-                        profile_id: Some(admission.grant.profile_id.clone()),
-                        profile_revision: Some(admission.grant.profile_revision),
+                        profile_id: admission
+                            .grant
+                            .profile
+                            .as_ref()
+                            .map(|profile| profile.id.clone()),
+                        profile_revision: admission
+                            .grant
+                            .profile
+                            .as_ref()
+                            .map(|profile| profile.revision),
                         credential_revocation_generation: Some(
                             admission.grant.credential_revocation_generation,
                         ),
@@ -1279,8 +1287,10 @@ where
         // refresh permit then carries that same profile through Start/recovery.
         if !self.local_profile.as_ref().is_some_and(|selected| {
             selected.environment_id == grant.environment_id
-                && selected.profile_id == grant.profile_id
-                && selected.profile_revision == grant.profile_revision
+                && grant.profile.as_ref().is_some_and(|profile| {
+                    selected.profile_id == profile.id
+                        && selected.profile_revision == profile.revision
+                })
         }) {
             return Err(Status::permission_denied(
                 "credential refresh profile changed",

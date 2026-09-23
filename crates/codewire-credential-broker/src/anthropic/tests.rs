@@ -7,8 +7,8 @@ use base64::{
 };
 use codewire_access::{
     AccessProfileId, BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialId,
-    CredentialMetadata, DerivedGrant, EnvironmentId, GrantPermission, Owner, OwnerId, Placement,
-    ProviderId,
+    CredentialMetadata, DerivedGrant, EnvironmentId, GrantPermission, GrantProfile, Owner, OwnerId,
+    Placement, ProviderId,
 };
 use zeroize::Zeroizing;
 
@@ -50,8 +50,10 @@ impl Lease {
             grant: DerivedGrant {
                 environment_id: EnvironmentId::parse("synthetic-environment").unwrap(),
                 environment_generation: 3,
-                profile_id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
-                profile_revision: 4,
+                profile: Some(GrantProfile {
+                    id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                    revision: 4,
+                }),
                 capability_slot: CapabilitySlot::parse(PROVIDER).unwrap(),
                 credential_id,
                 credential_revocation_generation: 7,
@@ -388,7 +390,7 @@ fn every_lease_coordinate_and_expiry_is_checked_before_borrowing_material() {
                     CredentialId::parse("33333333-3333-4333-8333-333333333333").unwrap()
             }
             9 => lease.grant.environment_generation = 0,
-            10 => lease.grant.profile_revision = 0,
+            10 => lease.grant.profile.as_mut().unwrap().revision = 0,
             11 => lease.material_generation = 0,
             12 => lease.permission.operation = BrokerOperationId::parse("count-tokens").unwrap(),
             13 => lease.permission.route = BrokerRouteId::parse("openai-api").unwrap(),

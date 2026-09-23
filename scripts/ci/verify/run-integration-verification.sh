@@ -251,7 +251,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test authority \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential restricted-role matrix" "$logfile" 9
+  assert_passed_count "platform credential restricted-role matrix" "$logfile" 10
 
   logfile="$RUN_DIR/platform-broker-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

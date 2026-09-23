@@ -332,11 +332,14 @@ pub fn environment_template_opts(
         .map_err(|_| anyhow::anyhow!("invalid managed credential client selection"))?;
     managed_credential_clients
         .check_collisions(env.project_spec.environment.keys().map(String::as_str))?;
+    // Without a profile, the only managed client is the creator's own GitHub
+    // connection for a selected GitHub repository.
+    let account_github = codewire_access::ManagedCredentialClients::from_profile_slots(["github"])?;
     anyhow::ensure!(
         managed_credential_clients == Default::default()
-            || selection
-                .as_ref()
-                .is_some_and(|selection| selection.profile.is_some()),
+            || selection.as_ref().is_some_and(|selection| {
+                selection.profile.is_some() || managed_credential_clients == account_github
+            }),
         "managed credential clients require an exact selected profile"
     );
     anyhow::ensure!(

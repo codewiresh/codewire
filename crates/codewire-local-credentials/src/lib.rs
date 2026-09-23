@@ -2658,7 +2658,11 @@ fn load_credential_refresh_marker(
                 || permit.request_id.is_nil()
                 || permit.grant.credential_id != *credential_id
                 || permit.grant.environment_generation == 0
-                || permit.grant.profile_revision == 0
+                || permit
+                    .grant
+                    .profile
+                    .as_ref()
+                    .is_none_or(|profile| profile.revision == 0)
                 || permit.grant.credential_revocation_generation == 0
                 || permit.current_material_generation == 0
                 || permit.current_material_generation.checked_add(1)

@@ -314,7 +314,10 @@ fn rotation_changes_grant_generation_without_profile_revision() {
         1_800_000_000,
     )
     .expect("rotated grant");
-    assert_eq!(grants[0].profile_revision, 1);
+    assert_eq!(
+        grants[0].profile.as_ref().map(|profile| profile.revision),
+        Some(1)
+    );
     assert_eq!(grants[0].credential_revocation_generation, 3);
 }
 
@@ -760,4 +763,85 @@ fn profiles_grant_only_the_authorized_current_github_connection() {
     )
     .unwrap();
     assert!(cross_user.is_empty());
+}
+
+#[test]
+fn a_platform_environment_without_a_profile_uses_the_creators_authorized_github() {
+    let user = Owner::User(owner_id("user-one"));
+    let catalog = builtin_provider_catalog();
+    let active = CredentialMetadata {
+        placement: Placement::Platform,
+        ..github_connection("github-one", user, CredentialStatus::Active)
+    };
+    let credentials = [(active.id.clone(), active.clone())]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    // Selecting a repository is the creator's own consent: an organization
+    // environment needs no personal-profile confirmation for it.
+    let platform = |authorized: Vec<CredentialId>| GrantContext {
+        placement: GrantPlacement::Platform,
+        organization_id: Some(owner_id("org-one")),
+        ..context(authorized)
+    };
+
+    let grant = derive_account_github_grant(
+        &platform(vec![active.id.clone()]),
+        &credentials,
+        &catalog,
+        1_800_000_000,
+    )
+    .unwrap()
+    .expect("authorized account connection");
+    assert_eq!(grant.capability_slot, CapabilitySlot::github());
+    assert_eq!(grant.credential_id, active.id);
+    assert_eq!(grant.profile, None);
+
+    // Not authorized by launch authority, or no connection: omitted.
+    for (authorized, credentials) in [
+        (Vec::new(), credentials.clone()),
+        (vec![active.id.clone()], BTreeMap::new()),
+    ] {
+        assert_eq!(
+            derive_account_github_grant(&platform(authorized), &credentials, &catalog, 1),
+            Ok(None)
+        );
+    }
+
+    // Another user's connection is never the creator's.
+    let other = CredentialMetadata {
+        placement: Placement::Platform,
+        ..github_connection(
+            "github-other",
+            Owner::User(owner_id("user-two")),
+            CredentialStatus::Active,
+        )
+    };
+    let foreign = [(other.id.clone(), other.clone())]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        derive_account_github_grant(&platform(vec![other.id]), &foreign, &catalog, 1),
+        Ok(None)
+    );
+
+    // Only hosted platform environments hold an account grant.
+    for placement in [GrantPlacement::Local, GrantPlacement::PlatformToLocal] {
+        let context = GrantContext {
+            placement,
+            ..platform(vec![active.id.clone()])
+        };
+        assert!(derive_account_github_grant(&context, &credentials, &catalog, 1).is_err());
+    }
+
+    // An authorized but revoked connection fails closed.
+    let revoked = CredentialMetadata {
+        status: CredentialStatus::Revoked,
+        ..active.clone()
+    };
+    let revoked = [(revoked.id.clone(), revoked)]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        derive_account_github_grant(&platform(vec![active.id]), &revoked, &catalog, 1).is_err()
+    );
 }

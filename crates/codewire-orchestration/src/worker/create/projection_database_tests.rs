@@ -402,6 +402,40 @@ async fn database_capture_selects_github_client_only_while_connected() -> Result
         let (deleted_digest, _, deleted_clients) = capture("deleted").await?;
         ensure!(deleted_clients == "v1:codex", "deleted: {deleted_clients}");
         ensure!(deleted_digest == missing_digest);
+
+        // Without a profile, a selected GitHub repository uses the creator's
+        // connection while it is active, and reserves no GitHub names.
+        sqlx::query("DELETE FROM platform_environment_access_bindings WHERE environment_id=$1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        store_project(
+            &db,
+            &ProjectSpec {
+                repositories: vec![codewire_project::RepositorySpec {
+                    source: "https://github.com/synthetic-user/private.git".into(),
+                    destination: "/workspace/private".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await?;
+        let disconnected = load_environment(&db.pool, ENVIRONMENT).await?;
+        ensure!(matches!(disconnected.projection_selection, Ok(None)));
+        ensure!(disconnected.managed_credential_clients == Ok(Default::default()));
+        sqlx::query(
+            "INSERT INTO platform_credentials \
+             (id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) \
+             VALUES ($1,$2,'github','oauth','Synthetic GitHub','active',1,1)",
+        )
+        .bind(&github)
+        .bind(CREATOR)
+        .execute(&db.pool)
+        .await?;
+        let (_, account_reserved, account_clients) = capture("account").await?;
+        ensure!(account_clients == "v2:10", "account: {account_clients}");
+        ensure!(account_reserved == codewire_project::platform_projection_reserved_keys([])?);
         Ok(())
     }
     .await;

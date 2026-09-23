@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use codewire_access::{
     AccessError, AccessProfile, AccessProfileId, AccessProfileName, CapabilitySlot, CredentialId,
     CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, GrantContext,
-    GrantPlacement, Owner, OwnerId, Placement, ProviderCatalog, ProviderId, derive_grants,
-    validate_profile_entries,
+    GrantPlacement, Owner, OwnerId, Placement, ProviderCatalog, ProviderId,
+    derive_account_github_grant, derive_grants, validate_profile_entries,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -597,17 +597,44 @@ impl PlatformAccessProfileStore {
     ) -> Result<Vec<DerivedGrant>, Error> {
         let mut tx = self.begin_transaction().await?;
         lock_environment(&mut tx, context, true, false).await?;
-        let binding = load_binding(&mut tx, context).await?;
-        let grants = self
-            .admit_binding(
-                &mut tx,
-                context,
-                &binding.binding,
-                binding.personal_owner_confirmed_by.as_ref(),
-            )
-            .await?;
+        let grants = match find_binding(&mut tx, context).await? {
+            Some(binding) => {
+                self.admit_binding(
+                    &mut tx,
+                    context,
+                    &binding.binding,
+                    binding.personal_owner_confirmed_by.as_ref(),
+                )
+                .await?
+            }
+            // Selecting a GitHub repository needs no profile: without a
+            // binding, the creator's one GitHub connection is the only grant.
+            None => self.admit_account_github(&mut tx, context).await?,
+        };
         tx.commit().await.map_err(database_error)?;
         Ok(grants)
+    }
+
+    async fn admit_account_github(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+    ) -> Result<Vec<DerivedGrant>, Error> {
+        let owner = Owner::User(context.user_id.clone());
+        let mut credentials = BTreeMap::new();
+        if let Some(id) = crate::store::active_github_connection(&mut **tx, &owner)
+            .await
+            .map_err(credential_error)?
+        {
+            let metadata = lock_credential(tx, &owner, &id).await?;
+            credentials.insert(id, metadata);
+        }
+        Ok(
+            derive_account_github_grant(context, &credentials, &self.catalog, unix_now()?)
+                .map_err(access_error)?
+                .into_iter()
+                .collect(),
+        )
     }
 
     /// Admit an explicit platform credential selection for owner-authenticated
@@ -948,16 +975,26 @@ async fn load_binding(
     tx: &mut Transaction<'_, Postgres>,
     context: &GrantContext,
 ) -> Result<PlatformBindingMetadata, Error> {
-    let (id, revision, confirmed_by): (String, i64, Option<String>) = sqlx::query_as(
-        "SELECT profile_id,profile_revision,personal_owner_confirmed_by FROM platform_environment_access_bindings \
-         WHERE environment_id=$1",
-    )
-    .bind(context.environment_id.as_str())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?
-    .ok_or(Error::NotFound)?;
-    Ok(PlatformBindingMetadata {
+    find_binding(tx, context).await?.ok_or(Error::NotFound)
+}
+
+async fn find_binding(
+    tx: &mut Transaction<'_, Postgres>,
+    context: &GrantContext,
+) -> Result<Option<PlatformBindingMetadata>, Error> {
+    let Some((id, revision, confirmed_by)): Option<(String, i64, Option<String>)> =
+        sqlx::query_as(
+            "SELECT profile_id,profile_revision,personal_owner_confirmed_by FROM platform_environment_access_bindings \
+             WHERE environment_id=$1",
+        )
+        .bind(context.environment_id.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(PlatformBindingMetadata {
         binding: EnvironmentAccessBinding {
             environment_id: context.environment_id.clone(),
             profile_id: AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?,
@@ -966,7 +1003,7 @@ async fn load_binding(
         personal_owner_confirmed_by: confirmed_by
             .map(|id| OwnerId::parse(id).map_err(|_| Error::CorruptRecord))
             .transpose()?,
-    })
+    }))
 }
 
 async fn profile_for_context(

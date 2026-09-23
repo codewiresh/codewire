@@ -455,6 +455,19 @@ impl AuthoritySource {
         let selection = metadata.selection(&scope, reserved_keys)?;
         let lineage =
             validate_lineage(&self.client, &scope, &gateway, &identities.workspace).await?;
+        // Selecting a GitHub repository needs no profile. Orchestration records
+        // that choice once, when it renders the verified workspace Pod with the
+        // GitHub client; only then is the creator's active connection
+        // authorized. A missing connection is omitted, never fabricated.
+        if profile.is_none()
+            && lineage.managed_github()
+            && let Some(github) =
+                codewire_platform_credentials::active_github_connection(&self.pool, &owner)
+                    .await
+                    .map_err(|_| Error::Unavailable)?
+        {
+            context.authorized_credentials.insert(github);
+        }
         // No profile/Kube await follows the final database scope reread. A
         // different binding with identical entry IDs still changes Scope.
         if self.scope(&environment).await? != scope

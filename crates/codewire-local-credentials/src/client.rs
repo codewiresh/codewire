@@ -8,7 +8,7 @@ use codewire_access::{
     AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
     CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId,
-    GrantPermission, Owner, OwnerId, Placement, ProviderId, SshPublicKeyMetadata,
+    GrantPermission, GrantProfile, Owner, OwnerId, Placement, ProviderId, SshPublicKeyMetadata,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
@@ -1574,8 +1574,10 @@ pub(crate) fn derived_grant_from_proto(value: v1::DerivedGrant) -> Result<Derive
     Ok(DerivedGrant {
         environment_id: EnvironmentId::parse(value.environment_id).map_err(data_loss)?,
         environment_generation: value.environment_generation,
-        profile_id: AccessProfileId::parse(value.profile_id).map_err(data_loss)?,
-        profile_revision: value.profile_revision,
+        profile: Some(GrantProfile {
+            id: AccessProfileId::parse(value.profile_id).map_err(data_loss)?,
+            revision: value.profile_revision,
+        }),
         capability_slot: CapabilitySlot::parse(value.capability_slot).map_err(data_loss)?,
         credential_id: CredentialId::parse(value.credential_id).map_err(data_loss)?,
         credential_revocation_generation: value.credential_revocation_generation,

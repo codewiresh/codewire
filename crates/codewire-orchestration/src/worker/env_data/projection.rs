@@ -9,10 +9,13 @@ use codewire_project::{
 };
 
 // ProjectSpec, its binding and the pinned revision's slots share one PostgreSQL
-// statement snapshot. Every personal profile reserves GitHub's names, which the
-// selection digest binds; the managed GitHub client is selected only while the
-// owner has an active connection, so a missing one is omitted, never
-// fabricated. Launch authority resolves the connection itself. Do not replace this with independent reads or a lookup of
+// statement snapshot. GitHub is the creator's one account connection. Every
+// personal profile reserves GitHub's names, which the selection digest binds.
+// The managed GitHub client is selected only while the creator has an active
+// connection, so a missing one is omitted, never fabricated: for a personal
+// profile, or with no profile when the project selects a GitHub repository.
+// The rendered Pod records that choice; launch authority resolves the
+// connection itself. Do not replace this with independent reads or a lookup of
 // the profile's current_revision/name. Slot allocation is capped at 64; a
 // separate bounded existence probe rejects, rather than truncates, excess rows.
 pub(super) const ENVIRONMENT_QUERY: &str = r#"
@@ -42,9 +45,9 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
                ) AS selected
                OFFSET 64 LIMIT 1
            ) AS profile_slots_overflow,
-           p.user_id IS NOT NULL AND EXISTS(
+           (p.user_id IS NOT NULL OR b.environment_id IS NULL) AND EXISTS(
                SELECT 1 FROM platform_credentials AS c
-               WHERE c.user_id = p.user_id AND c.organization_id IS NULL
+               WHERE c.user_id = e.created_by AND c.organization_id IS NULL
                  AND c.provider = 'github' AND c.authentication_kind = 'oauth'
                  AND c.status = 'active'
                  AND (c.expires_at_unix IS NULL
@@ -77,13 +80,30 @@ impl ProjectionCapture {
             self.profile_slots
                 .iter()
                 .map(String::as_str)
-                .filter(|slot| *slot != "github" || self.github_connected),
+                .filter(|slot| *slot != "github" || self.github_connected)
+                .chain(self.account_github(project).then_some("github")),
         )
         .map_err(|_| Error)?;
         clients
             .check_collisions(project.environment.keys().map(String::as_str))
             .map_err(|_| Error)?;
         Ok(clients)
+    }
+
+    /// Selecting a GitHub repository needs no profile: without one, the
+    /// creator's active connection is the environment's GitHub client.
+    fn account_github(&self, project: &ProjectSpec) -> bool {
+        self.profile_id.is_none()
+            && self.github_connected
+            && project.repositories.iter().any(|repository| {
+                url::Url::parse(&repository.source).is_ok_and(|url| {
+                    url.scheme() == "https"
+                        && url.host_str().is_some_and(|host| {
+                            host.trim_end_matches('.')
+                                .eq_ignore_ascii_case("github.com")
+                        })
+                })
+            })
     }
 
     pub(super) fn selection(
@@ -140,7 +160,10 @@ impl ProjectionCapture {
             )?,
         };
         selected.validate()?;
-        if project.secrets.is_empty() && selected.profile.is_none() {
+        // Without a profile or secrets, a selection exists only to carry the
+        // creator's GitHub client, decided once here at capture.
+        if project.secrets.is_empty() && selected.profile.is_none() && !self.account_github(project)
+        {
             Ok(None)
         } else {
             Ok(Some(selected))

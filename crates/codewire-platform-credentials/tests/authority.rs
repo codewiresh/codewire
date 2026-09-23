@@ -189,7 +189,13 @@ async fn restricted_broker_enrolls_refreshes_and_uses_exact_bound_grants() -> Re
         let runtime = profiles(&pool);
         let unwrap_before = provider.unwrap_calls.load(Ordering::SeqCst);
         let grants = runtime.evaluate_grants(&context).await?;
-        ensure!(grants.len() == 1 && grants[0].profile_revision == 1);
+        ensure!(
+            grants.len() == 1
+                && grants[0]
+                    .profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.revision == 1)
+        );
         ensure!(provider.unwrap_calls.load(Ordering::SeqCst) == unwrap_before);
         ensure!(runtime.get_revision(&user, &profile.id, 1).await? == profile);
         ensure!(
@@ -697,7 +703,7 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
         // The still-pinned revision is not replaced by a metadata edit.
         ensure!(manager.get(&user, &profile.id).await?.revision == 2);
         let grants = profiles(&pool).evaluate_grants(&context).await?;
-        ensure!(grants.len() == 1 && grants[0].profile_revision == 1);
+        ensure!(grants.len() == 1 && grants[0].profile.as_ref().is_some_and(|profile| profile.revision == 1));
         pool.close().await;
         Ok(())
     }.await;
@@ -806,6 +812,52 @@ async fn restricted_broker_final_admission_rejects_revoke_and_owner_deletion_dur
             );
             ensure!(material_count(&db.pool, record.metadata.id.as_str()).await? == 0);
         }
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn an_environment_without_a_profile_is_granted_only_the_creators_authorized_github()
+-> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("account-github-user").await?;
+        let org = db.organization("account-github-org").await?;
+        let (pool, _) = db.broker_pool().await?;
+        let broker = store(&pool, Arc::new(SyntheticKek::default()));
+        let mut github = registration("GitHub", Kind::OAuth);
+        github.provider = codewire_access::ProviderId::parse("github")?;
+        let connection = broker.create(&user, github, &value(OLD_VALUE)).await?;
+        let other = broker
+            .create(&user, registration("Codex", Kind::OAuth), &value(OLD_VALUE))
+            .await?;
+        // No binding and no personal-profile confirmation: selecting a GitHub
+        // repository is the creator's consent, which launch authority checks.
+        let mut context = environment(
+            &db,
+            &user,
+            &org,
+            "account-github-env",
+            &connection.metadata.id,
+        )
+        .await?;
+        context.allow_personal_credentials = false;
+        context
+            .authorized_credentials
+            .insert(other.metadata.id.clone());
+        let runtime = profiles(&pool);
+        let grants = runtime.evaluate_grants(&context).await?;
+        ensure!(grants.len() == 1, "only the GitHub connection is granted");
+        ensure!(grants[0].capability_slot == CapabilitySlot::github());
+        ensure!(grants[0].credential_id == connection.metadata.id);
+        ensure!(grants[0].profile.is_none());
+        // Not authorized by launch authority: GitHub is omitted, not denied.
+        context.authorized_credentials.clear();
+        ensure!(runtime.evaluate_grants(&context).await?.is_empty());
         pool.close().await;
         Ok(())
     }

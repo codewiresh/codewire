@@ -381,8 +381,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 if grants.iter().any(|grant| {
                     grant.environment_id != session.context.environment_id
                         || grant.environment_generation != session.context.environment_generation
-                        || grant.profile_id != profile.profile_id
-                        || grant.profile_revision != profile.profile_revision
+                        || grant.profile.as_ref().is_none_or(|granted| {
+                            granted.id != profile.profile_id
+                                || granted.revision != profile.profile_revision
+                        })
                         || !session
                             .context
                             .authorized_credentials
@@ -918,8 +920,7 @@ fn has_provider_budget(elapsed: Duration) -> bool {
 fn same_grant_binding(a: &DerivedGrant, b: &DerivedGrant) -> bool {
     a.environment_id == b.environment_id
         && a.environment_generation == b.environment_generation
-        && a.profile_id == b.profile_id
-        && a.profile_revision == b.profile_revision
+        && a.profile == b.profile
         && a.capability_slot == b.capability_slot
         && a.credential_id == b.credential_id
         && a.permissions == b.permissions

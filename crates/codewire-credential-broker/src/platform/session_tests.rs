@@ -1,5 +1,5 @@
 use super::*;
-use codewire_access::{AccessProfileId, CredentialId, EnvironmentId, OwnerId};
+use codewire_access::{AccessProfileId, CredentialId, EnvironmentId, GrantProfile, OwnerId};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -256,8 +256,10 @@ fn description(session: &PlatformRuntimeSession) -> DerivedGrant {
     DerivedGrant {
         environment_id: session.context.environment_id.clone(),
         environment_generation: session.context.environment_generation,
-        profile_id: profile.profile_id.clone(),
-        profile_revision: profile.profile_revision,
+        profile: Some(GrantProfile {
+            id: profile.profile_id.clone(),
+            revision: profile.profile_revision,
+        }),
         capability_slot: CapabilitySlot::codex(),
         credential_id: session
             .context
@@ -379,15 +381,16 @@ async fn owner_local_admit_rejects_malformed_grants_before_credential_lookup() {
             }
             "generation" => invalid.environment_generation += 1,
             "profile" => {
-                invalid.profile_id = AccessProfileId::parse(Uuid::new_v4().to_string()).unwrap()
+                invalid.profile.as_mut().unwrap().id =
+                    AccessProfileId::parse(Uuid::new_v4().to_string()).unwrap()
             }
-            "revision" => invalid.profile_revision += 1,
+            "revision" => invalid.profile.as_mut().unwrap().revision += 1,
             "credential" => {
                 invalid.credential_id = CredentialId::parse(Uuid::new_v4().to_string()).unwrap()
             }
             "slot" => invalid.capability_slot = CapabilitySlot::github(),
             "permission" => invalid.permissions.clear(),
-            "bad trailing grant" => invalid.profile_revision += 1,
+            "bad trailing grant" => invalid.profile.as_mut().unwrap().revision += 1,
             "empty" => {}
             _ => unreachable!(),
         }

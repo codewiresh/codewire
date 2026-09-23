@@ -397,8 +397,9 @@ fn broker_operation_lease_rederives_the_bound_grant_before_material_access() {
     assert_eq!(lease.credential.metadata.id, credential.metadata.id);
     assert_eq!(lease.grant.environment_id, environment_id);
     assert_eq!(lease.grant.environment_generation, 41);
-    assert_eq!(lease.grant.profile_id, profile.profile.id);
-    assert_eq!(lease.grant.profile_revision, profile.profile.revision);
+    let granted = lease.grant.profile.as_ref().expect("local grant profile");
+    assert_eq!(granted.id, profile.profile.id);
+    assert_eq!(granted.revision, profile.profile.revision);
     assert_eq!(lease.grant.capability_slot, CapabilitySlot::codex());
     assert_eq!(lease.permission.operation.as_str(), "responses");
     assert_eq!(lease.permission.route.as_str(), "openai-api");
@@ -1051,8 +1052,8 @@ fn oauth_refresh_start_rechecks_binding_and_hard_expiry_after_reservation() {
             authority
                 .replace_environment_access_binding(
                     &environment_id,
-                    &grant.profile_id,
-                    grant.profile_revision,
+                    &grant.profile.as_ref().unwrap().id,
+                    grant.profile.as_ref().unwrap().revision,
                     replacement.profile.id,
                     replacement.profile.revision,
                 )
@@ -1124,8 +1125,8 @@ fn oauth_refresh_attempt_id_cannot_alias_another_credential_after_rebind() {
     authority
         .replace_environment_access_binding(
             &environment_id,
-            &first_grant.profile_id,
-            first_grant.profile_revision,
+            &first_grant.profile.as_ref().unwrap().id,
+            first_grant.profile.as_ref().unwrap().revision,
             replacement.profile.id,
             replacement.profile.revision,
         )
@@ -1572,7 +1573,10 @@ fn environment_bindings_pin_revisions_survive_restart_and_guard_deletion() {
         .expect("evaluate pinned grants");
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].environment_generation, 7);
-    assert_eq!(grants[0].profile_revision, profile.profile.revision);
+    assert_eq!(
+        grants[0].profile.as_ref().map(|granted| granted.revision),
+        Some(profile.profile.revision)
+    );
     assert_eq!(grants[0].credential_id, first.metadata.id);
     assert_eq!(
         authority.delete_credential(&first.metadata.id),
