@@ -281,24 +281,29 @@ async fn actor(
         .await
         .map_err(|_| unavailable())?
         .ok_or(AppError::Unauthorized)?;
-    if !enabled || !factor {
+    if !enabled {
         return Err(AppError::Forbidden);
     }
     // Use wall-clock time after any lock wait, not transaction-start NOW().
     let query = if mutating {
-        "SELECT id,expires_at FROM sessions WHERE token_hash=$1 AND user_id=$2 \
-         FOR UPDATE"
+        "SELECT id,expires_at,two_factor_setup_skipped_at IS NOT NULL FROM sessions \
+         WHERE token_hash=$1 AND user_id=$2 FOR UPDATE"
     } else {
-        "SELECT id,expires_at FROM sessions WHERE token_hash=$1 AND user_id=$2 \
-         FOR SHARE"
+        "SELECT id,expires_at,two_factor_setup_skipped_at IS NOT NULL FROM sessions \
+         WHERE token_hash=$1 AND user_id=$2 FOR SHARE"
     };
-    let (id, expires_at): (String, NaiveDateTime) = sqlx::query_as(query)
+    let (id, expires_at, setup_skipped): (String, NaiveDateTime, bool) = sqlx::query_as(query)
         .bind(digest)
         .bind(&account_id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|_| unavailable())?
         .ok_or(AppError::Unauthorized)?;
+    // The same two-factor boundary as the dashboard: an enabled factor, or
+    // setup skipped by this browser session.
+    if !factor && !setup_skipped {
+        return Err(AppError::Forbidden);
+    }
     if !valid_id(&id) {
         return Err(unavailable());
     }

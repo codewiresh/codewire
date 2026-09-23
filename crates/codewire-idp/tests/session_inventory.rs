@@ -431,6 +431,52 @@ async fn authority_and_target_scope_are_closed_and_revocation_is_acknowledged() 
             403
         );
     }
+    // Setup skipped by another session does not authorize this one; setup
+    // skipped by this browser session does, like the dashboard gate.
+    sqlx::query("UPDATE sessions SET two_factor_setup_skipped_at=NOW() WHERE id=$1")
+        .bind("inventory_auth_other")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let list = format!("/api/auth/sessions?account_id={owner}");
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            &list,
+            Some("auth-token"),
+            Value::Null,
+            &[],
+            false
+        )
+        .await
+        .0,
+        403
+    );
+    sqlx::query("UPDATE sessions SET two_factor_setup_skipped_at=NOW() WHERE id=$1")
+        .bind("inventory_auth_actor")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            &list,
+            Some("auth-token"),
+            Value::Null,
+            &[],
+            false
+        )
+        .await
+        .0,
+        200
+    );
+    sqlx::query("UPDATE sessions SET two_factor_setup_skipped_at=NULL WHERE user_id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("UPDATE users SET two_factor_enabled=true WHERE id=$1")
         .bind(owner)
         .execute(&pool)

@@ -51,8 +51,11 @@ async fn retained_rows(pool: &PgPool) -> anyhow::Result<Vec<String>> {
         "platform_credentials",
         "platform_credential_material",
     ] {
+        // Version 30 adds an unset sessions column; retained rows are
+        // compared without it.
         let value: String = sqlx::query_scalar(&format!(
-            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text FROM public.{table} t"
+            "SELECT COALESCE(jsonb_agg(r ORDER BY r::text),'[]'::jsonb)::text \
+             FROM (SELECT to_jsonb(t) - 'two_factor_setup_skipped_at' AS r FROM public.{table} t) AS rows"
         ))
         .fetch_one(pool)
         .await?;

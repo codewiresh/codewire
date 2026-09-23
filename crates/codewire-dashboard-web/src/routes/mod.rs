@@ -78,6 +78,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/setup-2fa/_actions/verify",
             post(authentication::setup_two_factor_action),
         )
+        .route(
+            "/setup-2fa/_actions/skip",
+            post(authentication::skip_two_factor_setup_action),
+        )
         .route("/device", get(device::device))
         .route("/device/_actions/approve", post(device::approve))
         .route("/accept-invite", get(invitations::invitation_page))

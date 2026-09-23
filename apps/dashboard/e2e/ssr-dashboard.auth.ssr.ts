@@ -15,6 +15,7 @@ const serverUrl = process.env.SERVER_URL || "http://127.0.0.1:8080";
 const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const authEmail = `e2e-ssr-auth-${runId}@codewire.sh`;
 const enrollmentEmail = `e2e-ssr-enrollment-${runId}@codewire.sh`;
+const skipSetupEmail = `e2e-ssr-skip-setup-${runId}@codewire.sh`;
 const resetEmail = `e2e-ssr-reset-${runId}@codewire.sh`;
 const signupSafetyEmail = `e2e-ssr-signup-${runId}@codewire.sh`;
 const replacementPassword = "ReplacementPass8!";
@@ -272,6 +273,27 @@ test.describe.serial("server-rendered identity flows", () => {
     if (await continueLink.count()) await continueLink.click();
     await expect(page).toHaveURL(/\/dashboard/);
     await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  });
+
+  test("skips 2FA setup for this session only and asks again at the next sign-in", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop setup-skip contract");
+
+    await seedSyntheticUser(skipSetupEmail, "SSR Setup Skip");
+    await clearRateLimits();
+    await page.context().clearCookies();
+
+    const login = await signInThroughRust(page, skipSetupEmail, TEST_PASSWORD);
+    expect(login.headers().location).toMatch(/^\/setup-2fa/);
+    await expect(page.getByRole("heading", { name: "Secure your account" })).toBeVisible();
+    const skipped = await submitAndCapture(page, "/setup-2fa/_actions/skip", /skip for now/i);
+    expect(skipped.status()).toBe(303);
+    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+
+    await page.context().clearCookies();
+    const again = await signInThroughRust(page, skipSetupEmail, TEST_PASSWORD);
+    expect(again.headers().location).toMatch(/^\/setup-2fa/);
+    await expect(page.getByRole("heading", { name: "Secure your account" })).toBeVisible();
   });
 
   test("enables 2FA for a seeded login, signs out, and completes a fresh login", async ({ page, isMobile }) => {

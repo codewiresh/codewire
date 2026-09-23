@@ -36,7 +36,8 @@
           <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>
           <div class="cw-card-content">
             <p class="cw-settings-muted">Two-factor authentication: <strong>{% if settings.two_factor_enabled %}Enabled{% else %}Not enabled{% endif %}</strong>.</p>
-            <p class="cw-settings-muted">Two-factor authentication protects your account and is required to manage browser sessions.</p>
+            <p class="cw-settings-muted">Two-factor authentication protects your account.</p>
+            {% if !settings.two_factor_enabled %}<p><a href="/setup-2fa?return_to=%2Fsettings%2F">Set up two-factor authentication</a></p>{% endif %}
             <p><a href="/forgot-password">Request a password reset</a></p>
             <p class="cw-settings-muted">If email delivery is available for your account, the reset flow will send instructions. This page cannot confirm delivery.</p>
           </div>
@@ -64,7 +65,7 @@
               </li>{% endfor %}
             </ul>
             <nav class="cw-session-pagination" aria-label="Session pages"><a href="{{ settings.first_sessions_url }}">First page</a>{% if !settings.next_sessions_url.is_empty() %}<a href="{{ settings.next_sessions_url }}">Next page</a>{% endif %}</nav>
-            {% else %}<p class="cw-alert cw-alert--warning" role="status">Session controls are unavailable. Reload to try again. Two-factor authentication must be enabled; no unknown sessions can be signed out here.</p>{% endif %}
+            {% else %}<p class="cw-alert cw-alert--warning" role="status">Session controls are unavailable. Reload to try again. No unknown sessions can be signed out here.</p>{% endif %}
             <form id="sign-out" method="post" action="/settings/_actions/sign-out{{ view.global_context_query }}"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out of this browser</button></form>
           </div>
         </section>

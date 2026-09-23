@@ -8,7 +8,7 @@ const VERSION: i64 = 29;
 // bytes; it does not claim version28 alone was deployed.
 const ACCEPTED_STAGED28: &str = "cbd725bc78e4c8ab5a2e1b68798ac3143fab453755bf7c8e09767af689b46f6e0dfc3dc86645cd4a356a20074cb9869f";
 
-fn assert_accepted_staged28() -> anyhow::Result<()> {
+pub(super) fn assert_accepted_staged28() -> anyhow::Result<()> {
     let migration = MIGRATOR
         .iter()
         .find(|migration| migration.version == 28)

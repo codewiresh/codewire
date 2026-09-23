@@ -589,6 +589,32 @@ restores the pre-0029 table fingerprint pinned as
 cluster roles and external OpenBao key material remain outside this boundary.
 These tests and instructions authorize no live reset.
 
+### Per-session two-factor setup skip
+
+Migration `0030_two_factor_setup_skip.sql` adds one nullable
+`sessions.two_factor_setup_skipped_at` timestamp. It records that one browser
+session chose **Skip for now** on the two-factor setup page. The choice ends
+with that session: sign-out, revocation, expiry and account disablement delete
+the row, and every newly created session starts with the column unset.
+Enabling a factor clears it for all of the account's sessions. The IdP reports
+`skip_2fa_setup` only for the current session of an account without an enabled
+factor, and the terminal attach and session-control checks accept the same
+session marker. An enrolled factor is never skipped at sign-in.
+
+The upgrade fixture pins migration 29 at W1 branch head
+`5991eabfdafb350c14c3e66960b507cfaf7fc8f6` as `ACCEPTED_STAGED29`, applies
+versions 1–29, and proves the pre-0030 table fingerprint
+`ACCEPTED_PRE_TWO_FACTOR_SKIP_SCHEMA_FINGERPRINT`. Upgrading keeps existing
+sessions with the column unset, records the new application fingerprint, and a
+second startup is a no-op. Services run the migrator at startup, so a version-29
+binary cannot restart against a version-30 ledger.
+
+There is no in-place downgrade. Rollback replays the selected version-29
+source into only an empty, disposable application `public` schema. The fixture
+proves the ledger and migration 29 checksum are restored, the column is absent,
+session records are discarded, the pre-0030 fingerprint returns, and a
+separate schema survives. These tests and instructions authorize no live reset.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:
