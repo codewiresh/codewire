@@ -578,7 +578,7 @@ class WorkflowContract(unittest.TestCase):
         dependencies = ordinary.split("    needs:\n", 1)[1].split("    steps:\n", 1)[0]
         self.assertEqual([line.strip().removeprefix("- ") for line in dependencies.splitlines()],
                          ["verification-selection", "cw-release-assets", "workspace-image", "policy", "standard",
-                          "tooling", "rust-transport", "database", "services-control", "services-runtime", "edge-kind"])
+                          "tooling", "rust-compile", "rust-transport", "database", "services-control", "services-runtime", "edge-kind"])
         harness = (ROOT / "scripts/ci/tests/probe-workspace-r2-cache.sh").read_text()
         self.assertIn("--kill-after=150s 2700s", harness)
         self.assertIn('--file "$context/images/workspace/Dockerfile" --target cw-builder', harness)

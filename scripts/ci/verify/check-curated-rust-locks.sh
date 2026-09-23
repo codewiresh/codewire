@@ -51,6 +51,7 @@ check_workspace() {
       printf '[curated-rust-locks] %s: populating exact locked Cargo inputs\n' "$name"
       "$CARGO_BIN" fetch --locked --manifest-path "$stage/Cargo.toml"
       if output="$(run_locked_metadata)"; then
+        check_root_versions "$name" "$lock"
         printf '[curated-rust-locks] %s: OK\n' "$name"
         return
       fi
@@ -60,7 +61,15 @@ check_workspace() {
     return 1
   fi
 
+  check_root_versions "$name" "$lock"
   printf '[curated-rust-locks] %s: OK\n' "$name"
+}
+
+# The curated images must build the versions the root workspace already
+# selects. Drift is fixed with scripts/dev/sync-curated-rust-locks.sh.
+check_root_versions() {
+  python3 "$ROOT/scripts/ci/verify/curated_rust_locks.py" check-drift \
+    "${CURATED_RUST_ROOT_LOCK:-$ROOT/Cargo.lock}" "$2" "$1"
 }
 
 shopt -s nullglob

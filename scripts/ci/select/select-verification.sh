@@ -461,7 +461,10 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-select-verification.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/verify/check-curated-rust-locks.sh|\
-      scripts/ci/tests/test-curated-rust-locks.sh)
+      scripts/ci/tests/test-curated-rust-locks.sh|\
+      scripts/ci/verify/curated_rust_locks.py|\
+      scripts/dev/sync-curated-rust-locks.sh|\
+      scripts/ci/verify/compile-all-targets.sh)
         select_token rust_curated_locks
         recognized=true
         ;;

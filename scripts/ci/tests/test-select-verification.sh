@@ -492,7 +492,10 @@ run_paths_case curated_derp_lock pull_request refs/pull/504/head false \
 run_paths_case curated_lock_guard pull_request refs/pull/505/head false \
   'policy rust_curated_locks' \
   scripts/ci/verify/check-curated-rust-locks.sh \
-  scripts/ci/tests/test-curated-rust-locks.sh
+  scripts/ci/tests/test-curated-rust-locks.sh \
+  scripts/ci/verify/curated_rust_locks.py \
+  scripts/dev/sync-curated-rust-locks.sh \
+  scripts/ci/verify/compile-all-targets.sh
 run_paths_case rust_toolchain_guard pull_request refs/pull/506/head false \
   'policy' \
   .gitea/workflows/rust-latest-canary.yaml \
@@ -1633,6 +1636,7 @@ workspace-image|Container contract verification|ci-heavy|workspace_image
 policy|Policy verification|ci-lite|policy
 standard|Standard verification|ci-heavy|standard
 tooling|Tooling / delivery contract verification|ci-heavy|tooling
+rust-compile|Compile every Rust target|ci-heavy|rust_transport
 rust-transport|Rust / transport verification|ci-heavy|rust_transport
 database|Database verification|ci-heavy|database
 services-control|Service control-plane verification|ci-heavy|services_control
@@ -1683,7 +1687,7 @@ done
 # desktop compiler cache. Those two jobs retain 55-minute ceilings. The full
 # Kind gate additionally owns real token rotation and integrated runtime tests;
 # its 85-minute ceiling leaves five minutes below the 90-minute heavy budget.
-for job_id in cw-release-assets standard tooling database services-control services-runtime; do
+for job_id in cw-release-assets standard tooling rust-compile database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -1761,7 +1765,7 @@ grep -qF '    timeout-minutes: 13' "$TMP/policy.yaml" || {
   exit 1
 }
 
-for job_id in policy standard tooling rust-transport database services-control services-runtime edge-kind; do
+for job_id in policy standard tooling rust-compile rust-transport database services-control services-runtime edge-kind; do
   block="$TMP/${job_id}.yaml"
   grep -qF 'name: Reuse exact PR-head content verification' "$block"
   grep -qF "if: \${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}" \
@@ -1895,8 +1899,8 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 14 ]] || {
-  echo 'Codewire CI requires nine ordinary heavy groups, three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 15 ]] || {
+  echo 'Codewire CI requires ten ordinary heavy groups, three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
@@ -1982,8 +1986,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 17 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eight groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
+if [ "$top_level_jobs" != 18 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, nine groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -2466,14 +2470,15 @@ grep -qF '    runs-on: ci-lite' "$required_block" || {
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in cw-release-assets workspace-image standard rust-transport database services-control services-runtime edge-kind; do
+for group in cw-release-assets workspace-image standard rust-compile rust-transport database services-control services-runtime edge-kind; do
   grep -qF "      - ${group}" "$required_block" || {
     echo "required CI does not wait on ${group}" >&2
     exit 1
   }
 done
 for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT \
-    VERIFICATION_RUST_TRANSPORT_RESULT VERIFICATION_DATABASE_RESULT \
+    VERIFICATION_RUST_COMPILE_RESULT VERIFICATION_RUST_TRANSPORT_RESULT \
+    VERIFICATION_DATABASE_RESULT \
     VERIFICATION_SERVICES_CONTROL_RESULT VERIFICATION_SERVICES_RUNTIME_RESULT \
     VERIFICATION_EDGE_KIND_RESULT VERIFICATION_WORKSPACE_IMAGE_RESULT; do
   grep -qF "${result}:" "$required_block" || {
@@ -2992,3 +2997,15 @@ bash -n \
 "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
 
 echo 'select-verification fixtures: OK'
+
+# Preflight runs the fast compile for exactly the selections that make CI run
+# its rust-compile job (the emitter's rust_transport expectation).
+compile_tokens='rust rust_curated_locks transport transport_derp_contract'
+grep -qF "selected_any ${compile_tokens}" "$ROOT/scripts/ci/select/emit-verification-matrices.sh" || {
+  echo 'rust_transport expectation no longer uses the fast-compile token set' >&2
+  exit 1
+}
+grep -qF "selection_has_any ${compile_tokens}; then" "$ROOT/scripts/dev/preflight.sh" || {
+  echo 'preflight fast compile drifted from the CI rust-compile selection' >&2
+  exit 1
+}

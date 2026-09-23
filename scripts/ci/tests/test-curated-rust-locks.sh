@@ -127,4 +127,31 @@ grep -qF 'fetch --locked' "$fake_state.calls"
 test "$(grep -cF 'metadata --locked --offline' "$fake_state.calls")" -eq 2
 test "$(grep -cF 'fetch --locked' "$fake_state.calls")" -eq 1
 
-printf 'curated Rust workspace lock fixtures: stale gateway rejected; current derp/gateway and cold-cache forms green\n'
+# A curated lock that selects a version the root lock does not select is drift,
+# even when it is internally consistent with its own manifest.
+drift_dir="$TMP/drift"
+mkdir -p "$drift_dir"
+cp "$ROOT/deployments/docker/derp.Cargo.toml" "$drift_dir/derp.Cargo.toml"
+cp "$ROOT/deployments/docker/derp.Cargo.lock" "$drift_dir/derp.Cargo.lock"
+drift_package="$(awk '/^name = /{name=$3} /^source = "registry/{print name; exit}' \
+  "$drift_dir/derp.Cargo.lock" | tr -d '"')"
+[ -n "$drift_package" ] || {
+  printf 'no registry package found for the drift fixture\n' >&2
+  exit 1
+}
+drift_root="$TMP/drift-root.Cargo.lock"
+awk -v target="$drift_package" '
+  /^name = / { current = $3; gsub(/"/, "", current) }
+  current == target && /^version = / { print "version = \"0.0.0-drift\""; current = ""; next }
+  { print }
+' "$ROOT/Cargo.lock" >"$drift_root"
+drift_log="$TMP/drift.log"
+if CURATED_RUST_MANIFEST_DIR="$drift_dir" CURATED_RUST_ROOT_LOCK="$drift_root" \
+    "$GUARD" >"$drift_log" 2>&1; then
+  printf 'curated-lock guard accepted a version the root lock does not select\n' >&2
+  exit 1
+fi
+grep -qF "  $drift_package " "$drift_log"
+grep -qF 'curated Rust workspace derp drifted from the root lock' "$drift_log"
+
+printf 'curated Rust workspace lock fixtures: stale gateway and root drift rejected; current derp/gateway and cold-cache forms green\n'
