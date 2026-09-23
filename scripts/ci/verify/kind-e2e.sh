@@ -23,16 +23,32 @@ source "$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
 source "$ROOT/scripts/ci/verify/kind/suites/sandbox-supply-chain.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/runtime-acceptance.sh
 source "$ROOT/scripts/ci/verify/kind/suites/runtime-acceptance.sh"
+# shellcheck source=scripts/ci/verify/kind/credential-mode.sh
+source "$ROOT/scripts/ci/verify/kind/credential-mode.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/up.sh
+source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/edge-contract.sh
+source "$ROOT/scripts/ci/verify/kind/suites/edge-contract.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/credential-journey.sh
+source "$ROOT/scripts/ci/verify/kind/suites/credential-journey.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/workspace-services.sh
+source "$ROOT/scripts/ci/verify/kind/suites/workspace-services.sh"
 
 kind_e2e_usage() {
   cat >&2 <<'EOF'
 usage:
   scripts/ci/verify/kind-e2e.sh
+  KIND_CLUSTER_NAME=<new-cluster> scripts/ci/verify/kind-e2e.sh up
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite edge-contract
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite credentials
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite workspace-services
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite final-fencing
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite environment-session
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite sandbox-supply-chain
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite runtime-acceptance
+  KIND_CLUSTER_NAME=<retained-cluster> KIND_PUBLIC_ORIGIN=<origin> scripts/ci/verify/kind-e2e.sh credentials real
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh credentials fake
 EOF
 }
 
@@ -40,6 +56,21 @@ dispatch_kind_e2e() {
   if [ "$#" -eq 0 ]; then
     run_integrated_kind_suite
     return
+  fi
+  if [ "${1:-}" = "up" ] && [ "$#" -eq 1 ]; then
+    run_kind_up
+    return
+  fi
+  if [ "${1:-}" = "credentials" ]; then
+    case "$#:${2:-}" in
+      2:real | 2:fake)
+        run_retained_credential_mode "$2"
+        return
+        ;;
+    esac
+    echo "::error::the Kind credentials command takes exactly one mode: real or fake"
+    kind_e2e_usage
+    return 2
   fi
   if [ "${1:-}" != "suite" ]; then
     echo "::error::unknown Kind e2e command: ${1:-missing}"
@@ -53,6 +84,15 @@ dispatch_kind_e2e() {
   fi
 
   case "$2" in
+    edge-contract)
+      run_retained_edge_contract_suite
+      ;;
+    credentials)
+      run_retained_credentials_suite
+      ;;
+    workspace-services)
+      run_retained_workspace_services_suite
+      ;;
     dashboard-browser)
       run_retained_dashboard_browser_suite
       ;;

@@ -138,8 +138,13 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     fi && \
     codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
       -p codewire-orchestration --bin codewire-orchestration "$@" && \
+    credential_features=enrollment && \
+    if [ "$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e ]; then \
+      credential_features=enrollment,kind-e2e; \
+    fi && \
     codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
-      -p codewire-credential-service --features enrollment --bin codewire-credential-service && \
+      -p codewire-credential-service --features "$credential_features" \
+      --bin codewire-credential-service && \
     mkdir -p /out && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-idp" /out/codewire-idp && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-orchestration" /out/codewire-orchestration && \

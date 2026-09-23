@@ -20,6 +20,13 @@ secrets or credentials or bypassing a selected gate: use synthetic credentials
 for verification unless direct access is separately authorized, and preserve
 the checked-in topology and assertions.
 
+Checked-in local development tooling, such as `make kind-credentials-real`, may load the
+owner's development credentials from OpenBao into the local Kind cluster
+without asking, provided the values flow only through pipes into Kubernetes
+Secrets and are never printed, logged, written to disk, or held by the agent.
+Never ask the owner to paste a secret or place one in a file. Reading,
+exporting, or displaying a secret value still needs explicit authority.
+
 Routine developer work on owner-designated local or remote machines, including
 Macs, has standing authority within an authorized task. Run developer commands
 without per-operation approval: source/artifact transfer, dependency and tool
@@ -73,6 +80,43 @@ add procedure, not permission.
 Risk selects safeguards, not unrelated tests. Inspect only facts that can alter
 the next mutation. Reuse accepted evidence and replan only for a material change
 to scope, dependencies, contracts, effects, recovery, authority, or acceptance.
+
+## Done means observed working
+
+A change that affects anything a user or operator can see or do is not done
+until it has run in the product and been observed working. Tests, checks, and
+CI are necessary evidence; they are never proof of behavior.
+
+- Start every product session on the retained local Kind cluster
+  (`make kind-status`, then `make kind-watch`; see `docs/dev/AGENT-WORKFLOW.md`)
+  and confirm http://nj.example.invalid:4174/ loads before editing. A broken local
+  cluster is the first blocker, not a later gate.
+- Before pushing a user-visible change, walk its acceptance journey on the
+  retained local Kind cluster through the owner URL, including the empty, failure,
+  and recovery states it touches. Record what was run and what was observed.
+- Every workstream and handoff names a mandatory local acceptance journey. If
+  it depends on tooling that does not exist yet, that tooling lands first; a
+  journey is never "optional if available".
+- When a real provider step needs the owner, such as a GitHub authorization,
+  prepare everything else first and ask once for exactly that step.
+- Until the journey has run, report the change as "not yet observed working".
+
+## Local development loop
+
+Iterate on one retained local Kind cluster; commands live in
+`docs/dev/AGENT-WORKFLOW.md`.
+
+- Never recreate the cluster to test a change. Create it once (`make kind-up`,
+  or keep the gate's cluster), then deploy changed services into it
+  (`make kind-deploy`) and serve UI from source (`make kind-watch`).
+- Run only the Kind suites a change needs (`make kind-test`). It maps the
+  repository classifier's selection to retained suites. If a narrow change asks
+  for the full gate only because a mapping is missing, add the mapping and its
+  suite instead of running the full gate.
+- The full `make e2e-kind` is a landing qualification: run it once per landing
+  head, never as an iteration step, and do not repeat it for an unchanged tree.
+- Switch the credential-service to `real` only for journeys that need a real
+  provider; the synthetic fixture remains the gate's default.
 
 ## Program control
 
@@ -131,7 +175,8 @@ immediately before merge.
 Use the installed `fj` CLI for Forgejo issues, PRs, Actions, and merges. The
 legacy `tea` CLI is not part of the supported agent workflow.
 
-Use the smallest check that can catch the affected failure class. Local checks
+Use the smallest check that can catch the affected failure class, plus the
+product journey that "Done means observed working" requires. Local checks
 are the development loop. Hosted CI is required only when a hosted-only claim
 (such as scheduling, credentials, permissions, cache, or timing) lacks
 equivalent accepted exact local/read-only evidence, or repository protection
@@ -159,7 +204,8 @@ rebuild integration, Kind, or product images locally solely to create or refresh
 a push receipt. This mode is unavailable for `main`, tags, deletions, multi-ref
 pushes, Tier 3 effects, or work whose acceptance depends on local-only hardware.
 It is not a waiver: bind the pushed head once and do not merge until every
-required exact-head gate succeeds. The frontend iteration checkpoint still
+required exact-head gate succeeds. CI never substitutes for the local product
+journey. The frontend iteration checkpoint still
 requires an explicit landing instruction.
 
 Bind a hosted run once and use a transition watcher; never spend turns polling
@@ -229,8 +275,8 @@ weakening of the required local hardware gate.
   rebuilds do not require separate approval. Do not commit, push, open a PR,
   run hosted CI, or recreate Kind until the owner says “land it.” Preserve
   unrelated state and the existing production and credential boundaries.
-- During active iteration use `make design-system`, `make dashboard-watch`, or
-  `make dashboard-watch-kind`. Run `scripts/dev/preflight.sh --explain` before
+- During active iteration use `make kind-watch` against the retained local
+  cluster; use `make design-system` only for fixture-only work. Run `scripts/dev/preflight.sh --explain` before
   the final landing gate. If an obviously UI-only change is unclassified or
   selects integration, Kind, or full verification solely because classification
   is missing, repair the classifier or split the unrelated change before

@@ -56,8 +56,22 @@ pub struct CredentialServiceConfig {
     pub(super) github_executable: PathBuf,
     pub(super) github_app_authorization: Option<GitHubAppAuthorizationConfig>,
     pub(super) runtime_directory: PathBuf,
-    pub(super) credential_openbao: OpenBaoTransitConfig,
-    pub(super) application_openbao: OpenBaoTransitConfig,
+    pub(super) keks: KekAuthorityConfig,
+}
+
+/// Where the credential-service's key-encryption keys come from.
+pub(super) enum KekAuthorityConfig {
+    /// OpenBao Transit: the only authority in promotable builds.
+    OpenBao {
+        credential: Box<OpenBaoTransitConfig>,
+        application: Box<OpenBaoTransitConfig>,
+    },
+    /// The in-memory test provider, compiled only into the non-promotable Kind
+    /// image (as orchestration's tenant-secret test provider is). It does not
+    /// really encrypt; it lets the production service run in a local cluster
+    /// that has no OpenBao.
+    #[cfg(feature = "kind-e2e")]
+    KindTest,
 }
 
 impl CredentialServiceConfig {
@@ -106,40 +120,58 @@ impl CredentialServiceConfig {
             path("CREDENTIAL_BROKER_TLS_KEY_FILE")?,
         )
         .map_err(|_| RuntimeError::Configuration("credential broker TLS files"))?;
-        let openbao_address: Url = required("CREDENTIAL_BAO_ADDR")?
-            .parse()
-            .map_err(|_| RuntimeError::Configuration("CREDENTIAL_BAO_ADDR"))?;
-        let openbao_auth_mount = required("CREDENTIAL_BAO_AUTH_MOUNT")?;
-        let openbao_expected_cluster_id = required("CREDENTIAL_BAO_EXPECTED_CLUSTER_ID")?;
-        let credential_transit_mount = required("CREDENTIAL_BAO_TRANSIT_MOUNT")?;
-        let application_transit_mount = required("CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT")?;
-        if credential_transit_mount == application_transit_mount {
-            return Err(RuntimeError::Configuration(
-                "distinct credential and application OpenBao authorities",
-            ));
-        }
-        let credential_openbao = OpenBaoTransitConfig::new(
-            openbao_address.clone(),
-            openbao_auth_mount.clone(),
-            required("CREDENTIAL_BAO_ROLE")?,
-            credential_transit_mount,
-            // The existing derived tenant-dek primitive, in its dedicated
-            // credential Transit mount: not a new envelope or generic secret.
-            "tenant-dek".to_owned(),
-            openbao_expected_cluster_id.clone(),
-        )
-        .map_err(|_| RuntimeError::Configuration("credential OpenBao authority"))?;
-        let application_openbao = OpenBaoTransitConfig::new(
-            openbao_address,
-            openbao_auth_mount,
-            required("CREDENTIAL_APPLICATION_BAO_ROLE")?,
-            application_transit_mount,
-            // Application projections use the existing tenant-secret envelope
-            // key in the independently authorized tenant Transit mount.
-            "tenant-dek".to_owned(),
-            openbao_expected_cluster_id,
-        )
-        .map_err(|_| RuntimeError::Configuration("application OpenBao authority"))?;
+        let keks = match lookup("CODEWIRE_KIND_CREDENTIAL_TEST_KEK") {
+            None => {
+                let openbao_address: Url = required("CREDENTIAL_BAO_ADDR")?
+                    .parse()
+                    .map_err(|_| RuntimeError::Configuration("CREDENTIAL_BAO_ADDR"))?;
+                let openbao_auth_mount = required("CREDENTIAL_BAO_AUTH_MOUNT")?;
+                let openbao_expected_cluster_id = required("CREDENTIAL_BAO_EXPECTED_CLUSTER_ID")?;
+                let credential_transit_mount = required("CREDENTIAL_BAO_TRANSIT_MOUNT")?;
+                let application_transit_mount =
+                    required("CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT")?;
+                if credential_transit_mount == application_transit_mount {
+                    return Err(RuntimeError::Configuration(
+                        "distinct credential and application OpenBao authorities",
+                    ));
+                }
+                let credential_openbao = OpenBaoTransitConfig::new(
+                    openbao_address.clone(),
+                    openbao_auth_mount.clone(),
+                    required("CREDENTIAL_BAO_ROLE")?,
+                    credential_transit_mount,
+                    // The existing derived tenant-dek primitive, in its dedicated
+                    // credential Transit mount: not a new envelope or generic secret.
+                    "tenant-dek".to_owned(),
+                    openbao_expected_cluster_id.clone(),
+                )
+                .map_err(|_| RuntimeError::Configuration("credential OpenBao authority"))?;
+                let application_openbao = OpenBaoTransitConfig::new(
+                    openbao_address,
+                    openbao_auth_mount,
+                    required("CREDENTIAL_APPLICATION_BAO_ROLE")?,
+                    application_transit_mount,
+                    // Application projections use the existing tenant-secret envelope
+                    // key in the independently authorized tenant Transit mount.
+                    "tenant-dek".to_owned(),
+                    openbao_expected_cluster_id,
+                )
+                .map_err(|_| RuntimeError::Configuration("application OpenBao authority"))?;
+                KekAuthorityConfig::OpenBao {
+                    credential: Box::new(credential_openbao),
+                    application: Box::new(application_openbao),
+                }
+            }
+            #[cfg(feature = "kind-e2e")]
+            Some(value) if value == "true" => KekAuthorityConfig::KindTest,
+            // Outside the Kind image the flag is never honoured, and any value
+            // is a startup error rather than a silent OpenBao fallback.
+            Some(_) => {
+                return Err(RuntimeError::Configuration(
+                    "CODEWIRE_KIND_CREDENTIAL_TEST_KEK",
+                ));
+            }
+        };
         Ok(Self {
             database_url,
             public_listen,
@@ -150,8 +182,7 @@ impl CredentialServiceConfig {
             github_executable: path("CREDENTIAL_GITHUB_EXECUTABLE")?,
             github_app_authorization,
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
-            credential_openbao,
-            application_openbao,
+            keks,
         })
     }
 }
@@ -315,6 +346,42 @@ mod tests {
                 CredentialServiceConfig::from_lookup(|name| partial.get(name).cloned()).is_err()
             );
         }
+    }
+
+    #[cfg(not(feature = "kind-e2e"))]
+    #[test]
+    fn kind_test_kek_flag_is_rejected_outside_the_kind_build() {
+        for value in ["true", "false", ""] {
+            let mut values = inputs();
+            values.insert("CODEWIRE_KIND_CREDENTIAL_TEST_KEK", value.into());
+            assert!(
+                CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).is_err()
+            );
+        }
+    }
+
+    #[cfg(feature = "kind-e2e")]
+    #[test]
+    fn kind_test_kek_replaces_only_the_openbao_inputs() {
+        let mut values = inputs();
+        values.retain(|name, _| !name.contains("_BAO_"));
+        values.insert("CODEWIRE_KIND_CREDENTIAL_TEST_KEK", "true".into());
+        let config =
+            CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+        assert!(matches!(config.keks, KekAuthorityConfig::KindTest));
+        for name in values.keys() {
+            let mut partial = values.clone();
+            partial.remove(name);
+            if *name != "CODEWIRE_KIND_CREDENTIAL_TEST_KEK" {
+                assert!(
+                    CredentialServiceConfig::from_lookup(|name| partial.get(name).cloned())
+                        .is_err(),
+                    "{name}"
+                );
+            }
+        }
+        values.insert("CODEWIRE_KIND_CREDENTIAL_TEST_KEK", "yes".into());
+        assert!(CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).is_err());
     }
 
     #[test]

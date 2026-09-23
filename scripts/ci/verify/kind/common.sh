@@ -617,11 +617,22 @@ build_images_and_smokes() {
 
   prepare_kind_support_images
 
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
+  # `kind-e2e.sh up` deploys for manual testing and runs no smoke suite.
+  if [ "${KIND_BUILD_SMOKES:-1}" = 1 ] \
+      && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
     log "building Rust kind smoke binaries"
     "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
       "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
   fi
+}
+
+# Retained suites rerun gate steps on a kept cluster. `up` builds no smoke
+# binaries, so build them here; cargo makes repeated builds incremental.
+build_retained_kind_smokes() {
+  mkdir -p "$RUN_DIR"
+  log "building Rust kind smoke binaries for the retained suite"
+  "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
+    "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
 }
 
 assert_prebuilt_release_product_images() {

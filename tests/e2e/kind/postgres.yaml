@@ -14,11 +14,24 @@ spec:
       labels:
         app: postgres
     spec:
+      # The alpine image's postgres group; the key stays root-owned 0640.
+      securityContext:
+        fsGroup: 70
       containers:
         - name: postgres
           # Readable Kustomize input. The Kind gate resolves and side-loads
           # its reviewed linux/amd64 digest before cluster creation.
           image: postgres:17-alpine
+          # TLS is offered, not required: the fake credential-service and the
+          # other services keep plain connections; the real one verifies it.
+          args:
+            - postgres
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/run/postgres-tls/tls.crt
+            - -c
+            - ssl_key_file=/run/postgres-tls/tls.key
           env:
             - name: POSTGRES_USER
               value: codewire
@@ -33,6 +46,15 @@ spec:
               command: ["pg_isready", "-U", "codewire", "-d", "codewire"]
             initialDelaySeconds: 3
             periodSeconds: 3
+          volumeMounts:
+            - name: tls
+              mountPath: /run/postgres-tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: codewire-kind-postgres-tls
+            defaultMode: 0640
 ---
 apiVersion: v1
 kind: Service

@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind design-system e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-deploy kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-watch kind-status design-system e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
 
 # Default target
@@ -185,6 +185,42 @@ dashboard-watch-kind:
 	CODEWIRE_BILLING_ORIGIN="$${CODEWIRE_BILLING_ORIGIN:-http://127.0.0.1:8081}" \
 	CODEWIRE_BROWSER_API_ORIGIN="$${CODEWIRE_BROWSER_API_ORIGIN:-http://127.0.0.1:8080}" \
 	python3 scripts/dev/dashboard-watch.py
+
+# Manual testing on the retained cluster from `KEEP_KIND_CLUSTER=1 make e2e-kind`
+# (same KIND_CLUSTER_NAME). KIND_PUBLIC_ORIGIN is the browser origin registered
+# as the GitHub App callback origin; the default is the owner workstation's
+# Tailnet URL, served by `tailscale serve` from the watcher on 127.0.0.1:5182.
+KIND_PUBLIC_ORIGIN ?= http://nj.example.invalid:4174
+
+# Create and deploy a new retained cluster without running the test suites.
+kind-up:
+	./scripts/ci/verify/kind-e2e.sh up
+
+# Rebuild one service from current source into the retained cluster, e.g.
+# `make kind-deploy SERVICE=credential-service`.
+kind-deploy:
+	@test -n "$(SERVICE)" || { echo "usage: make kind-deploy SERVICE=<idp|orchestration|credential-service|billing|coordinator>" >&2; exit 2; }
+	./scripts/dev/kind/deploy-service.sh "$(SERVICE)"
+
+# Run only the retained Kind suites the current change needs (SUITES=... to
+# choose explicitly).
+kind-test:
+	KIND_TEST_SUITES="$(SUITES)" ./scripts/dev/kind/test-selected.sh
+
+kind-credentials-real:
+	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" ./scripts/ci/verify/kind-e2e.sh credentials real
+
+kind-credentials-fake:
+	./scripts/ci/verify/kind-e2e.sh credentials fake
+
+kind-seed-login:
+	./scripts/dev/kind/dev-loop.sh seed-login
+
+kind-watch:
+	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" ./scripts/dev/kind/dev-loop.sh watch
+
+kind-status:
+	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" ./scripts/dev/kind/dev-loop.sh status
 
 design-system:
 	python3 scripts/dev/design-system-server.py

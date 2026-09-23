@@ -119,28 +119,43 @@ async fn run_connected(
     // Explicit in-cluster configuration never searches the user's kubeconfig.
     let kube_config = kube::Config::incluster().map_err(|_| RuntimeError::Kubernetes)?;
     let client = kube::Client::try_from(kube_config).map_err(|_| RuntimeError::Kubernetes)?;
-    let identity: Arc<dyn OpenBaoWorkloadIdentity> = Arc::new(
-        KubernetesOpenBaoWorkloadIdentity::from_env(client.clone(), "CREDENTIAL_BAO_AUDIENCE")
-            .map_err(|_| RuntimeError::Kubernetes)?,
-    );
-    let credential_openbao = Arc::new(
-        OpenBaoTransitProvider::new(config.credential_openbao, identity.clone())
-            .map_err(|_| RuntimeError::OpenBao)?,
-    );
-    let application_openbao = Arc::new(
-        OpenBaoTransitProvider::new(config.application_openbao, identity)
-            .map_err(|_| RuntimeError::OpenBao)?,
-    );
-    credential_openbao
-        .authority_id()
-        .await
-        .map_err(|_| RuntimeError::OpenBao)?;
-    application_openbao
-        .authority_id()
-        .await
-        .map_err(|_| RuntimeError::OpenBao)?;
-    let authorities =
-        crate::authority::RuntimeKekAuthorities::new(credential_openbao, application_openbao);
+    let authorities = match config.keks {
+        config::KekAuthorityConfig::OpenBao {
+            credential,
+            application,
+        } => {
+            let identity: Arc<dyn OpenBaoWorkloadIdentity> = Arc::new(
+                KubernetesOpenBaoWorkloadIdentity::from_env(
+                    client.clone(),
+                    "CREDENTIAL_BAO_AUDIENCE",
+                )
+                .map_err(|_| RuntimeError::Kubernetes)?,
+            );
+            let credential_openbao = Arc::new(
+                OpenBaoTransitProvider::new(*credential, identity.clone())
+                    .map_err(|_| RuntimeError::OpenBao)?,
+            );
+            let application_openbao = Arc::new(
+                OpenBaoTransitProvider::new(*application, identity)
+                    .map_err(|_| RuntimeError::OpenBao)?,
+            );
+            credential_openbao
+                .authority_id()
+                .await
+                .map_err(|_| RuntimeError::OpenBao)?;
+            application_openbao
+                .authority_id()
+                .await
+                .map_err(|_| RuntimeError::OpenBao)?;
+            crate::authority::RuntimeKekAuthorities::new(credential_openbao, application_openbao)
+        }
+        #[cfg(feature = "kind-e2e")]
+        config::KekAuthorityConfig::KindTest => {
+            tracing::warn!("using the Kind-only credential KEK test provider");
+            let test = Arc::new(codewire_protected_store::secret_envelope::TestKekProvider);
+            crate::authority::RuntimeKekAuthorities::new(test.clone(), test)
+        }
+    };
     // The platform process serves many environments. Resolve the finite product
     // destination families; each operation still requires its exact profile lease.
     let upstream = ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
