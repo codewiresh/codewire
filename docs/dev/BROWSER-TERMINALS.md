@@ -65,17 +65,3 @@ rules, not managed sandbox acceptance. The checked-in authenticated browser and
 sandbox journeys separately prove the real identity, runtime and projection
 boundaries, including stable shell PID, working directory and shell variables
 after navigation and reconnect, and independent second-terminal state.
-
-## Renderer-specific goldens
-
-The existing lifecycle journey captures both terminal viewport sizes using the
-desktop project. Regenerate its two Ubuntu24 goldens with
-`scripts/ci/verify/update-playwright-ubuntu24-snapshots.sh --chromium-archive
-<absolute-pinned-archive> --prepared-kind-terminal` after the checked-in
-`codewire-e2e-ci` topology has been prepared with the intended source images.
-This profile runs the real lifecycle assertions unchanged, permits only those
-two snapshot updates, and does not create, deploy or forward the topology.
-It requires the stock source/image/archive verification receipt and a matching
-prepared-cluster workspace marker, then passes that verified image into the
-test-owned preset. An older published image or caller override cannot substitute.
-Renderer regeneration is not full exact-tree qualification or Dev evidence.

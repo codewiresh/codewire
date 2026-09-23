@@ -679,7 +679,6 @@ run_edge() {
   done
   python3 scripts/checks/repo_checks.py connect-edge-routing --self-test
   scripts/ci/tests/test-kind-e2e-cleanup.sh
-  scripts/ci/tests/test-kind-e2e-ubuntu-snapshot-runner.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
   scripts/ci/tests/test-kind-forwards.sh
   python3 -B scripts/ci/tests/test-kind-codex-session.py

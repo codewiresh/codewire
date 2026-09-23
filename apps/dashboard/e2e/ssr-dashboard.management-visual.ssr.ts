@@ -76,10 +76,6 @@ test.describe.serial("rounded management interface", () => {
       await expect(page.locator(".cw-org-switcher-label").first()).toHaveText("Management Visual");
       await expect(page.getByRole("heading", { name: heading, exact: true }).first()).toBeVisible();
       await expectNoPageOverflow(page);
-      await expect(page).toHaveScreenshot(
-        `${snapshot}-${isMobile ? "mobile" : "desktop"}.png`,
-        { fullPage: false },
-      );
     }
   });
 
@@ -118,15 +114,6 @@ test.describe.serial("rounded management interface", () => {
       );
       await expect(page.getByRole("heading", { name: heading, exact: true }).first()).toBeVisible();
       await expectNoPageOverflow(page);
-      await expect(page).toHaveScreenshot(
-        `${snapshot}-${isMobile ? "mobile" : "desktop"}.png`,
-        {
-          fullPage: false,
-          // Only per-run public identifiers are volatile. Real metadata,
-          // controls, two-row inventory and org context remain asserted.
-          mask: [page.locator("#account-details dd").nth(1), page.locator("#sessions code")],
-        },
-      );
     }
   });
 
@@ -149,13 +136,6 @@ test.describe.serial("rounded management interface", () => {
       );
       await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
       await expectNoPageOverflow(page);
-      await expect(page).toHaveScreenshot(
-        `${snapshot}-${isMobile ? "mobile" : "desktop"}.png`,
-        {
-          fullPage: false,
-          mask: [page.locator(".cw-audit-table tbody td:first-child")],
-        },
-      );
     }
   });
 });

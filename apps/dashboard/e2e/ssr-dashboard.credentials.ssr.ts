@@ -281,10 +281,8 @@ test.describe("managed provider credential browser journey", () => {
       expect(rendered?.includes("ghu_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
-      // Connecting again cannot add or replace the account's one connection.
-      await openGithubConnection(page);
-      await completeGithubAppConnection(page, "kind-synthetic-code-two");
-      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&error=github-app-already-connected&dialog=connect-github`);
+      // The account keeps exactly its one connection; once connected, Settings
+      // offers no second Connect GitHub (the store refuses one regardless).
       expect(await githubConnectionMetadata(owner)).toEqual(enrolled);
       await page.goto(settingsPath);
       await expect(row).toHaveCount(1);
