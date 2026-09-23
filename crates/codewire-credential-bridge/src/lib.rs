@@ -54,6 +54,13 @@ const HOST_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const HOST_OUTPUT_BUFFER: usize = 32;
 const RESPONSE_BODY_BUFFER: usize = 16;
+/// How long one response's reader may leave its full buffer unread while the
+/// host stream waits. Git reads a pack more slowly than a provider sends it.
+const RESPONSE_CONSUMER_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(200)
+} else {
+    Duration::from_secs(30)
+};
 
 type GuestOutput = mpsc::Sender<Result<v1::CredentialBridgeGuestMessage, Status>>;
 type ResponseBodyItem = Result<WireBytes, io::Error>;
@@ -320,17 +327,19 @@ impl CredentialBridge {
                         })?;
                     (pending.phase == ResponsePhase::Streaming).then(|| pending.body.clone())
                 };
+                // Waiting for this bounded reader holds back the host stream, and
+                // with it the broker and provider; nothing is buffered without
+                // bound. A reader that stops or leaves loses only its own
+                // response, never the bridge's other requests.
                 if let Some(sender) = sender {
-                    sender
-                        .try_send(Ok(WireBytes::from(response.data)))
-                        .map_err(|error| match error {
-                            mpsc::error::TrySendError::Full(_) => Status::resource_exhausted(
-                                "credential bridge response consumer is too slow",
-                            ),
-                            mpsc::error::TrySendError::Closed(_) => {
-                                Status::cancelled("credential bridge request was cancelled")
-                            }
-                        })?;
+                    let sent = tokio::time::timeout(
+                        RESPONSE_CONSUMER_TIMEOUT,
+                        sender.send(Ok(WireBytes::from(response.data))),
+                    )
+                    .await;
+                    if !matches!(sent, Ok(Ok(()))) {
+                        self.abandon(&response.request_id, epoch).await;
+                    }
                 }
                 Ok(())
             }
@@ -347,7 +356,10 @@ impl CredentialBridge {
                     }
                     pending
                 };
-                pending.completed.store(true, Ordering::Release);
+                // An abandoned response ends without completion, as an error.
+                if pending.phase == ResponsePhase::Streaming {
+                    pending.completed.store(true, Ordering::Release);
+                }
                 drop(pending);
                 Ok(())
             }
@@ -470,6 +482,25 @@ impl CredentialBridge {
                 failure_emitted: false,
             },
         })
+    }
+
+    /// Stop one streaming response whose reader stopped accepting or left.
+    /// Its remaining frames are ignored, its reader sees an incomplete body,
+    /// and the host is asked to stop sending it.
+    async fn abandon(&self, request_id: &str, epoch: u64) {
+        {
+            let mut state = self.inner.lock().await;
+            let Some(pending) = state.pending.get_mut(request_id) else {
+                return;
+            };
+            if pending.epoch != epoch || pending.phase != ResponsePhase::Streaming {
+                return;
+            }
+            // Replacing the only sender closes the reader's stream after what it
+            // already buffered, without completion.
+            pending.body = mpsc::channel(1).0;
+        }
+        self.cancel(request_id, epoch).await;
     }
 
     async fn cancel(&self, request_id: &str, epoch: u64) {

@@ -389,17 +389,68 @@ async fn response_chunk_and_cumulative_limits_are_enforced() {
     }
 }
 
+/// Queue host frames from a separate task: a reader that has not caught up
+/// holds the host stream back, so these sends wait rather than fail.
+fn stream_body(harness: &Harness, request_id: &str, chunks: usize) -> tokio::task::JoinHandle<()> {
+    let input = harness.input.clone();
+    let request_id = request_id.to_owned();
+    tokio::spawn(async move {
+        for payload in (0..chunks)
+            .map(|_| body(&request_id, b"x"))
+            .chain([end(&request_id)])
+        {
+            let message = v1::CredentialBridgeHostMessage {
+                payload: Some(payload),
+            };
+            if input.send(Ok(message)).await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
 #[tokio::test]
-async fn slow_consumer_cannot_grow_the_response_queue() {
+async fn a_slow_reader_holds_the_host_back_and_receives_every_byte() {
     let mut harness = Harness::new().await;
     let (task, request) = harness.submit().await;
     harness.send(start(&request.request_id)).await;
     let response = bounded(task).await.unwrap();
-    for _ in 0..=RESPONSE_BODY_BUFFER {
-        harness.send(body(&request.request_id, b"x")).await;
+    // More than the reader's bounded queue arrives before it reads anything.
+    let chunks = 2 * RESPONSE_BODY_BUFFER;
+    let sender = stream_body(&harness, &request.request_id, chunks);
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
     }
-    harness.terminal(tonic::Code::ResourceExhausted).await;
-    assert!(bounded(to_bytes(response.into_body(), 100)).await.is_err());
+    assert!(harness.bridge.inner.lock().await.active.is_some());
+    let bytes = bounded(to_bytes(response.into_body(), chunks))
+        .await
+        .unwrap();
+    assert_eq!(bytes.len(), chunks);
+    bounded(sender).await.unwrap();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_stalled_reader_loses_only_its_own_response() {
+    let mut harness = Harness::new().await;
+    let (task, request) = harness.submit().await;
+    harness.send(start(&request.request_id)).await;
+    let response = bounded(task).await.unwrap();
+    let sender = stream_body(&harness, &request.request_id, RESPONSE_BODY_BUFFER + 2);
+    // The reader never reads: after its timeout the host is asked to stop.
+    let cancel = harness.next().await;
+    assert!(matches!(
+        cancel.payload,
+        Some(GuestPayload::Cancel(ref cancel)) if cancel.request_id == request.request_id
+    ));
+    bounded(sender).await.unwrap();
+    // Buffered bytes are delivered, then the body ends as incomplete.
+    assert!(bounded(to_bytes(response.into_body(), 1024)).await.is_err());
+    // The bridge still serves other requests.
+    let (task, request) = harness.submit().await;
+    harness.send(start(&request.request_id)).await;
+    harness.send(end(&request.request_id)).await;
+    assert_eq!(bounded(task).await.unwrap().status(), StatusCode::OK);
     harness.stop().await;
 }
 
