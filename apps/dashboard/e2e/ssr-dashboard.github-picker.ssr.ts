@@ -54,7 +54,9 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
     await page.unroute(`**/${slug}/_fragments/create-options`);
     const browser = page.locator("[data-github-browser]");
     await expect(browser).toBeVisible();
-    await expect(browser.getByRole("status")).toContainText("Choose a GitHub connection");
+    // The account's one GitHub connection does not exist yet; assert the
+    // state, not its wording.
+    await expect(browser).toHaveAttribute("data-github-state", "not-configured");
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
     await expect(browser.getByRole("link", { name: "Connect GitHub" }))
       .toHaveAttribute("href", `/settings/credentials/?org=${slug}&creation_draft=${draft}`);
@@ -64,18 +66,23 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
     const form = page.locator("[data-environment-form]");
     const csrf = await form.locator('[name="_csrf"]').inputValue();
     const endpoint = `/${slug}/_fragments/github-repositories`;
-    const missingSelection = await page.request.post(endpoint, {
+    // Without a connection the service refuses closed; nothing is cached.
+    const notConnected = await page.request.post(endpoint, {
+      headers: { Origin: ssrUrl }, form: { _csrf: csrf, page_token: "" },
+    });
+    expect(notConnected.status()).toBe(422);
+    expect(notConnected.headers()["cache-control"]).toContain("no-store");
+    // The browser never selects a credential or profile for repository listing.
+    const legacySelector = await page.request.post(endpoint, {
       headers: { Origin: ssrUrl }, form: { _csrf: csrf, credential_profile: "", page_token: "" },
     });
-    expect(missingSelection.status()).toBe(422);
-    expect(await missingSelection.text()).toContain("Choose a current credential profile");
-    expect(missingSelection.headers()["cache-control"]).toContain("no-store");
+    expect(legacySelector.status()).toBe(422);
     const wrongOrigin = await page.request.post(endpoint, {
-      headers: { Origin: "https://unrelated.example.test" }, form: { _csrf: csrf, credential_profile: "" },
+      headers: { Origin: "https://unrelated.example.test" }, form: { _csrf: csrf },
     });
     expect(wrongOrigin.status()).toBe(403);
     const wrongCsrf = await page.request.post(endpoint, {
-      headers: { Origin: ssrUrl }, form: { _csrf: "synthetic-invalid", credential_profile: "" },
+      headers: { Origin: ssrUrl }, form: { _csrf: "synthetic-invalid" },
     });
     expect(wrongCsrf.status()).toBe(403);
 

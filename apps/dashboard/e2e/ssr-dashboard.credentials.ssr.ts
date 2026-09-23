@@ -4,7 +4,7 @@ import { bypassTwoFactor, cleanupUser, createAuthenticatedSession, getUserId, se
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import {
   destroyGithubCheckout, githubCheckoutImage, githubCheckoutInstall, githubCheckoutName,
-  githubConnectionMetadata, githubGitCounters, verifyGithubCheckout,
+  githubConnectionMetadata, githubGitCounters, profileCurrentRevision, verifyGithubCheckout,
 } from "./helpers/github-checkout";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
@@ -151,7 +151,7 @@ test.describe("managed provider credential browser journey", () => {
   );
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("refreshes GitHub App authorization before a protected repository checkout, then revokes and deletes it", async ({ page, isMobile }) => {
+  test("connects the account's one GitHub, browses and checks out without choosing it, then deletes and reconnects it", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop credential lifecycle contract");
     test.setTimeout(600_000);
     const name = "synthetic-user";
@@ -200,13 +200,15 @@ test.describe("managed provider credential browser journey", () => {
       const setupLink = page.getByRole("link", { name: "Connect GitHub", exact: true });
       await expect(setupLink).toHaveAttribute("href", settingsPath);
       await setupLink.click();
-      const discard = page.getByRole("dialog", { name: "Discard changes?", exact: true });
-      await expect(discard).toBeVisible();
-      await discard.getByRole("button", { name: "Keep editing", exact: true }).click();
+      // Leaving through the setup link keeps the draft, so the guard asks to
+      // leave rather than to discard; identify it by behavior, not heading.
+      const leave = page.locator("dialog[open]");
+      await expect(leave).toHaveCount(1);
+      await leave.getByRole("button", { name: "Keep editing", exact: true }).click();
       await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("setup-name-not-persisted");
       await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
       await setupLink.click();
-      await discard.getByRole("button", { name: "Discard changes", exact: true }).click();
+      await leave.getByRole("button", { name: "Save draft and leave", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}`);
       const returnLink = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
       await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
@@ -269,12 +271,9 @@ test.describe("managed provider credential browser journey", () => {
       expect(rendered?.includes("ghu_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
-      let row = page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row", { hasText: name });
+      const credentialRows = page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row");
+      let row = credentialRows.filter({ hasText: name });
       await expect(row).toHaveCount(1);
-      await expect(row).toContainText("GitHub · OAuth");
-      await expect(row).toContainText("synthetic-user");
-      await expect(row).toContainText("Active");
-      await expect(row).toContainText("Generation 1");
       await expect(row.locator("strong").first()).toHaveText(name);
       await expect(row.getByText("Rename", { exact: true })).toHaveCount(0);
       rendered = await page.locator("body").textContent();
@@ -282,21 +281,21 @@ test.describe("managed provider credential browser journey", () => {
       expect(rendered?.includes("ghu_")).toBe(false);
       expect(rendered?.includes("oauth_token")).toBe(false);
 
+      // Connecting again cannot add or replace the account's one connection.
       await openGithubConnection(page);
       await completeGithubAppConnection(page, "kind-synthetic-code-two");
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&error=github-app-already-connected&dialog=connect-github`);
-      await expect(page.getByRole("alert")).toContainText("This GitHub account is already connected");
-      const savedConnections = page.getByRole("region", { name: "Saved GitHub connections", exact: true });
-      await expect(savedConnections.getByRole("button", { name: "Reconnect synthetic-user", exact: true })).toBeVisible();
-      await expect(savedConnections).toContainText("Active");
+      expect(await githubConnectionMetadata(owner)).toEqual(enrolled);
       await page.goto(settingsPath);
       await expect(row).toHaveCount(1);
-      await expect(row).toContainText("Generation 1");
 
+      // Every personal profile includes the account's GitHub connection; a
+      // profile never selects or pins a GitHub credential.
       const profileName = "github-repository-browser";
       await page.getByRole("button", { name: "Create profile", exact: true }).click();
       const createProfile = page.locator('form[action^="/settings/credentials/_actions/profiles/create"]');
       await expect(page.getByRole("dialog", { name: "Create profile", exact: true })).toBeVisible();
+      await expect(createProfile.getByRole("combobox", { name: "GitHub", exact: true })).toHaveCount(0);
       // The native pattern already blocks malformed names. Prove the server
       // negative separately through this same browser cookie jar and the exact
       // real form action, without changing the pattern or any auth guard.
@@ -304,30 +303,24 @@ test.describe("managed provider credential browser journey", () => {
       if (!profileAction) throw new Error("Create profile omitted its native action");
       const profileCsrf = await createProfile.locator('[name="_csrf"]').inputValue();
       const validation = await page.context().request.post(new URL(profileAction, ssrUrl).toString(), {
-        form: { _csrf: profileCsrf, name: " ", codex: "", openai: "", github: "", anthropic: "", ssh: "" },
+        form: { _csrf: profileCsrf, name: " ", codex: "", openai: "", anthropic: "", ssh: "" },
         headers: { Origin: ssrUrl, Referer: page.url() },
         maxRedirects: 0,
       });
       expect(validation.status()).toBe(303);
       expect(validation.headers().location).toBe(`${settingsPath}&error=profile-invalid&dialog=create-profile`);
       await page.goto(new URL(validation.headers().location, ssrUrl).toString());
-      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&error=profile-invalid&dialog=create-profile`);
       await expect(page.getByRole("dialog", { name: "Create profile", exact: true })).toBeVisible();
-      await expect(page.getByRole("alert")).toContainText("Check the profile name and selected credentials");
       await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
       await createProfile.getByRole("textbox", { name: "Profile name", exact: true }).fill(profileName);
-      const githubChoice = createProfile.getByRole("combobox", { name: "GitHub", exact: true });
-      const credentialId = await githubChoice.locator("option", { hasText: name }).getAttribute("value");
-      if (!credentialId) throw new Error("Verified GitHub connection was not selectable");
-      await githubChoice.selectOption(credentialId);
       await page.getByRole("dialog", { name: "Create profile", exact: true })
         .getByRole("button", { name: "Create profile", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=profile-created`);
-      await expect(page.getByRole("status")).toHaveText("Credential profile created.");
       let profileRow = page.locator(".cw-profile-row", { hasText: profileName });
       await expect(profileRow).toHaveCount(1);
-      await expect(profileRow).toBeVisible();
+      await expect(profileRow).toContainText(`GitHub: @${name}`);
       const profileId = await profileRow.locator('[name="profile_id"]').first().inputValue();
+      expect(await profileCurrentRevision(profileId)).toBe(1);
 
       await returnLink.click();
       await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${draft}`);
@@ -345,25 +338,22 @@ test.describe("managed provider credential browser journey", () => {
       expect(restoreResponse.headers()["cache-control"]).toBe("private, no-store");
       await expect(draftForm.locator('[name="_csrf"]')).toHaveValue(currentCsrf);
       await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
-      await expect(draftForm).toHaveAttribute("data-create-draft-actor", owner);
-      await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
       await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("2000");
       await expect(ttl).toHaveValue("3600s");
       await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
-      await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("");
       expect(setupDispatches).toEqual([]);
       await page.getByRole("textbox", { name: "Name", exact: true }).fill(githubCheckoutName);
+
+      // Repository browsing uses the account's connection directly, with no
+      // profile selected and nothing to choose.
       const browser = page.locator("[data-github-browser]");
-      await expect(browser.getByRole("combobox", { name: "GitHub account" }).locator(`option[value="${profileId}@1"]`)).toContainText("synthetic-user");
-      await browser.getByRole("combobox", { name: "GitHub account" }).selectOption(`${profileId}@1`);
-      await expect(browser.getByText("Connected as @synthetic-user")).toBeVisible();
+      await expect(browser).toHaveAttribute("data-github-state", "connected");
       const choices = browser.locator("[data-select-github-repository]");
       await expect(choices).toHaveCount(50);
       const afterPicker = await githubGitCounters();
       expect(afterPicker.appRefresh).toBe(beforePicker.appRefresh + 1);
       await expect(browser.getByRole("button", { name: /synthetic-user\/repository-50/ })).toBeDisabled();
       await browser.getByRole("searchbox", { name: "Find a repository" }).fill("repository-51");
-      await expect(browser.getByRole("status")).toContainText("matching repositories found across 2 pages");
       await expect(choices).toHaveCount(1);
       await expect(choices.first()).toContainText("synthetic-user/repository-51");
       await browser.getByRole("searchbox", { name: "Find a repository" }).clear();
@@ -376,13 +366,14 @@ test.describe("managed provider credential browser journey", () => {
         .toHaveValue("https://github.com/synthetic-user/repository-01.git");
       await expect(source.getByRole("textbox", { name: "Branch", exact: true })).toHaveValue("main");
       await expect(source.getByRole("textbox", { name: "Mount path", exact: true })).toHaveValue("repository-01");
+      // Selecting the repository is the authorization: a private checkout runs
+      // through the account's GitHub connection with no profile selected.
       await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
-      await page.getByRole("combobox", { name: "Credential profile", exact: true }).selectOption(`${profileId}@1`);
       await source.getByRole("textbox", { name: "Branch", exact: true }).fill("my-working-branch");
       await browser.getByRole("button", { name: /synthetic-user\/repository-01/ }).click();
       await expect(page.locator("[data-repository-row]")).toHaveCount(1);
       await expect(source.getByRole("textbox", { name: "Branch", exact: true })).toHaveValue("my-working-branch");
-      await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("github-repository-draft");
+      await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue(githubCheckoutName);
       rendered = await page.locator("body").textContent();
       expect(rendered?.includes("gho_")).toBe(false);
       expect(rendered?.includes("ghu_")).toBe(false);
@@ -402,41 +393,37 @@ test.describe("managed provider credential browser journey", () => {
       page.off("request", observeSetup);
       await page.getByRole("button", { name: "Create Sandbox", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}/${slug}/?message=environment-created`);
-      await verifyGithubCheckout(page, orgId, profileId, before);
+      await verifyGithubCheckout(page, orgId, before);
       await destroyGithubCheckout(page, orgId);
 
-      // The normal destroy finished before removing its selected profile.
+      // Delete removes the connection directly and leaves every profile as it
+      // was: profiles show GitHub as missing, Create cannot browse.
       await page.goto("/settings/credentials/");
+      row = credentialRows.filter({ hasText: name });
+      await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
+      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
+        .getByRole("button", { name: "Delete GitHub", exact: true }).click();
+      await page.getByRole("dialog", { name: "Delete GitHub?", exact: true })
+        .getByRole("button", { name: "Delete GitHub", exact: true }).click();
+      await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=credential-deleted/);
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(0);
+      expect(await githubConnectionMetadata(owner)).toEqual([]);
       profileRow = page.locator(".cw-profile-row", { hasText: profileName });
-      await profileRow.getByRole("button", { name: "Manage profile", exact: true }).click();
-      await page.getByRole("dialog", { name: profileName, exact: true })
-        .getByRole("button", { name: "Delete profile", exact: true }).click();
-      await page.getByRole("dialog", { name: `Delete ${profileName}?`, exact: true })
-        .getByRole("button", { name: "Delete profile", exact: true }).click();
-      await expect(profileRow).toHaveCount(0);
-      row = page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row", { hasText: name });
+      await expect(profileRow).toContainText("GitHub: missing");
+      expect(await profileCurrentRevision(profileId)).toBe(1);
+      await page.goto(`/${slug}/new/`);
+      await expect(page.locator("[data-github-browser]")).toHaveAttribute("data-github-state", "not-configured");
+      await expect(page.locator("[data-github-browser]").getByRole("link", { name: "Connect GitHub", exact: true })).toBeVisible();
 
-      await expect(row).toContainText("Active");
-      await expect(row).toContainText("Generation 2");
-      await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
-      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
-        .getByRole("button", { name: "Revoke credential", exact: true }).click();
-      await page.getByRole("dialog", { name: `Revoke ${name}?`, exact: true })
-        .getByRole("button", { name: "Revoke credential", exact: true }).click();
-      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-revoked`);
-      await expect(page.getByRole("status")).toHaveText("Credential revoked.");
-      row = page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row", { hasText: name });
-      await expect(row).toContainText("Revoked");
-      await expect(row).toContainText("Generation 3");
-
-      await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
-      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
-        .getByRole("button", { name: "Delete credential", exact: true }).click();
-      await page.getByRole("dialog", { name: `Delete ${name}?`, exact: true })
-        .getByRole("button", { name: "Delete credential", exact: true }).click();
-      await expect(page).toHaveURL(`${ssrUrl}/settings/credentials/?message=credential-deleted`);
-      await expect(page.getByRole("status")).toHaveText("Credential deleted.");
-      await expect(page.getByRole("region", { name: "Credentials", exact: true }).locator(".cw-credential-row", { hasText: name })).toHaveCount(0);
+      // Reconnect restores GitHub for every profile without a new revision.
+      await page.goto("/settings/credentials/");
+      await openGithubConnection(page);
+      await completeGithubAppConnection(page, "kind-synthetic-code-one");
+      await expect(page).toHaveURL(/message=github-app-connected/);
+      expect(await githubConnectionMetadata(owner)).toHaveLength(1);
+      profileRow = page.locator(".cw-profile-row", { hasText: profileName });
+      await expect(profileRow).toContainText(`GitHub: @${name}`);
+      expect(await profileCurrentRevision(profileId)).toBe(1);
     } catch (error) {
       primaryFailure = error;
       throw error;

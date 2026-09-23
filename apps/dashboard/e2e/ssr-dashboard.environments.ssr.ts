@@ -418,7 +418,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Branch", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Mount path", { exact: true })).toBeVisible();
     await expect(page.locator("[data-github-browser]")).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "GitHub account" })).toBeVisible();
+    // One account-level connection: there is no account selector to choose.
+    await expect(page.locator("[data-github-browser]")).toHaveAttribute("data-github-state", "not-configured");
     await expect(page.getByRole("searchbox", { name: "Find a repository" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Add custom Git URL" })).toBeVisible();
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
