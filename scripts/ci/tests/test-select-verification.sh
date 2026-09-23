@@ -1539,7 +1539,9 @@ assert_tokens dispatch_services \
 output_file="$TMP/github-output"
 paths_file="$TMP/github-output.paths"
 printf '%s\n' proto/codewire/v1/common.proto > "$paths_file"
-GITHUB_OUTPUT="$output_file" GITHUB_EVENT_NAME=pull_request \
+# Clear any real event payload: a CI run's own pull request text must not
+# opt this fixture into Kind.
+env -u GITHUB_EVENT_PATH GITHUB_OUTPUT="$output_file" GITHUB_EVENT_NAME=pull_request \
   "$SELECTOR" "$paths_file" >/dev/null
 assert_tokens github_output \
   'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
