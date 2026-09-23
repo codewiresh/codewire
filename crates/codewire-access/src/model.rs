@@ -198,14 +198,23 @@ impl AccessProfile {
         matches!(self.owner, Owner::User(_))
     }
 
-    /// Every capability slot this profile selects: its credential entries and,
-    /// for a personal profile, GitHub. GitHub is resolved from the account's
-    /// current connection at use time, so it is selected even while missing.
-    pub fn selected_slots(&self) -> impl Iterator<Item = &str> {
+    /// Every capability slot whose environment names this profile reserves:
+    /// the credential entries and, for a personal profile, GitHub, connected
+    /// or not. A platform selection digest binds these names for the life of
+    /// an environment operation, so they never follow the mutable connection.
+    pub fn reserved_slots(&self) -> impl Iterator<Item = &str> {
+        self.launch_slots(true)
+    }
+
+    /// The capability slots a launch selects: the credential entries and, for
+    /// a personal profile whose owner has an active GitHub connection at
+    /// launch, GitHub. A missing connection is omitted, never fabricated, so a
+    /// profile without one launches without the managed GitHub client.
+    pub fn launch_slots(&self, github_connected: bool) -> impl Iterator<Item = &str> {
         self.entries
             .keys()
             .map(CapabilitySlot::as_str)
-            .chain(self.includes_github().then_some("github"))
+            .chain((github_connected && self.includes_github()).then_some("github"))
     }
 }
 

@@ -280,6 +280,7 @@ async fn profile_candidates(
     if reference.placement != Some(StoragePlacement::Local)
         && let Some(platform) = platform
     {
+        let github_connected = platform_github_connected(&platform.client).await?;
         let mut page_token = String::new();
         let mut seen = BTreeSet::new();
         for _ in 0..MAX_SOURCE_METADATA_PAGES {
@@ -305,10 +306,17 @@ async fn profile_candidates(
                     .map(|entry| entry.capability_slot.clone())
                     .collect::<BTreeSet<_>>();
                 // GitHub is never a profile entry: every personal profile
-                // includes the account's one connection, resolved at launch.
+                // includes the account's one connection. It is a launch slot
+                // only while that connection is active; a missing one is
+                // omitted, never fabricated. Unlike a platform sandbox, a local
+                // VM derives reserved names from these slots too; delegation
+                // authority accepts either capture and authorizes GitHub only
+                // when this capture selected it.
                 let exact_entries = profile_slots.len() == profile.entries.len()
                     && !profile_slots.contains("github");
-                profile_slots.insert("github".to_owned());
+                if github_connected {
+                    profile_slots.insert("github".to_owned());
+                }
                 anyhow::ensure!(
                     profile.revision > 0
                         && exact_entries
@@ -496,6 +504,53 @@ pub(super) async fn resolve_requested_sources(
         selected.platform = Some(authority);
     }
     Ok(selected)
+}
+
+/// Whether the account has an active, unexpired GitHub OAuth connection.
+/// Personal profiles select GitHub for a launch only while this holds.
+async fn platform_github_connected(
+    client: &codewire_client::CodewireClient,
+) -> anyhow::Result<bool> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_secs();
+    let mut page_token = String::new();
+    let mut seen = BTreeSet::new();
+    for _ in 0..MAX_SOURCE_METADATA_PAGES {
+        let response = client
+            .list_credentials(codewire_client::ListCredentialsRequest {
+                page_size: SOURCE_METADATA_PAGE_SIZE,
+                page_token,
+                ..Default::default()
+            })
+            .await
+            .context("list platform credential metadata")?;
+        anyhow::ensure!(
+            response.credentials.len() <= SOURCE_METADATA_PAGE_SIZE as usize,
+            "platform credential metadata exceeded its requested page bound"
+        );
+        if response.credentials.iter().any(|credential| {
+            credential.provider == "github"
+                && credential.authentication_kind
+                    == codewire_client::CredentialAuthenticationKind::Oauth
+                && credential.status == codewire_client::CredentialStatus::Active
+                && credential
+                    .expires_at_unix
+                    .is_none_or(|expires| expires > now)
+        }) {
+            return Ok(true);
+        }
+        if response.next_page_token.is_empty() {
+            return Ok(false);
+        }
+        anyhow::ensure!(
+            seen.insert(response.next_page_token.clone()),
+            "platform credential metadata pagination repeated a cursor"
+        );
+        page_token = response.next_page_token;
+    }
+    anyhow::bail!("platform credential metadata exceeded its page bound")
 }
 
 fn platform_profile_slots(

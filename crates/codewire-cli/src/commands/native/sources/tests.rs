@@ -493,6 +493,32 @@ fn create_and_update_accept_only_the_reviewed_source_flag_names() {
 
 #[tokio::test]
 async fn platform_metadata_resolution_is_authenticated_exact_and_material_free() {
+    use codewire_client as rpc;
+    let github = |status: rpc::CredentialStatus, expires_at_unix: Option<u64>| rpc::Credential {
+        id: "github-credential".into(),
+        provider: "github".into(),
+        authentication_kind: rpc::CredentialAuthenticationKind::Oauth.into(),
+        status: status.into(),
+        expires_at_unix,
+        ..Default::default()
+    };
+    // An active, unexpired connection makes GitHub a launch slot.
+    resolve_platform_metadata(
+        vec![github(rpc::CredentialStatus::Active, None)],
+        &["codex", "github", "openai"],
+    )
+    .await;
+    // A missing, revoked, or expired connection is omitted, never fabricated.
+    for credentials in [
+        Vec::new(),
+        vec![github(rpc::CredentialStatus::Revoked, None)],
+        vec![github(rpc::CredentialStatus::Active, Some(1))],
+    ] {
+        resolve_platform_metadata(credentials, &["codex", "openai"]).await;
+    }
+}
+
+async fn resolve_platform_metadata(credentials: Vec<codewire_client::Credential>, slots: &[&str]) {
     use buffa::Message as _;
     use codewire_client as rpc;
     use wiremock::matchers::{header, method, path};
@@ -579,6 +605,14 @@ async fn platform_metadata_resolution_is_authenticated_exact_and_material_free()
             }
             .encode_to_vec(),
         ),
+        (
+            "/codewire.v1.CredentialService/ListCredentials",
+            rpc::ListCredentialsResponse {
+                credentials,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ),
     ] {
         Mock::given(method("POST"))
             .and(path(rpc_path))
@@ -627,8 +661,7 @@ async fn platform_metadata_resolution_is_authenticated_exact_and_material_free()
     assert_eq!(
         resolved.profile,
         Some(ResolvedProfile {
-            // Every personal profile includes the account's GitHub connection.
-            profile_slots: BTreeSet::from(["codex".into(), "github".into(), "openai".into()]),
+            profile_slots: slots.iter().map(|slot| (*slot).to_owned()).collect(),
             ..profile()
         })
     );
@@ -636,10 +669,10 @@ async fn platform_metadata_resolution_is_authenticated_exact_and_material_free()
     assert_eq!(bound.server_url, server.uri());
     assert_eq!(bound.organization_id, "org_test");
     assert_eq!(bound.user_id, "user_test");
-    assert_eq!(bound.profile_slots, ["codex", "github", "openai"]);
+    assert_eq!(bound.profile_slots, slots);
     assert_eq!(
         server.received_requests().await.unwrap().len(),
-        4,
+        5,
         "only identity, membership, and metadata reads are allowed"
     );
 }

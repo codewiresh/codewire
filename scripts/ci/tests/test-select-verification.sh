@@ -1365,7 +1365,7 @@ grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$lo
 grep -qF -- '--lib tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 10' "$integration_runner"
 grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
-grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 6' "$integration_runner"
+grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
 grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
@@ -1385,7 +1385,7 @@ grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 13' "$
 grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"
 grep -qF 'assert_passed_count "platform owner-source authority matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 3' "$integration_runner"
+grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 4' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \

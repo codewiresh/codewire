@@ -12,6 +12,7 @@ fn capture() -> ProjectionCapture {
         profile_revision_exists: false,
         profile_slots: Vec::new(),
         profile_slots_overflow: false,
+        github_connected: true,
     }
 }
 
@@ -265,6 +266,42 @@ fn captured_clients_are_exact_slots_not_provider_families_or_global_configuratio
             .encode(),
         "v1:none"
     );
+}
+
+#[test]
+fn github_connection_selects_the_client_but_never_changes_the_bound_digest() {
+    let (project, mut captured) = selected_profile();
+    captured.profile_slots = vec!["codex".into(), "github".into()];
+    let connected = captured
+        .selection(&project, "synthetic-org", 7)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        captured
+            .managed_credential_clients(&project)
+            .unwrap()
+            .encode(),
+        "v2:11"
+    );
+    // A missing connection is omitted from the managed clients, never
+    // fabricated, while GitHub's names stay reserved under the same digest.
+    captured.github_connected = false;
+    let missing = captured
+        .selection(&project, "synthetic-org", 7)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        captured
+            .managed_credential_clients(&project)
+            .unwrap()
+            .encode(),
+        "v1:codex"
+    );
+    assert_eq!(
+        missing.reserved_keys,
+        platform_projection_reserved_keys(["codex", "github"]).unwrap()
+    );
+    assert_eq!(missing.sha256().unwrap(), connected.sha256().unwrap());
 }
 
 #[test]

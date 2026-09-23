@@ -660,10 +660,19 @@ fn every_personal_profile_includes_github_and_never_pins_it() {
     let empty = github_profile(user.clone());
     empty.validate().unwrap();
     assert!(empty.includes_github());
-    assert_eq!(empty.selected_slots().collect::<Vec<_>>(), vec!["github"]);
+    assert_eq!(empty.launch_slots(true).collect::<Vec<_>>(), vec!["github"]);
+    // A missing connection is omitted from the launch, never fabricated, but
+    // GitHub's environment names stay reserved whether or not it is connected.
+    assert!(empty.launch_slots(false).next().is_none());
+    assert_eq!(empty.reserved_slots().collect::<Vec<_>>(), vec!["github"]);
     let codex = profile("codex", user, "codex-work");
     assert_eq!(
-        codex.selected_slots().collect::<Vec<_>>(),
+        codex.launch_slots(true).collect::<Vec<_>>(),
+        vec!["codex", "github"]
+    );
+    assert_eq!(codex.launch_slots(false).collect::<Vec<_>>(), vec!["codex"]);
+    assert_eq!(
+        codex.reserved_slots().collect::<Vec<_>>(),
         vec!["codex", "github"]
     );
     // Organizations cannot hold a GitHub connection.
@@ -674,7 +683,11 @@ fn every_personal_profile_includes_github_and_never_pins_it() {
     );
     assert!(!organization.includes_github());
     assert_eq!(
-        organization.selected_slots().collect::<Vec<_>>(),
+        organization.launch_slots(true).collect::<Vec<_>>(),
+        vec!["codex"]
+    );
+    assert_eq!(
+        organization.reserved_slots().collect::<Vec<_>>(),
         vec!["codex"]
     );
 }

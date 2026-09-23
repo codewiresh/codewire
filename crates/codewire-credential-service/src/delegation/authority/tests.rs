@@ -114,7 +114,7 @@ impl KekProvider for TaggedApplicationKek {
 mod public_wire;
 
 fn platform_selection() -> PlatformProjectionSelection {
-    // Every personal profile includes GitHub, so its keys are always reserved.
+    // A local VM captured while GitHub was connected reserves its keys.
     let mut reserved_keys = platform_projection_reserved_keys(["github"]).unwrap();
     reserved_keys.insert(NATIVE_CODEX_HOME_KEY.into());
     PlatformProjectionSelection {
@@ -534,6 +534,69 @@ async fn application_and_credential_authorities_are_incompatible_across_full_and
             application.unwrap_calls.load(Ordering::SeqCst) == 3,
             "application authority did not own both projections and the wrong-store denial"
         );
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_is_granted_only_when_the_local_capture_selected_it_and_it_is_connected()
+-> Result<()> {
+    let h = Harness::unserved("127.0.0.1:0".parse()?).await?;
+    let result = async {
+        let (captured, _) = setup_owner_sources(&h).await?;
+        let mut platform = captured.platform.clone();
+        for key in HttpProvider::GitHubOAuth.reserved_environment_keys() {
+            platform.reserved_keys.remove(*key);
+        }
+        let uncaptured = OwnerLocalSelection::new(
+            captured.local_environment_id,
+            captured.local_environment_generation,
+            platform,
+            captured.selection_sha256,
+        )?;
+        let grants = |selection: OwnerLocalSelection| {
+            let h = &h;
+            async move {
+                let authority = admitted(h, selection).await?;
+                let session = authority.current_session().await?;
+                anyhow::Ok(authority.owner_local_grants(&session).await?)
+            }
+        };
+
+        // Without a connection both captures admit and no GitHub is fabricated.
+        ensure!(grants(captured.clone()).await?.is_empty());
+        ensure!(grants(uncaptured.clone()).await?.is_empty());
+
+        let owner = Owner::User(OwnerId::parse(ALICE)?);
+        let github = h
+            .store
+            .create(
+                &owner,
+                CredentialRegistration {
+                    provider: ProviderId::parse("github")?,
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "GitHub".into(),
+                    account_hint: Some("synthetic-account".into()),
+                    expires_at_unix: None,
+                },
+                &ProtectedValue::from_slice(b"synthetic-github-material-never-public")?,
+            )
+            .await?;
+
+        // A capture that selected GitHub is granted the account's connection.
+        let connected = grants(captured).await?;
+        ensure!(
+            connected.len() == 1
+                && connected[0].credential_id == github.metadata.id
+                && connected[0].capability_slot == CapabilitySlot::github(),
+            "captured GitHub was not granted the active connection"
+        );
+        // A capture made without GitHub never fails and never gains it later;
+        // reselecting the profile captures it again.
+        ensure!(grants(uncaptured).await?.is_empty());
         Ok(())
     }
     .await;

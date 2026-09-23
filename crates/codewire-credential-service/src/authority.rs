@@ -445,8 +445,11 @@ impl AuthoritySource {
         } else {
             (None, None)
         };
+        // The selection digest was captured when the environment was created
+        // and binds reserved names, not connection state: connecting or
+        // deleting GitHub later changes only the authorized credentials above.
         let reserved_keys = codewire_project::platform_projection_reserved_keys(
-            profile.iter().flat_map(|profile| profile.selected_slots()),
+            profile.iter().flat_map(|profile| profile.reserved_slots()),
         )
         .map_err(|_| Error::Denied)?;
         let selection = metadata.selection(&scope, reserved_keys)?;

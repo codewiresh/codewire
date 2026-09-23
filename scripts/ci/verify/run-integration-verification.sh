@@ -292,7 +292,7 @@ run_database() {
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib delegation::authority::tests:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "owner-local delegation authority matrix" "$logfile" 6
+  assert_passed_count "owner-local delegation authority matrix" "$logfile" 7
 
   logfile="$RUN_DIR/oauth-bearer-identity.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -365,7 +365,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'worker::create::projection_database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment projection capture matrix" "$logfile" 3
+  assert_passed_count "environment projection capture matrix" "$logfile" 4
 
   logfile="$RUN_DIR/organization-tenant-secret-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

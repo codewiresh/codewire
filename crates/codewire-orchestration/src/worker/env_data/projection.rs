@@ -9,8 +9,10 @@ use codewire_project::{
 };
 
 // ProjectSpec, its binding and the pinned revision's slots share one PostgreSQL
-// statement snapshot. Every personal profile selects GitHub; the account's
-// current connection is resolved later by launch authority. Do not replace this with independent reads or a lookup of
+// statement snapshot. Every personal profile reserves GitHub's names, which the
+// selection digest binds; the managed GitHub client is selected only while the
+// owner has an active connection, so a missing one is omitted, never
+// fabricated. Launch authority resolves the connection itself. Do not replace this with independent reads or a lookup of
 // the profile's current_revision/name. Slot allocation is capped at 64; a
 // separate bounded existence probe rejects, rather than truncates, excess rows.
 pub(super) const ENVIRONMENT_QUERY: &str = r#"
@@ -39,7 +41,15 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
                    SELECT 'github' WHERE p.user_id IS NOT NULL
                ) AS selected
                OFFSET 64 LIMIT 1
-           ) AS profile_slots_overflow
+           ) AS profile_slots_overflow,
+           p.user_id IS NOT NULL AND EXISTS(
+               SELECT 1 FROM platform_credentials AS c
+               WHERE c.user_id = p.user_id AND c.organization_id IS NULL
+                 AND c.provider = 'github' AND c.authentication_kind = 'oauth'
+                 AND c.status = 'active'
+                 AND (c.expires_at_unix IS NULL
+                      OR c.expires_at_unix > extract(epoch FROM clock_timestamp()))
+           ) AS github_connected
     FROM environments AS e
     LEFT JOIN platform_environment_access_bindings AS b ON b.environment_id = e.id
     LEFT JOIN platform_access_profile_revisions AS r
@@ -55,6 +65,7 @@ pub(super) struct ProjectionCapture {
     pub profile_revision_exists: bool,
     pub profile_slots: Vec<String>,
     pub profile_slots_overflow: bool,
+    pub github_connected: bool,
 }
 
 impl ProjectionCapture {
@@ -63,7 +74,10 @@ impl ProjectionCapture {
         project: &ProjectSpec,
     ) -> Result<codewire_access::ManagedCredentialClients, Error> {
         let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
-            self.profile_slots.iter().map(String::as_str),
+            self.profile_slots
+                .iter()
+                .map(String::as_str)
+                .filter(|slot| *slot != "github" || self.github_connected),
         )
         .map_err(|_| Error)?;
         clients
