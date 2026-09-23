@@ -185,7 +185,9 @@ fn proto_timestamp(value: NaiveDateTime) -> Timestamp {
     Timestamp::from_unix(value.timestamp(), value.timestamp_subsec_nanos() as i32)
 }
 
-fn optional_proto_timestamp(value: Option<NaiveDateTime>) -> buffa::MessageField<Timestamp> {
+fn optional_proto_timestamp(
+    value: Option<NaiveDateTime>,
+) -> buffa::MessageField<Timestamp, buffa::Inline<Timestamp>> {
     value.map(proto_timestamp).into()
 }
 

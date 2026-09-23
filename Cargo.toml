@@ -171,10 +171,10 @@ tokio-vsock = "=0.7.2"
 
 # Connect-RPC (client-facing contract; docs/plans/connect-rpc/). Pre-1.0 —
 # pinned exact on purpose; bump deliberately, never via `cargo update`.
-connectrpc = { git = "https://github.com/connectrpc/connect-rust.git", rev = "4da239d7a18b7dfeb40002b00f1f37e93891db17" }
-connectrpc-build = "=0.8.0"
-buffa = { version = "=0.8.1", features = ["json"] }
-buffa-types = { version = "=0.8.1", features = ["json"] }
+connectrpc = "=0.9.1"
+connectrpc-build = "=0.9.0"
+buffa = { version = "=0.9.1", features = ["json"] }
+buffa-types = { version = "=0.9.1", features = ["json"] }
 
 # ---------------------------------------------------------------------------
 # Server-side stack (used by codewire-server-core and the Phase 2+ services)

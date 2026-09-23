@@ -443,7 +443,7 @@ fn secret_write_validation(error: AppError, key: &str, value: &str) -> AppError 
     }
 }
 
-fn optional_proto_timestamp(value: &str) -> MessageField<Timestamp> {
+fn optional_proto_timestamp(value: &str) -> MessageField<Timestamp, buffa::Inline<Timestamp>> {
     if value.is_empty() {
         return None.into();
     }
