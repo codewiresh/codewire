@@ -84,7 +84,7 @@ async function settings(page: Page, slug: string, width: number): Promise<void> 
       }
       await fits(page);
     });
-    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API keys"]]) {
+    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API Keys"]]) {
       await stage(`settings-${path}-${scope}-${width}`, async () => {
         await visit(page, `/settings/${path}/${query}`);
         await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
@@ -131,7 +131,12 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
       ? page.getByRole("link", { name: "Manage personal secrets", exact: true })
       : page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link");
     await setup.click();
-    await expect(page).toHaveURL(`${ORIGIN}/settings/${destination}/?org=${slug}&creation_draft=${draft}`);
+    // A dirty form asks before leaving; the saved draft is kept.
+    const destinationUrl = `${ORIGIN}/settings/${destination}/?org=${slug}&creation_draft=${draft}`;
+    const leave = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
+    await Promise.race([page.waitForURL(destinationUrl), leave.waitFor()]);
+    if (await leave.isVisible()) await button(leave, "Save draft and leave").click();
+    await expect(page).toHaveURL(destinationUrl);
     const back = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
     await expect(back).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
     await back.click();
@@ -161,6 +166,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await settings(page, slug, width);
     if (width === 1440) {
       await stage("settings-to-create-1440", async () => {
+        // Personal pages visited directly carry no organization context, so
+        // start from organization-scoped Settings, where Create is offered.
+        await visit(page, `/settings/?org=${slug}`);
         await page.getByRole("link", { name: "Create Sandbox", exact: true }).first().click();
         const form = page.locator("[data-environment-form]");
         await expect(form).toHaveAttribute("data-create-draft-actor", userId);
