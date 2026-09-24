@@ -561,6 +561,9 @@ run_rust_compile() {
 }
 
 run_derp_contract() {
+  # The packages shard builds this binary in its own job. Build it here so the
+  # local-vmm shard stands alone; under "all" the graph already built it.
+  cargo build --locked -p codewire-derp --bin codewire-derp || return $?
   local port=$((61000 + (${GITHUB_RUN_ID:-$$} % 4000)))
   local log_dir="${RUNNER_TEMP:-$ROOT/.tmp}/codewire-derp-contract-${GITHUB_RUN_ID:-$$}"
   mkdir -p "$log_dir"

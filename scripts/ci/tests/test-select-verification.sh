@@ -1515,6 +1515,11 @@ grep -qF -- \
   "-run '^TestWebSocketFallbackRelaysTailscaleGoClients$' ./derp/..." \
   "$derp_runner"
 grep -qF 'DERP_WEBSOCKET=1' "$derp_runner"
+# The local-vmm shard runs apart from the packages shard that builds binaries.
+grep -qF 'cargo build --locked -p codewire-derp --bin codewire-derp' "$derp_runner" || {
+  echo 'DERP runner must build the relay binary it starts' >&2
+  exit 1
+}
 grep -qF "if grep -Eq -- '--- SKIP'" "$derp_runner"
 grep -qF "|| ! grep -Eq -- '^[[:space:]]*--- PASS:'" "$derp_runner"
 grep -qF 'if selected transport_pkg_codewire_vmm_guest_probe; then' \
