@@ -173,32 +173,32 @@ expect_failure unsigned-annotated-tag \
   "$source_sha" "$unsigned_tag_object" "$source_sha" "$canonical_main_sha"
 
 mapfile -t recovery_tags < <(
-  "$COMPUTE_TAGS" nexus-system-cluster.example.invalid/oci-promoted/codewire services "$source_sha" v0.3.359 \
+  "$COMPUTE_TAGS" registry.example.invalid/codewire services "$source_sha" v0.3.359 \
     refs/heads/main main
 )
 [[ "${recovery_tags[*]}" == \
-  "nexus-system-cluster.example.invalid/oci-promoted/codewire/services:${source_sha} nexus-system-cluster.example.invalid/oci-promoted/codewire/services:v0.3.359" ]]
+  "registry.example.invalid/codewire/services:${source_sha} registry.example.invalid/codewire/services:v0.3.359" ]]
 
 mapfile -t push_tags < <(
-  "$COMPUTE_TAGS" nexus-system-cluster.example.invalid/oci-promoted/codewire services "$source_sha" v0.3.359 \
+  "$COMPUTE_TAGS" registry.example.invalid/codewire services "$source_sha" v0.3.359 \
     refs/tags/v0.3.359 v0.3.359
 )
 [[ "${push_tags[*]}" == \
-  "nexus-system-cluster.example.invalid/oci-promoted/codewire/services:${source_sha} nexus-system-cluster.example.invalid/oci-promoted/codewire/services:v0.3.359" ]]
+  "registry.example.invalid/codewire/services:${source_sha} registry.example.invalid/codewire/services:v0.3.359" ]]
 
 mapfile -t dev_tags < <(
-  "$COMPUTE_TAGS" nexus-system-cluster.example.invalid/oci-promoted/codewire services "$source_sha" '' \
+  "$COMPUTE_TAGS" registry.example.invalid/codewire services "$source_sha" '' \
     refs/heads/main main
 )
 [[ "${dev_tags[*]}" == \
-  "nexus-system-cluster.example.invalid/oci-promoted/codewire/services:${source_sha}" ]]
+  "registry.example.invalid/codewire/services:${source_sha}" ]]
 
 mapfile -t direct_tag_tags < <(
-  "$COMPUTE_TAGS" nexus-system-cluster.example.invalid/oci-promoted/codewire services "$source_sha" '' \
+  "$COMPUTE_TAGS" registry.example.invalid/codewire services "$source_sha" '' \
     refs/tags/v0.3.359 v0.3.359
 )
 [[ "${direct_tag_tags[*]}" == \
-  "nexus-system-cluster.example.invalid/oci-promoted/codewire/services:${source_sha} nexus-system-cluster.example.invalid/oci-promoted/codewire/services:v0.3.359" ]]
+  "registry.example.invalid/codewire/services:${source_sha} registry.example.invalid/codewire/services:v0.3.359" ]]
 
 deploy_workflow="$ROOT/.gitea/workflows/deploy-prod.yaml"
 cli_workflow="$ROOT/.gitea/workflows/cli-release.yaml"
@@ -419,7 +419,7 @@ grep -Fq -- '--provenance="$provenance"' "$image_builder"
 grep -Fq -- '--metadata-file "$build_metadata"' "$image_builder"
 grep -Fq '"$credential_fetcher" "$registry_username_file" "$registry_password_file"' \
   "$image_builder"
-grep -Fq "readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'" \
+grep -Fq "readonly REGISTRY_HOST='registry.example.invalid'" \
   "$image_builder"
 if grep -Fq 'GITEA_REGISTRY_TOKEN' "$image_builder"; then
   echo 'image builder still accepts a direct registry token' >&2

@@ -29,7 +29,7 @@ def candidates(source_sha: str = SOURCE_SHA) -> list[list[str]]:
         [
             family,
             source_sha,
-            f"nexus-system-cluster.example.invalid/oci-promoted/codewire/{family}@{DIGESTS[family]}",
+            f"registry.example.invalid/codewire/{family}@{DIGESTS[family]}",
         ]
         for family in image_bundle.FAMILIES
     ]
@@ -96,7 +96,7 @@ class ImageBundleTests(unittest.TestCase):
 
     def test_mutable_candidate_reference_is_rejected(self) -> None:
         values = candidates()
-        values[0][2] = "nexus-system-cluster.example.invalid/oci-promoted/codewire/dashboard:latest"
+        values[0][2] = "registry.example.invalid/codewire/dashboard:latest"
         with self.assertRaises(image_bundle.BundleError):
             image_bundle._create_bundle(SOURCE_SHA, values)
 
@@ -120,7 +120,7 @@ class ImageBundleTests(unittest.TestCase):
         old = image_bundle._create_bundle(SOURCE_SHA, candidates())
         changed_digest = copy.deepcopy(old)
         changed_digest["images"][0]["ref"] = (
-            "nexus-system-cluster.example.invalid/oci-promoted/codewire/dashboard@sha256:" + "f" * 64
+            "registry.example.invalid/codewire/dashboard@sha256:" + "f" * 64
         )
         with self.assertRaises(image_bundle.BundleError):
             image_bundle.validate_boundary(old, changed_digest)
@@ -145,13 +145,13 @@ class ImageBundleTests(unittest.TestCase):
             self.assertEqual(
                 image_bundle._candidate_from_metadata(
                     "gateway", SOURCE_SHA,
-                    "nexus-system-cluster.example.invalid/oci-promoted/codewire",
+                    "registry.example.invalid/codewire",
                     metadata,
                 ),
                 (
                     "gateway",
                     SOURCE_SHA,
-                    f"nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@{DIGESTS['gateway']}",
+                    f"registry.example.invalid/codewire/gateway@{DIGESTS['gateway']}",
                 ),
             )
 
@@ -166,13 +166,13 @@ class ImageBundleTests(unittest.TestCase):
             self.assertEqual(
                 image_bundle._candidate_from_metadata(
                     "workspace", SOURCE_SHA,
-                    "nexus-system-cluster.example.invalid/oci-promoted/codewire",
+                    "registry.example.invalid/codewire",
                     metadata,
                 ),
                 (
                     "workspace",
                     SOURCE_SHA,
-                    f"nexus-system-cluster.example.invalid/oci-promoted/codewire/workspace@{digest}",
+                    f"registry.example.invalid/codewire/workspace@{digest}",
                 ),
             )
 
@@ -188,13 +188,13 @@ class ImageBundleTests(unittest.TestCase):
                 image_bundle._candidate_from_metadata(
                     "confidential-probe",
                     SOURCE_SHA,
-                    "nexus-system-cluster.example.invalid/oci-promoted/codewire",
+                    "registry.example.invalid/codewire",
                     metadata,
                 ),
                 (
                     "confidential-probe",
                     SOURCE_SHA,
-                    "nexus-system-cluster.example.invalid/oci-promoted/codewire/confidential-probe@"
+                    "registry.example.invalid/codewire/confidential-probe@"
                     + digest,
                 ),
             )
@@ -204,7 +204,7 @@ class ImageBundleTests(unittest.TestCase):
         values[-1] = [
             "workspace",
             SOURCE_SHA,
-            "nexus-system-cluster.example.invalid/oci-promoted/codewire/workspace@sha256:" + "f" * 64,
+            "registry.example.invalid/codewire/workspace@sha256:" + "f" * 64,
         ]
         with self.assertRaises(image_bundle.BundleError):
             image_bundle._create_bundle(SOURCE_SHA, values)

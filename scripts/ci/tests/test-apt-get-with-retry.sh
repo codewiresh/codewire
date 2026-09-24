@@ -62,7 +62,7 @@ chmod 0755 "$TEST_TMP/bin/apt-get"
 cat >"$TEST_TMP/bin/sleep" <<'SH'
 #!/usr/bin/bash
 set -euo pipefail
-[[ $# == 1 && "$1" == 30 ]] || exit 98
+[[ $# == 1 && "$1" =~ ^(30|60|120|240|300)$ ]] || exit 98
 printf '%s\n' "$1" >>"$FAKE_SLEEP_LOG"
 SH
 chmod 0755 "$TEST_TMP/bin/sleep"
@@ -124,7 +124,12 @@ run_case() {
   [[ "$status" == "$expected_status" ]] || fail "$name returned $status, expected $expected_status"
   [[ "$(<"$case_dir/apt.state")" == "$expected_calls" ]] || fail "$name changed the APT invocation count"
   [[ "$(<"$case_dir/timeout.state")" == "$expected_timeouts" ]] || fail "$name changed bounded acquisition count"
-  [[ "$(wc -l <"$case_dir/sleep.log")" == "$expected_waits" ]] || fail "$name changed the fixed inter-attempt waits"
+  [[ "$(wc -l <"$case_dir/sleep.log")" == "$expected_waits" ]] || fail "$name changed the inter-attempt waits"
+  [[ "$(head -n "$expected_waits" <<<"30
+60
+120
+240
+300" | tr '\n' ' ')" == "$(tr '\n' ' ' <"$case_dir/sleep.log")" ]] || fail "$name changed the exponential backoff sequence"
   [[ "$(grep -c '^APT acquisition failed; retrying the exact command ' "$case_dir/output.log" || true)" == "$expected_waits" ]] \
     || fail "$name changed the retry reports"
   for ((attempt = 1; attempt <= expected_calls; attempt++)); do
@@ -132,8 +137,8 @@ run_case() {
     install_args=("${helper_args[@]}")
     [[ "$mode" != chain ]] || install_args=(install -y package-one)
     case "$kind" in
-      update) expected_args=("${helper_args[@]}") ;;
-      download) expected_args=("${install_args[@]}" --download-only) ;;
+      update) expected_args=("${helper_args[@]}" -o Acquire::Retries=5) ;;
+      download) expected_args=("${install_args[@]}" --download-only -o Acquire::Retries=5) ;;
       apply) expected_args=("${install_args[@]}" --no-download) ;;
       *) fail "$name has unknown expected invocation kind $kind" ;;
     esac
@@ -169,16 +174,16 @@ run_case() {
 
 helper_args=(-o Acquire::https::Verify-Peer=false -o 'Acquire::https::User-Agent=codewire fixture' update)
 run_case partial-update-recovery partial,0,0,0 0 update,update,download,apply 1 chain
-run_case partial-update-exhaustion partial,partial,partial,partial 100 update,update,update,update 3 chain
+run_case partial-update-exhaustion partial,partial,partial,partial,partial,partial 100 update,update,update,update,update,update 5 chain
 helper_args+=(-o APT::Update::Error-Mode=persistent)
 run_case caller-cannot-weaken-update partial,0,0,0 0 update,update,download,apply 1 chain
 
 helper_args=(-o Acquire::https::Verify-Peer=false -o 'Acquire::https::User-Agent=codewire fixture' install -y package-one)
 run_case immediate-success 0,0 0 download,apply 0
 run_case ordinary-recovery 42,43,0,0 0 download,download,download,apply 2
-run_case ordinary-exhaustion 41,42,43,44 44 download,download,download,download 3
+run_case ordinary-exhaustion 41,42,43,44,45,46 46 download,download,download,download,download,download 5
 run_case timeout-recovery hang,0,0 0 download,download,apply 1
-run_case timeout-exhaustion hang,hang,hang,hang 124 download,download,download,download 3
+run_case timeout-exhaustion hang,hang,hang,hang,hang,hang 124 download,download,download,download,download,download 5
 run_case apply-failure-is-not-retried 0,67 67 download,apply 0
 
 # This proves ordinary TERM-responsive children, not arbitrary detached process

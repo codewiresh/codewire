@@ -53,7 +53,7 @@ if [ "${FAKE_TRANSIENT_REGISTRY_IMAGE:-}" = "$name" ]; then
   if [ "$count" -lt "$failures" ]; then
     printf '%s\n' "$((count + 1))" >"$state"
     if [ "$count" -eq 0 ]; then
-      printf 'unexpected status from HEAD request to https://nexus-system-cluster.example.invalid/v2/oci-promoted/codewire/%s/blobs/sha256:test: 503 Service Temporarily Unavailable\n' \
+      printf 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/%s/blobs/sha256:test: 503 Service Temporarily Unavailable\n' \
         "$name" >&2
     else
       printf 'login attempt to https://nexus.example.invalid/v2/ failed with status: 503 Service Unavailable\n' >&2
@@ -69,7 +69,7 @@ printf '%s|%s|%s|%s|%s|%s\n' \
   "$name" "$CODEWIRE_EXTERNAL_BUILDX_BUILDER" \
   "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" "$CODEWIRE_SCCACHE_MODE" \
   "$CODEWIRE_PROVENANCE_BUILDER_ID" "${CODEWIRE_BUILD_RUNTIME_SET:-0}" >>"$BUILD_LOG"
-printf 'candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/%s@sha256:%064d\n' \
+printf 'candidate_ref=registry.example.invalid/codewire/%s@sha256:%064d\n' \
   "$name" 0 >>"$GITHUB_OUTPUT"
 SH
 chmod 0755 "$fixture/scripts/ci/images/build-push-image.sh"
@@ -128,13 +128,13 @@ printf '0\n' >"$transient_state"
     scripts/ci/images/build-push-runtime-images.sh
 )
 [[ "$(wc -l <"$transient_output" | tr -d ' ')" -eq 5 ]] ||
-  fail "transient Nexus recovery did not emit the exact five-image set"
+  fail "transient registry recovery did not emit the exact five-image set"
 [[ "$(wc -l <"$transient_build_log" | tr -d ' ')" -eq 5 ]] ||
-  fail "transient Nexus recovery rebuilt a successful image"
+  fail "transient registry recovery rebuilt a successful image"
 [[ "$(cat "$transient_state")" -eq 2 ]] ||
-  fail "transient Nexus recovery did not observe both injected failures"
+  fail "transient registry recovery did not observe both injected failures"
 [[ "$(grep -c '^60$' "$transient_sleep_log")" -eq 2 ]] ||
-  fail "transient Nexus recovery did not use the fixed retry delay"
+  fail "transient registry recovery did not use the fixed retry delay"
 
 fatal_state="$work/fatal-state"
 printf '0\n' >"$fatal_state"
@@ -156,7 +156,7 @@ if (
   fail "non-retryable protected build failure was accepted"
 fi
 [[ ! -s "$work/fatal-sleep.log" ]] ||
-  fail "non-retryable protected build failure entered the Nexus retry loop"
+  fail "non-retryable protected build failure entered the registry retry loop"
 grep -Fq 'non-retryable protected build failure' "$work/fatal.stdout" ||
   fail "non-retryable protected build failure was not observable"
 
@@ -183,11 +183,11 @@ printf '0\n' >"$maintenance_state"
     scripts/ci/images/build-push-runtime-images.sh
 )
 [[ "$(cat "$maintenance_state")" -eq 60 ]] ||
-  fail "Nexus maintenance recovery did not reach its final admitted retry"
+  fail "registry maintenance recovery did not reach its final admitted retry"
 [[ "$(grep -c '^60$' "$maintenance_sleep_log")" -eq 60 ]] ||
-  fail "Nexus maintenance recovery did not use sixty bounded waits"
+  fail "registry maintenance recovery did not use sixty bounded waits"
 [[ "$(wc -l <"$maintenance_output" | tr -d ' ')" -eq 5 ]] ||
-  fail "Nexus maintenance recovery did not emit the exact five-image set"
+  fail "registry maintenance recovery did not emit the exact five-image set"
 
 exhausted_state="$work/exhausted-state"
 exhausted_sleep_log="$work/exhausted-sleep.log"
@@ -210,12 +210,12 @@ if (
     CODEWIRE_SCCACHE_MODE=local \
     scripts/ci/images/build-push-runtime-images.sh
 ) >"$work/exhausted.stdout" 2>"$work/exhausted.stderr"; then
-  fail "exhausted Nexus outage was accepted"
+  fail "exhausted registry outage was accepted"
 fi
 [[ "$(cat "$exhausted_state")" -eq 61 ]] ||
-  fail "Nexus retry boundary did not stop after 61 failed attempts"
+  fail "registry retry boundary did not stop after 61 failed attempts"
 [[ "$(grep -c '^60$' "$exhausted_sleep_log")" -eq 60 ]] ||
-  fail "Nexus retry boundary did not use exactly 60 bounded waits"
+  fail "registry retry boundary did not use exactly 60 bounded waits"
 
 builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
 [[ "$builder" =~ ^codewire-runtime-42-3-[0-9]+$ ]] ||
@@ -239,7 +239,7 @@ grep -Fq 'moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452b
   "$docker_log" || fail "wrapper did not pin BuildKit"
 grep -Fq "buildx rm --force $builder" "$docker_log" ||
   fail "wrapper did not destroy its BuildKit daemon"
-[[ "$(grep -Ec '^pull nexus-system-cluster\.private\.invalid/oci-promoted/codewire/' "$docker_log")" -eq 5 ]] ||
+[[ "$(grep -Ec '^pull registry\.example\.invalid/codewire/' "$docker_log")" -eq 5 ]] ||
   fail "wrapper did not pull all five protected candidates by digest"
 for family in dashboard derp gateway mesh services; do
   grep -Eq "^image tag .*codewire/${family}@sha256:[0-9a-f]{64} codewire-${family}:e2e$" \

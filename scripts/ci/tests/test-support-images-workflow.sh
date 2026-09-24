@@ -231,7 +231,7 @@ grep -Fq 'https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest'
 [[ "$(tail -n 1 "$CONFIDENTIAL_PROBE_DOCKERFILE")" == 'USER 65532:65532' ]] ||
   fail 'confidential probe does not restore its unprivileged runtime user'
 
-if grep -Eq '(nexus-system-cluster\.private\.invalid/oci-promoted/codewire|ghcr\.io/codewiresh)/(base|workspace):(latest|main)' \
+if grep -Eq '(registry\.example\.invalid/codewire|ghcr\.io/codewiresh)/(base|workspace):(latest|main)' \
     "$WORKFLOW"; then
   fail 'support-image publication contains a moving image tag'
 fi

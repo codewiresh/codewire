@@ -23,14 +23,16 @@ layer_cache_mode="${CODEWIRE_BUILDKIT_CACHE_MODE:-local}"
 build_runtime_set="${CODEWIRE_BUILD_RUNTIME_SET:-0}"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
-readonly REGISTRY_HOST='nexus-system-cluster.example.invalid'
-readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/oci-promoted/codewire"
+# Harbor is the only publication registry. Nexus remains a read-only source of
+# approved third-party inputs (below); nothing is pushed there.
+readonly REGISTRY_HOST='registry.example.invalid'
+readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/codewire"
 source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
 readonly APPROVED_REGISTRY_HOST='nexus.example.invalid'
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
-# Docker keys credentials by registry hostname. The protected publisher keeps
-# its write-only promoted-repository login, while this canonical hostname uses
-# the separate read-only approved-input identity for the pinned SBOM tool.
+# Docker keys credentials by registry hostname. The Harbor publisher pushes
+# codewire/ images, while this canonical Nexus hostname uses the separate
+# read-only approved-input identity for the pinned SBOM tool.
 readonly SBOM_GENERATOR_IMAGE='nexus.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
 readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
 readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
@@ -119,7 +121,7 @@ if [ -n "$base_image_ref" ]; then
     echo "An exact base image may only be supplied to the workspace build" >&2
     exit 1
   fi
-  if [[ ! "$base_image_ref" =~ ^(nexus-system-cluster\.private\.invalid/oci-promoted/codewire/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$ ]]; then
+  if [[ ! "$base_image_ref" =~ ^(registry\.example\.invalid/codewire/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$ ]]; then
     echo "Workspace base image must be an exact supported digest reference" >&2
     exit 1
   fi
@@ -171,14 +173,15 @@ fi
 
 umask 077
 work="$(mktemp -d)"
-registry_username_file="$work/nexus-username"
-registry_password_file="$work/nexus-password"
+registry_username_file="$work/harbor-username"
+registry_password_file="$work/harbor-password"
 approved_registry_username_file="$work/nexus-approved-username"
 approved_registry_password_file="$work/nexus-approved-password"
 build_metadata="$work/build-metadata.json"
 bake_metadata="$work/bake-metadata.json"
 docker_config="${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-$work/docker-config}"
-credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
+credential_fetcher="${OPENBAO_HARBOR_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-harbor-credentials.sh}"
+approved_credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
 buildx_builder=''
 buildx_builder_owned=0
 source_remote_url=''
@@ -242,11 +245,15 @@ else
   mkdir -m 0700 "$docker_config"
 fi
 if [ ! -x "$credential_fetcher" ]; then
-  echo "OpenBao Nexus credential fetcher is missing or not executable" >&2
+  echo "OpenBao Harbor credential fetcher is missing or not executable" >&2
+  exit 1
+fi
+if [ ! -x "$approved_credential_fetcher" ]; then
+  echo "OpenBao approved-input credential fetcher is missing or not executable" >&2
   exit 1
 fi
 "$credential_fetcher" "$registry_username_file" "$registry_password_file"
-"$credential_fetcher" --approved \
+"$approved_credential_fetcher" --approved \
   "$approved_registry_username_file" "$approved_registry_password_file"
 
 registry_auth_error() {
@@ -278,7 +285,7 @@ registry_login_host() {
     login_error="$(mktemp "$work/login-error.XXXXXX")"
     registry_username="$(<"$username_file")"
     [[ -n "$registry_username" && "$registry_username" != *$'\n'* ]] || {
-      echo 'Nexus username is malformed' >&2
+      echo 'Registry username is malformed' >&2
       return 1
     }
     if DOCKER_CONFIG="$docker_config" docker login "$registry_host" \
@@ -294,7 +301,7 @@ registry_login_host() {
     if registry_service_unavailable "$login_error" "$registry_host" \
         && [ "$unavailable_attempt" -lt "$unavailable_attempts" ]; then
       unavailable_attempt=$((unavailable_attempt + 1))
-      printf 'Nexus is temporarily unavailable during registry login; retrying %s (%d/%d)\n' \
+      printf 'Registry is temporarily unavailable during login; retrying %s (%d/%d)\n' \
         "$registry_host" "$unavailable_attempt" "$unavailable_attempts" >&2
       sleep "$NEXUS_BACKUP_RETRY_DELAY_SECONDS"
       continue
@@ -381,7 +388,7 @@ run_buildx_with_nexus_retry() {
       return "$build_status"
     fi
 
-    printf 'Nexus is temporarily unavailable during protected publication; retrying the exact %s build (%d/%d)\n' \
+    printf 'Registry is temporarily unavailable during protected publication; retrying the exact %s build (%d/%d)\n' \
       "$image_name" "$((attempt + 1))" "$attempts" >&2
     sleep "$NEXUS_BACKUP_RETRY_DELAY_SECONDS"
   done

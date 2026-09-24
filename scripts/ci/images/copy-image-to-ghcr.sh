@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Copy one exact promoted Nexus manifest, unchanged, to Harbor (the registry
-# every deployment pulls from) or to the public GHCR mirror.
+# Copy one exact Harbor manifest, unchanged, to another tag in its Harbor
+# repository (the registry every deployment pulls from) or to the public GHCR
+# mirror. Images are built and pushed to Harbor; nothing reads Nexus here.
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then
@@ -13,9 +14,9 @@ target_repository="$2"
 shift 2
 tags=("$@")
 
-readonly source_pattern='^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/(dashboard|derp|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
+readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
 if [[ ! "$source_ref" =~ $source_pattern ]]; then
-  echo "Source must be an exact supported promoted Nexus digest reference" >&2
+  echo "Source must be an exact supported Harbor digest reference" >&2
   exit 1
 fi
 image_name="${BASH_REMATCH[1]}"
@@ -56,23 +57,22 @@ for tag in "${tags[@]}"; do
   seen_tags[$tag]=1
 done
 
-: "${NEXUS_REGISTRY_USERNAME_FILE:?NEXUS_REGISTRY_USERNAME_FILE is required}"
-: "${NEXUS_REGISTRY_PASSWORD_FILE:?NEXUS_REGISTRY_PASSWORD_FILE is required}"
+# The Harbor publisher reads every source and writes Harbor alias tags.
+: "${HARBOR_PUBLISH_USERNAME:?HARBOR_PUBLISH_USERNAME is required}"
+: "${HARBOR_PUBLISH_PASSWORD_FILE:?HARBOR_PUBLISH_PASSWORD_FILE is required}"
 if [ "$target_label" = GHCR ]; then
   : "${GHCR_PUBLISH_USERNAME:?GHCR_PUBLISH_USERNAME is required}"
   : "${GHCR_PUBLISH_TOKEN_FILE:?GHCR_PUBLISH_TOKEN_FILE is required}"
   target_username="$GHCR_PUBLISH_USERNAME"
   target_credential_file="$GHCR_PUBLISH_TOKEN_FILE"
 else
-  : "${HARBOR_PUBLISH_USERNAME:?HARBOR_PUBLISH_USERNAME is required}"
-  : "${HARBOR_PUBLISH_PASSWORD_FILE:?HARBOR_PUBLISH_PASSWORD_FILE is required}"
   target_username="$HARBOR_PUBLISH_USERNAME"
   target_credential_file="$HARBOR_PUBLISH_PASSWORD_FILE"
 fi
 skopeo_runner="${SKOPEO_RUNNER:-scripts/ci/images/run-skopeo-container.sh}"
 docker_bin="${DOCKER_BIN:-docker}"
 
-for secret_file in "$NEXUS_REGISTRY_USERNAME_FILE" "$NEXUS_REGISTRY_PASSWORD_FILE" "$target_credential_file"; do
+for secret_file in "$HARBOR_PUBLISH_PASSWORD_FILE" "$target_credential_file"; do
   if [ ! -f "$secret_file" ] || [ ! -s "$secret_file" ]; then
     echo "Registry credential file is missing or empty" >&2
     exit 1
@@ -157,18 +157,19 @@ registry_login() {
   done
 }
 
-readonly NEXUS_HOST='nexus-system-cluster.example.invalid'
-nexus_username="$(<"$NEXUS_REGISTRY_USERNAME_FILE")"
-[[ -n "$nexus_username" && "$nexus_username" != *$'\n'* ]] || {
-  echo 'Nexus username is malformed' >&2
+readonly HARBOR_HOST='registry.example.invalid'
+[[ -n "$HARBOR_PUBLISH_USERNAME" && "$HARBOR_PUBLISH_USERNAME" != *$'\n'* ]] || {
+  echo 'Harbor username is malformed' >&2
   exit 1
 }
-registry_login Nexus "$NEXUS_HOST" "$nexus_username" "$NEXUS_REGISTRY_PASSWORD_FILE"
-[[ -n "$target_username" && "$target_username" != *$'\n'* ]] || {
-  printf '%s username is malformed\n' "$target_label" >&2
-  exit 1
-}
-registry_login "$target_label" "$target_host" "$target_username" "$target_credential_file"
+registry_login Harbor "$HARBOR_HOST" "$HARBOR_PUBLISH_USERNAME" "$HARBOR_PUBLISH_PASSWORD_FILE"
+if [ "$target_label" = GHCR ]; then
+  [[ -n "$target_username" && "$target_username" != *$'\n'* ]] || {
+    echo 'GHCR username is malformed' >&2
+    exit 1
+  }
+  registry_login GHCR "$target_host" "$target_username" "$target_credential_file"
+fi
 
 inspect_digest() {
   local ref="$1"
@@ -179,7 +180,7 @@ inspect_digest() {
 
 source_digest="$(inspect_digest "$source_ref")"
 if [ "$source_digest" != "$expected_digest" ]; then
-  echo "Canonical Nexus manifest digest does not match its immutable reference" >&2
+  echo "Canonical Harbor manifest digest does not match its immutable reference" >&2
   exit 1
 fi
 

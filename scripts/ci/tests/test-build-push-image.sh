@@ -354,21 +354,33 @@ cleanup() {
 }
 trap cleanup EXIT
 base_digest="sha256:$(printf 'e%.0s' {1..64})"
-base_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/base@$base_digest"
+base_ref="registry.example.invalid/codewire/base@$base_digest"
 
+# Nexus serves only approved third-party inputs; publication must never ask it
+# for a publisher credential. Harbor supplies the only publisher identity.
 cat >"$work/bin/fetch-nexus" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${1:-}" == --approved ]]; then
-  username="${FAKE_APPROVED_REGISTRY_USERNAME:?}"
-  password="${FAKE_APPROVED_REGISTRY_PASSWORD:?}"
-  shift
-else
-  username="${FAKE_REGISTRY_USERNAME:?}"
-  password="${FAKE_REGISTRY_PASSWORD:?}"
+if [[ "${1:-}" != --approved ]]; then
+  echo 'Nexus publisher credential requested by publication' >&2
+  exit 97
 fi
-printf '%s' "$username" >"$1"
-printf '%s' "$password" >"$2"
+shift
+printf '%s' "${FAKE_APPROVED_REGISTRY_USERNAME:?}" >"$1"
+printf '%s' "${FAKE_APPROVED_REGISTRY_PASSWORD:?}" >"$2"
+chmod 0600 "$1" "$2"
+printf '%q %q\n' "$1" "$2" >>"${FAKE_FETCH_CALLS:?}"
+EOF
+
+cat >"$work/bin/fetch-harbor" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$#" -ne 2 ]]; then
+  echo 'Harbor publisher credential takes exactly two output paths' >&2
+  exit 98
+fi
+printf '%s' "${FAKE_REGISTRY_USERNAME:?}" >"$1"
+printf '%s' "${FAKE_REGISTRY_PASSWORD:?}" >"$2"
 chmod 0600 "$1" "$2"
 printf '%q %q\n' "$1" "$2" >>"${FAKE_FETCH_CALLS:?}"
 EOF
@@ -395,10 +407,10 @@ set_manifest() {
 }
 
 case "${1:-} ${2:-} ${3:-}" in
-  login\ nexus-system-cluster.example.invalid\ *|login\ nexus.example.invalid\ *)
+  login\ registry.example.invalid\ *|login\ nexus.example.invalid\ *)
     registry_host="$2"
     case "$registry_host" in
-      nexus-system-cluster.example.invalid)
+      registry.example.invalid)
         expected_username="${FAKE_REGISTRY_USERNAME:?}"
         expected_password="${FAKE_REGISTRY_PASSWORD:?}"
         ;;
@@ -420,7 +432,7 @@ case "${1:-} ${2:-} ${3:-}" in
         exit 1
       fi
     fi
-    if [ "$registry_host" = nexus-system-cluster.example.invalid ] \
+    if [ "$registry_host" = registry.example.invalid ] \
         && [ -n "${FAKE_LOGIN_NEXUS_FAILURES:-}" ]; then
       login_state="${FAKE_LOGIN_NEXUS_STATE:?}"
       login_count="$(cat "$login_state")"
@@ -554,7 +566,7 @@ case "${1:-} ${2:-} ${3:-}" in
       build_count="$(cat "$build_state")"
       if [ "$build_count" -lt "$FAKE_BUILD_NEXUS_FAILURES" ]; then
         printf '%s\n' "$((build_count + 1))" >"$build_state"
-        echo 'unexpected status from HEAD request to https://nexus-system-cluster.example.invalid/v2/oci-promoted/codewire/test/blobs/sha256:test: 503 Service Temporarily Unavailable' >&2
+        echo 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/test/blobs/sha256:test: 503 Service Temporarily Unavailable' >&2
         exit 1
       fi
     fi
@@ -631,7 +643,7 @@ case "${1:-} ${2:-} ${3:-}" in
       build_count="$(cat "$build_state")"
       if [ "$build_count" -lt "$FAKE_BUILD_NEXUS_FAILURES" ]; then
         printf '%s\n' "$((build_count + 1))" >"$build_state"
-        echo 'unexpected status from HEAD request to https://nexus-system-cluster.example.invalid/v2/oci-promoted/codewire/test/blobs/sha256:test: 503 Service Temporarily Unavailable' >&2
+        echo 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/test/blobs/sha256:test: 503 Service Temporarily Unavailable' >&2
         exit 1
       fi
     fi
@@ -695,11 +707,12 @@ cat >"$work/bin/sleep" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_SLEEP_CALLS:?}"
 EOF
-chmod +x "$work/bin/fetch-nexus" "$work/bin/docker" "$work/bin/sccache" \
+chmod +x "$work/bin/fetch-nexus" "$work/bin/fetch-harbor" "$work/bin/docker" "$work/bin/sccache" \
   "$work/bin/sleep"
 
 export PATH="$work/bin:$PATH"
 export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/fetch-nexus"
+export OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/bin/fetch-harbor"
 export FAKE_REGISTRY_USERNAME="$registry_username"
 export FAKE_REGISTRY_PASSWORD="$registry_password"
 export FAKE_APPROVED_REGISTRY_USERNAME="$approved_registry_username"
@@ -744,9 +757,9 @@ grep -qF 'SCCACHE_DIR=/var/cache/sccache MULTILEVEL=disk,s3' "$FAKE_SCCACHE_CALL
 grep -qxF 'family=gateway' "$GITHUB_OUTPUT" || fail 'candidate family is absent'
 grep -qxF "source_sha=$source_sha" "$GITHUB_OUTPUT" ||
   fail 'candidate source SHA is absent'
-grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=registry.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'candidate digest ref is absent'
-grep -qF -- "gateway.tags=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:$source_sha" "$FAKE_DOCKER_CALLS" ||
+grep -qF -- "gateway.tags=registry.example.invalid/codewire/gateway:$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'immutable source tag did not reach canonical Bake target'
 grep -qF -- "CODEWIRE_IMAGE_SOURCE_SHA=$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'exact source revision did not reach canonical Bake'
@@ -769,10 +782,20 @@ grep -qF -- 'Provenance.SLSA' \
 grep -qF -- '--sbom=generator=nexus.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
   "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not request an SBOM from the approved exact generator'
-grep -qF ' login nexus-system-cluster.example.invalid ' "$FAKE_DOCKER_CALLS" ||
+grep -qF ' login registry.example.invalid ' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not use its scoped promoted-output login'
 grep -qF ' login nexus.example.invalid ' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not use its scoped approved-input login'
+# Publication targets Harbor only: no retired Nexus publication host appears in
+# any login, build, push or tag call.
+if grep -qF 'nexus-system-cluster' "$FAKE_DOCKER_CALLS"; then
+  fail 'protected publication contacted the retired Nexus publication registry'
+fi
+if grep -Eq '(--tag|-t)[ =]nexus|\.tags=nexus' "$FAKE_DOCKER_CALLS"; then
+  fail 'protected publication pushed or tagged an image in Nexus'
+fi
+grep -Eq '(--tag|-t)[ =]registry\.example\.invalid/codewire/|\.tags=registry\.example\.invalid/codewire/' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not tag its image in Harbor'
 grep -qF -- 'SBOM.SPDX' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not verify its emitted SPDX SBOM'
 grep -qF -- 'image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
@@ -858,7 +881,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
   fail 'transient Nexus login did not retry twice before the approved login'
 [[ "$(grep -cxF '60' "$FAKE_SLEEP_CALLS")" -eq 2 ]] ||
   fail 'transient Nexus login did not use the bounded retry delay'
-grep -qF 'retrying nexus-system-cluster.example.invalid (2/61)' \
+grep -qF 'retrying registry.example.invalid (2/61)' \
   "$work/transient-nexus-login.out" ||
   fail 'transient Nexus login retry was not attributable'
 
@@ -870,7 +893,7 @@ grep -qF 'retrying nexus-system-cluster.example.invalid (2/61)' \
 )
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'existing source-SHA image was rebuilt'
-grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=registry.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'source-SHA rerun did not preserve the original digest'
 
 : >"$GITHUB_OUTPUT"
@@ -898,10 +921,10 @@ create_calls_before="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" |
   CODEWIRE_SOURCE_SHA="$source_sha" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 )
-grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=registry.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'release alias did not preserve the source-SHA digest'
 awk -F '\t' \
-  -v reference='nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:v0.3.999' \
+  -v reference='registry.example.invalid/codewire/gateway:v0.3.999' \
   -v digest="$digest" \
   '$1 == reference && $2 == digest { found = 1 } END { exit !found }' \
   "$FAKE_MANIFESTS" ||
@@ -942,7 +965,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
   cd "$ROOT"
-  FAKE_INSPECT_AUTH_ONCE_REF='nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:v0.3.997' \
+  FAKE_INSPECT_AUTH_ONCE_REF='registry.example.invalid/codewire/gateway:v0.3.997' \
   FAKE_INSPECT_AUTH_STATE="$work/inspect-auth-state" \
   CODEWIRE_RELEASE_TAG='v0.3.997' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
@@ -960,7 +983,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
   cd "$ROOT"
-  FAKE_CREATE_AUTH_ONCE_REF='nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:v0.3.996' \
+  FAKE_CREATE_AUTH_ONCE_REF='registry.example.invalid/codewire/gateway:v0.3.996' \
   FAKE_CREATE_AUTH_STATE="$work/create-auth-state" \
   CODEWIRE_RELEASE_TAG='v0.3.996' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
@@ -974,7 +997,7 @@ grep -qF 'Registry authentication expired while creating' \
   fail 'transient create auth was not retried exactly once'
 
 printf '%s\t%s\n' \
-  'nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:v0.3.998' "$mismatch_digest" \
+  'registry.example.invalid/codewire/gateway:v0.3.998' "$mismatch_digest" \
   >>"$FAKE_MANIFESTS"
 if (
   cd "$ROOT"
@@ -989,7 +1012,7 @@ grep -qF 'Refusing to replace immutable image tag' "$work/mismatched-alias.out" 
 [[ "$(build_invocation_count)" -eq 2 ]] ||
   fail 'mismatched release alias triggered a build'
 
-export FAKE_INSPECT_ERROR_REF="nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh:$source_sha"
+export FAKE_INSPECT_ERROR_REF="registry.example.invalid/codewire/mesh:$source_sha"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 if (
   cd "$ROOT"
@@ -1021,7 +1044,7 @@ grep -qF 'REQUIRE_EXISTING_SOURCE_IMAGE must be 0 or 1' \
 
 if (
   cd "$ROOT"
-  CODEWIRE_BASE_IMAGE_REF='nexus-system-cluster.example.invalid/oci-promoted/codewire/base:latest' \
+  CODEWIRE_BASE_IMAGE_REF='registry.example.invalid/codewire/base:latest' \
     "$BUILDER" workspace images/workspace/Dockerfile .
 ) >"$work/moving-base.out" 2>&1; then
   fail 'moving workspace base image was accepted'
@@ -1090,7 +1113,7 @@ fi
 
 for family in dashboard services mesh gateway derp; do
   awk -F '\t' \
-    -v reference="nexus-system-cluster.example.invalid/oci-promoted/codewire/${family}:$source_sha" \
+    -v reference="registry.example.invalid/codewire/${family}:$source_sha" \
     '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
   mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
 done
@@ -1114,19 +1137,19 @@ runtime_set_call="$(grep -E ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" | t
 [[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' <<<"$runtime_set_call" | wc -l)" -eq 5 ]] ||
   fail 'protected runtime Bake did not bind the private cache credential to all five targets'
 for family in dashboard services mesh gateway derp; do
-  grep -qF -- "${family}.tags=nexus-system-cluster.example.invalid/oci-promoted/codewire/${family}:$source_sha" \
+  grep -qF -- "${family}.tags=registry.example.invalid/codewire/${family}:$source_sha" \
     "$FAKE_DOCKER_CALLS" || fail "protected runtime Bake omitted exact $family source tag"
   awk -F '\t' \
-    -v reference="nexus-system-cluster.example.invalid/oci-promoted/codewire/${family}:$source_sha" \
+    -v reference="registry.example.invalid/codewire/${family}:$source_sha" \
     -v digest="$digest" \
     '$1 == reference && $2 == digest { found = 1 } END { exit !found }' \
     "$FAKE_MANIFESTS" || fail "protected runtime Bake omitted the $family manifest"
 done
-grep -qxF "candidate_ref=nexus-system-cluster.example.invalid/oci-promoted/codewire/services@$digest" \
+grep -qxF "candidate_ref=registry.example.invalid/codewire/services@$digest" \
   "$GITHUB_OUTPUT" || fail 'protected runtime Bake did not preserve the anchor candidate digest'
 
 awk -F '\t' \
-  -v reference="nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh:$source_sha" \
+  -v reference="registry.example.invalid/codewire/mesh:$source_sha" \
   '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
 mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
 partial_runtime_builds_before="$(build_invocation_count)"
@@ -1191,7 +1214,7 @@ grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
   fail 'Kind image builder omitted its structured phase result'
 
-base_source_tag="nexus-system-cluster.example.invalid/oci-promoted/codewire/base:$source_sha"
+base_source_tag="registry.example.invalid/codewire/base:$source_sha"
 awk -F '\t' -v reference="$base_source_tag" \
   '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
 mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
@@ -1249,7 +1272,7 @@ fi
 
 # Exercise old release sources and explicit cold mode through the real argument
 # construction. Only the synthetic registry manifests are removed between runs.
-workspace_source_tag="nexus-system-cluster.example.invalid/oci-promoted/codewire/workspace:$source_sha"
+workspace_source_tag="registry.example.invalid/codewire/workspace:$source_sha"
 printf 'FROM scratch\n' >"$work/legacy-workspace.Dockerfile"
 for variant in legacy disabled protected; do
   awk -F '\t' -v reference="$workspace_source_tag" '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Verify and sign one complete protected runtime image set. The required mode
-# signs the Nexus build references and the Harbor references every deployment
-# pulls; --ghcr-mirror separately signs the public GHCR copies, which never
-# gate delivery.
+# signs the Harbor references the build pushed and every deployment pulls;
+# --ghcr-mirror separately signs the public GHCR copies, which never gate
+# delivery.
 set -euo pipefail
 
 sign_target=delivery
@@ -23,7 +23,6 @@ readonly OPENBAO_ADDR='https://openbao.example.invalid'
 readonly OPENBAO_ROLE='codewire-source-dev-publisher'
 readonly OPENBAO_AUDIENCE='openbao-codewire-source-dev-publisher'
 readonly OPENBAO_KEY='openbao://codewire-runtime'
-readonly NEXUS_HOST='nexus-system-cluster.example.invalid'
 readonly GHCR_HOST='ghcr.io'
 readonly HARBOR_HOST='registry.example.invalid'
 readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
@@ -145,7 +144,6 @@ registry_login() {
 
 refresh_openbao_token
 if [[ "$sign_target" == delivery ]]; then
-  registry_login platform/data/nexus/oci-promoter "$NEXUS_HOST" password
   registry_login platform/data/ci/codewire/harbor-publisher "$HARBOR_HOST" password
 else
   registry_login platform/data/ci/codewire/ghcr-publisher "$GHCR_HOST" token
@@ -252,10 +250,10 @@ sign_reference() {
   printf 'Runtime signature accepted: family=%s ref=%s\n' "$family" "$reference"
 }
 
-while IFS=$'\t' read -r family nexus_ref; do
-  digest="${nexus_ref##*@}"
+while IFS=$'\t' read -r family harbor_ref; do
+  digest="${harbor_ref##*@}"
   if [[ "$sign_target" == delivery ]]; then
-    references=("$nexus_ref" "$HARBOR_HOST/codewire/${family}@${digest}")
+    references=("$harbor_ref")
   else
     references=("$GHCR_HOST/codewiresh/${family}@${digest}")
   fi
@@ -266,7 +264,7 @@ while IFS=$'\t' read -r family nexus_ref; do
 done < <(jq -r '.images[] | [.family, .ref] | @tsv' "$bundle")
 
 if [[ "$sign_target" == delivery ]]; then
-  echo 'Verified and signed the exact five-image runtime set in Nexus and Harbor'
+  echo 'Verified and signed the exact five-image runtime set in Harbor'
 else
   echo 'Verified and signed the exact five-image runtime set in the GHCR mirror'
 fi
