@@ -773,6 +773,14 @@ run_paths_case generic_package pull_request refs/pull/119/head false \
   'policy web' packages/shared/src/index.ts
 run_paths_case dashboard pull_request refs/pull/12/head false \
   'policy web' apps/dashboard/playwright.config.ts
+# Browser specs run only under Edge/Kind: a push to main runs Kind for them,
+# and a pull request runs Kind only when opted in.
+run_paths_case dashboard_e2e_pull_request pull_request refs/pull/12/head false \
+  'policy web' apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts
+run_paths_case dashboard_e2e_pull_request_opt_in pull_request refs/pull/12/head true \
+  'edge_kind kind policy web' apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts
+run_paths_case dashboard_e2e_push push refs/heads/main false \
+  'edge_kind kind policy web' apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts
 run_paths_case dashboard_browser_gate pull_request refs/pull/1202/head false \
   'policy web' scripts/ci/tests/test-dashboard-browser-gate.sh
 run_paths_case dashboard_design_preview pull_request refs/pull/120/head false \
@@ -1766,7 +1774,11 @@ grep -qF 'name: Verify sealed policy tools' "$policy_block"
 grep -qF 'name: Run Policy' "$policy_block"
 grep -A1 -F 'name: Run Policy' "$policy_block" \
   | grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')"
-if grep -Eq 'run:.*docker|setup-bun|setup-go|curl |wget ' "$policy_block"; then
+# The shared fail-fast cancel step (last step, checked below) is a post-failure
+# API call, not a setup dependency of the sealed policy tools.
+policy_setup_block="$TMP/policy-setup.yaml"
+sed '/^      - name: Cancel the run after this failure$/,$d' "$policy_block" > "$policy_setup_block"
+if grep -Eq 'run:.*docker|setup-bun|setup-go|curl |wget ' "$policy_setup_block"; then
   echo 'policy: sealed policy job gained a Docker or network-tool setup dependency' >&2
   exit 1
 fi
@@ -1794,6 +1806,119 @@ for job_id in policy standard tooling rust-compile rust-packages rust-features r
     exit 1
   fi
 done
+
+# rust_transport_expected also covers curated locks and the desktop artifact.
+# Each shard runs only for a rust or transport selection, like rust-transport,
+# and otherwise succeeds without work so the aggregator still sees success.
+for job_id in rust-packages rust-features; do
+  block="$TMP/${job_id}.yaml"
+  run_guard="$(awk '/^      - name: Run the Rust .* shard$/ { getline; print; exit }' "$block")"
+  for token in rust transport; do
+    grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" <<<"$run_guard" || {
+      echo "${job_id}: shard run step must require a ${token} selection" >&2
+      exit 1
+    }
+  done
+done
+
+# Fail fast: every group that feeds Required verification (including the Kind
+# builds Edge/Kind needs) ends with one identical step that cancels the run
+# after that group fails. Selection, the aggregator, and the opt-in cache
+# experiments never cancel the run.
+fail_fast_step="$TMP/fail-fast-step.sh"
+python3 - "$WORKFLOW" "$fail_fast_step" <<'PY'
+import sys
+import yaml
+
+workflow, script = sys.argv[1:]
+jobs = yaml.safe_load(open(workflow, encoding="utf-8"))["jobs"]
+name = "Cancel the run after this failure"
+cancelling = {
+    "cw-release-assets", "workspace-image", "policy", "standard", "tooling",
+    "rust-compile", "rust-packages", "rust-features", "rust-transport",
+    "database", "services-control", "services-runtime", "kind-workspace",
+    "kind-product", "kind-smokes", "edge-kind",
+}
+exempt = {
+    "verification-selection", "required-verification",
+    "workspace-cache-measurement", "workspace-cache-probes",
+}
+if set(jobs) != cancelling | exempt:
+    raise SystemExit(f"fail-fast job classification is stale: {sorted(set(jobs) ^ (cancelling | exempt))}")
+required = set(jobs["required-verification"]["needs"]) - {"verification-selection"}
+edge_needs = set(jobs["edge-kind"]["needs"]) - {"verification-selection"}
+if not required | edge_needs <= cancelling:
+    raise SystemExit(f"required groups lack fail-fast: {sorted((required | edge_needs) - cancelling)}")
+runs = set()
+for job_id, job in jobs.items():
+    steps = [step for step in job["steps"] if step.get("name") == name]
+    if job_id in exempt:
+        if steps:
+            raise SystemExit(f"{job_id}: must not cancel the run")
+        continue
+    if len(steps) != 1 or job["steps"][-1].get("name") != name:
+        raise SystemExit(f"{job_id}: fail-fast cancel must be the single last step")
+    step = steps[0]
+    condition = step.get("if", "")
+    if "failure()" not in condition or "tested_tree_receipt != 'accepted'" not in condition:
+        raise SystemExit(f"{job_id}: fail-fast cancel must run only after a failure of a tested tree")
+    if step.get("env") != {"GITEA_TOKEN": "${{ github.token }}"}:
+        raise SystemExit(f"{job_id}: fail-fast cancel must use only the job token")
+    runs.add(step["run"])
+if len(runs) != 1:
+    raise SystemExit("fail-fast cancel steps diverged between jobs")
+with open(script, "w", encoding="utf-8") as handle:
+    handle.write("set -eo pipefail\n" + runs.pop())
+PY
+fail_fast_probe="$TMP/fail-fast"
+mkdir -p "$fail_fast_probe/bin"
+cat > "$fail_fast_probe/bin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FAIL_FAST_ARGS"
+config=''
+while [ "$#" -gt 0 ]; do
+  [ "$1" = --config ] && config="$2"
+  shift
+done
+cp "$config" "$FAIL_FAST_CONFIG"
+printf '%s' "$FAIL_FAST_STATUS"
+exit "${FAIL_FAST_EXIT:-0}"
+SH
+chmod +x "$fail_fast_probe/bin/curl"
+run_fail_fast_case() {
+  local name="$1" status="$2" curl_exit="$3" run_id="$4" expected="$5" rc=0
+  local out="$fail_fast_probe/$name.out"
+  rm -f "$fail_fast_probe/args" "$fail_fast_probe/config"
+  env -i PATH="$fail_fast_probe/bin:/usr/bin:/bin" HOME="$fail_fast_probe" \
+    TMPDIR="$fail_fast_probe" GITHUB_RUN_ID="$run_id" \
+    GITHUB_REPOSITORY=codewire/codewire GITHUB_SERVER_URL=https://forgejo.example \
+    GITEA_TOKEN=synthetic-fail-fast-token FAIL_FAST_STATUS="$status" \
+    FAIL_FAST_EXIT="$curl_exit" FAIL_FAST_ARGS="$fail_fast_probe/args" \
+    FAIL_FAST_CONFIG="$fail_fast_probe/config" \
+    bash "$fail_fast_step" > "$out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || { echo "fail-fast $name: step exited $rc" >&2; cat "$out" >&2; exit 1; }
+  grep -qF "$expected" "$out" || { echo "fail-fast $name: missing '$expected'" >&2; cat "$out" >&2; exit 1; }
+  if grep -qF synthetic-fail-fast-token "$out" \
+      || { [ -f "$fail_fast_probe/args" ] && grep -qF synthetic-fail-fast-token "$fail_fast_probe/args"; }; then
+    echo "fail-fast $name: token leaked into output or curl arguments" >&2
+    exit 1
+  fi
+  if [ -z "$run_id" ]; then
+    [ ! -e "$fail_fast_probe/args" ] || { echo 'fail-fast: called curl without a run id' >&2; exit 1; }
+    return 0
+  fi
+  grep -qxF 'https://forgejo.example/api/v1/repos/codewire/codewire/actions/runs/8185/cancel' "$fail_fast_probe/args"
+  grep -qxF POST "$fail_fast_probe/args"
+  grep -qxF 'header = "Authorization: token synthetic-fail-fast-token"' "$fail_fast_probe/config"
+  if find "$fail_fast_probe" -maxdepth 1 -name 'tmp.*' | grep -q .; then
+    echo "fail-fast $name: left its credential file behind" >&2
+    exit 1
+  fi
+}
+run_fail_fast_case accepted 200 0 8185 'requested cancellation of run 8185 (HTTP 200)'
+run_fail_fast_case forbidden 403 0 8185 'requested cancellation of run 8185 (HTTP 403)'
+run_fail_fast_case network 000 7 8185 'requested cancellation of run 8185 (HTTP 000)'
+run_fail_fast_case missing_run 200 0 '' 'run identity or token unavailable; run not cancelled'
 
 control_block="$TMP/services-control.yaml"
 runtime_block="$TMP/services-runtime.yaml"
