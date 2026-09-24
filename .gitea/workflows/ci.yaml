@@ -293,6 +293,28 @@ jobs:
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
+
   workspace-image:
     enable-openid-connect: true
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -396,6 +418,28 @@ jobs:
           RUN swift test --scratch-path /tmp/codewire-ios-build
           DOCKERFILE
 
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
+
   policy:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     # Baseline repository contracts are non-Docker checks over sealed tools.
@@ -424,6 +468,28 @@ jobs:
       - name: Run Policy
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
         run: scripts/ci/verify/run-product-verification.sh policy-core
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   standard:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -520,6 +586,28 @@ jobs:
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
+
   tooling:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     # Give repository tooling and delivery-contract checks an independent
@@ -586,6 +674,28 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh security
 
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
+
   rust-compile:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Compile every Rust target
@@ -641,6 +751,28 @@ jobs:
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
+
   rust-packages:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport packages
@@ -661,21 +793,21 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
       - name: Verify sealed Rust toolchain
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Select best-effort shared Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Verify Rust cache capacity
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
 
       - name: Install pinned protoc for Rust builds
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/protoc.zip \
@@ -689,15 +821,37 @@ jobs:
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
       - name: Run the Rust packages shard
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           RUST_TRANSPORT_SHARD: packages
         run: scripts/ci/verify/run-product-verification.sh rust-transport
 
       - name: Report and clean Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   rust-features:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -719,21 +873,21 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
       - name: Verify sealed Rust toolchain
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Select best-effort shared Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Verify Rust cache capacity
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
 
       - name: Install pinned protoc for Rust builds
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/protoc.zip \
@@ -747,15 +901,37 @@ jobs:
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
       - name: Run the Rust features shard
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           RUST_TRANSPORT_SHARD: features
         run: scripts/ci/verify/run-product-verification.sh rust-transport
 
       - name: Report and clean Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   rust-transport:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -857,6 +1033,28 @@ jobs:
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
+
   database:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Database verification
@@ -953,6 +1151,28 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   services-control:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -1072,6 +1292,28 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   services-runtime:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -1194,6 +1436,28 @@ jobs:
 
   # Independent build groups use private workers. Native same-run artifacts
   # carry exact outputs; the consumer never treats cache entries as proof.
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
   kind-workspace:
     # zizmor: ignore[excessive-permissions] Existing untrusted cache identity only; no publication.
     name: Kind workspace build
@@ -1262,6 +1526,28 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
+
   kind-product:
     # zizmor: ignore[excessive-permissions] Existing untrusted cache identity only; non-promotable images.
     name: Kind product image build
@@ -1307,6 +1593,28 @@ jobs:
           path: ${{ runner.temp }}/kind-product-out/
           if-no-files-found: error
           retention-days: 1
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   kind-smokes:
     # zizmor: ignore[excessive-permissions] Existing untrusted cache identity only; synthetic test binaries.
@@ -1369,6 +1677,28 @@ jobs:
           path: ${{ runner.temp }}/kind-smokes-out/
           if-no-files-found: error
           retention-days: 1
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   edge-kind:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -1478,6 +1808,28 @@ jobs:
       - name: Run Kind
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/verify/kind-e2e.sh
+
+      - name: Cancel the run after this failure
+        # Fail fast: a failed required group cancels the rest of the run
+        # instead of letting slower groups (Rust, Kind) run on. Best effort;
+        # the job has already failed and this step never changes that result.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   workspace-cache-measurement:
     # This experiment uses the existing untrusted PR cache identity only.

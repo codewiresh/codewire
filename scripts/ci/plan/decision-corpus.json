@@ -144,6 +144,30 @@
         "selection_tokens": ["contracts", "contracts_proto", "database", "deploy", "go_consumer_interop", "go_support", "go_tailnet", "policy", "policy_shell", "policy_shell_omittable", "release", "runtime_confidential", "runtime_dev_smoke", "rust", "rust_curated_locks", "rust_workspace", "sdk_go", "sdk_python", "sdk_ts", "security", "security_dev_smoke_auth", "security_go", "security_idp_kek", "security_js", "service_apikey_smoke", "service_billing", "service_connectcore", "service_coordinator", "service_idp", "service_integration", "service_nats", "service_orchestration", "service_temporal", "transport", "transport_derp_contract", "transport_pkg_codewire_coordinator", "transport_pkg_codewire_daemon", "transport_pkg_codewire_derp", "transport_pkg_codewire_gateway", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_mesh", "transport_pkg_codewire_netstack", "transport_pkg_codewire_tailnet", "transport_pkg_codewire_udp_relay", "transport_pkg_codewire_vmm_guest_probe", "web"],
         "required_local_mode": "full"
       }
+    },
+    {
+      "id": "dashboard-e2e-pull-request",
+      "event": "pull_request",
+      "ref": "refs/pull/2195/head",
+      "kind_e2e_opt_in": false,
+      "paths": ["apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["policy", "policy_shell_omittable", "web"],
+        "required_local_mode": "default"
+      }
+    },
+    {
+      "id": "dashboard-e2e-push",
+      "event": "push",
+      "ref": "refs/heads/main",
+      "kind_e2e_opt_in": false,
+      "paths": ["apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts"],
+      "expected": {
+        "classification": "changed",
+        "selection_tokens": ["edge_kind", "kind", "policy", "policy_shell_omittable", "web"],
+        "required_local_mode": "kind"
+      }
     }
   ]
 }
