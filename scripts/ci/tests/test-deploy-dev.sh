@@ -149,27 +149,49 @@ grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher' \
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "runtime publisher retains a split Forgejo GHCR username"
 fi
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 1 ]] ||
-  fail "runtime publisher does not use one bundle-scoped publication transaction"
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job")" -eq 2 ]] ||
+  fail "runtime publisher does not publish the bundle and pinned defaults to Harbor"
 # shellcheck disable=SC2016
 grep -Fq -- '--runtime-bundle "$bundle"' <<<"$publish_job" ||
   fail "runtime publisher does not consume the validated bundle"
+grep -Fq 'scripts/ci/images/publish-image-to-harbor.sh --pinned-defaults' <<<"$publish_job" ||
+  fail "runtime publisher does not keep the compiled-in default digests in Harbor"
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 1 ]] ||
+  fail "runtime publisher does not mirror the bundle to GHCR exactly once"
 if grep -Fq 'outputs.source_sha' <<<"$publish_job"; then
   fail "runtime publisher duplicates the immutable workflow source through job outputs"
 fi
 validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publish_job" | cut -d: -f1)"
-first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
-last_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | tail -1 | cut -d: -f1)"
-signer_line="$(grep -n 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job" | cut -d: -f1)"
+first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
+last_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job" | tail -1 | cut -d: -f1)"
+signer_line="$(grep -n 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
 canonical_line="$(grep -n 'canonical_main_sha=' <<<"$publish_job" | cut -d: -f1)"
 dispatch_line="$(grep -n 'scripts/ci/deploy/dispatch-deploy-dev.sh' <<<"$publish_job" | cut -d: -f1)"
+ghcr_mirror_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | cut -d: -f1)"
+ghcr_signer_line="$(grep -n 'sign-runtime-image-set.sh --ghcr-mirror' <<<"$publish_job" | cut -d: -f1)"
 [[ -n "$validation_line" && -n "$first_copy_line" && "$validation_line" -lt "$first_copy_line" ]] ||
-  fail "complete runtime bundle validation does not precede GHCR copies"
+  fail "complete runtime bundle validation does not precede Harbor copies"
 [[ -n "$last_copy_line" && -n "$signer_line" && "$last_copy_line" -lt "$signer_line" ]] ||
-  fail "runtime signing does not follow every GHCR copy"
+  fail "runtime signing does not follow every Harbor copy"
 [[ -n "$signer_line" && -n "$canonical_line" && -n "$dispatch_line" \
   && "$signer_line" -lt "$canonical_line" && "$canonical_line" -lt "$dispatch_line" ]] ||
-  fail "deploy dispatch is not the final operation after signing and canonical-head verification"
+  fail "deploy dispatch does not follow signing and canonical-head verification"
+[[ -n "$ghcr_mirror_line" && -n "$ghcr_signer_line" \
+  && "$dispatch_line" -lt "$ghcr_mirror_line" && "$ghcr_mirror_line" -lt "$ghcr_signer_line" ]] ||
+  fail "the GHCR mirror does not follow the deploy dispatch"
+# The GHCR mirror must never gate delivery: both mirror steps continue on error.
+mirror_steps="$(awk '
+  /^      - name: / { capture = ($0 ~ /GHCR/) }
+  capture { print }
+' <<<"$publish_job")"
+[[ "$(grep -c '^      - name: ' <<<"$mirror_steps")" -eq 2 ]] ||
+  fail "expected exactly two GHCR mirror steps"
+[[ "$(grep -c '^        continue-on-error: true$' <<<"$mirror_steps")" -eq 2 ]] ||
+  fail "a GHCR mirror step can fail delivery"
+if awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' <<<"$publish_job" \
+    | grep -q 'continue-on-error'; then
+  fail "a delivery step outside the GHCR mirror continues on error"
+fi
 [[ "$(grep -Fc '            --candidate ' <<<"$publish_job")" -eq 5 ]] ||
   fail "runtime validation does not contain exactly five image candidates"
 # shellcheck disable=SC2016

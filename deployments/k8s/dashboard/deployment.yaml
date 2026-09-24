@@ -25,6 +25,7 @@ spec:
           type: RuntimeDefault
       imagePullSecrets:
         - name: nexus-registry
+        - name: harbor-registry
       containers:
         - name: dashboard
           image: git.example.com/codewire/dashboard:latest

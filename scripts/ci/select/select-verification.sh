@@ -1519,11 +1519,13 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/nexus-publication-retry-contract.sh|\
       scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\
+      scripts/ci/images/publish-image-to-harbor.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
       scripts/ci/setup/curl-transport-retry.sh|\
       scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
+      scripts/ci/setup/fetch-openbao-harbor-credentials.sh|\
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/setup/fetch-openbao-nexus-credentials.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
@@ -1539,6 +1541,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-publish-image-to-ghcr.sh|\
+      scripts/ci/tests/test-publish-image-to-harbor.sh|\
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-run-skopeo-container.sh|\
       scripts/ci/tests/test-support-images-workflow.sh|\
@@ -1550,6 +1553,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-run-rust-build.sh|\
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
+      scripts/ci/tests/test-fetch-openbao-harbor-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\

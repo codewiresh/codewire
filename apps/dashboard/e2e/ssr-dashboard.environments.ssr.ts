@@ -33,9 +33,9 @@ const orgName = "SSR Environment Workspace";
 const presetName = "ssr-environment-preset";
 const environmentName = "ssr-terminal-workspace";
 const repositoryUrl = `https://example.test/codewire/${slug}`;
-// Current published immutable Codewire workspace image.
+// Current published immutable Codewire workspace image in Harbor.
 // This browser proof must never turn a floating registry tag into a test input.
-const workspaceImage = "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
+const workspaceImage = "registry.example.invalid/codewire/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
 // Sealed Kind runs side-load the Forgejo-proven workspace under a disposable
 // local alias. Only the test-owned preset may use that alias; browser assertions
 // above the product's canonical workspace choice continue to use workspaceImage.

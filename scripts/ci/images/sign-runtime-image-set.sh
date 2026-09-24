@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# Verify and sign one complete protected runtime image set in Nexus and GHCR.
+# Verify and sign one complete protected runtime image set. The required mode
+# signs the Nexus build references and the Harbor references every deployment
+# pulls; --ghcr-mirror separately signs the public GHCR copies, which never
+# gate delivery.
 set -euo pipefail
 
+sign_target=delivery
+if [[ "${1:-}" == --ghcr-mirror ]]; then
+  sign_target=ghcr-mirror
+  shift
+fi
 if [[ $# -ne 2 ]]; then
-  echo 'Usage: sign-runtime-image-set.sh IMAGE_BUNDLE PUBLIC_KEY' >&2
+  echo 'Usage: sign-runtime-image-set.sh [--ghcr-mirror] IMAGE_BUNDLE PUBLIC_KEY' >&2
   exit 2
 fi
 
@@ -17,6 +25,7 @@ readonly OPENBAO_AUDIENCE='openbao-codewire-source-dev-publisher'
 readonly OPENBAO_KEY='openbao://codewire-runtime'
 readonly NEXUS_HOST='nexus-system-cluster.example.invalid'
 readonly GHCR_HOST='ghcr.io'
+readonly HARBOR_HOST='registry.example.invalid'
 readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
 readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 readonly COSIGN_IMAGE='nexus-system-cluster.example.invalid/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c'
@@ -119,29 +128,28 @@ refresh_openbao_token() {
   chmod 0600 "$work/openbao.curl"
 }
 
-refresh_openbao_token
-curl --config "$work/openbao.curl" "${CURL_BOUNDS[@]}" \
-  --output "$work/nexus.json" \
-  "$OPENBAO_ADDR/v1/platform/data/nexus/oci-promoter"
-curl --config "$work/openbao.curl" "${CURL_BOUNDS[@]}" \
-  --output "$work/ghcr.json" \
-  "$OPENBAO_ADDR/v1/platform/data/ci/codewire/ghcr-publisher"
-jq -er '.data.data.username | strings | select(length > 0)' \
-  "$work/nexus.json" >"$work/nexus.username"
-jq -er '.data.data.password | strings | select(length > 0)' \
-  "$work/nexus.json" >"$work/nexus.password"
-jq -er '.data.data.username | strings | select(length > 0)' \
-  "$work/ghcr.json" >"$work/ghcr.username"
-jq -er '.data.data.token | strings | select(length > 0)' \
-  "$work/ghcr.json" >"$work/ghcr.token"
-chmod 0600 "$work"/{nexus.username,nexus.password,ghcr.username,ghcr.token}
+# Log in to one registry with an OpenBao KV credential: PATH HOST SECRET_FIELD.
+registry_login() {
+  local path="$1" host="$2" secret_field="$3" name="${2%%.*}"
+  curl --config "$work/openbao.curl" "${CURL_BOUNDS[@]}" \
+    --output "$work/$name.json" "$OPENBAO_ADDR/v1/$path"
+  jq -er '.data.data.username | strings | select(length > 0)' \
+    "$work/$name.json" >"$work/$name.username"
+  jq -er --arg field "$secret_field" '.data.data[$field] | strings | select(length > 0)' \
+    "$work/$name.json" >"$work/$name.secret"
+  chmod 0600 "$work/$name.username" "$work/$name.secret"
+  DOCKER_CONFIG="$docker_config" docker login "$host" \
+    --username "$(<"$work/$name.username")" \
+    --password-stdin <"$work/$name.secret" >/dev/null
+}
 
-DOCKER_CONFIG="$docker_config" docker login "$NEXUS_HOST" \
-  --username "$(<"$work/nexus.username")" \
-  --password-stdin <"$work/nexus.password" >/dev/null
-DOCKER_CONFIG="$docker_config" docker login "$GHCR_HOST" \
-  --username "$(<"$work/ghcr.username")" \
-  --password-stdin <"$work/ghcr.token" >/dev/null
+refresh_openbao_token
+if [[ "$sign_target" == delivery ]]; then
+  registry_login platform/data/nexus/oci-promoter "$NEXUS_HOST" password
+  registry_login platform/data/ci/codewire/harbor-publisher "$HARBOR_HOST" password
+else
+  registry_login platform/data/ci/codewire/ghcr-publisher "$GHCR_HOST" token
+fi
 docker image inspect --format '{{.Id}}' "$COSIGN_IMAGE" >/dev/null 2>&1 || {
   echo 'Approved Cosign image was not preloaded by protected infrastructure' >&2
   exit 1
@@ -246,11 +254,19 @@ sign_reference() {
 
 while IFS=$'\t' read -r family nexus_ref; do
   digest="${nexus_ref##*@}"
-  ghcr_ref="ghcr.io/codewiresh/${family}@${digest}"
-  verify_native_attestations "$family" "$nexus_ref"
-  verify_native_attestations "$family" "$ghcr_ref"
-  sign_reference "$family" "$nexus_ref"
-  sign_reference "$family" "$ghcr_ref"
+  if [[ "$sign_target" == delivery ]]; then
+    references=("$nexus_ref" "$HARBOR_HOST/codewire/${family}@${digest}")
+  else
+    references=("$GHCR_HOST/codewiresh/${family}@${digest}")
+  fi
+  for reference in "${references[@]}"; do
+    verify_native_attestations "$family" "$reference"
+    sign_reference "$family" "$reference"
+  done
 done < <(jq -r '.images[] | [.family, .ref] | @tsv' "$bundle")
 
-echo 'Verified and signed the exact five-image runtime set in Nexus and GHCR'
+if [[ "$sign_target" == delivery ]]; then
+  echo 'Verified and signed the exact five-image runtime set in Nexus and Harbor'
+else
+  echo 'Verified and signed the exact five-image runtime set in the GHCR mirror'
+fi
