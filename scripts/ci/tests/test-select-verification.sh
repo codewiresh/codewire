@@ -1790,6 +1790,20 @@ for job_id in policy standard tooling rust-compile rust-packages rust-features r
   fi
 done
 
+# rust_transport_expected also covers curated locks and the desktop artifact.
+# Each shard runs only for a rust or transport selection, like rust-transport,
+# and otherwise succeeds without work so the aggregator still sees success.
+for job_id in rust-packages rust-features; do
+  block="$TMP/${job_id}.yaml"
+  run_guard="$(awk '/^      - name: Run the Rust .* shard$/ { getline; print; exit }' "$block")"
+  for token in rust transport; do
+    grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" <<<"$run_guard" || {
+      echo "${job_id}: shard run step must require a ${token} selection" >&2
+      exit 1
+    }
+  done
+done
+
 control_block="$TMP/services-control.yaml"
 runtime_block="$TMP/services-runtime.yaml"
 grep -qF 'name: Resolve service control-plane scope' "$control_block"
