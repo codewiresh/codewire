@@ -114,7 +114,7 @@ async function assertExplicitCreateRecovery(page: Page) {
       await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=unavailable`);
       await expect(form).toHaveAttribute("data-create-draft-exact", "true");
       await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
-      await expect(page.locator("[data-create-draft-status]")).toContainText("requested saved selections are unavailable");
+      await expect(page.locator("[data-create-draft-status]")).toContainText("The requested draft is unavailable in this tab.");
       await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
     }
     await page.goto(`/${slug}/new/?destroyed=bogus&sources=first&sources=second&creation_draft=${requestedDraft}`);
