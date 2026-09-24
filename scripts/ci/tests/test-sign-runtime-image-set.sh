@@ -48,6 +48,9 @@ case "$url" in
   */v1/platform/data/ci/codewire/ghcr-publisher)
     printf '%s\n' '{"data":{"data":{"username":"ghcr-user","token":"synthetic-ghcr-token"}}}' >"$output"
     ;;
+  */v1/platform/data/ci/codewire/harbor-publisher)
+    printf '%s\n' '{"data":{"data":{"username":"robot$codewire+publisher","password":"synthetic-harbor-password"}}}' >"$output"
+    ;;
   *) printf 'unexpected curl URL: %s\n' "$url" >&2; exit 1 ;;
 esac
 SH
@@ -116,7 +119,8 @@ printf '\n' >>"$DOCKER_LOG"
 case "${1:-} ${2:-} ${3:-}" in
   login\ *)
     credential="$(cat)"
-    [[ "$credential" == synthetic-nexus-password || "$credential" == synthetic-ghcr-token ]]
+    [[ "$credential" == synthetic-nexus-password || "$credential" == synthetic-ghcr-token \
+      || "$credential" == synthetic-harbor-password ]]
     mkdir -p "${DOCKER_CONFIG:?}"
     printf '%s\n' '{}' >"$DOCKER_CONFIG/config.json"
     ;;
@@ -235,8 +239,16 @@ fi
   fail 'signer reused one short-lived OpenBao token across registry signatures'
 [[ "$(grep -c '/v1/platform/data/nexus/oci-promoter$' "$curl_log")" -eq 1 ]] ||
   fail 'signer fetched Nexus credentials more than once'
-[[ "$(grep -c '/v1/platform/data/ci/codewire/ghcr-publisher$' "$curl_log")" -eq 1 ]] ||
-  fail 'signer fetched GHCR credentials more than once'
+[[ "$(grep -c '/v1/platform/data/ci/codewire/harbor-publisher$' "$curl_log")" -eq 1 ]] ||
+  fail 'signer fetched Harbor credentials more than once'
+if grep -q '/v1/platform/data/ci/codewire/ghcr-publisher$' "$curl_log"; then
+  fail 'delivery signing depended on the GHCR mirror credential'
+fi
+[[ "$(grep -c '^registry.example.invalid/codewire/' "$signature_state")" -eq 5 ]] ||
+  fail 'delivery signing did not sign all five Harbor references'
+if grep -q '^ghcr.io/' "$signature_state"; then
+  fail 'delivery signing signed a GHCR mirror reference'
+fi
 [[ "$(grep -c "create .*--pull=never .*${COSIGN_IMAGE} version" "$docker_log")" -eq 1 ]] ||
   fail 'signer did not extract the exact preloaded Cosign image without pulling'
 grep -Fq 'cp cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:/ko-app/cosign ' \
@@ -248,9 +260,9 @@ fi
   fail 'signer did not verify provenance in both registries'
 [[ "$(grep -c "buildx imagetools inspect .*SBOM.SPDX" "$docker_log")" -eq 10 ]] ||
   fail 'signer did not verify SBOMs in both registries'
-grep -Fq 'Verified and signed the exact five-image runtime set in Nexus and GHCR' \
+grep -Fq 'Verified and signed the exact five-image runtime set in Nexus and Harbor' \
   "$work/first.out" || fail 'signer omitted its complete-set result'
-if rg -n 'synthetic-(request|forgejo|openbao|nexus-password|ghcr-token)' \
+if rg -n 'synthetic-(request|forgejo|openbao|nexus-password|ghcr-token|harbor-password)' \
   "$work/first.out" "$work/first.err" "$docker_log" "$cosign_log"; then
   fail 'signer exposed short-lived identity or registry credential material'
 fi
@@ -282,7 +294,7 @@ fi
 grep -Fq 'Runtime provenance is invalid for dashboard' "$work/provenance.err" ||
   fail 'invalid provenance rejection was not attributable'
 
-bad_sbom_ref="ghcr.io/codewiresh/dashboard@$digest"
+bad_sbom_ref="registry.example.invalid/codewire/dashboard@$digest"
 if FAKE_BAD_SBOM_REF="$bad_sbom_ref" run_signer \
   >"$work/sbom.out" 2>"$work/sbom.err"; then
   fail 'signer accepted an invalid protected SBOM'
@@ -296,5 +308,22 @@ if FAKE_COSIGN_MISSING=1 run_signer \
 fi
 grep -Fq 'Approved Cosign image was not preloaded' "$work/missing.err" ||
   fail 'missing approved Cosign rejection was not attributable'
+
+# The GHCR mirror is signed separately and needs only the GHCR credential.
+: >"$curl_log"
+if ! PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    "$SIGNER" --ghcr-mirror "$bundle" "$public_key" >"$work/mirror.out" 2>"$work/mirror.err"; then
+  sed -n '1,40p' "$work/mirror.err" >&2
+  fail 'GHCR mirror signing fixture failed'
+fi
+[[ "$(grep -c '^ghcr.io/codewiresh/' "$signature_state")" -eq 5 ]] ||
+  fail 'GHCR mirror signing did not sign all five mirror references'
+[[ "$(grep -c '/v1/platform/data/ci/codewire/ghcr-publisher$' "$curl_log")" -eq 1 ]] ||
+  fail 'GHCR mirror signing did not fetch the GHCR credential once'
+if grep -Eq '/v1/platform/data/(nexus/oci-promoter|ci/codewire/harbor-publisher)$' "$curl_log"; then
+  fail 'GHCR mirror signing fetched delivery registry credentials'
+fi
+grep -Fq 'runtime set in the GHCR mirror' "$work/mirror.out" ||
+  fail 'GHCR mirror signing omitted its result'
 
 printf '[test-sign-runtime-image-set] closed protected signing contract passed\n'

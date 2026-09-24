@@ -90,7 +90,7 @@ jobs:
           CODEWIRE_SCCACHE_MODE: local
         run: scripts/ci/images/build-push-runtime-images.sh
 
-      - name: Copy the complete runtime set without rebuilding
+      - name: Publish the complete runtime set to Harbor without rebuilding
         run: |
           set -euo pipefail
           bundle="${RUNNER_TEMP:?}/codewire-dev-image-bundle.json"
@@ -102,11 +102,15 @@ jobs:
             --candidate gateway "$GITHUB_SHA" "${{ steps.build.outputs.gateway_candidate_ref }}" \
             --candidate services "$GITHUB_SHA" "${{ steps.build.outputs.services_candidate_ref }}" \
             --candidate mesh "$GITHUB_SHA" "${{ steps.build.outputs.mesh_candidate_ref }}"
-          # The bundle publisher keeps one fetched registry credential set across
-          # all five immutable copies. Per-image credential reacquisition made
-          # one atomic release depend on ten redundant OIDC/OpenBao exchanges.
-          scripts/ci/images/publish-image-to-ghcr.sh \
+          # Harbor is the registry every deployment pulls from. The bundle
+          # publisher keeps one fetched credential set across all five
+          # immutable copies, then proves each digest with the consumer pull
+          # identity. The public GHCR mirror follows delivery and never gates it.
+          scripts/ci/images/publish-image-to-harbor.sh \
             --runtime-bundle "$bundle"
+          # Sandboxes and gateways default to digests compiled into the
+          # product; keep each one in Harbor before Dev references it.
+          scripts/ci/images/publish-image-to-harbor.sh --pinned-defaults
 
       - name: Sign the exact runtime set
         run: |
@@ -126,3 +130,20 @@ jobs:
 
       - name: Dispatch only the canonical source SHA
         run: scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"
+
+      # The public GHCR mirror is best effort: Dev already pulls from Harbor,
+      # so an unreachable ghcr.io must never block or fail delivery.
+      - name: Mirror the runtime set to GHCR without gating delivery
+        id: ghcr-mirror
+        continue-on-error: true
+        run: |
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            --runtime-bundle "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json"
+
+      - name: Sign the GHCR mirror without gating delivery
+        if: ${{ steps.ghcr-mirror.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          scripts/ci/images/sign-runtime-image-set.sh --ghcr-mirror \
+            "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
+            scripts/ci/trust/codewire-runtime-signing.pub

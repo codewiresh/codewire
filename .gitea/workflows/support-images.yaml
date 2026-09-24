@@ -88,11 +88,22 @@ jobs:
           CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}
         run: scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .
 
-      - name: Publish verified public support pair without rebuilding
+      - name: Publish the verified support pair to Harbor without rebuilding
         run: |
           set -euo pipefail
           [[ "${{ steps.base.outputs.source_sha }}" == "$GITHUB_SHA" ]]
           [[ "${{ steps.workspace.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          scripts/ci/images/publish-image-to-harbor.sh \
+            --support-pair \
+            "${{ steps.base.outputs.candidate_ref }}" \
+            "${{ steps.workspace.outputs.candidate_ref }}" \
+            "$GITHUB_SHA"
+
+      # Harbor serves every consumer; the public GHCR copy never gates it.
+      - name: Mirror the support pair to GHCR without gating delivery
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           scripts/ci/images/publish-image-to-ghcr.sh \
             --support-pair \
             "${{ steps.base.outputs.candidate_ref }}" \
@@ -118,10 +129,19 @@ jobs:
         id: confidential_probe
         run: scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe
 
-      - name: Publish confidential bootstrap probe without rebuilding
+      - name: Publish confidential bootstrap probe to Harbor without rebuilding
         run: |
           set -euo pipefail
           [[ "${{ steps.confidential_probe.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ steps.confidential_probe.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/confidential-probe \
+            "$GITHUB_SHA"
+
+      - name: Mirror confidential bootstrap probe to GHCR without gating delivery
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           scripts/ci/images/publish-image-to-ghcr.sh \
             "${{ steps.confidential_probe.outputs.candidate_ref }}" \
             ghcr.io/codewiresh/confidential-probe \

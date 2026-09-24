@@ -147,6 +147,7 @@ def validate_production_source(files: dict[str, Any]) -> str:
     for required in [
         "publish-runtime-images:",
         "image-bundle.py create",
+        "publish-image-to-harbor.sh",
         "publish-image-to-ghcr.sh",
         "dispatch-deploy-prod.sh",
         "enable-openid-connect: true",

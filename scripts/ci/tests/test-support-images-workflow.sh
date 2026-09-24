@@ -288,4 +288,25 @@ grep -qFx -- 'ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"' \
 [[ "$(grep -Ec -- 'allow-scripts=|NPM_CONFIG_ALLOW_SCRIPTS=' "$WORKSPACE_DOCKERFILE")" -eq 1 ]] ||
   fail 'workspace grants lifecycle-script permission beyond the Claude installer'
 
+# Harbor is the required publication; the GHCR mirror never gates delivery.
+for job_name in publish_job probe_job; do
+  job="${!job_name}"
+  [[ "$(grep -Fc 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$job")" -eq 1 ]] ||
+    fail "$job_name does not publish exactly once to Harbor"
+  harbor_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$job" | cut -d: -f1)"
+  ghcr_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$job" | cut -d: -f1)"
+  [[ -n "$harbor_line" && -n "$ghcr_line" && "$harbor_line" -lt "$ghcr_line" ]] ||
+    fail "$job_name does not publish to Harbor before the GHCR mirror"
+  mirror_step="$(awk '/^      - name: / { capture = ($0 ~ /GHCR/) } capture' <<<"$job")"
+  grep -Fq 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$mirror_step" ||
+    fail "$job_name GHCR copy is outside its named mirror step"
+  grep -qx '        continue-on-error: true' <<<"$mirror_step" ||
+    fail "$job_name GHCR mirror can fail support delivery"
+  if awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' <<<"$job" | grep -q continue-on-error; then
+    fail "$job_name lets a required Harbor step continue on error"
+  fi
+done
+grep -Fq 'registry.example.invalid/codewire/confidential-probe' <<<"$probe_job" ||
+  fail 'confidential probe is not published to its Harbor repository'
+
 echo 'support-image workflow contract: OK'

@@ -561,6 +561,9 @@ run_rust_compile() {
 }
 
 run_derp_contract() {
+  # The packages shard builds this binary in its own job. Build it here so the
+  # local-vmm shard stands alone; under "all" the graph already built it.
+  cargo build --locked -p codewire-derp --bin codewire-derp || return $?
   local port=$((61000 + (${GITHUB_RUN_ID:-$$} % 4000)))
   local log_dir="${RUNNER_TEMP:-$ROOT/.tmp}/codewire-derp-contract-${GITHUB_RUN_ID:-$$}"
   mkdir -p "$log_dir"
@@ -711,6 +714,7 @@ run_release() {
   scripts/ci/tests/test-build-push-image.sh
   scripts/ci/tests/test-run-rust-build.sh
   scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh
+  scripts/ci/tests/test-fetch-openbao-harbor-credentials.sh
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh
   scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh
   scripts/ci/tests/test-forgejo-action-mirrors.sh
@@ -723,6 +727,8 @@ run_release() {
   scripts/ci/tests/test-dispatch-deploy-dev.sh
   scripts/ci/tests/test-dispatch-deploy-prod.sh
   scripts/ci/tests/test-publish-image-to-ghcr.sh
+  scripts/ci/tests/test-publish-image-to-harbor.sh
+  scripts/ci/tests/test-sign-runtime-image-set.sh
   scripts/ci/tests/test-resolve-published-support-pair.sh
   scripts/ci/tests/test-run-skopeo-container.sh
   scripts/ci/tests/test-support-images-workflow.sh

@@ -31,7 +31,7 @@ grep -Fq -- '--environment prod' <<<"$publish_job" ||
 grep -Fq -- '--source-sha "$SOURCE_SHA"' <<<"$publish_job" ||
   fail "production candidate validation is not bound to the selected source"
 validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publish_job" | cut -d: -f1)"
-first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
+first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
 [[ -n "$validation_line" && -n "$first_copy_line" && "$validation_line" -lt "$first_copy_line" ]] ||
   fail "complete production validation does not precede registry publication"
 
@@ -50,15 +50,28 @@ fi
 # shellcheck disable=SC2016
 [[ "$(grep -Fc '      candidate_ref: ${{ steps.build.outputs.candidate_ref }}' "$WORKFLOW")" -eq 5 ]] ||
   fail "all five production runtime jobs must expose digest candidates"
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-harbor.sh' "$WORKFLOW")" -eq 7 ]] ||
+  fail "production must publish exactly seven image manifests to Harbor"
 [[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' "$WORKFLOW")" -eq 7 ]] ||
-  fail "production must copy exactly seven image manifests to GHCR"
+  fail "production must mirror exactly seven image manifests to GHCR"
 # shellcheck disable=SC2016
-[[ "$(grep -Fc '            "$SOURCE_SHA" "$RELEASE_TAG"' "$WORKFLOW")" -eq 7 ]] ||
-  fail "every production image must receive source-SHA and stable SemVer aliases"
+[[ "$(grep -Fc '            "$SOURCE_SHA" "$RELEASE_TAG"' "$WORKFLOW")" -eq 14 ]] ||
+  fail "every production image must receive source-SHA and stable SemVer aliases in Harbor and GHCR"
 for family in base workspace; do
+  grep -Fq "            registry.example.invalid/codewire/$family" "$WORKFLOW" ||
+    fail "production omits the $family support image from Harbor"
   grep -Fq "            ghcr.io/codewiresh/$family" "$WORKFLOW" ||
-    fail "production omits the $family support image"
+    fail "production omits the $family support image from the GHCR mirror"
 done
+# Harbor gates release; every GHCR copy sits in a mirror step that continues on error.
+ghcr_steps="$(awk '/^      - name: / { capture = ($0 ~ /GHCR/) } capture' "$WORKFLOW")"
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$ghcr_steps")" -eq 7 ]] ||
+  fail "a production GHCR copy is outside a named mirror step"
+[[ "$(grep -c '^      - name: ' <<<"$ghcr_steps")" -eq "$(grep -c '^        continue-on-error: true$' <<<"$ghcr_steps")" ]] ||
+  fail "a production GHCR mirror step can fail release"
+if awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' "$WORKFLOW" | grep -q continue-on-error; then
+  fail "a required production step continues on error"
+fi
 
 support_job="$(sed -n '/^  publish-support-release-images:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
 grep -Fq '    needs: [release-selection]' <<<"$support_job" ||
@@ -77,7 +90,7 @@ if grep -Fq 'needs.build-' <<<"$support_job"; then
   fail "support release publication still crosses a runner job-output boundary"
 fi
 workspace_line="$(grep -n 'id: workspace' <<<"$support_job" | cut -d: -f1)"
-support_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$support_job" | head -1 | cut -d: -f1)"
+support_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$support_job" | head -1 | cut -d: -f1)"
 [[ -n "$workspace_line" && -n "$support_copy_line" && "$workspace_line" -lt "$support_copy_line" ]] ||
   fail "support release publication can run before the same-job workspace build"
 

@@ -412,7 +412,11 @@ fn generate_short_id() -> String {
 /// Mirrors `normalizeImageRef`.
 pub(crate) fn normalize_image_ref(image_ref: &str) -> String {
     match image_ref.trim() {
-        "workspace" | "codewiresh/workspace" | "ghcr.io/codewiresh/workspace" => {
+        "workspace"
+        | "codewiresh/workspace"
+        | "ghcr.io/codewiresh/workspace"
+        | "registry.example.invalid/codewire/workspace"
+        | crate::sandbox::LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE => {
             crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string()
         }
         other => other.to_string(),
@@ -1970,6 +1974,29 @@ credentials: {profile: user/work}
             crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE
         );
         assert_eq!(normalize_image_ref("python:3.12"), "python:3.12");
+        // The former public GHCR location of the same digest resolves to the
+        // Harbor reference deployments pull, as do the short workspace names.
+        for legacy in [
+            crate::sandbox::LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+            "ghcr.io/codewiresh/workspace",
+            "registry.example.invalid/codewire/workspace",
+            " workspace ",
+        ] {
+            assert_eq!(
+                normalize_image_ref(legacy),
+                crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE
+            );
+        }
+        assert!(
+            crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE
+                .starts_with("registry.example.invalid/codewire/workspace@sha256:")
+        );
+        assert!(crate::sandbox::is_canonical_workspace_runtime_image(
+            crate::sandbox::LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE
+        ));
+        assert!(!crate::sandbox::is_canonical_workspace_runtime_image(
+            "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4"
+        ));
     }
 
     #[test]

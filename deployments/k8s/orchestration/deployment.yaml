@@ -28,6 +28,7 @@ spec:
     spec:
       imagePullSecrets:
         - name: nexus-registry
+        - name: harbor-registry
       serviceAccountName: codewire-orchestration
       containers:
         - name: orchestration

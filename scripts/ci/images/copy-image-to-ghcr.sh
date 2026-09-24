@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+# Copy one exact promoted Nexus manifest, unchanged, to Harbor (the registry
+# every deployment pulls from) or to the public GHCR mirror.
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then
-  echo "Usage: $0 SOURCE_DIGEST_REF GHCR_REPOSITORY TAG [TAG...]" >&2
+  echo "Usage: $0 SOURCE_DIGEST_REF TARGET_REPOSITORY TAG [TAG...]" >&2
   exit 2
 fi
 
@@ -19,8 +21,14 @@ fi
 image_name="${BASH_REMATCH[1]}"
 expected_digest="sha256:${BASH_REMATCH[2]}"
 
-if [ "$target_repository" != "ghcr.io/codewiresh/$image_name" ]; then
-  echo "GHCR repository must match the supported source image family" >&2
+if [ "$target_repository" = "ghcr.io/codewiresh/$image_name" ]; then
+  target_label=GHCR
+  target_host=ghcr.io
+elif [ "$target_repository" = "registry.example.invalid/codewire/$image_name" ]; then
+  target_label=Harbor
+  target_host=registry.example.invalid
+else
+  echo "Target repository must be the Harbor or GHCR repository of the supported source image family" >&2
   exit 1
 fi
 
@@ -31,10 +39,14 @@ for tag in "${tags[@]}"; do
       echo "The mutable latest alias is restricted to base and workspace compatibility" >&2
       exit 1
     fi
+  elif [ "$target_label" = Harbor ] && [ "$tag" = "keep-${expected_digest/:/-}" ]; then
+    # Harbor retains immutable keep-* tags. This one pins a digest the product
+    # references by default, such as the compiled-in workspace image.
+    :
   elif [[ ! "$tag" =~ ^[0-9a-f]{40}$ ]] \
     && [[ ! "$tag" =~ ^[0-9a-f]{64}$ ]] \
     && [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Destination tags must be an exact source object ID, stable SemVer, or an approved support-image latest alias" >&2
+    echo "Destination tags must be an exact source object ID, stable SemVer, an approved support-image latest alias, or the Harbor keep tag of the exact digest" >&2
     exit 1
   fi
   if [[ -n "${seen_tags[$tag]:-}" ]]; then
@@ -46,12 +58,21 @@ done
 
 : "${NEXUS_REGISTRY_USERNAME_FILE:?NEXUS_REGISTRY_USERNAME_FILE is required}"
 : "${NEXUS_REGISTRY_PASSWORD_FILE:?NEXUS_REGISTRY_PASSWORD_FILE is required}"
-: "${GHCR_PUBLISH_USERNAME:?GHCR_PUBLISH_USERNAME is required}"
-: "${GHCR_PUBLISH_TOKEN_FILE:?GHCR_PUBLISH_TOKEN_FILE is required}"
+if [ "$target_label" = GHCR ]; then
+  : "${GHCR_PUBLISH_USERNAME:?GHCR_PUBLISH_USERNAME is required}"
+  : "${GHCR_PUBLISH_TOKEN_FILE:?GHCR_PUBLISH_TOKEN_FILE is required}"
+  target_username="$GHCR_PUBLISH_USERNAME"
+  target_credential_file="$GHCR_PUBLISH_TOKEN_FILE"
+else
+  : "${HARBOR_PUBLISH_USERNAME:?HARBOR_PUBLISH_USERNAME is required}"
+  : "${HARBOR_PUBLISH_PASSWORD_FILE:?HARBOR_PUBLISH_PASSWORD_FILE is required}"
+  target_username="$HARBOR_PUBLISH_USERNAME"
+  target_credential_file="$HARBOR_PUBLISH_PASSWORD_FILE"
+fi
 skopeo_runner="${SKOPEO_RUNNER:-scripts/ci/images/run-skopeo-container.sh}"
 docker_bin="${DOCKER_BIN:-docker}"
 
-for secret_file in "$NEXUS_REGISTRY_USERNAME_FILE" "$NEXUS_REGISTRY_PASSWORD_FILE" "$GHCR_PUBLISH_TOKEN_FILE"; do
+for secret_file in "$NEXUS_REGISTRY_USERNAME_FILE" "$NEXUS_REGISTRY_PASSWORD_FILE" "$target_credential_file"; do
   if [ ! -f "$secret_file" ] || [ ! -s "$secret_file" ]; then
     echo "Registry credential file is missing or empty" >&2
     exit 1
@@ -143,7 +164,11 @@ nexus_username="$(<"$NEXUS_REGISTRY_USERNAME_FILE")"
   exit 1
 }
 registry_login Nexus "$NEXUS_HOST" "$nexus_username" "$NEXUS_REGISTRY_PASSWORD_FILE"
-registry_login GHCR ghcr.io "$GHCR_PUBLISH_USERNAME" "$GHCR_PUBLISH_TOKEN_FILE"
+[[ -n "$target_username" && "$target_username" != *$'\n'* ]] || {
+  printf '%s username is malformed\n' "$target_label" >&2
+  exit 1
+}
+registry_login "$target_label" "$target_host" "$target_username" "$target_credential_file"
 
 inspect_digest() {
   local ref="$1"
@@ -166,19 +191,20 @@ for tag in "${tags[@]}"; do
   if existing_digest="$(inspect_digest "$target_ref" 2>"$inspect_error")"; then
     if [ "$existing_digest" != "$expected_digest" ]; then
       if [ "$tag" != latest ]; then
-        echo "Refusing to replace immutable GHCR tag with a different digest: $target_ref" >&2
+        echo "Refusing to replace immutable $target_label tag with a different digest: $target_ref" >&2
         exit 1
       fi
       printf 'Updating support-image compatibility alias: %s (%s -> %s)\n' \
         "$target_ref" "$existing_digest" "$expected_digest"
     else
-      printf 'GHCR tag already matches canonical digest: %s@%s\n' \
+      printf '%s tag already matches canonical digest: %s@%s\n' "$target_label" \
         "$target_ref" "$expected_digest"
       continue
     fi
   elif ! grep -Eiq 'manifest unknown|name unknown|not found|status code: 404|status: 404' \
       "$inspect_error"; then
-    echo "Unable to determine whether GHCR tag is absent: $target_ref" >&2
+    echo "Unable to determine whether $target_label tag is absent: $target_ref" >&2
+    sed -n '1,20p' "$inspect_error" >&2
     exit 1
   fi
 
@@ -189,7 +215,7 @@ for tag in "${tags[@]}"; do
 
   mirrored_digest="$(inspect_digest "$target_ref")"
   if [ "$mirrored_digest" != "$expected_digest" ]; then
-    echo "GHCR manifest digest diverged after exact copy: $target_ref" >&2
+    echo "$target_label manifest digest diverged after exact copy: $target_ref" >&2
     exit 1
   fi
   printf 'Copied canonical image manifest: %s@%s\n' \
@@ -199,7 +225,12 @@ done
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {
     printf 'source_digest=%s\n' "$expected_digest"
-    printf 'ghcr_ref=%s\n' "$first_target_ref"
-    printf 'ghcr_digest=%s\n' "$expected_digest"
+    if [ "$target_label" = GHCR ]; then
+      printf 'ghcr_ref=%s\n' "$first_target_ref"
+      printf 'ghcr_digest=%s\n' "$expected_digest"
+    else
+      printf 'harbor_ref=%s\n' "$first_target_ref"
+      printf 'harbor_digest=%s\n' "$expected_digest"
+    fi
   } >>"$GITHUB_OUTPUT"
 fi

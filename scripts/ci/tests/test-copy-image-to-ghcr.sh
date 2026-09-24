@@ -261,4 +261,46 @@ if GHCR_PUBLISH_TOKEN_FILE="$work/missing" "$COPY_IMAGE" "$source_ref" \
   fail "missing credential file was accepted"
 fi
 
+# Harbor is the registry deployments pull from: same exact-copy contract,
+# its own publisher credential, and the Harbor keep tag of the exact digest.
+printf 'harbor-test-password' >"$work/harbor-password"
+chmod 600 "$work/harbor-password"
+rm -f "$work/state/"*
+harbor_repository='registry.example.invalid/codewire/gateway'
+: >"$GITHUB_OUTPUT"
+env -u GHCR_PUBLISH_USERNAME -u GHCR_PUBLISH_TOKEN_FILE \
+  HARBOR_PUBLISH_USERNAME='robot$codewire+publisher' \
+  HARBOR_PUBLISH_PASSWORD_FILE="$work/harbor-password" \
+  "$COPY_IMAGE" "$source_ref" "$harbor_repository" "$source_sha" \
+  "keep-${expected_digest/:/-}" >"$work/harbor.out" 2>&1 ||
+  { cat "$work/harbor.out" >&2; fail 'Harbor publication failed'; }
+grep -q '^login .*registry.example.invalid ' "$FAKE_CALLS" ||
+  fail 'Harbor publication did not log in to registry.example.invalid'
+[[ "$(<"$work/state/$source_sha")" == "$expected_digest" ]] ||
+  fail 'Harbor source tag does not have the canonical digest'
+grep -qxF "harbor_ref=$harbor_repository:$source_sha" "$GITHUB_OUTPUT" ||
+  fail 'Harbor ref output is absent'
+if grep -qF 'harbor-test-password' "$FAKE_CALLS"; then
+  fail 'the Harbor credential reached the command arguments'
+fi
+if HARBOR_PUBLISH_USERNAME='robot$codewire+publisher' \
+  HARBOR_PUBLISH_PASSWORD_FILE="$work/harbor-password" \
+  "$COPY_IMAGE" "$source_ref" "$harbor_repository" "keep-sha256-$(printf 'd%.0s' {1..64})" \
+    >"$work/harbor-keep-mismatch.out" 2>&1; then
+  fail 'a Harbor keep tag for another digest was accepted'
+fi
+if "$COPY_IMAGE" "$source_ref" "$target_repository" "keep-${expected_digest/:/-}" \
+    >"$work/ghcr-keep.out" 2>&1; then
+  fail 'a Harbor keep tag was accepted for the GHCR mirror'
+fi
+if "$COPY_IMAGE" "$source_ref" 'registry.example.invalid/other/gateway' "$source_sha" \
+    >"$work/harbor-project.out" 2>&1; then
+  fail 'a Harbor repository outside the codewire project was accepted'
+fi
+if env -u HARBOR_PUBLISH_PASSWORD_FILE HARBOR_PUBLISH_USERNAME=x \
+  "$COPY_IMAGE" "$source_ref" "$harbor_repository" "$source_sha" \
+    >"$work/harbor-missing.out" 2>&1; then
+  fail 'Harbor publication without its credential was accepted'
+fi
+
 echo 'copy-image-to-ghcr tests passed'
