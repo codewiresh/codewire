@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly attempts=4
-readonly delay_seconds=30
+# Upstream snapshot mirrors throttle shared CI egress with bursts of 502/503.
+# Back off exponentially (30s doubling, capped at 300s) so a burst passes
+# instead of exhausting the attempts within two minutes.
+readonly attempts=6
+readonly -a delay_seconds=(30 60 120 240 300)
 readonly transaction_timeout_seconds=300
 
 bounded_apt() {
@@ -13,8 +16,10 @@ bounded_apt() {
     # network acquisition finite so the retry policy can handle that failure.
     # APT otherwise accepts partial indexes after transient download failures.
     # Put the policy last so callers cannot restore warning-only updates.
+    # Acquire::Retries retries each failed file inside one attempt, so a
+    # single 502 does not discard an otherwise complete acquisition.
     if timeout --signal=TERM --kill-after=3s "${transaction_timeout_seconds}s" \
-      apt-get "${command[@]}" -o APT::Update::Error-Mode=any; then
+      apt-get "${command[@]}" -o Acquire::Retries=5 -o APT::Update::Error-Mode=any; then
       return 0
     else
       status=$?
@@ -23,8 +28,8 @@ bounded_apt() {
       break
     fi
     printf 'APT acquisition failed; retrying the exact command (%d/%d) after %d seconds\n' \
-      "$((attempt + 1))" "$attempts" "$delay_seconds" >&2
-    sleep "$delay_seconds"
+      "$((attempt + 1))" "$attempts" "${delay_seconds[$((attempt - 1))]}" >&2
+    sleep "${delay_seconds[$((attempt - 1))]}"
   done
   return "$status"
 }
