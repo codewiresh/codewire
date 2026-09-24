@@ -47,7 +47,14 @@ async function credentials(page: Page, slug: string): Promise<void> {
     await expect(editor.locator("[data-dialog-close]")).toHaveCount(1);
     if (choice === "GitHub") {
       await expect(editor.locator('input[name="name"]')).toHaveCount(0);
-      await expect(button(editor, "Continue to GitHub")).toBeVisible();
+      // One account-level connection: connected accounts see it and can
+      // reconnect; others continue to GitHub.
+      const connection = editor.getByRole("region", { name: "Your GitHub connection", exact: true });
+      if (await connection.count()) {
+        await expect(connection.getByRole("button", { name: /^Reconnect / })).toBeVisible();
+      } else {
+        await expect(button(editor, "Continue to GitHub")).toBeVisible();
+      }
     }
     await fits(page, editor);
     await button(editor, "Back").click();
@@ -58,9 +65,12 @@ async function credentials(page: Page, slug: string): Promise<void> {
   await button(page, "Create profile").click();
   const profile = dialog(page, "Create profile");
   await expect(profile.getByLabel("Profile name", { exact: true })).toBeFocused();
-  for (const provider of ["Codex", "OpenAI API", "GitHub", "Anthropic", "SSH"]) {
+  for (const provider of ["Codex", "OpenAI API", "Anthropic", "SSH"]) {
     await expect(profile.getByLabel(provider, { exact: true })).toBeVisible();
   }
+  // GitHub is one account-level connection included in every profile, not a
+  // per-profile choice.
+  await expect(profile.getByLabel("GitHub", { exact: true })).toHaveCount(0);
   await fits(page, profile);
   await button(profile, "Cancel").click();
 }
@@ -97,9 +107,10 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
   await expect(page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link")).toBeVisible();
   const github = page.locator("[data-github-browser]");
   await expect(github.getByRole("heading", { name: "From GitHub", exact: true })).toBeVisible();
-  await expect(github.getByLabel("GitHub account", { exact: true })).toBeVisible();
+  await expect(github.getByText("GitHub account", { exact: true })).toBeVisible();
+  await expect(github.locator("[data-github-connection-status]")).toBeVisible();
   await expect(github.getByRole("searchbox", { name: "Find a repository" })).toBeVisible();
-  await expect(github.locator("[data-github-setup-link]")).toHaveText(/^(Connect|Check|Manage) GitHub connection$/);
+  await expect(github.locator("[data-github-setup-link]")).toHaveText(/^(Connect GitHub|Reconnect GitHub|Manage GitHub connection)$/);
   await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
   await expect(page.locator(".cw-preview-pattern")).toContainText("https://{label}-{sandbox-id-prefix}-");
   await expect(dialog(page, "Choose a GitHub repository")).toHaveCount(0);
