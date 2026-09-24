@@ -20,24 +20,24 @@ other_digest="sha256:$(printf 'b%.0s' {1..64})"
 base_digest="sha256:$(printf 'd%.0s' {1..64})"
 workspace_digest="sha256:$(printf 'e%.0s' {1..64})"
 source_sha="$(printf 'c%.0s' {1..40})"
-source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$expected_digest"
+source_ref="registry.example.invalid/codewire/gateway@$expected_digest"
 target_repository='ghcr.io/codewiresh/gateway'
-base_source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/base@$base_digest"
-workspace_source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/workspace@$workspace_digest"
+base_source_ref="registry.example.invalid/codewire/base@$base_digest"
+workspace_source_ref="registry.example.invalid/codewire/workspace@$workspace_digest"
 base_repository='ghcr.io/codewiresh/base'
 workspace_repository='ghcr.io/codewiresh/workspace'
-nexus_username='nexus-publisher-test'
-nexus_password='nexus-wrapper-test-password'
+harbor_username='robot$codewire+publisher'
+harbor_password='harbor-wrapper-test-password'
 ghcr_token='ghcr-wrapper-test-token'
 
-cat >"$work/bin/fetch-nexus" <<'EOF'
+cat >"$work/bin/fetch-harbor" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "${FAKE_NEXUS_FETCH_FAIL:-0}" != 1 ] || exit 1
-printf '%s' "${FAKE_NEXUS_USERNAME:?}" >"$1"
-printf '%s' "${FAKE_NEXUS_PASSWORD:?}" >"$2"
+[ "${FAKE_HARBOR_FETCH_FAIL:-0}" != 1 ] || exit 1
+printf '%s' "${FAKE_HARBOR_USERNAME:?}" >"$1"
+printf '%s' "${FAKE_HARBOR_PASSWORD:?}" >"$2"
 chmod 0600 "$1" "$2"
-printf '%s\t%s\n' "$1" "$2" >>"${FAKE_NEXUS_FETCH_CALLS:?}"
+printf '%s\t%s\n' "$1" "$2" >>"${FAKE_HARBOR_FETCH_CALLS:?}"
 EOF
 
 cat >"$work/bin/fetch-ghcr" <<'EOF'
@@ -55,11 +55,10 @@ cat >"$work/bin/copy-image" <<'EOF'
 set -euo pipefail
 [ "${FAKE_COPY_FAIL:-0}" != 1 ] || exit 1
 [[ "${GHCR_PUBLISH_USERNAME:?}" == codewire-package-publisher ]]
-[[ "$(<"${NEXUS_REGISTRY_USERNAME_FILE:?}")" == "${FAKE_NEXUS_USERNAME:?}" ]]
-[[ "$(<"${NEXUS_REGISTRY_PASSWORD_FILE:?}")" == "${FAKE_NEXUS_PASSWORD:?}" ]]
+[[ "${HARBOR_PUBLISH_USERNAME:?}" == "${FAKE_HARBOR_USERNAME:?}" ]]
+[[ "$(<"${HARBOR_PUBLISH_PASSWORD_FILE:?}")" == "${FAKE_HARBOR_PASSWORD:?}" ]]
 [[ "$(<"${GHCR_PUBLISH_TOKEN_FILE:?}")" == "${FAKE_GHCR_TOKEN:?}" ]]
-[[ "$(stat -c '%a' "$NEXUS_REGISTRY_USERNAME_FILE")" == 600 ]]
-[[ "$(stat -c '%a' "$NEXUS_REGISTRY_PASSWORD_FILE")" == 600 ]]
+[[ "$(stat -c '%a' "$HARBOR_PUBLISH_PASSWORD_FILE")" == 600 ]]
 [[ "$(stat -c '%a' "$GHCR_PUBLISH_TOKEN_FILE")" == 600 ]]
 printf '%s\n' "$*" >>"${FAKE_COPY_CALLS:?}"
 call=1
@@ -111,17 +110,17 @@ case "$1" in
   *) exit 1 ;;
 esac
 EOF
-chmod +x "$work/bin/fetch-nexus" "$work/bin/fetch-ghcr" "$work/bin/copy-image" "$work/bin/skopeo-runner"
+chmod +x "$work/bin/fetch-harbor" "$work/bin/fetch-ghcr" "$work/bin/copy-image" "$work/bin/skopeo-runner"
 
-export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/fetch-nexus"
+export OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/bin/fetch-harbor"
 export OPENBAO_GHCR_CREDENTIAL_FETCHER="$work/bin/fetch-ghcr"
 export GHCR_COPY_HELPER="$work/bin/copy-image"
 export SKOPEO_RUNNER="$work/bin/skopeo-runner"
-export FAKE_NEXUS_USERNAME="$nexus_username"
-export FAKE_NEXUS_PASSWORD="$nexus_password"
+export FAKE_HARBOR_USERNAME="$harbor_username"
+export FAKE_HARBOR_PASSWORD="$harbor_password"
 export FAKE_GHCR_USERNAME='codewire-package-publisher'
 export FAKE_GHCR_TOKEN="$ghcr_token"
-export FAKE_NEXUS_FETCH_CALLS="$work/nexus-fetch-calls"
+export FAKE_HARBOR_FETCH_CALLS="$work/harbor-fetch-calls"
 export FAKE_GHCR_FETCH_CALLS="$work/ghcr-fetch-calls"
 export FAKE_COPY_CALLS="$work/copy-calls"
 export FAKE_COPY_COUNTER="$work/copy-counter"
@@ -135,8 +134,8 @@ export GITHUB_OUTPUT="$work/output"
 
 grep -qxF -- '--check' "$FAKE_SKOPEO_CALLS" ||
   fail 'pinned Skopeo runtime was not checked before publication'
-[[ "$(wc -l <"$FAKE_NEXUS_FETCH_CALLS")" -eq 1 ]] ||
-  fail 'paired Nexus credential was not fetched exactly once'
+[[ "$(wc -l <"$FAKE_HARBOR_FETCH_CALLS")" -eq 1 ]] ||
+  fail 'paired Harbor credential was not fetched exactly once'
 [[ "$(wc -l <"$FAKE_GHCR_FETCH_CALLS")" -eq 1 ]] ||
   fail 'paired GHCR credential was not fetched exactly once'
 grep -qxF "$source_ref $target_repository $source_sha" "$FAKE_COPY_CALLS" ||
@@ -146,7 +145,7 @@ grep -qxF "inspect --no-creds --format {{.Digest}} docker://$target_repository@$
 grep -qxF "ghcr_public_ref=$target_repository@$expected_digest" "$GITHUB_OUTPUT" ||
   fail 'public digest output is absent'
 
-probe_source_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/confidential-probe@$expected_digest"
+probe_source_ref="registry.example.invalid/codewire/confidential-probe@$expected_digest"
 probe_repository='ghcr.io/codewiresh/confidential-probe'
 "$PUBLISH_IMAGE" "$probe_source_ref" "$probe_repository" "$source_sha"
 grep -qxF "$probe_source_ref $probe_repository $source_sha" "$FAKE_COPY_CALLS" ||
@@ -158,11 +157,11 @@ while IFS=$'\t' read -r username_file token_file; do
   [ ! -e "$token_file" ] || fail 'private credential file survived publication'
 done <"$FAKE_GHCR_FETCH_CALLS"
 while IFS=$'\t' read -r username_file password_file; do
-  [ ! -e "$username_file" ] || fail 'private Nexus username file survived publication'
-  [ ! -e "$password_file" ] || fail 'private Nexus password file survived publication'
-done <"$FAKE_NEXUS_FETCH_CALLS"
-if grep -qF "$nexus_username" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS" \
-  || grep -qF "$nexus_password" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS" \
+  [ ! -e "$username_file" ] || fail 'private Harbor username file survived publication'
+  [ ! -e "$password_file" ] || fail 'private Harbor password file survived publication'
+done <"$FAKE_HARBOR_FETCH_CALLS"
+if grep -qF "$harbor_username" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS" \
+  || grep -qF "$harbor_password" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS" \
   || grep -qF "$ghcr_token" "$FAKE_GHCR_FETCH_CALLS" "$FAKE_COPY_CALLS"; then
   fail 'a registry token reached command arguments'
 fi
@@ -171,20 +170,20 @@ runtime_bundle="$work/runtime-bundle.json"
 python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
   --source-sha "$source_sha" \
   --output "$runtime_bundle" \
-  --candidate dashboard "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/dashboard@$expected_digest" \
-  --candidate derp "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/derp@$expected_digest" \
-  --candidate gateway "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$expected_digest" \
-  --candidate services "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/services@$expected_digest" \
-  --candidate mesh "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh@$expected_digest"
-: >"$FAKE_NEXUS_FETCH_CALLS"
+  --candidate dashboard "$source_sha" "registry.example.invalid/codewire/dashboard@$expected_digest" \
+  --candidate derp "$source_sha" "registry.example.invalid/codewire/derp@$expected_digest" \
+  --candidate gateway "$source_sha" "registry.example.invalid/codewire/gateway@$expected_digest" \
+  --candidate services "$source_sha" "registry.example.invalid/codewire/services@$expected_digest" \
+  --candidate mesh "$source_sha" "registry.example.invalid/codewire/mesh@$expected_digest"
+: >"$FAKE_HARBOR_FETCH_CALLS"
 : >"$FAKE_GHCR_FETCH_CALLS"
 : >"$FAKE_COPY_CALLS"
 : >"$FAKE_COPY_COUNTER"
 : >"$FAKE_SKOPEO_CALLS"
 : >"$GITHUB_OUTPUT"
 "$PUBLISH_IMAGE" --runtime-bundle "$runtime_bundle"
-[[ "$(wc -l <"$FAKE_NEXUS_FETCH_CALLS")" -eq 1 ]] ||
-  fail 'runtime bundle fetched the paired Nexus credential more than once'
+[[ "$(wc -l <"$FAKE_HARBOR_FETCH_CALLS")" -eq 1 ]] ||
+  fail 'runtime bundle fetched the paired Harbor credential more than once'
 [[ "$(wc -l <"$FAKE_GHCR_FETCH_CALLS")" -eq 1 ]] ||
   fail 'runtime bundle fetched the paired GHCR credential more than once'
 mapfile -t runtime_copy_calls <"$FAKE_COPY_CALLS"
@@ -192,7 +191,7 @@ mapfile -t runtime_copy_calls <"$FAKE_COPY_CALLS"
   fail 'runtime bundle did not perform exactly five immutable copy operations'
 for index in "${!runtime_copy_calls[@]}"; do
   family=(dashboard derp gateway services mesh)
-  expected_source="nexus-system-cluster.example.invalid/oci-promoted/codewire/${family[$index]}@$expected_digest"
+  expected_source="registry.example.invalid/codewire/${family[$index]}@$expected_digest"
   expected_target="ghcr.io/codewiresh/${family[$index]}"
   [[ "${runtime_copy_calls[$index]}" == "$expected_source $expected_target $source_sha" ]] ||
     fail "runtime bundle copy order or source identity changed at ${family[$index]}"
@@ -200,7 +199,7 @@ for index in "${!runtime_copy_calls[@]}"; do
     "$GITHUB_OUTPUT" || fail "runtime bundle omitted ${family[$index]} output"
 done
 
-: >"$FAKE_NEXUS_FETCH_CALLS"
+: >"$FAKE_HARBOR_FETCH_CALLS"
 : >"$FAKE_GHCR_FETCH_CALLS"
 : >"$FAKE_COPY_CALLS"
 : >"$FAKE_COPY_COUNTER"
@@ -217,8 +216,8 @@ while IFS=$'\t' read -r username_file token_file; do
 done <"$FAKE_GHCR_FETCH_CALLS"
 while IFS=$'\t' read -r username_file password_file; do
   [[ ! -e "$username_file" && ! -e "$password_file" ]] ||
-    fail 'runtime bundle failure retained a private Nexus credential file'
-done <"$FAKE_NEXUS_FETCH_CALLS"
+    fail 'runtime bundle failure retained a private Harbor credential file'
+done <"$FAKE_HARBOR_FETCH_CALLS"
 
 bad_runtime_bundle="$work/bad-runtime-bundle.json"
 cp "$runtime_bundle" "$bad_runtime_bundle"
@@ -253,7 +252,7 @@ fi
   fail 'credential fetch failure reached the copy helper'
 
 fetch_calls_before="$(wc -l <"$FAKE_GHCR_FETCH_CALLS")"
-if "$PUBLISH_IMAGE" 'nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway:latest' \
+if "$PUBLISH_IMAGE" 'registry.example.invalid/codewire/gateway:latest' \
     "$target_repository" "$source_sha" >"$work/moving-source.out" 2>&1; then
   fail 'moving source reference was accepted'
 fi
@@ -332,7 +331,7 @@ if grep -qE ' latest$' "$FAKE_COPY_CALLS"; then
   fail 'an unverified immutable pair reached compatibility alias mutation'
 fi
 
-: >"$FAKE_NEXUS_FETCH_CALLS"
+: >"$FAKE_HARBOR_FETCH_CALLS"
 : >"$FAKE_GHCR_FETCH_CALLS"
 : >"$FAKE_COPY_CALLS"
 : >"$FAKE_SKOPEO_CALLS"
@@ -342,7 +341,7 @@ if FAKE_RUNTIME_UNAVAILABLE=1 "$PUBLISH_IMAGE" "$source_ref" \
 fi
 grep -Fq 'Pinned Skopeo runtime is unavailable' "$work/runtime-unavailable.out" ||
   fail 'missing Skopeo runtime was not classified before registry activity'
-[[ ! -s "$FAKE_NEXUS_FETCH_CALLS" && ! -s "$FAKE_GHCR_FETCH_CALLS" ]] ||
+[[ ! -s "$FAKE_HARBOR_FETCH_CALLS" && ! -s "$FAKE_GHCR_FETCH_CALLS" ]] ||
   fail 'missing Skopeo runtime reached credential retrieval'
 [[ ! -s "$FAKE_COPY_CALLS" ]] ||
   fail 'missing Skopeo runtime reached image mutation'

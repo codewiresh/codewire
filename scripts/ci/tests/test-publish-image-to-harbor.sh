@@ -13,18 +13,18 @@ fail() {
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/publish-image-to-harbor.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/bin"
+mkdir -p "$work/bin" "$work/present"
 
 digest="sha256:$(printf 'a%.0s' {1..64})"
 other_digest="sha256:$(printf 'b%.0s' {1..64})"
 source_sha="$(printf 'c%.0s' {1..40})"
-nexus="nexus-system-cluster.example.invalid/oci-promoted/codewire"
+harbor="registry.example.invalid/codewire"
 
+# Publication never reads Nexus: this fetcher fails the run if it is called.
 cat >"$work/bin/nexus-fetcher" <<'SH'
 #!/usr/bin/env bash
-set -euo pipefail
-printf 'nexus-user' >"$1"
-printf 'synthetic-nexus-password' >"$2"
+echo 'Nexus credential requested during Harbor publication' >&2
+exit 97
 SH
 cat >"$work/bin/harbor-fetcher" <<'SH'
 #!/usr/bin/env bash
@@ -43,7 +43,7 @@ cat >"$work/bin/copy-helper" <<'SH'
 set -euo pipefail
 [[ "${HARBOR_PUBLISH_USERNAME:?}" == 'robot$codewire+publisher' ]]
 [[ "$(<"${HARBOR_PUBLISH_PASSWORD_FILE:?}")" == synthetic-harbor-publisher-password ]]
-[[ -s "${NEXUS_REGISTRY_PASSWORD_FILE:?}" ]]
+[[ -z "${NEXUS_REGISTRY_PASSWORD_FILE:-}" ]]
 printf '%s\n' "$*" >>"${FAKE_COPY_LOG:?}"
 [[ "${FAKE_COPY_FAILURE:-0}" != 1 ]]
 SH
@@ -54,13 +54,30 @@ printf '%s\n' "$*" >>"${FAKE_SKOPEO_LOG:?}"
 case "$1" in
   --check) echo SKOPEO_RUNTIME_READY ;;
   login)
-    [[ "${SKOPEO_AUTH_VOLUME:?}" == fake-pull-volume ]]
-    [[ "$(cat)" == synthetic-harbor-pull-password ]]
+    [[ "${SKOPEO_AUTH_VOLUME:?}" == fake-volume ]]
+    credential="$(cat)"
+    [[ "$credential" == synthetic-harbor-pull-password \
+      || "$credential" == synthetic-harbor-publisher-password ]]
     [[ "${!#}" == registry.example.invalid ]]
     ;;
   inspect)
-    [[ "${SKOPEO_AUTH_VOLUME:?}" == fake-pull-volume ]]
-    printf '%s\n' "${FAKE_PULL_DIGEST:?}"
+    [[ "${SKOPEO_AUTH_VOLUME:?}" == fake-volume ]]
+    ref="${!#}"
+    ref="${ref#docker://}"
+    ref_digest="${ref##*@}"
+    if [[ -n "${FAKE_ABSENT:-}" && "$ref" == *"$FAKE_ABSENT"* \
+        && ! -e "${FAKE_PRESENT_DIR:?}/${ref_digest}" ]]; then
+      echo 'manifest unknown' >&2
+      exit 1
+    fi
+    printf '%s\n' "${FAKE_PULL_DIGEST:-$ref_digest}"
+    ;;
+  copy)
+    destination="${!#}"
+    source="${*: -2:1}"
+    [[ "$*" == *--src-no-creds* && "$source" == docker://ghcr.io/codewiresh/* ]]
+    [[ "$destination" == docker://registry.example.invalid/codewire/*:keep-sha256-* ]]
+    touch "${FAKE_PRESENT_DIR:?}/${source##*@}"
     ;;
   *) exit 64 ;;
 esac
@@ -69,8 +86,8 @@ cat >"$work/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  'volume create') printf 'fake-pull-volume\n' ;;
-  'volume rm fake-pull-volume') printf 'removed\n' >>"${FAKE_DOCKER_LOG:?}" ;;
+  'volume create') printf 'fake-volume\n' ;;
+  'volume rm fake-volume') printf 'removed\n' >>"${FAKE_DOCKER_LOG:?}" ;;
   *) exit 1 ;;
 esac
 SH
@@ -85,63 +102,114 @@ export FAKE_FETCH_LOG="$work/fetch.log"
 export FAKE_COPY_LOG="$work/copy.log"
 export FAKE_SKOPEO_LOG="$work/skopeo.log"
 export FAKE_DOCKER_LOG="$work/docker.log"
-export FAKE_PULL_DIGEST="$digest"
+export FAKE_PRESENT_DIR="$work/present"
 
 reset_logs() { : >"$FAKE_FETCH_LOG"; : >"$FAKE_COPY_LOG"; : >"$FAKE_SKOPEO_LOG"; : >"$FAKE_DOCKER_LOG"; }
 
 bundle="$work/bundle.json"
 python3 "$ROOT/scripts/ci/images/image-bundle.py" create --source-sha "$source_sha" --output "$bundle" \
-  --candidate dashboard "$source_sha" "$nexus/dashboard@$digest" \
-  --candidate derp "$source_sha" "$nexus/derp@$digest" \
-  --candidate gateway "$source_sha" "$nexus/gateway@$digest" \
-  --candidate services "$source_sha" "$nexus/services@$digest" \
-  --candidate mesh "$source_sha" "$nexus/mesh@$digest"
+  --candidate dashboard "$source_sha" "$harbor/dashboard@$digest" \
+  --candidate derp "$source_sha" "$harbor/derp@$digest" \
+  --candidate gateway "$source_sha" "$harbor/gateway@$digest" \
+  --candidate services "$source_sha" "$harbor/services@$digest" \
+  --candidate mesh "$source_sha" "$harbor/mesh@$digest"
 
 reset_logs
 export GITHUB_OUTPUT="$work/output"
 : >"$GITHUB_OUTPUT"
 "$PUBLISH" --runtime-bundle "$bundle" >"$work/runtime.out" 2>&1 ||
   { cat "$work/runtime.out" >&2; fail 'runtime bundle publication failed'; }
-[[ "$(wc -l <"$FAKE_COPY_LOG")" -eq 5 ]] || fail 'runtime bundle did not copy five images'
+[[ "$(wc -l <"$FAKE_COPY_LOG")" -eq 5 ]] || fail 'runtime bundle did not confirm five source tags'
 for family in dashboard derp gateway services mesh; do
-  grep -qxF "$nexus/$family@$digest registry.example.invalid/codewire/$family $source_sha" "$FAKE_COPY_LOG" ||
-    fail "runtime copy for $family is not the exact source-tagged Harbor copy"
-  grep -qxF "${family}_harbor_ref=registry.example.invalid/codewire/$family@$digest" "$GITHUB_OUTPUT" ||
+  grep -qxF "$harbor/$family@$digest $harbor/$family $source_sha" "$FAKE_COPY_LOG" ||
+    fail "runtime publication for $family is not the exact source-tagged Harbor image"
+  grep -qxF "${family}_harbor_ref=$harbor/$family@$digest" "$GITHUB_OUTPUT" ||
     fail "runtime Harbor ref output for $family is absent"
 done
 [[ "$(grep -c '^inspect ' "$FAKE_SKOPEO_LOG")" -eq 5 ]] ||
   fail 'the pull-only identity did not verify all five digests'
 grep -qxF -- '--pull' <(cut -d' ' -f1 "$FAKE_FETCH_LOG") ||
   fail 'the Harbor pull-only credential was not fetched'
+if grep -q '^copy ' "$FAKE_SKOPEO_LOG"; then
+  fail 'runtime publication imported an image instead of confirming Harbor tags'
+fi
 grep -qxF removed "$FAKE_DOCKER_LOG" || fail 'the pull auth volume was not removed'
 if grep -rqF synthetic- "$FAKE_COPY_LOG" "$FAKE_SKOPEO_LOG" "$work/runtime.out"; then
   fail 'a registry credential reached command arguments or output'
 fi
+if grep -rqiF nexus "$FAKE_COPY_LOG" "$FAKE_SKOPEO_LOG" "$FAKE_FETCH_LOG"; then
+  fail 'Harbor publication referenced Nexus'
+fi
 
 reset_logs
-"$PUBLISH" --support-pair "$nexus/base@$digest" "$nexus/workspace@$digest" "$source_sha" \
+"$PUBLISH" --support-pair "$harbor/base@$digest" "$harbor/workspace@$digest" "$source_sha" \
   >"$work/support.out" 2>&1 || { cat "$work/support.out" >&2; fail 'support pair publication failed'; }
-grep -qxF "$nexus/base@$digest registry.example.invalid/codewire/base $source_sha latest" "$FAKE_COPY_LOG" ||
-  fail 'support base was not copied with its source tag and latest alias'
-grep -qxF "$nexus/workspace@$digest registry.example.invalid/codewire/workspace $source_sha latest" "$FAKE_COPY_LOG" ||
-  fail 'support workspace was not copied with its source tag and latest alias'
+grep -qxF "$harbor/base@$digest $harbor/base $source_sha latest" "$FAKE_COPY_LOG" ||
+  fail 'support base did not receive its source tag and latest alias'
+grep -qxF "$harbor/workspace@$digest $harbor/workspace $source_sha latest" "$FAKE_COPY_LOG" ||
+  fail 'support workspace did not receive its source tag and latest alias'
 
 reset_logs
-"$PUBLISH" --keep "$nexus/workspace@$digest" "$nexus/gateway@$digest" >"$work/keep.out" 2>&1 ||
+"$PUBLISH" --keep "$harbor/workspace@$digest" "$harbor/gateway@$digest" >"$work/keep.out" 2>&1 ||
   { cat "$work/keep.out" >&2; fail 'keep publication failed'; }
-grep -qxF "$nexus/workspace@$digest registry.example.invalid/codewire/workspace keep-${digest/:/-}" "$FAKE_COPY_LOG" ||
+grep -qxF "$harbor/workspace@$digest $harbor/workspace keep-${digest/:/-}" "$FAKE_COPY_LOG" ||
   fail 'keep publication did not use the exact-digest keep tag'
 [[ "$(grep -c '^inspect ' "$FAKE_SKOPEO_LOG")" -eq 2 ]] || fail 'keep publication did not verify both digests'
 
+# Compiled-in defaults already in Harbor are only kept; the public mirror is
+# never contacted.
+mapfile -t pinned < <(
+  grep -ohE 'registry\.example\.invalid/codewire/(workspace|gateway)@sha256:[0-9a-f]{64}' \
+    "$ROOT/crates/codewire-orchestration/src/sandbox/mod.rs" \
+    "$ROOT/crates/codewire-orchestration/src/sandbox/template/mod.rs" \
+    "$ROOT/crates/codewire-orchestration/src/worker/create.rs" \
+    "$ROOT/deployments/k8s/base/config.env" | sort -u
+)
+[[ "${#pinned[@]}" -ge 2 ]] || fail 'source does not pin Harbor workspace and gateway defaults'
 reset_logs
-"$PUBLISH" "$nexus/confidential-probe@$digest" registry.example.invalid/codewire/confidential-probe "$source_sha" \
+"$PUBLISH" --pinned-defaults >"$work/pinned.out" 2>&1 ||
+  { cat "$work/pinned.out" >&2; fail 'pinned defaults publication failed'; }
+if grep -q '^copy ' "$FAKE_SKOPEO_LOG"; then
+  fail 'a pinned default already in Harbor was imported again'
+fi
+for ref in "${pinned[@]}"; do
+  pinned_digest="${ref##*@}"
+  grep -qxF "$ref ${ref%@*} keep-${pinned_digest/:/-}" "$FAKE_COPY_LOG" ||
+    fail "pinned default was not kept in Harbor: $ref"
+done
+
+# A default Harbor lacks is imported once, by exact digest, from the public
+# mirror without credentials, then kept and verified.
+reset_logs
+workspace_default="$(printf '%s\n' "${pinned[@]}" | grep '/workspace@')"
+FAKE_ABSENT="${workspace_default##*@}" "$PUBLISH" --pinned-defaults >"$work/import.out" 2>&1 ||
+  { cat "$work/import.out" >&2; fail 'pinned default import failed'; }
+[[ "$(grep -c '^copy ' "$FAKE_SKOPEO_LOG")" -eq 1 ]] ||
+  fail 'a missing pinned default was not imported exactly once'
+grep -qF "docker://ghcr.io/codewiresh/workspace@${workspace_default##*@}" "$FAKE_SKOPEO_LOG" ||
+  fail 'the pinned default import did not use the exact public digest'
+grep -qF 'Imported pinned default into Harbor' "$work/import.out" ||
+  fail 'the pinned default import was not reported'
+reset_logs
+FAKE_ABSENT="${workspace_default##*@}" "$PUBLISH" --pinned-defaults >"$work/import-again.out" 2>&1 ||
+  fail 'repeated pinned default publication failed'
+if grep -q '^copy ' "$FAKE_SKOPEO_LOG"; then
+  fail 'an imported pinned default was imported again'
+fi
+
+reset_logs
+"$PUBLISH" "$harbor/confidential-probe@$digest" "$harbor/confidential-probe" "$source_sha" \
   >"$work/single.out" 2>&1 || { cat "$work/single.out" >&2; fail 'single publication failed'; }
-if "$PUBLISH" "$nexus/gateway@$digest" registry.example.invalid/codewire/services "$source_sha" \
+if "$PUBLISH" "$harbor/gateway@$digest" "$harbor/services" "$source_sha" \
     >"$work/mismatch.out" 2>&1; then
   fail 'a Harbor repository for another family was accepted'
 fi
 if "$PUBLISH" --keep "ghcr.io/codewiresh/workspace@$digest" >"$work/bad-keep.out" 2>&1; then
-  fail 'a non-Nexus keep source was accepted'
+  fail 'a non-Harbor keep source was accepted'
+fi
+if "$PUBLISH" "nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" \
+    "$harbor/gateway" "$source_sha" >"$work/nexus-source.out" 2>&1; then
+  fail 'a Nexus source reference was accepted'
 fi
 
 reset_logs
@@ -153,10 +221,10 @@ grep -qF 'Harbor pull identity does not read the canonical digest' "$work/pull.o
 
 reset_logs
 if FAKE_COPY_FAILURE=1 "$PUBLISH" --runtime-bundle "$bundle" >"$work/copy-failure.out" 2>&1; then
-  fail 'a failed Harbor copy was accepted'
+  fail 'a failed Harbor tag confirmation was accepted'
 fi
 if grep -q '^inspect ' "$FAKE_SKOPEO_LOG"; then
-  fail 'verification continued after a failed Harbor copy'
+  fail 'verification continued after a failed Harbor tag confirmation'
 fi
 
 echo '[test-publish-image-to-harbor] Harbor publication contract passed'

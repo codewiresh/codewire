@@ -102,14 +102,15 @@ jobs:
             --candidate gateway "$GITHUB_SHA" "${{ steps.build.outputs.gateway_candidate_ref }}" \
             --candidate services "$GITHUB_SHA" "${{ steps.build.outputs.services_candidate_ref }}" \
             --candidate mesh "$GITHUB_SHA" "${{ steps.build.outputs.mesh_candidate_ref }}"
-          # Harbor is the registry every deployment pulls from. The bundle
-          # publisher keeps one fetched credential set across all five
-          # immutable copies, then proves each digest with the consumer pull
-          # identity. The public GHCR mirror follows delivery and never gates it.
+          # The build pushed all five images to Harbor, the registry every
+          # deployment pulls from. Confirm each source-SHA tag and prove each
+          # digest with the consumer pull identity. The public GHCR mirror
+          # follows delivery and never gates it.
           scripts/ci/images/publish-image-to-harbor.sh \
             --runtime-bundle "$bundle"
           # Sandboxes and gateways default to digests compiled into the
-          # product; keep each one in Harbor before Dev references it.
+          # product; keep each one in Harbor before Dev references it. A
+          # default Harbor lacks is imported once from the public mirror.
           scripts/ci/images/publish-image-to-harbor.sh --pinned-defaults
 
       - name: Sign the exact runtime set

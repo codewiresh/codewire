@@ -200,11 +200,11 @@ openssl pkey -in "$work/signing.key" -pubout -out "$public_key" >/dev/null 2>&1
 python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
   --source-sha "$source_sha" \
   --output "$bundle" \
-  --candidate dashboard "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/dashboard@$digest" \
-  --candidate derp "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/derp@$digest" \
-  --candidate gateway "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" \
-  --candidate services "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/services@$digest" \
-  --candidate mesh "$source_sha" "nexus-system-cluster.example.invalid/oci-promoted/codewire/mesh@$digest"
+  --candidate dashboard "$source_sha" "registry.example.invalid/codewire/dashboard@$digest" \
+  --candidate derp "$source_sha" "registry.example.invalid/codewire/derp@$digest" \
+  --candidate gateway "$source_sha" "registry.example.invalid/codewire/gateway@$digest" \
+  --candidate services "$source_sha" "registry.example.invalid/codewire/services@$digest" \
+  --candidate mesh "$source_sha" "registry.example.invalid/codewire/mesh@$digest"
 
 export DOCKER_LOG="$docker_log"
 export COSIGN_LOG="$cosign_log"
@@ -227,18 +227,19 @@ if ! run_signer >"$work/first.out" 2>"$work/first.err"; then
   sed -n '1,80p' "$cosign_log" >&2
   fail 'valid protected runtime signing fixture failed'
 fi
-[[ "$(wc -l <"$signature_state" | tr -d ' ')" -eq 10 ]] ||
-  fail 'signer did not create exactly ten registry-specific signatures'
-[[ "$(sort -u "$signature_state" | wc -l | tr -d ' ')" -eq 10 ]] ||
+[[ "$(wc -l <"$signature_state" | tr -d ' ')" -eq 5 ]] ||
+  fail 'signer did not create exactly five Harbor signatures'
+[[ "$(sort -u "$signature_state" | wc -l | tr -d ' ')" -eq 5 ]] ||
   fail 'signer signed a registry reference more than once'
-[[ "$(grep -c '^sign ' "$cosign_log")" -eq 10 ]] ||
+[[ "$(grep -c '^sign ' "$cosign_log")" -eq 5 ]] ||
   fail 'signer did not invoke Cosign exactly once per registry reference'
-[[ "$(grep -c '/id_token?' "$curl_log")" -eq 11 ]] ||
+[[ "$(grep -c '/id_token?' "$curl_log")" -eq 6 ]] ||
   fail 'signer did not mint one initial and one per-signature Forgejo identity'
-[[ "$(grep -c '/v1/auth/forgejo-jwt/login$' "$curl_log")" -eq 11 ]] ||
+[[ "$(grep -c '/v1/auth/forgejo-jwt/login$' "$curl_log")" -eq 6 ]] ||
   fail 'signer reused one short-lived OpenBao token across registry signatures'
-[[ "$(grep -c '/v1/platform/data/nexus/oci-promoter$' "$curl_log")" -eq 1 ]] ||
-  fail 'signer fetched Nexus credentials more than once'
+if grep -q '/v1/platform/data/nexus/' "$curl_log"; then
+  fail 'delivery signing fetched a Nexus credential'
+fi
 [[ "$(grep -c '/v1/platform/data/ci/codewire/harbor-publisher$' "$curl_log")" -eq 1 ]] ||
   fail 'signer fetched Harbor credentials more than once'
 if grep -q '/v1/platform/data/ci/codewire/ghcr-publisher$' "$curl_log"; then
@@ -256,11 +257,14 @@ grep -Fq 'cp cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:/k
 if grep -q '^run ' "$docker_log"; then
   fail 'signer retained a cross-DinD bind-mount execution path'
 fi
-[[ "$(grep -c "buildx imagetools inspect .*Provenance.SLSA" "$docker_log")" -eq 10 ]] ||
-  fail 'signer did not verify provenance in both registries'
-[[ "$(grep -c "buildx imagetools inspect .*SBOM.SPDX" "$docker_log")" -eq 10 ]] ||
-  fail 'signer did not verify SBOMs in both registries'
-grep -Fq 'Verified and signed the exact five-image runtime set in Nexus and Harbor' \
+[[ "$(grep -c "buildx imagetools inspect .*Provenance.SLSA" "$docker_log")" -eq 5 ]] ||
+  fail 'signer did not verify provenance for every Harbor reference'
+[[ "$(grep -c "buildx imagetools inspect .*SBOM.SPDX" "$docker_log")" -eq 5 ]] ||
+  fail 'signer did not verify SBOMs for every Harbor reference'
+if grep -q 'nexus-system-cluster.example.invalid/codewire\|oci-promoted' "$docker_log" "$cosign_log"; then
+  fail 'delivery signing touched a Nexus publication reference'
+fi
+grep -Fq 'Verified and signed the exact five-image runtime set in Harbor' \
   "$work/first.out" || fail 'signer omitted its complete-set result'
 if rg -n 'synthetic-(request|forgejo|openbao|nexus-password|ghcr-token|harbor-password)' \
   "$work/first.out" "$work/first.err" "$docker_log" "$cosign_log"; then
@@ -277,7 +281,7 @@ run_signer >"$work/second.out" 2>"$work/second.err"
   fail 'idempotent signer minted identities for already accepted signatures'
 [[ "$(grep -c '/v1/auth/forgejo-jwt/login$' "$curl_log")" -eq $((login_calls_before + 1)) ]] ||
   fail 'idempotent signer refreshed OpenBao for already accepted signatures'
-[[ "$(grep -Fc 'Runtime signature already accepted:' "$work/second.out")" -eq 10 ]] ||
+[[ "$(grep -Fc 'Runtime signature already accepted:' "$work/second.out")" -eq 5 ]] ||
   fail 'idempotent signer did not report all accepted signatures'
 
 if GITHUB_REF=refs/pull/1/head run_signer >"$work/pr.out" 2>"$work/pr.err"; then
@@ -286,7 +290,7 @@ fi
 grep -Fq 'restricted to canonical main' "$work/pr.err" ||
   fail 'non-main signing rejection was not attributable'
 
-bad_ref="nexus-system-cluster.example.invalid/oci-promoted/codewire/dashboard@$digest"
+bad_ref="registry.example.invalid/codewire/dashboard@$digest"
 if FAKE_BAD_PROVENANCE_REF="$bad_ref" run_signer \
   >"$work/provenance.out" 2>"$work/provenance.err"; then
   fail 'signer accepted invalid protected provenance'

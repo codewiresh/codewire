@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
-readonly NEXUS_REGISTRY_HOST='nexus-system-cluster.example.invalid'
-readonly NEXUS_APPROVED_REGISTRY_HOST='nexus.example.invalid'
+readonly PUBLISH_REGISTRY_HOST='registry.example.invalid'
+readonly APPROVED_REGISTRY_HOST='nexus.example.invalid'
 source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
@@ -51,8 +51,8 @@ DOCKER_CONFIG="$docker_config" docker buildx create \
 is_nexus_backup_unavailable() {
   local log_file="$1"
 
-  if ! grep -Fq "https://${NEXUS_REGISTRY_HOST}/v2/" "$log_file" \
-      && ! grep -Fq "https://${NEXUS_APPROVED_REGISTRY_HOST}/v2/" "$log_file"; then
+  if ! grep -Fq "https://${PUBLISH_REGISTRY_HOST}/v2/" "$log_file" \
+      && ! grep -Fq "https://${APPROVED_REGISTRY_HOST}/v2/" "$log_file"; then
     return 1
   fi
   grep -Eq '503 Service (Temporarily )?Unavailable' "$log_file"
@@ -96,7 +96,7 @@ run_protected_build() {
       return "$build_status"
     fi
 
-    printf 'Nexus is temporarily unavailable during protected publication; retrying the exact %s build (%d/%d)\n' \
+    printf 'Registry is temporarily unavailable during protected publication; retrying the exact %s build (%d/%d)\n' \
       "$image_name" "$((attempt + 1))" "$NEXUS_BACKUP_RETRY_ATTEMPTS" >&2
     sleep "$NEXUS_BACKUP_RETRY_DELAY_SECONDS"
   done
@@ -112,12 +112,12 @@ build_one() {
   run_protected_build "$image_name" "$dockerfile" "$output" "$build_runtime_set"
 
   candidate_ref="$(sed -n 's/^candidate_ref=//p' "$output")"
-  if [[ ! "$candidate_ref" =~ ^nexus-system-cluster\.private\.invalid/oci-promoted/codewire/${image_name}@sha256:[0-9a-f]{64}$ ]]; then
+  if [[ ! "$candidate_ref" =~ ^registry\.example\.invalid/codewire/${image_name}@sha256:[0-9a-f]{64}$ ]]; then
     echo "Runtime build returned an invalid $image_name candidate reference" >&2
     exit 1
   fi
 
-  # Nexus is the protected candidate boundary. Pull the immutable manifest
+  # Harbor is the protected candidate boundary. Pull the immutable manifest
   # back by digest and give its selected local platform image the disposable
   # names consumed by Kind. GHCR publication and deploy dispatch occur only
   # after the complete exact-image suite passes in the same job.
