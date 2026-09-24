@@ -856,6 +856,18 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      apps/dashboard/e2e/*)
+        # Browser specs run only under Edge/Kind. A push to main runs them
+        # post-merge so an edited spec cannot reach main unexecuted; a pull
+        # request runs them only when it opts into Kind.
+        if [ "$event" != pull_request ] || [ "$pr_kind_opt_in" = true ]; then
+          select_token edge_kind
+          kind_relevant=true
+        fi
+        ;;
+    esac
+
+    case "$path" in
       crates/codewire-local-vmm/macos-sandbox-canary-experiment/Package.swift|\
       crates/codewire-local-vmm/macos-sandbox-canary-experiment/Sources/*/*.swift|\
       crates/codewire-local-vmm/macos-sandbox-canary-experiment/Sources/CCanarySupport/CCanarySupport.c|\
