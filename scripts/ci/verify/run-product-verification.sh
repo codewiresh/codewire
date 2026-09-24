@@ -711,6 +711,7 @@ run_release() {
   scripts/ci/tests/test-build-push-image.sh
   scripts/ci/tests/test-run-rust-build.sh
   scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh
+  scripts/ci/tests/test-fetch-openbao-harbor-credentials.sh
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh
   scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh
   scripts/ci/tests/test-forgejo-action-mirrors.sh
@@ -723,6 +724,8 @@ run_release() {
   scripts/ci/tests/test-dispatch-deploy-dev.sh
   scripts/ci/tests/test-dispatch-deploy-prod.sh
   scripts/ci/tests/test-publish-image-to-ghcr.sh
+  scripts/ci/tests/test-publish-image-to-harbor.sh
+  scripts/ci/tests/test-sign-runtime-image-set.sh
   scripts/ci/tests/test-resolve-published-support-pair.sh
   scripts/ci/tests/test-run-skopeo-container.sh
   scripts/ci/tests/test-support-images-workflow.sh

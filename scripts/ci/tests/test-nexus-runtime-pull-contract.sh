@@ -23,6 +23,10 @@ for environment in dev production; do
   kubectl kustomize "$ROOT/deployments/k8s/overlays/$environment" >"$output"
   grep -Fq 'name: nexus-registry' "$output" ||
     fail "$environment render does not consume nexus-registry"
+  # Harbor is the registry deployments pull from; both secrets stay listed
+  # until no workload references Nexus.
+  [[ "$(grep -c 'name: harbor-registry' "$output")" -eq "$(grep -c 'name: nexus-registry' "$output")" ]] ||
+    fail "$environment render does not pair every nexus-registry with harbor-registry"
   if grep -Eq 'gitea-registry|GITEA_REGISTRY_TOKEN' "$output"; then
     fail "$environment render retains legacy Gitea credential ownership"
   fi
@@ -33,6 +37,8 @@ for mesh in \
   "$ROOT/deployments/k8s/flux/production/mesh-helmrelease.yaml"; do
   grep -Fq '      - name: nexus-registry' "$mesh" ||
     fail "$mesh does not consume nexus-registry"
+  grep -Fq '      - name: harbor-registry' "$mesh" ||
+    fail "$mesh does not consume harbor-registry"
 done
 
 smoke="$ROOT/scripts/runtime/dev/smoke-dev-candidate.sh"

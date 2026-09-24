@@ -30,6 +30,7 @@ spec:
     spec:
       imagePullSecrets:
         - name: nexus-registry
+        - name: harbor-registry
       containers:
         - name: billing
           # Runs from the shared codewire/services image (one image, many

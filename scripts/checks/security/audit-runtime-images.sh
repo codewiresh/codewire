@@ -36,6 +36,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
 readonly workspace_image='ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff'
+# Deployments pull the same digest from Harbor; the CLI's local default keeps
+# the public GHCR mirror.
+readonly harbor_workspace_image='registry.example.invalid/codewire/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff'
 readonly dind_image='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
 rust_channel="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' \
   rust-toolchain.toml)"
@@ -69,7 +72,8 @@ readonly -a runtime_reference_paths=(
   ':!scripts/checks/security/audit-runtime-images.sh'
 )
 
-if moving_workspace="$(git grep -nF 'ghcr.io/codewiresh/workspace:latest' -- \
+if moving_workspace="$(git grep -nF -e 'ghcr.io/codewiresh/workspace:latest' \
+    -e 'registry.example.invalid/codewire/workspace:latest' -- \
     "${runtime_reference_paths[@]}" || true)" \
   && [[ -n "$moving_workspace" ]]; then
   echo "runtime image audit: moving canonical workspace references are forbidden" >&2
@@ -92,7 +96,7 @@ if retired_dind="$(git grep -nF 'ghcr.io/codewiresh/dind' -- \
 fi
 
 for assertion in \
-  "crates/codewire-orchestration/src/sandbox/mod.rs:$workspace_image" \
+  "crates/codewire-orchestration/src/sandbox/mod.rs:CANONICAL_WORKSPACE_RUNTIME_IMAGE: &str = \"$harbor_workspace_image\"" \
   "crates/codewire-cli/src/commands/collaboration.rs:$workspace_image" \
   "crates/codewire-orchestration/src/sandbox/template/mod.rs:$dind_image"; do
   path="${assertion%%:*}"

@@ -24,6 +24,7 @@ spec:
     spec:
       imagePullSecrets:
         - name: nexus-registry
+        - name: harbor-registry
       terminationGracePeriodSeconds: 15
       containers:
         - name: udp-relay

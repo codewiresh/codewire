@@ -11,7 +11,7 @@ export const githubCheckoutName = "github-repository-draft";
 export const githubCheckoutUrl = "https://github.com/synthetic-user/repository-01.git";
 // The same pinned workspace contract used by ssr-dashboard.environments.ssr.ts.
 export const githubCheckoutImage = process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE
-  || "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
+  || "registry.example.invalid/codewire/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
 // Public deterministic fixture identity; not a credential. The install marker
 // proves setup checked out the repository BEFORE running the user's command.
 const checkoutCommit = "78e440926ea15ee9644a69199694e39f6f06e3ce";

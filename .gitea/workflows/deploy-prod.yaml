@@ -239,7 +239,24 @@ jobs:
           CODEWIRE_SOURCE_DIR: .release-source
         run: scripts/ci/images/build-push-image.sh workspace .release-source/images/workspace/Dockerfile .release-source
 
-      - name: Copy both support release manifests without rebuilding
+      - name: Publish both support release manifests to Harbor without rebuilding
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ steps.base.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/base \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ steps.workspace.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/workspace \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+
+      # Harbor serves every consumer; the public GHCR copy never gates release.
+      - name: Mirror both support release manifests to GHCR without gating release
+        continue-on-error: true
         env:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
@@ -275,7 +292,7 @@ jobs:
           path: .release-source
           fetch-depth: 0
 
-      - name: Validate complete production candidate bundle
+      - name: Validate and publish the production bundle to Harbor
         env:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
@@ -291,6 +308,34 @@ jobs:
             --candidate gateway "${{ needs.build-gateway-image.outputs.source_sha }}" "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
             --candidate services "${{ needs.build-services-image.outputs.source_sha }}" "${{ needs.build-services-image.outputs.candidate_ref }}" \
             --candidate mesh "${{ needs.build-mesh-image.outputs.source_sha }}" "${{ needs.build-mesh-image.outputs.candidate_ref }}"
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/dashboard \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ needs.build-derp.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/derp \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/gateway \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ needs.build-services-image.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/services \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ needs.build-mesh-image.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/mesh \
+            "$SOURCE_SHA" "$RELEASE_TAG"
+
+      - name: Mirror the runtime release to GHCR without gating release
+        continue-on-error: true
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
           scripts/ci/images/publish-image-to-ghcr.sh \
             "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
             ghcr.io/codewiresh/dashboard \
