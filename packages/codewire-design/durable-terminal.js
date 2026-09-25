@@ -811,7 +811,7 @@
         clearPresentations();
       }
     }, true);
-    if (!P.uuid.test(org || "") || !P.uuid.test(environment || "") || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug || "") || !csrf) {
+    if (!P.organizationId(org) || !P.uuid.test(environment || "") || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug || "") || !csrf) {
       announce("Terminal settings are unavailable. Reload this page.");
       return;
     }

@@ -176,7 +176,9 @@ mod tests {
     use super::*;
     const ORIGIN: &str = "https://dashboard.example.test";
     const DRAFT: &str = "00000000-0000-4000-8000-000000000003";
-    const ORG: &str = "00000000-0000-4000-8000-000000000002";
+    // Product organization IDs are opaque 32-hex strings, not UUIDs.
+    const ORG: &str = "6bf8d155e84c4fc5b479b17022fe41dd";
+    const PROJECT: &str = "00000000-0000-4000-8000-000000000002";
     const ACTOR: &str = "11111111111140008000000000000001";
     const NOW: u64 = 4_000_000;
 
@@ -195,7 +197,7 @@ mod tests {
     #[test]
     fn restore_retains_stale_exact_sources_and_requires_free_form_reentry() {
         let mut value = metadata();
-        value["selections"]["secret_project"] = serde_json::json!(ORG);
+        value["selections"]["secret_project"] = serde_json::json!(PROJECT);
         value["selections"]["ports"] = serde_json::json!([{ "port": "3000", "access": "creator" }]);
         let draft = SelectionDraft::parse(value.to_string().as_bytes(), NOW)
             .ok()
@@ -210,7 +212,7 @@ mod tests {
         let current_default_image = form.image.clone();
         draft.hydrate(&mut form).unwrap();
         assert_eq!(form.sources.projects.len(), 1);
-        assert_eq!(form.sources.projects[0].id, ORG);
+        assert_eq!(form.sources.projects[0].id, PROJECT);
         assert!(form.sources.projects[0].selected && form.sources.projects[0].synthetic);
         assert_eq!(form.sources.profiles.len(), 1);
         assert_eq!(form.sources.profiles[0].id, DRAFT);
@@ -392,7 +394,7 @@ mod tests {
         }
         let mut draft = metadata();
         draft["saved_at"] = serde_json::json!(chrono::Utc::now().timestamp_millis() as u64);
-        draft["selections"]["secret_project"] = serde_json::json!(ORG);
+        draft["selections"]["secret_project"] = serde_json::json!(PROJECT);
         draft["selections"]["ports"] = serde_json::json!([{ "port": "3000", "access": "creator" }]);
         if mode == "wrong actor" {
             draft["actor"] = serde_json::json!(ORG);
@@ -401,7 +403,7 @@ mod tests {
             draft["organization"] = serde_json::json!(DRAFT);
         }
         if mode == "wrong draft" {
-            draft["draft"] = serde_json::json!(ORG);
+            draft["draft"] = serde_json::json!(PROJECT);
         }
         let response = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -628,7 +630,7 @@ mod tests {
             assert_private_without_dispatch(&headers, &calls);
             assert!(html.contains("data-create-draft-restored=\"true\""));
             assert!(html.contains(&format!("value=\"{DRAFT}@9007199254740993\"")));
-            assert!(html.contains(&format!("value=\"{ORG}\"")));
+            assert!(html.contains(&format!("value=\"{PROJECT}\"")));
             assert!(html.contains("Draft restored. Review current choices"));
             assert!(
                 calls

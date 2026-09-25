@@ -120,14 +120,23 @@ pub(crate) fn canonical_id(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
 }
 
-// IdP account IDs are opaque (currently 32 hex bytes), not UUIDs. Match the
-// existing terminal account boundary and preserve identity bytes unchanged.
-pub(crate) fn actor_id(value: &str) -> bool {
+// IdP account IDs and organization IDs are opaque (currently 32 hex bytes),
+// not UUIDs. Match the existing terminal account boundary and preserve
+// identity bytes unchanged.
+fn opaque_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+pub(crate) fn actor_id(value: &str) -> bool {
+    opaque_id(value)
+}
+
+pub(crate) fn organization_id(value: &str) -> bool {
+    opaque_id(value)
 }
 
 /// Reuse canonical cookie identity/2FA; only immutable public identity escapes.
@@ -162,9 +171,8 @@ impl SelectionDraft {
         let draft: Self = serde_json::from_slice(bytes).map_err(|_| ())?;
         if draft.version != 1
             || !actor_id(&draft.actor)
-            || ![&draft.organization, &draft.draft]
-                .into_iter()
-                .all(|id| canonical_id(id))
+            || !organization_id(&draft.organization)
+            || !canonical_id(&draft.draft)
             || draft.saved_at > now
         {
             return Err(());
@@ -324,7 +332,8 @@ mod tests {
     use super::*;
     const NOW: u64 = 4_000_000;
     const ACTOR: &str = "11111111111140008000000000000001";
-    const ORG: &str = "00000000-0000-4000-8000-000000000002";
+    // Product organization IDs are opaque 32-hex strings, not UUIDs.
+    const ORG: &str = "6bf8d155e84c4fc5b479b17022fe41dd";
     const DRAFT: &str = "00000000-0000-4000-8000-000000000003";
 
     #[test]
@@ -462,9 +471,25 @@ mod tests {
             invalid[key] = value;
             assert!(parse(&invalid, NOW).is_err());
         }
-        let mut invalid = metadata();
-        invalid["organization"] = serde_json::json!("6BF8D155-E84C-4FC5-B479-B17022FE41DD");
-        assert!(parse(&invalid, NOW).is_err());
+        for id in [ORG, "00000000-0000-4000-8000-000000000002"] {
+            assert!(organization_id(id));
+            let mut exact = metadata();
+            exact["organization"] = serde_json::json!(id);
+            assert!(parse(&exact, NOW).ok().unwrap().matches(ACTOR, id, DRAFT));
+        }
+        for id in [
+            String::new(),
+            "organization:delimiter".into(),
+            "org@example.test".into(),
+            " org".into(),
+            "non-ascii-é".into(),
+            "a".repeat(129),
+        ] {
+            assert!(!organization_id(&id));
+            let mut invalid = metadata();
+            invalid["organization"] = serde_json::json!(id);
+            assert!(parse(&invalid, NOW).is_err());
+        }
     }
 
     #[test]

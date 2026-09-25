@@ -38,7 +38,8 @@ test("creation keeps sources visible and closed advanced fields remain native fo
 
 const draftPrefix = "codewire.create-selections.v1:";
 const actor = "11111111111140008000000000000001";
-const organization = "00000000-0000-4000-8000-000000000002";
+// Product organization IDs are opaque 32-hex strings, not UUIDs.
+const organization = "6bf8d155e84c4fc5b479b17022fe41dd";
 const draftId = "00000000-0000-4000-8000-000000000003";
 const projectId = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
 const profile = "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76@9007199254740993";

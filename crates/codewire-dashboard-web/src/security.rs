@@ -46,9 +46,19 @@ pub(crate) struct GitHubAppNavigation {
     pub(crate) draft_id: Option<String>,
 }
 
+// Navigation tail layout: version, organization length, organization bytes,
+// draft flag, then an optional canonical draft ID. Organization IDs are opaque
+// (currently 32 hex bytes), so their length is explicit and bounded.
+const GITHUB_APP_NAVIGATION_LAYOUT_VERSION: u8 = 2;
+const GITHUB_APP_NAVIGATION_ORGANIZATION_MAX_BYTES: usize = 128;
+const GITHUB_APP_NAVIGATION_DRAFT_BYTES: usize = 36;
+const GITHUB_APP_NAVIGATION_MAX_BYTES: usize =
+    3 + GITHUB_APP_NAVIGATION_ORGANIZATION_MAX_BYTES + GITHUB_APP_NAVIGATION_DRAFT_BYTES;
+const GITHUB_APP_NAVIGATION_MAX_ENCODED: usize = (GITHUB_APP_NAVIGATION_MAX_BYTES * 4).div_ceil(3);
+
 impl GitHubAppNavigation {
     fn encode(&self) -> Option<String> {
-        if !crate::environment_drafts::canonical_id(&self.organization_id)
+        if !crate::environment_drafts::organization_id(&self.organization_id)
             || self
                 .draft_id
                 .as_deref()
@@ -56,9 +66,11 @@ impl GitHubAppNavigation {
         {
             return None;
         }
-        let mut bytes = Vec::with_capacity(74);
-        bytes.push(1);
-        bytes.extend_from_slice(self.organization_id.as_bytes());
+        let organization = self.organization_id.as_bytes();
+        let mut bytes = Vec::with_capacity(GITHUB_APP_NAVIGATION_MAX_BYTES);
+        bytes.push(GITHUB_APP_NAVIGATION_LAYOUT_VERSION);
+        bytes.push(u8::try_from(organization.len()).ok()?);
+        bytes.extend_from_slice(organization);
         bytes.push(u8::from(self.draft_id.is_some()));
         if let Some(id) = &self.draft_id {
             bytes.extend_from_slice(id.as_bytes());
@@ -67,21 +79,29 @@ impl GitHubAppNavigation {
     }
 
     fn decode(encoded: &str) -> Option<Self> {
-        if !matches!(encoded.len(), 51 | 99) {
+        // Bound the untrusted tail before decoding it.
+        if encoded.len() > GITHUB_APP_NAVIGATION_MAX_ENCODED {
             return None;
         }
         let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
-        if bytes.first() != Some(&1) || !matches!(bytes.len(), 38 | 74) {
+        let (&version, rest) = bytes.split_first()?;
+        let (&length, rest) = rest.split_first()?;
+        let length = usize::from(length);
+        if version != GITHUB_APP_NAVIGATION_LAYOUT_VERSION
+            || length > GITHUB_APP_NAVIGATION_ORGANIZATION_MAX_BYTES
+            || rest.len() <= length
+        {
             return None;
         }
-        let organization_id = std::str::from_utf8(&bytes[1..37]).ok()?;
-        if !crate::environment_drafts::canonical_id(organization_id) {
+        let (organization, rest) = rest.split_at(length);
+        let organization_id = std::str::from_utf8(organization).ok()?;
+        if !crate::environment_drafts::organization_id(organization_id) {
             return None;
         }
-        let draft_id = match (bytes[37], bytes.len()) {
-            (0, 38) => None,
-            (1, 74) => {
-                let id = std::str::from_utf8(&bytes[38..]).ok()?;
+        let draft_id = match rest {
+            [0] => None,
+            [1, id @ ..] if id.len() == GITHUB_APP_NAVIGATION_DRAFT_BYTES => {
+                let id = std::str::from_utf8(id).ok()?;
                 if !crate::environment_drafts::canonical_id(id) {
                     return None;
                 }
@@ -512,8 +532,9 @@ mod tests {
         let state = new_csrf_token();
         let session = HeaderValue::from_static("codewire.session_token=synthetic-session");
         let id = "00000000-0000-4000-8000-000000000001";
+        // Product organization IDs are opaque 32-hex strings, not UUIDs.
         let nav = GitHubAppNavigation {
-            organization_id: "00000000-0000-4000-8000-000000000002".into(),
+            organization_id: "6bf8d155e84c4fc5b479b17022fe41dd".into(),
             draft_id: Some("00000000-0000-4000-8000-000000000003".into()),
         };
         let headers = |value: &str| {
@@ -540,23 +561,36 @@ mod tests {
             let continuation =
                 github_app_authorization_continuation(&headers(value), &state, &session).unwrap();
             assert_eq!(continuation.navigation, Some(nav.clone()));
-            let mut bad_version = URL_SAFE_NO_PAD.decode(tail).unwrap();
-            bad_version[0] = 2;
-            let mut bad_flag = URL_SAFE_NO_PAD.decode(tail).unwrap();
-            bad_flag[37] = 2;
-            let mut nil_org = URL_SAFE_NO_PAD.decode(tail).unwrap();
-            nil_org[1..37].copy_from_slice(b"00000000-0000-0000-0000-000000000000");
-            let mut nil_draft = URL_SAFE_NO_PAD.decode(tail).unwrap();
-            nil_draft[38..].copy_from_slice(b"00000000-0000-0000-0000-000000000000");
+            let decoded = URL_SAFE_NO_PAD.decode(tail).unwrap();
+            assert_eq!(&decoded[..2], &[GITHUB_APP_NAVIGATION_LAYOUT_VERSION, 32]);
+            let mut bad_version = decoded.clone();
+            bad_version[0] = 1;
+            let mut bad_flag = decoded.clone();
+            bad_flag[34] = 2;
+            let mut empty_org = decoded.clone();
+            empty_org[1] = 0;
+            let mut overlong_org = decoded.clone();
+            overlong_org[1] = 33;
+            let mut delimiter_org = decoded.clone();
+            delimiter_org[2] = b':';
+            let mut nil_draft = decoded.clone();
+            nil_draft[35..].copy_from_slice(b"00000000-0000-0000-0000-000000000000");
+            let mut oversize_org = vec![GITHUB_APP_NAVIGATION_LAYOUT_VERSION, 129];
+            oversize_org.extend_from_slice(&[b'a'; 129]);
+            oversize_org.push(0);
             for malformed in [
                 String::new(),
                 "not-base64!".into(),
                 format!("{tail}.extra"),
                 "x".repeat(2048),
+                "A".repeat(GITHUB_APP_NAVIGATION_MAX_ENCODED + 1),
                 URL_SAFE_NO_PAD.encode(bad_version),
                 URL_SAFE_NO_PAD.encode(bad_flag),
-                URL_SAFE_NO_PAD.encode(nil_org),
+                URL_SAFE_NO_PAD.encode(empty_org),
+                URL_SAFE_NO_PAD.encode(overlong_org),
+                URL_SAFE_NO_PAD.encode(delimiter_org),
                 URL_SAFE_NO_PAD.encode(nil_draft),
+                URL_SAFE_NO_PAD.encode(oversize_org),
                 tail[..tail.len() - 1].into(),
             ] {
                 let continuation = github_app_authorization_continuation(
@@ -656,7 +690,7 @@ mod tests {
                 .is_none()
             );
             let invalid_nav = GitHubAppNavigation {
-                organization_id: "invalid".into(),
+                organization_id: "organization:invalid".into(),
                 ..nav.clone()
             };
             assert_eq!(
@@ -673,11 +707,31 @@ mod tests {
         }
         let org_only = GitHubAppNavigation {
             draft_id: None,
-            ..nav
+            ..nav.clone()
         };
         assert_eq!(
             GitHubAppNavigation::decode(&org_only.encode().unwrap()),
             Some(org_only)
+        );
+        for organization_id in [
+            "00000000-0000-4000-8000-000000000002".to_owned(),
+            "a".repeat(GITHUB_APP_NAVIGATION_ORGANIZATION_MAX_BYTES),
+        ] {
+            let bounded = GitHubAppNavigation {
+                organization_id,
+                ..nav.clone()
+            };
+            let encoded = bounded.encode().unwrap();
+            assert!(encoded.len() <= GITHUB_APP_NAVIGATION_MAX_ENCODED);
+            assert_eq!(GitHubAppNavigation::decode(&encoded), Some(bounded));
+        }
+        assert!(
+            GitHubAppNavigation {
+                organization_id: "a".repeat(GITHUB_APP_NAVIGATION_ORGANIZATION_MAX_BYTES + 1),
+                ..nav
+            }
+            .encode()
+            .is_none()
         );
     }
 

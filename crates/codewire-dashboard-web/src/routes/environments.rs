@@ -886,7 +886,7 @@ impl CreateOptionsRequest {
         if !values.is_empty()
             || csrf.len() > 64
             || !crate::environment_drafts::actor_id(&actor)
-            || !crate::environment_drafts::canonical_id(&organization)
+            || !crate::environment_drafts::organization_id(&organization)
             || !crate::environment_drafts::canonical_id(&draft_id)
             || draft_return.query() != raw_return
             || matches!(&draft_return, crate::environment_drafts::DraftReturn::Exact(id) if id != &draft_id)
@@ -2678,6 +2678,27 @@ mod tests {
             assert!(crate::environment_drafts::canonical_id(
                 &page.create_form.draft_id
             ));
+        }
+    }
+
+    #[test]
+    fn create_options_accept_opaque_product_organization_ids() {
+        let draft = "00000000-0000-4000-8000-000000000003";
+        let body = |organization: &str| {
+            format!(
+                "_csrf=synthetic&actor=11111111111140008000000000000001&organization={organization}&draft_id={draft}&draft_return="
+            )
+        };
+        // Product organization IDs are opaque 32-hex strings, not UUIDs.
+        for organization in [
+            "6bf8d155e84c4fc5b479b17022fe41dd",
+            "00000000-0000-4000-8000-000000000002",
+        ] {
+            let request = CreateOptionsRequest::parse(body(organization).as_bytes()).unwrap();
+            assert_eq!(request.organization, organization);
+        }
+        for organization in ["", "organization%3Adelimiter", &"a".repeat(129)] {
+            assert!(CreateOptionsRequest::parse(body(organization).as_bytes()).is_err());
         }
     }
 
