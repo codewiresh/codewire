@@ -37,7 +37,6 @@ pub mod connect_testing;
 pub mod db;
 pub mod error;
 pub mod health;
-pub mod runtime_images;
 pub mod http;
 pub mod internal_hmac;
 pub mod kek;
@@ -51,6 +50,7 @@ pub mod organization_slug;
 #[cfg(feature = "kubernetes-identity")]
 pub mod pod_identity;
 pub mod rest_sunset;
+pub mod runtime_images;
 pub mod validation;
 
 pub use config::ServiceConfig;

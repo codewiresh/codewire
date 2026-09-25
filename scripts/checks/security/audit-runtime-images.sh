@@ -39,8 +39,8 @@ readonly workspace_image='ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754
 # The CLI's local default keeps a public GHCR image. Deployments use the Harbor
 # default, which is written only in the runtime image defaults module.
 readonly runtime_defaults='crates/codewire-server-core/src/runtime_images.rs'
-harbor_workspace_image="$(sed -nE 's#^[[:space:]]*"(registry\.example\.invalid/codewire/workspace@sha256:[0-9a-f]{64})";$#\1#p' \
-  "$runtime_defaults")"
+harbor_workspace_image="$(grep -oE 'registry\.example\.invalid/codewire/workspace@sha256:[0-9a-f]{64}' \
+  "$runtime_defaults" || true)"
 if [[ "$(grep -c . <<<"$harbor_workspace_image")" != 1 ]]; then
   echo "runtime image audit: $runtime_defaults must define one Harbor workspace digest" >&2
   exit 1
