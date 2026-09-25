@@ -58,6 +58,8 @@ jobs:
         id: select
         env:
           RECOVERY_TAG: ${{ inputs.release_tag }}
+          # Reads Forgejo's signature verification for the release tag.
+          GITEA_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           selected_tag="$GITHUB_REF_NAME"

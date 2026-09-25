@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-readonly ROOT
-readonly CANONICAL_SIGNING_FINGERPRINT='E66EACD85E979D3A10C5744AACB59B76E29853EA'
-
 usage() {
   cat >&2 <<'EOF'
 usage: verify-release-tag-ref.sh EVENT WORKFLOW_REF WORKFLOW_REF_NAME RECOVERY_TAG SERVER_URL REPOSITORY SOURCE_SHA REMOTE_OBJECT_SHA REMOTE_PEELED_SHA CANONICAL_MAIN_SHA
@@ -33,18 +29,16 @@ source_sha="$7"
 remote_object_sha="$8"
 remote_peeled_sha="$9"
 canonical_main_sha="${10}"
-public_key="${CODEWIRE_RELEASE_TAG_PUBLIC_KEY:-$ROOT/keys/production-release.asc}"
-expected_fingerprint="${CODEWIRE_RELEASE_TAG_SIGNING_FINGERPRINT:-$CANONICAL_SIGNING_FINGERPRINT}"
-
-if [[ "$public_key" != "$ROOT/keys/production-release.asc" ||
-  "$expected_fingerprint" != "$CANONICAL_SIGNING_FINGERPRINT" ]]; then
+# A release tag is trusted when Forgejo verifies its signature against a GPG
+# key registered on the tagger's Forgejo account. Only the synthetic test
+# harness may substitute the HTTP client.
+curl_bin="${CODEWIRE_RELEASE_TAG_CURL:-curl}"
+if [[ "$curl_bin" != curl ]]; then
   [[ "${CODEWIRE_RELEASE_TAG_TEST_MODE:-0}" == 1 ]] ||
-    fail "release tag trust overrides are accepted only by the synthetic test harness"
+    fail "release tag HTTP overrides are accepted only by the synthetic test harness"
 fi
-[[ -f "$public_key" && ! -L "$public_key" ]] ||
-  fail "release tag public key must be one regular file"
-[[ "$expected_fingerprint" =~ ^[0-9A-F]{40}$ ]] ||
-  fail "release tag fingerprint must be one uppercase primary fingerprint"
+[[ -n "${GITEA_TOKEN:-}" ]] ||
+  fail "Forgejo API token is required to read the release tag verification"
 
 case "$event" in
   push)
@@ -107,30 +101,34 @@ git merge-base --is-ancestor "$source_sha" "$canonical_main_sha" ||
 
 umask 077
 verify_home="$(mktemp -d "${RUNNER_TEMP:-/tmp}/codewire-release-tag.XXXXXX")"
-verify_status="$verify_home/verify.status"
 cleanup() {
   rm -rf -- "$verify_home"
 }
 trap cleanup EXIT
-mkdir -m 0700 "$verify_home/gnupg"
-public_records="$verify_home/public.records"
-GNUPGHOME="$verify_home/gnupg" gpg --batch --with-colons \
-  --import-options show-only --import "$public_key" >"$public_records" 2>/dev/null ||
-  fail "release tag public key is not valid OpenPGP"
-public_count="$(awk -F: '$1 == "pub" { count++ } END { print count + 0 }' "$public_records")"
-public_fingerprint="$(awk -F: '$1 == "pub" { primary = 1; next } primary && $1 == "fpr" { print $10; exit }' "$public_records")"
-[[ "$public_count" == 1 && "$public_fingerprint" == "$expected_fingerprint" ]] ||
-  fail "release tag public key does not match the expected primary fingerprint"
-GNUPGHOME="$verify_home/gnupg" gpg --batch --import "$public_key" >/dev/null 2>&1 ||
-  fail "release tag public key could not be imported"
-if ! GNUPGHOME="$verify_home/gnupg" git \
-  -c gpg.format=openpgp -c gpg.program=gpg \
-  verify-tag --raw "$tag_ref" >"$verify_status" 2>&1; then
-  fail "release tag signature is invalid"
+auth_config="$verify_home/forgejo.curl"
+printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" >"$auth_config"
+unset GITEA_TOKEN
+tag_record="$verify_home/tag.json"
+tag_api="${server_url}/api/v1/repos/${repository}/git/tags/${remote_object_sha}"
+if ! http_status="$("$curl_bin" --config "$auth_config" --silent --show-error \
+    --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 \
+    --output "$tag_record" --write-out '%{http_code}' "$tag_api" 2>/dev/null)"; then
+  fail "Forgejo release tag lookup failed for '$tag'"
 fi
-valid_fingerprints="$(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $3 }' "$verify_status")"
-[[ "$valid_fingerprints" == "$expected_fingerprint" ]] ||
-  fail "release tag was not signed by the expected primary key"
+[[ "$http_status" == 200 ]] ||
+  fail "Forgejo release tag lookup for '$tag' returned HTTP $http_status"
+if ! verified_record="$(jq -er \
+    --arg tag "$tag" --arg object "$remote_object_sha" --arg commit "$source_sha" '
+      select(type == "object"
+        and .tag == $tag and .sha == $object
+        and .object.type == "commit" and .object.sha == $commit)
+      | [(.verification.verified == true), (.verification.signer.username // "")]
+      | @tsv' "$tag_record" 2>/dev/null)"; then
+  fail "Forgejo release tag record for '$tag' does not match the canonical tag"
+fi
+IFS=$'\t' read -r verified signer <<<"$verified_record"
+[[ "$verified" == true ]] ||
+  fail "release tag '$tag' is not signed by a GPG key verified by Forgejo"
 
-printf 'release tag verified: tag=%s commit=%s signer=%s\n' \
-  "$tag" "$source_sha" "$expected_fingerprint"
+printf 'release tag verified: tag=%s commit=%s forgejo_signer=%s\n' \
+  "$tag" "$source_sha" "${signer:-unknown}"

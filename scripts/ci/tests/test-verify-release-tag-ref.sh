@@ -12,65 +12,78 @@ cleanup() {
 }
 trap cleanup EXIT
 
-signer_home="$fixture/signer"
-wrong_signer_home="$fixture/wrong-signer"
-mkdir -m 0700 "$signer_home" "$wrong_signer_home"
-GNUPGHOME="$signer_home" gpg --batch --passphrase '' \
-  --quick-generate-key 'Release Guard Test <release-guard@example.invalid>' \
-  rsa2048 sign 0 >/dev/null 2>&1
-signing_fingerprint="$(GNUPGHOME="$signer_home" gpg --batch --with-colons --list-secret-keys |
-  awk -F: '$1 == "fpr" { print $10; exit }')"
-GNUPGHOME="$signer_home" gpg --batch --armor --export "$signing_fingerprint" \
-  >"$fixture/release-tag-public.asc"
-GNUPGHOME="$wrong_signer_home" gpg --batch --passphrase '' \
-  --quick-generate-key 'Wrong Release Guard <wrong@example.invalid>' \
-  rsa2048 sign 0 >/dev/null 2>&1
-wrong_signing_fingerprint="$(GNUPGHOME="$wrong_signer_home" gpg --batch --with-colons --list-secret-keys |
-  awk -F: '$1 == "fpr" { print $10; exit }')"
+# Forgejo decides whether a release tag's signature belongs to a key on the
+# tagger's account. The synthetic API below answers from the fixture's real tag
+# objects; FAKE_TAG_API_MODE selects the response under test.
+fake_curl="$fixture/fake-curl"
+cat >"$fake_curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$FAKE_CURL_ARGV_LOG"
+config='' output='' url=''
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config) config="$2"; shift 2 ;;
+    --output) output="$2"; shift 2 ;;
+    --proto|--connect-timeout|--max-time|--write-out) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+grep -Fqx "header = \"Authorization: token ${FAKE_EXPECTED_TOKEN}\"" "$config" || exit 99
+[[ "$url" =~ ^https://git\.example\.invalid/api/v1/repos/codewire/codewire/git/tags/([0-9a-f]{40})$ ]] || exit 98
+object="${BASH_REMATCH[1]}"
+name="$(git cat-file tag "$object" | awk '$1 == "tag" { print $2; exit }')"
+commit="$(git cat-file tag "$object" | awk '$1 == "object" { print $2; exit }')"
+record() {
+  jq -cn --arg tag "$name" --arg sha "$1" --arg commit "$commit" --argjson verified "$2" \
+    '{tag: $tag, sha: $sha, object: {type: "commit", sha: $commit},
+      verification: {verified: $verified, reason: "", signer: {username: "release-guard"}}}'
+}
+case "${FAKE_TAG_API_MODE:-verified}" in
+  verified) record "$object" true >"$output"; printf 200 ;;
+  unverified) record "$object" false >"$output"; printf 200 ;;
+  sha-mismatch) record "$(printf '0%.0s' {1..40})" true >"$output"; printf 200 ;;
+  malformed) printf 'not json' >"$output"; printf 200 ;;
+  not-found) printf '{"message":"not found"}' >"$output"; printf 404 ;;
+  server-error) printf '{"message":"boom"}' >"$output"; printf 500 ;;
+  transport) exit 7 ;;
+  *) exit 97 ;;
+esac
+SH
+chmod 0755 "$fake_curl"
+token_canary='forgejo-release-token-canary-7d1f'
 export CODEWIRE_RELEASE_TAG_TEST_MODE=1
-export CODEWIRE_RELEASE_TAG_PUBLIC_KEY="$fixture/release-tag-public.asc"
-export CODEWIRE_RELEASE_TAG_SIGNING_FINGERPRINT="$signing_fingerprint"
+export CODEWIRE_RELEASE_TAG_CURL="$fake_curl"
+export FAKE_CURL_ARGV_LOG="$fixture/curl-argv.log"
+export FAKE_EXPECTED_TOKEN="$token_canary"
+export GITEA_TOKEN="$token_canary"
 
 git -C "$fixture" init -q
 git -C "$fixture" config user.name 'Release Guard Test'
 git -C "$fixture" config user.email release-guard@example.invalid
 git -C "$fixture" config commit.gpgsign false
-# The fixture explicitly signs the cases that require a generated fixture key.
-# Keep its deliberately unsigned annotated case independent of host defaults.
+# Signature trust comes from Forgejo; the fixture tags stay unsigned so host
+# signing defaults cannot change them.
 git -C "$fixture" config tag.gpgSign false
 git -C "$fixture" commit -q --allow-empty -m base
 git -C "$fixture" branch -M main
 git -C "$fixture" commit -q --allow-empty -m release
 source_sha="$(git -C "$fixture" rev-parse HEAD)"
 canonical_main_sha="$source_sha"
-GNUPGHOME="$signer_home" git -C "$fixture" \
-  -c gpg.format=openpgp -c gpg.program=gpg \
-  tag -s -u "$signing_fingerprint" \
-  v0.3.359 -m v0.3.359
+git -C "$fixture" tag -a v0.3.359 -m v0.3.359
 tag_object_sha="$(git -C "$fixture" rev-parse v0.3.359)"
 
 git -C "$fixture" switch -q -c unmerged HEAD~1
 git -C "$fixture" commit -q --allow-empty -m unmerged
 unmerged_sha="$(git -C "$fixture" rev-parse HEAD)"
-GNUPGHOME="$signer_home" git -C "$fixture" \
-  -c gpg.format=openpgp -c gpg.program=gpg \
-  tag -s -u "$signing_fingerprint" \
-  v0.3.360 -m v0.3.360
+git -C "$fixture" tag -a v0.3.360 -m v0.3.360
 unmerged_tag_object="$(git -C "$fixture" rev-parse v0.3.360)"
 git -C "$fixture" switch -q main
 
-GNUPGHOME="$wrong_signer_home" git -C "$fixture" \
-  -c gpg.format=openpgp -c gpg.program=gpg tag -s \
-  -u "$wrong_signing_fingerprint" v0.3.361 -m v0.3.361
-wrong_signer_tag_object="$(git -C "$fixture" rev-parse v0.3.361)"
-GNUPGHOME="$signer_home" git -C "$fixture" \
-  -c gpg.format=openpgp -c gpg.program=gpg \
-  tag -s -u "$signing_fingerprint" \
-  v0.3.362 -m v0.3.362
+git -C "$fixture" tag -a v0.3.362 -m v0.3.362
 embedded_name_tag_object="$(git -C "$fixture" rev-parse v0.3.362)"
 git -C "$fixture" update-ref refs/tags/v0.3.363 "$embedded_name_tag_object"
-git -C "$fixture" tag -a v0.3.364 -m v0.3.364
-unsigned_tag_object="$(git -C "$fixture" rev-parse v0.3.364)"
 
 run_verify() {
   (cd "$fixture" && "$VERIFY" "$@")
@@ -85,15 +98,53 @@ expect_failure() {
   fi
 }
 
-run_verify \
+verified_output="$(run_verify \
   push refs/tags/v0.3.359 v0.3.359 '' \
   https://git.example.invalid codewire/codewire \
-  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" 2>&1)"
+grep -Fq "release tag verified: tag=v0.3.359 commit=$source_sha forgejo_signer=release-guard" \
+  <<<"$verified_output"
 
 run_verify \
   workflow_dispatch refs/heads/main main v0.3.359 \
   https://git.example.invalid/ codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null
+
+# Forgejo's verdict is required; every other response fails closed.
+for mode in unverified sha-mismatch malformed not-found server-error transport; do
+  if FAKE_TAG_API_MODE="$mode" run_verify \
+      workflow_dispatch refs/heads/main main v0.3.359 \
+      https://git.example.invalid codewire/codewire \
+      "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null 2>&1; then
+    printf 'release tag guard test failed: Forgejo %s response was accepted\n' "$mode" >&2
+    exit 1
+  fi
+done
+if (unset GITEA_TOKEN; run_verify \
+    workflow_dispatch refs/heads/main main v0.3.359 \
+    https://git.example.invalid codewire/codewire \
+    "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha") >/dev/null 2>&1; then
+  echo 'release tag guard test failed: verification ran without a Forgejo token' >&2
+  exit 1
+fi
+if (unset CODEWIRE_RELEASE_TAG_TEST_MODE; run_verify \
+    workflow_dispatch refs/heads/main main v0.3.359 \
+    https://git.example.invalid codewire/codewire \
+    "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha") >/dev/null 2>&1; then
+  echo 'release tag guard test failed: HTTP client override accepted outside test mode' >&2
+  exit 1
+fi
+# The token reaches only a private curl config, never arguments or output.
+all_output="$(for mode in verified unverified not-found; do
+  FAKE_TAG_API_MODE="$mode" run_verify \
+    workflow_dispatch refs/heads/main main v0.3.359 \
+    https://git.example.invalid codewire/codewire \
+    "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" 2>&1 || true
+done)"
+if grep -Fq "$token_canary" <<<"$all_output" || grep -Fq "$token_canary" "$FAKE_CURL_ARGV_LOG"; then
+  echo 'release tag guard test failed: Forgejo token leaked into output or arguments' >&2
+  exit 1
+fi
 
 expect_failure unmerged-tag-source \
   workflow_dispatch refs/heads/main main v0.3.360 \
@@ -159,18 +210,10 @@ expect_failure unsupported-event \
   pull_request refs/pull/1/head main v0.3.359 \
   https://git.example.invalid codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
-expect_failure unexpected-signer \
-  workflow_dispatch refs/heads/main main v0.3.361 \
-  https://git.example.invalid codewire/codewire \
-  "$source_sha" "$wrong_signer_tag_object" "$source_sha" "$canonical_main_sha"
 expect_failure mismatched-signed-tag-name \
   workflow_dispatch refs/heads/main main v0.3.363 \
   https://git.example.invalid codewire/codewire \
   "$source_sha" "$embedded_name_tag_object" "$source_sha" "$canonical_main_sha"
-expect_failure unsigned-annotated-tag \
-  workflow_dispatch refs/heads/main main v0.3.364 \
-  https://git.example.invalid codewire/codewire \
-  "$source_sha" "$unsigned_tag_object" "$source_sha" "$canonical_main_sha"
 
 mapfile -t recovery_tags < <(
   "$COMPUTE_TAGS" registry.example.invalid/codewire services "$source_sha" v0.3.359 \
@@ -209,11 +252,17 @@ publish_release_test="$ROOT/scripts/ci/tests/test-publish-cw-release.sh"
 installer="$ROOT/apps/cli/install.sh"
 cli_readme="$ROOT/apps/cli/README.md"
 release_public_key="$ROOT/apps/cli/GPG_PUBLIC_KEY.asc"
-production_tag_public_key="$ROOT/keys/production-release.asc"
 package_script="$ROOT/scripts/ci/release/package-cw-release.sh"
 
 grep -Fq '  workflow_dispatch:' "$deploy_workflow"
 grep -Fq '  release-selection:' "$deploy_workflow"
+for workflow in "$deploy_workflow" "$cli_workflow"; do
+  sed -n '/- name: Select exact canonical release source/,/scripts\/ci\/release\/verify-release-tag-ref\.sh/p' \
+    "$workflow" | grep -Fq '          GITEA_TOKEN: ${{ github.token }}' || {
+    printf '%s does not pass the Forgejo token to release tag verification\n' "$workflow" >&2
+    exit 1
+  }
+done
 grep -Fq "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$deploy_workflow"
 grep -Fq '          path: .release-source' "$deploy_workflow"
 grep -Fq '+refs/heads/main:refs/remotes/origin/main' "$deploy_workflow"
@@ -429,14 +478,9 @@ grep -Fq 'python3 scripts/ci/images/image-bundle.py candidate' "$image_builder"
 grep -Fq 'git -C "$source_dir" rev-parse HEAD' "$image_builder"
 grep -Fq 'checkout $checked_out_sha does not match selected source $source_sha' "$image_builder"
 
-production_tag_fingerprint="$(
-  gpg --batch --show-keys --with-colons "$production_tag_public_key" 2>/dev/null |
-    awk -F: '$1 == "fpr" { print $10; exit }'
-)"
-[[ "$production_tag_fingerprint" == \
-  'E66EACD85E979D3A10C5744AACB59B76E29853EA' ]] || {
-  echo 'production Git-tag key does not match the pinned release identity' >&2
+if [[ -e "$ROOT/keys/production-release.asc" ]]; then
+  echo 'release tags are trusted through Forgejo; no pinned production key file may remain' >&2
   exit 1
-}
+fi
 
 printf 'release tag dispatch guard tests: OK\n'
