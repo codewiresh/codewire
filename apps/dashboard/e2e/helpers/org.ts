@@ -14,8 +14,8 @@ export async function ensureTestOrg(
   `;
   if (existing) return existing.id;
 
-  // Create org
-  const orgId = crypto.randomUUID();
+  // Create org with a product-format ID: opaque 32 hex, not a hyphenated UUID.
+  const orgId = crypto.randomUUID().replaceAll("-", "");
   await sql`
     INSERT INTO organizations (id, name, slug, created_by, created_at, updated_at)
     VALUES (${orgId}, ${name}, ${slug}, ${ownerId}, NOW(), NOW())

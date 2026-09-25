@@ -8,7 +8,9 @@
   const encoder = new TextEncoder();
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const sessionId = (value) => typeof value === "string" && value.startsWith("session-") && uuid.test(value.slice(8));
+  // Account and organization IDs are opaque (currently 32 hex bytes), not UUIDs.
   const accountId = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+  const organizationId = accountId;
   const bytes = (value) => encoder.encode(value).length;
   const closed = (value, required, optional = []) => value !== null && typeof value === "object"
     && !Array.isArray(value) && required.every((key) => Object.hasOwn(value, key))
@@ -80,5 +82,5 @@
   }
 
   globalThis.CodewireTerminalProtocol = Object.freeze({ protocol, limits, states, uuid, sessionId,
-    accountId, bytes, closed, offset, encodeClient, decodeServer, session, inventory });
+    accountId, organizationId, bytes, closed, offset, encodeClient, decodeServer, session, inventory });
 })();

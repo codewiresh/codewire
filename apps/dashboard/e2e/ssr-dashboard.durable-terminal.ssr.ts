@@ -3,7 +3,8 @@ import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
 // Browser controller proof on the checked-in design server. These explicitly
 // synthetic BFF/WS responses do not qualify real daemon or authentication flows.
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });
-const org = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+// Product organization IDs are opaque 32-hex strings, not UUIDs.
+const org = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const environment = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const prefix = "codewire:terminal:v1:";
 const sessionId = (index: number) => `session-00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;

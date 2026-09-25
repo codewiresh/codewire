@@ -15,7 +15,8 @@ try {
   await seedSyntheticIdentity(sql, USERS.owner.email, USERS.owner.name, USERS.owner.isAdmin);
   const [owner] = await sql`SELECT id FROM users WHERE email = ${USERS.owner.email}`;
   const [existing] = await sql`SELECT id FROM organizations WHERE slug = ${ORGANIZATION_SLUG}`;
-  const organization = existing?.id ?? randomUUID();
+  // Match product organization IDs: opaque 32-hex strings, not hyphenated UUIDs.
+  const organization = existing?.id ?? randomUUID().replaceAll("-", "");
   if (!existing) {
     await sql`INSERT INTO organizations (id, name, slug, created_by)
               VALUES (${organization}, ${USERS.owner.name}, ${ORGANIZATION_SLUG}, ${owner.id})`;
