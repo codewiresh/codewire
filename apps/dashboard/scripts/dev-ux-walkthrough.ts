@@ -94,63 +94,74 @@ async function settings(page: Page, slug: string, width: number): Promise<void> 
   }
 }
 
+// Each step is its own fixed stage so a Dev failure names the failing step.
 async function createForm(page: Page, slug: string, userId: string, orgId: string, width: number): Promise<void> {
-  const navigationStarted = Date.now();
-  await visit(page, `/${slug}/new/`);
   const form = page.locator("[data-environment-form]");
-  await expect(form).toHaveAttribute("data-create-draft-actor", userId);
-  await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-  console.error(`[dev-ux] create-editable-${width}:passed duration_ms=${Date.now() - navigationStarted}`);
-  await expect(form).toHaveAttribute("data-create-options-loading", "false", { timeout: 30_000 });
-  await expect(form.locator('[name="confirm_personal_credentials"], [name="confirm_personal_secrets"]')).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "Manage personal secrets", exact: true })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link")).toBeVisible();
   const github = page.locator("[data-github-browser]");
-  await expect(github.getByRole("heading", { name: "From GitHub", exact: true })).toBeVisible();
-  await expect(github.getByText("GitHub account", { exact: true })).toBeVisible();
-  await expect(github.locator("[data-github-connection-status]")).toBeVisible();
-  await expect(github.getByRole("searchbox", { name: "Find a repository" })).toBeVisible();
-  await expect(github.locator("[data-github-setup-link]")).toHaveText(/^(Connect GitHub|Reconnect GitHub|Manage GitHub connection)$/);
-  await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
-  await expect(page.locator(".cw-preview-pattern")).toContainText("https://{label}-{sandbox-id-prefix}-");
-  await expect(dialog(page, "Choose a GitHub repository")).toHaveCount(0);
-  await fits(page, github);
-  await fits(page, page.locator("#environment-create-card"));
-  // Read-only setup detours: do not create credentials or application secrets.
-  for (const destination of ["secrets", "credentials"]) {
-    if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
-      await page.locator("[data-create-resources] > summary").click();
-    }
-    await page.getByLabel("CPU", { exact: true }).selectOption("2000");
-    await page.getByLabel("Delete after", { exact: true }).fill("8h");
-    await page.getByLabel("Name", { exact: true }).fill(`dev-ux-draft-${destination}`);
-    await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
-    const draft = await form.getAttribute("data-create-draft-id");
-    expect(draft).toMatch(/^[0-9a-f-]{36}$/);
-    const setup = destination === "secrets"
-      ? page.getByRole("link", { name: "Manage personal secrets", exact: true })
-      : page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link");
-    await setup.click();
-    // A dirty form asks before leaving; the saved draft is kept.
-    const destinationUrl = `${ORIGIN}/settings/${destination}/?org=${slug}&creation_draft=${draft}`;
-    const leave = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
-    await Promise.race([page.waitForURL(destinationUrl), leave.waitFor()]);
-    if (await leave.isVisible()) await button(leave, "Save draft and leave").click();
-    await expect(page).toHaveURL(destinationUrl);
-    const back = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
-    await expect(back).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
-    await back.click();
-    await expect(form).toHaveAttribute("data-create-draft-id", draft!);
+  await stage(`create-editable-${width}`, async () => {
+    await visit(page, `/${slug}/new/`);
     await expect(form).toHaveAttribute("data-create-draft-actor", userId);
     await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-    await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-    await button(page, "Restore saved draft").click();
-    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
-    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
-    await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
-    await expect(page.getByLabel("Name", { exact: true })).toHaveValue(`dev-ux-draft-${destination}`);
-    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
+  });
+  await stage(`create-options-${width}`, async () => {
+    await expect(form).toHaveAttribute("data-create-options-loading", "false", { timeout: 30_000 });
+    await expect(form.locator('[name="confirm_personal_credentials"], [name="confirm_personal_secrets"]')).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Manage personal secrets", exact: true })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link")).toBeVisible();
+  });
+  await stage(`create-github-${width}`, async () => {
+    await expect(github.getByRole("heading", { name: "From GitHub", exact: true })).toBeVisible();
+    await expect(github.getByText("GitHub account", { exact: true })).toBeVisible();
+    await expect(github.locator("[data-github-connection-status]")).toBeVisible();
+    await expect(github.getByRole("searchbox", { name: "Find a repository" })).toBeVisible();
+    await expect(github.locator("[data-github-setup-link]")).toHaveText(/^(Connect GitHub|Reconnect GitHub|Manage GitHub connection)$/);
+  });
+  await stage(`create-preview-${width}`, async () => {
+    await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
+    await expect(page.locator(".cw-preview-pattern")).toContainText("https://{label}-{sandbox-id-prefix}-");
+    await expect(dialog(page, "Choose a GitHub repository")).toHaveCount(0);
+  });
+  await stage(`create-fit-${width}`, async () => {
+    await fits(page, github);
     await fits(page, page.locator("#environment-create-card"));
+  });
+  // Read-only setup detours: do not create credentials or application secrets.
+  for (const destination of ["secrets", "credentials"]) {
+    await stage(`create-detour-${destination}-${width}`, async () => {
+      if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
+        await page.locator("[data-create-resources] > summary").click();
+      }
+      await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+      await page.getByLabel("Delete after", { exact: true }).fill("8h");
+      await page.getByLabel("Name", { exact: true }).fill(`dev-ux-draft-${destination}`);
+      await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
+      const draft = await form.getAttribute("data-create-draft-id");
+      expect(draft).toMatch(/^[0-9a-f-]{36}$/);
+      const setup = destination === "secrets"
+        ? page.getByRole("link", { name: "Manage personal secrets", exact: true })
+        : page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link");
+      await setup.click();
+      // A dirty form asks before leaving; the saved draft is kept.
+      const destinationUrl = `${ORIGIN}/settings/${destination}/?org=${slug}&creation_draft=${draft}`;
+      const leave = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
+      await Promise.race([page.waitForURL(destinationUrl), leave.waitFor()]);
+      if (await leave.isVisible()) await button(leave, "Save draft and leave").click();
+      await expect(page).toHaveURL(destinationUrl);
+      const back = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
+      await expect(back).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
+      await back.click();
+      await expect(form).toHaveAttribute("data-create-draft-id", draft!);
+      await expect(form).toHaveAttribute("data-create-draft-actor", userId);
+      await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+      await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+      await button(page, "Restore saved draft").click();
+      await expect(form).toHaveAttribute("data-create-draft-restored", "true");
+      await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+      await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
+      await expect(page.getByLabel("Name", { exact: true })).toHaveValue(`dev-ux-draft-${destination}`);
+      await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
+      await fits(page, page.locator("#environment-create-card"));
+    });
   }
 }
 
@@ -175,7 +186,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
         await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
       });
     }
-    await stage(`create-form-${width}`, () => createForm(page, slug, userId, orgId, width));
+    await createForm(page, slug, userId, orgId, width);
   }
   await page.setViewportSize({ width: 1440, height: 900 });
   let previewPattern = "";
