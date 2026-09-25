@@ -37,6 +37,7 @@ pub mod connect_testing;
 pub mod db;
 pub mod error;
 pub mod health;
+pub mod runtime_images;
 pub mod http;
 pub mod internal_hmac;
 pub mod kek;

@@ -160,10 +160,7 @@ grep -qxF "$harbor/workspace@$digest $harbor/workspace keep-${digest/:/-}" "$FAK
 # never contacted.
 mapfile -t pinned < <(
   grep -ohE 'registry\.example\.invalid/codewire/(workspace|gateway)@sha256:[0-9a-f]{64}' \
-    "$ROOT/crates/codewire-orchestration/src/sandbox/mod.rs" \
-    "$ROOT/crates/codewire-orchestration/src/sandbox/template/mod.rs" \
-    "$ROOT/crates/codewire-orchestration/src/worker/create.rs" \
-    "$ROOT/deployments/k8s/base/config.env" | sort -u
+    "$ROOT/crates/codewire-server-core/src/runtime_images.rs" | sort -u
 )
 [[ "${#pinned[@]}" -ge 2 ]] || fail 'source does not pin Harbor workspace and gateway defaults'
 reset_logs

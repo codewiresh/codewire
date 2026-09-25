@@ -829,7 +829,7 @@
       restoreEmptyAppPorts(form);
     } else if (event.target.closest("[data-reset-workspace-image]")) {
       const image = form.querySelector('[name="image"]');
-      if (image instanceof HTMLInputElement) image.value = "registry.example.invalid/codewire/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
+      if (image instanceof HTMLInputElement) image.value = image.placeholder;
     }
   });
 
