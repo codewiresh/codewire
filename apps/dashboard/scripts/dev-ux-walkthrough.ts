@@ -4,6 +4,10 @@ import { expect, request, type Locator, type Page } from "@playwright/test";
 import { DevUxError, type OwnedUxSandbox } from "./dev-ux-ownership";
 
 const ORIGIN = "https://codewire-dev.sh";
+// Re-attaching a surviving terminal after navigation, reload, reconnect, or
+// closing another tab takes a few seconds on Dev; the 5s expect default is
+// shorter than that real round trip.
+const TERMINAL_ATTACH_MS = 30_000;
 const button = (owner: Page | Locator, name: string) => owner.getByRole("button", { name, exact: true });
 const dialog = (page: Page, name: string) => page.getByRole("dialog", { name, exact: true });
 
@@ -277,7 +281,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await visit(page, detailPath);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstId!);
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
-    await expect(button(page, "Disconnect")).toBeEnabled();
+    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
   });
   await stage("terminal-tabs-second", async () => {
     await button(page, "New terminal").click();
@@ -285,7 +289,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     secondId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(secondId).toBeTruthy();
     expect(secondId).not.toBe(firstId);
-    await expect(button(page, "Disconnect")).toBeEnabled();
+    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
     await send("printf '__UX_SECOND__%s__%s__\\n' \"${CW_UX_SESSION-unset}\" \"$$\"");
     await expect(rows).toContainText(/__UX_SECOND__unset__\d+__/);
     expect(/__UX_SECOND__unset__(\d+)__/.exec(await rows.innerText())![1]).not.toBe(pid);
@@ -304,7 +308,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await button(page, "Disconnect").click();
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
     await button(page, "Reconnect").click();
-    await expect(button(page, "Disconnect")).toBeEnabled();
+    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
     await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_RESUMED__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
     await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__/tmp__${job}__`);
   });
@@ -323,7 +327,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
   await stage("terminal-tabs-survivor", async () => {
     await expect(page.getByRole("tab")).toHaveCount(1);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstId!);
-    await expect(button(page, "Disconnect")).toBeEnabled();
+    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
     await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_SURVIVOR__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
     await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
   });
