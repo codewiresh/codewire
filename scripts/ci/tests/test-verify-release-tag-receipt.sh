@@ -57,49 +57,69 @@ case "$*" in
 esac
 EOF
 
-cat >"$mock_bin/tea" <<'EOF'
+cat >"$mock_bin/fj" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-output=''
-endpoint=''
+[ "${FIXTURE_MODE:?}" != api_unavailable ] || exit 1
+[ "$1 $2" = 'actions runs' ] || { echo "unexpected fj command: $*" >&2; exit 2; }
+verb="$3"; shift 3
+repo=codewire; target=''; job=''; output=text
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    -R) [ "$2" = origin ] || exit 2; shift 2 ;;
+    -r) [ "$2" = codewire/deploy ] || exit 2; repo=deploy; shift 2 ;;
+    -H) [ "$2" = git.example.invalid ] || exit 2; shift 2 ;;
+    --head|--workflow|--event|--status|-L) shift 2 ;;
+    --job) job="$2"; shift 2 ;;
     --output) output="$2"; shift 2 ;;
-    --login|--remote) shift 2 ;;
-    api) shift ;;
-    /repos/*) endpoint="$1"; shift ;;
-    *) echo "unexpected tea argument: $1" >&2; exit 2 ;;
+    [0-9]*) target="$1"; shift ;;
+    *) echo "unexpected fj argument: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$output" ] && [ -n "$endpoint" ]
-[ "${FIXTURE_MODE:?}" != api_unavailable ] || exit 1
-case "$endpoint" in
-  *'/actions/runs?event=push&'*)
-    conclusion=success
-    [ "$FIXTURE_MODE" != failed_ci ] || conclusion=failure
-    printf '{"workflow_runs":[{"id":701,"path":"ci.yaml@refs/heads/main","event":"push","run_attempt":1,"head_sha":"%s","status":"completed","conclusion":"%s"}],"total_count":1}' \
-      "$FIXTURE_MAIN_SHA" "$conclusion" >"$output"
+ci_status=success
+[ "$FIXTURE_MODE" != failed_ci ] || ci_status=failure
+required_status=success
+[ "$FIXTURE_MODE" != failed_required ] || required_status=failure
+dev_status=success
+[ "$FIXTURE_MODE" != failed_dev ] || dev_status=failure
+dev_source="$FIXTURE_MAIN_SHA"
+[ "$FIXTURE_MODE" != wrong_dev_source ] || dev_source="$(printf '%040d' 7)"
+case "$repo:$verb:$target" in
+  codewire:list:)
+    [ "$output" = json ]
+    printf '{"schema_version":1,"total_count":1,"runs":[{"id":701,"head_sha":"%s","workflow":"ci.yaml","status":"%s","event":"push","ref":"main"}]}' \
+      "$FIXTURE_MAIN_SHA" "$ci_status"
     ;;
-  *'/actions/runs?event=workflow_dispatch&'*)
-    conclusion=success
-    [ "$FIXTURE_MODE" != failed_dev ] || conclusion=failure
-    printf '{"workflow_runs":[{"id":703,"path":"dev-deployment-smoke-receipt.yaml@refs/heads/main","event":"workflow_dispatch","run_attempt":1,"head_sha":"%s","status":"completed","conclusion":"%s","actor":{"login":"codewire-deploy-smoke"}}],"total_count":1}' \
-      "$FIXTURE_MAIN_SHA" "$conclusion" >"$output"
+  codewire:view:701)
+    printf '{"schema_version":1,"run":{"id":701,"head_sha":"%s","workflow":"ci.yaml","status":"%s","event":"push","ref":"main"},"jobs":[{"id":702,"run_id":701,"name":"Required verification","status":"%s","attempt":1}]}' \
+      "$FIXTURE_MAIN_SHA" "$ci_status" "$required_status"
     ;;
-  */actions/runs/701/jobs\?*)
-    conclusion=success
-    [ "$FIXTURE_MODE" != failed_required ] || conclusion=failure
-    printf '{"jobs":[{"id":702,"name":"Required verification","run_attempt":1,"head_sha":"%s","status":"completed","conclusion":"%s"}],"total_count":1}' \
-      "$FIXTURE_MAIN_SHA" "$conclusion" >"$output"
+  deploy:list:)
+    run_status=success
+    [ "$FIXTURE_MODE" != failed_dev ] || run_status=failure
+    printf '{"schema_version":1,"total_count":1,"runs":[{"id":801,"head_sha":"%040d","workflow":"promote-dev.yaml","status":"%s","event":"","ref":"main"}]}' \
+      9 "$run_status"
     ;;
-  */actions/runs/703/jobs\?*)
-    printf '{"jobs":[{"id":704,"name":"Record deploy-owned dev smoke result","run_attempt":1,"head_sha":"%s","status":"completed","conclusion":"success"}],"total_count":1}' \
-      "$FIXTURE_MAIN_SHA" >"$output"
+  deploy:view:801)
+    printf '{"schema_version":1,"run":{"id":801,"workflow":"promote-dev.yaml","status":"%s","event":"","ref":"main"},"jobs":[{"id":811,"name":"Commit one complete dev release","status":"success","attempt":1},{"id":812,"name":"Verify the exact promoted dev commit","status":"success","attempt":1},{"id":813,"name":"Run exact-source Dev acceptance smokes","status":"%s","attempt":1}]}' \
+      "$dev_status" "$dev_status"
     ;;
-  *) echo "unexpected endpoint: $endpoint" >&2; exit 2 ;;
+  deploy:logs:801)
+    case "$job" in 811|813) ;; *) exit 2 ;; esac
+    printf '== job %s ==\r\n2026-09-27T16:51:42.6844462Z Checked out exact Codewire source %s\r\n' "$job" "$dev_source"
+    ;;
+  *) echo "unexpected fj request: $repo $verb $target" >&2; exit 2 ;;
 esac
 EOF
-chmod +x "$mock_bin/git" "$mock_bin/tea"
+
+# The receipt must not depend on the legacy tea CLI.
+cat >"$mock_bin/tea" <<'EOF'
+#!/usr/bin/env bash
+echo "tea must not be used" >&2
+exit 99
+EOF
+
+chmod +x "$mock_bin/git" "$mock_bin/fj" "$mock_bin/tea"
 
 run_case() {
   local name="$1" mode="$2" expected="$3"
@@ -113,6 +133,10 @@ run_case() {
     PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$tag_object" \
     PREFLIGHT_PUSH_REMOTE_NAME=origin \
     "$CHECK" 2>&1)" || fail "$name checker returned failure"
+  if grep -Fq 'tea must not be used' <<<"$output"; then
+    printf '%s\n' "$output" >&2
+    fail "$name invoked the legacy tea CLI"
+  fi
   grep -Fxq "release_tag_receipt=$expected" <<<"$output" || {
     printf '%s\n' "$output" >&2
     fail "$name expected $expected"
@@ -127,6 +151,7 @@ run_case api_unavailable api_unavailable fallback
 run_case failed_ci failed_ci fallback
 run_case failed_required failed_required fallback
 run_case failed_dev failed_dev fallback
+run_case wrong_dev_source wrong_dev_source fallback
 
 if grep -qF "tags: ['v*']" "$ROOT/.gitea/workflows/ci.yaml"; then
   fail 'generic CI still runs redundantly for release tags'
