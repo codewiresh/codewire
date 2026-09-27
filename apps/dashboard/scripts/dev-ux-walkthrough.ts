@@ -24,55 +24,63 @@ async function fits(page: Page, owner?: Locator): Promise<void> {
   if (owner) expect(await owner.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
 }
 
-async function credentials(page: Page, slug: string): Promise<void> {
-  await visit(page, `/settings/credentials/?org=${slug}`);
-  await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Profiles", exact: true, level: 2 })).toBeVisible();
+async function credentials(page: Page, slug: string, width: number): Promise<void> {
   const add = button(page, "Add credential");
-  await add.click();
   const chooser = dialog(page, "Add credential");
-  await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(5);
-  await expect(chooser.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
-  await fits(page, chooser);
-  for (const [choice, title] of [
-    ["GitHub", "Connect GitHub"], ["Codex", "Connect Codex"],
-    ["OpenAI API key", "Add OpenAI API key"], ["Anthropic API key", "Add Anthropic API key"],
-    ["SSH key", "Add SSH key"],
+  await stage(`credentials-page-${width}`, async () => {
+    await visit(page, `/settings/credentials/?org=${slug}`);
+    await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Profiles", exact: true, level: 2 })).toBeVisible();
+  });
+  await stage(`credentials-chooser-${width}`, async () => {
+    await add.click();
+    await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(5);
+    await expect(chooser.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
+    await fits(page, chooser);
+  });
+  for (const [key, choice, title] of [
+    ["github", "GitHub", "Connect GitHub"], ["codex", "Codex", "Connect Codex"],
+    ["openai", "OpenAI API key", "Add OpenAI API key"], ["anthropic", "Anthropic API key", "Add Anthropic API key"],
+    ["ssh", "SSH key", "Add SSH key"],
   ]) {
-    await button(chooser, choice).click();
-    const editor = dialog(page, title);
-    await expect(editor).toBeVisible();
-    await expect(page.locator("dialog[open]")).toHaveCount(1);
-    await expect(editor.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
-    await expect(editor.locator("[data-dialog-close]")).toHaveCount(1);
-    if (choice === "GitHub") {
-      await expect(editor.locator('input[name="name"]')).toHaveCount(0);
-      // One account-level connection: connected accounts see it and can
-      // reconnect; others continue to GitHub.
-      const connection = editor.getByRole("region", { name: "Your GitHub connection", exact: true });
-      if (await connection.count()) {
-        await expect(connection.getByRole("button", { name: /^Reconnect / })).toBeVisible();
-      } else {
-        await expect(button(editor, "Continue to GitHub")).toBeVisible();
+    await stage(`credentials-${key}-${width}`, async () => {
+      await button(chooser, choice).click();
+      const editor = dialog(page, title);
+      await expect(editor).toBeVisible();
+      await expect(page.locator("dialog[open]")).toHaveCount(1);
+      await expect(editor.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
+      await expect(editor.locator("[data-dialog-close]")).toHaveCount(1);
+      if (choice === "GitHub") {
+        await expect(editor.locator('input[name="name"]')).toHaveCount(0);
+        // One account-level connection: connected accounts see it and can
+        // reconnect; others continue to GitHub.
+        const connection = editor.getByRole("region", { name: "Your GitHub connection", exact: true });
+        if (await connection.count()) {
+          await expect(connection.getByRole("button", { name: /^Reconnect / })).toBeVisible();
+        } else {
+          await expect(button(editor, "Continue to GitHub")).toBeVisible();
+        }
       }
+      await fits(page, editor);
+      await button(editor, "Back").click();
+      await expect(button(chooser, choice)).toBeFocused();
+    });
+  }
+  await stage(`credentials-profile-${width}`, async () => {
+    await button(chooser, "Cancel").click();
+    await expect(add).toBeFocused();
+    await button(page, "Create profile").click();
+    const profile = dialog(page, "Create profile");
+    await expect(profile.getByLabel("Profile name", { exact: true })).toBeFocused();
+    for (const provider of ["Codex", "OpenAI API", "Anthropic", "SSH"]) {
+      await expect(profile.getByLabel(provider, { exact: true })).toBeVisible();
     }
-    await fits(page, editor);
-    await button(editor, "Back").click();
-    await expect(button(chooser, choice)).toBeFocused();
-  }
-  await button(chooser, "Cancel").click();
-  await expect(add).toBeFocused();
-  await button(page, "Create profile").click();
-  const profile = dialog(page, "Create profile");
-  await expect(profile.getByLabel("Profile name", { exact: true })).toBeFocused();
-  for (const provider of ["Codex", "OpenAI API", "Anthropic", "SSH"]) {
-    await expect(profile.getByLabel(provider, { exact: true })).toBeVisible();
-  }
-  // GitHub is one account-level connection included in every profile, not a
-  // per-profile choice.
-  await expect(profile.getByLabel("GitHub", { exact: true })).toHaveCount(0);
-  await fits(page, profile);
-  await button(profile, "Cancel").click();
+    // GitHub is one account-level connection included in every profile, not a
+    // per-profile choice.
+    await expect(profile.getByLabel("GitHub", { exact: true })).toHaveCount(0);
+    await fits(page, profile);
+    await button(profile, "Cancel").click();
+  });
 }
 
 async function settings(page: Page, slug: string, width: number): Promise<void> {
@@ -173,7 +181,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
   page.setDefaultNavigationTimeout(30_000);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
-    await stage(`credentials-${width}`, () => credentials(page, slug));
+    await credentials(page, slug, width);
     await settings(page, slug, width);
     if (width === 1440) {
       await stage("settings-to-create-1440", async () => {
