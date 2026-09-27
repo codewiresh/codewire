@@ -26,6 +26,7 @@ PRODUCTION_GRAPH = json.loads(
     (PLANNER_PATH.parent / "artifact-graph.json").read_text()
 )
 WORKSPACE_VERIFICATION_SPEC = PRODUCTION_GRAPH["artifacts"]["workspace_image_verification"]
+DEV_ACCEPTANCE_HARNESS_SPEC = PRODUCTION_GRAPH["artifacts"]["dev_acceptance_harness"]
 CREDENTIAL_ACCEPTANCE_PATHS = (
     "scripts/runtime/dev/provider-anthropic-output.py",
     "scripts/runtime/dev/provider-anthropic-smoke.sh",
@@ -35,7 +36,6 @@ CREDENTIAL_ACCEPTANCE_PATHS = (
     "scripts/runtime/dev/provider-codex-workload.sh",
     "scripts/runtime/dev/provider-openai-smoke.sh",
     "scripts/runtime/dev/provider-openai-workload.py",
-    "scripts/runtime/dev/run-secrets-credentials-acceptance.sh",
     "scripts/runtime/dev/smoke-local-platform-sources.sh",
     "scripts/runtime/tests/test-local-platform-sources-smoke.sh",
     "scripts/runtime/tests/test-provider-anthropic-smoke.sh",
@@ -201,6 +201,7 @@ class FixtureRepository:
                     "kind": "file-set",
                     "inputs": ["deployments/k8s/**"],
                 },
+                "dev_acceptance_harness": DEV_ACCEPTANCE_HARNESS_SPEC,
                 "cw_cli_release_assets": {
                     "kind": "rust-package",
                     "manifest": "Cargo.toml",
@@ -357,6 +358,7 @@ class FixtureRepository:
                         "workspace_cw_binary",
                         "confidential_workspace_acceptance_contract",
                         "dev_release_tree",
+                        "dev_acceptance_harness",
                         "dashboard_image",
                         "gateway_image",
                         "derp_image",
@@ -621,6 +623,9 @@ dependencies = ["core"]
         for path in WORKSPACE_VERIFICATION_SPEC["inputs"]:
             if "*" not in path and not (self.root / path).exists():
                 self.write(path, "# Synthetic workspace verification input\n")
+        for path in DEV_ACCEPTANCE_HARNESS_SPEC["inputs"]:
+            if "*" not in path and not (self.root / path).exists():
+                self.write(path, "# Synthetic Dev acceptance harness input\n")
 
     def commit(self, message: str) -> str:
         run(["git", "add", "-A"], self.root)
@@ -1044,6 +1049,86 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertTrue(document["baseline"]["validation"]["valid"])
         self.assertEqual(self.dev_release_state(document), "affected")
         self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
+
+    def deploy_outputs(self, repository: FixtureRepository, document: dict, head: str) -> dict[str, str]:
+        tree = run(["git", "rev-parse", f"{head}^{{tree}}"], repository.root)
+        with tempfile.TemporaryDirectory(prefix="codewire-deploy-adapter-") as temporary:
+            plan_path = Path(temporary) / "plan.json"
+            plan_path.write_text(json.dumps(document, sort_keys=True) + "\n")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PLANNER_PATH.parent / "apply-deploy-plan.py"),
+                    "--plan",
+                    str(plan_path),
+                    "--head",
+                    head,
+                    "--head-tree",
+                    tree,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        return dict(line.split("=", 1) for line in completed.stdout.splitlines())
+
+    def test_acceptance_harness_input_selects_exact_source_promotion(self) -> None:
+        # promote-dev runs Dev acceptance only from the exact promoted source,
+        # so a harness-only edit must promote that source to be accepted.
+        for path in DEV_ACCEPTANCE_HARNESS_SPEC["inputs"]:
+            with self.subTest(path=path), tempfile.TemporaryDirectory(
+                prefix="codewire-acceptance-harness-test-"
+            ) as temporary:
+                repository = FixtureRepository(Path(temporary))
+                head = repository.change(path, "# Synthetic harness edit\n")
+                candidate = repository.deployed_source_candidate(repository.base, head)
+                document = repository.deployed_source_plan(candidate, head)
+                self.assertTrue(document["baseline"]["validation"]["valid"])
+                self.assertFalse(document["degraded_reasons"])
+                self.assertEqual(
+                    document["artifacts"]["dev_acceptance_harness"]["state"], "affected"
+                )
+                self.assertEqual(self.dev_release_state(document), "unaffected")
+                self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
+                self.assertEqual(self.states(document), ("unaffected", "unaffected"))
+                # Every Dev-selected source still publishes its exact workspace.
+                self.assertEqual(
+                    self.workspace_states(document),
+                    ("unaffected", "unaffected", "affected"),
+                )
+                self.assertEqual(
+                    document["artifacts"]["workspace_image_verification"]["state"],
+                    "unaffected",
+                )
+                outputs = self.deploy_outputs(repository, document, head)
+                self.assertEqual(outputs["deploy_dev"], "true")
+                self.assertEqual(outputs["reason"], "dev_acceptance_affected")
+                self.assertEqual(outputs["dev_acceptance_harness_state"], "affected")
+
+    def test_unrelated_dashboard_script_and_docs_edits_still_skip_deployment(self) -> None:
+        self.repo.write("apps/dashboard/scripts/unrelated-helper.ts", "export {};\n")
+        self.repo.write("apps/dashboard/README.md", "unrelated app edit\n")
+        head = self.repo.change("docs/dev/notes.md", "# Unrelated notes\n")
+        candidate = self.repo.deployed_source_candidate(self.repo.base, head)
+        document = self.repo.deployed_source_plan(candidate, head)
+        self.assertTrue(document["baseline"]["validation"]["valid"])
+        self.assertEqual(document["artifacts"]["dev_acceptance_harness"]["state"], "unaffected")
+        self.assertTrue(all(
+            artifact["state"] == "unaffected"
+            for artifact in document["artifacts"].values()
+        ))
+        outputs = self.deploy_outputs(self.repo, document, head)
+        self.assertEqual(outputs["deploy_dev"], "false")
+        self.assertEqual(outputs["reason"], "artifacts_unaffected")
+
+    def test_acceptance_entrypoint_keeps_its_verification_capabilities(self) -> None:
+        path = "scripts/runtime/dev/run-secrets-credentials-acceptance.sh"
+        self.assertIn(path, DEV_ACCEPTANCE_HARNESS_SPEC["inputs"])
+        self.assertNotIn(path, PRODUCTION_GRAPH["non_artifact_inputs"])
+        capabilities = select_capabilities([path])
+        self.assertIn("|runtime_dev_smoke|", capabilities["selection"])
 
     def test_each_runtime_positive_is_visible_from_deployed_source(self) -> None:
         cases = (
