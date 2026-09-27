@@ -19,9 +19,11 @@ async function visit(page: Page, path: string): Promise<void> {
   if (actual.origin !== ORIGIN || actual.pathname !== path.split("?")[0]) throw new DevUxError("ux-route");
 }
 
+// Layout settles after resizes, dialog transitions, and terminal refits; poll
+// until it fits instead of sampling one mid-transition frame.
 async function fits(page: Page, owner?: Locator): Promise<void> {
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
-  if (owner) expect(await owner.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), { timeout: 5_000 }).toBe(true);
+  if (owner) await expect.poll(() => owner.evaluate((node) => node.scrollWidth <= node.clientWidth + 1), { timeout: 5_000 }).toBe(true);
 }
 
 async function credentials(page: Page, slug: string, width: number): Promise<void> {
@@ -257,28 +259,38 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.locator("[data-terminal-copy-status]")).toHaveText("Selection copied.");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("__UX_COPY__");
   });
-  await stage("terminal-tabs-navigation-reconnect", async () => {
+  const rename = dialog(page, "Rename terminal");
+  const close = dialog(page, "Close terminal?");
+  let secondId: string | null = null;
+  await stage("terminal-tabs-job", async () => {
     await send("cd /tmp; sleep 300 & CW_UX_JOB=$!; printf '__UX_JOB__%s__\\n' \"$CW_UX_JOB\"");
     await expect(rows).toContainText(/__UX_JOB__\d+__/);
     job = /__UX_JOB__(\d+)__/.exec(await rows.innerText())![1];
+  });
+  await stage("terminal-tabs-rename", async () => {
     await button(page, "Rename terminal").click();
-    const rename = dialog(page, "Rename terminal");
     await rename.getByLabel("Terminal name", { exact: true }).fill("UX shell");
     await button(rename, "Save name").click();
+  });
+  await stage("terminal-tabs-navigation", async () => {
     await visit(page, `/settings/?org=${slug}`);
     await visit(page, detailPath);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstId!);
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
     await expect(button(page, "Disconnect")).toBeEnabled();
+  });
+  await stage("terminal-tabs-second", async () => {
     await button(page, "New terminal").click();
     await expect(page.getByRole("tab")).toHaveCount(2);
-    const secondId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
+    secondId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(secondId).toBeTruthy();
     expect(secondId).not.toBe(firstId);
     await expect(button(page, "Disconnect")).toBeEnabled();
     await send("printf '__UX_SECOND__%s__%s__\\n' \"${CW_UX_SESSION-unset}\" \"$$\"");
     await expect(rows).toContainText(/__UX_SECOND__unset__\d+__/);
     expect(/__UX_SECOND__unset__(\d+)__/.exec(await rows.innerText())![1]).not.toBe(pid);
+  });
+  await stage("terminal-tabs-reload", async () => {
     await button(page, "Rename terminal").click();
     await rename.getByLabel("Terminal name", { exact: true }).fill("UX logs");
     await button(rename, "Save name").click();
@@ -286,6 +298,8 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByRole("tab")).toHaveText(["UX shell", "UX logs"]);
     await expect(page.getByRole("tab", { name: "UX logs", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondId!);
+  });
+  await stage("terminal-tabs-reconnect", async () => {
     await page.getByRole("tab", { name: "UX shell", exact: true }).click();
     await button(page, "Disconnect").click();
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
@@ -293,23 +307,30 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(button(page, "Disconnect")).toBeEnabled();
     await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_RESUMED__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
     await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__/tmp__${job}__`);
+  });
+  await stage("terminal-tabs-switch", async () => {
     await page.getByRole("tab", { name: "UX shell", exact: true }).press("ArrowRight");
     await expect(page.getByRole("tab", { name: "UX logs", exact: true })).toBeFocused();
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondId!);
+  });
+  await stage("terminal-tabs-close", async () => {
     await button(page, "Close terminal").click();
-    const close = dialog(page, "Close terminal?");
     await button(close, "Cancel").click();
     await expect(page.getByRole("tab")).toHaveCount(2);
     await button(page, "Close terminal").click();
     await button(close, "Close terminal").click();
+  });
+  await stage("terminal-tabs-survivor", async () => {
     await expect(page.getByRole("tab")).toHaveCount(1);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstId!);
     await expect(button(page, "Disconnect")).toBeEnabled();
     await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_SURVIVOR__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
     await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
+  });
+  await stage("terminal-tabs-mobile-fit", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await fits(page);
-    expect((await terminal.boundingBox())!.height).toBeGreaterThanOrEqual(180);
+    await expect.poll(async () => (await terminal.boundingBox())?.height ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(180);
     await page.setViewportSize({ width: 1440, height: 900 });
   });
   await stage("ports-resize-dismissal", async () => {
