@@ -324,10 +324,20 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await button(page, "Close terminal").click();
     await button(close, "Close terminal").click();
   });
-  await stage("terminal-tabs-survivor", async () => {
+  await stage("terminal-tabs-survivor-tab", async () => {
     await expect(page.getByRole("tab")).toHaveCount(1);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstId!);
+  });
+  await stage("terminal-tabs-survivor-connected", async () => {
     await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+  });
+  // Closing the confirmation dialog must leave keyboard input with the
+  // surviving terminal before anything is typed into it.
+  await stage("terminal-tabs-survivor-focus", async () => {
+    await terminal.locator("textarea").focus();
+    await expect(terminal.locator("textarea")).toBeFocused();
+  });
+  await stage("terminal-tabs-survivor-shell", async () => {
     await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_SURVIVOR__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
     await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
   });
