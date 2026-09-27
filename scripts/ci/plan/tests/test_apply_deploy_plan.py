@@ -12,14 +12,14 @@ ADAPTER = Path(__file__).parents[1] / "apply-deploy-plan.py"
 HEAD = "a" * 40
 TREE = "b" * 40
 BASE = "c" * 40
-ARTIFACTS = (
-    "dev_release_tree",
+RUNTIME_ARTIFACTS = (
     "dashboard_image",
     "gateway_image",
     "derp_image",
     "services_image",
     "mesh_image",
 )
+ARTIFACTS = ("dev_release_tree", "dev_acceptance_harness", *RUNTIME_ARTIFACTS)
 
 
 def plan_document(
@@ -106,8 +106,48 @@ class DeployPlanAdapterTests(unittest.TestCase):
         self.assertEqual(outputs["dev_release_tree_state"], "affected")
         self.assertIn("dev_release_tree:affected", outputs["matched_categories"])
 
+    def test_acceptance_harness_change_selects_exact_source_promotion(self) -> None:
+        outputs, _ = self.apply(plan_document({"dev_acceptance_harness": "affected"}))
+        self.assertEqual(outputs["deploy_dev"], "true")
+        self.assertEqual(outputs["reason"], "dev_acceptance_affected")
+        self.assertEqual(outputs["dev_acceptance_harness_state"], "affected")
+        self.assertEqual(outputs["dev_release_tree_state"], "unaffected")
+        for artifact in RUNTIME_ARTIFACTS:
+            self.assertEqual(outputs[f"{artifact}_state"], "unaffected")
+        self.assertEqual(
+            outputs["matched_categories"],
+            "dev_release_tree:unaffected,dev_acceptance_harness:affected,"
+            + ",".join(f"{name}:unaffected" for name in RUNTIME_ARTIFACTS),
+        )
+
+    def test_acceptance_harness_reason_never_hides_release_or_runtime_changes(self) -> None:
+        for states, reason in (
+            ({"dev_release_tree": "affected"}, "dev_release_affected"),
+            ({"services_image": "affected"}, "artifact_affected"),
+            ({"mesh_image": "unclassified"}, "artifact_unclassified"),
+        ):
+            with self.subTest(states=states):
+                outputs, _ = self.apply(
+                    plan_document({"dev_acceptance_harness": "affected", **states})
+                )
+                self.assertEqual(outputs["deploy_dev"], "true")
+                self.assertEqual(outputs["reason"], reason)
+
+    def test_unclassified_acceptance_harness_selects_deployment(self) -> None:
+        outputs, _ = self.apply(plan_document({"dev_acceptance_harness": "unclassified"}))
+        self.assertEqual(outputs["deploy_dev"], "true")
+        self.assertEqual(outputs["reason"], "artifact_unclassified")
+
+    def test_plan_without_acceptance_harness_fact_fails_closed(self) -> None:
+        document = plan_document()
+        del document["artifacts"]["dev_acceptance_harness"]
+        outputs, error = self.apply(document)
+        self.assertEqual(outputs["deploy_dev"], "true")
+        self.assertEqual(outputs["reason"], "plan_invalid")
+        self.assertIn("plan omits artifact dev_acceptance_harness", error)
+
     def test_each_affected_artifact_selects_atomic_runtime_set(self) -> None:
-        for artifact in ARTIFACTS[1:]:
+        for artifact in RUNTIME_ARTIFACTS:
             with self.subTest(artifact=artifact):
                 outputs, _ = self.apply(plan_document({artifact: "affected"}))
                 self.assertEqual(outputs["deploy_dev"], "true")

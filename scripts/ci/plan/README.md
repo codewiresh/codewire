@@ -30,9 +30,10 @@ matching immutable pair whose revision is an ancestor of the exact head.
 proven unaffected, both are selected.
 
 The workspace image also depends on the complete Dev release selection: the
-release tree, all five runtime images, and the confidential-workspace
-acceptance contract. Every source selected for Dev therefore publishes an
-exact-source workspace image even when the `cw` binary is unchanged. A source
+release tree, the Dev acceptance harness, all five runtime images, and the
+confidential-workspace acceptance contract. Every source selected for Dev
+therefore publishes an exact-source workspace image even when the `cw` binary
+is unchanged. A source
 that does not select Dev and does not affect the support pair remains
 skippable. File-set and composite inputs are explicit ownership rules, so they
 do not make unrelated Rust artifacts unclassified.
@@ -96,9 +97,12 @@ candidate makes every artifact `unclassified`.
 
 `apply-deploy-plan.py` owns only the existing atomic runtime policy. It selects
 the complete five-image build, publication, and exact-source dispatch when any
-runtime image is `affected` or `unclassified`; it skips only when all five are
-`unaffected`. The adapter does not inspect source paths, resolve external
-state, publish images, or authorize deployment.
+runtime image, the Dev release tree, or the Dev acceptance harness is `affected`
+or `unclassified`; it skips only when all of them are `unaffected`. promote-dev
+runs acceptance only from the exact promoted source, so a harness-only change
+(`dev_acceptance_affected`) is accepted only by promoting that source. The
+adapter does not inspect source paths, resolve external state, publish images,
+or authorize deployment.
 
 Run the focused no-network tests and current-tree Cargo oracle with:
 

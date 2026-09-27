@@ -23,7 +23,10 @@ RUNTIME_ARTIFACTS = (
     "mesh_image",
 )
 DEV_RELEASE_ARTIFACT = "dev_release_tree"
-DEPLOY_ARTIFACTS = (DEV_RELEASE_ARTIFACT, *RUNTIME_ARTIFACTS)
+# Dev acceptance runs only from the exact promoted source, so a harness change
+# can be accepted only by promoting that exact source.
+DEV_ACCEPTANCE_ARTIFACT = "dev_acceptance_harness"
+DEPLOY_ARTIFACTS = (DEV_RELEASE_ARTIFACT, DEV_ACCEPTANCE_ARTIFACT, *RUNTIME_ARTIFACTS)
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 STATE_VALUES = {"affected", "unaffected", "unclassified"}
@@ -102,7 +105,12 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
         states[name] != "unaffected" for name in RUNTIME_ARTIFACTS
     )
     release_state = states[DEV_RELEASE_ARTIFACT]
-    selected = runtime_selected or release_state != "unaffected"
+    acceptance_state = states[DEV_ACCEPTANCE_ARTIFACT]
+    selected = (
+        runtime_selected
+        or release_state != "unaffected"
+        or acceptance_state != "unaffected"
+    )
     if not valid:
         reason = "baseline_invalid"
     elif "unclassified" in states.values():
@@ -111,6 +119,8 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
         reason = "artifact_affected"
     elif release_state == "affected":
         reason = "dev_release_affected"
+    elif acceptance_state == "affected":
+        reason = "dev_acceptance_affected"
     else:
         reason = "artifacts_unaffected"
 

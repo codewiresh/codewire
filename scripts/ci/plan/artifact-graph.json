@@ -34,7 +34,6 @@
     "scripts/runtime/dev/provider-codex-workload.sh",
     "scripts/runtime/dev/provider-openai-smoke.sh",
     "scripts/runtime/dev/provider-openai-workload.py",
-    "scripts/runtime/dev/run-secrets-credentials-acceptance.sh",
     "scripts/runtime/dev/smoke-local-platform-sources.sh",
     "scripts/runtime/tests/test-local-platform-sources-smoke.sh",
     "scripts/runtime/tests/test-provider-anthropic-smoke.sh",
@@ -50,6 +49,23 @@
       "kind": "file-set",
       "inputs": [
         "deployments/k8s/**"
+      ]
+    },
+    "dev_acceptance_harness": {
+      "kind": "file-set",
+      "inputs": [
+        "apps/dashboard/package.json",
+        "apps/dashboard/scripts/dev-ux-ownership.ts",
+        "apps/dashboard/scripts/dev-ux-walkthrough.ts",
+        "apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts",
+        "bun.lock",
+        "package.json",
+        "scripts/ci/install-pinned-playwright-chromium.sh",
+        "scripts/ci/verify/runtime-dev-commodity-smoke.sh",
+        "scripts/ci/verify/stock-ssh-workload.sh",
+        "scripts/runtime/dev/provider-ssh-smoke.sh",
+        "scripts/runtime/dev/run-secrets-credentials-acceptance.sh",
+        "scripts/runtime/dev/smoke-dev-commodity.sh"
       ]
     },
     "cw_cli_release_assets": {
@@ -249,6 +265,7 @@
         "workspace_cw_binary",
         "confidential_workspace_acceptance_contract",
         "dev_release_tree",
+        "dev_acceptance_harness",
         "dashboard_image",
         "gateway_image",
         "derp_image",
