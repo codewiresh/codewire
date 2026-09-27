@@ -347,51 +347,67 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect.poll(async () => (await terminal.boundingBox())?.height ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(180);
     await page.setViewportSize({ width: 1440, height: 900 });
   });
-  await stage("ports-resize-dismissal", async () => {
-    // Same bounded synthetic server as commodity smoke; never serve files or
-    // attach provider credentials. Destroying this owned Sandbox cleans it up.
-    const canary = "codewire-dev-ux-preview";
+  // Same bounded synthetic server as commodity smoke; never serve files or
+  // attach provider credentials. Destroying this owned Sandbox cleans it up.
+  const canary = "codewire-dev-ux-preview";
+  const before = page.url();
+  const ports = dialog(page, `Ports · ${owned.name}`);
+  const port = ports.locator(".cw-port-row", { has: page.getByText("ux-preview", { exact: true }) });
+  let preview = "";
+  await stage("ports-preview-server", async () => {
     await send(`node -e 'require("http").createServer((q,s)=>{s.writeHead(200,{"content-type":"text/plain","cache-control":"no-store"});s.end("${canary}")}).listen(8080,"0.0.0.0")' >/dev/null 2>&1 &`);
     await send(`for i in 1 2 3 4 5; do test "$(curl -fsS --max-time 2 http://127.0.0.1:8080)" = "${canary}" && { printf '__UX_PREVIEW_%s__\\n' ready; break; }; sleep 1; done`);
     await expect(rows).toContainText("__UX_PREVIEW_ready__");
-    const before = page.url();
+  });
+  await stage("ports-preview-add", async () => {
     await button(page, "Ports").click();
-    const ports = dialog(page, `Ports · ${owned.name}`);
     await expect(ports).toBeVisible();
     await expect(ports.getByLabel("Internal port", { exact: true })).toBeVisible();
     await ports.getByLabel("Internal port", { exact: true }).fill("8080");
     await ports.getByLabel("Preview label", { exact: true }).fill("ux-preview");
     await expect(ports.getByLabel("Who can open the preview?", { exact: true })).toHaveValue("creator");
     await button(ports, "Add port").click();
-    const port = ports.locator(".cw-port-row", { has: page.getByText("ux-preview", { exact: true }) });
     await expect(port).toContainText("8080 · Creator");
+  });
+  await stage("ports-preview-url", async () => {
     const open = port.getByRole("link", { name: "Open preview", exact: true });
-    const preview = await open.getAttribute("href");
+    preview = (await open.getAttribute("href")) ?? "";
     const expected = new URL(previewPattern.replace("{label}", "ux-preview").replace("{sandbox-id-prefix}", id.slice(0, 5)));
     expect(expected.protocol).toBe("https:");
     expect(expected.hostname.startsWith(`ux-preview-${id.slice(0, 5)}-${slug}.`)).toBe(true);
-    expect(new URL(preview!).href).toBe(expected.href);
+    expect(new URL(preview).href).toBe(expected.href);
     await button(port, "Copy URL").click();
     await expect(port.locator("[data-preview-copy-status]")).toHaveText("Preview URL copied.");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(preview);
-    // Isolated request context has no browser cookies. Do not follow login
-    // redirects, inject auth across domains, or change the preview to public.
-    const anonymous = await request.newContext();
-    try {
-      const denied = await anonymous.get(preview!, { maxRedirects: 0, timeout: 15_000 });
+  });
+  // Isolated request context has no browser cookies. Do not follow login
+  // redirects, inject auth across domains, or change the preview to public.
+  const anonymous = await request.newContext();
+  try {
+    await stage("ports-preview-denied", async () => {
+      const denied = await anonymous.get(preview, { maxRedirects: 0, timeout: 15_000 });
       expect([302, 303, 401, 403]).toContain(denied.status());
       expect(await denied.text()).not.toContain(canary);
-      // #2142: normal private-preview Open has no browser-auth handoff yet.
-      // Do not inject a full account cookie or claim authenticated Open proof.
+    });
+    // #2142: normal private-preview Open has no browser-auth handoff yet.
+    // Do not inject a full account cookie or claim authenticated Open proof.
+    await stage("ports-preview-removed", async () => {
       await button(port, "Remove ux-preview preview").click();
       await expect(port).toHaveCount(0);
-      const removed = await anonymous.get(preview!, { maxRedirects: 0, timeout: 15_000 });
+      const removed = await anonymous.get(preview, { maxRedirects: 0, timeout: 15_000 });
       expect(removed.status()).toBe(404);
       expect(await removed.text()).not.toContain(canary);
-    } finally { await anonymous.dispose(); }
+    });
+  } finally { await anonymous.dispose(); }
+  await stage("ports-close", async () => {
     await button(ports, "Close").click();
     expect(page.url()).toBe(before);
-    await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
+    // The dialog must leave the live terminal intact. Check its latest
+    // output: earlier lines may have scrolled out of the visible rows.
+    await expect(rows).toContainText("__UX_PREVIEW_ready__");
+    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+  });
+  await stage("resize-dismissal", async () => {
     await button(page, "Resize").click();
     const resize = dialog(page, `Resize ${owned.name}`);
     await expect(resize).toBeVisible();
