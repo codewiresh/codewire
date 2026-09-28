@@ -612,7 +612,7 @@ source "$1"
 
     def test_support_image_mapping_preserves_exact_digests_and_aliases(self):
         for status, registry in ((1, "quay.io/jetstack"),
-                                 (0, "nexus.example.invalid/oci-approved/jetstack")):
+                                 (0, "registry.example.invalid/oci-approved/jetstack")):
             with self.subTest(status=status):
                 result = self.shell('''
 validate_sealed_kind_images() { return %s; }
@@ -625,7 +625,7 @@ kind_credential_support_images
                     for name, digest in CREDENTIAL_IMAGES
                 ])
 
-    def test_sealed_prepare_and_load_use_only_preloaded_nexus_references(self):
+    def test_sealed_prepare_and_load_use_only_preloaded_harbor_references(self):
         result = self.shell('''
 exec 3>&1
 validate_sealed_kind_images() { return 0; }
@@ -634,7 +634,7 @@ log() { :; }
 docker() {
   case "$1 $2" in
     'image inspect'|'image tag')
-      [[ "$3" == nexus.example.invalid/oci-approved/jetstack/cert-manager-*@sha256:* ]] || return 98
+      [[ "$3" == registry.example.invalid/oci-approved/jetstack/cert-manager-*@sha256:* ]] || return 98
       printf 'docker:%s\\n' "$*" >&3 ;;
     *) echo unexpected-network; return 99 ;;
   esac
@@ -647,11 +647,11 @@ load_kind_credential_support_images
         self.assertEqual(result.returncode, 0, result.stderr)
         expected = []
         for name, digest in CREDENTIAL_IMAGES:
-            source = f"nexus.example.invalid/oci-approved/jetstack/cert-manager-{name}@sha256:{digest}"
+            source = f"registry.example.invalid/oci-approved/jetstack/cert-manager-{name}@sha256:{digest}"
             alias = f"localhost/codewire-ci/cert-manager-{name}:verified-{digest}"
             expected += [f"docker:image inspect {source}", f"docker:image tag {source} {alias}"]
         for name, digest in CREDENTIAL_IMAGES:
-            source = f"nexus.example.invalid/oci-approved/jetstack/cert-manager-{name}@sha256:{digest}"
+            source = f"registry.example.invalid/oci-approved/jetstack/cert-manager-{name}@sha256:{digest}"
             alias = f"localhost/codewire-ci/cert-manager-{name}:verified-{digest}"
             expected += [f"docker:image inspect {source}",
                          f"kind:load docker-image --name synthetic-credential-fixture {alias}",
