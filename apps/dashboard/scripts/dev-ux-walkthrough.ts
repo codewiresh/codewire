@@ -13,7 +13,10 @@ const dialog = (page: Page, name: string) => page.getByRole("dialog", { name, ex
 
 async function stage(name: string, operation: () => Promise<void>): Promise<void> {
   const started = Date.now();
-  try { await operation(); } catch { throw new DevUxError(name); }
+  // A step may raise a narrower fixed label; anything else maps to the step.
+  try { await operation(); } catch (error) {
+    throw error instanceof DevUxError && error.stage.startsWith(`${name}-`) ? error : new DevUxError(name);
+  }
   console.error(`[dev-ux] ${name}:passed duration_ms=${Date.now() - started}`);
 }
 
@@ -339,7 +342,20 @@ export async function runDevUxWalkthrough(page: Page, options: {
   });
   await stage("terminal-tabs-survivor-shell", async () => {
     await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_SURVIVOR__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
-    await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
+    try {
+      await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
+    } catch {
+      // Value-blind classification from fixed tokens only: lost input or
+      // redraw, a command that ran without output, different values, or a
+      // terminal that detached.
+      const text = await rows.innerText().catch(() => "");
+      const detached = !(await button(page, "Disconnect").isEnabled().catch(() => false));
+      const kind = detached ? "detached"
+        : text.includes("__UX_SURVIVOR__preserved__") ? "mismatch"
+        : text.includes("jobs -pr") ? "no-output"
+        : "no-echo";
+      throw new DevUxError(`terminal-tabs-survivor-shell-${kind}`);
+    }
   });
   await stage("terminal-tabs-mobile-fit", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
