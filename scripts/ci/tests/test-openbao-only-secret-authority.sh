@@ -234,7 +234,7 @@ fi
 
 # Decide from the rendered workload rather than source fragments. Dev uses a
 # Pod-bound TokenRequest identity with two exact audiences per OpenBao client;
-# the reusable/Production render remains unconfigured.
+# Production binds its reconciled tenant Transit authority the same way.
 render_root="$(mktemp -d)"
 trap 'rm -rf -- "$render_root"' EXIT
 kubectl kustomize deployments/k8s/overlays/dev >"$render_root/dev.yaml"
@@ -412,12 +412,19 @@ for topology in local-kind local-kind-static; do
   ' "$render_root/$topology-credential-network-policy.json" >/dev/null
 done
 
-jq -e '
-  .BAO_ADDR == "" and
-  .OPENBAO_KUBERNETES_API_AUDIENCE == "" and
-  .TENANT_SECRET_BAO_ROLE == "" and
-  .TENANT_SECRET_BAO_AUDIENCE == "" and
-  .TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID == "" and
+# Production binds the tenant-secret client to its reconciled OpenBao Transit
+# authority (clusters/system-cluster/access/openbao-codewire-tenant-secrets.json
+# in infra); confidential storage stays unconfigured until reconciled.
+prod_login_mount='prod-cluster-k8s'
+jq -e --arg prod_login_mount "$prod_login_mount" '
+  .BAO_ADDR == "https://openbao.example.invalid" and
+  .OPENBAO_KUBERNETES_API_AUDIENCE == "https://10.70.0.100:6443" and
+  .TENANT_SECRET_BAO_AUTH_MOUNT == $prod_login_mount and
+  .TENANT_SECRET_BAO_ROLE == "codewire-tenant-prod-cluster" and
+  .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-prod-cluster" and
+  .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-prod" and
+  .TENANT_SECRET_BAO_TRANSIT_KEY == "tenant-dek" and
+  .TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID == "00000000-0000-0000-0000-000000000000" and
   .CONFIDENTIAL_STORAGE_BAO_ADDR == "" and
   .CONFIDENTIAL_STORAGE_BAO_ROLE == "" and
   .CONFIDENTIAL_STORAGE_BAO_AUDIENCE == "" and
