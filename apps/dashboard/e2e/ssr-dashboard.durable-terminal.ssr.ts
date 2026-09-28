@@ -16,7 +16,7 @@ type Detail = { state: string; desiredState: string; tone: string; lastEvent: st
 
 async function transport(page: Page) {
   const state = { accountId: "account-a", sessions: [] as Session[], connections: [] as Connection[],
-    launches: 0, stops: 0, lists: 0, launchFailure: "", stopFailure: "", listStatus: 200, listGate: Promise.resolve(),
+    launches: 0, stops: 0, lists: 0, launchFailure: "", stopFailure: "", listStatus: 200, listGate: Promise.resolve(), launchGate: Promise.resolve(),
     statusGate: Promise.resolve(), statusAvailable: true, running: true, setupComplete: true, detail: null as Detail | null };
   await page.route("**/_fragments/terminal-readiness", async (route) => {
     await state.statusGate;
@@ -39,6 +39,7 @@ async function transport(page: Page) {
     const form = new URLSearchParams(route.request().postData() || "");
     expect([...form.keys()].sort()).toEqual(["_csrf", "account_id"]);
     expect(form.get("account_id")).toBe(state.accountId);
+    await state.launchGate;
     if (state.launchFailure === "csrf") {
       await route.fulfill({ status: 403, json: { error: "request-rejected" } });
       return;
@@ -86,6 +87,27 @@ function output(connection: Connection, text: string, offset = 0n) {
   const data = Buffer.from(text);
   connection.route.send(JSON.stringify({ type: "output", offset: String(offset), nextOffset: String(offset + BigInt(data.length)), data: data.toString("base64") }));
   return offset + BigInt(data.length);
+}
+
+function attached(state: { connections: Connection[] }, id: string) {
+  return state.connections.filter((connection) => connection.url.searchParams.get("session_id") === id);
+}
+
+function connectionStatus(page: Page, id: string) {
+  return page.locator(`[data-terminal-session-id="${id}"] [data-terminal-connection]`);
+}
+
+// A fake-clock jump can start a readiness poll. Let it finish before time
+// moves again so its own abort deadline cannot report the Sandbox unavailable.
+async function settleReadiness(page: Page) {
+  await expect(page.getByRole("button", { name: "Refresh sandbox status", exact: true })).toBeEnabled();
+}
+
+// fastForward fires each due timer once at the target time; runFor would also
+// fire a just-started poll's abort deadline within the same long advance.
+async function advance(page: Page, ms: number) {
+  await page.clock.fastForward(ms);
+  await settleReadiness(page);
 }
 
 test("detail layout keeps usable output and compact footer with alerts and short viewports", async ({ page }) => {
@@ -429,7 +451,7 @@ test("continuous partial drainage does not count already transmitted frames towa
   expect(state.stops).toBe(0);
 });
 
-test("a genuinely full frame queue pauses without replaying input on reconnect", async ({ page }) => {
+test("a genuinely full frame queue pauses and reconnects automatically without replaying input", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
   await openFixture(page);
@@ -445,12 +467,19 @@ test("a genuinely full frame queue pauses without replaying input on reconnect",
   }
   await expect.poll(() => state.connections[0].frames.length).toBe(64);
   await page.keyboard.insertText("not-sent");
-  await expect(page.locator("[data-terminal-connection]")).toContainText("will not be resent");
+  const connection = page.locator("[data-terminal-connection]");
+  await expect(connection).toHaveText("Connection paused. Some input may not have arrived and will not be resent. Reconnecting…");
   expect(state.connections[0].frames).toHaveLength(64);
   await page.evaluate(() => { (window as unknown as { terminalTestBuffer: { buffered: number } }).terminalTestBuffer.buffered = 0; });
-  await page.getByRole("button", { name: "Reconnect", exact: true }).click();
+  await page.clock.runFor(999);
+  await expect(connection).toContainText("Reconnecting…");
+  expect(state.connections).toHaveLength(1);
+  await page.clock.runFor(1);
   await expect.poll(() => state.connections.length).toBe(2);
+  expect(state.connections[1].url.searchParams.get("session_id")).toBe(sessionId(1));
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
   expect(state.connections[1].frames.some((frame) => frame.type === "input")).toBe(false);
+  expect(state.connections[0].frames.filter((frame) => frame.data === "not-sent")).toHaveLength(0);
   expect(state.stops).toBe(0);
 });
 
@@ -618,6 +647,8 @@ test("send deadlines follow the oldest outstanding frame and partial progress ca
   await page.clock.fastForward(6000);
   await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
   expect(state.connections[1].frames.some((frame) => frame.type === "input")).toBe(false);
+  // Manual Reconnect replaced the pending automatic attempt; one transport remains.
+  expect(state.connections).toHaveLength(2);
   expect(state.stops).toBe(0);
 });
 
@@ -1092,7 +1123,7 @@ test("initial terminal restoration waits for fresh status rather than rendered r
   expect(state.launches).toBe(0);
 });
 
-test("incomplete setup blocks launch and attachment until an explicit action after readiness", async ({ page }) => {
+test("incomplete setup blocks launch and attachment until readiness, then re-attaches without launching", async ({ page }) => {
   const state = await transport(page);
   state.setupComplete = false;
   state.sessions = [{ sessionId: sessionId(9), state: "running" }];
@@ -1112,12 +1143,15 @@ test("incomplete setup blocks launch and attachment until an explicit action aft
   state.setupComplete = true;
   await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeEnabled();
-  expect(state.connections).toHaveLength(0);
+  // Readiness re-attaches the restored existing session; it never launches one.
+  await expect.poll(() => state.connections.length).toBe(1);
+  expect(state.connections[0].url.searchParams.get("session_id")).toBe(sessionId(9));
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+  expect(state.lists).toBe(2);
   expect(state.launches).toBe(0);
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect.poll(() => state.launches).toBe(1);
-  await expect.poll(() => state.connections.length).toBe(1);
+  await expect.poll(() => state.connections.length).toBe(2);
 });
 
 test("initial terminal inventory waits until workspace setup finishes", async ({ page }) => {
@@ -1199,13 +1233,14 @@ test("a pending stopped-state list cannot consume initial restoration when setup
   expect(state.connections).toHaveLength(0);
 });
 
-test("Sandbox lifecycle changes pause terminal controls without automatic launch or reconnect", async ({ page }) => {
+test("Sandbox lifecycle changes pause terminal controls without automatic launch, and re-attaches existing sessions automatically when ready again", async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   await openFixture(page);
   await expect.poll(() => state.connections.length).toBe(1);
-  output(state.connections[0], "retained-on-sandbox-stop\r\n");
+  const cursor = output(state.connections[0], "retained-on-sandbox-stop\r\n");
   await expect(page.getByRole("tabpanel")).toContainText("retained-on-sandbox-stop");
+  await expect.poll(() => state.connections[0].frames.some((frame) => frame.type === "ack" && frame.offset === String(cursor))).toBe(true);
   const status = async (available: boolean, running: boolean, id = environment) => {
     if (id === environment) { state.statusAvailable = available; state.running = running; }
     await page.evaluate((detail) => {
@@ -1226,12 +1261,379 @@ test("Sandbox lifecycle changes pause terminal controls without automatic launch
   expect(state.connections.length).toBe(1);
   await status(true, true);
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeEnabled();
-  expect(state.connections.length).toBe(1);
+  // Readiness returning re-attaches the same session from its rendered cursor.
+  await expect.poll(() => state.connections.length).toBe(2);
+  expect(state.connections[1].url.searchParams.get("session_id")).toBe(sessionId(1));
+  expect(state.connections[1].url.searchParams.get("output_offset")).toBe(String(cursor));
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+  await expect(page.getByRole("tabpanel")).toContainText("retained-on-sandbox-stop");
+  expect(state.connections[1].frames.some((frame) => frame.type === "input")).toBe(false);
   expect(state.launches).toBe(0);
   expect(state.stops).toBe(0);
+});
+
+test("a transport loss without final status re-attaches the same session from the rendered offset after backoff", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  const cursor = output(state.connections[0], "before-transport-loss\r\n");
+  await expect.poll(() => state.connections[0].frames.some((frame) => frame.type === "ack" && frame.offset === String(cursor))).toBe(true);
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  const connection = page.locator("[data-terminal-connection]");
+  state.connections[0].route.close({ code: 1011, reason: "upstream restarted" });
+  await expect(connection).toHaveText("Disconnected. Reconnecting…");
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeEnabled();
+  await advance(page, 999);
+  await expect(connection).toHaveText("Disconnected. Reconnecting…");
+  expect(state.connections).toHaveLength(1);
+  await advance(page, 1);
+  await expect.poll(() => state.connections.length).toBe(2);
+  expect(state.connections[1].url.searchParams.get("session_id")).toBe(sessionId(1));
+  expect(state.connections[1].url.searchParams.get("output_offset")).toBe(String(cursor));
+  await expect(connection).toHaveText("Connected");
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+  await expect(page.getByRole("tabpanel")).toContainText("before-transport-loss");
+  // The first attempt re-attaches directly without re-listing sessions.
+  expect(state.lists).toBe(1);
+  expect(state.connections[0].frames.filter((frame) => frame.type === "ack")).toHaveLength(1);
+  expect(state.connections[1].frames.some((frame) => ["ack", "input"].includes(String(frame.type)))).toBe(false);
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("explicit Disconnect stays disconnected across time and readiness changes until Reconnect", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  const connection = page.locator("[data-terminal-connection]");
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect.poll(() => state.connections[0].closed).toBe(true);
+  await expect(connection).toHaveText("Disconnected");
+  await advance(page, 60_000);
+  await expect(connection).toHaveText("Disconnected");
+  state.statusAvailable = false;
+  await advance(page, 5000);
+  await expect(connection).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
+  state.statusAvailable = true;
+  await advance(page, 5000);
+  await expect(connection).toHaveText("Disconnected. Reconnect to resume this terminal.");
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeEnabled();
+  await advance(page, 60_000);
+  expect(state.connections).toHaveLength(1);
+  expect(state.lists).toBe(1);
   await page.getByRole("button", { name: "Reconnect", exact: true }).click();
   await expect.poll(() => state.connections.length).toBe(2);
+  expect(state.connections[1].url.searchParams.get("session_id")).toBe(sessionId(1));
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+for (const ending of ["exited", "abnormal-final", "unverifiable", "render-failure"] as const) {
+  test(`${ending} ending stays manual and never reconnects automatically`, async ({ page }) => {
+    if (ending === "render-failure") await holdRenderCallbacks(page);
+    await page.clock.install();
+    const state = await transport(page);
+    state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+    await openFixture(page);
+    await expect.poll(() => state.connections.length).toBe(1);
+    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+    await page.clock.pauseAt(new Date(Date.now() + 1000));
+    await settleReadiness(page);
+    const socket = state.connections[0];
+    const connection = page.locator("[data-terminal-connection]");
+    if (ending === "exited") {
+      socket.route.send(JSON.stringify({ type: "status", state: "exited", exitCode: 0 }));
+      socket.route.close({ code: 1000, reason: "finished" });
+      await expect(connection).toHaveText("exited (0)");
+    } else if (ending === "abnormal-final") {
+      socket.route.send(JSON.stringify({ type: "status", state: "exited", exitCode: 0 }));
+      socket.route.close({ code: 1011, reason: "upstream failed" });
+      await expect(connection).toHaveText("Connection closed before terminal output could be confirmed.");
+    } else if (ending === "unverifiable") {
+      output(socket, "out-of-order", 7n);
+      await expect(connection).toHaveText("Connection closed because terminal output could not be verified.");
+    } else {
+      await page.evaluate(() => { (window as unknown as { terminalTestWrites: { throwNext: boolean } }).terminalTestWrites.throwNext = true; });
+      output(socket, "failed-write");
+      await expect(connection).toHaveText("Output could not be rendered. Choose Replay recent output to recover.");
+    }
+    await advance(page, 60_000);
+    await advance(page, 60_000);
+    expect(state.connections).toHaveLength(1);
+    expect(state.lists).toBe(1);
+    expect(state.launches).toBe(0);
+    expect(state.stops).toBe(0);
+  });
+}
+
+test("an automatic reconnect whose old output cannot finish rendering stays manual", async ({ page }) => {
+  await holdRenderCallbacks(page);
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "never-finishes-rendering\r\n");
+  await expect.poll(async () => (await heldWrites(page)).callbacks).toBe(1);
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  const connection = page.locator("[data-terminal-connection]");
+  state.connections[0].route.close({ code: 1011, reason: "upstream restarted" });
+  await expect(connection).toHaveText("Disconnected. Reconnecting…");
+  await advance(page, 1000);
+  await expect(connection).toHaveText("Connecting…");
+  await advance(page, 5000);
+  await expect(connection).toHaveText("Output is still rendering. Replay output before reconnecting.");
+  await advance(page, 60_000);
+  expect(state.connections).toHaveLength(1);
+  expect(state.connections[0].frames.some((frame) => frame.type === "ack")).toBe(false);
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("a failed readiness poll pauses terminals and re-attaches wanted sessions without launching when ready again", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }, { sessionId: sessionId(2), state: "running" }];
+  await openFixture(page);
+  await expect(page.getByRole("tab")).toHaveCount(2);
+  await expect.poll(() => state.connections.length).toBe(2);
+  const [first] = attached(state, sessionId(1));
+  const cursor = output(first, "survives-readiness-flap\r\n");
+  await expect.poll(() => first.frames.some((frame) => frame.type === "ack" && frame.offset === String(cursor))).toBe(true);
+  await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(connectionStatus(page, sessionId(2))).toHaveText("Disconnected");
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  // One failed poll reports the Sandbox unavailable.
+  state.statusAvailable = false;
+  await advance(page, 5000);
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
+  await expect.poll(() => first.closed).toBe(true);
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
+  const lists = state.lists;
+  state.statusAvailable = true;
+  await advance(page, 5000);
+  await expect.poll(() => state.connections.length).toBe(3);
+  const replacement = state.connections[2];
+  expect(replacement.url.searchParams.get("session_id")).toBe(sessionId(1));
+  expect(replacement.url.searchParams.get("output_offset")).toBe(String(cursor));
+  expect(state.lists).toBe(lists + 1);
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("Connected");
+  // Explicit Disconnect survives the readiness flap and its refresh.
+  await expect(connectionStatus(page, sessionId(2))).toHaveText("Disconnected. Reconnect to resume this terminal.");
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeEnabled();
+  await advance(page, 60_000);
+  expect(state.connections).toHaveLength(3);
+  expect(replacement.frames.some((frame) => frame.type === "input")).toBe(false);
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("automatic retries back off to a cap, revalidate only the failing tab, and stop when its session disappears", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }, { sessionId: sessionId(2), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(2);
+  const [sibling] = attached(state, sessionId(2));
+  const status = connectionStatus(page, sessionId(1));
+  await expect(status).toHaveText("Connected");
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  // Each replacement is accepted and then closes at once, like a failing upstream.
+  const fail = async (count: number) => {
+    await expect(status).toHaveText("Connected");
+    attached(state, sessionId(1))[count - 1].route.close({ code: 1011, reason: "upstream unavailable" });
+    await expect(status).toHaveText("Disconnected. Reconnecting…");
+  };
+  await fail(1);
+  const lists = state.lists;
+  for (const [delay, count] of [[1000, 2], [2000, 3], [4000, 4], [8000, 5], [15000, 6]] as const) {
+    await advance(page, delay - 1);
+    await expect(status).toHaveText("Disconnected. Reconnecting…");
+    expect(attached(state, sessionId(1))).toHaveLength(count - 1);
+    await advance(page, 1);
+    await expect.poll(() => attached(state, sessionId(1)).length).toBe(count);
+    await fail(count);
+  }
+  // Only the third attempt re-read the inventory, and the sibling stayed attached.
+  expect(state.lists).toBe(lists + 1);
+  expect(sibling.closed).toBe(false);
+  expect(state.connections).toHaveLength(7);
+  state.sessions = state.sessions.filter((session) => session.sessionId !== sessionId(1));
+  await advance(page, 14_999);
+  await expect(status).toHaveText("Disconnected. Reconnecting…");
+  await advance(page, 1);
+  await expect(status).toHaveText("This terminal is no longer available.");
+  await expect(page.locator("[data-terminal-message]")).toContainText("no longer available");
+  expect(state.lists).toBe(lists + 2);
+  await advance(page, 60_000);
+  await advance(page, 60_000);
+  expect(attached(state, sessionId(1))).toHaveLength(6);
+  expect(sibling.closed).toBe(false);
+  await expect(connectionStatus(page, sessionId(2))).toHaveText("Connected");
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("a replacement that closes before the stability window does not reset the backoff", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  const connection = page.locator("[data-terminal-connection]");
+  await expect(connection).toHaveText("Connected");
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  state.connections[0].route.close({ code: 1011, reason: "upstream restarted" });
+  await advance(page, 1000);
+  await expect.poll(() => state.connections.length).toBe(2);
+  await expect(connection).toHaveText("Connected");
+  // Open for less than five seconds: the next wait doubles.
+  await advance(page, 4999);
+  state.connections[1].route.close({ code: 1011, reason: "upstream restarted" });
+  await expect(connection).toHaveText("Disconnected. Reconnecting…");
+  await advance(page, 1999);
+  await expect(connection).toHaveText("Disconnected. Reconnecting…");
+  expect(state.connections).toHaveLength(2);
+  await advance(page, 1);
+  await expect.poll(() => state.connections.length).toBe(3);
+  await expect(connection).toHaveText("Connected");
+  // Open for the full window: the next loss waits only one second again.
+  await advance(page, 5000);
+  state.connections[2].route.close({ code: 1011, reason: "upstream restarted" });
+  await expect(connection).toHaveText("Disconnected. Reconnecting…");
+  await advance(page, 999);
+  await expect(connection).toHaveText("Disconnected. Reconnecting…");
+  expect(state.connections).toHaveLength(3);
+  await advance(page, 1);
+  await expect.poll(() => state.connections.length).toBe(4);
+  expect(state.connections.every((item) => item.url.searchParams.get("session_id") === sessionId(1))).toBe(true);
+  expect(state.lists).toBe(1);
+  expect(state.launches).toBe(0);
+});
+
+test("an account change found by revalidation pauses every terminal even while a launch is pending", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(11), state: "running" }, { sessionId: sessionId(12), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(2);
+  const [sibling] = attached(state, sessionId(12));
+  const status = connectionStatus(page, sessionId(11));
+  await expect(status).toHaveText("Connected");
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  for (const [count, delay] of [[1, 1000], [2, 2000]] as const) {
+    await expect(status).toHaveText("Connected");
+    attached(state, sessionId(11))[count - 1].route.close({ code: 1011, reason: "upstream unavailable" });
+    await advance(page, delay);
+    await expect.poll(() => attached(state, sessionId(11)).length).toBe(count + 1);
+  }
+  await expect(status).toHaveText("Connected");
+  attached(state, sessionId(11))[2].route.close({ code: 1011, reason: "upstream unavailable" });
+  await expect(status).toHaveText("Disconnected. Reconnecting…");
+  // The third attempt's inventory read is held while a launch starts.
+  let releaseList!: () => void;
+  state.listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+  await advance(page, 4000);
+  await expect.poll(() => state.lists).toBe(2);
+  let releaseLaunch!: () => void;
+  state.launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => state.launches).toBe(1);
+  state.accountId = "account-b";
+  state.sessions = [];
+  releaseList();
+  // Output stays hidden and no transport stays open until identity is known.
+  await expect(page.locator("[data-terminal-panels]")).toBeHidden();
+  await expect.poll(() => sibling.closed).toBe(true);
+  expect(state.lists).toBe(2);
+  releaseLaunch();
+  await expect.poll(() => state.lists).toBe(3);
+  await expect(page.locator(`[data-terminal-session-id="${sessionId(11)}"]`)).toHaveCount(0);
+  await expect(page.locator(`[data-terminal-session-id="${sessionId(12)}"]`)).toHaveCount(0);
+  expect(await page.evaluate(() => sessionStorage.getItem("codewire:terminal:v1:account"))).toBe("account-b");
+  expect(state.launches).toBe(1);
+  expect(state.stops).toBe(0);
+});
+
+test("readiness returning during a pending launch re-lists sessions before re-attaching", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(11), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expect(connectionStatus(page, sessionId(11))).toHaveText("Connected");
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  let releaseLaunch!: () => void;
+  state.launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => state.launches).toBe(1);
+  state.statusAvailable = false;
+  await advance(page, 5000);
+  await expect(connectionStatus(page, sessionId(11))).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
+  state.statusAvailable = true;
+  await advance(page, 5000);
+  await expect(connectionStatus(page, sessionId(11))).toHaveText("Reconnecting…");
+  expect(state.lists).toBe(1);
+  // Completing the launch promptly re-lists; the clock does not advance.
+  releaseLaunch();
+  await expect.poll(() => state.lists).toBe(2);
+  await expect.poll(() => attached(state, sessionId(11)).length).toBe(2);
+  await expect(connectionStatus(page, sessionId(11))).toHaveText("Connected");
+  await expect(page.getByRole("tab")).toHaveCount(2);
+  expect(state.launches).toBe(1);
+  expect(state.stops).toBe(0);
+});
+
+test("a hidden page makes no automatic attempts and returning revalidates before re-attaching", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  const cursor = output(state.connections[0], "before-hidden\r\n");
+  await expect.poll(() => state.connections[0].frames.some((frame) => frame.type === "ack" && frame.offset === String(cursor))).toBe(true);
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  const connection = page.locator("[data-terminal-connection]");
+  state.connections[0].route.close({ code: 1011, reason: "upstream restarted" });
+  await expect(connection).toHaveText("Disconnected. Reconnecting…");
+  const visibility = (hidden: boolean) => page.evaluate((hidden) => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => hidden ? "hidden" : "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+  await visibility(true);
+  await expect(connection).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
+  // Readiness polling is paused while hidden, so there is no poll to settle.
+  await page.clock.fastForward(60_000);
+  await page.clock.fastForward(60_000);
+  await expect(connection).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
+  expect(state.connections).toHaveLength(1);
+  expect(state.lists).toBe(1);
+  await visibility(false);
+  await expect.poll(() => state.connections.length).toBe(2);
+  expect(state.lists).toBeGreaterThanOrEqual(2);
+  expect(state.connections[1].url.searchParams.get("session_id")).toBe(sessionId(1));
+  expect(state.connections[1].url.searchParams.get("output_offset")).toBe(String(cursor));
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
 });
 
 test("inventory keeps scheduled and protected deletion metadata visible on mobile", async ({ page }) => {
@@ -1645,8 +2047,10 @@ test("oversized input and a full browser send buffer are never queued for replay
   await page.keyboard.type("x");
   await expect(page.locator("[data-terminal-connection]")).toContainText("will not be resent");
   expect(state.connections[0].frames.some((frame) => frame.type === "input")).toBe(false);
-  await page.getByRole("button", { name: "Reconnect", exact: true }).click();
+  // The stalled transport reconnects automatically; the unsent input is gone.
   await expect.poll(() => state.connections.length).toBe(2);
+  expect(state.connections[1].url.searchParams.get("session_id")).toBe(sessionId(1));
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
   expect(state.connections[1].frames.some((frame) => frame.type === "input")).toBe(false);
   expect(state.stops).toBe(0);
 });

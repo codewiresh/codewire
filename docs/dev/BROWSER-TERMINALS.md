@@ -60,6 +60,26 @@ fixed send deadline. Disconnect or uncertain delivery discards staged input;
 input is never replayed on reconnect. Plain Ctrl+C remains a shell interrupt;
 Copy selection and Ctrl+Shift+C copy without sending input.
 
+## Automatic reconnection
+
+A tab that is still wanted re-attaches its existing session automatically when
+the WebSocket closes or errors without a final status, input delivery stalls,
+or a send fails. Attempts wait 1, 2, 4 and 8 seconds, then every 15 seconds,
+for as long as the page is visible. Only a replacement that stays open for five
+seconds resets that backoff, so an upstream that accepts and immediately closes
+cannot cause a one-second loop. Every third attempt re-reads the inventory for
+that tab alone; a session that no longer exists becomes unavailable and stops
+retrying, while healthy sibling tabs stay attached. Losing Sandbox readiness
+pauses every transport but keeps the tabs wanted. When readiness returns, the
+dashboard refreshes the inventory and re-attaches the surviving sessions.
+
+Automatic recovery never launches, restarts or stops a shell and never resends
+input. Explicit Disconnect, a final session status, unverifiable output, a
+rendering failure and a rendering queue that does not drain stay manual until
+Reconnect or Replay recent output. Reconnect always acts immediately. Hidden or
+suspended pages make no attempts; returning to the page revalidates the account
+before re-attaching.
+
 Focused synthetic controller/adapter tests establish these protocol and browser
 rules, not managed sandbox acceptance. The checked-in authenticated browser and
 sandbox journeys separately prove the real identity, runtime and projection
