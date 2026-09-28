@@ -270,7 +270,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
   const close = dialog(page, "Close terminal?");
   let secondId: string | null = null;
   await stage("terminal-tabs-job", async () => {
-    await send("cd /tmp; sleep 300 & CW_UX_JOB=$!; printf '__UX_JOB__%s__\\n' \"$CW_UX_JOB\"");
+    // The job must outlive every terminal stage below, including slow
+    // attaches; the disposable Sandbox is destroyed at the end of the run.
+    await send("cd /tmp; sleep 3600 & CW_UX_JOB=$!; printf '__UX_JOB__%s__\\n' \"$CW_UX_JOB\"");
     await expect(rows).toContainText(/__UX_JOB__\d+__/);
     job = /__UX_JOB__(\d+)__/.exec(await rows.innerText())![1];
   });
@@ -341,9 +343,10 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(terminal.locator("textarea")).toBeFocused();
   });
   await stage("terminal-tabs-survivor-shell", async () => {
-    await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_SURVIVOR__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
+    // Always print, so a changed shell reports a mismatch instead of silence.
+    await send("printf '__UX_SURVIVOR__%s__%s__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\" \"$(jobs -pr)\" \"$(kill -0 \"$CW_UX_JOB\" 2>/dev/null && echo alive || echo gone)\"");
     try {
-      await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__`);
+      await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__${job}__alive__`);
     } catch {
       // Value-blind classification from fixed tokens only: lost input or
       // redraw, a command that ran without output, different values, or a
@@ -351,7 +354,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
       const text = await rows.innerText().catch(() => "");
       const detached = !(await button(page, "Disconnect").isEnabled().catch(() => false));
       const kind = detached ? "detached"
-        : text.includes("__UX_SURVIVOR__preserved__") ? "mismatch"
+        : /__UX_SURVIVOR__(?!%s)/.test(text) ? "mismatch"
         : text.includes("jobs -pr") ? "no-output"
         : "no-echo";
       throw new DevUxError(`terminal-tabs-survivor-shell-${kind}`);
