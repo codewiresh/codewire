@@ -4,7 +4,7 @@ set -euo pipefail
 # Official quay.io/skopeo/stable linux/amd64 image, Skopeo 1.22.2, copied
 # byte-for-byte through the reviewed Nexus promotion boundary. Disposable
 # runners must preload this exact internal reference before registration.
-readonly SKOPEO_IMAGE='nexus.example.invalid/oci-approved/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
+readonly SKOPEO_IMAGE='registry.example.invalid/oci-approved/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
 docker_bin="${DOCKER_BIN:-docker}"
 
 [[ $# -gt 0 ]] || {
