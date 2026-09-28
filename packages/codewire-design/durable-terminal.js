@@ -10,6 +10,12 @@
     && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value);
   const live = (state) => ["starting", "running"].includes(state);
   const ended = (state) => !["starting", "running", "stopping"].includes(state);
+  // Automatic re-attachment waits 1, 2, 4 and 8 s, then 15 s, while the tab is
+  // wanted and the page is visible. Only a connection that stays open resets it.
+  const retryBaseMs = 1000;
+  const retryMaxMs = 15000;
+  const stableMs = 5000;
+  const revalidateEvery = 3;
 
   function clearReferences() {
     try {
@@ -56,6 +62,9 @@
     let renameOpener = null;
     let requestController = null;
     let foregroundCheck = false;
+    // Readiness returned while another request was pending: re-list before
+    // re-attaching, because the Sandbox may have restarted.
+    let relist = false;
     // Rendered lifecycle state is not fresh setup readiness. Wait for the
     // authenticated status controller before opening a transport or a shell.
     let runtimeAvailable = false;
@@ -169,7 +178,14 @@
       tab.stagedInput = null;
     }
     function detach(tab, text = "Disconnected", keepWanted = false) {
-      if (!keepWanted) tab.wanted = false;
+      if (!keepWanted) {
+        tab.wanted = false;
+        tab.failures = 0;
+      }
+      clearTimeout(tab.retryTimer);
+      tab.retryTimer = null;
+      clearTimeout(tab.stableTimer);
+      tab.stableTimer = null;
       tab.attempt += 1;
       const socket = tab.socket;
       tab.socket = null;
@@ -184,11 +200,49 @@
       tab.presentation.terminal.options.disableStdin = true;
       connectionText(tab, text);
     }
+    // Transport loss is not a decision to stop. Re-attach the same wanted
+    // session automatically; explicit Disconnect, final status, unverifiable
+    // output, render failure and unavailable sessions stay manual. Nothing
+    // here launches a shell, and input is never resent.
+    function automatic(tab) {
+      return tab.wanted && tab.available && !tab.disposed && !tab.renderFailed && !ended(tab.state);
+    }
+    function scheduleReconnect(tab) {
+      clearTimeout(tab.retryTimer);
+      tab.retryTimer = null;
+      if (!automatic(tab) || suspended || document.hidden) return;
+      const delay = Math.min(retryBaseMs * 2 ** Math.min(tab.failures, 4), retryMaxMs);
+      tab.failures += 1;
+      tab.retryTimer = setTimeout(() => {
+        tab.retryTimer = null;
+        retry(tab);
+      }, delay);
+    }
+    function lose(tab, text) {
+      const automatically = automatic(tab);
+      detach(tab, `${text} ${automatically ? "Reconnecting…" : "Reconnect to resume this terminal."}`, automatically);
+      if (automatically) scheduleReconnect(tab);
+    }
+    function retry(tab) {
+      // Foreground and readiness recovery own hidden, suspended and not-ready
+      // waits; each reconnects wanted tabs when it completes.
+      if (!automatic(tab) || tab.socket || suspended || document.hidden) return;
+      if (!runtimeReady()) detach(tab, readinessMessage(), true);
+      else if (pending) scheduleReconnect(tab);
+      else if (!authorized || relist) void refresh();
+      else if (tab.failures % revalidateEvery === 0) void revalidate(tab);
+      else void connect(tab);
+    }
+    // Identity checks pause every transport. Wanted tabs reconnect when the
+    // check completes; the others keep their last state.
+    function pauseForIdentity(tab) {
+      detach(tab, tab.wanted ? "Checking account…" : tab.connection.textContent, true);
+    }
     function sendDeadline(tab) {
       return Math.min(tab.stagedInput?.deadline ?? Infinity, ...tab.sendQueue.map((frame) => frame.deadline));
     }
     function pauseInput(tab) {
-      detach(tab, "Connection paused. Some input may not have arrived and will not be resent.");
+      lose(tab, "Connection paused. Some input may not have arrived and will not be resent.");
       return false;
     }
     function reconcileSendQueue(tab, socket) {
@@ -230,7 +284,7 @@
       if (tab.queuedBytes + bytes + (tab.stagedInput?.bytes ?? 0) > P.limits.pendingInputBytes
         || tab.sendQueue.length + (tab.stagedInput ? 1 : 0) >= P.limits.pendingInputFrames) return pauseInput(tab);
       try { socket.send(encoded); } catch {
-        detach(tab, "Connection closed. Input will not be resent.");
+        lose(tab, "Connection closed. Input will not be resent.");
         return false;
       }
       // Metadata only: drained bytes are not a receipt, and input is never replayed.
@@ -332,7 +386,7 @@
     }
     async function connect(tab) {
       if (tab.renderFailed) return;
-      if (!runtimeReady()) { detach(tab, readinessMessage()); return; }
+      if (!runtimeReady()) { detach(tab, readinessMessage(), true); return; }
       detach(tab, "Connecting…", true);
       tab.wanted = true;
       const attempt = tab.attempt;
@@ -358,6 +412,11 @@
         if (socket.protocol !== P.protocol) { detach(tab, "The terminal protocol is unavailable."); return; }
         tab.toggle.textContent = "Disconnect";
         connectionText(tab, live(tab.state) ? "Connected" : tab.state);
+        // A server that accepts and then closes must not reset the backoff.
+        tab.stableTimer = setTimeout(() => {
+          tab.stableTimer = null;
+          if (tab.socket === socket) tab.failures = 0;
+        }, stableMs);
         updateControls();
         tab.presentation.fitAndResize();
       });
@@ -400,7 +459,7 @@
         } catch { detach(tab, "Connection closed because terminal output could not be verified."); }
       });
       socket.addEventListener("error", () => {
-        if (tab.socket === socket) detach(tab, "Connection closed. Reconnect to resume this terminal.");
+        if (tab.socket === socket) lose(tab, "Connection closed.");
       });
       socket.addEventListener("close", (event) => {
         if (tab.socket !== socket) return;
@@ -409,8 +468,38 @@
           finalAfterRender(tab, finalText);
         } else if (finalStatus) {
           detach(tab, "Connection closed before terminal output could be confirmed.");
-        } else detach(tab, "Disconnected. Reconnect to resume this terminal.");
+        } else lose(tab, "Disconnected.");
       });
+    }
+    // Every third automatic attempt re-reads the inventory for this tab only,
+    // so a vanished session stops retrying without detaching healthy siblings.
+    // Account and authorization changes still use the full refresh.
+    async function revalidate(tab) {
+      const current = epoch;
+      const attempt = tab.attempt;
+      const stale = () => current !== epoch || attempt !== tab.attempt || suspended || document.hidden
+        || foregroundCheck || !automatic(tab) || !!tab.socket;
+      let data;
+      try { data = await request("list"); } catch (error) {
+        if (stale()) return;
+        // Identity doubts pause every transport and hide output, as on focus.
+        if (error.authorization) foreground();
+        else scheduleReconnect(tab);
+        return;
+      }
+      if (stale()) return;
+      if (data.accountId !== account) { foreground(); return; }
+      const session = data.sessions.find((item) => item.sessionId === tab.id);
+      if (!session) {
+        tab.available = false;
+        inventory = inventory.filter((item) => item.sessionId !== tab.id);
+        detach(tab, "This terminal is no longer available.");
+        announce("A saved terminal is no longer available. Choose an existing terminal or start a new one.");
+        showInventory();
+        return;
+      }
+      tab.state = session.state;
+      void connect(tab);
     }
     function presentation(tab) {
       tab.root.replaceChildren();
@@ -472,13 +561,17 @@
         socket: null, attempt: 0, renderEpoch: 0, renderAbort: new AbortController(), renderFailed: false,
         rendered: 0n, received: 0n, pendingBytes: 0, pendingFrames: 0, writes: Promise.resolve(),
         sendQueue: [], queuedBytes: 0, sendTimer: null, stagedInput: null, inputTimer: null,
+        retryTimer: null, stableTimer: null, failures: 0,
         wanted: true, available: true, disposed: false };
       presentation(tab);
       tabs.set(tab.id, tab);
       button.addEventListener("click", () => choose(tab.id));
       tab.toggle.addEventListener("click", () => {
-        if (tab.socket) detach(tab);
-        else void refresh(tab.id);
+        // Disconnect is sticky until Reconnect. Reconnect acts immediately,
+        // including while an automatic attempt is waiting or connecting.
+        if ([WebSocket.OPEN, WebSocket.CLOSING].includes(tab.socket?.readyState)) { detach(tab); return; }
+        tab.failures = 0;
+        void refresh(tab.id);
       });
       tab.reset.addEventListener("click", async () => {
         detach(tab);
@@ -567,7 +660,7 @@
       authorized = false;
       invalidateRename();
       panels.hidden = true;
-      for (const tab of tabs.values()) detach(tab, "Checking account…", true);
+      for (const tab of tabs.values()) pauseForIdentity(tab);
       updateControls();
       announce("Refreshing terminal sessions…");
       try {
@@ -609,10 +702,12 @@
         choose(tabs.has(active) ? active : tabs.keys().next().value);
         store();
         announce(missing ? "A saved terminal is no longer available. Choose an existing terminal or start a new one." : "");
+        relist = false;
         for (const tab of tabs.values()) if (tab.available && tab.wanted) void connect(tab);
       } catch (error) {
         if (current !== epoch || suspended) return;
         if (error.authorization) { clearReferences(); clearPresentations(); account = null; }
+        else for (const tab of tabs.values()) if (automatic(tab)) lose(tab, "Terminal sessions are unavailable.");
         announce(error.authorization ? "Sign in with access to this Sandbox, then refresh sessions." : "Terminal sessions are unavailable. Refresh sessions to try again.");
       } finally {
         if (current === epoch) {
@@ -668,6 +763,7 @@
           pending = false;
           showInventory();
           if (foregroundCheck && !document.hidden) void refresh();
+          else if (relist && runtimeReady() && !document.hidden) void refresh();
         }
       }
     }
@@ -768,7 +864,7 @@
       invalidateRename();
       panels.hidden = true;
       foregroundCheck = true;
-      for (const tab of tabs.values()) detach(tab, "Checking account…", true);
+      for (const tab of tabs.values()) pauseForIdentity(tab);
       updateControls();
       if (!document.hidden && !pending) void refresh();
     }
@@ -782,21 +878,34 @@
       runtimeAvailable = status.available;
       runtimeRunning = status.running;
       setupComplete = status.setupComplete;
+      const ready = runtimeReady();
       root.dataset.terminalAvailable = String(runtimeAvailable);
       root.dataset.terminalRunning = String(runtimeRunning);
       for (const tab of tabs.values()) {
-        if (!runtimeReady()) detach(tab, readinessMessage());
-        else if (!wasReady && !tab.socket) connectionText(tab, "Disconnected. Reconnect to resume this terminal.");
+        // Readiness loss pauses the transport without withdrawing intent.
+        if (!ready) detach(tab, readinessMessage(), true);
+        else if (!wasReady && !tab.socket) {
+          connectionText(tab, automatic(tab) ? "Reconnecting…" : "Disconnected. Reconnect to resume this terminal.");
+        }
       }
-      root.querySelector("[data-terminal-empty]").textContent = !runtimeReady() ? readinessMessage()
+      root.querySelector("[data-terminal-empty]").textContent = !ready ? readinessMessage()
         : "Choose New terminal to start a shell. Leaving this page disconnects the browser; the shell keeps running until you close it or stop the Sandbox.";
       updateControls();
-      if (runtimeReady() && !initialStatusReceived && !pending && !suspended && !document.hidden) {
+      if (ready && !initialStatusReceived && !pending && !suspended && !document.hidden) {
         initialStatusReceived = true;
         // Initial restoration must wait until setup stops owning workspace
         // replacement. Explicit Refresh/Stop remain available during setup.
-        // Later readiness transitions require explicit Reconnect, never Launch.
         void refresh();
+      } else if (ready && !wasReady && initialStatusReceived) {
+        // The Sandbox may have restarted: re-list before re-attaching so ended
+        // sessions become unavailable. Readiness never launches a shell.
+        const waiting = [...tabs.values()].filter((tab) => automatic(tab) && !tab.socket);
+        if (!waiting.length) return;
+        if (!pending) void refresh();
+        else {
+          relist = true;
+          for (const tab of waiting) scheduleReconnect(tab);
+        }
       }
     });
     document.addEventListener("submit", (event) => {
