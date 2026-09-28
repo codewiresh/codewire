@@ -188,8 +188,8 @@ registry_auth_uri="$(jq -er '.data.SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI' "$
 coco_enabled="$(jq -er '.data.SANDBOX_KATA_COCO_INIT_DATA_ENABLED' "$configmap_json")"
 test_resource_uri="$(jq -er '.data.SANDBOX_KATA_COCO_TEST_RESOURCE_URI' "$configmap_json")"
 
-[[ "$gateway_image" =~ ^nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:[a-f0-9]{64}$ ]] || \
-  die "promoted gateway image is not an exact approved Nexus digest"
+[[ "$gateway_image" =~ ^registry\.example\.invalid/codewire/gateway@sha256:[a-f0-9]{64}$ ]] || \
+  die "promoted gateway image is not an exact Harbor digest"
 [[ "$dind_image" =~ ^docker\.io/library/docker:[0-9]+\.[0-9]+\.[0-9]+-dind@sha256:[a-f0-9]{64}$ ]] || \
   die "active dind image is not an exact official Docker digest"
 [[ "$kbs_url" == "https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080" ]] || \
@@ -298,8 +298,8 @@ SCRIPT
 fi
 
 kubectl_dev -n "$SANDBOX_NAMESPACE" get serviceaccount codewire-sandbox -o json >"$service_account_json"
-jq -e 'any(.imagePullSecrets[]?; .name == "nexus-registry")' "$service_account_json" >/dev/null || \
-  die "codewire-sandbox ServiceAccount does not select the Nexus pull Secret"
+jq -e 'any(.imagePullSecrets[]?; .name == "harbor-registry")' "$service_account_json" >/dev/null || \
+  die "codewire-sandbox ServiceAccount does not select the Harbor pull Secret"
 
 kubectl_dev -n "$SERVER_NAMESPACE" get configmap codewire-trustee-kbs-ca -o json >"$ca_json"
 kbs_ca="$(jq -er '.data["ca.crt"]' "$ca_json")"
@@ -343,14 +343,14 @@ if [[ "$IMAGE_ROLE" == "product" ]]; then
     '          memory: 4Gi')"
 fi
 
-registry_egress_yaml=$'    - toFQDNs:\n        - matchName: nexus.example.invalid\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
-dns_rules_yaml=$'          rules:\n            dns:\n              - matchName: nexus.example.invalid\n              - matchName: codewire-trustee-kbs.codewire-trustee.svc.cluster.local\n'
+registry_egress_yaml=$'    - toFQDNs:\n        - matchName: registry.example.invalid\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
+dns_rules_yaml=$'          rules:\n            dns:\n              - matchName: registry.example.invalid\n              - matchName: codewire-trustee-kbs.codewire-trustee.svc.cluster.local\n'
 if [[ "$public_registry_egress" == "1" ]]; then
   dns_rules_yaml=""
   registry_egress_yaml=$'    - toCIDRSet:\n        - cidr: 0.0.0.0/0\n          except:\n            - 10.0.0.0/8\n            - 100.64.0.0/10\n            - 127.0.0.0/8\n            - 169.254.0.0/16\n            - 172.16.0.0/12\n            - 192.168.0.0/16\n        - cidr: ::/0\n          except:\n            - fc00::/7\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
 fi
 if [[ "$IMAGE_ROLE" == "product" ]]; then
-  registry_egress_yaml+=$'    - toFQDNs:\n        - matchName: nexus.example.invalid\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
+  registry_egress_yaml+=$'    - toFQDNs:\n        - matchName: registry.example.invalid\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
 fi
 
 policy_source="$ROOT/crates/codewire-orchestration/src/sandbox/template/encoding.rs"

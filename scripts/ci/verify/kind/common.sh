@@ -807,7 +807,7 @@ validate_sealed_kind_images() {
       || [ "$KIND_AGENT_SANDBOX_IMAGE" != "$APPROVED_KIND_AGENT_SANDBOX_IMAGE" ] \
       || [ "$KIND_WORKSPACE_IMAGE" != "$APPROVED_KIND_WORKSPACE_IMAGE" ] \
       || [ "$KIND_DIND_IMAGE" != "$APPROVED_KIND_DIND_IMAGE" ]; then
-    echo "::error::sealed Kind inputs must match the five approved Nexus digests"
+    echo "::error::sealed Kind inputs must match the five approved Harbor digests"
     return 2
   fi
 }
@@ -903,7 +903,7 @@ load_images_into_kind() {
   fi
 
   if validate_sealed_kind_images; then
-    # The trusted runner boundary pulls these images from Nexus before any
+    # The trusted runner boundary pulls these images from Harbor before any
     # repository-controlled workflow starts. This process receives neither a
     # registry credential nor public-registry egress; it can only prove and
     # side-load the five exact local references into the disposable Kind node.
@@ -3231,7 +3231,7 @@ assert_sandbox_supply_chain() {
           (["ErrImagePull", "Failed", "FailedToRetrieveImagePullSecret", "ImagePullBackOff"]
             | index($event.reason)) != null and
           (($event.message // "")
-            | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|nexus\\.example\\.invalid/oci-approved/(codewire/workspace|docker/dind)|localhost/codewire-ci/(workspace|docker-dind))"))
+            | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|registry\\.example\\.invalid/oci-approved/(codewire/workspace|docker/dind)|localhost/codewire-ci/(workspace|docker-dind))"))
         )
       | $event
     ] | length == 0
@@ -3239,7 +3239,7 @@ assert_sandbox_supply_chain() {
     echo "::error::Kind recorded a workspace or DinD image-provenance failure"
     jq -r '.items[]
       | select((.message // "")
-          | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|nexus\\.example\\.invalid/oci-approved/(codewire/workspace|docker/dind)|localhost/codewire-ci/(workspace|docker-dind))"))
+          | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|registry\\.example\\.invalid/oci-approved/(codewire/workspace|docker/dind)|localhost/codewire-ci/(workspace|docker-dind))"))
       | "\(.metadata.namespace // "default")/\(.involvedObject.name): \(.reason)"' \
       <<<"$events" >&2
     return 1
