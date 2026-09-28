@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { expect, type Page } from "@playwright/test";
 import postgres from "postgres";
 import { waitForEnvironmentState } from "./environment";
+import { defaultWorkspaceImage } from "./runtime-images";
 
 const sql = postgres(process.env.DATABASE_URL!);
 const execFileAsync = promisify(execFile);
@@ -10,8 +11,7 @@ const serverUrl = process.env.SERVER_URL || "http://127.0.0.1:8080";
 export const githubCheckoutName = "github-repository-draft";
 export const githubCheckoutUrl = "https://github.com/synthetic-user/repository-01.git";
 // The same pinned workspace contract used by ssr-dashboard.environments.ssr.ts.
-export const githubCheckoutImage = process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE
-  || "registry.example.invalid/codewire/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
+export const githubCheckoutImage = process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || defaultWorkspaceImage;
 // Public deterministic fixture identity; not a credential. The install marker
 // proves setup checked out the repository BEFORE running the user's command.
 const checkoutCommit = "78e440926ea15ee9644a69199694e39f6f06e3ce";

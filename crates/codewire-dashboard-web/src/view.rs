@@ -1189,6 +1189,14 @@ pub(crate) struct EnvironmentCreateFormView {
 }
 
 impl EnvironmentCreateFormView {
+    /// The product's default workspace image, rendered as the image field's
+    /// placeholder so the browser reset control needs no copy of it.
+    pub(crate) fn default_image(&self) -> &'static str {
+        codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE
+    }
+}
+
+impl EnvironmentCreateFormView {
     /// Navigation metadata only; derive it from the final form, not catalogs.
     pub(crate) fn creation_draft_parameter(&self) -> String {
         if crate::environment_drafts::canonical_id(&self.draft_id) {

@@ -6,6 +6,7 @@ import { getUserId } from "./helpers/db";
 import { cleanupEnvironments, waitForEnvironmentState } from "./helpers/environment";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { USERS } from "./helpers/seed";
+import { defaultWorkspaceImage } from "./helpers/runtime-images";
 import { terminalWebSocketUrl } from "./helpers/terminal-websocket";
 
 // The serial Create setup journey enters write-only personal secret values.
@@ -35,7 +36,7 @@ const environmentName = "ssr-terminal-workspace";
 const repositoryUrl = `https://example.test/codewire/${slug}`;
 // Current published immutable Codewire workspace image in Harbor.
 // This browser proof must never turn a floating registry tag into a test input.
-const workspaceImage = "registry.example.invalid/codewire/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
+const workspaceImage = defaultWorkspaceImage;
 // Sealed Kind runs side-load the Forgejo-proven workspace under a disposable
 // local alias. Only the test-owned preset may use that alias; browser assertions
 // above the product's canonical workspace choice continue to use workspaceImage.

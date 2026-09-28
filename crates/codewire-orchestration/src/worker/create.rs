@@ -217,7 +217,7 @@ impl SandboxWorkerCfg {
             credential_runtime,
             gateway_image: getenv(
                 "SANDBOX_GATEWAY_IMAGE",
-                "registry.example.invalid/codewire/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836",
+                codewire_server_core::runtime_images::DEFAULT_GATEWAY_IMAGE,
             ),
             dind_image: getenv("SANDBOX_DIND_IMAGE", ""),
             runtime_profile: std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default(),

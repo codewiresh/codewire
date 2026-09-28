@@ -50,6 +50,7 @@ pub mod organization_slug;
 #[cfg(feature = "kubernetes-identity")]
 pub mod pod_identity;
 pub mod rest_sunset;
+pub mod runtime_images;
 pub mod validation;
 
 pub use config::ServiceConfig;

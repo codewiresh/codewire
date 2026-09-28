@@ -76,7 +76,7 @@ pub(crate) fn confidential_init_data(opts: &TemplateOpts) -> anyhow::Result<Stri
 }
 
 // Canonical sandbox and daemon contract constants.
-pub const DEFAULT_GATEWAY_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836";
+pub const DEFAULT_GATEWAY_IMAGE: &str = codewire_server_core::runtime_images::DEFAULT_GATEWAY_IMAGE;
 pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
 pub const DEFAULT_GATEWAY_READYZ_PORT: i64 = 2223;
 pub const DEFAULT_GATEWAY_SSH_PORT: i64 = 2222;

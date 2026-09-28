@@ -107,6 +107,9 @@ case "$repo:$verb:$target" in
   deploy:logs:801)
     case "$job" in 811|813) ;; *) exit 2 ;; esac
     printf '== job %s ==\r\n2026-09-27T16:51:42.6844462Z Checked out exact Codewire source %s\r\n' "$job" "$dev_source"
+    # Real job logs are far larger than a pipe buffer after the matched
+    # line; an early-exiting matcher must not turn that into a failure.
+    awk 'BEGIN { for (i = 0; i < 100000; i++) print "2026-09-27T16:51:43.0000000Z filler line that keeps the job log larger than a pipe buffer\r" }'
     ;;
   *) echo "unexpected fj request: $repo $verb $target" >&2; exit 2 ;;
 esac
