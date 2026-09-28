@@ -5,13 +5,13 @@ set -euo pipefail
 kind_credential_support_images() {
   # Image manifests resolved from the signed v1.17.1 release's official
   # registry references; Linux/amd64 only, like this native Kind gate.
-  # Sealed runners preload the same manifests through their approved Nexus
+  # Sealed runners preload the same manifests through their approved Harbor
   # boundary. Docker digest references include the repository, so an approved
-  # Nexus reference cannot satisfy an inspection of the public Quay name.
+  # Harbor reference cannot satisfy an inspection of the public Quay name.
   local registry sealed_status=0
   validate_sealed_kind_images >&2 || sealed_status=$?
   case "$sealed_status" in
-    0) registry=nexus.example.invalid/oci-approved/jetstack ;;
+    0) registry=registry.example.invalid/oci-approved/jetstack ;;
     1) registry=quay.io/jetstack ;;
     *) return "$sealed_status" ;;
   esac

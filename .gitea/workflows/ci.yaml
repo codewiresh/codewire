@@ -1714,11 +1714,11 @@ jobs:
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
-      KIND_INGRESS_CONTROLLER_IMAGE: nexus.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
-      KIND_INGRESS_CERTGEN_IMAGE: nexus.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
-      KIND_AGENT_SANDBOX_IMAGE: nexus.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125
-      KIND_WORKSPACE_IMAGE: nexus.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510
-      KIND_DIND_IMAGE: nexus.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
+      KIND_INGRESS_CONTROLLER_IMAGE: registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
+      KIND_INGRESS_CERTGEN_IMAGE: registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
+      KIND_AGENT_SANDBOX_IMAGE: registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125
+      KIND_WORKSPACE_IMAGE: registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510
+      KIND_DIND_IMAGE: registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
       CODEWIRE_KIND_PRODUCT_IMAGE_MODE: prebuilt-ci
       CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256: ${{ needs.kind-workspace.outputs.manifest_sha256 }}

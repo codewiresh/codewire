@@ -82,19 +82,19 @@ if [ -z "${KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
   KIND_AGENT_SANDBOX_IMAGE=''
 fi
 if [ -z "${APPROVED_KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
-  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE='nexus.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
+  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
 fi
 if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
-  APPROVED_KIND_INGRESS_CERTGEN_IMAGE='nexus.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+  APPROVED_KIND_INGRESS_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
 fi
 if [ -z "${APPROVED_KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
-  APPROVED_KIND_AGENT_SANDBOX_IMAGE='nexus.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
 fi
 if [ -z "${APPROVED_KIND_WORKSPACE_IMAGE+x}" ]; then
-  APPROVED_KIND_WORKSPACE_IMAGE='nexus.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
+  APPROVED_KIND_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
 fi
 if [ -z "${APPROVED_KIND_DIND_IMAGE+x}" ]; then
-  APPROVED_KIND_DIND_IMAGE='nexus.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
+  APPROVED_KIND_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
 fi
 if [ -z "${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE+x}" ]; then
   KIND_INGRESS_CONTROLLER_LOCAL_IMAGE='localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
@@ -3158,14 +3158,14 @@ assert_sandbox_supply_chain() {
     def workspace_image:
       startswith("ghcr.io/codewiresh/workspace:") or
       startswith("ghcr.io/codewiresh/workspace@") or
-      startswith("nexus.example.invalid/oci-approved/codewire/workspace@") or
+      startswith("registry.example.invalid/oci-approved/codewire/workspace@") or
       startswith("localhost/codewire-ci/workspace:");
     def dind_image:
       startswith("ghcr.io/codewiresh/" + "dind") or
       startswith("docker:" + "dind") or
       startswith("docker.io/library/docker:") or
       startswith("docker.io/library/docker@") or
-      startswith("nexus.example.invalid/oci-approved/docker/dind@") or
+      startswith("registry.example.invalid/oci-approved/docker/dind@") or
       startswith("localhost/codewire-ci/docker-dind:");
     [
       .items[]
@@ -3187,8 +3187,8 @@ assert_sandbox_supply_chain() {
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
                startswith("docker.io/library/docker") or
-               startswith("nexus.example.invalid/oci-approved/codewire/workspace@") or
-               startswith("nexus.example.invalid/oci-approved/docker/dind@") or
+               startswith("registry.example.invalid/oci-approved/codewire/workspace@") or
+               startswith("registry.example.invalid/oci-approved/docker/dind@") or
                startswith("localhost/codewire-ci/workspace:") or
                startswith("localhost/codewire-ci/docker-dind:"))
     ' <<<"$pods" | LC_ALL=C sort -u >&2
@@ -3202,8 +3202,8 @@ assert_sandbox_supply_chain() {
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
                startswith("docker.io/library/docker") or
-               startswith("nexus.example.invalid/oci-approved/codewire/workspace@") or
-               startswith("nexus.example.invalid/oci-approved/docker/dind@") or
+               startswith("registry.example.invalid/oci-approved/codewire/workspace@") or
+               startswith("registry.example.invalid/oci-approved/docker/dind@") or
                startswith("localhost/codewire-ci/workspace:") or
                startswith("localhost/codewire-ci/docker-dind:"))] as $images
     | ($images | index($workspace) != null)
@@ -3215,8 +3215,8 @@ assert_sandbox_supply_chain() {
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
                startswith("docker.io/library/docker") or
-               startswith("nexus.example.invalid/oci-approved/codewire/workspace@") or
-               startswith("nexus.example.invalid/oci-approved/docker/dind@") or
+               startswith("registry.example.invalid/oci-approved/codewire/workspace@") or
+               startswith("registry.example.invalid/oci-approved/docker/dind@") or
                startswith("localhost/codewire-ci/workspace:") or
                startswith("localhost/codewire-ci/docker-dind:"))] | unique[]' \
       <<<"$templates" >&2

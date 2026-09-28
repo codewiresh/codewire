@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly RUNNER="$ROOT/scripts/ci/images/run-skopeo-container.sh"
-readonly IMAGE='nexus.example.invalid/oci-approved/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
+readonly IMAGE='registry.example.invalid/oci-approved/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
 
 fail() {
   printf '[test-run-skopeo-container] ERROR: %s\n' "$*" >&2
