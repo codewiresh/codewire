@@ -141,10 +141,21 @@ while read -r candidate; do
   commit_job="$(jq -r '.jobs[] | select(.name == "Commit one complete dev release") | .id' "$view")"
   acceptance_job="$(jq -r '.jobs[] | select(.name == "Run exact-source Dev acceptance smokes") | .id' "$view")"
   [[ "$commit_job" =~ ^[1-9][0-9]*$ && "$acceptance_job" =~ ^[1-9][0-9]*$ ]] || continue
-  fj actions runs logs "$candidate" "${deploy_repo[@]}" --job "$commit_job" 2>/dev/null \
-    | tr -d '\r' | grep -Eq "$checkout_line" || continue
-  fj actions runs logs "$candidate" "${deploy_repo[@]}" --job "$acceptance_job" 2>/dev/null \
-    | tr -d '\r' | grep -Eq "$checkout_line" || continue
+  # Read each whole log into a file before matching. A pipeline ending in
+  # grep -q can stop reading early and fail the writer under pipefail.
+  job_log="$tmp/deploy-$candidate-job.log"
+  job_text="$tmp/deploy-$candidate-job.txt"
+  proven=true
+  for job in "$commit_job" "$acceptance_job"; do
+    if ! fj actions runs logs "$candidate" "${deploy_repo[@]}" --job "$job" \
+        >"$job_log" 2>/dev/null \
+      || ! tr -d '\r' <"$job_log" >"$job_text" \
+      || ! grep -Eq "$checkout_line" "$job_text"; then
+      proven=false
+      break
+    fi
+  done
+  [ "$proven" = true ] || continue
   dev_run_id="$candidate"
   break
 done < <(jq -r '
