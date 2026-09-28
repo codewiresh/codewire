@@ -43,7 +43,7 @@ Options:
 Run this script only through the Infra Kubernetes access wrapper. It reads
 ConfigMaps but no Secrets. Its temporary Cilium policy permits only cluster
 DNS, Trustee KBS on its exact namespace/port, and TCP 443 to either the exact
-private Nexus hostname or the public-address space used by product workspaces.
+private Harbor hostname or the public-address space used by product workspaces.
 USAGE
 }
 

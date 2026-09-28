@@ -336,9 +336,9 @@ resolve_active_release() {
   kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$configmap" -o json \
     >"$EVIDENCE_DIR/active-runtime-config.json"
   image="$(jq -r '.data.SANDBOX_GATEWAY_IMAGE // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
-  # Deploy owns the Dev registry overlay. Require its canonical private Nexus
+  # Deploy owns the Dev registry overlay. Require its canonical private Harbor
   # authority here; accepting the source-template or public mirror hides drift.
-  [[ "$image" =~ ^nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:[0-9a-f]{64}$ ]] || \
+  [[ "$image" =~ ^registry\.example\.invalid/codewire/gateway@sha256:[0-9a-f]{64}$ ]] || \
     die "active dev ConfigMap has no digest-pinned private gateway image"
 
   while IFS= read -r line; do
