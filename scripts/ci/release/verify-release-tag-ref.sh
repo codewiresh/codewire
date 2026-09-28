@@ -66,8 +66,12 @@ case "$event" in
     ;;
 esac
 
-[[ "$server_url" == "https://git.example.invalid" ]] ||
-  fail "server must be canonical Gitea, got '$server_url'"
+# The canonical Forgejo instance has one public and one internal Tailnet
+# name; runners register against the internal one. Nothing else is trusted.
+case "$server_url" in
+  https://git.example.invalid|https://forgejo.example.invalid) ;;
+  *) fail "server must be canonical Forgejo, got '$server_url'" ;;
+esac
 [[ "$repository" == "codewire/codewire" ]] ||
   fail "repository must be codewire/codewire, got '$repository'"
 valid_object_id "$source_sha" || fail "release source is not a Git object ID"

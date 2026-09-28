@@ -31,8 +31,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 grep -Fqx "header = \"Authorization: token ${FAKE_EXPECTED_TOKEN}\"" "$config" || exit 99
-[[ "$url" =~ ^https://git\.example\.invalid/api/v1/repos/codewire/codewire/git/tags/([0-9a-f]{40})$ ]] || exit 98
-object="${BASH_REMATCH[1]}"
+[[ "$url" =~ ^https://(git\.example\.invalid|forgejo-system-cluster\.private\.invalid)/api/v1/repos/codewire/codewire/git/tags/([0-9a-f]{40})$ ]] || exit 98
+object="${BASH_REMATCH[2]}"
 name="$(git cat-file tag "$object" | awk '$1 == "tag" { print $2; exit }')"
 commit="$(git cat-file tag "$object" | awk '$1 == "object" { print $2; exit }')"
 record() {
@@ -110,6 +110,12 @@ run_verify \
   https://git.example.invalid/ codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null
 
+# Runners register against the same instance's internal Tailnet name.
+run_verify \
+  workflow_dispatch refs/heads/main main v0.3.359 \
+  https://forgejo.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null
+
 # Forgejo's verdict is required; every other response fails closed.
 for mode in unverified sha-mismatch malformed not-found server-error transport; do
   if FAKE_TAG_API_MODE="$mode" run_verify \
@@ -173,6 +179,10 @@ expect_failure branch-push \
 expect_failure mismatched-push-ref-name \
   push refs/tags/v0.3.359 v0.3.358 '' \
   https://git.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
+expect_failure lookalike-internal-server \
+  workflow_dispatch refs/heads/main main v0.3.359 \
+  https://forgejo.example.invalid.evil.example codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
 expect_failure wrong-server \
   workflow_dispatch refs/heads/main main v0.3.359 \
