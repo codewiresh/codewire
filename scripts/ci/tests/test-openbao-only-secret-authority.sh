@@ -415,10 +415,11 @@ done
 # Production binds the tenant-secret client to its reconciled OpenBao Transit
 # authority (clusters/system-cluster/access/openbao-codewire-tenant-secrets.json
 # in infra); confidential storage stays unconfigured until reconciled.
-jq -e '
+prod_login_mount='prod-cluster-k8s'
+jq -e --arg prod_login_mount "$prod_login_mount" '
   .BAO_ADDR == "https://openbao.example.invalid" and
   .OPENBAO_KUBERNETES_API_AUDIENCE == "https://10.70.0.100:6443" and
-  .TENANT_SECRET_BAO_AUTH_MOUNT == "prod-cluster-k8s" and
+  .TENANT_SECRET_BAO_AUTH_MOUNT == $prod_login_mount and
   .TENANT_SECRET_BAO_ROLE == "codewire-tenant-prod-cluster" and
   .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-prod-cluster" and
   .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-prod" and
