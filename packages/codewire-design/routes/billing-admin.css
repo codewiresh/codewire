@@ -65,14 +65,7 @@
 
 [data-dashboard-app] .cw-billing-stack,
 [data-dashboard-app] .cw-admin-stack { gap: .8rem; }
-[data-dashboard-app] .cw-admin-stack > .cw-page-title,
-[data-dashboard-app] .cw-admin-heading .cw-page-title { font: 500 .78rem/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
-[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-body { padding: 1rem; }
-[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-header { padding: .9rem 1rem; border-bottom-color: #1d1d1d; }
-[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-header h2,
-[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-title { font-size: .78rem; }
-[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-card-header > div > p,
-[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-muted { color: #6e6e6e; font-size: .7rem; }
+[data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-muted { font-size: var(--text-secondary); }
 [data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-stat-grid { gap: .75rem; }
 [data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-stat { padding: .8rem; border-color: #222; border-radius: .45rem; background: #0b0b0b; }
 [data-dashboard-app] :is(.cw-billing-stack, .cw-admin-stack) .cw-stat > span { color: #666; font: .6rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }

@@ -731,3 +731,187 @@ if (app) {
   });
   setDrawerOpen(drawerPathMatches(currentDrawer()));
 }
+
+// Provider device authorization runs inside its Credentials dialog: the form
+// asks for enrollment events, shows the one-time code while the provider waits
+// for approval, and reloads Credentials once the connection is saved. Without
+// JavaScript the same form opens the streamed fallback page.
+(() => {
+  "use strict";
+  const running = new WeakMap();
+  const element = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const reset = (dialog) => {
+    running.get(dialog)?.abort();
+    running.delete(dialog);
+    dialog.querySelector(".cw-device-enrollment")?.remove();
+    delete dialog.dataset.enrollmentState;
+    const submit = dialog.querySelector('.cw-dialog-actions [type="submit"]');
+    if (submit instanceof HTMLButtonElement) submit.disabled = false;
+  };
+  const view = (dialog, state, ...children) => {
+    dialog.querySelector(".cw-device-enrollment")?.remove();
+    const section = element("section", "cw-device-enrollment");
+    section.setAttribute("aria-live", "polite");
+    section.append(...children);
+    dialog.querySelector(".cw-dialog-body")?.append(section);
+    dialog.dataset.enrollmentState = state;
+    return section;
+  };
+  const svgIcon = (name) => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "cw-icon");
+    svg.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", `/assets/codewire/icons-v2.svg#${name}`);
+    svg.append(use);
+    return svg;
+  };
+  // The service reports "YYYY-MM-DD HH:MM UTC"; show it in the viewer's time.
+  const localTime = (text) => {
+    const parts = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC$/.exec(text || "");
+    if (!parts) return text;
+    const [, year, month, day, hour, minute] = parts.map(Number);
+    return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" })
+      .format(new Date(Date.UTC(year, month - 1, day, hour, minute)));
+  };
+  // The Clipboard API exists only in secure contexts. Elsewhere the code is
+  // selected and copied; when that fails it stays selected for the keyboard.
+  const copyText = async (text, node) => {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    if (!document.execCommand("copy")) throw new Error("copy unavailable");
+    selection?.removeAllRanges();
+  };
+  const showChallenge = (dialog, form, challenge) => {
+    let url;
+    try { url = new URL(challenge.verificationUrl); } catch { url = null; }
+    if (!url || url.protocol !== "https:" || typeof challenge.userCode !== "string") return false;
+    const code = element("div", "cw-device-code");
+    const copy = element("button", "cw-device-copy");
+    copy.type = "button";
+    copy.setAttribute("aria-label", "Copy code");
+    copy.append(svgIcon("icon-copy"));
+    const value = element("code", "", challenge.userCode);
+    copy.addEventListener("click", () => {
+      copyText(challenge.userCode, value).then(() => {
+        copy.replaceChildren(svgIcon("icon-check"));
+        copy.setAttribute("aria-label", "Code copied");
+        window.setTimeout(() => {
+          copy.replaceChildren(svgIcon("icon-copy"));
+          copy.setAttribute("aria-label", "Copy code");
+        }, 1600);
+      }, () => {});
+    });
+    code.append(value, copy);
+    const open = element("a", "cw-button", `Open ${challenge.provider}`);
+    open.href = url.href;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    const again = element("button", "cw-link-button", "Get a new code");
+    again.type = "button";
+    again.addEventListener("click", () => { void enroll(form, dialog); });
+    const footer = element("div", "cw-device-footer");
+    footer.append(element("p", "cw-device-status", `Waiting for approval. The code expires at ${localTime(challenge.expires)}.`), again);
+    view(dialog, "waiting",
+      element("p", "", `Enter this code in ${challenge.provider} to approve the connection.`),
+      code,
+      open,
+      footer);
+    open.focus({ preventScroll: true });
+    return true;
+  };
+  const showFailure = (dialog, message, uncertain) => {
+    const again = element("button", "cw-button cw-button--outline", "Try again");
+    again.type = "button";
+    again.addEventListener("click", () => reset(dialog));
+    view(dialog, "failed",
+      element("p", "cw-alert cw-alert--error", message),
+      ...(uncertain ? [element("p", "cw-device-status", "It may already be saved. Check Credentials before connecting again.")] : []),
+      again);
+    dialog.querySelector(".cw-alert--error")?.setAttribute("role", "alert");
+  };
+  const handle = (dialog, form, name, data) => {
+    if (name === "challenge") return showChallenge(dialog, form, data) ? "continue" : "invalid";
+    if (name === "connected" && typeof data.location === "string" && data.location.startsWith("/settings/credentials/")) {
+      view(dialog, "connected", element("p", "cw-alert cw-alert--success", "Connected. Updating Credentials…"));
+      window.location.assign(data.location);
+      return "done";
+    }
+    if (name === "failed" && typeof data.message === "string") {
+      showFailure(dialog, data.message, data.uncertain === true);
+      return "done";
+    }
+    return "invalid";
+  };
+  const enroll = async (form, dialog) => {
+    reset(dialog);
+    const controller = new AbortController();
+    running.set(dialog, controller);
+    view(dialog, "starting", element("p", "cw-device-status", "Requesting a sign-in code…"));
+    const submit = dialog.querySelector('.cw-dialog-actions [type="submit"]');
+    if (submit instanceof HTMLButtonElement) submit.disabled = true;
+    try {
+      const response = await fetch(form.action, {
+        method: "POST",
+        body: new URLSearchParams(new FormData(form)),
+        headers: { Accept: "text/event-stream" },
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
+      // Validation and session failures answer with the page itself.
+      if (!response.body || !(response.headers.get("content-type") || "").startsWith("text/event-stream")) {
+        window.location.assign(response.url);
+        return;
+      }
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        let boundary;
+        while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const name = /^event: (.+)$/m.exec(frame)?.[1];
+          const data = /^data: (.+)$/m.exec(frame)?.[1];
+          if (!name || !data) continue;
+          const outcome = handle(dialog, form, name, JSON.parse(data));
+          if (outcome === "done") return;
+          if (outcome === "invalid") throw new Error("invalid enrollment event");
+        }
+      }
+      throw new Error("enrollment ended without an outcome");
+    } catch {
+      if (controller.signal.aborted) return;
+      showFailure(dialog, "The connection ended before Codewire confirmed it.", true);
+    }
+  };
+  document.addEventListener("submit", (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.matches("form[data-device-enrollment]")) return;
+    const dialog = form.closest("dialog");
+    if (!(dialog instanceof HTMLDialogElement) || typeof TextDecoderStream !== "function" || event.defaultPrevented) return;
+    event.preventDefault();
+    if (!dialog.dataset.enrollmentWired) {
+      dialog.dataset.enrollmentWired = "true";
+      dialog.addEventListener("close", () => reset(dialog));
+    }
+    // The submitted values now belong to the running connection, so closing
+    // the dialog cancels it instead of asking to discard edits.
+    form.querySelectorAll("input, textarea").forEach((control) => { control.defaultValue = control.value; });
+    void enroll(form, dialog);
+  });
+})();

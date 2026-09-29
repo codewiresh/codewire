@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
 
-test.use({ storageState: { cookies: [], origins: [] } });
+// The Create sheet slides in; with motion a help trigger can move out from under
+// the pointer, hover-hide its popover, and let Escape close the sheet instead.
+// Reduced motion removes that race; a rarer one under heavy load remains.
+test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reducedMotion: "reduce" } });
 
 test("Create resource help stays readable without editing or closing the form", async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
-  await page.locator("[data-create-resources] > summary").click();
 
   const rows = await page.locator(".cw-create-resources > .cw-field").evaluateAll((fields) =>
     fields.map((field) => Math.round(field.getBoundingClientRect().top)));
@@ -38,7 +40,8 @@ test("Create resource help stays readable without editing or closing the form", 
   await expect(page.locator("[data-create-draft-status]")).toHaveText("");
   expect(await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("codewire.create-selections.v1:")).length)).toBe(0);
 
-  await page.locator("[data-create-resources] > summary").focus();
+  // Keyboard users reach the first resource help from the field before it.
+  await page.getByRole("textbox", { name: "Name", exact: true }).focus();
   await page.keyboard.press("Tab");
   await expect(cpu).toBeFocused();
   await expect(help).toBeVisible();

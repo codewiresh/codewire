@@ -61,14 +61,18 @@ test.describe("server-rendered dashboard", () => {
         headingSize: headingStyle?.fontSize,
         headingLineHeight: headingStyle?.lineHeight,
         headingLetterSpacing: headingStyle?.letterSpacing,
+        headingTransform: headingStyle?.textTransform,
+        headingWeight: headingStyle?.fontWeight,
       };
     });
     expect(shellGeometry.sidebarWidth).toBe(260);
     expect(shellGeometry.headerHeight).toBe(52);
-    expect(shellGeometry.headingFont).toContain("IBM Plex Mono");
-    expect(shellGeometry.headingSize).toBe("12px");
-    expect(shellGeometry.headingLineHeight).toBe("16px");
-    expect(shellGeometry.headingLetterSpacing).toBe("1.56px");
+    // Page titles are sentence-case sans headings, not small mono labels.
+    expect(shellGeometry.headingFont).not.toContain("IBM Plex Mono");
+    expect(Number.parseFloat(shellGeometry.headingSize ?? "0")).toBeGreaterThanOrEqual(24);
+    expect(shellGeometry.headingTransform).toBe("none");
+    expect(Number(shellGeometry.headingWeight)).toBeGreaterThanOrEqual(600);
+    expect(shellGeometry.headingLetterSpacing).toBe("normal");
 
     await expect(page.locator('[data-quick-search-results] a[data-search-text*="snapshots"]')).toHaveCount(0);
     const searchResults = page.locator(".cw-sidebar-slot [data-quick-search-results]");

@@ -18,16 +18,12 @@
 [data-dashboard-app] .cw-settings-subnav a[aria-current="page"] { background: #191919; color: #ededed; }
 [data-dashboard-app] .cw-settings-content { width: min(100%, 52rem); min-width: 0; padding: 1.5rem 1.25rem 3rem; }
 [data-dashboard-app] .cw-settings-content > .cw-alert { margin-bottom: 1rem; }
-[data-dashboard-app] .cw-settings-content .cw-page-title { font: 500 .78rem/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
 [data-dashboard-app] .cw-settings-card { overflow: visible; }
-[data-dashboard-app] .cw-settings-card + .cw-settings-card { margin-top: .8rem; }
-[data-dashboard-app] .cw-settings-card .cw-card-header { padding: 1rem 1.1rem .75rem; border-bottom: 1px solid #1d1d1d; }
-[data-dashboard-app] .cw-settings-card .cw-card-title { display: flex; align-items: center; gap: .5rem; font-size: .78rem; }
-[data-dashboard-app] .cw-settings-card .cw-card-description { margin-top: .25rem; color: #6e6e6e; font-size: .7rem; line-height: 1.5; }
-[data-dashboard-app] .cw-settings-card .cw-card-content { padding: 1rem 1.1rem; }
+[data-dashboard-app] .cw-settings-card + .cw-settings-card { margin-top: 1rem; }
+[data-dashboard-app] .cw-settings-card .cw-card-title { display: flex; align-items: center; gap: .5rem; }
 [data-dashboard-app] .cw-settings-card form + p,
 [data-dashboard-app] .cw-settings-card p + form { margin-top: .75rem; }
-[data-dashboard-app] .cw-settings-muted { margin: 0; color: #777; font-size: .75rem; line-height: 1.6; }
+[data-dashboard-app] .cw-settings-muted { margin: 0; color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
 [data-dashboard-app] .cw-mono { font-family: var(--font-mono); }
 [data-dashboard-app] .cw-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; padding: 1rem; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
 [data-dashboard-app] .cw-settings-form > .cw-button { align-self: end; justify-self: start; }
@@ -149,3 +145,26 @@
   [data-dashboard-app] .cw-public-key > small { grid-column: auto; }
   [data-dashboard-app] .cw-profile-row header { align-items: stretch; flex-direction: column; }
 }
+/* Device authorization in a credential dialog replaces the form with its steps. */
+[data-dashboard-app] .cw-credential-dialog[data-enrollment-state] .cw-dialog-body > :not(.cw-device-enrollment),
+[data-dashboard-app] .cw-credential-dialog[data-enrollment-state] .cw-dialog-actions [type="submit"] { display: none; }
+[data-dashboard-app] .cw-device-enrollment { display: grid; gap: .875rem; justify-items: start; }
+[data-dashboard-app] .cw-device-enrollment > p { margin: 0; }
+[data-dashboard-app] .cw-device-code { display: inline-flex; align-items: center; gap: .5rem; margin: 0; padding: .375rem .375rem .375rem .875rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--bg-surface); }
+[data-dashboard-app] .cw-device-code code { color: var(--fg-primary); font: 600 1.375rem/1.2 var(--font-mono); letter-spacing: .08em; }
+[data-dashboard-app] .cw-device-copy { display: grid; width: 2rem; height: 2rem; place-items: center; border: 0; border-radius: .375rem; background: transparent; color: var(--fg-secondary); cursor: pointer; }
+[data-dashboard-app] .cw-device-copy:hover,
+[data-dashboard-app] .cw-device-copy:focus-visible { background: var(--bg-surface-hover); color: var(--fg-primary); outline: 2px solid var(--accent-muted); outline-offset: 1px; }
+[data-dashboard-app] .cw-device-copy .cw-icon { width: 16px; height: 16px; }
+[data-dashboard-app] .cw-device-footer { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .5rem 1rem; width: 100%; }
+[data-dashboard-app] .cw-link-button { padding: 0; border: 0; background: none; color: var(--accent-hover); font: inherit; font-size: var(--text-secondary); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+[data-dashboard-app] .cw-link-button:hover,
+[data-dashboard-app] .cw-link-button:focus-visible { color: var(--fg-primary); }
+[data-dashboard-app] .cw-device-status { margin: 0; color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
+/* Without JavaScript the same steps stream into one centered panel; each step hides the one before it. */
+[data-dashboard-app] .cw-connect { display: grid; min-height: 100vh; place-items: center; padding: 1.5rem 1rem; }
+[data-dashboard-app] .cw-connect-panel { width: min(100%, 30rem); }
+[data-dashboard-app] .cw-connect-back { color: var(--fg-secondary); font-size: var(--text-secondary); }
+[data-dashboard-app] .cw-connect-panel .cw-card-title { margin-top: .5rem; }
+[data-dashboard-app] .cw-connect-panel:has([data-connect-challenge]) [data-connect-pending],
+[data-dashboard-app] .cw-connect-panel:has([data-connect-result]) :is([data-connect-pending], [data-connect-challenge]) { display: none; }

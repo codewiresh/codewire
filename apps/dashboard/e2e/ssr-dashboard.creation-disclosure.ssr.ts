@@ -9,22 +9,22 @@ test("creation keeps sources visible and closed advanced fields remain native fo
   await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
   const resources = page.locator("[data-create-resources]");
   const runtime = page.locator("[data-create-runtime]");
-  await expect(resources).not.toHaveAttribute("open", "");
+  // Resources and lifetime are first-class fields; only runtime commands fold away.
+  await expect(resources.getByRole("heading", { name: "Resources and lifetime", exact: true })).toBeVisible();
+  await expect(resources.locator("summary")).toHaveCount(0);
   await expect(runtime).not.toHaveAttribute("open", "");
-  await expect(page.getByLabel("CPU", { exact: true })).toBeHidden();
+  await expect(page.getByLabel("CPU", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Install Command", { exact: true })).toBeHidden();
   await expect(page.getByRole("heading", { name: "Repositories", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Application secrets", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Provider credentials", exact: true })).toBeVisible();
   await expect(page.locator(".cw-snapshot-stub, .cw-snapshot-meter")).toHaveCount(0);
-  await resources.locator("summary").click();
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Memory", { exact: true }).selectOption("4096");
   await page.getByLabel("Disk", { exact: true }).selectOption("20");
   await expect(page.getByLabel("CPU", { exact: true }).locator("option:checked")).toHaveText("2 vCPU");
   await expect(page.getByLabel("Memory", { exact: true }).locator("option:checked")).toHaveText("4 GiB");
   await expect(page.getByLabel("Delete after")).toHaveAccessibleDescription(/automatic deletion.*not an idle timeout/);
-  await resources.locator("summary").click();
   await runtime.locator("summary").click();
   await page.getByLabel("Install Command", { exact: true }).fill("bun install");
   await page.getByLabel("Startup Script", { exact: true }).fill("bun run dev");
@@ -61,11 +61,11 @@ const fixtureUrl = () => {
 };
 
 function loadingCreateFixture(hydratedHtml: string) {
-  const start = hydratedHtml.indexOf("<div data-create-optional-options>");
+  const start = hydratedHtml.indexOf('<div class="cw-create-stack" data-create-optional-options>');
   const end = hydratedHtml.indexOf('<details class="cw-create-panel cw-runtime-options', start);
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
-  return `${hydratedHtml.slice(0, start)}<div data-create-optional-options><p role="status">Loading provider, secret, agent, and isolation choices…</p><button type="button" data-retry-create-options hidden>Retry loading choices</button><input type="hidden" name="isolation_tier" value="standard"></div>\n${hydratedHtml.slice(end)}`
+  return `${hydratedHtml.slice(0, start)}<div class="cw-create-stack" data-create-optional-options><p role="status">Loading provider, secret, agent, and isolation choices…</p><button type="button" data-retry-create-options hidden>Retry loading choices</button><input type="hidden" name="isolation_tier" value="standard"></div>\n${hydratedHtml.slice(end)}`
     .replace('data-create-options-loading="false"', 'data-create-options-loading="true"')
     .replace(/<p class="cw-field-help" data-create-preview-hint>.*?<\/p>/, '<p class="cw-field-help" data-create-preview-hint>Loading preview URL details…</p>');
 }
@@ -292,7 +292,6 @@ test("Create submission has bounded pending feedback and recovers from BFCache",
 
 test("dirty Create Close keeps inputs and saved draft until explicit Discard", async ({ page }) => {
   await page.goto(fixtureUrl());
-  await page.locator("[data-create-resources] summary").click();
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Name", { exact: true }).fill("unsaved-name-canary");
   const form = page.locator("[data-environment-form]");
@@ -421,7 +420,6 @@ test("dirty Create setup navigation offers Keep or saved-draft navigation", asyn
   await page.goto(fixtureUrl());
   let creates = 0;
   page.on("request", (request) => { if (/PrepareEnvironment|\/_actions\/sandboxes\/create/.test(request.url())) creates += 1; });
-  await page.locator("[data-create-resources] summary").click();
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Name", { exact: true }).fill("setup-private-canary");
   const link = page.locator("[data-github-setup-link]");
@@ -548,9 +546,8 @@ test("Create setup links carry only the current draft handle and Edit links stay
   for (const link of await links.all()) {
     const href = await link.getAttribute("href");
     const target = new URL(href!, page.url());
-    expect([...target.searchParams.entries()]).toEqual(target.pathname.endsWith("/settings-secrets.html")
-      ? [["org", "fixture-org"], ["creation_draft", draftId]]
-      : [["creation_draft", draftId]]);
+    // Settings carries no organization; the draft handle is the only context.
+    expect([...target.searchParams.entries()]).toEqual([["creation_draft", draftId]]);
     expect(href).not.toContain("name-never-navigation");
     expect(href).not.toContain("canary.invalid");
   }
@@ -619,7 +616,6 @@ test("explicit return with unavailable storage keeps a usable native form", asyn
 
 test("Create drafts save bounded authored fields and offer explicit recovery after reload", async ({ page }) => {
   await page.goto(fixtureUrl());
-  await page.locator("[data-create-resources] summary").click();
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Memory", { exact: true }).selectOption("4096");
   await page.getByLabel("Disk", { exact: true }).selectOption("20");
@@ -642,7 +638,6 @@ test("Create drafts save bounded authored fields and offer explicit recovery aft
   });
   await page.reload();
   await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
-  await page.locator("[data-create-resources] summary").click();
   await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
   const draft = JSON.parse(bytes) as Draft;
@@ -745,7 +740,6 @@ test("Create recovery restores authored values only after current selections are
   await expect(page.getByLabel("Repository URL")).toHaveValue("https://git.example.test/team/repository.git");
   await expect(page.getByLabel("Branch", { exact: true })).toHaveValue("feature");
   await expect(page.getByLabel("Mount path", { exact: true })).toHaveValue("repository");
-  await page.locator("[data-create-resources] summary").click();
   await expect(page.getByLabel("Delete after")).toHaveValue("not-a-duration");
   await expect(page.getByLabel("Internal port")).toHaveValue("");
   await expect(page.getByLabel("Preview label")).toHaveValue("web");
@@ -756,7 +750,6 @@ test("Create recovery restores authored values only after current selections are
 
 test("Create draft retains in-progress preview and lifetime text", async ({ page }) => {
   await page.goto(fixtureUrl());
-  await page.locator("[data-create-resources] summary").click();
   await page.getByLabel("Delete after").fill("not-a-duration");
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByLabel("Preview label").fill("web");

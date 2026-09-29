@@ -78,9 +78,13 @@ test("five full-row choices open focused provider editors with Back and one foot
       await expect(editor.locator('input[name="name"]')).toHaveCount(0);
       await expect(action(editor, "Done")).toBeFocused();
       await expect(action(editor, "Continue to GitHub")).toHaveCount(0);
-      const saved = editor.getByRole("region", { name: "Your GitHub connection", exact: true });
-      await expect(action(saved, "Reconnect verified-user")).toBeVisible();
-      await expect(saved).toContainText("Active");
+      // The one account-level connection is stated plainly; the actions are
+      // reconnecting it or disconnecting it to use a different account.
+      await expect(editor).toContainText("Your GitHub account verified-user is already connected.");
+      await expect(editor).toContainText("Active");
+      await expect(action(editor, "Reconnect")).toBeVisible();
+      await expect(action(editor, "Disconnect")).toBeVisible();
+      await expect(editor.getByRole("heading", { level: 3 })).toHaveCount(0);
       await page.screenshot({ path: test.info().outputPath("github-saved-connections.png") });
     }
     if (name.includes("API key")) {
@@ -105,7 +109,7 @@ test("saved GitHub connection opens its exact reconnect dialog without submittin
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
   await choose(page, "GitHub");
   const connect = dialog(page, "Connect GitHub");
-  await action(connect, "Reconnect verified-user").click();
+  await action(connect, "Reconnect").click();
   const reconnect = dialog(page, "Reconnect verified-user");
   await expect(reconnect).toBeVisible();
   await expect(connect).not.toBeVisible();
@@ -312,15 +316,15 @@ test("reconnect consent and destructive confirms preserve exact authority and ne
   await action(reconnect, "Back").click();
   // GitHub has no revoke step: one confirmed Delete removes the connection.
   await expect(action(manage, "Revoke credential")).toHaveCount(0);
-  await action(manage, "Delete GitHub").click();
-  const removal = dialog(page, "Delete GitHub?");
-  await footer(removal, "Delete GitHub");
+  await action(manage, "Disconnect GitHub").click();
+  const removal = dialog(page, "Disconnect GitHub?");
+  await footer(removal, "Disconnect GitHub");
   await expect(action(removal, "Cancel")).toBeFocused();
-  await expect(removal).toContainText("Every profile uses GitHub again after you reconnect");
+  await expect(removal).toContainText("Profiles show GitHub as missing until you connect again");
   await page.screenshot({ path: test.info().outputPath("github-delete-confirmation.png") });
   await fits(page, removal);
   expect(posts).toEqual([]);
-  await action(removal, "Delete GitHub").click();
+  await action(removal, "Disconnect GitHub").click();
   await expect.poll(() => posts.length).toBe(1);
   expect(posts[0]).toEqual({ path: "/settings/credentials/_actions/credentials/delete", fields: {
     _csrf: "design-fixture-only", credential_id: "fixture-github", expected_revocation_generation: "1",
