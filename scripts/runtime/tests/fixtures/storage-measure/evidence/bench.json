@@ -1,0 +1,1 @@
+{"create_to_ready_ms": 9000, "server": {"provision_ms": 1500, "attach_ms": 2000, "create_to_ready_ms": 9000, "image_pulled": false}, "teardown": {"status": "ok", "error": null, "reclaim_policy": "Delete", "pod_delete_ms": 2100, "pvc_delete_ms": 150, "pv_delete_ms": 800, "total_ms": 3050}}
