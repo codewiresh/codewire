@@ -4,7 +4,8 @@
 # `kind-e2e.sh credentials real|fake` selects the credential-service.
 #
 #   seed-login      seed e2e-owner@codewire.sh / SecureTestPass9#
-#   runtime-images  load the product's default workspace image, as Dev runs it
+#   runtime-images  load the product's default workspace and DinD images, by
+#                   digest, as Dev runs them (--dry-run prints the plan)
 #   watch           make the cluster serve KIND_PUBLIC_ORIGIN like Dev (browser
 #                   origin, default images), then serve the current dashboard
 #                   source there
@@ -102,26 +103,104 @@ ensure_review_origin() {
   done
 }
 
-# Create's default workspace image is a Harbor digest that Dev pulls with its
-# registry credential. The public GHCR mirror publishes the same digest, so
-# load that into every node under the Harbor reference the product uses; the
-# identical digest makes it the same image, and no credential is involved.
+# Every image a default Sandbox runs that the Kind gate does not build; the
+# gateway and daemon-init come from the locally built gateway image. Each row
+# is the product constant a default Sandbox renders (the Kind overlay's
+# SANDBOX_DIND_IMAGE names the same reference):
+#
+#   name  file defining it  constant  accepted reference  public source
+#
+# The public source serves the same digest without a credential; \N is the
+# Nth group of the accepted reference, whose last group is its digest.
+# - workspace: a Harbor digest Dev pulls with its registry credential; the
+#   public GHCR mirror publishes the same digests.
+# - dind: Docker Hub's official image, pulled by its index digest alone.
+RUNTIME_IMAGES=(
+  'workspace crates/codewire-server-core/src/runtime_images.rs DEFAULT_WORKSPACE_IMAGE ^registry\.example\.invalid/codewire/([a-z0-9-]+)@(sha256:[0-9a-f]{64})$ ghcr.io/codewiresh/\1@\2'
+  'dind crates/codewire-orchestration/src/sandbox/template/mod.rs DEFAULT_DIND_IMAGE ^docker\.io/library/docker:[0-9]+\.[0-9]+\.[0-9]+-dind@(sha256:[0-9a-f]{64})$ docker.io/library/docker@\1'
+)
+
+# Print "<name> <reference> <source>" for every row, or fail closed when a
+# constant is missing, repeated or not the shape its row accepts, or when the
+# source would not name the reference's exact digest.
+resolve_runtime_images() {
+  local row name file constant pattern template reference source group
+  for row in "${RUNTIME_IMAGES[@]}"; do
+    read -r name file constant pattern template <<<"$row"
+    reference="$(sed -n "s/^pub const ${constant}: &str = \"\\(.*\\)\";\$/\\1/p" \
+      "$ROOT/$file" 2>/dev/null)" || true
+    [[ -n "$reference" && "$reference" != *$'\n'* ]] \
+      || die "${file} must define ${constant} once, on one line"
+    [[ "$reference" =~ $pattern ]] \
+      || die "${constant} is not a reference the ${name} row accepts: ${reference}"
+    source="$template"
+    for group in $(seq $((${#BASH_REMATCH[@]} - 1)) -1 1); do
+      source="${source//\\${group}/${BASH_REMATCH[group]}}"
+    done
+    [[ "$source" =~ ^[a-z0-9.-]+(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$ \
+      && "${source##*@}" == "${reference##*@}" ]] \
+      || die "the ${name} source ${source} does not pin ${constant}'s digest"
+    printf '%s %s %s\n' "$name" "$reference" "$source"
+  done
+}
+
+# containerd records a reference that carries both a tag and a digest under the
+# digest alone, which is also how the kubelet resolves it.
+image_record() {
+  local repository="${1%@*}"
+  case "${repository##*/}" in
+    *:*) repository="${repository%:*}" ;;
+  esac
+  printf '%s@%s\n' "$repository" "${1##*@}"
+}
+
+# The digest the node's image record <ref> points at; empty when absent.
+# Read the whole listing: stopping early would fail the pipe.
+node_image_digest() {
+  docker exec "$1" ctr -n k8s.io images ls \
+    | awk -v ref="$2" '$1 == ref && !found { print $3; found = 1 }'
+}
+
+# Pull every row's public source into every node by digest and name it as
+# the product renders it. An image already present at its digest is skipped;
+# any record that names a different digest fails the load.
 cmd_runtime_images() {
+  local dry_run=false resolved name reference source record digest node have
+  case "${1:-}" in
+    '') ;;
+    --dry-run) dry_run=true ;;
+    *) die "usage: $0 runtime-images [--dry-run]" ;;
+  esac
+  resolved="$(resolve_runtime_images)" || exit 1
+  if [ "$dry_run" = true ]; then
+    while read -r name reference source; do
+      printf '%s %s <- %s\n' "$name" "$reference" "$source"
+    done <<<"$resolved"
+    return 0
+  fi
   require_cluster
-  local harbor mirror node
-  harbor="$(sed -n 's/^pub const DEFAULT_WORKSPACE_IMAGE: &str = "\(.*\)";$/\1/p' \
-    "$ROOT/crates/codewire-server-core/src/runtime_images.rs")"
-  [[ "$harbor" =~ ^registry\.example\.invalid/codewire/[a-z0-9-]+@sha256:[0-9a-f]{64}$ ]] \
-    || die "could not read DEFAULT_WORKSPACE_IMAGE from runtime_images.rs"
-  mirror="ghcr.io/codewiresh/${harbor#registry.example.invalid/codewire/}"
   for node in $(kind get nodes --name "$KIND_CLUSTER_NAME"); do
-    if docker exec "$node" crictl inspecti "$harbor" >/dev/null 2>&1; then
-      continue
-    fi
-    log "loading the default workspace image ${harbor##*@} into ${node} from ${mirror%@*}"
-    docker exec "$node" crictl pull "$mirror" >/dev/null \
-      || die "the public GHCR mirror does not serve ${mirror}"
-    docker exec "$node" ctr -n k8s.io images tag --force "$mirror" "$harbor" >/dev/null
+    while read -r name reference source; do
+      record="$(image_record "$reference")"
+      digest="${reference##*@}"
+      have="$(node_image_digest "$node" "$record")" \
+        || die "could not list the images on ${node}"
+      [ "$have" != "$digest" ] || continue
+      [ -z "$have" ] || die "${node} names ${record} for ${have}, not ${digest}"
+      log "loading the ${name} image ${digest} into ${node} from ${source%@*}"
+      docker exec "$node" crictl pull "$source" >/dev/null \
+        || die "${source%@*} does not serve ${digest}"
+      have="$(node_image_digest "$node" "$source")" || have=''
+      [ "$have" = "$digest" ] \
+        || die "${node} pulled ${source} as ${have:-nothing}, not ${digest}"
+      if [ "$record" != "$source" ]; then
+        docker exec "$node" ctr -n k8s.io images tag "$source" "$record" >/dev/null \
+          || die "could not name ${source} as ${record} on ${node}"
+        have="$(node_image_digest "$node" "$record")" || have=''
+        [ "$have" = "$digest" ] \
+          || die "${node} names ${record} for ${have:-nothing}, not ${digest}"
+      fi
+    done <<<"$resolved"
   done
 }
 
@@ -188,8 +267,8 @@ cmd_status() {
 
 case "${1:-}" in
   seed-login) cmd_seed_login ;;
-  runtime-images) cmd_runtime_images ;;
+  runtime-images) shift; cmd_runtime_images "$@" ;;
   watch) cmd_watch ;;
   status) cmd_status ;;
-  *) echo "usage: $0 <seed-login|runtime-images|watch|status>" >&2; exit 2 ;;
+  *) echo "usage: $0 <seed-login|runtime-images [--dry-run]|watch|status>" >&2; exit 2 ;;
 esac

@@ -213,6 +213,14 @@ run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head
   scripts/ci/tests/test-sync-local-secrets.sh
 run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false \
   'policy policy_shell' scripts/dev/kind/sync-local-secrets.sh
+run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head false \
+  'policy policy_shell' scripts/ci/tests/test-kind-runtime-images.sh
+# The retained-cluster helpers are policy even where Kind would run; any other
+# scripts/dev/kind helper still selects the Kind gate.
+run_paths_case kind_retained_helpers_main push refs/heads/main false \
+  'policy policy_shell' scripts/dev/kind/dev-loop.sh scripts/ci/tests/test-kind-runtime-images.sh
+run_paths_case kind_dev_helper_main push refs/heads/main false \
+  'edge_kind kind policy policy_shell' scripts/dev/kind/kind-forwards.sh
 run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head false \
   'policy' .env.example secret-authority.example.json
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
