@@ -1437,6 +1437,8 @@ grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sour
 grep -qF 'assert_passed_count "platform owner-source authority matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 4' "$integration_runner"
+grep -qF -- "'api::admin::startup_database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \
