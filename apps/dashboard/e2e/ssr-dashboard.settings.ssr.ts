@@ -40,7 +40,7 @@ test.describe.serial("server-rendered settings mutations", () => {
         await email.fill(`ssr-git-${runId}@example.test`);
         await page.getByRole("button", { name: "Save commit identity" }).click();
         await expect(page.getByRole("status")).toContainText("Git commit identity saved");
-        await expect(page).toHaveURL(`/settings/credentials/${context}&message=identity-saved#git-identity`);
+        await expect(page).toHaveURL("/settings/credentials/?message=identity-saved#git-identity");
         await expect(page.getByLabel("Commit author name", { exact: true }).last()).toHaveValue("SSR Git Identity");
       } finally {
         // Restore even when a post-save assertion fails; exercise the retained
@@ -53,7 +53,7 @@ test.describe.serial("server-rendered settings mutations", () => {
           headers: { Origin: new URL(page.url()).origin }, maxRedirects: 0,
         });
         expect(response.status()).toBe(303);
-        expect(response.headers().location).toContain(`org=${encodeURIComponent(org.slug)}`);
+        expect(response.headers().location).not.toContain("org=");
         expect(response.headers().location).toContain("message=identity-saved#git-identity");
         await page.goto(response.headers().location);
         await expect(page.getByLabel("Commit author name", { exact: true }).last()).toHaveValue(originalName);

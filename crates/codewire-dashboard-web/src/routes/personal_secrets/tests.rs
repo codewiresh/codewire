@@ -215,7 +215,7 @@ async fn personal_context_discards_inaccessible_orgs_but_never_authentication_fa
                 .unwrap();
         assert_eq!(view.organization_navigation_unavailable, unavailable);
         assert!(!view.has_selected_organization);
-        assert!(view.global_context_query.is_empty());
+        assert_eq!(view.settings_url, "/settings/");
         assert_eq!(source.calls("/ListEnvironments"), 0);
     }
     for case in [2, 3, 5] {
@@ -422,8 +422,8 @@ fn recovery_uses_current_key_identity_not_stale_row_index_or_untrusted_dialog() 
     assert_eq!(page.active_dialog, "secret-1-value");
     assert_eq!(approved_error("untrusted-provider-text"), "");
     assert_eq!(
-        context_query("allowed", "DATABASE_URL", &DraftReturn::NoRequest),
-        "?org=allowed&cursor=DATABASE_URL"
+        context_query("DATABASE_URL", &DraftReturn::NoRequest),
+        "?cursor=DATABASE_URL"
     );
 }
 
@@ -609,7 +609,7 @@ async fn draft_query_is_closed_and_independent_of_ordinary_query_rejection() {
             .await
             .unwrap();
         assert_eq!(query.draft, expected);
-        let closed = context_query(&query.org, &query.cursor, &query.draft);
+        let closed = context_query(&query.cursor, &query.draft);
         assert!(!closed.contains("not-a-draft"));
         assert!(!closed.contains("return_to"));
         assert!(!closed.contains("foreign.example"));
@@ -628,12 +628,8 @@ async fn draft_query_is_closed_and_independent_of_ordinary_query_rejection() {
         );
     }
     assert_eq!(
-        context_query(
-            "space & org",
-            "DATABASE_URL",
-            &DraftReturn::Exact(DRAFT.into())
-        ),
-        format!("?org=space+%26+org&cursor=DATABASE_URL&creation_draft={DRAFT}")
+        context_query("DATABASE_URL", &DraftReturn::Exact(DRAFT.into())),
+        format!("?cursor=DATABASE_URL&creation_draft={DRAFT}")
     );
 }
 
@@ -682,12 +678,14 @@ async fn native_draft_pages_revalidate_org_and_preserve_paging_reload_and_nonmut
         "href=\"/allowed/new/?creation_draft={DRAFT}\">Return to Create Sandbox</a>"
     )));
     assert!(rendered.contains(&format!(
-        "href=\"{PATH}?org=allowed&#38;creation_draft={DRAFT}\">First page</a>"
+        "href=\"{PATH}?creation_draft={DRAFT}\">First page</a>"
     )));
     assert!(rendered.contains(&format!(
-        "href=\"{PATH}?org=allowed&#38;cursor=KEY098&#38;creation_draft={DRAFT}\">Next page</a>"
+        "href=\"{PATH}?cursor=KEY098&#38;creation_draft={DRAFT}\">Next page</a>"
     )));
-    assert!(rendered.contains(&format!("action=\"{PATH}_actions/set?org=allowed&#38;cursor=AAA_PREVIOUS&#38;creation_draft={DRAFT}\"")));
+    assert!(rendered.contains(&format!(
+        "action=\"{PATH}_actions/set?cursor=AAA_PREVIOUS&#38;creation_draft={DRAFT}\""
+    )));
     // Cancel remains a local dialog dismissal; the separate return anchor is
     // usable without submitting any form, including with JavaScript disabled.
     assert!(rendered.contains("type=\"button\" data-dialog-close>Cancel</button>"));
@@ -710,7 +708,9 @@ async fn native_draft_pages_revalidate_org_and_preserve_paging_reload_and_nonmut
     assert_eq!(response.status(), StatusCode::OK);
     let rendered = response.text().await.unwrap();
     assert!(rendered.contains("Return to Create Sandbox"));
-    assert!(rendered.contains(&format!("href=\"{PATH}?org=allowed&#38;cursor=AAA_PREVIOUS&#38;creation_draft={DRAFT}\">Reload secrets</a>")));
+    assert!(rendered.contains(&format!(
+        "href=\"{PATH}?cursor=AAA_PREVIOUS&#38;creation_draft={DRAFT}\">Reload secrets</a>"
+    )));
     assert!(!rendered.contains("id=\"add-secret-form\""));
 
     source.inventory.store(0, Ordering::SeqCst);
@@ -813,7 +813,7 @@ async fn native_draft_writes_preserve_closed_feedback_without_an_organization_de
             };
             assert_eq!(
                 response.headers()[header::LOCATION],
-                format!("{PATH}?org={org}&cursor=AAA_PREVIOUS{draft}&message={message}")
+                format!("{PATH}?cursor=AAA_PREVIOUS{draft}&message={message}")
             );
             assert!(
                 !response
@@ -912,7 +912,7 @@ async fn native_draft_validation_reopens_only_owning_editor_without_private_mate
             assert_eq!(response.status(), StatusCode::SEE_OTHER);
             assert_eq!(
                 response.headers()[header::LOCATION],
-                format!("{PATH}?org=allowed&creation_draft={DRAFT}&error=outcome-unknown")
+                format!("{PATH}?creation_draft={DRAFT}&error=outcome-unknown")
             );
         } else {
             assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);

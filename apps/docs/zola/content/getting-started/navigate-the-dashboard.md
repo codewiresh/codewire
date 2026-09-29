@@ -3,24 +3,15 @@ title: Navigate the dashboard
 description: Understanding the Codewire dashboard layout
 ---
 
-The dashboard at [codewire.sh/dashboard](https://codewire.sh/dashboard) is your home base for managing organizations and environments.
+Sign in at [codewire.sh](https://codewire.sh) to open the dashboard, your home base for managing organizations and sandboxes.
 
 ## Home
 
-The home page shows all your organizations, each displaying:
+Signing in opens your current organization's home, `codewire.sh/<organization>/`, which lists its sandboxes. If you do not belong to an organization yet, the dashboard offers to create one.
 
-- **Organization name**
-- **Environment count** — total environments in the org
-- **Running count** — how many environments are currently running
+## Switch organization
 
-### Setup checklist
-
-After creating your first organization, a setup checklist guides you through:
-
-1. Create an organization
-2. Create an environment
-
-Completed steps are checked off automatically.
+Choose an organization from the switcher at the top of the sidebar. You stay where you were: Settings stays on the same Settings page, and an organization page opens the same section in the organization you chose. Codewire remembers the choice in this browser, so personal pages such as Settings never need the organization in their address.
 
 ## Sidebar
 

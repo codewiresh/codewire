@@ -2539,14 +2539,8 @@ mod tests {
                 assert!(!href.contains("not-navigation"));
                 assert!(
                     href.starts_with(&format!("/{}/secrets/", organization.slug))
-                        || href.starts_with(&format!(
-                            "/settings/secrets/?org={}&amp;",
-                            organization.slug
-                        ))
-                        || href.starts_with(&format!(
-                            "/settings/credentials/?org={}&amp;",
-                            organization.slug
-                        ))
+                        || href.starts_with("/settings/secrets/?creation_draft=")
+                        || href.starts_with("/settings/credentials/?creation_draft=")
                 );
             }
         }
@@ -2616,19 +2610,13 @@ mod tests {
         .unwrap();
         let hrefs = setup_hrefs(&html);
         assert_eq!(hrefs.len(), 4);
-        assert_eq!(
-            hrefs[0],
-            format!("/settings/secrets/?org={}", organization.slug)
-        );
+        assert_eq!(hrefs[0], "/settings/secrets/");
         assert_eq!(
             hrefs[1],
             format!("/{}/secrets/organization/", organization.slug)
         );
         assert_eq!(hrefs[2], organization.secrets_url);
-        assert_eq!(
-            hrefs[3],
-            format!("/settings/credentials/?org={}", organization.slug)
-        );
+        assert_eq!(hrefs[3], "/settings/credentials/");
     }
 
     #[test]
@@ -3946,7 +3934,7 @@ mod tests {
             }));
         }
         assert!(html.contains(&format!(
-            "<a href=\"/settings/credentials/?org=organization&amp;{}\" data-github-setup-link data-create-draft-setup>Connect GitHub</a>",
+            "<a href=\"/settings/credentials/?{}\" data-github-setup-link data-create-draft-setup>Connect GitHub</a>",
             form.creation_draft_parameter()
         )));
         assert!(html.contains("data-github-browser data-github-state=\"not-configured\""));

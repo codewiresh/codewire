@@ -600,10 +600,8 @@ pub(crate) struct DashboardView {
     pub(crate) organizations: Vec<OrganizationRow>,
     pub(crate) has_organizations: bool,
     pub(crate) organization_navigation_unavailable: bool,
-    pub(crate) show_checklist: bool,
     pub(crate) new_organization_url: String,
     pub(crate) settings_url: String,
-    pub(crate) global_context_query: String,
     pub(crate) has_selected_organization: bool,
     pub(crate) selected_organization_name: String,
     pub(crate) selected_organization_slug: String,
@@ -622,6 +620,17 @@ pub(crate) struct DashboardView {
 }
 
 impl DashboardView {
+    /// The switcher's monogram: the selected organization's first letter.
+    pub(crate) fn selected_organization_initial(&self) -> String {
+        self.selected_organization_name
+            .chars()
+            .find(|character| character.is_alphanumeric())
+            .map_or_else(
+                || "·".to_owned(),
+                |initial| initial.to_uppercase().collect(),
+            )
+    }
+
     pub(crate) fn select_organization(
         &mut self,
         organization: &OrganizationContext,
@@ -632,8 +641,6 @@ impl DashboardView {
         self.selected_organization_name = organization.name.clone();
         self.selected_organization_slug = organization.slug.clone();
         self.selected_organization_url = organization.environments_url.clone();
-        self.global_context_query = format!("?org={}", organization.slug);
-        self.settings_url = format!("/settings/{}", self.global_context_query);
         self.sandbox_total = sandboxes.len();
         self.sandbox_running = sandboxes
             .iter()

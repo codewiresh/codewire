@@ -105,7 +105,7 @@ test.describe.serial("rounded management interface", () => {
     ] as const) {
       const response = await page.goto(`${path}?org=${slug}`);
       expect(response?.status()).toBe(200);
-      await expect(page).toHaveURL(`/settings/?org=${slug}${path === "/settings/" ? "" : path.includes("security") ? "#security" : "#sessions"}`);
+      await expect(page).toHaveURL(`/settings/${path === "/settings/" ? "" : path.includes("security") ? "#security" : "#sessions"}`);
       await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
       await expect(page.locator(".cw-account-session")).toHaveCount(2);
       await expect(page.locator("#account-details dd").first()).toHaveText("Account visual owner");

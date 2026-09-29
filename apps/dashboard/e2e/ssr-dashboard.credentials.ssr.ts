@@ -196,7 +196,7 @@ test.describe("managed provider credential browser journey", () => {
       await ttl.fill("3600s");
       await page.getByRole("textbox", { name: "Name", exact: true }).fill("setup-name-not-persisted");
       await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
-      const settingsPath = `/settings/credentials/?org=${slug}&creation_draft=${draft}`;
+      const settingsPath = `/settings/credentials/?creation_draft=${draft}`;
       const setupLink = page.getByRole("link", { name: "Connect GitHub", exact: true });
       await expect(setupLink).toHaveAttribute("href", settingsPath);
       await setupLink.click();

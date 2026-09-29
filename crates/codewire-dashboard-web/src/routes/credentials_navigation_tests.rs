@@ -214,12 +214,16 @@ async fn github_callbacks_drop_bad_navigation_without_changing_authorization_or_
                         "no-store, max-age=0"
                     );
                     assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
-                    assert!(
-                        response.headers()[header::SET_COOKIE]
-                            .to_str()
-                            .unwrap()
-                            .contains("Max-Age=0")
-                    );
+                    let cookies: Vec<_> = response
+                        .headers()
+                        .get_all(header::SET_COOKIE)
+                        .iter()
+                        .map(|value| value.to_str().unwrap().to_owned())
+                        .collect();
+                    assert!(cookies.iter().any(|cookie| {
+                        cookie.starts_with("codewire_github_app_authorization=")
+                            && cookie.contains("Max-Age=0")
+                    }));
                     let target = response.headers()[header::LOCATION].to_str().unwrap();
                     let path = target.split_once('?').unwrap().0;
                     let navigation = if path == PATH {
@@ -233,14 +237,21 @@ async fn github_callbacks_drop_bad_navigation_without_changing_authorization_or_
                     };
                     let preserved = nav_valid && mode != "no membership" && result != "bad state";
                     assert_eq!(navigation.contains("creation_draft="), preserved);
-                    assert_eq!(navigation.contains("org="), preserved);
-                    if preserved {
-                        assert!(navigation.contains(if mode == "renamed" {
-                            "org=renamed"
+                    assert!(!navigation.contains("org="));
+                    // The organization the signed navigation named becomes the
+                    // remembered one; the callback URL never selects it.
+                    let remembered = format!(
+                        "codewire_current_org={};",
+                        if mode == "renamed" {
+                            "renamed"
                         } else {
-                            "org=synthetic"
-                        }));
-                    }
+                            "synthetic"
+                        }
+                    );
+                    assert_eq!(
+                        cookies.iter().any(|cookie| cookie.starts_with(&remembered)),
+                        preserved
+                    );
                     assert!(
                         !target.contains("synthetic-callback-code")
                             && !target.contains("attacker-org")
@@ -285,9 +296,14 @@ async fn credential_page_has_explicit_return_and_page_owned_native_actions_only(
         format!("&creation_draft={DRAFT}"),
         format!("&creation_draft={DRAFT}&creation_draft={DRAFT}"),
     ] {
+        let query = suffix.trim_start_matches('&');
         let response = client()
-            .get(format!("{}{PATH}?org=synthetic{suffix}", dashboard.origin))
-            .headers(authority("unused"))
+            .get(format!(
+                "{}{PATH}{}{query}",
+                dashboard.origin,
+                if query.is_empty() { "" } else { "?" }
+            ))
+            .headers(remembered_authority("unused"))
             .send()
             .await
             .unwrap();
@@ -302,13 +318,12 @@ async fn credential_page_has_explicit_return_and_page_owned_native_actions_only(
                 .filter(|field| field.starts_with("/settings/credentials/_actions/"))
             {
                 assert!(
-                    field.ends_with(&format!("?org=synthetic&amp;creation_draft={DRAFT}")),
+                    field.ends_with(&format!("?creation_draft={DRAFT}")),
                     "native action lost navigation: {field}"
                 );
             }
-            assert!(!html.contains(&format!(
-                "/settings/?org=synthetic&amp;creation_draft={DRAFT}"
-            )));
+            // Only the organization switcher's relative links name one.
+            assert!(!html.replace("href=\"?org=", "").contains("org="));
         } else {
             assert!(!html.contains("creation_draft="));
         }
@@ -380,7 +395,9 @@ async fn profile_native_and_hx_success_validation_and_upstream_failure_keep_navi
                             .into_owned()
                     };
                     assert_eq!(navigation.contains("creation_draft="), exact);
-                    assert!(navigation.contains("org=synthetic"));
+                    // An action posted from an older page may still name its
+                    // organization; the page it returns to does not.
+                    assert!(!navigation.contains("org="));
                     if !valid {
                         assert!(
                             target.contains("error=profile-invalid")
@@ -507,4 +524,18 @@ async fn navigation_does_not_change_credentials_authentication_or_mutation_fence
                 .any(|(path, _)| path.ends_with("/ListOrganizations"))
         );
     }
+}
+
+/// A signed-in browser whose remembered organization is the synthetic one.
+fn remembered_authority(csrf: &str) -> HeaderMap {
+    let mut headers = authority(csrf);
+    headers.insert(
+        header::COOKIE,
+        format!(
+            "codewire.session_token=synthetic-session; codewire_ssr_csrf={csrf}; codewire_current_org=synthetic"
+        )
+        .parse()
+        .unwrap(),
+    );
+    headers
 }

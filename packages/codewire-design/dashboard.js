@@ -594,7 +594,7 @@ if (app) {
     }
   };
 
-  const menuSelector = ".cw-org-details[open], .cw-action-menu[open], .cw-filter-menu[open], .cw-row-menu[open], .cw-menu-resize[open], .cw-menu-destroy[open]";
+  const menuSelector = ".cw-org-switcher[open], .cw-user-menu[open], .cw-org-details[open], .cw-action-menu[open], .cw-filter-menu[open], .cw-row-menu[open], .cw-menu-resize[open], .cw-menu-destroy[open]";
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
     // A dialog's close/backdrop event can reach here after it has closed.

@@ -2,6 +2,7 @@ import { test as setup, expect, Page } from "@playwright/test";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { USERS, TEST_PASSWORD } from "./helpers/seed";
+import { ACCOUNT_HOME } from "./helpers/org";
 import * as OTPAuth from "otpauth";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,7 +37,7 @@ const completeTwoFactorSetup = async (page: Page) => {
     .toBeVisible({ timeout: 15000 });
   await expect(page.getByTestId("recovery-code")).toHaveCount(10);
   await page.getByRole("link", { name: /continue to codewire/i }).click();
-  await page.waitForURL(/\/dashboard/, { timeout: 15000 });
+  await page.waitForURL(ACCOUNT_HOME, { timeout: 15000 });
 };
 
 setup("authenticate", async ({ page }) => {
@@ -64,8 +65,13 @@ setup("authenticate", async ({ page }) => {
   console.log("Login successful — master user authenticated");
 
   // Verify we're logged in
-  await expect(page).toHaveURL(/\/dashboard/);
-  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  // The account home is the Dashboard without an organization, or the
+  // organization's Sandboxes home with one; either proves the signed-in shell.
+  await expect(page).toHaveURL(ACCOUNT_HOME);
+  await expect(
+    page.getByRole("heading", { name: "Dashboard", exact: true })
+      .or(page.getByRole("heading", { name: "Sandboxes", exact: true })),
+  ).toBeVisible();
   const session = (await page.context().cookies()).find((cookie) => (
     cookie.name === "codewire.session_token"
   ));
