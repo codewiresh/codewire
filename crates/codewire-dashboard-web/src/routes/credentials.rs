@@ -862,18 +862,26 @@ fn enrollment_event_frame(
 fn enrollment_failure_message(reason: credentials_connect::OAuthEnrollmentFailure) -> &'static str {
     use credentials_connect::OAuthEnrollmentFailure as Failure;
     match reason {
-        Failure::SignInRequired => "Your session ended. Sign in again, then connect from Credentials.",
-        Failure::Unavailable => "The credential service is busy or unavailable. Try again in a moment.",
+        Failure::SignInRequired => {
+            "Your session ended. Sign in again, then connect from Credentials."
+        }
+        Failure::Unavailable => {
+            "The credential service is busy or unavailable. Try again in a moment."
+        }
         Failure::AlreadyExists => {
             "A credential with this name already exists. No credential was overwritten; choose another name or reconnect the existing one."
         }
-        Failure::Changed => "This credential changed while connecting. Open it in Credentials and reconnect.",
+        Failure::Changed => {
+            "This credential changed while connecting. Open it in Credentials and reconnect."
+        }
         Failure::Unsupported => {
             "Codewire could not verify the provider's response. Try again; if it fails again, contact support."
         }
         Failure::Invalid => "That connection request was not valid. Start again from Credentials.",
         Failure::NotCompleted => "Sign-in was not completed. Start again to get a new code.",
-        Failure::Expired => "The code expired before it was approved. Start again to get a new code.",
+        Failure::Expired => {
+            "The code expired before it was approved. Start again to get a new code."
+        }
         Failure::Cancelled => "Connection cancelled.",
         Failure::UnexpectedResponse => {
             "Codewire did not get a final answer from the provider, so the connection may or may not have been saved."
@@ -1534,7 +1542,11 @@ mod tests {
             .split("</dialog>")
             .next()
             .unwrap();
-        assert!(dialog.contains("Your GitHub account <strong>verified-user</strong> is already connected."));
+        assert!(
+            dialog.contains(
+                "Your GitHub account <strong>verified-user</strong> is already connected."
+            )
+        );
         assert!(dialog.contains("disconnect this one and connect again"));
         assert!(dialog.contains("credential-00000000-0000-4000-8000-000000000001-reconnect"));
         assert!(dialog.contains("credential-00000000-0000-4000-8000-000000000001-delete"));
@@ -1918,7 +1930,9 @@ mod tests {
         use credentials_connect::{
             OAuthEnrollmentEvent as Event, OAuthEnrollmentFailure as Failure,
         };
-        let frame = |event| enrollment_event_frame(event, "/settings/credentials/?message=credential-connected");
+        let frame = |event| {
+            enrollment_event_frame(event, "/settings/credentials/?message=credential-connected")
+        };
         let challenge = frame(Event::Challenge {
             provider: "OpenAI Codex",
             verification_url: "https://auth.openai.com/codex/device".into(),
@@ -1927,11 +1941,20 @@ mod tests {
         });
         assert!(challenge.starts_with("event: challenge\ndata: {"));
         assert!(challenge.ends_with("}\n\n"));
-        let data: serde_json::Value =
-            serde_json::from_str(challenge.lines().nth(1).unwrap().strip_prefix("data: ").unwrap())
-                .unwrap();
+        let data: serde_json::Value = serde_json::from_str(
+            challenge
+                .lines()
+                .nth(1)
+                .unwrap()
+                .strip_prefix("data: ")
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(data["userCode"], "ABCD-1234");
-        assert_eq!(data["verificationUrl"], "https://auth.openai.com/codex/device");
+        assert_eq!(
+            data["verificationUrl"],
+            "https://auth.openai.com/codex/device"
+        );
         assert_eq!(
             frame(Event::Committed),
             "event: connected\ndata: {\"location\":\"/settings/credentials/?message=credential-connected\"}\n\n"
@@ -1947,7 +1970,10 @@ mod tests {
         assert!(!wants_enrollment_events(&headers));
         headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
         assert!(wants_enrollment_events(&headers));
-        assert_eq!(approved_message("credential-connected"), "Credential connected.");
+        assert_eq!(
+            approved_message("credential-connected"),
+            "Credential connected."
+        );
     }
 
     #[test]
