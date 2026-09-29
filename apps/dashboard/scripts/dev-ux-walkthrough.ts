@@ -11,13 +11,18 @@ const TERMINAL_ATTACH_MS = 30_000;
 const button = (owner: Page | Locator, name: string) => owner.getByRole("button", { name, exact: true });
 const dialog = (page: Page, name: string) => page.getByRole("dialog", { name, exact: true });
 
-async function stage(name: string, operation: () => Promise<void>): Promise<void> {
-  const started = Date.now();
+function passed(name: string, started: number): void {
+  console.error(`[dev-ux] ${name}:passed duration_ms=${Date.now() - started}`);
+}
+
+// `started` defaults to the call; pass an earlier instant to time from an
+// event that precedes the step, such as the server accepting Create.
+async function stage(name: string, operation: () => Promise<void>, started = Date.now()): Promise<void> {
   // A step may raise a narrower fixed label; anything else maps to the step.
   try { await operation(); } catch (error) {
     throw error instanceof DevUxError && error.stage.startsWith(`${name}-`) ? error : new DevUxError(name);
   }
-  console.error(`[dev-ux] ${name}:passed duration_ms=${Date.now() - started}`);
+  passed(name, started);
 }
 
 async function visit(page: Page, path: string): Promise<void> {
@@ -156,7 +161,8 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
         : page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link");
       await setup.click();
       // A dirty form asks before leaving; the saved draft is kept.
-      const destinationUrl = `${ORIGIN}/settings/${destination}/?org=${slug}&creation_draft=${draft}`;
+      // Personal Settings carry no organization; the draft handle alone returns.
+      const destinationUrl = `${ORIGIN}/settings/${destination}/?creation_draft=${draft}`;
       const leave = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
       await Promise.race([page.waitForURL(destinationUrl), leave.waitFor()]);
       if (await leave.isVisible()) await button(leave, "Save draft and leave").click();
@@ -222,9 +228,17 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByLabel("Organization secrets", { exact: false })).not.toBeChecked();
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
     for (const agent of await page.locator('input[name="agent"]').all()) await agent.uncheck();
+  });
+  // Time the backend start apart from the UI checks. New terminal is enabled
+  // only after setup completes and the runtime is ready.
+  let submitted = 0;
+  let accepted = 0;
+  await stage("create-submit", async () => {
     owned.beforeCreate();
+    submitted = Date.now();
     await button(page, "Create Sandbox").click();
     await expect(page.getByRole("status")).toContainText("Sandbox creation started");
+    accepted = Date.now();
   });
   const id = await owned.createdId(deadline);
   const detailPath = `/${slug}/${id}/`;
@@ -238,13 +252,20 @@ export async function runDevUxWalkthrough(page: Page, options: {
   let firstId: string | null = null;
   let pid = "";
   let job = "";
-  await stage("terminal-colors-copy", async () => {
+  // Backend start runs while the ownership lookup above resolves the ID, so
+  // time it from acceptance rather than from this step's own start.
+  await stage("create-to-terminal-enabled", async () => {
     await visit(page, detailPath);
     await expect(button(page, "New terminal")).toBeEnabled({ timeout: 240_000 });
+  }, accepted);
+  await stage("terminal-attach", async () => {
     await button(page, "New terminal").click();
     await expect(button(page, "Disconnect")).toBeEnabled({ timeout: 60_000 });
     firstId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(firstId).toBeTruthy();
+  });
+  passed("create-to-terminal", submitted);
+  await stage("terminal-colors-copy", async () => {
     await send("export CW_UX_SESSION=preserved; printf '\\033[31m__UX_RED__\\033[0m\\n__UX_COPY__\\n__UX_PID__%s__\\n' \"$$\"");
     await expect(rows).toContainText(/__UX_PID__\d+__/);
     pid = /__UX_PID__(\d+)__/.exec(await rows.innerText())![1];

@@ -1,0 +1,14 @@
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolume",
+  "metadata": {
+    "name": "pvc-11111111-2222-4333-8444-555555555555",
+    "creationTimestamp": "2026-09-29T10:00:03Z"
+  },
+  "spec": {
+    "csi": {"driver": "linstor.csi.linbit.com", "volumeHandle": "pvc-11111111-2222-4333-8444-555555555555"},
+    "persistentVolumeReclaimPolicy": "Delete",
+    "volumeMode": "Filesystem"
+  },
+  "status": {"phase": "Bound"}
+}

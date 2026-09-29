@@ -1,0 +1,9 @@
+SM_INFO {"nproc":4,"kernel":"6.12.40","fs_type":"virtiofs"}
+SM_RESULT {"step":"git_clone","status":"ok","exit_code":0,"ms":5210}
+SM_RESULT {"step":"cargo_fetch","status":"ok","exit_code":0,"ms":8120}
+SM_RESULT {"step":"cargo_build","status":"ok","exit_code":0,"ms":61234}
+SM_RESULT {"step":"file_tree_pack","status":"ok","exit_code":0,"ms":2100}
+SM_RESULT {"step":"file_tree_unpack","status":"ok","exit_code":0,"ms":3400}
+SM_RESULT {"step":"file_tree_remove","status":"ok","exit_code":0,"ms":900}
+SM_RESULT {"step":"docker_build","status":"skipped","reason":"docker-unavailable"}
+unrelated tool output is ignored

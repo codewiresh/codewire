@@ -1,0 +1,33 @@
+{
+  "label": "attach-002",
+  "role": "attach",
+  "warmup": false,
+  "status": "ok",
+  "error": null,
+  "data_source": null,
+  "client": {
+    "create_to_bound_ms": 1400,
+    "create_to_ready_ms": 3900,
+    "bound_to_ready_ms": 2500
+  },
+  "server": {
+    "scheduled_after_create_ms": 300,
+    "provision_ms": 1000,
+    "attach_ms": null,
+    "create_to_ready_ms": 4000,
+    "image_pulled": false,
+    "node": "cw-dev-prod-node-1",
+    "csi_driver": "linstor.csi.linbit.com",
+    "volume_mode": "Filesystem"
+  },
+  "content_verified": null,
+  "teardown": {
+    "status": "ok",
+    "error": null,
+    "reclaim_policy": "Delete",
+    "pod_delete_ms": 1100,
+    "pvc_delete_ms": 120,
+    "pv_delete_ms": 600,
+    "total_ms": 1820
+  }
+}

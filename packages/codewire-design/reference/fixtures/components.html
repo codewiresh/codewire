@@ -58,8 +58,22 @@
         <div class="cw-field"><label class="cw-label" for="g-search">Search</label><input class="cw-input" id="g-search" type="search" value="codewire"></div>
         <div class="cw-field"><label class="cw-label" for="g-number">Number</label><input class="cw-input cw-mono" id="g-number" type="number" value="3000"></div>
         <div class="cw-field"><label class="cw-label" for="g-textarea">Textarea</label><textarea class="cw-textarea cw-mono" id="g-textarea" rows="3">bun install</textarea></div>
-        <div class="cw-field"><label class="cw-label" for="g-date">Date and time</label><input class="cw-input" id="g-date" type="datetime-local"><p class="cw-field-help">Recoloured native control; our own picker replaces it.</p></div>
+        <div class="cw-field"><label class="cw-label" for="g-date">Hard expiry (UTC)</label><input class="cw-input" id="g-date" type="datetime-local" data-date-picker><p class="cw-field-help">Type a date or choose one from the calendar. Values are UTC.</p></div>
       </form>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="date-title">
+    <header class="cw-card-header"><h2 id="date-title" class="cw-card-title">Date picker</h2><p class="cw-card-description">Opens from the calendar button on any expiry field. Arrow keys move by day and week, Page Up and Page Down by month, Enter chooses. Values stay UTC.</p></header>
+    <div class="cw-card-content">
+      <div class="gallery-stage">
+        <div class="cw-date-picker" role="dialog" aria-label="Choose Hard expiry (UTC), example">
+          <div class="cw-date-picker-header"><button class="cw-icon-button" type="button" aria-label="Previous month"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-left"/></svg></button><h2>October 2026</h2><button class="cw-icon-button" type="button" aria-label="Next month"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-right"/></svg></button></div>
+          <table role="grid" aria-label="October 2026"><thead><tr><th scope="col" abbr="Monday">Mo</th><th scope="col" abbr="Tuesday">Tu</th><th scope="col" abbr="Wednesday">We</th><th scope="col" abbr="Thursday">Th</th><th scope="col" abbr="Friday">Fr</th><th scope="col" abbr="Saturday">Sa</th><th scope="col" abbr="Sunday">Su</th></tr></thead><tbody><tr><td></td><td></td><td></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Thursday, October 1, 2026">1</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Friday, October 2, 2026">2</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Saturday, October 3, 2026">3</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Sunday, October 4, 2026">4</button></td></tr><tr><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Monday, October 5, 2026">5</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Tuesday, October 6, 2026">6</button></td><td aria-selected="true"><button class="cw-date-picker-day" type="button" tabindex="0" aria-label="Wednesday, October 7, 2026">7</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Thursday, October 8, 2026">8</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Friday, October 9, 2026">9</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Saturday, October 10, 2026">10</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Sunday, October 11, 2026">11</button></td></tr><tr><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Monday, October 12, 2026">12</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Tuesday, October 13, 2026">13</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Wednesday, October 14, 2026">14</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Thursday, October 15, 2026">15</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Friday, October 16, 2026">16</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Saturday, October 17, 2026">17</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Sunday, October 18, 2026">18</button></td></tr><tr><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Monday, October 19, 2026">19</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Tuesday, October 20, 2026">20</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Wednesday, October 21, 2026">21</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Thursday, October 22, 2026">22</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Friday, October 23, 2026">23</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Saturday, October 24, 2026">24</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Sunday, October 25, 2026">25</button></td></tr><tr><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Monday, October 26, 2026">26</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Tuesday, October 27, 2026">27</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Wednesday, October 28, 2026">28</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Thursday, October 29, 2026">29</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Friday, October 30, 2026">30</button></td><td aria-selected="false"><button class="cw-date-picker-day" type="button" tabindex="-1" aria-label="Saturday, October 31, 2026">31</button></td><td></td></tr></tbody></table>
+          <div class="cw-date-picker-time"><label for="g-date-time">Time (UTC)</label><input class="cw-input cw-mono" id="g-date-time" value="13:30" inputmode="numeric"></div>
+          <div class="cw-date-picker-footer"><button class="cw-link-button" type="button">Clear</button><button class="cw-button cw-button--small" type="button">Done</button></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -129,6 +143,58 @@
         <li class="cw-badge" data-tone="warning">Expiring</li>
         <li class="cw-badge" data-tone="danger">Revoked</li>
         <li class="cw-badge" data-tone="info">Admin</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="menus-title">
+    <header class="cw-card-header"><h2 id="menus-title" class="cw-card-title">Menus and disclosures</h2><p class="cw-card-description">Menus float over the page; disclosures reveal more of the same surface. Both are native details elements.</p></header>
+    <div class="cw-card-content cw-stack">
+      <div class="gallery-menus">
+        <details class="cw-menu" open>
+          <summary class="cw-button cw-button--outline cw-button--pill">Second Team</summary>
+          <section class="cw-menu-panel cw-menu-panel--fill" aria-label="Organizations">
+            <h2 class="cw-menu-heading">Organizations</h2>
+            <ul>
+              <li><a href="#menus-title" aria-current="true">Second Team<span class="cw-menu-meta">Owner</span></a></li>
+              <li><a href="#menus-title">E2E Owner<span class="cw-menu-meta">Member</span></a></li>
+            </ul>
+            <hr class="cw-menu-separator">
+            <a href="#menus-title">New Organization</a>
+          </section>
+        </details>
+        <details class="cw-menu" open>
+          <summary class="cw-icon-button" aria-label="Actions for quiet-mesa">•••</summary>
+          <div class="cw-menu-panel cw-menu-panel--end">
+            <a href="#menus-title">Open Sandbox</a>
+            <a href="#menus-title">Ports</a>
+            <details class="cw-disclosure cw-menu-danger"><summary>Delete</summary>
+              <div class="cw-menu-section"><p>Workspace files and terminal history are removed.</p><button class="cw-button cw-danger-button cw-button--small" type="button">Delete permanently</button></div>
+            </details>
+          </div>
+        </details>
+        <details class="cw-menu" open>
+          <summary class="cw-button cw-button--outline cw-button--small cw-button--pill">Filter</summary>
+          <form class="cw-menu-panel cw-menu-panel--form cw-menu-panel--start" action="#">
+            <div class="cw-field"><label class="cw-label" for="g-filter-state">State</label><select class="cw-select" id="g-filter-state"><option>All states</option><option>Running</option></select></div>
+            <button class="cw-button cw-button--small" type="submit">Apply filter</button>
+          </form>
+        </details>
+      </div>
+      <details class="cw-disclosure">
+        <summary>Optional expiry</summary>
+        <p class="cw-muted">A blank expiry means no hard expiry.</p>
+      </details>
+      <details class="cw-disclosure" open>
+        <summary>Details</summary>
+        <p class="cw-muted">Revision 9. Saving creates a new revision.</p>
+      </details>
+      <ul class="gallery-row" aria-label="Status pills">
+        <li class="cw-status cw-status--pill">stopped</li>
+        <li class="cw-status cw-status--pill" data-tone="success">running</li>
+        <li class="cw-status cw-status--pill" data-tone="warning">pending</li>
+        <li class="cw-status cw-status--pill" data-tone="danger">failed</li>
+        <li class="cw-status cw-status--pill" data-tone="info">updating</li>
       </ul>
     </div>
   </section>

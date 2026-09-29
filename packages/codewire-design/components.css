@@ -91,7 +91,9 @@ dialog.cw-discard-dialog {
 }
 
 .cw-dialog-header h2 {
+  max-width: 100%;
   margin: 0;
+  overflow-wrap: anywhere;
   font-size: var(--text-title);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
@@ -119,11 +121,14 @@ dialog.cw-discard-dialog {
   line-height: var(--leading-body);
 }
 
-.cw-dialog-header,
-.cw-dialog-body,
-.cw-dialog-actions {
-  padding: var(--space-4) var(--space-6);
+.cw-dialog-header {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-6) 0;
 }
+.cw-dialog-body { padding: var(--space-4) var(--space-6) var(--space-5); }
+.cw-dialog-actions { padding: var(--space-4) var(--space-6); }
 
 .cw-dialog-actions {
   display: flex;
@@ -145,6 +150,7 @@ dialog.cw-discard-dialog {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+  text-transform: capitalize;
 }
 
 .cw-status::before {
@@ -159,6 +165,27 @@ dialog.cw-discard-dialog {
 .cw-status[data-tone="warning"]::before { background: var(--warning); }
 .cw-status[data-tone="danger"]::before { background: var(--destructive); }
 .cw-status[data-tone="info"]::before { background: var(--info); }
+
+/* The same status as a compact tinted pill for dense tables. */
+.cw-status--pill {
+  gap: var(--space-1-5);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--fg-secondary);
+  font-size: var(--text-small);
+  line-height: var(--leading-ui);
+}
+
+.cw-status--pill::before {
+  width: var(--space-1-5);
+  height: var(--space-1-5);
+}
+
+.cw-status--pill[data-tone="success"] { background: var(--success-muted); color: var(--success); }
+.cw-status--pill[data-tone="warning"] { background: var(--warning-muted); color: var(--warning); }
+.cw-status--pill[data-tone="danger"] { background: var(--destructive-muted); color: var(--destructive); }
+.cw-status--pill[data-tone="info"] { background: var(--info-muted); color: var(--info); }
 
 .cw-field-label-row {
   display: flex;
@@ -205,6 +232,250 @@ dialog.cw-discard-dialog {
   color: var(--fg-secondary);
   font-size: var(--text-secondary);
   line-height: var(--leading-body);
+}
+
+/* Menus: a summary trigger and a floating panel of links and actions. The
+   panel's direct items share one row; nested forms keep their own layout. */
+.cw-menu { position: relative; }
+
+.cw-menu > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.cw-menu > summary::-webkit-details-marker,
+.cw-menu-panel details > summary::-webkit-details-marker { display: none; }
+
+.cw-menu-panel {
+  position: absolute;
+  z-index: 70;
+  top: calc(100% + var(--space-1));
+  display: grid;
+  min-width: var(--menu-min-width);
+  gap: var(--space-0-5);
+  padding: var(--space-1);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-lg);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-popover);
+  color: var(--fg-primary);
+  text-align: left;
+  white-space: normal;
+}
+
+.cw-menu-panel--end { right: 0; }
+.cw-menu-panel--start { left: 0; }
+.cw-menu-panel--fill { right: 0; left: 0; }
+
+/* A panel that holds a small form instead of a list of actions. */
+.cw-menu-panel--form {
+  width: min(var(--menu-form-width), calc(100vw - var(--space-8)));
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+.cw-menu-panel > ul {
+  display: grid;
+  gap: var(--space-0-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+:is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > :is(a, button):not(.cw-button, .cw-icon-button, .cw-link-button),
+:is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > form > button:not(.cw-button),
+:is(.cw-menu-panel, .cw-menu-panel > section) > details > summary {
+  display: flex;
+  width: 100%;
+  min-height: var(--control-height-sm);
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1-5) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: var(--text-secondary);
+  line-height: var(--leading-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+:is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > :is(a, button):not(.cw-button, .cw-icon-button, .cw-link-button):hover,
+:is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > form > button:not(.cw-button):hover,
+:is(.cw-menu-panel, .cw-menu-panel > section) > details > summary:hover,
+.cw-menu-panel [aria-current="true"] {
+  background: var(--bg-selected);
+}
+
+.cw-menu-heading {
+  margin: 0;
+  padding: var(--space-1-5) var(--space-2) var(--space-1);
+  color: var(--fg-tertiary);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-group);
+  text-transform: uppercase;
+}
+
+.cw-menu-meta {
+  margin-left: auto;
+  color: var(--fg-tertiary);
+  font-size: var(--text-small);
+}
+
+.cw-menu-separator {
+  margin: var(--space-1) 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.cw-menu-danger,
+:is(.cw-menu-panel, .cw-menu-panel > section) > details.cw-menu-danger > summary {
+  color: var(--destructive);
+}
+
+/* Content revealed inside a menu, such as a confirmation or a short form. */
+.cw-menu-section {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+  padding: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--fg-secondary);
+  font-size: var(--text-small);
+  line-height: var(--leading-body);
+}
+
+.cw-menu-section > p { margin: 0; }
+
+/* Disclosures: an inline summary that reveals more of the same surface. */
+.cw-disclosure > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  color: var(--fg-secondary);
+  font-size: var(--text-secondary);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-ui);
+  list-style: none;
+  cursor: pointer;
+}
+
+.cw-disclosure > summary::-webkit-details-marker { display: none; }
+
+.cw-disclosure > summary::before {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  flex: none;
+  background: currentColor;
+  content: "";
+  mask: var(--icon-chevron-mask) center / contain no-repeat;
+  rotate: -90deg;
+  transition: rotate 150ms ease;
+}
+
+.cw-disclosure[open] > summary::before { rotate: 0deg; }
+.cw-disclosure > summary:hover { color: var(--fg-primary); }
+.cw-disclosure[open] > summary { margin-bottom: var(--space-3); }
+
+/* Date picker: our calendar over a native datetime-local input. The input
+   keeps typing and submission; the calendar replaces only the browser popup. */
+.cw-date-field > input::-webkit-calendar-picker-indicator { display: none; }
+
+.cw-date-picker {
+  position: fixed;
+  inset: auto;
+  width: min(var(--date-picker-width), calc(100vw - var(--space-4)));
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-lg);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-popover);
+  color: var(--fg-primary);
+}
+
+.cw-date-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.cw-date-picker-header h2 {
+  margin: 0;
+  font-size: var(--text-secondary);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-ui);
+}
+
+.cw-date-picker table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.cw-date-picker th {
+  padding: var(--space-1) 0;
+  color: var(--fg-tertiary);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  text-align: center;
+}
+
+.cw-date-picker td {
+  padding: var(--space-0-5);
+  text-align: center;
+}
+
+.cw-date-picker-day {
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: var(--text-secondary);
+  cursor: pointer;
+}
+
+.cw-date-picker-day:hover { background: var(--bg-selected); }
+.cw-date-picker-day[aria-current="date"] { box-shadow: var(--shadow-today); }
+
+.cw-date-picker td[aria-selected="true"] > .cw-date-picker-day {
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font-weight: var(--weight-medium);
+}
+
+.cw-date-picker-day:disabled {
+  background: transparent;
+  color: var(--fg-disabled);
+  cursor: not-allowed;
+}
+
+.cw-date-picker-time {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  color: var(--fg-secondary);
+  font-size: var(--text-small);
+}
+
+.cw-date-picker-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
 }
 
 /* A one-time code shown for copying; the copy action sits inside the box. */

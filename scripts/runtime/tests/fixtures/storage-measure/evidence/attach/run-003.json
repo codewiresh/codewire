@@ -1,0 +1,33 @@
+{
+  "label": "attach-003",
+  "role": "attach",
+  "warmup": false,
+  "status": "failed",
+  "error": "pod not ContainersReady within 600s",
+  "data_source": null,
+  "client": {
+    "create_to_bound_ms": 1300,
+    "create_to_ready_ms": null,
+    "bound_to_ready_ms": null
+  },
+  "server": {
+    "scheduled_after_create_ms": 275,
+    "provision_ms": 1000,
+    "attach_ms": null,
+    "create_to_ready_ms": null,
+    "image_pulled": false,
+    "node": "cw-dev-prod-node-1",
+    "csi_driver": "linstor.csi.linbit.com",
+    "volume_mode": "Filesystem"
+  },
+  "content_verified": null,
+  "teardown": {
+    "status": "failed",
+    "error": "PV was not removed within 600s",
+    "reclaim_policy": "Delete",
+    "pod_delete_ms": 9000,
+    "pvc_delete_ms": 100,
+    "pv_delete_ms": null,
+    "total_ms": null
+  }
+}

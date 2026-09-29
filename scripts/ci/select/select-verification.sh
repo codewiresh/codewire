@@ -416,6 +416,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-openbao-only-secret-authority.sh|\
       scripts/ci/tests/test-preflight-openbao-native-secrets.sh|\
       scripts/ci/tests/test-sync-local-secrets.sh|\
+      scripts/ci/tests/test-kind-runtime-images.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
@@ -1257,6 +1258,12 @@ if [ "$event_selected" = false ]; then
       scripts/dev/kind/sync-local-secrets.sh)
         # The local credential bridge has a hermetic policy fixture and does
         # not provision or exercise a Kind cluster.
+        select_token policy
+        recognized=true
+        ;;
+      scripts/dev/kind/dev-loop.sh)
+        # Retained-cluster review helpers that the Kind gate never runs. Their
+        # runtime-image table has a hermetic policy fixture.
         select_token policy
         recognized=true
         ;;

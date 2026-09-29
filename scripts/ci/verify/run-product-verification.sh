@@ -208,11 +208,13 @@ run_policy_core() {
   scripts/ci/tests/test-openbao-only-secret-authority.sh
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
   scripts/ci/tests/test-sync-local-secrets.sh
+  scripts/ci/tests/test-kind-runtime-images.sh
   scripts/ci/tests/test-source-approval-workflow.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
   scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
+  scripts/runtime/tests/test-storage-measure.sh
   python3 scripts/ci/tests/test-repo-checks-modules.py
   python3 scripts/dev/test-macos-cli.py
   python3 scripts/dev/test-macos-ext4-tool.py
