@@ -483,7 +483,14 @@ test.describe.serial("server-rendered environments", () => {
     await assertExplicitCreateRecovery(page);
     expect(disallowedBrowserCalls).toEqual([]);
     expect(staleAssetRequests).toEqual([]);
+    // Restore brings back authored fields, which stay until Create or an
+    // explicit Discard: Escape must ask, not silently close the drawer.
     await page.keyboard.press("Escape");
+    const discard = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+    await expect(discard.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
+    await expect(page.locator("[data-drawer]")).toBeVisible();
+    await expect(page.locator("#environment-name")).toHaveValue("draft-name-restored");
+    await discard.getByRole("button", { name: "Discard changes", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/${slug}/$`));
     await expect(page.locator("[data-drawer]")).toBeHidden();
   });
@@ -522,7 +529,9 @@ test.describe.serial("server-rendered environments", () => {
       clientWidth: element.clientWidth,
       scrollWidth: element.scrollWidth,
     }));
-    expect(dimensions.clientWidth).toBe(539);
+    // The Create drawer is 700px wide (at most 94vw) with a 1px left border;
+    // the whole form must fit it without horizontal overflow.
+    expect(dimensions.clientWidth).toBe(699);
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
     await expect(page.getByLabel("Workspace image")).toHaveValue(
       workspaceImage,
