@@ -45,9 +45,12 @@ test.describe("server-rendered dashboard", () => {
       "/organizations/new/",
     );
 
-    const style = await page.request.get("/assets/codewire/routes/dashboard-v1.css");
+    // One token source: the console palette lives in the core stylesheet.
+    const style = await page.request.get("/assets/codewire/design-v1.css");
     expect(style.status()).toBe(200);
     expect(await style.text()).toContain("--bg-primary: #0a0a0a");
+    const routeStyle = await page.request.get("/assets/codewire/routes/dashboard-v1.css");
+    expect(await routeStyle.text()).not.toContain("--bg-primary:");
 
     const shellGeometry = await page.evaluate(() => {
       const sidebar = document.querySelector(".cw-sidebar-slot")?.getBoundingClientRect();

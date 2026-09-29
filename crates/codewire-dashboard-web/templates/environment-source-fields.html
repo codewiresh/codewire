@@ -11,8 +11,8 @@
   <fieldset class="cw-source-fields" aria-describedby="{{ source_fields_id }}-secrets-help"{% if !sources.application_selection_enabled %} disabled{% endif %}>
     <legend class="cw-sr-only">Application secret sources</legend>
     <ul class="cw-source-choices">
-      <li><label class="cw-source-choice"><input type="checkbox" name="include_org_secrets" value="platform"{% if sources.organization_selected %} checked{% endif %}><span>Organization secrets</span></label></li>
-      <li><label class="cw-source-choice"><input type="checkbox" name="include_user_secrets" value="platform"{% if sources.personal_selected %} checked{% endif %}><span>Personal secrets</span></label></li>
+      <li><label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_org_secrets" value="platform"{% if sources.organization_selected %} checked{% endif %}><span>Organization secrets</span></label></li>
+      <li><label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_user_secrets" value="platform"{% if sources.personal_selected %} checked{% endif %}><span>Personal secrets</span></label></li>
     </ul>
     <div class="cw-field">
       <label class="cw-label" for="{{ source_fields_id }}-secret-project">Secret project</label>

@@ -8,7 +8,7 @@
       <input class="cw-input" id="environment-search" name="search" value="{{ page.search }}" maxlength="128" placeholder="Search by name">
       <details class="cw-filter-menu"><summary class="cw-button cw-button--outline cw-button--small cw-button--pill"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-filter"/></svg>Filter</summary><div class="cw-filter-menu-panel"><label class="cw-label" for="environment-state">State</label><select class="cw-select" id="environment-state" name="state"><option value="all"{% if page.state_selected("all") %} selected{% endif %}>All states</option><option value="running"{% if page.state_selected("running") %} selected{% endif %}>Running</option><option value="stopped"{% if page.state_selected("stopped") %} selected{% endif %}>Stopped</option><option value="pending"{% if page.state_selected("pending") %} selected{% endif %}>Pending</option><option value="creating"{% if page.state_selected("creating") %} selected{% endif %}>Creating</option><option value="starting"{% if page.state_selected("starting") %} selected{% endif %}>Starting</option><option value="stopping"{% if page.state_selected("stopping") %} selected{% endif %}>Stopping</option><option value="error"{% if page.state_selected("error") %} selected{% endif %}>Error</option><option value="destroyed"{% if page.state_selected("destroyed") %} selected{% endif %}>Destroyed</option></select><button class="cw-button cw-button--small cw-button--pill" type="submit">Apply filter</button></div></details>
     </form>
-    <a class="cw-button cw-button--primary cw-button--pill" href="{{ organization.environments_url }}new/" data-drawer-trigger><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Create Sandbox</a>
+    <a class="cw-button cw-button--pill" href="{{ organization.environments_url }}new/" data-drawer-trigger><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Create Sandbox</a>
   </div>
 
   {% if let Some(editor) = page.source_editor %}
@@ -42,8 +42,8 @@
       {% if resize.requires_restart %}<div class="cw-alert cw-alert--warning" role="status">This change replaces the workspace Pod. It does not delete or recreate storage.</div>{% endif %}
       <form method="post" action="/{{ organization.slug }}/_actions/sandboxes/resize/apply">
         <input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ resize.environment_id }}"><input type="hidden" name="request_id" value="{{ resize.request_id }}"><input type="hidden" name="cpu_millicores" value="{{ resize.cpu_millicores }}"><input type="hidden" name="memory_mb" value="{{ resize.memory_mb }}"><input type="hidden" name="disk_gb" value="{{ resize.disk_gb }}">
-        {% if resize.requires_restart %}<label class="cw-checkbox"><input type="checkbox" name="allow_restart" value="true" required> I understand this may briefly interrupt the Sandbox.</label>{% endif %}
-        {% if resize.active_sessions_will_be_terminated %}<label class="cw-checkbox"><input type="checkbox" name="force" value="true" required> I understand {{ resize.active_session_count }} active session(s) will be terminated.</label>{% endif %}
+        {% if resize.requires_restart %}<label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="allow_restart" value="true" required> I understand this may briefly interrupt the Sandbox.</label>{% endif %}
+        {% if resize.active_sessions_will_be_terminated %}<label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="force" value="true" required> I understand {{ resize.active_session_count }} active session(s) will be terminated.</label>{% endif %}
         <button class="cw-button" type="submit">Apply resize</button>
       </form>
     </div>

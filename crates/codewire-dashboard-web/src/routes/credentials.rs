@@ -945,7 +945,7 @@ fn render_enrollment_event(
             user_code,
             expires_utc,
         } => format!(
-            "<div class=\"cw-device-enrollment\" data-connect-challenge><p>Enter this code in {provider} to approve the connection.</p><p class=\"cw-device-code\"><code>{code}</code></p><a class=\"cw-button\" href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\">Open {provider}</a><p class=\"cw-device-status\">Waiting for approval. The code expires at {expires}.</p></div>",
+            "<div class=\"cw-device-enrollment\" data-connect-challenge><p>Enter this code in {provider} to approve the connection.</p><p class=\"cw-copy-code\"><code>{code}</code></p><a class=\"cw-button\" href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\">Open {provider}</a><p class=\"cw-device-status\">Waiting for approval. The code expires at {expires}.</p></div>",
             provider = escape_html(provider),
             url = escape_html(&verification_url),
             code = escape_html(&user_code),
@@ -1677,7 +1677,7 @@ mod tests {
         assert!(html.contains("type=\"password\" data-dialog-private"));
         for form in html.split("<form").skip(1) {
             let opening = form.split('>').next().unwrap();
-            if opening.contains("cw-settings-form") {
+            if opening.contains("class=\"cw-form\"") {
                 assert_eq!(
                     opening.contains("data-dirty-guard"),
                     !opening.contains("_actions/git-identity")

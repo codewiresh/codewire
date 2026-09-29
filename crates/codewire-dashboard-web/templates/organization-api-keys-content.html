@@ -43,7 +43,7 @@
             </div>
             <div class="cw-field">
               <label class="cw-label" for="key-expiration">Expiration</label>
-              <select class="cw-input" id="key-expiration" name="expiration">
+              <select class="cw-select" id="key-expiration" name="expiration">
                 <option value="never"{% if page.form.expiration == "never" || page.form.expiration.is_empty() %} selected{% endif %}>Never</option>
                 <option value="30"{% if page.form.expiration == "30" %} selected{% endif %}>30 days</option>
                 <option value="60"{% if page.form.expiration == "60" %} selected{% endif %}>60 days</option>

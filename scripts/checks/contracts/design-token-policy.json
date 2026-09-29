@@ -147,6 +147,7 @@
     "crates/codewire-dashboard-web/templates/settings-navigation.html",
     "crates/codewire-dashboard-web/templates/settings.html",
     "crates/codewire-dashboard-web/templates/two-factor-recovery.html",
+    "packages/codewire-design/components.css",
     "packages/codewire-design/reference/fixtures/create-organization.html",
     "packages/codewire-design/reference/fixtures/device.html",
     "packages/codewire-design/reference/fixtures/home.html",
@@ -156,6 +157,7 @@
     "packages/codewire-design/reference/fixtures/settings-api-keys-one-time.html",
     "packages/codewire-design/reference/fixtures/settings-api-keys-unavailable.html",
     "packages/codewire-design/reference/fixtures/settings-secrets-unavailable.html",
-    "packages/codewire-design/reference/fixtures/terminal-ports.html"
+    "packages/codewire-design/reference/fixtures/terminal-ports.html",
+    "packages/codewire-design/styles.css"
   ]
 }
