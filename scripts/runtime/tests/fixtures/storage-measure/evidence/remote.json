@@ -1,0 +1,7 @@
+{
+  "full": {"label": "remote-full", "class": "linstor-r2", "status": "ok", "error": null, "source_used_mib": 1450, "create_to_ready_ms": 48000, "server_cut_after_create_ms": 1000, "restore_size": "20Gi", "content": "snapcontent-2", "snapshot_handle_present": true},
+  "incremental": {"label": "remote-incremental", "class": "linstor-r2", "status": "ok", "error": null, "source_used_mib": 1706, "create_to_ready_ms": 9000, "server_cut_after_create_ms": 0, "restore_size": "20Gi", "content": "snapcontent-3", "snapshot_handle_present": true, "delta_mib": 256},
+  "source_deleted_before_restore": true,
+  "restore": {"label": "restore-remote", "role": "restore", "warmup": false, "status": "failed", "error": "pod not ContainersReady within 600s", "data_source": {"kind": "VolumeSnapshot", "name": "sm-20260929100000-abcdef-remote-incremental"}, "client": {"create_to_bound_ms": 61000, "create_to_ready_ms": null, "bound_to_ready_ms": null}, "server": {"provision_ms": 60000, "attach_ms": null, "create_to_ready_ms": null, "image_pulled": false}, "content_verified": null, "teardown": {"status": "ok", "error": null, "reclaim_policy": "Delete", "pod_delete_ms": 1300, "pvc_delete_ms": 100, "pv_delete_ms": 700, "total_ms": 2100}},
+  "deletion": {"full": {"status": "ok", "snapshot_delete_ms": 4000, "content_delete_ms": 2000}, "incremental": {"status": "ok", "snapshot_delete_ms": 3000, "content_delete_ms": 1500}}
+}

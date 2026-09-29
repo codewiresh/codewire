@@ -1,0 +1,13 @@
+{
+  "exit_code": 0,
+  "info": {"nproc": 4, "kernel": "6.12.40", "fs_type": "virtiofs"},
+  "steps": [
+    {"step": "git_clone", "status": "ok", "exit_code": 0, "ms": 5210},
+    {"step": "cargo_fetch", "status": "ok", "exit_code": 0, "ms": 8120},
+    {"step": "cargo_build", "status": "ok", "exit_code": 0, "ms": 61234},
+    {"step": "file_tree_pack", "status": "ok", "exit_code": 0, "ms": 2100},
+    {"step": "file_tree_unpack", "status": "ok", "exit_code": 0, "ms": 3400},
+    {"step": "file_tree_remove", "status": "ok", "exit_code": 0, "ms": 900},
+    {"step": "docker_build", "status": "skipped", "reason": "docker-unavailable"}
+  ]
+}

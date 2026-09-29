@@ -1,0 +1,9 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"reason": "WaitForFirstConsumer", "firstTimestamp": "2026-09-29T10:00:00Z", "eventTime": null},
+    {"reason": "Provisioning", "firstTimestamp": "2026-09-29T10:00:01Z", "eventTime": null},
+    {"reason": "ProvisioningSucceeded", "firstTimestamp": "2026-09-29T10:00:03Z", "eventTime": null}
+  ]
+}
