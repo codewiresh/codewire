@@ -112,7 +112,9 @@ test.describe("server-rendered organization creation", () => {
   test("returns a complete validation page to a normal form post", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop no-JavaScript contract");
     await page.goto("/organizations/new/");
-    const csrf = await page.locator('input[name="_csrf"]').inputValue();
+    const csrf = await page
+      .locator('form[action="/organizations/_actions/create"] input[name="_csrf"]')
+      .inputValue();
     const response = await page.request.post("/organizations/_actions/create", {
       form: {
         name: "Normal Validation Organization",

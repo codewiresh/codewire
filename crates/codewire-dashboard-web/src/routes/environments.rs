@@ -36,7 +36,7 @@ use crate::{
         get_context_without_rail, mutation_redirect, valid_identifier,
     },
     security::{
-        canonical_cookie, csrf_cookie, csrf_cookie_value, new_csrf_token, with_csrf_cookie,
+        canonical_cookie, csrf_cookie, csrf_cookie_value, page_csrf_token, with_csrf_cookie,
     },
     state::AppState,
     templates::{
@@ -730,7 +730,7 @@ async fn render_page(
             &headers,
         );
     }
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let mut form = default_create_form(token.clone(), create_open);
     if let crate::environment_drafts::DraftReturn::Exact(id) = &draft_return {
         form.draft_id.clone_from(id);

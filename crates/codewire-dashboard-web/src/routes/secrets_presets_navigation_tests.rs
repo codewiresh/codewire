@@ -575,3 +575,64 @@ async fn every_secret_mutation_preserves_navigation_without_changing_connect_pay
         }
     }
 }
+
+fn set_csrf_cookie(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| value.strip_prefix("codewire_ssr_csrf="))
+        .and_then(|value| value.split(';').next())
+        .map(str::to_owned)
+}
+
+fn rendered_csrf_tokens(html: &str) -> Vec<&str> {
+    html.split(r#"name="_csrf" value=""#)
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect()
+}
+
+#[tokio::test]
+async fn navigation_sign_out_posts_the_page_token_without_rotating_other_tabs() {
+    let (upstream, _) = fixture("success").await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    for path in ["/settings/credentials/", "/synthetic/secrets/"] {
+        // A browser without a well-formed token gets one, used by every form.
+        let first = client()
+            .get(format!("{}{path}", dashboard.origin))
+            .headers(authority("malformed"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK, "{path}");
+        let token = set_csrf_cookie(&first).expect("page sets a CSRF cookie");
+        let html = first.text().await.unwrap();
+        let tokens = rendered_csrf_tokens(&html);
+        assert!(!tokens.is_empty(), "{path}");
+        assert!(tokens.iter().all(|rendered| *rendered == token), "{path}");
+        let sign_out = format!(
+            r#"<form method="post" action="/settings/_actions/sign-out" data-sign-out><input type="hidden" name="_csrf" value="{token}">"#
+        );
+        assert!(html.matches(&sign_out).count() >= 2, "{path}");
+        assert!(!html.contains("#sign-out\""), "{path}");
+
+        // Rendering again in another tab keeps the token already issued.
+        let second = client()
+            .get(format!("{}{path}", dashboard.origin))
+            .headers(authority(&token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK, "{path}");
+        assert!(set_csrf_cookie(&second).is_none_or(|cookie| cookie == token));
+        let html = second.text().await.unwrap();
+        assert!(
+            rendered_csrf_tokens(&html)
+                .iter()
+                .all(|rendered| *rendered == token)
+        );
+        assert!(html.contains(&sign_out), "{path}");
+    }
+}

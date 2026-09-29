@@ -57,6 +57,7 @@ fn two_factor_recovery_template_reveals_codes_only_after_verification() {
 fn admin_audit_template_escapes_sensitive_upstream_fields() {
     let view = DashboardView {
         user_name: "<unsafe admin>".into(),
+        csrf_token: Default::default(),
         is_admin: true,
         organizations: Vec::new(),
         has_organizations: false,
@@ -116,6 +117,7 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
 fn admin_accounts_template_escapes_access_request_fields() {
     let view = DashboardView {
         user_name: "Admin".into(),
+        csrf_token: Default::default(),
         is_admin: true,
         organizations: Vec::new(),
         has_organizations: false,

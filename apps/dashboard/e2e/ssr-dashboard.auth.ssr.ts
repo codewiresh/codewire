@@ -86,7 +86,7 @@ async function submitAndCapture(page: Page, path: string, button: RegExp) {
       && candidate.request().method() === "POST"
   ), { timeout: 15_000 });
   const owner = path === "/settings/_actions/sign-out"
-    ? page.locator('form[action^="/settings/_actions/sign-out"]')
+    ? page.locator("form#sign-out")
     : page;
   await owner.getByRole("button", { name: button }).click();
   return response;
@@ -346,6 +346,25 @@ test.describe.serial("server-rendered identity flows", () => {
     expect(freshLogin.status()).toBe(303);
     expect(freshLogin.headers().location).toMatch(/^\/two-factor/);
     await finishTwoFactorChallenge(page);
+
+    // A page loaded in another tab must not invalidate this tab's navigation.
+    const otherTab = await page.context().newPage();
+    await otherTab.goto("/settings/");
+    await otherTab.close();
+    const navigationSignOut = page.waitForResponse((candidate) => (
+      new URL(candidate.url()).pathname === "/settings/_actions/sign-out"
+        && candidate.request().method() === "POST"
+    ), { timeout: 15_000 });
+    await page.locator(".cw-sidebar-slot form[data-sign-out]")
+      .getByRole("button", { name: "Sign Out", exact: true })
+      .click();
+    expect((await navigationSignOut).status()).toBe(303);
+    await expect(page).toHaveURL(/\/login/);
+    expect((await page.context().cookies()).some((cookie) => (
+      cookie.name === "codewire.session_token"
+    ))).toBe(false);
+    await page.goto("/dashboard/");
+    await expect(page).toHaveURL(/\/login/);
   });
 
   test("resets a password through the clean-URL HttpOnly token flow", async ({ page, isMobile }) => {

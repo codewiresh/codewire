@@ -212,7 +212,9 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.locator('form[action^="/settings/_actions/ssh/"]')).toHaveCount(0);
     await expect(page.locator('form[action^="/settings/_actions/github/"]')).toHaveCount(0);
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
-    await expect(page.locator('form[action="/settings/_actions/sign-out"]')).toHaveCount(1);
+    await expect(page.locator('form#sign-out[action="/settings/_actions/sign-out"]')).toHaveCount(1);
+    await expect(page.locator('.cw-sidebar-slot form[data-sign-out][method="post"][action="/settings/_actions/sign-out"]')).toHaveCount(1);
+    await expect(page.locator('a[href$="#sign-out"]')).toHaveCount(0);
     await expect(page.locator('input[name="_csrf"]')).not.toHaveCount(0);
   });
 

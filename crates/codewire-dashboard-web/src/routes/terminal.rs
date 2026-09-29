@@ -12,7 +12,7 @@ use crate::{
     error::WebError,
     response::{TerminalStyleNonce, error_page, render_terminal_page},
     routes::organization_governance::{connect_page_error, get_context},
-    security::{csrf_cookie, new_csrf_token, with_csrf_cookie},
+    security::{csrf_cookie, page_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::TerminalTemplate,
     view::{SandboxListContext, TerminalPageView},
@@ -85,7 +85,7 @@ pub(super) async fn page(
         message: super::environments::page_message(&query.message).into(),
         error: super::environments::page_error(&query.error).into(),
     };
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let style_nonce = TerminalStyleNonce::new();
     with_csrf_cookie(
         render_terminal_page(
