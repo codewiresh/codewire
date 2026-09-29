@@ -151,6 +151,9 @@ cmd_watch() {
   if [ "$(credential_mode)" = real ] && [ "$(credential_origin)" != "$KIND_PUBLIC_ORIGIN" ]; then
     die "credential-service origin $(credential_origin) differs from KIND_PUBLIC_ORIGIN ${KIND_PUBLIC_ORIGIN}"
   fi
+  if [ "$(credential_mode)" = fake ]; then
+    log "WARNING: the credential-service is the gate's synthetic fixture; connecting GitHub, Codex or any provider will fail. Run make kind-credentials-real (needs an OpenBao login) before reviewing credentials."
+  fi
   ensure_review_origin
   cmd_runtime_images
   log "dashboard ${WATCH_ADDR} for ${KIND_PUBLIC_ORIGIN}/ (source ${SOURCE_ROOT}), credential-service $(credential_mode), browser API ${BROWSER_API}"
