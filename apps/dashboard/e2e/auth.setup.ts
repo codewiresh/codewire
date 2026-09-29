@@ -23,12 +23,17 @@ const fillField = async (page: Page, selector: string, value: string) => {
   await field.pressSequentially(value, { delay: 20 });
 };
 
+// Retries share this worker, so a secret enrolled by an earlier attempt
+// stays available when a later sign-in receives the challenge instead.
+let enrolledTotpSecret: string | undefined;
+
 const completeTwoFactorSetup = async (page: Page) => {
   await expect(page.getByRole("heading", { name: /secure your account/i }))
     .toBeVisible({ timeout: 15000 });
 
   const secret = (await page.getByTestId("totp-secret").textContent())?.trim();
   if (!secret) throw new Error("2FA setup secret was not visible");
+  enrolledTotpSecret = secret;
 
   const code = new OTPAuth.TOTP({ secret }).generate();
   await fillField(page, "#code", code);
@@ -37,6 +42,19 @@ const completeTwoFactorSetup = async (page: Page) => {
     .toBeVisible({ timeout: 15000 });
   await expect(page.getByTestId("recovery-code")).toHaveCount(10);
   await page.getByRole("link", { name: /continue to codewire/i }).click();
+  await page.waitForURL(ACCOUNT_HOME, { timeout: 15000 });
+};
+
+const completeTwoFactorChallenge = async (page: Page) => {
+  if (!enrolledTotpSecret) {
+    throw new Error("two-factor challenge arrived before this worker enrolled 2FA");
+  }
+  await expect(page.getByRole("heading", { name: /^two-factor authentication$/i }))
+    .toBeVisible({ timeout: 15000 });
+
+  const code = new OTPAuth.TOTP({ secret: enrolledTotpSecret }).generate();
+  await fillField(page, "#code", code);
+  await page.getByRole("button", { name: /^verify$/i }).click();
   await page.waitForURL(ACCOUNT_HOME, { timeout: 15000 });
 };
 
@@ -55,12 +73,14 @@ setup("authenticate", async ({ page }) => {
   await page.getByRole("button", { name: /sign in/i }).click();
   const response = await signInResponse;
   expect(response.status()).toBe(303);
-  expect(response.headers().location).toMatch(/^\/(dashboard|setup-2fa)/);
+  expect(response.headers().location).toMatch(/^\/(dashboard|setup-2fa|two-factor)/);
 
-  await page.waitForURL(/\/(dashboard|setup-2fa)/, { timeout: 15000 });
+  await page.waitForURL(/\/(dashboard|setup-2fa|two-factor)/, { timeout: 15000 });
   await page.waitForTimeout(1000);
   if (page.url().includes("/setup-2fa")) {
     await completeTwoFactorSetup(page);
+  } else if (page.url().includes("/two-factor")) {
+    await completeTwoFactorChallenge(page);
   }
   console.log("Login successful — master user authenticated");
 
