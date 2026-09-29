@@ -31,6 +31,10 @@ pub const DAEMON_CAPABILITY_FILES: &str = "files.v1";
 pub const DAEMON_CAPABILITY_HEALTH: &str = "health.v1";
 pub const DAEMON_CAPABILITY_SESSIONS: &str = "sessions.v1";
 pub const DAEMON_CAPABILITY_ATTACH: &str = "attach.v1";
+pub const DAEMON_CAPABILITY_SESSION_INPUT: &str = "session_input.v1";
+pub const DAEMON_CAPABILITY_SESSION_METADATA: &str = "session_metadata.v1";
+pub const SESSION_INPUT_MAX_BYTES: usize = 64 * 1024;
+pub const SESSION_INPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub const DAEMON_CAPABILITY_CREDENTIAL_BRIDGE: &str = "credential_bridge.v1";
 // Version4 uses the current complete recipient-sealed projection bundle. Old
 // single-ciphertext peers fail admission instead of discovering it at launch.
@@ -53,7 +57,27 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     DAEMON_CAPABILITY_HEALTH,
     DAEMON_CAPABILITY_SESSIONS,
     DAEMON_CAPABILITY_ATTACH,
+    DAEMON_CAPABILITY_SESSION_INPUT,
+    DAEMON_CAPABILITY_SESSION_METADATA,
 ];
+
+pub const HOST_DAEMON_CAPABILITIES: &[&str] = &[
+    DAEMON_CAPABILITY_HEALTH,
+    DAEMON_CAPABILITY_SESSIONS,
+    DAEMON_CAPABILITY_ATTACH,
+    DAEMON_CAPABILITY_SESSION_INPUT,
+    DAEMON_CAPABILITY_SESSION_METADATA,
+];
+
+/// Empty means unnamed. Named sessions use a bounded, shell-safe label.
+pub fn valid_session_name(name: &str) -> bool {
+    name.is_empty()
+        || (name.len() <= 64
+            && name.as_bytes()[0].is_ascii_alphanumeric()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')))
+}
 
 /// Material-free framing checks for the closed selected-key SSH transport.
 pub mod ssh;

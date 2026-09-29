@@ -2354,6 +2354,8 @@ mod linux {
         ];
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -2432,6 +2434,8 @@ mod linux {
 
     fn launch_request(command: Vec<String>) -> v1::LaunchSessionRequest {
         v1::LaunchSessionRequest {
+            name: String::new(),
+            parent_session_id: None,
             command,
             working_dir: "/".to_owned(),
             env: Vec::new(),
@@ -2450,6 +2454,8 @@ mod linux {
         let command = vec![CONTAINER_INIT_PATH.to_owned(), "identity".to_owned()];
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/".to_owned(),
                 env: Vec::new(),
@@ -2491,6 +2497,8 @@ mod linux {
         ];
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -2537,6 +2545,8 @@ mod linux {
         );
         let record = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: vec!["/bin/sh".to_owned(), "-c".to_owned(), query],
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -2684,6 +2694,8 @@ mod linux {
         let received_path = host_port_received_path(host_port);
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -2768,6 +2780,8 @@ mod linux {
         let received_path = mesh_received_path(generation);
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),

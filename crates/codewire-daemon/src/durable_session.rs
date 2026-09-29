@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::{SESSION_INPUT_MAX_BYTES, SESSION_INPUT_TIMEOUT};
 use portable_pty::{PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -117,6 +118,8 @@ struct ProcessMonitor {
     session_id: String,
     token: Uuid,
     handle: Arc<SessionHandle>,
+    #[cfg(unix)]
+    host_group: Option<crate::host_process::OwnedProcessGroup>,
     child: Child,
     stdin: Option<ChildStdin>,
     control: mpsc::Receiver<SessionControl>,
@@ -135,6 +138,22 @@ struct PtyProcessMonitor {
     pty_control: std_mpsc::Sender<PtyRuntimeControl>,
     control_thread: std::thread::JoinHandle<()>,
     output_task: JoinHandle<Result<(), SessionError>>,
+}
+
+#[cfg(unix)]
+struct HostPtyProcessMonitor {
+    inner: Weak<SessionEngineInner>,
+    session_id: String,
+    token: Uuid,
+    handle: Arc<SessionHandle>,
+    // Drop ordering must signal before the child's own reap/drop machinery.
+    group: crate::host_process::OwnedProcessGroup,
+    child: crate::execution::PtyLaunchGuard,
+    control: mpsc::Receiver<SessionControl>,
+    pty_control: std_mpsc::Sender<PtyRuntimeControl>,
+    control_thread: std::thread::JoinHandle<()>,
+    output_task: JoinHandle<Result<(), SessionError>>,
+    io_cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct PtyKillerGuard {
@@ -180,10 +199,19 @@ enum PtyRuntimeControl {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedSession {
     session_id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    parent_session_id: Option<String>,
     state: i32,
     command: Vec<String>,
     working_dir: String,
+    // Launch values stay with the live owner. Legacy values are discarded on
+    // recovery; a saved record is not authority to replay an old projection.
+    #[serde(skip_serializing, default)]
     env: Vec<String>,
+    #[serde(default)]
+    environment_projection_required: bool,
     pty: bool,
     term: String,
     width: i32,
@@ -213,6 +241,10 @@ struct PersistedTimestamp {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    #[error("{0}")]
+    AlreadyExists(String),
+    #[error("{0}")]
+    DeadlineExceeded(String),
     #[error("{0}")]
     InvalidArgument(String),
     #[error("{0}")]
@@ -254,7 +286,10 @@ impl SessionEngine {
             inner: Arc::new(SessionEngineInner {
                 config: config.clone(),
                 credential_bridge,
-                root: config.home_root.join(SESSION_DIRECTORY),
+                root: match &config.host {
+                    Some(host) => host.state_root.join("sessions"),
+                    None => config.home_root.join(SESSION_DIRECTORY),
+                },
                 initialized: OnceCell::new(),
                 sessions: Mutex::new(BTreeMap::new()),
                 active: Mutex::new(HashMap::new()),
@@ -291,6 +326,24 @@ impl SessionEngine {
         tokio::time::timeout_at(deadline, self.inner.launches.wait())
             .await
             .map_err(|_| SessionError::Internal("session launch cleanup did not settle".into()))?;
+        if self.inner.config.host.is_some() {
+            let ids = lock(&self.inner.active).keys().cloned().collect::<Vec<_>>();
+            let mut stops = tokio::task::JoinSet::new();
+            for id in ids {
+                let engine = self.clone();
+                stops.spawn(async move { engine.stop(&id).await });
+            }
+            while let Some(result) = tokio::time::timeout_at(deadline, stops.join_next())
+                .await
+                .map_err(|_| {
+                    SessionError::Internal("host session shutdown did not settle".into())
+                })?
+            {
+                result.map_err(|_| {
+                    SessionError::Internal("host session shutdown task failed".into())
+                })??;
+            }
+        }
         let handles = lock(&self.inner.sessions)
             .values()
             .cloned()
@@ -353,6 +406,10 @@ impl SessionEngine {
         if cancel.is_cancelled() {
             return Err(launch_cancelled_error());
         }
+        validate_session_name(&request.name)?;
+        if let Some(parent) = &request.parent_session_id {
+            validate_session_id(parent)?;
+        }
         let command = if request.command.is_empty() {
             vec![default_shell_for(&self.inner.config)]
         } else {
@@ -386,16 +443,35 @@ impl SessionEngine {
         if cancel.is_cancelled() {
             return Err(launch_cancelled_error());
         }
-        self.make_record_room().await?;
+        let handles = lock(&self.inner.sessions)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for handle in handles {
+            if !request.name.is_empty() && handle.metadata.lock().await.name == request.name {
+                return Err(SessionError::AlreadyExists(format!(
+                    "session name is already retained: {}",
+                    request.name
+                )));
+            }
+        }
+        if let Some(parent) = &request.parent_session_id {
+            self.handle(parent)?;
+        }
+        self.make_record_room_preserving(request.parent_session_id.as_deref())
+            .await?;
         if cancel.is_cancelled() {
             return Err(launch_cancelled_error());
         }
         let session_id = self.create_session_id().await?;
         let persisted = PersistedSession {
             session_id: session_id.clone(),
+            name: request.name,
+            parent_session_id: request.parent_session_id,
             state: v1::SessionLifecycleState::Starting as i32,
             command,
             working_dir,
+            environment_projection_required: !request.env.is_empty(),
             env: request.env,
             pty: request.pty,
             term: request.term,
@@ -427,9 +503,14 @@ impl SessionEngine {
         self.start_process(handle.clone(), &cancel).await
     }
 
+    #[cfg(test)]
     async fn make_record_room(&self) -> Result<(), SessionError> {
+        self.make_record_room_preserving(None).await
+    }
+
+    async fn make_record_room_preserving(&self, parent: Option<&str>) -> Result<(), SessionError> {
         drain_retired_records(&self.inner.root).await?;
-        prune_session_records(&self.inner, MAX_SESSION_RECORDS - 1, true).await
+        prune_session_records_preserving(&self.inner, MAX_SESSION_RECORDS - 1, true, parent).await
     }
 
     pub async fn list(&self) -> Result<Vec<v1::SessionRecord>, SessionError> {
@@ -526,21 +607,39 @@ impl SessionEngine {
         if cancel.is_cancelled() {
             return Err(launch_cancelled_error());
         }
+        {
+            let metadata = handle.metadata.lock().await;
+            if metadata.environment_projection_required && metadata.env.is_empty() {
+                return Err(SessionError::FailedPrecondition(
+                    "the launch environment projection is no longer available after daemon recovery; launch a new session with the required environment overrides".into(),
+                ));
+            }
+        }
         handle.launch_cancellation.send_replace(true);
         let _operation = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(launch_cancelled_error()),
             operation = handle.operation.lock() => operation,
         };
-        if handle.metadata.lock().await.cleanup_unknown {
-            return Err(SessionError::FailedPrecondition(
-                "session launch cleanup is unconfirmed; restart is unavailable".into(),
-            ));
+        {
+            let metadata = handle.metadata.lock().await;
+            if metadata.cleanup_unknown {
+                return Err(SessionError::FailedPrecondition(
+                    "session launch cleanup is unconfirmed; restart is unavailable".into(),
+                ));
+            }
         }
         if lock(&self.inner.active).contains_key(session_id) {
             // Once Stop is dispatched, retain the operation lock until the
             // previous monitor settles. Caller loss cannot cancel its cleanup.
             self.stop_active(session_id, &handle).await?;
+        }
+        // Stop can settle Interrupted when group/join/drain cleanup failed.
+        // Do not overwrite that newly published fence with a new launch.
+        if handle.metadata.lock().await.cleanup_unknown {
+            return Err(SessionError::FailedPrecondition(
+                "session process cleanup is unconfirmed; restart is unavailable".into(),
+            ));
         }
         if cancel.is_cancelled() {
             return Err(launch_cancelled_error());
@@ -612,6 +711,19 @@ impl SessionEngine {
                 ))
             })?
             .map_err(SessionError::FailedPrecondition)
+    }
+
+    pub async fn send_input(&self, session_id: &str, data: Vec<u8>) -> Result<(), SessionError> {
+        if data.is_empty() || data.len() > SESSION_INPUT_MAX_BYTES {
+            return Err(SessionError::InvalidArgument(
+                "session input must contain 1..65536 bytes".into(),
+            ));
+        }
+        // Queueing, write and acknowledgement share one budget. Cancellation
+        // after a partial write is inherently ambiguous; never replay it.
+        tokio::time::timeout(SESSION_INPUT_TIMEOUT, self.input(session_id, data))
+            .await
+            .map_err(|_| SessionError::DeadlineExceeded("session input acknowledgement timed out; input may have been written; do not retry automatically".into()))?
     }
 
     pub async fn resize(
@@ -750,6 +862,15 @@ impl SessionEngine {
         if snapshot.pty {
             return self.start_pty_process(handle, snapshot, cancel).await;
         }
+        self.start_pipe_process(handle, snapshot, cancel).await
+    }
+
+    async fn start_pipe_process(
+        &self,
+        handle: Arc<SessionHandle>,
+        snapshot: PersistedSession,
+        cancel: &CancellationToken,
+    ) -> Result<v1::SessionRecord, SessionError> {
         let command = &snapshot.command;
         let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
         {
@@ -780,6 +901,20 @@ impl SessionEngine {
             }
         };
         let mut process = prepared.tokio_command();
+        #[cfg(unix)]
+        if self.inner.config.host.is_some() {
+            // SAFETY: setsid is async-signal-safe and does not touch allocator
+            // state after fork. Host launches own a fresh session and group.
+            unsafe {
+                process.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+        }
 
         if launch_is_cancelled(&handle, cancel) {
             return self
@@ -798,6 +933,27 @@ impl SessionEngine {
                     .await;
             }
         };
+        #[cfg(unix)]
+        let mut host_group = if self.inner.config.host.is_some() {
+            match child
+                .id()
+                .and_then(|pid| crate::host_process::OwnedProcessGroup::new(pid).ok())
+            {
+                Some(group) => Some(group),
+                None => {
+                    let _ = terminate_native_launch(&mut child).await;
+                    return self
+                        .record_launch_cleanup(
+                            handle,
+                            false,
+                            "host process ownership could not be established".into(),
+                        )
+                        .await;
+                }
+            }
+        } else {
+            None
+        };
         let projection = tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(std::io::Error::other("environment launch cancelled")),
@@ -805,7 +961,12 @@ impl SessionEngine {
             result = prepared.project_spawned(child.id()) => result,
         };
         if projection.is_err() {
-            let confirmed = terminate_native_launch(&mut child).await;
+            let confirmed = terminate_session_launch(
+                &mut child,
+                #[cfg(unix)]
+                host_group.as_mut(),
+            )
+            .await;
             return self
                 .record_launch_cleanup(
                     handle,
@@ -815,7 +976,12 @@ impl SessionEngine {
                 .await;
         }
         let Some(stdin) = child.stdin.take() else {
-            let confirmed = terminate_native_launch(&mut child).await;
+            let confirmed = terminate_session_launch(
+                &mut child,
+                #[cfg(unix)]
+                host_group.as_mut(),
+            )
+            .await;
             return self
                 .record_launch_cleanup(
                     handle,
@@ -825,7 +991,12 @@ impl SessionEngine {
                 .await;
         };
         let Some(stdout) = child.stdout.take() else {
-            let confirmed = terminate_native_launch(&mut child).await;
+            let confirmed = terminate_session_launch(
+                &mut child,
+                #[cfg(unix)]
+                host_group.as_mut(),
+            )
+            .await;
             return self
                 .record_launch_cleanup(
                     handle,
@@ -835,7 +1006,12 @@ impl SessionEngine {
                 .await;
         };
         let Some(stderr) = child.stderr.take() else {
-            let confirmed = terminate_native_launch(&mut child).await;
+            let confirmed = terminate_session_launch(
+                &mut child,
+                #[cfg(unix)]
+                host_group.as_mut(),
+            )
+            .await;
             return self
                 .record_launch_cleanup(
                     handle,
@@ -847,7 +1023,12 @@ impl SessionEngine {
 
         let running = self.record_starting_running(&handle).await;
         if running.is_err() || launch_is_cancelled(&handle, cancel) {
-            let confirmed = terminate_native_launch(&mut child).await;
+            let confirmed = terminate_session_launch(
+                &mut child,
+                #[cfg(unix)]
+                host_group.as_mut(),
+            )
+            .await;
             return self
                 .record_launch_cleanup(
                     handle,
@@ -885,6 +1066,8 @@ impl SessionEngine {
                 session_id,
                 token,
                 handle: monitor_handle,
+                #[cfg(unix)]
+                host_group,
                 child,
                 stdin: Some(stdin),
                 control: control_rx,
@@ -976,6 +1159,27 @@ impl SessionEngine {
         drop(pair.slave);
 
         let mut child = crate::execution::PtyLaunchGuard::new(child);
+        #[cfg(unix)]
+        let mut host_group = if self.inner.config.host.is_some() {
+            match child
+                .process_id()
+                .and_then(|pid| crate::host_process::OwnedProcessGroup::new(pid).ok())
+            {
+                Some(group) => Some(group),
+                None => {
+                    let _ = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
+                    return self
+                        .record_launch_cleanup(
+                            handle,
+                            false,
+                            "host PTY ownership could not be established".into(),
+                        )
+                        .await;
+                }
+            }
+        } else {
+            None
+        };
         let projection = tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(std::io::Error::other("environment launch cancelled")),
@@ -983,7 +1187,12 @@ impl SessionEngine {
             result = prepared.project_spawned(child.process_id()) => result,
         };
         if projection.is_err() {
-            let confirmed = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
+            let confirmed = terminate_session_pty_launch(
+                &mut child,
+                #[cfg(unix)]
+                host_group.as_mut(),
+            )
+            .await;
             return self
                 .record_launch_cleanup(
                     handle,
@@ -993,10 +1202,25 @@ impl SessionEngine {
                 .await;
         }
 
+        #[cfg(unix)]
+        if host_group.is_some()
+            && let Err(error) = set_host_pty_nonblocking(&*pair.master)
+        {
+            let confirmed = terminate_session_pty_launch(&mut child, host_group.as_mut()).await;
+            return self
+                .record_launch_cleanup(handle, confirmed, format!("prepare host PTY: {error}"))
+                .await;
+        }
+
         let reader = match pair.master.try_clone_reader() {
             Ok(reader) => reader,
             Err(error) => {
-                let confirmed = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
+                let confirmed = terminate_session_pty_launch(
+                    &mut child,
+                    #[cfg(unix)]
+                    host_group.as_mut(),
+                )
+                .await;
                 return self
                     .record_launch_cleanup(
                         handle,
@@ -1009,7 +1233,12 @@ impl SessionEngine {
         let writer = match pair.master.take_writer() {
             Ok(writer) => writer,
             Err(error) => {
-                let confirmed = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
+                let confirmed = terminate_session_pty_launch(
+                    &mut child,
+                    #[cfg(unix)]
+                    host_group.as_mut(),
+                )
+                .await;
                 return self
                     .record_launch_cleanup(
                         handle,
@@ -1022,7 +1251,12 @@ impl SessionEngine {
 
         let running = self.record_starting_running(&handle).await;
         if running.is_err() || launch_is_cancelled(&handle, cancel) {
-            let confirmed = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
+            let confirmed = terminate_session_pty_launch(
+                &mut child,
+                #[cfg(unix)]
+                host_group.as_mut(),
+            )
+            .await;
             return self
                 .record_launch_cleanup(
                     handle,
@@ -1033,6 +1267,56 @@ impl SessionEngine {
         }
         let record = running?;
         let monitor_handle = handle.clone();
+
+        #[cfg(unix)]
+        if let Some(group) = host_group {
+            let io_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (output_tx, output_rx) = mpsc::channel(32);
+            let reader_cancel = io_cancel.clone();
+            let reader_thread = tokio::task::spawn_blocking(move || {
+                copy_host_pty_output(reader, output_tx, reader_cancel)
+            });
+            let output_task = tokio::spawn(capture_pty_output(
+                self.inner.root.clone(),
+                handle.clone(),
+                output_rx,
+                reader_thread,
+            ));
+            let (pty_control_tx, pty_control_rx) = std_mpsc::channel();
+            let control_cancel = io_cancel.clone();
+            let control_thread = std::thread::spawn(move || {
+                host_pty_control_loop(pair.master, writer, pty_control_rx, control_cancel)
+            });
+            let (control_tx, control_rx) = mpsc::channel(32);
+            let (start_tx, start_rx) = oneshot::channel();
+            let token = Uuid::new_v4();
+            let monitor = HostPtyProcessMonitor {
+                inner: Arc::downgrade(&self.inner),
+                session_id: snapshot.session_id.clone(),
+                token,
+                handle: monitor_handle,
+                group,
+                child,
+                control: control_rx,
+                pty_control: pty_control_tx,
+                control_thread,
+                output_task,
+                io_cancel,
+            };
+            let task = tokio::spawn(async move {
+                let _ = start_rx.await;
+                monitor_host_pty_process(monitor).await;
+            });
+            lock(&self.inner.active).insert(
+                snapshot.session_id,
+                ActiveSession {
+                    token,
+                    control: control_tx,
+                    task,
+                },
+            );
+            return self.complete_handoff(handle, start_tx, record).await;
+        }
 
         let (output_tx, output_rx) = mpsc::channel(32);
         let reader_thread = tokio::task::spawn_blocking(move || copy_pty_output(reader, output_tx));
@@ -1106,18 +1390,19 @@ impl SessionEngine {
         &self,
         handle: Arc<SessionHandle>,
         start: oneshot::Sender<()>,
-        record: v1::SessionRecord,
+        _record: v1::SessionRecord,
     ) -> Result<v1::SessionRecord, SessionError> {
         // The active monitor now owns the child. Caller loss must not stop it.
         let result = {
             let mut metadata = handle.metadata.lock().await;
             metadata.cleanup_unknown = false;
             metadata.cleanup_confirmed = false;
-            persist_metadata(&self.inner.root, &metadata).await
+            persist_metadata(&self.inner.root, &metadata)
+                .await
+                .map(|()| metadata.to_record())
         };
         let _ = start.send(());
-        result?;
-        Ok(record)
+        result
     }
 
     async fn record_launch_cleanup(
@@ -1169,6 +1454,18 @@ impl SessionEngine {
 
 impl SessionEngineInner {
     async fn initialize(&self) -> Result<(), SessionError> {
+        self.config
+            .validate_host()
+            .map_err(|error| SessionError::FailedPrecondition(error.to_string()))?;
+        if self.config.host.is_some()
+            && tokio::fs::symlink_metadata(&self.root)
+                .await
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(SessionError::FailedPrecondition(
+                "host session root must not be a symlink".into(),
+            ));
+        }
         tokio::fs::create_dir_all(&self.root)
             .await
             .map_err(|error| {
@@ -1178,6 +1475,9 @@ impl SessionEngineInner {
                 ))
             })?;
         set_private_directory_permissions(&self.root).await?;
+        if let Some(host) = &self.config.host {
+            set_private_directory_permissions(&host.state_root).await?;
+        }
         drain_retired_records(&self.root).await?;
 
         let mut entries = tokio::fs::read_dir(&self.root).await.map_err(|error| {
@@ -1217,6 +1517,22 @@ impl SessionEngineInner {
                 continue;
             }
             validate_session_id(&session_id)?;
+            if self.config.host.is_some() {
+                for name in [
+                    METADATA_FILE,
+                    OUTPUT_FILE,
+                    METADATA_TEMP_FILE,
+                    OUTPUT_TEMP_FILE,
+                ] {
+                    if let Ok(metadata) = tokio::fs::symlink_metadata(entry.path().join(name)).await
+                        && !metadata.is_file()
+                    {
+                        return Err(SessionError::FailedPrecondition(
+                            "host session state must contain only regular files".into(),
+                        ));
+                    }
+                }
+            }
             let path = entry.path().join(METADATA_FILE);
             let bytes = tokio::fs::read(&path).await.map_err(|error| {
                 SessionError::Internal(format!("read session metadata {}: {error}", path.display()))
@@ -1234,14 +1550,30 @@ impl SessionEngineInner {
                     path.display()
                 )));
             }
+            let legacy_projection = !metadata.env.is_empty();
+            if legacy_projection {
+                metadata.environment_projection_required = true;
+                metadata.env.clear();
+            }
+            validate_session_name(&metadata.name)?;
+            if let Some(parent) = &metadata.parent_session_id {
+                validate_session_id(parent)?;
+            }
             let (mut metadata_changed, output_index) =
                 reconcile_output_cursor(&self.root, &mut metadata).await?;
+            metadata_changed |= legacy_projection;
             if is_live_state(metadata.state) {
                 metadata.state = v1::SessionLifecycleState::Interrupted as i32;
                 metadata.finished_at = Some(PersistedTimestamp::now());
                 metadata.exit_code = None;
                 metadata.status_message =
                     "session interrupted because the environment daemon restarted".into();
+                if self.config.host.is_some() {
+                    // Persisted PIDs can never establish ownership after restart.
+                    metadata.cleanup_unknown = true;
+                    metadata.cleanup_confirmed = false;
+                    metadata.status_message = "host session interrupted; process cleanup is unknown; restart is unavailable".into();
+                }
                 metadata_changed = true;
             }
             if metadata_changed {
@@ -1255,6 +1587,24 @@ impl SessionEngineInner {
             });
             compact_output(&self.root, &handle, &mut *handle.metadata.lock().await).await?;
             loaded.insert(session_id, handle);
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for handle in loaded.values() {
+            let metadata = handle.metadata.lock().await;
+            if !metadata.name.is_empty() && !names.insert(metadata.name.clone()) {
+                return Err(SessionError::Internal(
+                    "duplicate retained session name".into(),
+                ));
+            }
+            if metadata
+                .parent_session_id
+                .as_ref()
+                .is_some_and(|id| !loaded.contains_key(id) || id == &metadata.session_id)
+            {
+                return Err(SessionError::Internal(
+                    "retained session parent is missing or invalid".into(),
+                ));
+            }
         }
         *lock(&self.sessions) = loaded;
         // Grandfather unresolved records from older unbounded stores rather
@@ -1303,12 +1653,32 @@ async fn prune_session_records(
     maximum: usize,
     require_room: bool,
 ) -> Result<(), SessionError> {
+    prune_session_records_preserving(inner, maximum, require_room, None).await
+}
+
+async fn prune_session_records_preserving(
+    inner: &SessionEngineInner,
+    maximum: usize,
+    require_room: bool,
+    parent: Option<&str>,
+) -> Result<(), SessionError> {
     let handles = lock(&inner.sessions).values().cloned().collect::<Vec<_>>();
     let needed = handles.len().saturating_sub(maximum);
     if needed == 0 {
         return Ok(());
     }
     let mut candidates = Vec::new();
+    // Keep identity-addressed parents while a retained child refers to them.
+    // Admission also pins its proposed parent before pruning makes room.
+    let mut referenced = std::collections::BTreeSet::new();
+    if let Some(parent) = parent {
+        referenced.insert(parent.to_owned());
+    }
+    for handle in &handles {
+        if let Some(parent) = &handle.metadata.lock().await.parent_session_id {
+            referenced.insert(parent.clone());
+        }
+    }
     for handle in handles {
         let metadata = handle.metadata.lock().await;
         let state = lifecycle_state(metadata.state);
@@ -1317,6 +1687,7 @@ async fn prune_session_records(
             v1::SessionLifecycleState::Exited | v1::SessionLifecycleState::Stopped
         ) || (state == v1::SessionLifecycleState::Failed && metadata.cleanup_confirmed))
             && !metadata.cleanup_unknown
+            && !referenced.contains(&metadata.session_id)
             && !lock(&inner.active).contains_key(&metadata.session_id)
         {
             candidates.push((
@@ -1377,12 +1748,47 @@ async fn terminate_native_launch(child: &mut Child) -> bool {
     }
 }
 
+async fn terminate_session_launch(
+    child: &mut Child,
+    #[cfg(unix)] group: Option<&mut crate::host_process::OwnedProcessGroup>,
+) -> bool {
+    #[cfg(unix)]
+    if let Some(group) = group {
+        let signals = group.terminate().await;
+        let reaped = tokio::time::timeout(crate::host_process::JOIN_TIMEOUT, child.wait()).await;
+        return signals.is_ok() && matches!(reaped, Ok(Ok(_)));
+    }
+    terminate_native_launch(child).await
+}
+
+async fn terminate_session_pty_launch(
+    child: &mut crate::execution::PtyLaunchGuard,
+    #[cfg(unix)] group: Option<&mut crate::host_process::OwnedProcessGroup>,
+) -> bool {
+    #[cfg(unix)]
+    if let Some(group) = group {
+        let signals = group.terminate().await;
+        return child
+            .terminate_confirmed(crate::host_process::JOIN_TIMEOUT)
+            .await
+            && signals.is_ok();
+    }
+    child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await
+}
+
 async fn monitor_process(monitor: ProcessMonitor) {
+    #[cfg(unix)]
+    if monitor.host_group.is_some() {
+        monitor_host_process(monitor).await;
+        return;
+    }
     let ProcessMonitor {
         inner,
         session_id,
         token,
         handle,
+        #[cfg(unix)]
+            host_group: _,
         mut child,
         mut stdin,
         mut control,
@@ -1416,10 +1822,7 @@ async fn monitor_process(monitor: ProcessMonitor) {
                 }
                 Some(SessionControl::Input { data, reply }) => {
                     let result = match stdin.as_mut() {
-                        Some(stdin) => stdin
-                            .write_all(&data)
-                            .await
-                            .map_err(|error| format!("write session input: {error}")),
+                        Some(stdin) => write_session_input(stdin, &data).await,
                         None => Err("session stdin is closed".into()),
                     };
                     let _ = reply.send(result);
@@ -1442,6 +1845,93 @@ async fn monitor_process(monitor: ProcessMonitor) {
 
     let output_error = join_output_tasks(stdout_task, stderr_task).await;
     finish_process(inner, session_id, token, handle, completion, output_error).await;
+}
+
+async fn write_session_input(stdin: &mut ChildStdin, data: &[u8]) -> Result<(), String> {
+    tokio::time::timeout(SESSION_INPUT_TIMEOUT, async {
+        stdin.write_all(data).await?;
+        stdin.flush().await
+    })
+    .await
+    .map_err(|_| {
+        "session input write timed out; outcome is ambiguous; do not retry automatically"
+            .to_string()
+    })?
+    .map_err(|error| format!("write session input: {error}"))
+}
+
+#[cfg(unix)]
+async fn monitor_host_process(monitor: ProcessMonitor) {
+    let ProcessMonitor {
+        inner,
+        session_id,
+        token,
+        handle,
+        host_group,
+        mut child,
+        mut stdin,
+        mut control,
+        stdout_task,
+        stderr_task,
+    } = monitor;
+    // Declare the group after Child: cancellation signals while Child is owned.
+    let mut group = host_group.expect("host process group is owned");
+    let completion = loop {
+        tokio::select! {
+            result = group.wait_for_exit() => {
+                let signals = group.terminate().await;
+                let status = tokio::time::timeout(crate::host_process::JOIN_TIMEOUT, child.wait()).await;
+                break ProcessCompletion::Exited(result.map(|_| ()).and(signals)
+                    .and_then(|()| status.map_err(|_| std::io::Error::other("host child reap timed out"))?)
+                    .map(|status| status.code().unwrap_or(1)).map_err(|error| error.to_string()));
+            }
+            command = control.recv() => match command {
+                Some(SessionControl::Stop { reply }) => {
+                    let result = terminate_session_launch(&mut child, Some(&mut group)).await;
+                    break ProcessCompletion::Stopped { result: if result { Ok(()) } else { Err("host process cleanup could not be confirmed".into()) }, reply };
+                }
+                Some(SessionControl::Input { data, reply }) => {
+                    if reply.is_closed() { continue; }
+                    let result = match stdin.as_mut() { Some(stdin) => write_session_input(stdin, &data).await,
+                        None => Err("host session stdin is closed".into()) };
+                    let _ = reply.send(result);
+                }
+                Some(SessionControl::Resize { reply, .. }) => { let _ = reply.send(Err("session is not a PTY session".into())); }
+                None => {
+                    let confirmed = terminate_session_launch(&mut child, Some(&mut group)).await;
+                    break ProcessCompletion::Exited(if confirmed { Ok(1) } else { Err("host process cleanup could not be confirmed".into()) });
+                }
+            }
+        }
+    };
+    drop(stdin);
+    let (stdout, stderr) = tokio::join!(
+        bounded_output_join(stdout_task),
+        bounded_output_join(stderr_task)
+    );
+    finish_process(
+        inner,
+        session_id,
+        token,
+        handle,
+        completion,
+        stdout.or(stderr),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+async fn bounded_output_join(mut task: JoinHandle<Result<(), SessionError>>) -> Option<String> {
+    match tokio::time::timeout(crate::host_process::JOIN_TIMEOUT, &mut task).await {
+        Ok(Ok(Ok(()))) => None,
+        Ok(Ok(Err(error))) => Some(error.to_string()),
+        Ok(Err(error)) => Some(format!("host output task failed: {error}")),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            Some("host output drain timed out; cleanup is unknown".into())
+        }
+    }
 }
 
 async fn monitor_pty_process(monitor: PtyProcessMonitor) {
@@ -1534,6 +2024,175 @@ async fn monitor_pty_process(monitor: PtyProcessMonitor) {
     finish_process(inner, session_id, token, handle, completion, output_error).await;
 }
 
+#[cfg(unix)]
+async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
+    use std::sync::atomic::Ordering;
+    let HostPtyProcessMonitor {
+        inner,
+        session_id,
+        token,
+        handle,
+        group,
+        mut child,
+        mut control,
+        pty_control,
+        control_thread,
+        output_task,
+        io_cancel,
+    } = monitor;
+    // Keep the guard live until group signaling completes; never wait/reap first.
+    let mut group = group;
+    let completion = loop {
+        tokio::select! {
+            result = group.wait_for_exit() => {
+                let signals = group.terminate().await;
+                // WNOWAIT proved exit and kept identity reserved through signals.
+                let status = child.terminate_confirmed(crate::host_process::JOIN_TIMEOUT).await;
+                break ProcessCompletion::Exited(if signals.is_ok() && status { result.map_err(|error| error.to_string()) }
+                    else { Err("host PTY cleanup could not be confirmed".into()) });
+            }
+            command = control.recv() => match command {
+                Some(SessionControl::Stop { reply }) => {
+                    io_cancel.store(true, Ordering::Release);
+                    let confirmed = terminate_session_pty_launch(&mut child, Some(&mut group)).await;
+                    break ProcessCompletion::Stopped { result: if confirmed { Ok(()) } else { Err("host PTY cleanup could not be confirmed".into()) }, reply };
+                }
+                Some(SessionControl::Input { data, reply }) => {
+                    if reply.is_closed() { continue; }
+                    if let Err(error) = pty_control.send(PtyRuntimeControl::Input { data, reply })
+                        && let PtyRuntimeControl::Input { reply, .. } = error.0 { let _ = reply.send(Err("host PTY input is closed".into())); }
+                }
+                Some(SessionControl::Resize { width, height, reply }) => {
+                    if let Err(error) = pty_control.send(PtyRuntimeControl::Resize { width, height, reply })
+                        && let PtyRuntimeControl::Resize { reply, .. } = error.0 { let _ = reply.send(Err("host PTY control is closed".into())); }
+                }
+                None => {
+                    io_cancel.store(true, Ordering::Release);
+                    let confirmed = terminate_session_pty_launch(&mut child, Some(&mut group)).await;
+                    break ProcessCompletion::Exited(if confirmed { Ok(1) } else { Err("host PTY cleanup could not be confirmed".into()) });
+                }
+            }
+        }
+    };
+    io_cancel.store(true, Ordering::Release);
+    drop(pty_control);
+    let mut join = tokio::task::spawn_blocking(move || control_thread.join());
+    let control_error =
+        match tokio::time::timeout(crate::host_process::JOIN_TIMEOUT, &mut join).await {
+            Ok(Ok(Ok(()))) => None,
+            _ => Some("host PTY control join could not be confirmed".into()),
+        };
+    let output_error = bounded_output_join(output_task).await;
+    finish_process(
+        inner,
+        session_id,
+        token,
+        handle,
+        completion,
+        control_error.or(output_error),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+fn set_host_pty_nonblocking(master: &dyn portable_pty::MasterPty) -> std::io::Result<()> {
+    let fd = master
+        .as_raw_fd()
+        .ok_or_else(|| std::io::Error::other("host PTY descriptor unavailable"))?;
+    // SAFETY: the descriptor remains owned by master, and only host clones use it.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_host_pty_output(
+    mut reader: Box<dyn Read + Send>,
+    output: mpsc::Sender<Vec<u8>>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    let mut buffer = vec![0; OUTPUT_BUFFER_SIZE];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(size) => {
+                if output.blocking_send(buffer[..size].to_vec()).is_err() {
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => return Ok(()),
+            Err(error) => return Err(format!("read host PTY output: {error}")),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn host_pty_control_loop(
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    mut writer: Box<dyn Write + Send>,
+    control: std_mpsc::Receiver<PtyRuntimeControl>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    while !cancel.load(Ordering::Acquire) {
+        let command = match control.recv_timeout(Duration::from_millis(10)) {
+            Ok(command) => command,
+            Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        match command {
+            PtyRuntimeControl::Input { data, reply } => {
+                if reply.is_closed() {
+                    continue;
+                }
+                let deadline = std::time::Instant::now() + SESSION_INPUT_TIMEOUT;
+                let mut remaining = data.as_slice();
+                let result = loop {
+                    if cancel.load(Ordering::Acquire)
+                        || reply.is_closed()
+                        || std::time::Instant::now() >= deadline
+                    {
+                        break Err("host PTY input interrupted; outcome is ambiguous; do not retry automatically".into());
+                    }
+                    match writer.write(remaining) {
+                        Ok(0) => break Err("host PTY input is closed".into()),
+                        Ok(size) => {
+                            remaining = &remaining[size..];
+                            if remaining.is_empty() {
+                                break writer.flush().map_err(|error| error.to_string());
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(error) => break Err(format!("write host PTY input: {error}")),
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            PtyRuntimeControl::Resize {
+                width,
+                height,
+                reply,
+            } => {
+                let _ = reply.send(
+                    master
+                        .resize(pty_size(width, height))
+                        .map_err(|error| error.to_string()),
+                );
+            }
+        }
+    }
+}
+
 async fn finish_process(
     inner: Weak<SessionEngineInner>,
     session_id: String,
@@ -1546,6 +2205,11 @@ async fn finish_process(
         {
             let mut metadata = handle.metadata.lock().await;
             metadata.finished_at = Some(PersistedTimestamp::now());
+            if inner.config.host.is_some() {
+                metadata.cleanup_unknown =
+                    completion_result(&completion).is_err() || output_error.is_some();
+                metadata.cleanup_confirmed = !metadata.cleanup_unknown;
+            }
             match (completion_result(&completion), output_error) {
                 (_, Some(error)) => {
                     metadata.state = v1::SessionLifecycleState::Failed as i32;
@@ -1567,6 +2231,11 @@ async fn finish_process(
                     metadata.exit_code = None;
                     metadata.status_message = error;
                 }
+            }
+            if inner.config.host.is_some() && metadata.cleanup_unknown {
+                metadata.state = v1::SessionLifecycleState::Interrupted as i32;
+                metadata.status_message =
+                    "host process cleanup could not be confirmed; restart is unavailable".into();
             }
             let _ = persist_metadata(&inner.root, &metadata).await;
         }
@@ -2222,9 +2891,21 @@ fn validate_session_id(session_id: &str) -> Result<(), SessionError> {
             "session identifier must start with session-".into(),
         ));
     };
-    Uuid::parse_str(raw_id).map_err(|_| {
+    let id = Uuid::parse_str(raw_id).map_err(|_| {
         SessionError::InvalidArgument(format!("invalid session identifier: {session_id}"))
     })?;
+    if id.to_string() != raw_id {
+        return Err(SessionError::InvalidArgument(
+            "session identifier must be canonical".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_session_name(name: &str) -> Result<(), SessionError> {
+    if !codewire_gateway_proto::valid_session_name(name) {
+        return Err(SessionError::InvalidArgument("session name must be 1..64 ASCII bytes, alphanumeric first, then alphanumeric, dot, underscore or hyphen".into()));
+    }
     Ok(())
 }
 
@@ -2263,6 +2944,9 @@ impl PersistedSession {
     fn to_record(&self) -> v1::SessionRecord {
         v1::SessionRecord {
             session_id: self.session_id.clone(),
+            name: self.name.clone(),
+            parent_session_id: self.parent_session_id.clone(),
+            cleanup_unknown: self.cleanup_unknown,
             state: self.state,
             command: self.command.clone(),
             working_dir: self.working_dir.clone(),
@@ -2337,6 +3021,8 @@ async fn set_private_file_permissions(_path: &Path) -> Result<(), SessionError> 
 
 pub fn status_from_session_error(error: SessionError) -> Status {
     match error {
+        SessionError::AlreadyExists(message) => Status::already_exists(message),
+        SessionError::DeadlineExceeded(message) => Status::deadline_exceeded(message),
         SessionError::InvalidArgument(message) => Status::invalid_argument(message),
         SessionError::NotFound(message) => Status::not_found(message),
         SessionError::FailedPrecondition(message) => Status::failed_precondition(message),
@@ -2360,6 +3046,7 @@ mod tests {
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         };
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
@@ -2380,14 +3067,20 @@ mod tests {
         }
     }
 
-    async fn pending_handle(engine: &SessionEngine, marker: &Path) -> Arc<SessionHandle> {
+    pub(super) async fn pending_handle(
+        engine: &SessionEngine,
+        marker: &Path,
+    ) -> Arc<SessionHandle> {
         let session_id = engine.create_session_id().await.unwrap();
         let metadata = PersistedSession {
             session_id: session_id.clone(),
+            name: String::new(),
+            parent_session_id: None,
             state: v1::SessionLifecycleState::Starting as i32,
             command: marker_request(marker).command,
             working_dir: engine.inner.config.home_root.to_string_lossy().into_owned(),
             env: Vec::new(),
+            environment_projection_required: false,
             pty: false,
             term: String::new(),
             width: 80,
@@ -2798,6 +3491,7 @@ mod tests {
             }),
             managed_credential_clients:
                 codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+            host: None,
             launch_projection: Some(crate::LaunchProjectionConfig {
                 selection_sha256: [4; 32],
                 native: Some(crate::NativeLaunchProjectionConfig {
@@ -2810,6 +3504,8 @@ mod tests {
         let engine = SessionEngine::new(&config, bridge);
         let record = engine
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -2897,10 +3593,13 @@ mod tests {
         file.sync_all().await.unwrap();
         let metadata = PersistedSession {
             session_id: session_id.into(),
+            name: String::new(),
+            parent_session_id: None,
             state: v1::SessionLifecycleState::Running as i32,
             command: vec!["sh".into()],
             working_dir: root.to_string_lossy().into_owned(),
             env: Vec::new(),
+            environment_projection_required: false,
             pty: true,
             term: "xterm-256color".into(),
             width: 80,
@@ -2924,7 +3623,7 @@ mod tests {
         }
     }
 
-    fn test_engine(root: &Path) -> SessionEngine {
+    pub(super) fn test_engine(root: &Path) -> SessionEngine {
         let config = Config {
             listen_addr: "unused:0".into(),
             workspace_root: root.join("workspace"),
@@ -2933,6 +3632,7 @@ mod tests {
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         };
         SessionEngine::new(&config, CredentialBridge::new(None))
@@ -3278,10 +3978,13 @@ mod tests {
 
         let mut metadata = PersistedSession {
             session_id: session_id.into(),
+            name: String::new(),
+            parent_session_id: None,
             state: v1::SessionLifecycleState::Exited as i32,
             command: vec!["true".into()],
             working_dir: root.to_string_lossy().into_owned(),
             env: Vec::new(),
+            environment_projection_required: false,
             pty: false,
             term: String::new(),
             width: 0,
@@ -3315,3 +4018,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "durable_session/host_tests.rs"]
+mod host_tests;

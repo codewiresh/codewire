@@ -745,6 +745,7 @@ mod tests {
                 home_root,
                 auth_token: crate::DaemonAuthToken::new(TEST_TOKEN).unwrap(),
                 process_execution: ProcessExecution::Native,
+                host: None,
                 launch_projection: None,
                 credential_bridge: Some(CredentialBridgeConfig {
                     transport: crate::CredentialBridgeTransport::Local,

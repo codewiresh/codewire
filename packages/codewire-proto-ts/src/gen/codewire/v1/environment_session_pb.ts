@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/environment_session.proto.
  */
 export const file_codewire_v1_environment_session: GenFile = /*@__PURE__*/
-  fileDesc("CiVjb2Rld2lyZS92MS9lbnZpcm9ubWVudF9zZXNzaW9uLnByb3RvEgtjb2Rld2lyZS52MSKXAwoSRW52aXJvbm1lbnRTZXNzaW9uEhIKCnNlc3Npb25faWQYASABKAkSMwoFc3RhdGUYAiABKA4yJC5jb2Rld2lyZS52MS5FbnZpcm9ubWVudFNlc3Npb25TdGF0ZRIPCgdjb21tYW5kGAMgAygJEhMKC3dvcmtpbmdfZGlyGAQgASgJEgsKA3B0eRgFIAEoCBIuCgpjcmVhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgpzdGFydGVkX2F0GAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIvCgtmaW5pc2hlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFgoJZXhpdF9jb2RlGAkgASgFSACIAQESGQoRb3V0cHV0X2VuZF9vZmZzZXQYCiABKAQSFgoOc3RhdHVzX21lc3NhZ2UYCyABKAkSGwoTb3V0cHV0X3N0YXJ0X29mZnNldBgMIAEoBEIMCgpfZXhpdF9jb2RlIo8BCh1FbnZpcm9ubWVudFNlc3Npb25PdXRwdXRDaHVuaxIOCgZvZmZzZXQYASABKAQSEwoLbmV4dF9vZmZzZXQYAiABKAQSOwoGc3RyZWFtGAMgASgOMisuY29kZXdpcmUudjEuRW52aXJvbm1lbnRTZXNzaW9uT3V0cHV0U3RyZWFtEgwKBGRhdGEYBCABKAwigwIKFExhdW5jaFNlc3Npb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIPCgdjb21tYW5kGAMgAygJEhMKC3dvcmtpbmdfZGlyGAQgASgJEjcKA2VudhgFIAMoCzIqLmNvZGV3aXJlLnYxLkxhdW5jaFNlc3Npb25SZXF1ZXN0LkVudkVudHJ5EgsKA3B0eRgGIAEoCBIMCgR0ZXJtGAcgASgJEg8KB2NvbHVtbnMYCCABKA0SDAoEcm93cxgJIAEoDRoqCghFbnZFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIkkKFUxhdW5jaFNlc3Npb25SZXNwb25zZRIwCgdzZXNzaW9uGAEgASgLMh8uY29kZXdpcmUudjEuRW52aXJvbm1lbnRTZXNzaW9uIj0KE0xpc3RTZXNzaW9uc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJIkkKFExpc3RTZXNzaW9uc1Jlc3BvbnNlEjEKCHNlc3Npb25zGAEgAygLMh8uY29kZXdpcmUudjEuRW52aXJvbm1lbnRTZXNzaW9uIk8KEUdldFNlc3Npb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRISCgpzZXNzaW9uX2lkGAMgASgJIkYKEkdldFNlc3Npb25SZXNwb25zZRIwCgdzZXNzaW9uGAEgASgLMh8uY29kZXdpcmUudjEuRW52aXJvbm1lbnRTZXNzaW9uIlAKElN0b3BTZXNzaW9uUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSEgoKc2Vzc2lvbl9pZBgDIAEoCSJHChNTdG9wU2Vzc2lvblJlc3BvbnNlEjAKB3Nlc3Npb24YASABKAsyHy5jb2Rld2lyZS52MS5FbnZpcm9ubWVudFNlc3Npb24iUwoVUmVzdGFydFNlc3Npb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRISCgpzZXNzaW9uX2lkGAMgASgJIkoKFlJlc3RhcnRTZXNzaW9uUmVzcG9uc2USMAoHc2Vzc2lvbhgBIAEoCzIfLmNvZGV3aXJlLnYxLkVudmlyb25tZW50U2Vzc2lvbiKQAQoYUmVhZFNlc3Npb25PdXRwdXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRISCgpzZXNzaW9uX2lkGAMgASgJEg4KBm9mZnNldBgEIAEoBBINCgVsaW1pdBgFIAEoBBIZChFhbGxvd19oaXN0b3J5X2dhcBgGIAEoCCKtAQoZUmVhZFNlc3Npb25PdXRwdXRSZXNwb25zZRI6CgZjaHVua3MYASADKAsyKi5jb2Rld2lyZS52MS5FbnZpcm9ubWVudFNlc3Npb25PdXRwdXRDaHVuaxITCgtuZXh0X29mZnNldBgCIAEoBBILCgNlb2YYAyABKAgSHQoVcmV0YWluZWRfc3RhcnRfb2Zmc2V0GAQgASgEEhMKC2hpc3RvcnlfZ2FwGAUgASgIImYKEUF0dGFjaFNlc3Npb25PcGVuEg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRISCgpzZXNzaW9uX2lkGAMgASgJEhUKDW91dHB1dF9vZmZzZXQYBCABKAQiNAoTQXR0YWNoU2Vzc2lvblJlc2l6ZRIPCgdjb2x1bW5zGAEgASgNEgwKBHJvd3MYAiABKA0ivgEKFEF0dGFjaFNlc3Npb25SZXF1ZXN0Ei4KBG9wZW4YASABKAsyHi5jb2Rld2lyZS52MS5BdHRhY2hTZXNzaW9uT3BlbkgAEg8KBXN0ZGluGAIgASgMSAASMgoGcmVzaXplGAMgASgLMiAuY29kZXdpcmUudjEuQXR0YWNoU2Vzc2lvblJlc2l6ZUgAEigKBmRldGFjaBgEIAEoCzIWLmdvb2dsZS5wcm90b2J1Zi5FbXB0eUgAQgcKBWlucHV0IkcKE0F0dGFjaFNlc3Npb25TdGF0dXMSMAoHc2Vzc2lvbhgBIAEoCzIfLmNvZGV3aXJlLnYxLkVudmlyb25tZW50U2Vzc2lvbiJWChtFbnZpcm9ubWVudFNlc3Npb25PdXRwdXRHYXASGAoQcmVxdWVzdGVkX29mZnNldBgBIAEoBBIdChVyZXRhaW5lZF9zdGFydF9vZmZzZXQYAiABKAQi0wEKFUF0dGFjaFNlc3Npb25SZXNwb25zZRI8CgZvdXRwdXQYASABKAsyKi5jb2Rld2lyZS52MS5FbnZpcm9ubWVudFNlc3Npb25PdXRwdXRDaHVua0gAEjIKBnN0YXR1cxgCIAEoCzIgLmNvZGV3aXJlLnYxLkF0dGFjaFNlc3Npb25TdGF0dXNIABI/CgtoaXN0b3J5X2dhcBgDIAEoCzIoLmNvZGV3aXJlLnYxLkVudmlyb25tZW50U2Vzc2lvbk91dHB1dEdhcEgAQgcKBWV2ZW50KtkCChdFbnZpcm9ubWVudFNlc3Npb25TdGF0ZRIpCiVFTlZJUk9OTUVOVF9TRVNTSU9OX1NUQVRFX1VOU1BFQ0lGSUVEEAASJgoiRU5WSVJPTk1FTlRfU0VTU0lPTl9TVEFURV9TVEFSVElORxABEiUKIUVOVklST05NRU5UX1NFU1NJT05fU1RBVEVfUlVOTklORxACEiYKIkVOVklST05NRU5UX1NFU1NJT05fU1RBVEVfU1RPUFBJTkcQAxIlCiFFTlZJUk9OTUVOVF9TRVNTSU9OX1NUQVRFX1NUT1BQRUQQBBIkCiBFTlZJUk9OTUVOVF9TRVNTSU9OX1NUQVRFX0VYSVRFRBAFEiQKIEVOVklST05NRU5UX1NFU1NJT05fU1RBVEVfRkFJTEVEEAYSKQolRU5WSVJPTk1FTlRfU0VTU0lPTl9TVEFURV9JTlRFUlJVUFRFRBAHKtoBCh5FbnZpcm9ubWVudFNlc3Npb25PdXRwdXRTdHJlYW0SMQotRU5WSVJPTk1FTlRfU0VTU0lPTl9PVVRQVVRfU1RSRUFNX1VOU1BFQ0lGSUVEEAASLAooRU5WSVJPTk1FTlRfU0VTU0lPTl9PVVRQVVRfU1RSRUFNX1NURE9VVBABEiwKKEVOVklST05NRU5UX1NFU1NJT05fT1VUUFVUX1NUUkVBTV9TVERFUlIQAhIpCiVFTlZJUk9OTUVOVF9TRVNTSU9OX09VVFBVVF9TVFJFQU1fUFRZEAMykwUKGUVudmlyb25tZW50U2Vzc2lvblNlcnZpY2USVgoNTGF1bmNoU2Vzc2lvbhIhLmNvZGV3aXJlLnYxLkxhdW5jaFNlc3Npb25SZXF1ZXN0GiIuY29kZXdpcmUudjEuTGF1bmNoU2Vzc2lvblJlc3BvbnNlElgKDExpc3RTZXNzaW9ucxIgLmNvZGV3aXJlLnYxLkxpc3RTZXNzaW9uc1JlcXVlc3QaIS5jb2Rld2lyZS52MS5MaXN0U2Vzc2lvbnNSZXNwb25zZSIDkAIBElIKCkdldFNlc3Npb24SHi5jb2Rld2lyZS52MS5HZXRTZXNzaW9uUmVxdWVzdBofLmNvZGV3aXJlLnYxLkdldFNlc3Npb25SZXNwb25zZSIDkAIBElAKC1N0b3BTZXNzaW9uEh8uY29kZXdpcmUudjEuU3RvcFNlc3Npb25SZXF1ZXN0GiAuY29kZXdpcmUudjEuU3RvcFNlc3Npb25SZXNwb25zZRJZCg5SZXN0YXJ0U2Vzc2lvbhIiLmNvZGV3aXJlLnYxLlJlc3RhcnRTZXNzaW9uUmVxdWVzdBojLmNvZGV3aXJlLnYxLlJlc3RhcnRTZXNzaW9uUmVzcG9uc2USZwoRUmVhZFNlc3Npb25PdXRwdXQSJS5jb2Rld2lyZS52MS5SZWFkU2Vzc2lvbk91dHB1dFJlcXVlc3QaJi5jb2Rld2lyZS52MS5SZWFkU2Vzc2lvbk91dHB1dFJlc3BvbnNlIgOQAgESWgoNQXR0YWNoU2Vzc2lvbhIhLmNvZGV3aXJlLnYxLkF0dGFjaFNlc3Npb25SZXF1ZXN0GiIuY29kZXdpcmUudjEuQXR0YWNoU2Vzc2lvblJlc3BvbnNlKAEwAUK6AQoPY29tLmNvZGV3aXJlLnYxQhdFbnZpcm9ubWVudFNlc3Npb25Qcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_empty, file_google_protobuf_timestamp]);
+  fileDesc("CiVjb2Rld2lyZS92MS9lbnZpcm9ubWVudF9zZXNzaW9uLnByb3RvEgtjb2Rld2lyZS52MSL0AwoSRW52aXJvbm1lbnRTZXNzaW9uEhIKCnNlc3Npb25faWQYASABKAkSMwoFc3RhdGUYAiABKA4yJC5jb2Rld2lyZS52MS5FbnZpcm9ubWVudFNlc3Npb25TdGF0ZRIPCgdjb21tYW5kGAMgAygJEhMKC3dvcmtpbmdfZGlyGAQgASgJEgsKA3B0eRgFIAEoCBIuCgpjcmVhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgpzdGFydGVkX2F0GAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIvCgtmaW5pc2hlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFgoJZXhpdF9jb2RlGAkgASgFSACIAQESGQoRb3V0cHV0X2VuZF9vZmZzZXQYCiABKAQSFgoOc3RhdHVzX21lc3NhZ2UYCyABKAkSGwoTb3V0cHV0X3N0YXJ0X29mZnNldBgMIAEoBBIMCgRuYW1lGA0gASgJEh4KEXBhcmVudF9zZXNzaW9uX2lkGA4gASgJSAGIAQESFwoPY2xlYW51cF91bmtub3duGA8gASgIQgwKCl9leGl0X2NvZGVCFAoSX3BhcmVudF9zZXNzaW9uX2lkIo8BCh1FbnZpcm9ubWVudFNlc3Npb25PdXRwdXRDaHVuaxIOCgZvZmZzZXQYASABKAQSEwoLbmV4dF9vZmZzZXQYAiABKAQSOwoGc3RyZWFtGAMgASgOMisuY29kZXdpcmUudjEuRW52aXJvbm1lbnRTZXNzaW9uT3V0cHV0U3RyZWFtEgwKBGRhdGEYBCABKAwixwIKFExhdW5jaFNlc3Npb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIPCgdjb21tYW5kGAMgAygJEhMKC3dvcmtpbmdfZGlyGAQgASgJEjcKA2VudhgFIAMoCzIqLmNvZGV3aXJlLnYxLkxhdW5jaFNlc3Npb25SZXF1ZXN0LkVudkVudHJ5EgsKA3B0eRgGIAEoCBIMCgR0ZXJtGAcgASgJEg8KB2NvbHVtbnMYCCABKA0SDAoEcm93cxgJIAEoDRIMCgRuYW1lGAogASgJEh4KEXBhcmVudF9zZXNzaW9uX2lkGAsgASgJSACIAQEaKgoIRW52RW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIUChJfcGFyZW50X3Nlc3Npb25faWQiSQoVTGF1bmNoU2Vzc2lvblJlc3BvbnNlEjAKB3Nlc3Npb24YASABKAsyHy5jb2Rld2lyZS52MS5FbnZpcm9ubWVudFNlc3Npb24iPQoTTGlzdFNlc3Npb25zUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkiSQoUTGlzdFNlc3Npb25zUmVzcG9uc2USMQoIc2Vzc2lvbnMYASADKAsyHy5jb2Rld2lyZS52MS5FbnZpcm9ubWVudFNlc3Npb24iTwoRR2V0U2Vzc2lvblJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhIKCnNlc3Npb25faWQYAyABKAkiRgoSR2V0U2Vzc2lvblJlc3BvbnNlEjAKB3Nlc3Npb24YASABKAsyHy5jb2Rld2lyZS52MS5FbnZpcm9ubWVudFNlc3Npb24iUAoSU3RvcFNlc3Npb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRISCgpzZXNzaW9uX2lkGAMgASgJIkcKE1N0b3BTZXNzaW9uUmVzcG9uc2USMAoHc2Vzc2lvbhgBIAEoCzIfLmNvZGV3aXJlLnYxLkVudmlyb25tZW50U2Vzc2lvbiJTChVSZXN0YXJ0U2Vzc2lvblJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhIKCnNlc3Npb25faWQYAyABKAkiSgoWUmVzdGFydFNlc3Npb25SZXNwb25zZRIwCgdzZXNzaW9uGAEgASgLMh8uY29kZXdpcmUudjEuRW52aXJvbm1lbnRTZXNzaW9uImMKF1NlbmRTZXNzaW9uSW5wdXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRISCgpzZXNzaW9uX2lkGAMgASgJEgwKBGRhdGEYBCABKAwiGgoYU2VuZFNlc3Npb25JbnB1dFJlc3BvbnNlIpABChhSZWFkU2Vzc2lvbk91dHB1dFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhIKCnNlc3Npb25faWQYAyABKAkSDgoGb2Zmc2V0GAQgASgEEg0KBWxpbWl0GAUgASgEEhkKEWFsbG93X2hpc3RvcnlfZ2FwGAYgASgIIq0BChlSZWFkU2Vzc2lvbk91dHB1dFJlc3BvbnNlEjoKBmNodW5rcxgBIAMoCzIqLmNvZGV3aXJlLnYxLkVudmlyb25tZW50U2Vzc2lvbk91dHB1dENodW5rEhMKC25leHRfb2Zmc2V0GAIgASgEEgsKA2VvZhgDIAEoCBIdChVyZXRhaW5lZF9zdGFydF9vZmZzZXQYBCABKAQSEwoLaGlzdG9yeV9nYXAYBSABKAgiZgoRQXR0YWNoU2Vzc2lvbk9wZW4SDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhIKCnNlc3Npb25faWQYAyABKAkSFQoNb3V0cHV0X29mZnNldBgEIAEoBCI0ChNBdHRhY2hTZXNzaW9uUmVzaXplEg8KB2NvbHVtbnMYASABKA0SDAoEcm93cxgCIAEoDSK+AQoUQXR0YWNoU2Vzc2lvblJlcXVlc3QSLgoEb3BlbhgBIAEoCzIeLmNvZGV3aXJlLnYxLkF0dGFjaFNlc3Npb25PcGVuSAASDwoFc3RkaW4YAiABKAxIABIyCgZyZXNpemUYAyABKAsyIC5jb2Rld2lyZS52MS5BdHRhY2hTZXNzaW9uUmVzaXplSAASKAoGZGV0YWNoGAQgASgLMhYuZ29vZ2xlLnByb3RvYnVmLkVtcHR5SABCBwoFaW5wdXQiRwoTQXR0YWNoU2Vzc2lvblN0YXR1cxIwCgdzZXNzaW9uGAEgASgLMh8uY29kZXdpcmUudjEuRW52aXJvbm1lbnRTZXNzaW9uIlYKG0Vudmlyb25tZW50U2Vzc2lvbk91dHB1dEdhcBIYChByZXF1ZXN0ZWRfb2Zmc2V0GAEgASgEEh0KFXJldGFpbmVkX3N0YXJ0X29mZnNldBgCIAEoBCLTAQoVQXR0YWNoU2Vzc2lvblJlc3BvbnNlEjwKBm91dHB1dBgBIAEoCzIqLmNvZGV3aXJlLnYxLkVudmlyb25tZW50U2Vzc2lvbk91dHB1dENodW5rSAASMgoGc3RhdHVzGAIgASgLMiAuY29kZXdpcmUudjEuQXR0YWNoU2Vzc2lvblN0YXR1c0gAEj8KC2hpc3RvcnlfZ2FwGAMgASgLMiguY29kZXdpcmUudjEuRW52aXJvbm1lbnRTZXNzaW9uT3V0cHV0R2FwSABCBwoFZXZlbnQq2QIKF0Vudmlyb25tZW50U2Vzc2lvblN0YXRlEikKJUVOVklST05NRU5UX1NFU1NJT05fU1RBVEVfVU5TUEVDSUZJRUQQABImCiJFTlZJUk9OTUVOVF9TRVNTSU9OX1NUQVRFX1NUQVJUSU5HEAESJQohRU5WSVJPTk1FTlRfU0VTU0lPTl9TVEFURV9SVU5OSU5HEAISJgoiRU5WSVJPTk1FTlRfU0VTU0lPTl9TVEFURV9TVE9QUElORxADEiUKIUVOVklST05NRU5UX1NFU1NJT05fU1RBVEVfU1RPUFBFRBAEEiQKIEVOVklST05NRU5UX1NFU1NJT05fU1RBVEVfRVhJVEVEEAUSJAogRU5WSVJPTk1FTlRfU0VTU0lPTl9TVEFURV9GQUlMRUQQBhIpCiVFTlZJUk9OTUVOVF9TRVNTSU9OX1NUQVRFX0lOVEVSUlVQVEVEEAcq2gEKHkVudmlyb25tZW50U2Vzc2lvbk91dHB1dFN0cmVhbRIxCi1FTlZJUk9OTUVOVF9TRVNTSU9OX09VVFBVVF9TVFJFQU1fVU5TUEVDSUZJRUQQABIsCihFTlZJUk9OTUVOVF9TRVNTSU9OX09VVFBVVF9TVFJFQU1fU1RET1VUEAESLAooRU5WSVJPTk1FTlRfU0VTU0lPTl9PVVRQVVRfU1RSRUFNX1NUREVSUhACEikKJUVOVklST05NRU5UX1NFU1NJT05fT1VUUFVUX1NUUkVBTV9QVFkQAzL0BQoZRW52aXJvbm1lbnRTZXNzaW9uU2VydmljZRJWCg1MYXVuY2hTZXNzaW9uEiEuY29kZXdpcmUudjEuTGF1bmNoU2Vzc2lvblJlcXVlc3QaIi5jb2Rld2lyZS52MS5MYXVuY2hTZXNzaW9uUmVzcG9uc2USWAoMTGlzdFNlc3Npb25zEiAuY29kZXdpcmUudjEuTGlzdFNlc3Npb25zUmVxdWVzdBohLmNvZGV3aXJlLnYxLkxpc3RTZXNzaW9uc1Jlc3BvbnNlIgOQAgESUgoKR2V0U2Vzc2lvbhIeLmNvZGV3aXJlLnYxLkdldFNlc3Npb25SZXF1ZXN0Gh8uY29kZXdpcmUudjEuR2V0U2Vzc2lvblJlc3BvbnNlIgOQAgESUAoLU3RvcFNlc3Npb24SHy5jb2Rld2lyZS52MS5TdG9wU2Vzc2lvblJlcXVlc3QaIC5jb2Rld2lyZS52MS5TdG9wU2Vzc2lvblJlc3BvbnNlElkKDlJlc3RhcnRTZXNzaW9uEiIuY29kZXdpcmUudjEuUmVzdGFydFNlc3Npb25SZXF1ZXN0GiMuY29kZXdpcmUudjEuUmVzdGFydFNlc3Npb25SZXNwb25zZRJfChBTZW5kU2Vzc2lvbklucHV0EiQuY29kZXdpcmUudjEuU2VuZFNlc3Npb25JbnB1dFJlcXVlc3QaJS5jb2Rld2lyZS52MS5TZW5kU2Vzc2lvbklucHV0UmVzcG9uc2USZwoRUmVhZFNlc3Npb25PdXRwdXQSJS5jb2Rld2lyZS52MS5SZWFkU2Vzc2lvbk91dHB1dFJlcXVlc3QaJi5jb2Rld2lyZS52MS5SZWFkU2Vzc2lvbk91dHB1dFJlc3BvbnNlIgOQAgESWgoNQXR0YWNoU2Vzc2lvbhIhLmNvZGV3aXJlLnYxLkF0dGFjaFNlc3Npb25SZXF1ZXN0GiIuY29kZXdpcmUudjEuQXR0YWNoU2Vzc2lvblJlc3BvbnNlKAEwAUK6AQoPY29tLmNvZGV3aXJlLnYxQhdFbnZpcm9ubWVudFNlc3Npb25Qcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_empty, file_google_protobuf_timestamp]);
 
 /**
  * EnvironmentSession is the published durable-session record. session_id is
@@ -82,6 +82,25 @@ export type EnvironmentSession = Message<"codewire.v1.EnvironmentSession"> & {
    * @generated from field: uint64 output_start_offset = 12;
    */
   outputStartOffset: bigint;
+
+  /**
+   * Optional label, unique among retained records in this environment.
+   *
+   * @generated from field: string name = 13;
+   */
+  name: string;
+
+  /**
+   * @generated from field: optional string parent_session_id = 14;
+   */
+  parentSessionId?: string | undefined;
+
+  /**
+   * Cleanup cannot be established after a trusted-host daemon crash.
+   *
+   * @generated from field: bool cleanup_unknown = 15;
+   */
+  cleanupUnknown: boolean;
 };
 
 /**
@@ -174,6 +193,21 @@ export type LaunchSessionRequest = Message<"codewire.v1.LaunchSessionRequest"> &
    * @generated from field: uint32 rows = 9;
    */
   rows: number;
+
+  /**
+   * Empty means unnamed; otherwise 1..64 ASCII bytes, alphanumeric first,
+   * followed by alphanumeric, dot, underscore or hyphen.
+   *
+   * @generated from field: string name = 10;
+   */
+  name: string;
+
+  /**
+   * Canonical session UUID identity in this same environment, never a name.
+   *
+   * @generated from field: optional string parent_session_id = 11;
+   */
+  parentSessionId?: string | undefined;
 };
 
 /**
@@ -372,6 +406,53 @@ export const RestartSessionResponseSchema: GenMessage<RestartSessionResponse> = 
   messageDesc(file_codewire_v1_environment_session, 11);
 
 /**
+ * @generated from message codewire.v1.SendSessionInputRequest
+ */
+export type SendSessionInputRequest = Message<"codewire.v1.SendSessionInputRequest"> & {
+  /**
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * @generated from field: string session_id = 3;
+   */
+  sessionId: string;
+
+  /**
+   * Nonempty, at most 64KiB. The acknowledgement is bounded to five seconds.
+   *
+   * @generated from field: bytes data = 4;
+   */
+  data: Uint8Array;
+};
+
+/**
+ * Describes the message codewire.v1.SendSessionInputRequest.
+ * Use `create(SendSessionInputRequestSchema)` to create a new message.
+ */
+export const SendSessionInputRequestSchema: GenMessage<SendSessionInputRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_environment_session, 12);
+
+/**
+ * @generated from message codewire.v1.SendSessionInputResponse
+ */
+export type SendSessionInputResponse = Message<"codewire.v1.SendSessionInputResponse"> & {
+};
+
+/**
+ * Describes the message codewire.v1.SendSessionInputResponse.
+ * Use `create(SendSessionInputResponseSchema)` to create a new message.
+ */
+export const SendSessionInputResponseSchema: GenMessage<SendSessionInputResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_environment_session, 13);
+
+/**
  * @generated from message codewire.v1.ReadSessionOutputRequest
  */
 export type ReadSessionOutputRequest = Message<"codewire.v1.ReadSessionOutputRequest"> & {
@@ -413,7 +494,7 @@ export type ReadSessionOutputRequest = Message<"codewire.v1.ReadSessionOutputReq
  * Use `create(ReadSessionOutputRequestSchema)` to create a new message.
  */
 export const ReadSessionOutputRequestSchema: GenMessage<ReadSessionOutputRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_environment_session, 12);
+  messageDesc(file_codewire_v1_environment_session, 14);
 
 /**
  * @generated from message codewire.v1.ReadSessionOutputResponse
@@ -452,7 +533,7 @@ export type ReadSessionOutputResponse = Message<"codewire.v1.ReadSessionOutputRe
  * Use `create(ReadSessionOutputResponseSchema)` to create a new message.
  */
 export const ReadSessionOutputResponseSchema: GenMessage<ReadSessionOutputResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_environment_session, 13);
+  messageDesc(file_codewire_v1_environment_session, 15);
 
 /**
  * AttachSessionOpen must be the first frame in an attach stream.
@@ -487,7 +568,7 @@ export type AttachSessionOpen = Message<"codewire.v1.AttachSessionOpen"> & {
  * Use `create(AttachSessionOpenSchema)` to create a new message.
  */
 export const AttachSessionOpenSchema: GenMessage<AttachSessionOpen> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_environment_session, 14);
+  messageDesc(file_codewire_v1_environment_session, 16);
 
 /**
  * @generated from message codewire.v1.AttachSessionResize
@@ -509,7 +590,7 @@ export type AttachSessionResize = Message<"codewire.v1.AttachSessionResize"> & {
  * Use `create(AttachSessionResizeSchema)` to create a new message.
  */
 export const AttachSessionResizeSchema: GenMessage<AttachSessionResize> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_environment_session, 15);
+  messageDesc(file_codewire_v1_environment_session, 17);
 
 /**
  * @generated from message codewire.v1.AttachSessionRequest
@@ -550,7 +631,7 @@ export type AttachSessionRequest = Message<"codewire.v1.AttachSessionRequest"> &
  * Use `create(AttachSessionRequestSchema)` to create a new message.
  */
 export const AttachSessionRequestSchema: GenMessage<AttachSessionRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_environment_session, 16);
+  messageDesc(file_codewire_v1_environment_session, 18);
 
 /**
  * @generated from message codewire.v1.AttachSessionStatus
@@ -567,7 +648,7 @@ export type AttachSessionStatus = Message<"codewire.v1.AttachSessionStatus"> & {
  * Use `create(AttachSessionStatusSchema)` to create a new message.
  */
 export const AttachSessionStatusSchema: GenMessage<AttachSessionStatus> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_environment_session, 17);
+  messageDesc(file_codewire_v1_environment_session, 19);
 
 /**
  * Sent before replay when a requested cursor is older than retained history.
@@ -591,7 +672,7 @@ export type EnvironmentSessionOutputGap = Message<"codewire.v1.EnvironmentSessio
  * Use `create(EnvironmentSessionOutputGapSchema)` to create a new message.
  */
 export const EnvironmentSessionOutputGapSchema: GenMessage<EnvironmentSessionOutputGap> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_environment_session, 18);
+  messageDesc(file_codewire_v1_environment_session, 20);
 
 /**
  * @generated from message codewire.v1.AttachSessionResponse
@@ -626,7 +707,7 @@ export type AttachSessionResponse = Message<"codewire.v1.AttachSessionResponse">
  * Use `create(AttachSessionResponseSchema)` to create a new message.
  */
 export const AttachSessionResponseSchema: GenMessage<AttachSessionResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_environment_session, 19);
+  messageDesc(file_codewire_v1_environment_session, 21);
 
 /**
  * @generated from enum codewire.v1.EnvironmentSessionState
@@ -758,6 +839,17 @@ export const EnvironmentSessionService: GenService<{
     methodKind: "unary";
     input: typeof RestartSessionRequestSchema;
     output: typeof RestartSessionResponseSchema;
+  },
+  /**
+   * Acknowledges an owned stdin write/flush or PTY write, not queue admission.
+   * Timeout is ambiguous: callers must not automatically retry input.
+   *
+   * @generated from rpc codewire.v1.EnvironmentSessionService.SendSessionInput
+   */
+  sendSessionInput: {
+    methodKind: "unary";
+    input: typeof SendSessionInputRequestSchema;
+    output: typeof SendSessionInputResponseSchema;
   },
   /**
    * @generated from rpc codewire.v1.EnvironmentSessionService.ReadSessionOutput

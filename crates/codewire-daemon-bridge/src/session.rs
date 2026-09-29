@@ -92,6 +92,14 @@ pub trait EnvironmentSessionBackend: Clone + Send + Sync + 'static {
         session_id: &str,
     ) -> Result<v1::SessionRecord, connectrpc::ConnectError>;
 
+    async fn send_input(
+        &self,
+        ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        request: v1::SendSessionInputRequest,
+    ) -> Result<(), connectrpc::ConnectError>;
+
     async fn read_output(
         &self,
         ctx: &RequestContext,
@@ -152,6 +160,8 @@ where
                 &request.org_id,
                 &request.environment_id,
                 v1::LaunchSessionRequest {
+                    name: request.name,
+                    parent_session_id: request.parent_session_id,
                     command: request.command,
                     working_dir: request.working_dir,
                     env: request
@@ -285,6 +295,41 @@ where
             session: Some(public_session(session)).into(),
             ..Default::default()
         })
+    }
+
+    async fn send_session_input(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::SendSessionInputRequest>,
+    ) -> ServiceResult<proto::SendSessionInputResponse> {
+        self.backend.authorize(&ctx)?;
+        let request_id = request_id(&ctx);
+        let request = request.to_owned_message();
+        let mut violations = coordinate_violations(
+            &request.org_id,
+            &request.environment_id,
+            Some(&request.session_id),
+        );
+        if request.data.is_empty()
+            || request.data.len() > codewire_gateway_proto::SESSION_INPUT_MAX_BYTES
+        {
+            violations.push(violation("/data", "must contain 1..65536 bytes"));
+        }
+        if !violations.is_empty() {
+            return Err(self.backend.validation_error(violations, request_id));
+        }
+        self.backend
+            .send_input(
+                &ctx,
+                &request.org_id,
+                &request.environment_id,
+                v1::SendSessionInputRequest {
+                    session_id: request.session_id,
+                    data: request.data,
+                },
+            )
+            .await?;
+        connectrpc::Response::ok(proto::SendSessionInputResponse::default())
     }
 
     async fn read_session_output(
@@ -577,7 +622,33 @@ fn launch_violations(request: &proto::LaunchSessionRequest) -> Vec<FieldViolatio
     if request.command.is_empty() {
         violations.push(violation("/command", "must not be empty"));
     }
+    if !codewire_gateway_proto::valid_session_name(&request.name) {
+        violations.push(violation(
+            "/name",
+            "must be a safe name of at most 64 ASCII bytes",
+        ));
+    }
+    if request
+        .parent_session_id
+        .as_deref()
+        .is_some_and(|id| !canonical_session_id(id))
+    {
+        violations.push(violation(
+            "/parent_session_id",
+            "must be a canonical same-environment session identity",
+        ));
+    }
     violations
+}
+
+fn canonical_session_id(id: &str) -> bool {
+    id.strip_prefix("session-")
+        .and_then(|raw| {
+            uuid::Uuid::parse_str(raw)
+                .ok()
+                .map(|uuid| uuid.to_string() == raw)
+        })
+        .unwrap_or(false)
 }
 
 fn coordinate_violations(
@@ -608,6 +679,9 @@ fn terminal_dimension(value: u32) -> i32 {
 
 pub fn public_session(record: v1::SessionRecord) -> proto::EnvironmentSession {
     proto::EnvironmentSession {
+        name: record.name,
+        parent_session_id: record.parent_session_id,
+        cleanup_unknown: record.cleanup_unknown,
         session_id: record.session_id,
         state: public_session_state(record.state).into(),
         command: record.command,
@@ -694,6 +768,9 @@ mod tests {
                 (10, "output_end_offset"),
                 (11, "status_message"),
                 (12, "output_start_offset"),
+                (13, "name"),
+                (14, "parent_session_id"),
+                (15, "cleanup_unknown"),
             ],
         ),
         (
@@ -717,6 +794,8 @@ mod tests {
                 (7, "term"),
                 (8, "columns"),
                 (9, "rows"),
+                (10, "name"),
+                (11, "parent_session_id"),
             ],
         ),
         ("codewire.v1.LaunchSessionResponse", &[(1, "session")]),
@@ -740,6 +819,16 @@ mod tests {
             &[(1, "org_id"), (2, "environment_id"), (3, "session_id")],
         ),
         ("codewire.v1.RestartSessionResponse", &[(1, "session")]),
+        (
+            "codewire.v1.SendSessionInputRequest",
+            &[
+                (1, "org_id"),
+                (2, "environment_id"),
+                (3, "session_id"),
+                (4, "data"),
+            ],
+        ),
+        ("codewire.v1.SendSessionInputResponse", &[]),
         (
             "codewire.v1.ReadSessionOutputRequest",
             &[
@@ -801,6 +890,7 @@ mod tests {
         authorization_error: Option<connectrpc::ConnectError>,
         validation_calls: Arc<AtomicUsize>,
         output_reads: Arc<Mutex<Vec<v1::ReadSessionOutputRequest>>>,
+        unary_inputs: Arc<Mutex<Vec<v1::SendSessionInputRequest>>>,
     }
 
     impl TestBackend {
@@ -809,6 +899,7 @@ mod tests {
                 authorization_error: None,
                 validation_calls: Arc::new(AtomicUsize::new(0)),
                 output_reads: Arc::new(Mutex::new(Vec::new())),
+                unary_inputs: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -820,6 +911,7 @@ mod tests {
                 )),
                 validation_calls: Arc::new(AtomicUsize::new(0)),
                 output_reads: Arc::new(Mutex::new(Vec::new())),
+                unary_inputs: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -933,6 +1025,17 @@ mod tests {
             unreachable!("not used by bridge unit tests")
         }
 
+        async fn send_input(
+            &self,
+            _ctx: &RequestContext,
+            _org_id: &str,
+            _environment_id: &str,
+            request: v1::SendSessionInputRequest,
+        ) -> Result<(), connectrpc::ConnectError> {
+            self.unary_inputs.lock().await.push(request);
+            Ok(())
+        }
+
         async fn read_output(
             &self,
             _ctx: &RequestContext,
@@ -954,6 +1057,64 @@ mod tests {
         ) -> Result<Self::Attachment, connectrpc::ConnectError> {
             unreachable!("not used by bridge unit tests")
         }
+    }
+
+    #[tokio::test]
+    async fn unary_input_validates_before_dispatch_and_preserves_exact_bytes() {
+        let backend = TestBackend::allowed();
+        let inputs = backend.unary_inputs.clone();
+        let bridge = EnvironmentSessionBridge::new(backend);
+        for data in [
+            vec![],
+            vec![0; codewire_gateway_proto::SESSION_INPUT_MAX_BYTES + 1],
+            vec![0xff, 0, b'\n'],
+        ] {
+            let valid =
+                !data.is_empty() && data.len() <= codewire_gateway_proto::SESSION_INPUT_MAX_BYTES;
+            let message = proto::SendSessionInputRequest {
+                org_id: "org".into(),
+                environment_id: "env".into(),
+                session_id: "session-00000000-0000-4000-8000-000000000001".into(),
+                data: data.clone(),
+                ..Default::default()
+            };
+            let body = bytes::Bytes::from(message.encode_to_vec());
+            let view = proto::SendSessionInputRequest::decode_view(&body).unwrap();
+            let result = proto::EnvironmentSessionService::send_session_input(
+                &bridge,
+                RequestContext::default(),
+                ServiceRequest::from_parts(&view, &body),
+            )
+            .await;
+            if valid {
+                result.unwrap();
+                assert_eq!(inputs.lock().await.last().unwrap().data, data);
+            } else {
+                assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
+                assert!(inputs.lock().await.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unary_input_authorization_precedes_validation_and_dispatch() {
+        let backend = TestBackend::rejected();
+        let calls = backend.validation_calls.clone();
+        let inputs = backend.unary_inputs.clone();
+        let bridge = EnvironmentSessionBridge::new(backend);
+        let message = proto::SendSessionInputRequest::default();
+        let body = bytes::Bytes::from(message.encode_to_vec());
+        let view = proto::SendSessionInputRequest::decode_view(&body).unwrap();
+        let error = proto::EnvironmentSessionService::send_session_input(
+            &bridge,
+            RequestContext::default(),
+            ServiceRequest::from_parts(&view, &body),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthenticated);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(inputs.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -1284,6 +1445,7 @@ mod tests {
             proto::ENVIRONMENT_SESSION_SERVICE_GET_SESSION_SPEC,
             proto::ENVIRONMENT_SESSION_SERVICE_STOP_SESSION_SPEC,
             proto::ENVIRONMENT_SESSION_SERVICE_RESTART_SESSION_SPEC,
+            proto::ENVIRONMENT_SESSION_SERVICE_SEND_SESSION_INPUT_SPEC,
             proto::ENVIRONMENT_SESSION_SERVICE_READ_SESSION_OUTPUT_SPEC,
             proto::ENVIRONMENT_SESSION_SERVICE_ATTACH_SESSION_SPEC,
         ]
@@ -1302,7 +1464,7 @@ mod tests {
             .map(|method| method.name.as_deref().unwrap().to_owned())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(actual, expected);
-        assert_eq!(expected.len(), 7);
+        assert_eq!(expected.len(), 8);
     }
 
     #[test]
@@ -1341,6 +1503,9 @@ mod tests {
     fn private_records_convert_without_changing_byte_offsets() {
         let record = v1::SessionRecord {
             session_id: "session-1".into(),
+            name: "label".into(),
+            parent_session_id: Some("session-parent".into()),
+            cleanup_unknown: true,
             state: v1::SessionLifecycleState::Running as i32,
             command: vec!["sh".into()],
             working_dir: "/workspace".into(),
@@ -1351,6 +1516,9 @@ mod tests {
         };
         let public = public_session(record);
         assert_eq!(public.session_id, "session-1");
+        assert_eq!(public.name, "label");
+        assert_eq!(public.parent_session_id.as_deref(), Some("session-parent"));
+        assert!(public.cleanup_unknown);
         assert_eq!(
             public.state.as_known(),
             Some(proto::EnvironmentSessionState::Running)

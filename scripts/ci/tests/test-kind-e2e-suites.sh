@@ -111,6 +111,240 @@ for binding in \
     fail "prepared workspace readiness binding missing: $binding"
 done
 workspace_fixture="$(sed -n '/^workspace_service_smokes() {/,/^environment_resize_smoke() (/p' "$COMMON")"
+
+# Bash suppresses errexit throughout functions invoked from an if/|| condition.
+# Exercise the actual composites in that context, with synthetic leaf commands,
+# so neither a failed child nor a failed fixture transition can emit green.
+workspace_smoke_definition() {
+  awk -v name="$1" '
+    /^[[:alnum:]_]+\(\) [({]$/ {
+      if (copying) exit
+      if ($1 == name "()") copying = 1
+    }
+    copying { print }
+  ' "$COMMON"
+}
+
+run_workspace_failure_fixture() (
+  local target="$1" failure="$2"
+  local NS=codewire-e2e SANDBOX_NS=dev-sandboxes
+  local KIND_INGRESS_URL=http://fixture.invalid KIND_INGRESS_TLS_URL=https://fixture.invalid
+  local CARGO_CI_DIR="$FIXTURE/workspace-bin" GATEWAY_SMOKE_TMPDIR="$FIXTURE/gateway"
+  local RUN_DIR="$FIXTURE" GATEWAY_PUBLIC_FINGERPRINT
+  local claim_deletes=0
+  export WORKSPACE_FIXTURE_CALLS="$CALLS" WORKSPACE_FIXTURE_FAILURE="$failure"
+  mkdir -p "$CARGO_CI_DIR/examples" "$GATEWAY_SMOKE_TMPDIR"
+  cat >"$CARGO_CI_DIR/leaf" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+step="${0##*/}"
+if [[ "$step" == crd-smoke ]]; then
+  step="crd-${CRD_SMOKE_GATEWAY_PHASE:-${CRD_SMOKE_RESIZE_PHASE:-missing}}"
+fi
+printf '%s\n' "$step" >>"$WORKSPACE_FIXTURE_CALLS"
+[[ "$step" != "$WORKSPACE_FIXTURE_FAILURE" ]] || exit 43
+if [[ "$step" == crd-render ]]; then
+  printf '{"items":[{"kind":"SandboxTemplate","metadata":{"name":"fixture-template"}},{"kind":"SandboxWarmPool","metadata":{"name":"fixture-pool"}},{"kind":"SandboxClaim","metadata":{"name":"sandbox-%s"},"spec":{"warmPoolRef":{"name":"fixture-pool"}}}]}\n' "$CRD_SMOKE_RESIZE_ENVIRONMENT_ID"
+fi
+SH
+  chmod +x "$CARGO_CI_DIR/leaf"
+  for leaf in exec-smoke exec-stream-smoke environment-setup-smoke file-service-smoke crd-smoke; do
+    cp "$CARGO_CI_DIR/leaf" "$CARGO_CI_DIR/$leaf"
+  done
+
+  fixture_step() {
+    record "$1"
+    [[ "$1" != "$failure" ]] || return 41
+  }
+  log() { record "log $*"; }
+  kind_workspace_runtime_image() { printf '%s\n' fixture-workspace; }
+  gateway_auth_token_for_environment() { printf '%s\n' fixture-coordinate; }
+  daemon_auth_token_for_environment() { printf '%s\n' fixture-daemon; }
+  gateway_host_key_restart_smoke() { fixture_step gateway; }
+  file_service_smoke() { fixture_step file-composite; }
+  environment_resize_smoke() { fixture_step resize; }
+  environment_daemon_proxy_smoke() { fixture_step proxy; }
+  environment_setup_terminal_smoke() { fixture_step terminal; }
+  exec_service_connect_smoke() { fixture_step exec-service; }
+  platform_run_connect_smoke() { fixture_step platform-run; }
+  environment_session_protocol_smoke() { fixture_step session-protocol; }
+  capture_gateway_public_fingerprint() {
+    fixture_step "fingerprint-$1" || return $?
+    GATEWAY_PUBLIC_FINGERPRINT=SHA256:fixture
+  }
+  delete_kind_credential_bootstrap() { fixture_step credential-cleanup; }
+  kubectl_apply() { cat >/dev/null; fixture_step claim-apply; }
+  kubectl() {
+    case " $* " in
+      *' get deploy/agent-sandbox-controller '*) printf '1\n' ;;
+      *' scale deploy/agent-sandbox-controller '*--replicas=0*) fixture_step controller-stop ;;
+      *' scale deploy/agent-sandbox-controller '*) fixture_step controller-restore ;;
+      *' wait pod '*) fixture_step controller-drain ;;
+      *' wait pod/'*) fixture_step daemon-ready ;;
+      *' wait sandboxclaim/'*) fixture_step resize-claim-ready ;;
+      *' rollout restart '*) fixture_step gateway-restart ;;
+      *' rollout status '*) fixture_step controller-ready ;;
+      *' get secret '*metadata.uid*) printf 'fixture-secret-uid\n' ;;
+      *' get pod '*status.podIP*) printf '10.0.0.1\n' ;;
+      *' get pod '*metadata.uid*) printf 'fixture-pod-uid\n' ;;
+      *' delete sandboxclaim '*)
+        claim_deletes=$((claim_deletes + 1))
+        if [[ "$claim_deletes" -eq 1 ]]; then
+          fixture_step claim-reset
+        else
+          fixture_step claim-cleanup
+        fi
+        ;;
+      *' patch sandboxclaim '*) fixture_step claim-ready ;;
+      *' get sandboxclaim '*)
+        if [[ "$failure" == claim-not-ready ]]; then printf 'False\n'; else printf 'True\n'; fi
+        ;;
+      *' exec -i deploy/postgres '*)
+        local sql
+        sql="$(cat)"
+        if [[ "$sql" == INSERT* ]]; then
+          fixture_step database-setup
+        else
+          fixture_step database-cleanup
+        fi
+        ;;
+      *' delete pod '*) fixture_step pod-cleanup ;;
+      *' delete pod/'*) fixture_step daemon-reset ;;
+      *' --cascade=foreground '*) fixture_step resize-foreground ;;
+      *' delete secret/'*) fixture_step host-key-cleanup ;;
+      *) fail "unexpected workspace fixture command: $*" ;;
+    esac
+  }
+  case "$target" in
+    workspace_service_smokes|file_service_smoke|environment_resize_smoke)
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      "$target"
+      ;;
+    gateway_host_key_restart_smoke)
+      mktemp() { command mktemp -d "$FIXTURE/gateway.XXXXXX"; }
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      "$target"
+      ;;
+    environment_setup_terminal_smoke)
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      "$target" env-fixture
+      ;;
+    file-cleanup)
+      local claim_name=fixture-claim original_replicas=1 initial_status=0
+      eval "$(sed -n '/^  cleanup_file_service_binding() {/,/^  }/p' "$COMMON")" || return $?
+      if [[ "$failure" == cleanup-preserve ]]; then
+        initial_status=43
+        failure=controller-restore
+      fi
+      (exit "$initial_status")
+      cleanup_file_service_binding
+      ;;
+    curl_settled)
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      mktemp() { fixture_step probe-temp || return $?; printf '%s\n' "$FIXTURE/probe-headers"; }
+      curl() {
+        printf 'HTTP/1.1 200 OK\n' >"$PROBE_HEADERS"
+        printf '%s\n' fixture-body
+        fixture_step probe-transport
+      }
+      awk() { fixture_step probe-headers || return $?; command awk "$@"; }
+      "$target" http://fixture.invalid
+      ;;
+    auth_token_for_environment_scope)
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      kubectl() { fixture_step token-secret || return $?; printf '%s\n' Zml4dHVyZQ==; }
+      openssl() {
+        case "$1" in
+          base64) fixture_step token-encode || return $? ;;
+          dgst) fixture_step token-sign || return $? ;;
+          *) fail "unexpected fixture openssl command: $*" ;;
+        esac
+        cat
+      }
+      "$target" env-fixture coordinate
+      ;;
+    exec_service_connect_smoke)
+      # A failed stream binary must stop before any subsequent REST probes.
+      curl_settled() { fixture_step unexpected-curl; return 1; }
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      "$target" env-fixture
+      ;;
+    *) fail "unexpected workspace fixture target: $target" ;;
+  esac
+)
+
+workspace_failure_cases=0
+expect_workspace_failure() {
+  local target="$1" failure="$2" expected_status="$3" forbidden="$4" status
+  : >"$CALLS"
+  if run_workspace_failure_fixture "$target" "$failure" >"$FIXTURE/workspace-failure.out" 2>&1; then
+    fail "$target ignored failed $failure"
+  else
+    status=$?
+  fi
+  [[ "$status" -eq "$expected_status" ]] ||
+    fail "$target changed failed $failure status: got $status, want $expected_status"
+  if grep -Eq "$forbidden" "$CALLS"; then
+    fail "$target continued or emitted green after failed $failure"
+  fi
+  workspace_failure_cases=$((workspace_failure_cases + 1))
+}
+
+expect_workspace_failure workspace_service_smokes gateway 41 '^(exec-smoke|file-composite|resize)$'
+expect_workspace_failure workspace_service_smokes exec-smoke 43 '^(file-composite|resize)$'
+expect_workspace_failure workspace_service_smokes file-composite 41 '^resize$'
+expect_workspace_failure workspace_service_smokes resize 41 'green$'
+for failure in proxy terminal exec-service platform-run session-protocol; do
+  case "$failure" in
+    proxy) forbidden='^(terminal|exec-service|platform-run|session-protocol|file-service-smoke)$|green$' ;;
+    terminal) forbidden='^(exec-service|platform-run|session-protocol|file-service-smoke)$|green$' ;;
+    exec-service) forbidden='^(platform-run|session-protocol|file-service-smoke)$|green$' ;;
+    platform-run) forbidden='^(session-protocol|file-service-smoke)$|green$' ;;
+    session-protocol) forbidden='^file-service-smoke$|green$' ;;
+  esac
+  expect_workspace_failure file_service_smoke "$failure" 41 "$forbidden"
+done
+expect_workspace_failure file_service_smoke file-service-smoke 43 'green$'
+for failure in controller-stop controller-drain claim-reset claim-apply claim-ready database-setup; do
+  expect_workspace_failure file_service_smoke "$failure" 41 '^(proxy|terminal|exec-service|platform-run|session-protocol|file-service-smoke)$|green$'
+done
+expect_workspace_failure file_service_smoke claim-not-ready 1 '^(proxy|terminal|exec-service|platform-run|session-protocol|file-service-smoke)$|green$'
+for failure in database-cleanup claim-cleanup controller-restore controller-ready pod-cleanup; do
+  expect_workspace_failure file_service_smoke "$failure" 41 'green$'
+done
+expect_workspace_failure file_service_smoke crd-cleanup 43 'green$'
+expect_workspace_failure environment_setup_terminal_smoke environment-setup-smoke 43 'green$'
+expect_workspace_failure exec_service_connect_smoke exec-stream-smoke 43 '^unexpected-curl$|green$'
+expect_workspace_failure gateway_host_key_restart_smoke crd-setup 43 '^(daemon-reset|claim-apply)$|green$'
+expect_workspace_failure gateway_host_key_restart_smoke fingerprint-before-restart 41 '^gateway-restart$|green$'
+expect_workspace_failure gateway_host_key_restart_smoke gateway-restart 41 '^fingerprint-after-restart$|green$'
+expect_workspace_failure environment_resize_smoke crd-render 43 '^claim-apply$|green$'
+expect_workspace_failure environment_resize_smoke claim-apply 41 '^resize-claim-ready$|green$'
+for failure in claim-reset controller-restore controller-ready; do
+  expect_workspace_failure file-cleanup "$failure" 41 'green$'
+done
+expect_workspace_failure file-cleanup cleanup-preserve 43 'green$'
+for failure in probe-temp probe-transport probe-headers; do
+  expect_workspace_failure curl_settled "$failure" 41 'green$'
+done
+for failure in token-secret token-encode token-sign; do
+  expect_workspace_failure auth_token_for_environment_scope "$failure" 41 'green$'
+done
+for target in workspace_service_smokes file_service_smoke gateway_host_key_restart_smoke file-cleanup curl_settled auth_token_for_environment_scope; do
+  : >"$CALLS"
+  if ! run_workspace_failure_fixture "$target" none >"$FIXTURE/workspace-passing.out" 2>&1; then
+    fail "$target rejected passing leaves and fixture transitions"
+  fi
+  case "$target" in
+    workspace_service_smokes) grep -Fxq resize "$CALLS" || fail 'workspace success omitted resize' ;;
+    file_service_smoke) grep -Fq 'FileService streaming and black-box Connect contract green' "$CALLS" ||
+      fail 'file-service success omitted its green result' ;;
+    gateway_host_key_restart_smoke) grep -Fxq fingerprint-after-restart "$CALLS" || fail 'gateway success omitted the restart fingerprint' ;;
+  esac
+  workspace_failure_cases=$((workspace_failure_cases + 1))
+done
+printf '[test-kind-e2e-suites] workspace failure propagation: %s cases passed\n' "$workspace_failure_cases"
+
 python3 - "$ROOT" <<'PY'
 import hashlib
 import pathlib

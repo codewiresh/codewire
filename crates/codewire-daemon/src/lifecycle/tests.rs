@@ -37,6 +37,7 @@ fn config() -> Config {
         }),
         managed_credential_clients: Default::default(),
         // No host is connected. Lifecycle control must not request projection.
+        host: None,
         launch_projection: Some(LaunchProjectionConfig {
             selection_sha256: [7; 32],
             native: None,

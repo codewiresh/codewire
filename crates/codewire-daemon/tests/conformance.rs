@@ -37,6 +37,8 @@ async fn generated_session_client_authenticates_and_requires_ready_daemon() {
 
     let launched = client
         .launch(v1::LaunchSessionRequest {
+            name: String::new(),
+            parent_session_id: None,
             command: vec!["sh".into(), "-c".into(), "printf generated-client".into()],
             ..v1::LaunchSessionRequest::default()
         })

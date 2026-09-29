@@ -178,6 +178,7 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
+    config.validate_host()?;
     let selected_ssh = config
         .managed_credential_clients
         .contains(codewire_access::ManagedCredentialClient::Ssh);

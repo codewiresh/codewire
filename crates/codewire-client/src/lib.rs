@@ -89,8 +89,9 @@ pub use codewire_proto::codewire::v1::{
     ResizeEnvironmentRequest, ResizeEnvironmentResponse, RestartSessionRequest,
     RestartSessionResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse,
     RunRequest, RunResize, RunResponse, RunResponseView, RunStart, SecretMetadata, SecretProject,
-    SetProjectSecretRequest, SetProjectSecretResponse, SetSecretRequest, SetSecretResponse,
-    SetUserSecretRequest, SetUserSecretResponse, StartEnvironmentRequest, StartEnvironmentResponse,
+    SendSessionInputRequest, SendSessionInputResponse, SetProjectSecretRequest,
+    SetProjectSecretResponse, SetSecretRequest, SetSecretResponse, SetUserSecretRequest,
+    SetUserSecretResponse, StartEnvironmentRequest, StartEnvironmentResponse,
     StopEnvironmentRequest, StopEnvironmentResponse, StopSessionRequest, StopSessionResponse,
     StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest,
     StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse,
@@ -289,6 +290,20 @@ where
     ) -> Result<RestartSessionResponse, ClientError> {
         self.sessions
             .restart_session(request)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn send_session_input(
+        &self,
+        request: SendSessionInputRequest,
+    ) -> Result<SendSessionInputResponse, ClientError> {
+        self.sessions
+            .send_session_input_with_options(
+                request,
+                CallOptions::default().with_timeout(Duration::from_secs(5)),
+            )
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
@@ -1192,6 +1207,22 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    pub async fn send_session_input(
+        &self,
+        request: SendSessionInputRequest,
+    ) -> Result<SendSessionInputResponse, ClientError> {
+        self.sessions
+            .send_session_input_with_options(
+                request,
+                self.auth_options()
+                    .await?
+                    .with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn read_session_output(
         &self,
         request: ReadSessionOutputRequest,
@@ -1721,6 +1752,42 @@ mod tests {
                 result
             })
         }
+    }
+
+    #[tokio::test]
+    async fn acknowledged_session_input_uses_five_second_deadline_and_never_retries_ambiguous_error()
+     {
+        #[derive(Clone)]
+        struct AmbiguousTransport(Arc<std::sync::atomic::AtomicUsize>);
+        impl ClientTransport for AmbiguousTransport {
+            type ResponseBody = reqwest::Body;
+            type Error = ConnectError;
+            fn send(
+                &self,
+                request: Request<ClientBody>,
+            ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(request.uri().path().ends_with("/SendSessionInput"));
+                assert_eq!(request.headers()["connect-timeout-ms"], "5000");
+                Box::pin(async { Err(ConnectError::deadline_exceeded("ambiguous input write")) })
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = PublicEnvironmentSessionClient::new(
+            AmbiguousTransport(calls.clone()),
+            connectrpc::client::ClientConfig::new("http://connect-test.invalid".parse().unwrap()),
+        );
+        let result = client
+            .send_session_input(SendSessionInputRequest {
+                org_id: "org".into(),
+                environment_id: "env".into(),
+                session_id: "session-id".into(),
+                data: vec![0, 0xff],
+                ..Default::default()
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[derive(Clone)]

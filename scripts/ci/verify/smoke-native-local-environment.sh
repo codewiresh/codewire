@@ -695,6 +695,68 @@ run_cw() {
   LAST_STDERR="$stderr_file"
 }
 
+run_named_reader_smoke() {
+  local parent_name='native-reader-parent' reader_name='native-reader'
+  local input='native-reader-ack' parent_id reader_id
+
+  log 'checking named non-PTY input ACK, wait, restart identity, and known-clean stop'
+  run_cw run --detach --no-tty --name "$parent_name" --output json -- /bin/true
+  parent_id="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
+    die 'named reader parent did not return a canonical identity'
+  run_cw wait "$parent_name" --timeout 30s --output json
+  jq -e --arg id "$parent_id" --arg name "$parent_name" '
+    .session.session_id == $id and .session.name == $name and
+    .session.parent_session_id == "" and .session.pty == false and
+    .session.state == "Exited" and .session.exit_code == 0 and
+    .session.cleanup_unknown == false and .output == "" and .eof == true
+  ' "$LAST_STDOUT" >/dev/null || die 'named reader parent completion was not confirmed'
+
+  # Bound the detached guest process as well as each host-side cw command.
+  # shellcheck disable=SC2016 # This variable belongs to the guest process.
+  run_cw run --detach --no-tty --name "$reader_name" --parent "$parent_name" \
+    --output json -- timeout --signal=TERM --kill-after=5s 60s /bin/sh -c \
+    'set -eu; IFS= read -r value; printf "native-reader:%s\n" "$value"'
+  reader_id="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
+    die 'named non-PTY reader did not return a canonical identity'
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
+    .session_id == $id and .session_id != $parent and .name == $name and
+    .parent_session_id == $parent and .pty == false and .state == "Running"
+  ' "$LAST_STDOUT" >/dev/null || die 'named reader launch or canonical parent drifted'
+
+  run_cw send "$reader_name" "$input"
+  rg -qxF "Input written to $reader_id" "$LAST_STDOUT" ||
+    die 'named reader input ACK did not resolve to its canonical identity'
+  run_cw wait "$reader_name" --timeout 30s --output json
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" \
+    --arg output "native-reader:$input"$'\n' '
+    .session.session_id == $id and .session.name == $name and
+    .session.parent_session_id == $parent and .session.pty == false and
+    .session.state == "Exited" and .session.exit_code == 0 and
+    .session.cleanup_unknown == false and .output == $output and
+    .eof == true and .history_gap == false
+  ' "$LAST_STDOUT" >/dev/null || die 'named reader wait did not confirm input, zero exit, output, and EOF'
+
+  run_cw restart "$reader_name" --output json
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
+    length == 1 and (.[0] |
+      .session_id == $id and .name == $name and .parent_session_id == $parent and
+      .pty == false and .state == "Running" and .exit_code == null)
+  ' "$LAST_STDOUT" >/dev/null || die 'reader restart changed its identity, name, parent, or run state'
+  run_cw stop "$reader_name" --output json
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
+    length == 1 and (.[0] |
+      .session_id == $id and .name == $name and .parent_session_id == $parent and
+      .pty == false and .state == "Stopped" and .cleanup_unknown == false)
+  ' "$LAST_STDOUT" >/dev/null || die 'reader stop did not return its terminal known-clean record'
+  run_cw list --output json
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
+    [.[] | select(.name == $name)] |
+    length == 1 and (.[0] |
+      .session_id == $id and .parent_session_id == $parent and
+      .pty == false and .state == "Stopped" and .cleanup_unknown == false)
+  ' "$LAST_STDOUT" >/dev/null || die 'reader terminal known-clean record was not retained'
+}
+
 assert_current_target_cleared() {
   if rg -qF 'could not save the current local target' "$LAST_STDERR"; then
     die 'last environment deletion failed to clear the current target'
@@ -2498,6 +2560,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   exit 0
 fi
 
+run_named_reader_smoke
+
 log 'checking public Exec/File over the owner-only supervisor UDS'
 run_public_data_smoke
 
@@ -2595,6 +2659,8 @@ jq -e '
     "files.v1",
     "health.v1",
     "pty.v1",
+    "session_input.v1",
+    "session_metadata.v1",
     "sessions.v1"
   ] and
   .message == "local environment daemon is ready" and

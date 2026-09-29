@@ -26,11 +26,13 @@ clap_complete = { workspace = true }
 codewire-access = { workspace = true }
 codewire-client = { workspace = true }
 codewire-daemon = { workspace = true }
+codewire-gateway-proto = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
 codewire-protected-store = { workspace = true }
 codewire-workload-secrets = { workspace = true }
 libc = "0.2"
+hyper-util = { workspace = true }
 portable-pty = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
@@ -39,10 +41,11 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { workspace = true }
 toml = { workspace = true }
 tonic = { workspace = true }
+tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
@@ -54,7 +57,6 @@ buffa = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }
 codewire-credential-broker = { workspace = true, features = ["codex-enrollment", "ssh-agent"] }
-codewire-gateway-proto = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
 rustix = { workspace = true }

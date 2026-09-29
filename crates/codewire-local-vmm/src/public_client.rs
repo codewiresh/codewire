@@ -210,6 +210,23 @@ impl NativePublicSessionClient {
         )
     }
 
+    pub async fn send_input(
+        &self,
+        session_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), NativePublicClientError> {
+        self.inner
+            .send_session_input(codewire_client::SendSessionInputRequest {
+                org_id: self.org_id.clone(),
+                environment_id: self.environment_id.clone(),
+                session_id: session_id.to_owned(),
+                data,
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn read_output(
         &self,
         session_id: &str,

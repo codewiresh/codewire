@@ -152,6 +152,9 @@ fn classify_dispatch_error(error: tonic::Status) -> OrganizationRuntimeMutationE
             AppError::BadRequest("environment session request is invalid".into())
         }
         tonic::Code::NotFound => AppError::NotFound("environment session not found".into()),
+        tonic::Code::AlreadyExists => {
+            AppError::Conflict("environment session name is already retained".into())
+        }
         _ => return OrganizationRuntimeMutationError::ambiguous(uncertain_outcome()),
     };
     OrganizationRuntimeMutationError::Known(known)

@@ -48,6 +48,8 @@ const REQUIRED_LOCAL_DAEMON_CAPABILITIES: &[&str] = &[
     "files.v1",
     "health.v1",
     "pty.v1",
+    "session_input.v1",
+    "session_metadata.v1",
     "sessions.v1",
 ];
 
@@ -1285,6 +1287,21 @@ impl EnvironmentSessionBackend for LocalSessionBackend {
             .public_daemon_client(org_id, environment_id)
             .await?
             .restart(session_id)
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn send_input(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        request: daemon_v1::SendSessionInputRequest,
+    ) -> Result<(), connectrpc::ConnectError> {
+        self.supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?
+            .send_input(&request.session_id, request.data)
             .await
             .map_err(local_session_error)
     }
@@ -3026,6 +3043,18 @@ mod tests {
         assert_eq!(status.diagnostics[0].name, "daemon");
         assert!(status.diagnostics[0].healthy);
         assert!(!format!("{status:?}").contains(sentinel));
+
+        for required in ["session_input.v1", "session_metadata.v1"] {
+            let mut older = capabilities.clone();
+            older.capabilities.retain(|value| value != required);
+            let status = project_daemon_status(&older, &health);
+            assert_eq!(
+                status.state.as_known(),
+                Some(proto::EnvironmentDaemonState::Unsupported),
+                "missing {required} must not report the current session profile ready"
+            );
+            assert!(!status.diagnostics[0].healthy);
+        }
 
         let mut incompatible = capabilities;
         incompatible.daemon_version = sentinel.to_owned();

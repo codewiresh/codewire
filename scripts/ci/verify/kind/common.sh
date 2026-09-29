@@ -483,10 +483,10 @@ require_post_code() {
 # $PROBE_CODE.
 curl_settled() {
   local i
-  PROBE_HEADERS="$(mktemp)"
+  PROBE_HEADERS="$(mktemp)" || return $?
   for i in $(seq 1 15); do
-    PROBE_BODY="$(curl -s -D "$PROBE_HEADERS" "$@")"
-    PROBE_CODE="$(awk 'NR==1{print $2}' "$PROBE_HEADERS")"
+    PROBE_BODY="$(curl -s -D "$PROBE_HEADERS" "$@")" || return $?
+    PROBE_CODE="$(awk 'NR==1{print $2}' "$PROBE_HEADERS")" || return $?
     if [ "$PROBE_CODE" != "503" ]; then
       return 0
     fi
@@ -508,16 +508,16 @@ auth_token_for_environment_scope() {
   secret="$(
     kubectl -n "$NS" get secret codewire-secrets \
       -o jsonpath='{.data.SESSION_SECRET}' | base64 --decode
-  )"
-  payload="$(printf '{"environment_id":"%s","scope":"%s"}' "$environment_id" "$scope")"
+  )" || return $?
+  payload="$(printf '{"environment_id":"%s","scope":"%s"}' "$environment_id" "$scope")" || return $?
   encoded_payload="$(
     printf '%s' "$payload" | openssl base64 -A | tr '+/' '-_' | tr -d '='
-  )"
+  )" || return $?
   signature="$(
     printf '%s' "$encoded_payload" \
       | openssl dgst -sha256 -hmac "$secret" -binary \
       | openssl base64 -A | tr '+/' '-_' | tr -d '='
-  )"
+  )" || return $?
   printf '%s.%s' "$encoded_payload" "$signature"
 }
 
@@ -2327,20 +2327,20 @@ exec_service_connect_smoke() {
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
-    "$CARGO_CI_DIR/exec-stream-smoke"
+    "$CARGO_CI_DIR/exec-stream-smoke" || return $?
 
   ascii_command="printf 'stdout\\n'; printf 'stderr\\n' >&2; exit 17"
   ascii_connect_payload="$(jq -cn \
     --arg org_id org_contract_1 \
     --arg environment_id "$environment_id" \
     --arg command "$ascii_command" \
-    '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')"
+    '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')" || return $?
 
   curl_settled -X POST \
     -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -d "$ascii_connect_payload" \
-    "${KIND_INGRESS_URL}/api/v1/organizations/org_contract_1/environments/${environment_id}/exec"
+    "${KIND_INGRESS_URL}/api/v1/organizations/org_contract_1/environments/${environment_id}/exec" || return $?
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::retired authenticated REST exec returned ${PROBE_CODE}: ${PROBE_BODY}"
     return 1
@@ -2350,7 +2350,7 @@ exec_service_connect_smoke() {
     -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -d "$ascii_connect_payload" \
-    "${KIND_INGRESS_URL}/codewire.v1.ExecService/Exec"
+    "${KIND_INGRESS_URL}/codewire.v1.ExecService/Exec" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::Connect same-pod exec returned ${PROBE_CODE}: ${PROBE_BODY}"
     return 1
@@ -2373,13 +2373,13 @@ exec_service_connect_smoke() {
     --arg org_id org_contract_1 \
     --arg environment_id "$environment_id" \
     --arg command "$invalid_command" \
-    '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')"
+    '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')" || return $?
 
   curl_settled -X POST \
     -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -d "$invalid_connect_payload" \
-    "${KIND_INGRESS_URL}/codewire.v1.ExecService/Exec"
+    "${KIND_INGRESS_URL}/codewire.v1.ExecService/Exec" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::Connect invalid-byte exec returned ${PROBE_CODE}: ${PROBE_BODY}"
     return 1
@@ -2404,7 +2404,7 @@ environment_setup_terminal_smoke() (
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
-    "$CARGO_CI_DIR/environment-setup-smoke"
+    "$CARGO_CI_DIR/environment-setup-smoke" || return $?
   log "EnvironmentSetupService ticket-to-WebSocket path green"
 )
 
@@ -2416,13 +2416,13 @@ file_service_smoke() (
   local claim_name=sandbox-env-crd-smoke
   local daemon_pod=crd-smoke-workspace-daemon
   local gateway_token daemon_token original_replicas pod_ip pod_uid ready
-  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
-  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
+  gateway_token="$(gateway_auth_token_for_environment "$environment_id")" || return $?
+  daemon_token="$(daemon_auth_token_for_environment "$environment_id")" || return $?
 
   original_replicas="$(
     kubectl -n agent-sandbox-system get deploy/agent-sandbox-controller \
       -o jsonpath='{.spec.replicas}'
-  )"
+  )" || return $?
   if [[ ! "$original_replicas" =~ ^[0-9]+$ ]]; then
     echo "::error::agent-sandbox controller replica count is invalid: ${original_replicas:-missing}"
     return 1
@@ -2430,37 +2430,43 @@ file_service_smoke() (
 
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_file_service_binding() {
+    local status=$? cleanup_status=0
+    trap - EXIT
     set +e
     kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-      --ignore-not-found=true --wait=true >/dev/null
+      --ignore-not-found=true --wait=true >/dev/null || cleanup_status=$?
     kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
-      --replicas="$original_replicas" >/dev/null
+      --replicas="$original_replicas" >/dev/null || cleanup_status=$?
     if [ "$original_replicas" -gt 0 ]; then
       kubectl -n agent-sandbox-system rollout status \
-        deploy/agent-sandbox-controller --timeout=180s
+        deploy/agent-sandbox-controller --timeout=180s || cleanup_status=$?
     fi
+    if [ "$status" -eq 0 ]; then
+      status="$cleanup_status"
+    fi
+    exit "$status"
   }
   trap cleanup_file_service_binding EXIT
 
-  kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller --replicas=0
+  kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller --replicas=0 || return $?
   if [ "$original_replicas" -gt 0 ]; then
     kubectl -n agent-sandbox-system wait pod -l app=agent-sandbox-controller \
-      --for=delete --timeout=60s
+      --for=delete --timeout=60s || return $?
   fi
 
   pod_ip="$(
     kubectl -n "$SANDBOX_NS" get pod "$daemon_pod" -o jsonpath='{.status.podIP}'
-  )"
+  )" || return $?
   pod_uid="$(
     kubectl -n "$SANDBOX_NS" get pod "$daemon_pod" -o jsonpath='{.metadata.uid}'
-  )"
+  )" || return $?
   if [ -z "$pod_ip" ] || [ -z "$pod_uid" ]; then
     echo "::error::file-service fixture Pod has no current IP/UID"
     return 1
   fi
   kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-    --ignore-not-found=true --wait=true >/dev/null
-  kubectl_apply -f - <<EOF
+    --ignore-not-found=true --wait=true >/dev/null || return $?
+  kubectl_apply -f - <<EOF || return $?
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
@@ -2472,18 +2478,18 @@ spec:
 EOF
   kubectl -n "$SANDBOX_NS" patch sandboxclaim "$claim_name" \
     --subresource=status --type=merge \
-    -p "{\"status\":{\"sandbox\":{\"name\":\"${daemon_pod}\",\"podIPs\":[\"${pod_ip}\"]},\"conditions\":[{\"lastTransitionTime\":\"2026-01-01T00:00:00Z\",\"message\":\"Kind file-service fixture is ready\",\"reason\":\"Ready\",\"status\":\"True\",\"type\":\"Ready\"}]}}"
+    -p "{\"status\":{\"sandbox\":{\"name\":\"${daemon_pod}\",\"podIPs\":[\"${pod_ip}\"]},\"conditions\":[{\"lastTransitionTime\":\"2026-01-01T00:00:00Z\",\"message\":\"Kind file-service fixture is ready\",\"reason\":\"Ready\",\"status\":\"True\",\"type\":\"Ready\"}]}}" || return $?
   ready="$(
     kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
-  )"
+  )" || return $?
   if [ "$ready" != "True" ]; then
     echo "::error::file-service fixture SandboxClaim Ready status is ${ready:-missing}"
     return 1
   fi
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL || return $?
 INSERT INTO environments (
   id, org_id, created_by, type, name, state, desired_state, preset_id,
   cpu_millicores, memory_mb, disk_gb,
@@ -2540,32 +2546,32 @@ END
 \$fixture\$;
 SQL
 
-  environment_daemon_proxy_smoke "$environment_id" "$daemon_pod"
-  environment_setup_terminal_smoke "$environment_id"
-  exec_service_connect_smoke "$environment_id"
-  platform_run_connect_smoke "$environment_id"
-  environment_session_protocol_smoke "$environment_id"
+  environment_daemon_proxy_smoke "$environment_id" "$daemon_pod" || return $?
+  environment_setup_terminal_smoke "$environment_id" || return $?
+  exec_service_connect_smoke "$environment_id" || return $?
+  platform_run_connect_smoke "$environment_id" || return $?
+  environment_session_protocol_smoke "$environment_id" || return $?
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
     SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
-    "$CARGO_CI_DIR/file-service-smoke"
+    "$CARGO_CI_DIR/file-service-smoke" || return $?
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL || return $?
 DELETE FROM sandbox_environment_backend
 WHERE environment_id = '$environment_id';
 DELETE FROM environments WHERE id = '$environment_id';
 SQL
   kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-    --ignore-not-found=true --wait=true >/dev/null
+    --ignore-not-found=true --wait=true >/dev/null || return $?
   kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
-    --replicas="$original_replicas" >/dev/null
+    --replicas="$original_replicas" >/dev/null || return $?
   if [ "$original_replicas" -gt 0 ]; then
     kubectl -n agent-sandbox-system rollout status \
-      deploy/agent-sandbox-controller --timeout=180s
+      deploy/agent-sandbox-controller --timeout=180s || return $?
   fi
   trap - EXIT
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
@@ -2575,21 +2581,25 @@ SQL
     CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=cleanup \
     CRD_SMOKE_LOCAL_GATEWAY=1 \
-    "$CARGO_CI_DIR/crd-smoke"
-  kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null
-  rm -rf "$GATEWAY_SMOKE_TMPDIR"
+    "$CARGO_CI_DIR/crd-smoke" || return $?
+  kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null || return $?
+  rm -rf "$GATEWAY_SMOKE_TMPDIR" || return $?
   log "daemon-native FileService streaming and black-box Connect contract green"
 )
 
 platform_run_connect_smoke() {
   local environment_id="$1"
-  local certificate_dir certificate_pem
+  local certificate_dir certificate_pem status
 
   log "running public Connect platform Run smoke through TLS ingress"
-  certificate_dir="$(mktemp -d)"
+  certificate_dir="$(mktemp -d)" || return $?
   certificate_pem="$certificate_dir/ca.pem"
   kubectl -n "$NS" get secret/codewire-kind-ingress-ca \
-    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem"
+    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem" || {
+      status=$?
+      rm -rf "$certificate_dir"
+      return "$status"
+    }
 
   if ! SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_TLS_URL" \
     SMOKE_CA_CERT_FILE="$certificate_pem" \
@@ -2600,7 +2610,7 @@ platform_run_connect_smoke() {
     rm -rf "$certificate_dir"
     return 1
   fi
-  rm -rf "$certificate_dir"
+  rm -rf "$certificate_dir" || return $?
   log "public Connect platform Run pipe, PTY, and transport-loss behavior green"
 }
 
@@ -2614,7 +2624,7 @@ warm_environment_session_http_upstream() {
       -H 'content-type: application/json' \
       -H 'authorization: Bearer at_kind_connect_oidc_codewire_api' \
       -d '{"message":"whoami"}' \
-      "$base"
+      "$base" || return $?
     if [ "$PROBE_CODE" != "200" ] \
         || [ "$PROBE_BODY" != '{"message":"usr_contract_user"}' ]; then
       echo "::error::ordinary orchestration upstream warm ${i}/24 failed: code=${PROBE_CODE} body=${PROBE_BODY}"
@@ -2630,7 +2640,7 @@ assert_environment_session_grpc_service_upstream() {
   service_ip="$(
     kubectl -n "$NS" get service/codewire-orchestration-grpc \
       -o jsonpath='{.spec.clusterIP}'
-  )"
+  )" || return $?
   if [ -z "$service_ip" ] || [ "$service_ip" = "None" ]; then
     echo "::error::codewire-orchestration-grpc has no usable ClusterIP"
     return 1
@@ -2641,7 +2651,7 @@ assert_environment_session_grpc_service_upstream() {
   for i in $(seq 1 15); do
     controller_logs="$(
       kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --since=10m
-    )"
+    )" || return $?
     matching_lines="$(
       printf '%s\n' "$controller_logs" \
         | grep -F '/codewire.v1.EnvironmentSessionService/LaunchSession' \
@@ -2667,7 +2677,7 @@ assert_environment_session_grpc_service_upstream() {
     kubectl -n "$NS" get pods \
       -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration \
       -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}'
-  )"
+  )" || return $?
   while IFS= read -r pod_ip; do
     if [ -n "$pod_ip" ] && grep -Fq "${pod_ip}:8084" <<<"$matching_lines"; then
       echo "::error::EnvironmentSessionService gRPC ingress reused orchestration pod endpoint ${pod_ip}:8084"
@@ -2681,13 +2691,17 @@ assert_environment_session_grpc_service_upstream() {
 
 environment_session_protocol_smoke() {
   local environment_id="$1"
-  local certificate_dir certificate_pem
+  local certificate_dir certificate_pem status
 
   log "running EnvironmentSessionService direct Connect + public native-gRPC smoke"
-  certificate_dir="$(mktemp -d)"
+  certificate_dir="$(mktemp -d)" || return $?
   certificate_pem="$certificate_dir/ca.pem"
   kubectl -n "$NS" get secret/codewire-kind-ingress-ca \
-    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem"
+    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem" || {
+      status=$?
+      rm -rf "$certificate_dir"
+      return "$status"
+    }
 
   if ! SMOKE_SESSION_BASE_URL=http://127.0.0.1:8084 \
     SMOKE_ORG_ID=org_contract_1 \
@@ -2716,7 +2730,7 @@ environment_session_protocol_smoke() {
     rm -rf "$certificate_dir"
     return 1
   fi
-  rm -rf "$certificate_dir"
+  rm -rf "$certificate_dir" || return $?
   log "EnvironmentSessionService direct Connect + public native-gRPC output/list/logs/exit proof green"
 }
 
@@ -2727,7 +2741,7 @@ environment_daemon_proxy_smoke() {
   log "running authenticated environment-daemon proxy smoke"
   curl_settled -X POST -H 'content-type: application/json' \
     -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\"}" \
-    "$base"
+    "$base" || return $?
   if [ "$PROBE_CODE" != "401" ] \
       || ! printf '%s' "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
     echo "::error::unauthenticated daemon status bypassed product auth: code=$PROBE_CODE body=$PROBE_BODY"
@@ -2737,7 +2751,7 @@ environment_daemon_proxy_smoke() {
   curl_settled -X POST -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\"}" \
-    "$base"
+    "$base" || return $?
   if [ "$PROBE_CODE" != "200" ] \
       || ! printf '%s' "$PROBE_BODY" | jq -e \
         --arg pod_name "$pod_name" '
@@ -2768,31 +2782,35 @@ deploy_agent_sandbox() {
 }
 
 workspace_service_smokes() {
-  gateway_host_key_restart_smoke
+  # Callers check this composite with ||, which suppresses nested errexit.
+  # Every stage must explicitly preserve failure before running the next one.
+  gateway_host_key_restart_smoke || return $?
 
   log "running workspace exec smoke"
   SMOKE_NAMESPACE="$SANDBOX_NS" SMOKE_POD_NAME=crd-smoke-workspace-daemon \
-    "$CARGO_CI_DIR/exec-smoke"
-  file_service_smoke
-  environment_resize_smoke
+    "$CARGO_CI_DIR/exec-smoke" || return $?
+  file_service_smoke || return $?
+  environment_resize_smoke || return $?
 }
 
 environment_resize_smoke() (
   log "running public environment resize against the agent-sandbox controller"
-  umask 077
+  umask 077 || return $?
   local environment_id
-  environment_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  environment_id="$(python3 -c 'import uuid; print(uuid.uuid4())')" || return $?
   local request_id="kind-resize-${RANDOM}-${RANDOM}"
   local preset_id="preset-${environment_id}"
   local template_name shadow_pool_name
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
-  local gateway_token daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
+  local gateway_token daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid claim_uid
   local operation_id operation_state response runtime_state marker image resources
+  local current_pvc_uid resize_label sandbox_cpu claim_cpu storage_rbac pvc_rbac
+  local status
   local resize_manifest="$RUN_DIR/resize-$environment_id.json"
-  trap 'rm -f -- "$resize_manifest"' EXIT
-  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
-  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
+  trap 'status=$?; rm -f -- "$resize_manifest" || status=$?; exit "$status"' EXIT
+  gateway_token="$(gateway_auth_token_for_environment "$environment_id")" || return $?
+  daemon_token="$(daemon_auth_token_for_environment "$environment_id")" || return $?
 
   # Render through the same production code that runtime reconciliation validates.
   # No cluster mutation occurs before these exact object identities are known.
@@ -2803,13 +2821,13 @@ environment_resize_smoke() (
     SANDBOX_CREDENTIAL_GATEWAY_ROOTS_CONFIGMAP=codewire-credential-gateway-roots \
     SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots \
     CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
-    "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"
-  template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")"
-  shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")"
+    "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest" || return $?
+  template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")" || return $?
+  shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")" || return $?
   jq -e --arg claim "$claim_name" --arg pool "$shadow_pool_name" \
     '.items[] | select(.kind == "SandboxClaim") |
       .metadata.name == $claim and .spec.warmPoolRef.name == $pool' \
-    "$resize_manifest" >/dev/null
+    "$resize_manifest" >/dev/null || return $?
 
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_environment_resize_smoke() {
@@ -2852,30 +2870,31 @@ SQL
   }
   trap cleanup_environment_resize_smoke EXIT
 
-  kubectl_apply -f "$resize_manifest"
+  kubectl_apply -f "$resize_manifest" || return $?
   kubectl -n "$SANDBOX_NS" wait "sandboxclaim/${claim_name}" \
-    --for=condition=Ready --timeout=180s
+    --for=condition=Ready --timeout=180s || return $?
   sandbox_name="$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" \
-    -o jsonpath='{.status.sandbox.name}')"
+    -o jsonpath='{.status.sandbox.name}')" || return $?
   if [ -z "$sandbox_name" ]; then
     echo "::error::resize smoke claim did not resolve a Sandbox"
     return 1
   fi
   pod_name="$sandbox_name"
   kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" \
-    --for=condition=Ready --timeout=180s
-  old_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
-  old_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')"
-  pod_ip="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.podIP}')"
+    --for=condition=Ready --timeout=180s || return $?
+  old_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" || return $?
+  old_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')" || return $?
+  pod_ip="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.podIP}')" || return $?
   pvc_name="workspace-${sandbox_name}"
   kubectl -n "$SANDBOX_NS" wait "pvc/${pvc_name}" \
-    --for=jsonpath='{.status.phase}'=Bound --timeout=120s
-  pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')"
+    --for=jsonpath='{.status.phase}'=Bound --timeout=120s || return $?
+  pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" || return $?
   kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- \
-    sh -ceu 'printf codewire-resize-data > /workspace/resize-smoke-marker'
+    sh -ceu 'printf codewire-resize-data > /workspace/resize-smoke-marker' || return $?
+  claim_uid="$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}')" || return $?
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL || return $?
 BEGIN;
 -- A runnable fixture owns its own preset. The shared contract preset is
 -- deliberately missing runtime configuration for the Temporal failure test.
@@ -2900,7 +2919,7 @@ INSERT INTO sandbox_environment_backend (
 )
 VALUES (
   '$environment_id', '$SANDBOX_NS', '$claim_name',
-  '$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}')',
+  '$claim_uid',
   '$pod_name', '$pod_ip'
 );
 COMMIT;
@@ -2910,12 +2929,12 @@ SQL
     -H 'cookie: codewire.session_token=contract-admin-session-token' \
     -H 'content-type: application/json' \
     -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":500,\"memoryMb\":512,\"diskGb\":1,\"requestId\":\"${request_id}\"}" \
-    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
+    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::public resize request failed: code=$PROBE_CODE body=$PROBE_BODY"
     return 1
   fi
-  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")"
+  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")" || return $?
   if [ -z "$operation_id" ]; then
     echo "::error::public resize response omitted operation identity: $PROBE_BODY"
     return 1
@@ -2927,13 +2946,13 @@ SQL
       -H 'cookie: codewire.session_token=contract-admin-session-token' \
       -H 'content-type: application/json' \
       -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"operationId\":\"${operation_id}\"}" \
-      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
+      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation" || return $?
     if [ "$PROBE_CODE" != "200" ]; then
       echo "::error::resize operation poll failed: code=$PROBE_CODE body=$PROBE_BODY"
       return 1
     fi
     response="$PROBE_BODY"
-    operation_state="$(jq -r '.operation.state // empty' <<<"$response")"
+    operation_state="$(jq -r '.operation.state // empty' <<<"$response")" || return $?
     case "$operation_state" in
       ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED) break ;;
       ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED)
@@ -2963,9 +2982,9 @@ SQL
 
   pod_name="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire -Atc \
-      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")"
-  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
-  new_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')"
+      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")" || return $?
+  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" || return $?
+  new_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')" || return $?
   if [ -z "$new_pod_uid" ] || [ "$new_pod_uid" != "$old_pod_uid" ]; then
     echo "::error::live resize replaced the owned workspace Pod UID"
     return 1
@@ -2976,32 +2995,35 @@ SQL
   fi
   runtime_state="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire -Atc \
-      "SELECT state || ':' || cpu_millicores || ':' || memory_mb || ':' || disk_gb FROM environments WHERE id = '$environment_id'")"
+      "SELECT state || ':' || cpu_millicores || ':' || memory_mb || ':' || disk_gb FROM environments WHERE id = '$environment_id'")" || return $?
   if [ "$runtime_state" != "running:500:512:1" ]; then
     echo "::error::resize durable resource state is ${runtime_state:-missing}"
     return 1
   fi
   resources="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" \
-    -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}:{.spec.containers[?(@.name=="workspace")].resources.requests.memory}')"
+    -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}:{.spec.containers[?(@.name=="workspace")].resources.requests.memory}')" || return $?
   image="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" \
-    -o jsonpath='{.spec.containers[?(@.name=="workspace")].image}')"
+    -o jsonpath='{.spec.containers[?(@.name=="workspace")].image}')" || return $?
   marker="$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- \
-    sh -ceu 'cat /workspace/resize-smoke-marker')"
+    sh -ceu 'cat /workspace/resize-smoke-marker')" || return $?
   if [ "$resources" != "500m:512Mi" ] || [ "$image" != "codewire-gateway:e2e" ] \
       || [ "$marker" != "codewire-resize-data" ]; then
     echo "::error::live-resized Pod lost resources/image/data: resources=$resources image=$image marker=$marker"
     return 1
   fi
-  if [ "$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" != "$pvc_uid" ]; then
+  current_pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" || return $?
+  if [ "$current_pvc_uid" != "$pvc_uid" ]; then
     echo "::error::workspace PVC identity changed across resize"
     return 1
   fi
-  if [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.labels.codewire\.sh/resize-smoke-marker}')" != "preserved" ]; then
+  resize_label="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.labels.codewire\.sh/resize-smoke-marker}')" || return $?
+  if [ "$resize_label" != "preserved" ]; then
     echo "::error::live-resized Pod lost the resize identity label"
     return 1
   fi
-  if [ "$(kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.spec.podTemplate.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" != "500m" ] \
-      || [ "$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.spec.workspaceResources[?(@.containerName=="workspace")].resources.requests.cpu}')" != "500m" ]; then
+  sandbox_cpu="$(kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.spec.podTemplate.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" || return $?
+  claim_cpu="$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.spec.workspaceResources[?(@.containerName=="workspace")].resources.requests.cpu}')" || return $?
+  if [ "$sandbox_cpu" != "500m" ] || [ "$claim_cpu" != "500m" ]; then
     echo "::error::Sandbox or SandboxClaim did not retain the desired resize"
     return 1
   fi
@@ -3031,21 +3053,21 @@ SQL
     -H 'cookie: codewire.session_token=contract-admin-session-token' \
     -H 'content-type: application/json' \
     -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":500,\"memoryMb\":384,\"diskGb\":1,\"requestId\":\"${request_id}\",\"disruptionPolicy\":\"ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART\"}" \
-    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
+    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::explicit restart resize request failed: code=$PROBE_CODE body=$PROBE_BODY"
     return 1
   fi
-  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")"
+  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")" || return $?
   operation_state=""
   for _ in $(seq 1 180); do
     curl_settled -X POST \
       -H 'cookie: codewire.session_token=contract-admin-session-token' \
       -H 'content-type: application/json' \
       -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"operationId\":\"${operation_id}\"}" \
-      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
+      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation" || return $?
     response="$PROBE_BODY"
-    operation_state="$(jq -r '.operation.state // empty' <<<"$response")"
+    operation_state="$(jq -r '.operation.state // empty' <<<"$response")" || return $?
     case "$operation_state" in
       ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED) break ;;
       ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED)
@@ -3062,21 +3084,23 @@ SQL
   fi
   pod_name="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire -Atc \
-      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")"
-  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
+      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")" || return $?
+  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" || return $?
   if [ -z "$new_pod_uid" ] || [ "$new_pod_uid" = "$old_pod_uid" ]; then
     echo "::error::explicit restart did not replace the workspace Pod"
     return 1
   fi
-  if [ "$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" != "$pvc_uid" ] \
-      || [ "$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- sh -ceu 'cat /workspace/resize-smoke-marker')" != "codewire-resize-data" ]; then
+  current_pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" || return $?
+  marker="$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- sh -ceu 'cat /workspace/resize-smoke-marker')" || return $?
+  if [ "$current_pvc_uid" != "$pvc_uid" ] || [ "$marker" != "codewire-resize-data" ]; then
     echo "::error::explicit restart failed to preserve PVC identity or workspace data"
     return 1
   fi
 
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"
-  if [ "$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" != "yes" ] \
-      || [ "$(kubectl auth can-i patch persistentvolumeclaims --namespace "$SANDBOX_NS" --as "$as_user")" != "yes" ]; then
+  storage_rbac="$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" || return $?
+  pvc_rbac="$(kubectl auth can-i patch persistentvolumeclaims --namespace "$SANDBOX_NS" --as "$as_user")" || return $?
+  if [ "$storage_rbac" != "yes" ] || [ "$pvc_rbac" != "yes" ]; then
     echo "::error::orchestration resize RBAC is incomplete"
     return 1
   fi
@@ -3253,7 +3277,7 @@ start_gateway_port_forward() {
   local log_file="$GATEWAY_SMOKE_TMPDIR/port-forward-${label}.log"
   local i
 
-  stop_gateway_port_forward
+  stop_gateway_port_forward || return $?
   kubectl -n "$SANDBOX_NS" port-forward --address=127.0.0.1 \
     service/cw-gateway-svc-env-crd-smoke :2222 >"$log_file" 2>&1 &
   GATEWAY_PORT_FORWARD_PID=$!
@@ -3261,7 +3285,7 @@ start_gateway_port_forward() {
     GATEWAY_PORT_FORWARD_PORT="$(
       sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> 2222$/\1/p' \
         "$log_file" | sed -n '1p'
-    )"
+    )" || return $?
     if [ -n "$GATEWAY_PORT_FORWARD_PORT" ]; then
       return 0
     fi
@@ -3282,7 +3306,7 @@ capture_gateway_public_fingerprint() {
   local public_key=""
   local i
 
-  start_gateway_port_forward "$label"
+  start_gateway_port_forward "$label" || return $?
   for i in $(seq 1 30); do
     public_key="$(
       { ssh-keyscan -T 2 -t ed25519 -p "$GATEWAY_PORT_FORWARD_PORT" 127.0.0.1 \
@@ -3293,14 +3317,14 @@ capture_gateway_public_fingerprint() {
     fi
     sleep 1
   done
-  stop_gateway_port_forward
+  stop_gateway_port_forward || return $?
   if [ -z "$public_key" ]; then
     echo "::error::gateway did not present an Ed25519 SSH host key during ${label} probe"
     return 1
   fi
   GATEWAY_PUBLIC_FINGERPRINT="$(
     printf '%s\n' "$public_key" | ssh-keygen -lf - -E sha256 | awk '{ print $2 }'
-  )"
+  )" || return $?
   if [[ "$GATEWAY_PUBLIC_FINGERPRINT" != SHA256:* ]]; then
     echo "::error::gateway ${label} SSH fingerprint was malformed"
     return 1
@@ -3317,9 +3341,9 @@ gateway_host_key_restart_smoke() {
   local before_fingerprint after_fingerprint before_uid after_uid
 
   log "running CRD round-trip and gateway host-key restart smoke"
-  gateway_token="$(gateway_auth_token_for_environment env-crd-smoke)"
-  daemon_token="$(daemon_auth_token_for_environment env-crd-smoke)"
-  GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")"
+  gateway_token="$(gateway_auth_token_for_environment env-crd-smoke)" || return $?
+  daemon_token="$(daemon_auth_token_for_environment env-crd-smoke)" || return $?
+  GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")" || return $?
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$workspace_image" \
@@ -3327,13 +3351,13 @@ gateway_host_key_restart_smoke() {
     CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=setup \
     CRD_SMOKE_LOCAL_GATEWAY=1 \
-    "$CARGO_CI_DIR/crd-smoke"
+    "$CARGO_CI_DIR/crd-smoke" || return $?
 
   # Pod specs are immutable. Recreate only this owned daemon fixture when a
   # retained service smoke is repeated; preserve the gateway and host-key Secret.
   kubectl -n "$SANDBOX_NS" delete "pod/${daemon_pod}" \
-    --ignore-not-found=true --wait=true --timeout=120s
-  kubectl_apply -f - <<EOF
+    --ignore-not-found=true --wait=true --timeout=120s || return $?
+  kubectl_apply -f - <<EOF || return $?
 apiVersion: v1
 kind: Pod
 metadata:
@@ -3392,21 +3416,21 @@ spec:
       emptyDir: {}
 EOF
   kubectl -n "$SANDBOX_NS" wait "pod/${daemon_pod}" \
-    --for=condition=Ready --timeout=120s
-  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s
+    --for=condition=Ready --timeout=120s || return $?
+  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s || return $?
 
   before_uid="$(
     kubectl -n "$SANDBOX_NS" get secret "$host_key_secret" -o jsonpath='{.metadata.uid}'
-  )"
-  capture_gateway_public_fingerprint before-restart
+  )" || return $?
+  capture_gateway_public_fingerprint before-restart || return $?
   before_fingerprint="$GATEWAY_PUBLIC_FINGERPRINT"
 
-  kubectl -n "$SANDBOX_NS" rollout restart "deployment/${gateway_deploy}" >/dev/null
-  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s
+  kubectl -n "$SANDBOX_NS" rollout restart "deployment/${gateway_deploy}" >/dev/null || return $?
+  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s || return $?
   after_uid="$(
     kubectl -n "$SANDBOX_NS" get secret "$host_key_secret" -o jsonpath='{.metadata.uid}'
-  )"
-  capture_gateway_public_fingerprint after-restart
+  )" || return $?
+  capture_gateway_public_fingerprint after-restart || return $?
   after_fingerprint="$GATEWAY_PUBLIC_FINGERPRINT"
 
   if [ "$after_uid" != "$before_uid" ]; then

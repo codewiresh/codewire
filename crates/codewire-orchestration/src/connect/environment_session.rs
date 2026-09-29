@@ -21,7 +21,8 @@ use crate::api::environment_daemon::{
     EnvironmentDaemonSessionAttachment, attach_environment_daemon_session_core,
     get_environment_daemon_session_core, launch_environment_daemon_session_core,
     list_environment_daemon_sessions_core, read_environment_daemon_session_output_core,
-    restart_environment_daemon_session_core, stop_environment_daemon_session_core,
+    restart_environment_daemon_session_core, send_environment_daemon_session_input_core,
+    stop_environment_daemon_session_core,
 };
 use crate::connect::{rendered_workspace_error, workspace_rpc_error};
 
@@ -142,6 +143,25 @@ impl EnvironmentSessionBackend for PlatformSessionBackend {
             org_id,
             environment_id,
             session_id,
+        )
+        .await
+        .map_err(|error| workspace_rpc_error(&error, ctx))
+    }
+
+    async fn send_input(
+        &self,
+        ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        request: v1::SendSessionInputRequest,
+    ) -> Result<(), connectrpc::ConnectError> {
+        let user = auth_user(ctx)?.clone();
+        send_environment_daemon_session_input_core(
+            &self.state,
+            &user,
+            org_id,
+            environment_id,
+            request,
         )
         .await
         .map_err(|error| workspace_rpc_error(&error, ctx))

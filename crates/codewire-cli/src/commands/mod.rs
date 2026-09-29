@@ -13,6 +13,13 @@
 //! `lib.rs` line positions are historical anchors only.
 
 use super::*;
+#[cfg(unix)]
+pub(crate) use sessions::agents::*;
+
+#[cfg(unix)]
+mod host;
+#[cfg(unix)]
+pub(crate) use host::*;
 
 #[cfg(target_os = "linux")]
 mod native;
@@ -674,6 +681,22 @@ pub(crate) struct EnvironmentShellArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentRunArgs {
+    #[arg(long, help = "Unique session name within this environment")]
+    pub(crate) name: Option<String>,
+    #[arg(long, help = "Parent session name or ID within this environment")]
+    pub(crate) parent: Option<String>,
+    #[arg(long, value_parser = ["codex", "claude", "kimi"], conflicts_with = "command")]
+    pub(crate) agent: Option<String>,
+    #[arg(long, requires = "agent")]
+    pub(crate) model: Option<String>,
+    #[arg(long, requires = "agent", value_parser = ["low", "medium", "high", "xhigh", "max", "ultra"])]
+    pub(crate) effort: Option<String>,
+    #[arg(
+        long,
+        requires = "agent",
+        help = "Initial task for the managed conversation"
+    )]
+    pub(crate) prompt: Option<String>,
     #[arg(value_name = "ENV")]
     pub(crate) environment: Option<String>,
     #[arg(short = 'w', long = "workdir", alias = "dir", value_name = "DIR")]
@@ -693,7 +716,7 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) detach: bool,
     #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
-    #[arg(last = true, required = true, value_name = "COMMAND")]
+    #[arg(last = true, required_unless_present = "agent", value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
 }
 
@@ -770,6 +793,9 @@ pub(crate) enum EnvCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvCreateArgs {
+    #[arg(long = "type", value_enum, default_value_t = EnvironmentTypeArg::Sandbox,
+        help = "Sandbox or explicitly trusted host execution")]
+    environment_type: EnvironmentTypeArg,
     #[arg(value_name = "REPO_URL")]
     repo_urls: Vec<String>,
     #[arg(
@@ -908,6 +934,20 @@ pub(crate) enum PathModeArg {
     Auto,
     Clone,
     Copy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum EnvironmentTypeArg {
+    Sandbox,
+    Host,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HostDaemonArgs {
+    #[arg(long)]
+    pub(crate) environment: String,
+    #[arg(long)]
+    pub(crate) registry_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1761,6 +1801,12 @@ impl std::fmt::Debug for NetworkEnrollRedeemArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ListArgs {
+    #[arg(
+        long,
+        conflicts_with = "environment",
+        help = "List sessions across accessible environments"
+    )]
+    pub(crate) all: bool,
     #[arg(value_name = "ENV")]
     pub(crate) environment: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
@@ -1768,8 +1814,65 @@ pub(crate) struct ListArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct SessionTargetArgs {
+    #[arg(value_name = "TARGET", help = "SESSION, or ENV SESSION", num_args = 1..=2)]
+    pub(crate) target: Vec<String>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SendArgs {
+    #[arg(value_name = "TARGET_AND_TEXT", help = "SESSION TEXT, or ENV SESSION TEXT; --key omits TEXT", num_args = 1..=3)]
+    pub(crate) target_and_text: Vec<String>,
+    #[arg(
+        long,
+        conflicts_with = "key",
+        help = "Write text without a trailing newline"
+    )]
+    pub(crate) no_newline: bool,
+    #[arg(long, value_parser = ["ctrl-c", "ctrl-d", "enter", "escape", "tab"])]
+    pub(crate) key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WaitArgs {
+    #[arg(value_name = "TARGET", help = "SESSION, or ENV SESSION", num_args = 1..=2, required_unless_present = "message")]
+    pub(crate) target: Vec<String>,
+    #[arg(
+        long,
+        conflicts_with = "target",
+        help = "Wait for a managed message's terminal result"
+    )]
+    pub(crate) message: Option<String>,
+    #[arg(
+        long,
+        default_value = "30m",
+        help = "Maximum wait; timeout reports unknown, never success"
+    )]
+    pub(crate) timeout: String,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AgentMessageArgs {
+    #[arg(value_name = "TARGET_AND_TEXT", help = "SESSION TEXT, or ENV SESSION TEXT", num_args = 2..=3)]
+    pub(crate) target_and_text: Vec<String>,
+    #[arg(long, help = "Reply to a prior message ID")]
+    pub(crate) reply_to: Option<String>,
+    #[arg(long, help = "Expected active turn ID for steering")]
+    pub(crate) turn_id: Option<String>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct AttachArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV_OR_SESSION",
+        help = "Environment, or session in the selected environment"
+    )]
     pub(crate) environment: Option<String>,
     #[arg(value_name = "SESSION")]
     pub(crate) session: Option<String>,
@@ -1779,7 +1882,10 @@ pub(crate) struct AttachArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct LogsArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV_OR_SESSION",
+        help = "Environment, or session in the selected environment"
+    )]
     pub(crate) environment: Option<String>,
     #[arg(value_name = "SESSION")]
     pub(crate) session: Option<String>,

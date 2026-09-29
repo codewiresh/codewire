@@ -131,7 +131,20 @@ fn run_command_parser_rejects_conflicting_tty_overrides() {
 fn top_level_help_has_only_environment_session_commands() {
     let mut command = Cli::command();
     let help = command.render_long_help().to_string();
-    for retained in ["run ", "list ", "attach ", "logs "] {
+    for retained in [
+        "run ",
+        "list ",
+        "attach ",
+        "logs ",
+        "send ",
+        "wait ",
+        "stop ",
+        "restart ",
+        "msg ",
+        "steer ",
+        "interrupt ",
+        "inbox ",
+    ] {
         assert!(
             help.lines()
                 .any(|line| line.trim_start().starts_with(retained)),
@@ -143,17 +156,13 @@ fn top_level_help_has_only_environment_session_commands() {
         "exec ",
         "node ",
         "tasks ",
-        "msg ",
         "request ",
         "reply ",
         "listen ",
         "subscribe ",
         "status ",
-        "wait ",
         "kill ",
-        "send ",
         "watch ",
-        "inbox ",
         "access ",
         "hook ",
         "gateway ",

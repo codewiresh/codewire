@@ -670,6 +670,7 @@ pub async fn run_daemon() -> Result<()> {
                 additional_gids: plan.identity.additional_gids.clone(),
             },
         ),
+        host: None,
         launch_projection: seed.environment_projection_sha256().map(|selection| {
             codewire_daemon::LaunchProjectionConfig {
                 selection_sha256: selection.as_bytes(),

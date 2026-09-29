@@ -103,6 +103,7 @@ fn projection_daemon_child() {
                 ingress_gid: unsafe { libc::getegid() },
             }),
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: Some(LaunchProjectionConfig {
                 selection_sha256: SELECTION,
                 native: Some(NativeLaunchProjectionConfig {
@@ -574,6 +575,8 @@ async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen
         harness
             .client
             .launch_session(authorized(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: vec!["/bin/sh".into(), "-c".into(), PROBE.into()],
                 working_dir: harness
                     .root
@@ -672,6 +675,8 @@ async fn cancelled_launch_reaps_and_settles_without_a_late_launch(pty: bool) {
     }))
     .await;
     let request = v1::LaunchSessionRequest {
+        name: String::new(),
+        parent_session_id: None,
         command: vec!["/bin/sh".into(), "-c".into(), PROBE.into()],
         working_dir: harness
             .root

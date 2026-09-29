@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use codewire_client::{
-    AttachSessionOpen, ClientConfig, CodewireClient, EnvironmentSessionState, LaunchSessionRequest,
-    ListSessionsRequest, ReadSessionOutputRequest, StaticTokenProvider, attach_session_response,
+    AttachSessionOpen, ClientConfig, CodewireClient, EnvironmentSessionState, ErrorCode,
+    GetSessionRequest, LaunchSessionRequest, ListSessionsRequest, ReadSessionOutputRequest,
+    RestartSessionRequest, SendSessionInputRequest, StaticTokenProvider, StopSessionRequest,
+    attach_session_response,
 };
 
 #[tokio::main]
@@ -30,7 +32,187 @@ async fn main() -> anyhow::Result<()> {
 
     prove_terminal_session(&client, &org_id, &environment_id, 0).await?;
     prove_terminal_session(&client, &org_id, &environment_id, 42).await?;
+    prove_session_controls(&client, &org_id, &environment_id).await?;
     println!("environment-session-smoke: PASS ({base_url})");
+    Ok(())
+}
+
+async fn prove_session_controls(
+    client: &CodewireClient,
+    org_id: &str,
+    environment_id: &str,
+) -> anyhow::Result<()> {
+    let suffix = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let request = LaunchSessionRequest {
+        org_id: org_id.into(),
+        environment_id: environment_id.into(),
+        command: vec![
+            "timeout".into(),
+            "30".into(),
+            "sh".into(),
+            "-c".into(),
+            "read -r value; printf 'CONTROL:%s' \"$value\"".into(),
+        ],
+        working_dir: "/workspace".into(),
+        name: format!("reader-{suffix}"),
+        ..Default::default()
+    };
+    let parent = client
+        .launch_session(request.clone())
+        .await?
+        .session
+        .into_option()
+        .context("named launch lacks session")?;
+    let duplicate = client
+        .launch_session(request)
+        .await
+        .expect_err("duplicate name was admitted");
+    anyhow::ensure!(
+        duplicate.code() == ErrorCode::AlreadyExists,
+        "duplicate name: {duplicate}"
+    );
+    let child = client
+        .launch_session(LaunchSessionRequest {
+            org_id: org_id.into(),
+            environment_id: environment_id.into(),
+            command: vec!["sleep".into(), "30".into()],
+            working_dir: "/workspace".into(),
+            name: format!("child-{suffix}"),
+            parent_session_id: Some(parent.session_id.clone()),
+            ..Default::default()
+        })
+        .await?
+        .session
+        .into_option()
+        .context("child launch lacks session")?;
+    let result = async {
+        anyhow::ensure!(
+            child.parent_session_id.as_deref() == Some(parent.session_id.as_str()),
+            "parent was not retained as a canonical session identity"
+        );
+        let bad_input = client
+            .send_session_input(SendSessionInputRequest {
+                org_id: org_id.into(),
+                environment_id: environment_id.into(),
+                session_id: parent.session_id.clone(),
+                data: Vec::new(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("empty input was accepted");
+        anyhow::ensure!(
+            bad_input.code() == ErrorCode::InvalidArgument,
+            "empty input: {bad_input}"
+        );
+        client
+            .send_session_input(SendSessionInputRequest {
+                org_id: org_id.into(),
+                environment_id: environment_id.into(),
+                session_id: parent.session_id.clone(),
+                data: b"acknowledged\n".to_vec(),
+                ..Default::default()
+            })
+            .await
+            .context("acknowledge named reader input")?;
+        let ended = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let view = client
+                    .get_session(GetSessionRequest {
+                        org_id: org_id.into(),
+                        environment_id: environment_id.into(),
+                        session_id: parent.session_id.clone(),
+                        ..Default::default()
+                    })
+                    .await?
+                    .session
+                    .into_option()
+                    .context("GetSession lacks session")?;
+                if view.state.as_known() == Some(EnvironmentSessionState::Exited) {
+                    break Ok::<_, anyhow::Error>(view);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("named reader completion deadline")??;
+        anyhow::ensure!(
+            ended.name == parent.name && ended.exit_code == Some(0) && !ended.cleanup_unknown,
+            "named reader completion is not confirmed"
+        );
+        let output = client
+            .read_session_output(ReadSessionOutputRequest {
+                org_id: org_id.into(),
+                environment_id: environment_id.into(),
+                session_id: parent.session_id.clone(),
+                limit: 1024,
+                ..Default::default()
+            })
+            .await?;
+        let bytes: Vec<u8> = output
+            .chunks
+            .into_iter()
+            .flat_map(|chunk| chunk.data)
+            .collect();
+        anyhow::ensure!(
+            bytes == b"CONTROL:acknowledged" && output.eof,
+            "acknowledged input did not produce retained output and EOF"
+        );
+        let stopped = client
+            .stop_session(StopSessionRequest {
+                org_id: org_id.into(),
+                environment_id: environment_id.into(),
+                session_id: child.session_id.clone(),
+                ..Default::default()
+            })
+            .await?
+            .session
+            .into_option()
+            .context("StopSession lacks session")?;
+        anyhow::ensure!(
+            stopped.state.as_known() == Some(EnvironmentSessionState::Stopped)
+                && !stopped.cleanup_unknown,
+            "child stop is unconfirmed"
+        );
+        let restarted = client
+            .restart_session(RestartSessionRequest {
+                org_id: org_id.into(),
+                environment_id: environment_id.into(),
+                session_id: child.session_id.clone(),
+                ..Default::default()
+            })
+            .await?
+            .session
+            .into_option()
+            .context("RestartSession lacks session")?;
+        anyhow::ensure!(
+            restarted.session_id == child.session_id
+                && restarted.name == child.name
+                && restarted.parent_session_id == child.parent_session_id,
+            "restart changed the session identity, name or parent"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    // Clean up these identified sessions even after a failed control assertion.
+    for session in [&child, &parent] {
+        client
+            .stop_session(StopSessionRequest {
+                org_id: org_id.into(),
+                environment_id: environment_id.into(),
+                session_id: session.session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .context("clean up control-smoke session")?;
+    }
+    result?;
+    println!("environment-session-smoke: names/parent/send/negative/stop/restart PASS");
     Ok(())
 }
 
