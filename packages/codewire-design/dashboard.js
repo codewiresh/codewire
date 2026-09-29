@@ -594,7 +594,8 @@ if (app) {
     }
   };
 
-  const menuSelector = ".cw-org-switcher[open], .cw-user-menu[open], .cw-org-details[open], .cw-action-menu[open], .cw-filter-menu[open], .cw-row-menu[open], .cw-menu-resize[open], .cw-menu-destroy[open]";
+  // Every shared menu, and disclosures nested inside one, closes on an outside click.
+  const menuSelector = ".cw-menu[open], .cw-menu-panel details[open], .cw-org-details[open]";
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
     // A dialog's close/backdrop event can reach here after it has closed.
@@ -913,5 +914,250 @@ if (app) {
     // the dialog cancels it instead of asking to discard edits.
     form.querySelectorAll("input, textarea").forEach((control) => { control.defaultValue = control.value; });
     void enroll(form, dialog);
+  });
+})();
+
+// Date picker: our calendar over a native datetime-local input. The input stays
+// the submitted value, keeps keyboard entry and is the no-script fallback. The
+// value is UTC wall-clock time, so every calculation here uses UTC.
+(() => {
+  "use strict";
+  if (typeof HTMLElement.prototype.showPopover !== "function") return;
+  const DAY_MS = 86400000;
+  const pad = (number) => String(number).padStart(2, "0");
+  const monthLabel = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+  const dayLabel = new Intl.DateTimeFormat(undefined, { dateStyle: "full", timeZone: "UTC" });
+  const weekdayShort = new Intl.DateTimeFormat(undefined, { weekday: "short", timeZone: "UTC" });
+  const weekdayLong = new Intl.DateTimeFormat(undefined, { weekday: "long", timeZone: "UTC" });
+  const date = (day) => new Date(day);
+  const today = () => {
+    const now = new Date();
+    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  };
+  const parse = (value) => {
+    const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value || "");
+    return parts ? { day: Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])), time: `${parts[4]}:${parts[5]}` } : null;
+  };
+  const isoDay = (day) => `${date(day).getUTCFullYear()}-${pad(date(day).getUTCMonth() + 1)}-${pad(date(day).getUTCDate())}`;
+  const weekStart = (day) => day - ((date(day).getUTCDay() + 6) % 7) * DAY_MS;
+  const addMonths = (day, count) => {
+    const value = date(day);
+    const first = Date.UTC(value.getUTCFullYear(), value.getUTCMonth() + count, 1);
+    const last = date(Date.UTC(date(first).getUTCFullYear(), date(first).getUTCMonth() + 1, 0)).getUTCDate();
+    return Date.UTC(date(first).getUTCFullYear(), date(first).getUTCMonth(), Math.min(value.getUTCDate(), last));
+  };
+  // Fixtures serve the sprite from a relative path; reuse whatever the page uses.
+  const sprite = () => document.querySelector("svg.cw-icon use")?.getAttribute("href")?.split("#")[0] || "/assets/codewire/icons-v2.svg";
+  const icon = (name) => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "cw-icon");
+    svg.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", `${sprite()}#${name}`);
+    svg.append(use);
+    return svg;
+  };
+  const make = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  let sequence = 0;
+
+  const enhance = (input) => {
+    if (input.dataset.datePickerReady) return;
+    input.dataset.datePickerReady = "true";
+    const id = `cw-date-picker-${sequence += 1}`;
+    const group = make("div", "cw-input-group cw-date-field");
+    input.before(group);
+    const toggle = make("button", "cw-icon-button");
+    toggle.type = "button";
+    toggle.setAttribute("aria-label", "Choose date and time");
+    toggle.setAttribute("aria-haspopup", "dialog");
+    toggle.setAttribute("aria-controls", id);
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.append(icon("icon-calendar"));
+    group.append(input, toggle);
+
+    const picker = make("div", "cw-date-picker");
+    picker.id = id;
+    picker.popover = "auto";
+    picker.setAttribute("role", "dialog");
+    picker.setAttribute("aria-label", `Choose ${(input.labels?.[0]?.textContent || "date").trim()}`);
+    const heading = make("h2");
+    heading.id = `${id}-month`;
+    heading.setAttribute("aria-live", "polite");
+    const step = (name, label) => {
+      const button = make("button", "cw-icon-button");
+      button.type = "button";
+      button.setAttribute("aria-label", label);
+      button.append(icon(name));
+      return button;
+    };
+    const previous = step("icon-chevron-left", "Previous month");
+    const next = step("icon-chevron-right", "Next month");
+    const header = make("div", "cw-date-picker-header");
+    header.append(previous, heading, next);
+    const grid = make("table");
+    grid.setAttribute("role", "grid");
+    grid.setAttribute("aria-labelledby", heading.id);
+    const weekdays = make("tr");
+    for (let index = 0; index < 7; index += 1) {
+      const monday = Date.UTC(2024, 0, 1 + index);
+      const cell = make("th", "", weekdayShort.format(date(monday)).slice(0, 2));
+      cell.scope = "col";
+      cell.abbr = weekdayLong.format(date(monday));
+      weekdays.append(cell);
+    }
+    const head = make("thead");
+    head.append(weekdays);
+    const body = make("tbody");
+    grid.append(head, body);
+    const timeRow = make("div", "cw-date-picker-time");
+    const timeLabel = make("label", "", "Time (UTC)");
+    const time = make("input", "cw-input cw-mono");
+    time.id = `${id}-time`;
+    timeLabel.htmlFor = time.id;
+    time.inputMode = "numeric";
+    time.placeholder = "HH:MM";
+    time.maxLength = 5;
+    time.autocomplete = "off";
+    timeRow.append(timeLabel, time);
+    const clear = make("button", "cw-link-button", "Clear");
+    clear.type = "button";
+    const done = make("button", "cw-button cw-button--small", "Done");
+    done.type = "button";
+    const footer = make("div", "cw-date-picker-footer");
+    footer.append(clear, done);
+    picker.append(header, grid, timeRow, footer);
+    group.after(picker);
+
+    let selected = null;
+    let focusDay = today();
+    let month = focusDay;
+    const write = () => {
+      input.value = selected === null ? "" : `${isoDay(selected)}T${time.value || "00:00"}`;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const render = () => {
+      heading.textContent = monthLabel.format(date(month));
+      const first = Date.UTC(date(month).getUTCFullYear(), date(month).getUTCMonth(), 1);
+      const current = date(first).getUTCMonth();
+      const floor = today();
+      const rows = [];
+      for (let start = weekStart(first); date(start).getUTCMonth() === current || start < first; start += 7 * DAY_MS) {
+        const row = make("tr");
+        for (let offset = 0; offset < 7; offset += 1) {
+          const day = start + offset * DAY_MS;
+          const cell = make("td");
+          if (date(day).getUTCMonth() === current) {
+            const button = make("button", "cw-date-picker-day", String(date(day).getUTCDate()));
+            button.type = "button";
+            button.dataset.day = String(day);
+            button.setAttribute("aria-label", dayLabel.format(date(day)));
+            button.tabIndex = day === focusDay ? 0 : -1;
+            button.disabled = day < floor;
+            if (day === floor) button.setAttribute("aria-current", "date");
+            cell.setAttribute("aria-selected", String(day === selected));
+            cell.append(button);
+          }
+          row.append(cell);
+        }
+        rows.push(row);
+      }
+      body.replaceChildren(...rows);
+      previous.disabled = first <= Date.UTC(date(floor).getUTCFullYear(), date(floor).getUTCMonth(), 1);
+    };
+    const focusGrid = () => body.querySelector(`[data-day="${focusDay}"]`)?.focus();
+    const moveTo = (day) => {
+      focusDay = Math.max(day, today());
+      month = focusDay;
+      render();
+      focusGrid();
+    };
+    const choose = (day) => {
+      selected = day;
+      focusDay = day;
+      if (!time.value) time.value = "00:00";
+      time.removeAttribute("aria-invalid");
+      render();
+      write();
+      focusGrid();
+    };
+    const place = () => {
+      const bounds = group.getBoundingClientRect();
+      const width = picker.getBoundingClientRect().width;
+      const height = picker.getBoundingClientRect().height;
+      picker.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - width - 8))}px`;
+      const below = bounds.bottom + 6;
+      picker.style.top = `${below + height > window.innerHeight - 8 ? Math.max(8, bounds.top - height - 6) : below}px`;
+    };
+    const open = () => {
+      const value = parse(input.value);
+      selected = value?.day ?? null;
+      time.value = value?.time ?? "";
+      time.removeAttribute("aria-invalid");
+      focusDay = Math.max(selected ?? today(), today());
+      month = focusDay;
+      render();
+      picker.showPopover();
+      place();
+      focusGrid();
+    };
+
+    toggle.addEventListener("click", () => (picker.matches(":popover-open") ? picker.hidePopover() : open()));
+    picker.addEventListener("toggle", (event) => {
+      const opened = event.newState === "open";
+      toggle.setAttribute("aria-expanded", String(opened));
+      if (!opened && picker.contains(document.activeElement)) toggle.focus();
+    });
+    previous.addEventListener("click", () => { month = addMonths(month, -1); focusDay = Math.max(month, today()); render(); });
+    next.addEventListener("click", () => { month = addMonths(month, 1); focusDay = month; render(); });
+    body.addEventListener("click", (event) => {
+      const button = event.target instanceof Element ? event.target.closest("button[data-day]") : null;
+      if (button && !button.disabled) choose(Number(button.dataset.day));
+    });
+    body.addEventListener("keydown", (event) => {
+      const moves = {
+        ArrowLeft: () => focusDay - DAY_MS,
+        ArrowRight: () => focusDay + DAY_MS,
+        ArrowUp: () => focusDay - 7 * DAY_MS,
+        ArrowDown: () => focusDay + 7 * DAY_MS,
+        Home: () => weekStart(focusDay),
+        End: () => weekStart(focusDay) + 6 * DAY_MS,
+        PageUp: () => addMonths(focusDay, -1),
+        PageDown: () => addMonths(focusDay, 1),
+      };
+      if (moves[event.key]) {
+        event.preventDefault();
+        moveTo(moves[event.key]());
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        choose(focusDay);
+      }
+    });
+    time.addEventListener("change", () => {
+      const valid = /^([01]\d|2[0-3]):[0-5]\d$/.test(time.value);
+      if (valid || time.value === "") time.removeAttribute("aria-invalid");
+      else time.setAttribute("aria-invalid", "true");
+      if (valid && selected !== null) write();
+    });
+    clear.addEventListener("click", () => {
+      selected = null;
+      time.value = "";
+      render();
+      write();
+    });
+    done.addEventListener("click", () => picker.hidePopover());
+    window.addEventListener("resize", () => { if (picker.matches(":popover-open")) place(); });
+    document.addEventListener("scroll", () => { if (picker.matches(":popover-open")) place(); }, true);
+  };
+
+  const enhanceAll = (root) => root.querySelectorAll('input[type="datetime-local"][data-date-picker]').forEach(enhance);
+  enhanceAll(document);
+  document.addEventListener("htmx:afterSwap", (event) => {
+    if (event.target instanceof Element) enhanceAll(event.target);
   });
 })();
