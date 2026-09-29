@@ -68,15 +68,10 @@ app_public_value() {
 
 cmd_seed_login() {
   require_cluster
-  [ -d "$ROOT/apps/dashboard/node_modules/postgres" ] \
-    || die "install the dashboard dependencies first: (cd apps/dashboard && bun install --frozen-lockfile)"
   log "seeding the synthetic owner login"
   (
     cd "$ROOT/apps/dashboard"
-    # The seed script lives outside apps/dashboard; resolve its imports from
-    # the dashboard's dependencies, as the helpers it imports do.
-    NODE_PATH="$ROOT/apps/dashboard/node_modules" \
-      DATABASE_URL="postgres://codewire:codewire@127.0.0.1:${KIND_POSTGRES_HOST_PORT}/codewire" \
+    DATABASE_URL="postgres://codewire:codewire@127.0.0.1:${KIND_POSTGRES_HOST_PORT}/codewire" \
       bun "$ROOT/scripts/dev/kind/seed-login.ts"
   )
 }

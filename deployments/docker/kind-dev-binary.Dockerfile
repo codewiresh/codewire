@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Local Kind development only (`make kind-deploy`): compile one product binary
+# Local Kind development only (`make kind-deploy`): compile one service binary
 # incrementally in the same pinned Rust/Bookworm toolchain as the services
 # image and export just that file. Never promotable; nothing here is published.
 FROM codewire-rust-base AS builder
@@ -8,9 +8,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY proto ./proto
 COPY libs/gateway-proto ./libs/gateway-proto
-# The dashboard embeds its design assets and the CLI installer.
-COPY packages/codewire-design ./packages/codewire-design
-COPY apps/cli/install.sh ./apps/cli/install.sh
 ARG KIND_DEV_CRATE
 ARG KIND_DEV_FEATURES=
 ARG KIND_DEV_BIN=

@@ -4,13 +4,12 @@
 #
 #   KIND_CLUSTER_NAME=<cluster> scripts/dev/kind/deploy-service.sh <service>
 #
-# Services: idp, orchestration, credential-service, billing, coordinator,
-# dashboard (what the cluster ingress serves, so `make kind-test` exercises the
-# current dashboard source; `make kind-watch` serves it for review), and daemon
-# (the in-workspace `cw` carried by the gateway image; sandboxes created
-# afterwards run it). Each image is always the gate-built base plus every
-# binary deployed since, so repeated deploys never stack layers; a new base
-# from the gate or `up` resets it.
+# Services: idp, orchestration, credential-service, billing, coordinator, and
+# daemon (the in-workspace `cw` carried by the gateway image; sandboxes created
+# afterwards run it). The dashboard is served from source by `make kind-watch`
+# instead. Each image is always the gate-built base plus every binary deployed
+# since, so repeated deploys never stack layers; a new base from the gate or
+# `up` resets it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -32,21 +31,14 @@ case "$SERVICE" in
   idp | billing | coordinator) ;;
   orchestration) features="kind-e2e" ;;
   credential-service) features="enrollment,kind-e2e" ;;
-  dashboard)
-    image=codewire-dashboard
-    crate=codewire-dashboard-web
-    bin="$crate"
-    destination=/srv/codewire/
-    ;;
   daemon)
     image=codewire-gateway
     crate=codewire-cli-bin
     bin=cw
     destination=/usr/local/bin/
     ;;
-  *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|dashboard|daemon>" ;;
+  *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|daemon>" ;;
 esac
-deployment="codewire-${SERVICE}"
 IMAGE="${image}:e2e"
 BASE_IMAGE="${image}:kind-dev-base"
 STATE="$ROOT/.tmp/kind-dev/${KIND_CLUSTER_NAME}"
@@ -98,7 +90,7 @@ if [ "$SERVICE" = daemon ]; then
   exit 0
 fi
 kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" \
-  rollout restart "deployment/${deployment}" >/dev/null
+  rollout restart "deployment/${crate}" >/dev/null
 kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" \
-  rollout status "deployment/${deployment}" --timeout=180s
+  rollout status "deployment/${crate}" --timeout=180s
 log "${SERVICE} is running the current source"
