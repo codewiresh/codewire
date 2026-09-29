@@ -22,7 +22,8 @@ async function capturePosts(page: Page) {
   });
   return posts;
 }
-const submitted = (action: string, fields: Record<string, string>): Post => ({ path: `/settings/api-keys/_actions/${action}`, org: "alpha-team", cursor: "fixture-page", fields: { ...authority, ...fields } });
+// Personal pages carry no organization in the URL; each form names its own.
+const submitted = (action: string, fields: Record<string, string>): Post => ({ path: `/settings/api-keys/_actions/${action}`, org: null, cursor: "fixture-page", fields: { ...authority, ...fields } });
 
 test.beforeEach(async ({ page }) => {
   test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run the owned design preview and set CODEWIRE_DESIGN_ORIGIN");

@@ -28,7 +28,7 @@
               </div>
               <div class="cw-field">
                 <label class="cw-label" for="invite-role">Role</label>
-                <select class="cw-input" id="invite-role" name="role">
+                <select class="cw-select" id="invite-role" name="role">
                   <option value="member"{% if page.invite_form.role != "admin" %} selected{% endif %}>Member</option>
                   <option value="admin"{% if page.invite_form.role == "admin" %} selected{% endif %}>Admin</option>
                 </select>
@@ -38,7 +38,7 @@
             </div>
             <fieldset class="cw-field"><legend class="cw-label">Assignments</legend><div class="cw-org-assignments">
               {% for assignment in page.assignment_options %}
-              <label class="cw-org-assignment-option"><input type="checkbox" name="{{ assignment.value }}" value="selected"{% if page.invite_form.assignment_selected(assignment.value) %} checked{% endif %}{% if assignment.value == "viewer" %} disabled{% endif %}><span class="cw-assignment" data-tone="{{ assignment.tone }}">{{ assignment.label }}</span></label>
+              <label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="{{ assignment.value }}" value="selected"{% if page.invite_form.assignment_selected(assignment.value) %} checked{% endif %}{% if assignment.value == "viewer" %} disabled{% endif %}><span class="cw-assignment" data-tone="{{ assignment.tone }}">{{ assignment.label }}</span></label>
               {% endfor %}
             </div></fieldset>
           </form>
@@ -58,9 +58,9 @@
           {% if organization.can_admin && !member.is_owner %}
           <form class="cw-inline-form" method="post" action="/{{ organization.slug }}/members/_actions/role" hx-post="/{{ organization.slug }}/members/_actions/role">
             <input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="user_id" value="{{ member.user_id }}">
-            <label class="cw-label" for="role-{{ member.id }}">Role</label><select class="cw-compact-select" id="role-{{ member.id }}" name="role"><option value="member"{% if member.role == "Member" %} selected{% endif %}>Member</option><option value="admin"{% if member.role == "Admin" %} selected{% endif %}>Admin</option></select><button class="cw-button cw-button--outline cw-button--small" type="submit">Save</button>
+            <label class="cw-label" for="role-{{ member.id }}">Role</label><select class="cw-select cw-select--small" id="role-{{ member.id }}" name="role"><option value="member"{% if member.role == "Member" %} selected{% endif %}>Member</option><option value="admin"{% if member.role == "Admin" %} selected{% endif %}>Admin</option></select><button class="cw-button cw-button--outline cw-button--small" type="submit">Save</button>
           </form>
-          <details class="cw-assignment-editor"><summary class="cw-button cw-button--outline cw-button--small">Assignments</summary><div class="cw-assignment-popover"><form method="post" action="/{{ organization.slug }}/members/_actions/assignments" hx-post="/{{ organization.slug }}/members/_actions/assignments"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="member_id" value="{{ member.id }}"><div class="cw-org-assignments">{% for assignment in page.assignment_options %}<label class="cw-org-assignment-option"><input type="checkbox" name="{{ assignment.value }}" value="selected"{% if member.assignment_selected(assignment.value) %} checked{% endif %}{% if assignment.value == "viewer" %} disabled{% endif %}><span class="cw-assignment" data-tone="{{ assignment.tone }}">{{ assignment.label }}</span></label>{% endfor %}</div><button class="cw-button cw-button--small" type="submit">Save assignments</button></form></div></details>
+          <details class="cw-assignment-editor"><summary class="cw-button cw-button--outline cw-button--small">Assignments</summary><div class="cw-assignment-popover"><form method="post" action="/{{ organization.slug }}/members/_actions/assignments" hx-post="/{{ organization.slug }}/members/_actions/assignments"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="member_id" value="{{ member.id }}"><div class="cw-org-assignments">{% for assignment in page.assignment_options %}<label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="{{ assignment.value }}" value="selected"{% if member.assignment_selected(assignment.value) %} checked{% endif %}{% if assignment.value == "viewer" %} disabled{% endif %}><span class="cw-assignment" data-tone="{{ assignment.tone }}">{{ assignment.label }}</span></label>{% endfor %}</div><button class="cw-button cw-button--small" type="submit">Save assignments</button></form></div></details>
           <form method="post" action="/{{ organization.slug }}/members/_actions/remove" hx-post="/{{ organization.slug }}/members/_actions/remove"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="user_id" value="{{ member.user_id }}"><button class="cw-button cw-button--outline cw-button--small cw-danger-button" type="submit" aria-label="Remove {{ member.display_name }}">Remove</button></form>
           {% else %}<span class="cw-badge">{{ member.role }}</span>{% endif %}
         </div>

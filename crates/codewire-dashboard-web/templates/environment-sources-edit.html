@@ -15,7 +15,7 @@
       {% let sources = editor.fields %}
       {% let source_creation_draft_parameter = "" %}
       {% include "environment-source-fields.html" %}
-      <label class="cw-source-choice"><input type="checkbox" name="allow_restart" value="true"><span>I confirm the managed restart and interruption of current sessions.</span></label>
+      <label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="allow_restart" value="true"><span>I confirm the managed restart and interruption of current sessions.</span></label>
       <p class="cw-field-help">Clear both application-source checkboxes and choose no project to remove application secrets. Choose no provider credentials to clear the profile.</p>
       {% if !editor.fields.ready_for_edit() %}<p class="cw-field-error" role="alert">Valid source selections and complete source metadata are required before saving. Reload this page.</p>{% endif %}
     </div>

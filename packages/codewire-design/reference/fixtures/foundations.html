@@ -1,3 +1,98 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codewire foundations</title><link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css"><link rel="stylesheet" href="../../routes/dashboard.css"><style>main{max-width:940px;margin:auto;padding:40px 24px}.swatches{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.swatch{overflow:hidden;border:1px solid #262626;border-radius:8px;background:#0d0d0d}.swatch i{display:block;height:76px}.swatch code{display:block;padding:10px;font:11px/16px var(--font-mono)}section{margin-top:36px}.type{display:grid;gap:16px;padding:20px;border:1px solid #262626;border-radius:8px;background:#0d0d0d}.type p{margin:0}</style></head>
-<body class="cw-body"><main data-dashboard-app><a href="index.html" class="cw-muted">← Fixtures</a><h1>Foundations</h1><section><h2>Kernel Dark</h2><div class="swatches"><div class="swatch"><i style="background:#0a0a0a"></i><code>base · #0a0a0a</code></div><div class="swatch"><i style="background:#0d0d0d"></i><code>secondary · #0d0d0d</code></div><div class="swatch"><i style="background:#131313"></i><code>surface · #131313</code></div><div class="swatch"><i style="background:#1f96b4"></i><code>accent · #1f96b4</code></div><div class="swatch"><i style="background:#3fb950"></i><code>success · #3fb950</code></div><div class="swatch"><i style="background:#e8705f"></i><code>danger · #e8705f</code></div></div></section><section><h2>Typography</h2><div class="type"><p style="font:600 17px/22px var(--font-sans)">Sheet title · 17 / 22 / semibold</p><p style="font:13px/20px var(--font-sans)">Interface text · 13 / 20</p><p style="font:12px/16px var(--font-mono)">Metadata and identifiers · IBM Plex Mono 12 / 16</p><p style="color:#6e6e6e;font:10px/14px var(--font-mono);letter-spacing:.09em;text-transform:uppercase">Table label · 10 / 14</p></div></section></main></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codewire foundations</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="gallery.css">
+</head>
+<body class="cw-body">
+<main class="gallery" data-dashboard-app>
+  <header class="gallery-intro">
+    <nav class="gallery-nav" aria-label="Design system"><ul><li><a class="cw-button cw-button--ghost cw-button--small" href="index.html">All fixtures</a></li><li><a class="cw-button cw-button--outline cw-button--small" href="components.html">Components</a></li></ul></nav>
+    <h1 class="cw-page-title">Foundations</h1>
+    <p class="cw-page-description">Every value the product uses comes from these tokens in <code>styles.css</code>. Route styles may lay things out but may not introduce a size, colour, radius or spacing of their own.</p>
+  </header>
+
+  <section class="cw-card" aria-labelledby="type-title">
+    <header class="cw-card-header"><h2 id="type-title" class="cw-card-title">Type</h2><p class="cw-card-description">Six sizes, one per role. Nothing is smaller than 11px, and only the group label uses capitals.</p></header>
+    <div class="cw-card-content">
+      <dl class="gallery-type">
+        <div><dt>--text-page · 24–30</dt><dd data-size="page">Sandboxes</dd></div>
+        <div><dt>--text-title · 17</dt><dd data-size="title">Credentials</dd></div>
+        <div><dt>--text-body · 14</dt><dd data-size="body">Body text and field labels. Labels add weight 500 and the primary colour.</dd></div>
+        <div><dt>--text-secondary · 13</dt><dd data-size="secondary">Descriptions, dialog prose, buttons, navigation and table cells.</dd></div>
+        <div><dt>--text-small · 12</dt><dd data-size="small">Field help, errors, metadata and table headers.</dd></div>
+        <div><dt>--text-micro · 11</dt><dd data-size="micro">Group label</dd></div>
+        <div><dt>--text-code · 13</dt><dd data-size="code">registry.example.invalid/codewire/workspace</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="colour-title">
+    <header class="cw-card-header"><h2 id="colour-title" class="cw-card-title">Colour</h2><p class="cw-card-description">Surfaces step from darkest to lightest. Every text colour except disabled meets WCAG AA on every surface.</p></header>
+    <div class="cw-card-content cw-stack">
+      <ul class="gallery-swatches" aria-label="Surfaces">
+        <li class="gallery-swatch" data-token="bg-base"><span></span><code>--bg-base</code></li>
+        <li class="gallery-swatch" data-token="bg-secondary"><span></span><code>--bg-secondary</code></li>
+        <li class="gallery-swatch" data-token="bg-surface"><span></span><code>--bg-surface</code></li>
+        <li class="gallery-swatch" data-token="bg-overlay"><span></span><code>--bg-overlay</code></li>
+        <li class="gallery-swatch" data-token="bg-surface-hover"><span></span><code>--bg-surface-hover</code></li>
+        <li class="gallery-swatch" data-token="bg-selected"><span></span><code>--bg-selected</code></li>
+        <li class="gallery-swatch" data-token="bg-inverse"><span></span><code>--bg-inverse</code></li>
+      </ul>
+      <ul class="gallery-swatches" aria-label="Text and borders">
+        <li class="gallery-swatch" data-token="fg-primary"><span></span><code>--fg-primary</code></li>
+        <li class="gallery-swatch" data-token="fg-secondary"><span></span><code>--fg-secondary</code></li>
+        <li class="gallery-swatch" data-token="fg-tertiary"><span></span><code>--fg-tertiary</code></li>
+        <li class="gallery-swatch" data-token="fg-disabled"><span></span><code>--fg-disabled</code></li>
+        <li class="gallery-swatch" data-token="border"><span></span><code>--border</code></li>
+        <li class="gallery-swatch" data-token="border-hover"><span></span><code>--border-hover</code></li>
+      </ul>
+      <ul class="gallery-swatches" aria-label="Accent and status">
+        <li class="gallery-swatch" data-token="accent"><span></span><code>--accent</code></li>
+        <li class="gallery-swatch" data-token="accent-text"><span></span><code>--accent-text</code></li>
+        <li class="gallery-swatch" data-token="focus-ring"><span></span><code>--focus-ring</code></li>
+        <li class="gallery-swatch" data-token="success"><span></span><code>--success</code></li>
+        <li class="gallery-swatch" data-token="warning"><span></span><code>--warning</code></li>
+        <li class="gallery-swatch" data-token="destructive"><span></span><code>--destructive</code></li>
+        <li class="gallery-swatch" data-token="info"><span></span><code>--info</code></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="space-title">
+    <header class="cw-card-header"><h2 id="space-title" class="cw-card-title">Spacing</h2><p class="cw-card-description">A field keeps its label, control and help 6px apart; fields sit 20px apart so each label reads with its own control.</p></header>
+    <div class="cw-card-content">
+      <ul class="gallery-scale">
+        <li data-space="0-5">--space-0-5 · 2<span></span></li>
+        <li data-space="1">--space-1 · 4<span></span></li>
+        <li data-space="1-5">--space-1-5 · 6<span></span></li>
+        <li data-space="2">--space-2 · 8<span></span></li>
+        <li data-space="3">--space-3 · 12<span></span></li>
+        <li data-space="4">--space-4 · 16<span></span></li>
+        <li data-space="5">--space-5 · 20<span></span></li>
+        <li data-space="6">--space-6 · 24<span></span></li>
+        <li data-space="8">--space-8 · 32<span></span></li>
+        <li data-space="10">--space-10 · 40<span></span></li>
+        <li data-space="12">--space-12 · 48<span></span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="shape-title">
+    <header class="cw-card-header"><h2 id="shape-title" class="cw-card-title">Radius and elevation</h2><p class="cw-card-description">Controls and menu rows use md; cards, dialogs and pickers use lg so nested rows keep an even inset.</p></header>
+    <div class="cw-card-content">
+      <ul class="gallery-radii">
+        <li data-radius="sm">sm · 4</li>
+        <li data-radius="md">md · 8</li>
+        <li data-radius="lg">lg · 12</li>
+        <li data-radius="pill">pill</li>
+        <li data-shadow="popover">popover</li>
+        <li data-shadow="overlay">overlay</li>
+      </ul>
+    </div>
+  </section>
+</main>
+</body>
+</html>

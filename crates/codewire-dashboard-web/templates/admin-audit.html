@@ -20,7 +20,7 @@
         <form class="cw-filter-form" method="get" action="/admin/audit/">
           {% if view.has_selected_organization %}<input type="hidden" name="org" value="{{ view.selected_organization_slug }}">{% endif %}
           <label class="cw-field"><span>Action</span><input class="cw-input" type="search" name="action" value="{{ action }}" maxlength="256" placeholder="e.g. user.signin"></label>
-          <label class="cw-field"><span>Severity</span><select class="cw-input" name="severity"><option value="">All severity</option><option value="info"{% if info_selected %} selected{% endif %}>Info</option><option value="warn"{% if warn_selected %} selected{% endif %}>Warn</option><option value="error"{% if error_selected %} selected{% endif %}>Error</option></select></label>
+          <label class="cw-field"><span>Severity</span><select class="cw-select" name="severity"><option value="">All severity</option><option value="info"{% if info_selected %} selected{% endif %}>Info</option><option value="warn"{% if warn_selected %} selected{% endif %}>Warn</option><option value="error"{% if error_selected %} selected{% endif %}>Error</option></select></label>
           <button class="cw-button cw-button--outline" type="submit">Filter</button>
         </form>
         <section class="cw-card">

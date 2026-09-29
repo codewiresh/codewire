@@ -14,8 +14,7 @@
 .cw-org-form { display: grid; gap: var(--space-4); }
 .cw-org-form-row { display: grid; grid-template-columns: minmax(0, 1fr) 9rem auto; align-items: start; gap: var(--space-3); }
 .cw-org-assignments { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.cw-org-assignment-option { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--fg-secondary); font-size: .75rem; cursor: pointer; }
-.cw-org-assignment-option input { accent-color: var(--accent); }
+
 .cw-assignment { display: inline-flex; padding: .08rem .4rem; border: 1px solid var(--border-hover); border-radius: var(--radius-pill); font-size: .6875rem; line-height: 1.45; }
 .cw-assignment[data-tone="info"] { color: #60a5fa; border-color: rgba(96,165,250,.35); }
 .cw-assignment[data-tone="success"] { color: #4ade80; border-color: rgba(74,222,128,.35); }
@@ -36,9 +35,6 @@
 .cw-row-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .cw-row-actions form { margin: 0; }
 .cw-inline-form { display: flex; align-items: center; gap: var(--space-2); }
-.cw-compact-select { min-height: 1.875rem; padding: .25rem .5rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-base); color: var(--fg-primary); font: inherit; font-size: .75rem; }
-.cw-danger-button { border-color: rgba(239,68,68,.25); color: var(--destructive); }
-.cw-danger-button:hover, .cw-danger-button:focus-visible { border-color: rgba(239,68,68,.55); background: rgba(239,68,68,.08); }
 .cw-assignment-editor { position: relative; }
 .cw-assignment-editor > summary { list-style: none; }
 .cw-assignment-editor > summary::-webkit-details-marker { display: none; }
@@ -98,7 +94,6 @@
 [data-dashboard-app] .cw-org-management-layout .cw-person-copy strong { font: 500 .72rem var(--font-mono); }
 [data-dashboard-app] .cw-org-management-layout .cw-person-copy > span { color: #666; font-size: .67rem; }
 [data-dashboard-app] .cw-org-management-layout .cw-avatar { border: 1px solid #292929; background: #171717; }
-[data-dashboard-app] .cw-org-management-layout .cw-compact-select { border-radius: 999px; background: #111; }
 [data-dashboard-app] .cw-org-management-layout .cw-key,
 [data-dashboard-app] .cw-org-management-layout .cw-key-secret { border-radius: .45rem; background: #080808; }
 

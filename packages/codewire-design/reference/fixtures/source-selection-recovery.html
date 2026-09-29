@@ -40,8 +40,8 @@
       <input type="hidden" name="include_user_secrets" value="platform">
       <input type="hidden" name="secret_project" value="6bf8d155-e84c-4fc5-b479-b17022fe41dd">
       <fieldset class="cw-source-fields" disabled><legend>Platform sources</legend>
-        <label><input type="checkbox" name="include_org_secrets" value="platform" checked>Organization secrets</label>
-        <label><input type="checkbox" name="include_user_secrets" value="platform" checked>Personal secrets</label>
+        <label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_org_secrets" value="platform" checked>Organization secrets</label>
+        <label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_user_secrets" value="platform" checked>Personal secrets</label>
         <label class="cw-label" for="failed-project">Secret project</label>
         <select class="cw-select" id="failed-project" name="secret_project"><option value="6bf8d155-e84c-4fc5-b479-b17022fe41dd" selected>Current selected project (metadata unavailable)</option></select>
       </fieldset>
@@ -58,8 +58,8 @@
       <h2 id="load-failed-sources-title">Catalog load failed</h2>
       <input type="hidden" name="secret_project" value="6bf8d155-e84c-4fc5-b479-b17022fe41dd">
       <fieldset class="cw-source-fields"><legend>Platform sources</legend>
-        <label><input type="checkbox" name="include_org_secrets" value="platform" checked>Organization secrets</label>
-        <label><input type="checkbox" name="include_user_secrets" value="platform" checked>Personal secrets</label>
+        <label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_org_secrets" value="platform" checked>Organization secrets</label>
+        <label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_user_secrets" value="platform" checked>Personal secrets</label>
         <label class="cw-label" for="load-failed-project">Secret project</label>
         <select class="cw-select" id="load-failed-project" name="secret_project" disabled><option value="6bf8d155-e84c-4fc5-b479-b17022fe41dd" selected>Current selected project (metadata unavailable)</option></select>
         <p class="cw-field-error" role="alert">Project names could not be loaded. Reload before selecting a project.</p>

@@ -19,14 +19,11 @@
 [data-dashboard-app] .cw-settings-content { width: min(100%, 52rem); min-width: 0; padding: 1.5rem 1.25rem 3rem; }
 [data-dashboard-app] .cw-settings-content > .cw-alert { margin-bottom: 1rem; }
 [data-dashboard-app] .cw-settings-card { overflow: visible; }
-[data-dashboard-app] .cw-settings-card + .cw-settings-card { margin-top: 1rem; }
+[data-dashboard-app] .cw-settings-card + .cw-settings-card { margin-top: var(--space-4); }
 [data-dashboard-app] .cw-settings-card .cw-card-title { display: flex; align-items: center; gap: .5rem; }
 [data-dashboard-app] .cw-settings-card form + p,
 [data-dashboard-app] .cw-settings-card p + form { margin-top: .75rem; }
 [data-dashboard-app] .cw-settings-muted { margin: 0; color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
-[data-dashboard-app] .cw-mono { font-family: var(--font-mono); }
-[data-dashboard-app] .cw-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; padding: 1rem; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
-[data-dashboard-app] .cw-settings-form > .cw-button { align-self: end; justify-self: start; }
 [data-dashboard-app] .cw-settings-account-links { display: flex; flex-wrap: wrap; align-items: center; gap: .85rem; }
 [data-dashboard-app] .cw-settings-account-links > a { color: #3aa7c2; font-size: .72rem; }
 [data-dashboard-app] .cw-settings-account-links form { margin-left: auto; }
@@ -70,14 +67,8 @@
 [data-dashboard-app] .cw-credential-dialog { width: min(34rem, calc(100vw - 2rem)); }
 [data-dashboard-app] .cw-credential-dialog .cw-dialog-header { display: grid; justify-items: start; gap: var(--space-3); }
 [data-dashboard-app] .cw-credential-dialog .cw-dialog-header h2 { max-width: 100%; overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-credential-dialog .cw-dialog-back { padding: .25rem 0; min-height: 2rem; border: 0; background: transparent; color: var(--fg-secondary); }
-[data-dashboard-app] .cw-credential-dialog .cw-dialog-body { display: grid; gap: 1rem; overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-credential-dialog .cw-dialog-body > p { margin: 0; color: var(--fg-secondary); font-size: .8rem; line-height: 1.6; }
 [data-dashboard-app] .cw-credential-dialog .cw-dialog-actions { flex-wrap: wrap; }
 [data-dashboard-app] .cw-credential-dialog .cw-dialog-actions .cw-button { white-space: normal; }
-[data-dashboard-app] .cw-credential-dialog .cw-settings-form { grid-template-columns: minmax(0, 1fr); margin: 0; padding: 0; border: 0; background: none; }
-[data-dashboard-app] .cw-credential-dialog .cw-settings-form > h3,
-[data-dashboard-app] .cw-credential-dialog .cw-settings-form > p { grid-column: 1 / -1; margin: 0; line-height: 1.5; }
 [data-dashboard-app] .cw-credential-types { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
 [data-dashboard-app] .cw-credential-types li { display: grid; }
 [data-dashboard-app] .cw-credential-choice { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr) 1rem; align-items: center; gap: .8rem; width: 100%; padding: .85rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-primary); font: inherit; text-align: left; cursor: pointer; }
@@ -92,8 +83,6 @@
 [data-dashboard-app] .cw-credential-secondary { grid-column: 1 / -1; color: var(--fg-secondary); font-size: .75rem; line-height: 1.6; }
 [data-dashboard-app] .cw-credential-secondary summary { cursor: pointer; padding-block: .35rem; }
 [data-dashboard-app] .cw-credential-secondary p { margin: .5rem 0 0; overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-credential-consent { display: flex; align-items: start; gap: .5rem; font-size: .8rem; line-height: 1.5; }
-[data-dashboard-app] fieldset.cw-field { min-width: 0; margin: 0; padding: 0; border: 0; }
 [data-dashboard-app] .cw-personal-secrets-page > .cw-card { margin-top: 1rem; }
 [data-dashboard-app] .cw-personal-secrets-page .cw-card-content { display: grid; gap: .75rem; }
 [data-dashboard-app] .cw-personal-secrets { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
@@ -121,7 +110,7 @@
 }
 
 @media (max-width: 63.9375rem) {
-  [data-dashboard-app] .cw-settings-content :is(#security, #sessions) { scroll-margin-top: 3.75rem; }
+  [data-dashboard-app] .cw-settings-content :is(#security, #sessions) { scroll-margin-top: calc(var(--console-header) + var(--space-2)); }
   [data-dashboard-app] .cw-settings-layout { min-height: calc(100vh - 3.5rem); }
 }
 
@@ -134,7 +123,6 @@
   [data-dashboard-app] .cw-settings-subnav nav ul { display: flex; flex: none; gap: .25rem; }
   [data-dashboard-app] .cw-settings-subnav a { flex: none; }
   [data-dashboard-app] .cw-settings-content { padding: 1rem .8rem 2rem; }
-  [data-dashboard-app] .cw-settings-form { grid-template-columns: 1fr; }
   [data-dashboard-app] .cw-settings-details div { grid-template-columns: 1fr; gap: .25rem; }
   [data-dashboard-app] .cw-settings-list-heading { align-items: start; flex-direction: column; }
   [data-dashboard-app] .cw-settings-account-links { align-items: stretch; flex-direction: column; }
@@ -148,23 +136,14 @@
 /* Device authorization in a credential dialog replaces the form with its steps. */
 [data-dashboard-app] .cw-credential-dialog[data-enrollment-state] .cw-dialog-body > :not(.cw-device-enrollment),
 [data-dashboard-app] .cw-credential-dialog[data-enrollment-state] .cw-dialog-actions [type="submit"] { display: none; }
-[data-dashboard-app] .cw-device-enrollment { display: grid; gap: .875rem; justify-items: start; }
+[data-dashboard-app] .cw-device-enrollment { display: grid; gap: var(--space-4); justify-items: start; }
 [data-dashboard-app] .cw-device-enrollment > p { margin: 0; }
-[data-dashboard-app] .cw-device-code { display: inline-flex; align-items: center; gap: .5rem; margin: 0; padding: .375rem .375rem .375rem .875rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--bg-surface); }
-[data-dashboard-app] .cw-device-code code { color: var(--fg-primary); font: 600 1.375rem/1.2 var(--font-mono); letter-spacing: .08em; }
-[data-dashboard-app] .cw-device-copy { display: grid; width: 2rem; height: 2rem; place-items: center; border: 0; border-radius: .375rem; background: transparent; color: var(--fg-secondary); cursor: pointer; }
-[data-dashboard-app] .cw-device-copy:hover,
-[data-dashboard-app] .cw-device-copy:focus-visible { background: var(--bg-surface-hover); color: var(--fg-primary); outline: 2px solid var(--accent-muted); outline-offset: 1px; }
-[data-dashboard-app] .cw-device-copy .cw-icon { width: 16px; height: 16px; }
-[data-dashboard-app] .cw-device-footer { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .5rem 1rem; width: 100%; }
-[data-dashboard-app] .cw-link-button { padding: 0; border: 0; background: none; color: var(--accent-hover); font: inherit; font-size: var(--text-secondary); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-[data-dashboard-app] .cw-link-button:hover,
-[data-dashboard-app] .cw-link-button:focus-visible { color: var(--fg-primary); }
+[data-dashboard-app] .cw-device-footer { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-2) var(--space-4); width: 100%; }
 [data-dashboard-app] .cw-device-status { margin: 0; color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
 /* Without JavaScript the same steps stream into one centered panel; each step hides the one before it. */
-[data-dashboard-app] .cw-connect { display: grid; min-height: 100vh; place-items: center; padding: 1.5rem 1rem; }
+[data-dashboard-app] .cw-connect { display: grid; min-height: 100vh; place-items: center; padding: var(--space-6) var(--space-4); }
 [data-dashboard-app] .cw-connect-panel { width: min(100%, 30rem); }
 [data-dashboard-app] .cw-connect-back { color: var(--fg-secondary); font-size: var(--text-secondary); }
-[data-dashboard-app] .cw-connect-panel .cw-card-title { margin-top: .5rem; }
+[data-dashboard-app] .cw-connect-panel .cw-card-title { margin-top: var(--space-2); }
 [data-dashboard-app] .cw-connect-panel:has([data-connect-challenge]) [data-connect-pending],
 [data-dashboard-app] .cw-connect-panel:has([data-connect-result]) :is([data-connect-pending], [data-connect-challenge]) { display: none; }

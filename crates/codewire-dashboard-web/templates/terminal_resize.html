@@ -20,8 +20,8 @@
       <p class="cw-alert" data-resize-disk-warning hidden>Growing the workspace disk cannot be undone. You cannot shrink it back to its previous size.</p>
       <form data-resize-apply-form>
         <fieldset data-resize-consents><legend>Confirm this change</legend>
-          <label data-resize-restart-consent hidden><input type="checkbox" name="allow_restart">Allow a restart of this Sandbox.</label>
-          <label data-resize-session-consent hidden><input type="checkbox" name="force">Allow the active terminal sessions shown in this review to end.</label>
+          <label class="cw-choice" data-resize-restart-consent hidden><input class="cw-checkbox" type="checkbox" name="allow_restart">Allow a restart of this Sandbox.</label>
+          <label class="cw-choice" data-resize-session-consent hidden><input class="cw-checkbox" type="checkbox" name="force">Allow the active terminal sessions shown in this review to end.</label>
           <button class="cw-button" type="submit" data-resize-apply>Apply resize</button>
         </fieldset>
       </form>

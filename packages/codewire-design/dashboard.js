@@ -798,8 +798,8 @@ if (app) {
     let url;
     try { url = new URL(challenge.verificationUrl); } catch { url = null; }
     if (!url || url.protocol !== "https:" || typeof challenge.userCode !== "string") return false;
-    const code = element("div", "cw-device-code");
-    const copy = element("button", "cw-device-copy");
+    const code = element("div", "cw-copy-code");
+    const copy = element("button", "cw-icon-button");
     copy.type = "button";
     copy.setAttribute("aria-label", "Copy code");
     copy.append(svgIcon("icon-copy"));
