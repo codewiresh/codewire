@@ -2,7 +2,8 @@ import { expect, test } from "@playwright/test";
 
 // The Create sheet slides in; with motion a help trigger can move out from under
 // the pointer, hover-hide its popover, and let Escape close the sheet instead.
-test.use({ storageState: { cookies: [], origins: [] }, reducedMotion: "reduce" });
+// Reduced motion removes that race; a rarer one under heavy load remains.
+test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reducedMotion: "reduce" } });
 
 test("Create resource help stays readable without editing or closing the form", async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
