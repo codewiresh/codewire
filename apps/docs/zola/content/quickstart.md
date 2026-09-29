@@ -25,7 +25,7 @@ Two paths to get started — web dashboard or CLI.
 
 ### 2. Create an organization
 
-1. From the [dashboard](https://codewire.sh/dashboard), click **New Organization**
+1. From the [dashboard](https://codewire.sh/dashboard/), open the organization switcher and click **New Organization**
 2. Enter a **name** and **slug** for your organization
 3. Click **Create**
 

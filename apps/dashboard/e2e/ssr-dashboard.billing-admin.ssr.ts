@@ -6,7 +6,7 @@ import {
   disableTwoFactor,
   getUserId,
 } from "./helpers/db";
-import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
+import { ACCOUNT_HOME, cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { TEST_PASSWORD, USERS } from "./helpers/seed";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
@@ -20,7 +20,7 @@ async function loginAsAdmin(page: Page) {
   await fillField(page, "#email", USERS.admin.email);
   await fillField(page, "#password", TEST_PASSWORD);
   await page.getByRole("button", { name: /sign in/i }).click();
-  await page.waitForURL(/\/(dashboard|setup-2fa)/, { timeout: 15_000 });
+  await page.waitForURL((url) => url.pathname.startsWith("/setup-2fa") || ACCOUNT_HOME.test(url.pathname), { timeout: 15_000 });
   // This suite verifies admin authorization, not enrollment. Keep setup
   // material out of traces and let the seeded identity satisfy the 2FA gate.
   await bypassTwoFactor(USERS.admin.email);
@@ -72,7 +72,7 @@ test.describe.serial("server-rendered billing and administration", () => {
 
   test("redirects a non-admin before rendering privileged pages", async ({ page }) => {
     await page.goto("/admin/");
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
+    await expect(page).toHaveURL(ACCOUNT_HOME);
   });
 
   test("renders the admin overview, audit log, and catalog from server-side Connect clients", async ({

@@ -27,7 +27,7 @@
   </fieldset>
   <nav aria-label="Manage application secrets">
     <ul class="cw-source-choices">
-      <li><a href="/settings/secrets/?org={{ organization.slug }}{% if !source_creation_draft_parameter.is_empty() %}&amp;{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage personal secrets</a></li>
+      <li><a href="/settings/secrets/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage personal secrets</a></li>
       <li><a href="/{{ organization.slug }}/secrets/organization/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage organization secrets</a></li>
       <li><a href="{{ organization.secrets_url }}{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage secret projects</a></li>
     </ul>
@@ -57,7 +57,7 @@
   {% endif %}
   <nav aria-label="Manage provider credentials">
     <ul class="cw-source-choices">
-      <li><a href="/settings/credentials/?org={{ organization.slug }}{% if !source_creation_draft_parameter.is_empty() %}&amp;{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>{% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}Add credentials and create a profile{% else %}Manage personal credentials and profiles{% endif %}</a></li>
+      <li><a href="/settings/credentials/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>{% if sources.credential_selection_enabled && sources.profile_error.is_empty() && sources.profiles.is_empty() %}Add credentials and create a profile{% else %}Manage personal credentials and profiles{% endif %}</a></li>
     </ul>
   </nav>
 </section>

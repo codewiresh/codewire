@@ -15,6 +15,7 @@ mod environment_drafts;
 mod environments;
 mod github_repositories;
 mod invitations;
+mod organization_context;
 mod organization_governance;
 mod organizations;
 mod personal_api_keys;
@@ -42,6 +43,9 @@ pub(crate) const DASHBOARD_PATH: &str = "/dashboard/";
 pub(crate) const ORGANIZATIONS_FRAGMENT_PATH: &str = "/dashboard/_fragments/organizations";
 pub(crate) const NEW_ORGANIZATION_PATH: &str = "/organizations/new/";
 pub(crate) const CREATE_ORGANIZATION_ACTION_PATH: &str = "/organizations/_actions/create";
+
+use organization_context::remember as remember_organization_choice;
+pub(crate) use organization_context::remember_organization;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()

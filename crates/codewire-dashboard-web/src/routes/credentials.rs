@@ -680,6 +680,10 @@ pub(super) async fn github_app_callback(
             }
         }
     };
+    // The callback returns without organization parameters; the organization
+    // its signed navigation named becomes the remembered one.
+    let response =
+        super::remember_organization_choice(response, &state.public_origin, &context.org);
     github_app_callback_response(response, clear)
 }
 
@@ -1101,9 +1105,6 @@ fn mutation_error_code(code: ErrorCode, delete: bool) -> &'static str {
 
 fn navigation_query(context: &QueryParameters) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !context.org.is_empty() {
-        query.append_pair("org", &context.org);
-    }
     if let DraftReturn::Exact(id) = &context.draft {
         query.append_pair("creation_draft", id);
     }
@@ -1375,10 +1376,8 @@ mod tests {
             organizations: Vec::new(),
             has_organizations: false,
             organization_navigation_unavailable: false,
-            show_checklist: false,
             new_organization_url: "/organizations/new/".into(),
             settings_url: PATH.into(),
-            global_context_query: "?org=sample-org".into(),
             has_selected_organization: false,
             selected_organization_name: String::new(),
             selected_organization_slug: String::new(),
@@ -1671,7 +1670,7 @@ mod tests {
         );
         assert_eq!(
             response.headers()[header::LOCATION],
-            "/settings/credentials/?org=sample-org&error=credential-invalid&dialog=add-openai-api-key"
+            "/settings/credentials/?error=credential-invalid&dialog=add-openai-api-key"
         );
         let response = credential_mutation_error(
             ErrorCode::Unavailable,
@@ -1989,7 +1988,7 @@ mod tests {
         ] {
             let html = render_enrollment_event(event, &escape_html(&page_path(&context)));
             assert!(html.contains(&format!(
-                "href=\"/settings/credentials/?org=synthetic&amp;creation_draft={DRAFT}\""
+                "href=\"/settings/credentials/?creation_draft={DRAFT}\""
             )));
             assert!(!html.contains("synthetic-session"));
         }

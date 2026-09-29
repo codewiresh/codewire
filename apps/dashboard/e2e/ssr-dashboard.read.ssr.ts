@@ -24,14 +24,16 @@ test.describe("server-rendered dashboard", () => {
     if (!testInfo.project.use.isMobile) await cleanupTestOrg(dashboardOrgSlug);
   });
 
-  test("renders the shared console shell and operational overview", async ({ page, isMobile }) => {
+  test("opens the organization home in the shared console shell", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop visual contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
 
+    // The account home is the remembered or first organization's home.
     const response = await page.goto("/dashboard/");
     expect(response?.status()).toBe(200);
-    await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+    await expect(page).toHaveURL(/\/[a-z0-9-]+\/$/);
+    await expect(page.getByRole("heading", { name: "Sandboxes", exact: true })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Main navigation" }).first()).toBeVisible();
     const sandboxNavigation = page.locator(".cw-sidebar-slot").getByRole("region", {
       name: "Sandboxes",
@@ -68,13 +70,11 @@ test.describe("server-rendered dashboard", () => {
     expect(shellGeometry.headingLineHeight).toBe("16px");
     expect(shellGeometry.headingLetterSpacing).toBe("1.56px");
 
-    await expect(page.getByRole("heading", { name: "Recently created" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Resources" })).toBeVisible();
     await expect(page.locator('[data-quick-search-results] a[data-search-text*="snapshots"]')).toHaveCount(0);
     const searchResults = page.locator(".cw-sidebar-slot [data-quick-search-results]");
-    await expect(searchResults.getByRole("link", { name: "Credentials", exact: true, includeHidden: true })).toHaveAttribute("href", /\/settings\/credentials\/\?org=[a-z0-9-]+$/);
-    await expect(searchResults.getByRole("link", { name: "Account", exact: true, includeHidden: true })).toHaveAttribute("href", /\/settings\/\?org=[a-z0-9-]+$/);
-    await expect(searchResults.getByRole("link", { name: "Personal application secrets", exact: true, includeHidden: true })).toHaveAttribute("href", /\/settings\/secrets\/\?org=[a-z0-9-]+$/);
+    await expect(searchResults.getByRole("link", { name: "Credentials", exact: true, includeHidden: true })).toHaveAttribute("href", "/settings/credentials/");
+    await expect(searchResults.getByRole("link", { name: "Account", exact: true, includeHidden: true })).toHaveAttribute("href", "/settings/");
+    await expect(searchResults.getByRole("link", { name: "Personal application secrets", exact: true, includeHidden: true })).toHaveAttribute("href", "/settings/secrets/");
     await expect(searchResults.getByRole("link", { name: "Organization application secrets", exact: true, includeHidden: true })).toHaveAttribute("href", /\/secrets\/organization\/$/);
     await page.keyboard.press("/");
     await expect(page.locator(".cw-sidebar-slot [data-quick-search]")).toBeVisible();
@@ -114,8 +114,10 @@ test.describe("server-rendered dashboard", () => {
         httpOnly: true,
         sameSite: "Lax",
       }]);
+      // Without an organization the account home stays here; with one it is
+      // that organization's home. Both render the shared sidebar.
       await page.goto("/dashboard/");
-      await expect(page).toHaveURL(/\/dashboard\/$/);
+      await expect(page).toHaveURL(/\/[a-z0-9-]+\/$/);
       await page.getByRole("button", { name: "Toggle sidebar" }).click();
       await expect(page.locator("[data-dashboard-app]")).toHaveAttribute("data-mobile-open", "true");
       await expect(page.locator(".cw-mobile-drawer")).toBeVisible();

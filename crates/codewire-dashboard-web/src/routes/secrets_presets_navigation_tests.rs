@@ -636,3 +636,107 @@ async fn navigation_sign_out_posts_the_page_token_without_rotating_other_tabs() 
         assert!(html.contains(&sign_out), "{path}");
     }
 }
+
+fn remembered_org_cookie(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| value.strip_prefix("codewire_current_org="))
+        .and_then(|value| value.split(';').next())
+        .map(str::to_owned)
+}
+
+#[tokio::test]
+async fn organization_context_stays_out_of_urls_and_switching_keeps_the_page() {
+    let (upstream, _) = fixture("success").await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    let get = |path: &str, headers: HeaderMap| {
+        client()
+            .get(format!("{}{path}", dashboard.origin))
+            .headers(headers)
+            .send()
+    };
+
+    // Switching from a personal page stays on it and remembers the choice.
+    let response = get("/settings/credentials/?org=synthetic", authority("unused"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "/settings/credentials/"
+    );
+    assert_eq!(
+        remembered_org_cookie(&response).as_deref(),
+        Some("synthetic")
+    );
+
+    // Switching from an organization page keeps its section.
+    let response = get(
+        "/synthetic/secrets/project-1/?org=other-org",
+        authority("unused"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/other-org/secrets/");
+
+    // A malformed selection is dropped without being remembered.
+    let response = get("/settings/?org=Not%20Valid&cursor=x", authority("unused"))
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[header::LOCATION], "/settings/?cursor=x");
+    assert_eq!(remembered_org_cookie(&response), None);
+
+    // An organization page remembers its organization.
+    let response = get("/synthetic/secrets/", authority("unused"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        remembered_org_cookie(&response).as_deref(),
+        Some("synthetic")
+    );
+
+    // Personal pages show the remembered organization with clean links.
+    let mut headers = authority("unused");
+    headers.insert(
+        header::COOKIE,
+        "codewire.session_token=synthetic-session; codewire_current_org=synthetic"
+            .parse()
+            .unwrap(),
+    );
+    let response = get("/settings/credentials/", headers.clone())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response.text().await.unwrap();
+    assert!(html.contains("Synthetic organization"));
+    assert!(html.contains("href=\"/settings/secrets/\""));
+    assert!(!html.replace("href=\"?org=", "").contains("org="));
+
+    // The account home is the remembered organization's home.
+    let response = get("/dashboard/", headers).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/synthetic/");
+
+    // A remembered organization the account cannot see selects nothing.
+    let mut headers = authority("unused");
+    headers.insert(
+        header::COOKIE,
+        "codewire.session_token=synthetic-session; codewire_current_org=foreign-org"
+            .parse()
+            .unwrap(),
+    );
+    let response = get("/settings/credentials/", headers).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !response
+            .text()
+            .await
+            .unwrap()
+            .contains("Synthetic organization</span>")
+    );
+}
