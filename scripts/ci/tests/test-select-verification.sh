@@ -744,6 +744,16 @@ run_paths_case generated_connect_python pull_request refs/pull/113/head false \
   'contracts contracts_proto policy' libs/gen-python/codewire/v1/api_key_pb2.py
 run_paths_case permanent_raw_policy_guard pull_request refs/pull/117/head false \
   'policy' scripts/checks/contracts/permanent-raw-surface-policy.json
+run_present_paths_case design_token_policy pull_request refs/pull/2203/head false \
+  'policy' scripts/checks/contracts/design-token-policy.json
+run_present_paths_case design_token_baseline pull_request refs/pull/22031/head false \
+  'policy' scripts/checks/contracts/design-token-baseline.json \
+  scripts/checks/contracts/design-token-policy.json
+run_present_paths_case design_token_guard_module pull_request refs/pull/22032/head false \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  scripts/checks/repo_policy/design_tokens.py
+run_present_paths_case design_system_stylesheets pull_request refs/pull/22034/head false \
+  'policy web' packages/codewire-design/styles.css packages/codewire-design/routes/settings.css
 run_paths_case retired_openapi_deletions pull_request refs/pull/1175/head false \
   'policy' openapi.json crates/codewire-api-contract/src/lib.rs \
   crates/codewire-api-types/src/lib.rs crates/codewire-core/src/lib.rs \
@@ -1125,6 +1135,8 @@ run_paths_case unknown pull_request refs/pull/18/head false "$all_product_pr" \
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product_pr" \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   unexplained/new-surface.txt
+run_present_paths_case design_token_unknown_contract pull_request refs/pull/22033/head false \
+  "$all_product_pr" scripts/checks/contracts/design-token-unknown.json
 run_paths_case empty pull_request refs/pull/19/head false "$policy" ''
 
 contract_paths="$TMP/contract-fields.paths"
@@ -2681,6 +2693,7 @@ for policy_owner in \
     'crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py' \
     'scripts/checks/repo_checks.py license-map' \
     'scripts/checks/repo_checks.py permanent-raw-surface --self-test' \
+    'scripts/checks/repo_checks.py design-tokens --self-test' \
     'scripts/checks/repo_checks.py rust-validation-source' \
     'scripts/checks/repo_checks.py retired-reference-source' \
     'scripts/checks/source/check-native-desktop-ui.py' \

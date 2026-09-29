@@ -18,6 +18,7 @@ CHECKER = ROOT / "scripts/checks/repo_checks.py"
 sys.path.insert(0, str(CHECKER.parent))
 
 from repo_policy import (  # noqa: E402 - dispatcher directory is the import root
+    design_tokens,
     edge_routing,
     idp_security,
     licensing,
@@ -87,6 +88,7 @@ COMMANDS = {
         "turnstile access projection: static OK",
         False,
     ),
+    "design-tokens": (design_tokens.check_design_tokens, "design tokens: OK", True),
 }
 
 
