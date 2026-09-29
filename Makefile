@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-deploy kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-watch kind-status design-system e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-deploy kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
 
 # Default target
@@ -217,6 +217,9 @@ kind-credentials-fake:
 
 kind-seed-login:
 	./scripts/dev/kind/dev-loop.sh seed-login
+
+kind-runtime-images:
+	./scripts/dev/kind/dev-loop.sh runtime-images
 
 kind-watch:
 	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" KIND_BROWSER_API_ORIGIN="$(KIND_BROWSER_API_ORIGIN)" ./scripts/dev/kind/dev-loop.sh watch
