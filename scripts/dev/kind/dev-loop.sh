@@ -69,7 +69,7 @@ app_public_value() {
 cmd_seed_login() {
   require_cluster
   [ -d "$ROOT/apps/dashboard/node_modules/postgres" ] \
-    || die "install the dashboard dependencies first: (cd apps/dashboard && bun install --frozen-lockfile)"
+    || die "install the dashboard dependencies first: (cd apps/dashboard && bun install --frozen-lockfile --ignore-scripts)"
   log "seeding the synthetic owner login"
   (
     cd "$ROOT/apps/dashboard"
