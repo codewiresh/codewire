@@ -8,17 +8,17 @@
   </header>
 
   <div class="cw-console-org-switcher">
-    <details class="cw-org-switcher">
-      <summary>
+    <details class="cw-menu cw-org-switcher">
+      <summary class="cw-button cw-button--outline cw-button--pill">
         <span class="cw-org-initial" aria-hidden="true">{{ view.selected_organization_initial() }}</span>
         <span class="cw-org-switcher-label">{% if view.has_selected_organization %}{{ view.selected_organization_name }}{% else if view.organization_navigation_unavailable %}Organizations unavailable{% else %}Choose organization{% endif %}</span>
         <svg class="cw-icon cw-org-chevron" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-down"/></svg>
       </summary>
-      <section class="cw-org-menu">
-        <h2>Organizations</h2>
+      <section class="cw-menu-panel cw-menu-panel--fill cw-org-menu">
+        <h2 class="cw-menu-heading">Organizations</h2>
         <ul>
           {% for organization in view.organizations %}
-          <li><a href="?org={{ organization.slug }}"{% if view.selected_organization_slug == organization.slug %} aria-current="true"{% endif %} data-search-item data-search-text="{{ organization.name }} {{ organization.slug }}">{{ organization.name }}<span>{{ organization.role }}</span></a></li>
+          <li><a href="?org={{ organization.slug }}"{% if view.selected_organization_slug == organization.slug %} aria-current="true"{% endif %} data-search-item data-search-text="{{ organization.name }} {{ organization.slug }}">{{ organization.name }}<span class="cw-menu-meta">{{ organization.role }}</span></a></li>
           {% endfor %}
           <li><a href="{{ view.new_organization_url }}">＋ New Organization</a></li>
         </ul>

@@ -120,6 +120,10 @@
   --popover-width: 18rem;
   --popover-max-height: 16rem;
   --dialog-width: 32rem;
+  --menu-min-width: 13rem;
+  --menu-form-width: 18rem;
+  --date-picker-width: 18.5rem;
+  --shadow-today: inset 0 0 0 1px var(--border-hover);
   --content-narrow: 32rem;
   --content-default: 56rem;
   --content-wide: 76rem;
@@ -171,6 +175,9 @@
 .cw-body *::after {
   box-sizing: border-box;
 }
+
+/* The hidden attribute always wins over a component's display value. */
+[hidden] { display: none !important; }
 
 /* One focus ring for every interactive element. */
 :where(a, button, input, select, textarea, summary, [tabindex], dialog):focus-visible {
@@ -732,6 +739,10 @@
 }
 
 .cw-form-grid > :not(.cw-field) { grid-column: 1 / -1; }
+
+@media (max-width: 639px) {
+  .cw-form-grid { grid-template-columns: minmax(0, 1fr); }
+}
 
 .cw-field {
   display: grid;
