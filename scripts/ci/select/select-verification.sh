@@ -624,6 +624,12 @@ if [ "$event_selected" = false ]; then
         # in the same change continue through their own classifiers.
         recognized=true
         ;;
+      scripts/checks/contracts/design-token-policy.json|\
+      scripts/checks/contracts/design-token-baseline.json)
+        # The design-system guard reads only these contracts and runs in
+        # Policy; product paths in the same change keep their own classifiers.
+        recognized=true
+        ;;
       openapi.json|crates/codewire-api-contract/*|crates/codewire-api-types/*|\
       crates/codewire-core/*|libs/api-client-go/*|libs/api-client-python/*|\
       libs/api-client-ts/*|packages/codewire-types/*)

@@ -42,6 +42,24 @@ for color, spacing, radius, content width, and overlay shadow. Prefer semantic
 HTML and native controls; a class supplies presentation, not application state.
 State exposed to CSS uses `aria-*` or `data-*` attributes.
 
+`python3 scripts/checks/repo_checks.py design-tokens` enforces these
+conventions in Policy, locally and in CI. Literal font sizes, line heights,
+colors, radii, shadows, and spacing live only in the `:root` token block of
+`styles.css` (and of `routes/public.css`, which resolves against its own
+tokens); route sheets and fixtures reference `var(--token)` without fallbacks.
+The guard also rejects `!important`, removed focus outlines, route-level
+overrides of core primitives, undefined tokens and `cw-` classes, native
+controls without their primitive class, inline styles, and core primitives
+missing from `reference/fixtures/components.html`. Existing violations are
+fingerprinted in `scripts/checks/contracts/design-token-baseline.json`. The
+comparison is two-sided: a new violation fails as unapproved and a fixed one
+fails as stale, so the baseline can only shrink. After fixing violations, run
+`design-tokens --prune` to delete the stale entries; `--write-baseline` refuses
+to add entries to an existing baseline. Files listed in `strict_files` in
+`scripts/checks/contracts/design-token-policy.json` may have no baseline
+entries, and that list only grows. `--self-test` proves each rule on in-memory
+fixtures.
+
 Route modules keep public page URLs clean. Mutations live under `_actions`,
 partial HTML under `_fragments`, and event streams under `_events`. Route-local
 JavaScript and CSS must be registered as immutable same-origin assets by the

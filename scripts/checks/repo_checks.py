@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from repo_policy.shared import ROOT, argparse
+from repo_policy.design_tokens import check_design_tokens
 from repo_policy.edge_routing import check_connect_edge_routing
 from repo_policy.idp_security import check_idp_signing_kek_isolation
 from repo_policy.ses_security import check_ses_sender_isolation
@@ -57,6 +58,13 @@ def main(argv: list[str] | None = None) -> int:
     ses_parser.set_defaults(func=check_ses_sender_isolation)
     turnstile_parser = subparsers.add_parser("turnstile-access-projection")
     turnstile_parser.set_defaults(func=check_turnstile_access_projection)
+    design_parser = subparsers.add_parser("design-tokens")
+    design_parser.add_argument("--self-test", action="store_true")
+    design_baseline = design_parser.add_mutually_exclusive_group()
+    design_baseline.add_argument("--write-baseline", action="store_true")
+    design_baseline.add_argument("--prune", action="store_true")
+    design_parser.add_argument("--root", default=str(ROOT))
+    design_parser.set_defaults(func=check_design_tokens)
 
     args = parser.parse_args(argv)
     return args.func(args)
