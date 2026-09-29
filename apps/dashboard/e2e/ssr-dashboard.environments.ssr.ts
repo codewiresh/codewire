@@ -529,7 +529,9 @@ test.describe.serial("server-rendered environments", () => {
       clientWidth: element.clientWidth,
       scrollWidth: element.scrollWidth,
     }));
-    expect(dimensions.clientWidth).toBe(539);
+    // The Create drawer is 700px wide (at most 94vw) with a 1px left border;
+    // the whole form must fit it without horizontal overflow.
+    expect(dimensions.clientWidth).toBe(699);
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
     await expect(page.getByLabel("Workspace image")).toHaveValue(
       workspaceImage,
