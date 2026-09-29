@@ -156,7 +156,8 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
         : page.getByRole("navigation", { name: "Manage provider credentials" }).getByRole("link");
       await setup.click();
       // A dirty form asks before leaving; the saved draft is kept.
-      const destinationUrl = `${ORIGIN}/settings/${destination}/?org=${slug}&creation_draft=${draft}`;
+      // Personal Settings carry no organization; the draft handle alone returns.
+      const destinationUrl = `${ORIGIN}/settings/${destination}/?creation_draft=${draft}`;
       const leave = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
       await Promise.race([page.waitForURL(destinationUrl), leave.waitFor()]);
       if (await leave.isVisible()) await button(leave, "Save draft and leave").click();
