@@ -383,7 +383,7 @@ async fn render(
         ""
     };
     page.account_id = identity.id.clone();
-    page.action_query = context_query(&dashboard.selected_organization_slug, cursor, &query.draft);
+    page.action_query = context_query(cursor, &query.draft);
     page.reload_url = format!("{PATH}{}", page.action_query);
     page.creation_return_url = if dashboard.has_selected_organization
         && dashboard.selected_organization_slug == query.org
@@ -400,10 +400,7 @@ async fn render(
     page.first_page_url = if cursor.is_empty() {
         String::new()
     } else {
-        format!(
-            "{PATH}{}",
-            context_query(&dashboard.selected_organization_slug, "", &query.draft)
-        )
+        format!("{PATH}{}", context_query("", &query.draft))
     };
     if page.message.is_empty() {
         page.message = approved_message(&query.message).into();
@@ -418,11 +415,7 @@ async fn render(
             if !inventory.next_cursor.is_empty() {
                 page.next_page_url = format!(
                     "{PATH}{}",
-                    context_query(
-                        &dashboard.selected_organization_slug,
-                        &inventory.next_cursor,
-                        &query.draft
-                    )
+                    context_query(&inventory.next_cursor, &query.draft)
                 );
             }
         }
@@ -542,11 +535,8 @@ fn approved_error(code: &str) -> &'static str {
     }
 }
 
-fn context_query(org: &str, cursor: &str, draft: &DraftReturn) -> String {
+fn context_query(cursor: &str, draft: &DraftReturn) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !org.is_empty() && org.len() <= 128 {
-        query.append_pair("org", org);
-    }
     if !cursor.is_empty() && secrets_presets_connect::valid_user_secret_cursor(cursor) {
         query.append_pair("cursor", cursor);
     }
@@ -562,7 +552,7 @@ fn context_query(org: &str, cursor: &str, draft: &DraftReturn) -> String {
 }
 
 fn feedback(headers: &HeaderMap, context: &PageQuery, key: &str, code: &str) -> Response {
-    let mut query = context_query(&context.org, &context.cursor, &context.draft);
+    let mut query = context_query(&context.cursor, &context.draft);
     query.push(if query.is_empty() { '?' } else { '&' });
     // Both feedback fields are fixed call-site literals, never upstream text.
     query.push_str(key);

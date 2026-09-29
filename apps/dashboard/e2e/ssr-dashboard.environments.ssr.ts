@@ -176,7 +176,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     // The new personal Settings consumer must retain the same exact draft
     // through cancellation, server validation and a real native secret write.
     // Owning tests disable trace/video/failure screenshots around these inputs.
-    const personalPath = `/settings/secrets/?org=${slug}&creation_draft=${requestedDraft}`;
+    const personalPath = `/settings/secrets/?creation_draft=${requestedDraft}`;
     await page.getByRole("link", { name: "Manage personal secrets", exact: true }).click();
     await expect(page).toHaveURL(`${ssrUrl}${personalPath}`);
     const personalReturn = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
@@ -424,7 +424,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("searchbox", { name: "Find a repository" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Add custom Git URL" })).toBeVisible();
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
-    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?org=${slug}&creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?creation_draft=${draft}`);
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 
@@ -673,10 +673,10 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     await expect(page.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
-    await expect(page.getByRole("link", { name: "Manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}&creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?creation_draft=${draft}`);
     await expect(page.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/?creation_draft=${draft}`);
     await expect(page.getByRole("link", { name: "Manage secret projects" })).toHaveAttribute("href", `/${slug}/secrets/?creation_draft=${draft}`);
-    await expect(page.locator(`a[href="/settings/credentials/?org=${slug}&creation_draft=${draft}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
+    await expect(page.locator(`a[href="/settings/credentials/?creation_draft=${draft}"]`).filter({ hasText: /credentials/ }).last()).toBeVisible();
   });
 
   test("requires explicit recovery when a selected secret project is removed", async ({ page, isMobile }) => {
@@ -1240,9 +1240,9 @@ test.describe.serial("server-rendered environments", () => {
     await expect(sourceEditor.locator('[name="expected_secret_project"]')).toHaveValue(secretProjectId);
     await expect(sourceEditor.locator('[name="confirm_personal_secrets"]')).toHaveCount(0);
     await expect(sourceEditor.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
-    await expect(sourceEditor.getByRole("link", { name: "Manage personal secrets" })).toHaveAttribute("href", `/settings/secrets/?org=${slug}`);
+    await expect(sourceEditor.getByRole("link", { name: "Manage personal secrets" })).toHaveAttribute("href", "/settings/secrets/");
     await expect(sourceEditor.getByRole("link", { name: "Manage organization secrets" })).toHaveAttribute("href", `/${slug}/secrets/organization/`);
-    await expect(sourceEditor.locator(`a[href="/settings/credentials/?org=${slug}"]`)).toBeVisible();
+    await expect(sourceEditor.locator(`a[href="/settings/credentials/"]`)).toBeVisible();
     await sourceEditor.getByLabel("Secret project", { exact: true }).selectOption("");
     await sourceEditor.getByRole("button", { name: "Save sources", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("Sandbox sources saved. The Sandbox remains stopped.");

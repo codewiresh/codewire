@@ -58,7 +58,7 @@ Click **Revoke All Other Sessions** to sign out everywhere except your current d
 
 ## Account management
 
-From [Settings → Account](https://codewire.sh/settings/account):
+From [Settings → Account](https://codewire.sh/settings/):
 
 ### Export your data
 

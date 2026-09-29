@@ -10,7 +10,7 @@
   <div class="cw-console-org-switcher">
     <details class="cw-org-switcher">
       <summary>
-        <span class="cw-org-initial" aria-hidden="true">P</span>
+        <span class="cw-org-initial" aria-hidden="true">{{ view.selected_organization_initial() }}</span>
         <span class="cw-org-switcher-label">{% if view.has_selected_organization %}{{ view.selected_organization_name }}{% else if view.organization_navigation_unavailable %}Organizations unavailable{% else %}Choose organization{% endif %}</span>
         <svg class="cw-icon cw-org-chevron" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-down"/></svg>
       </summary>
@@ -18,7 +18,7 @@
         <h2>Organizations</h2>
         <ul>
           {% for organization in view.organizations %}
-          <li><a href="/dashboard/?org={{ organization.slug }}" data-search-item data-search-text="{{ organization.name }} {{ organization.slug }}">{{ organization.name }}<span>{{ organization.role }}</span></a></li>
+          <li><a href="?org={{ organization.slug }}"{% if view.selected_organization_slug == organization.slug %} aria-current="true"{% endif %} data-search-item data-search-text="{{ organization.name }} {{ organization.slug }}">{{ organization.name }}<span>{{ organization.role }}</span></a></li>
           {% endfor %}
           <li><a href="{{ view.new_organization_url }}">＋ New Organization</a></li>
         </ul>
@@ -52,16 +52,16 @@
   <section class="cw-console-admin">
     <h2>Admin</h2>
     <ul>
-      <li><a class="cw-nav-link" href="/admin/{{ view.global_context_query }}">Overview</a></li>
-      <li><a class="cw-nav-link" href="/admin/accounts/{{ view.global_context_query }}">Accounts</a></li>
-      <li><a class="cw-nav-link" href="/admin/audit/{{ view.global_context_query }}">Audit Log</a></li>
-      <li><a class="cw-nav-link" href="/admin/billing/{{ view.global_context_query }}">Billing Catalog</a></li>
+      <li><a class="cw-nav-link" href="/admin/">Overview</a></li>
+      <li><a class="cw-nav-link" href="/admin/accounts/">Accounts</a></li>
+      <li><a class="cw-nav-link" href="/admin/audit/">Audit Log</a></li>
+      <li><a class="cw-nav-link" href="/admin/billing/">Billing Catalog</a></li>
     </ul>
   </section>
   {% endif %}
 
   <ul class="cw-console-get-started">
-    <li><a class="cw-nav-link" href="/dashboard/#get-started">Get Started</a></li>
+    <li><a class="cw-nav-link" href="/docs/getting-started/">Get Started</a></li>
   </ul>
   <ul class="cw-console-footer">
     <li><a class="cw-nav-link" href="{{ view.settings_url }}"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-settings"/></svg>Settings</a></li>
@@ -74,7 +74,7 @@
       <div class="cw-command-input-row"><span aria-hidden="true">⌕</span><input data-quick-search-input aria-label="Search Codewire" autocomplete="off" placeholder="Search navigation, organizations, and Sandboxes"><button value="cancel" aria-label="Close search">Esc</button></div>
       <ul class="cw-command-results" data-quick-search-results>
         <li><a href="/dashboard/" data-search-item data-search-text="dashboard overview home">Dashboard</a></li>
-        {% for organization in view.organizations %}<li><a href="/dashboard/?org={{ organization.slug }}" data-search-item data-search-text="organization {{ organization.name }} {{ organization.slug }}">Organization · {{ organization.name }}</a></li>{% endfor %}
+        {% for organization in view.organizations %}<li><a href="/{{ organization.slug }}/" data-search-item data-search-text="organization {{ organization.name }} {{ organization.slug }}">Organization · {{ organization.name }}</a></li>{% endfor %}
         {% if view.has_selected_organization %}
         <li><a href="{{ view.selected_organization_url }}" data-search-item data-search-text="sandboxes environments all">All Sandboxes</a></li>
         <li><a href="/{{ view.selected_organization_slug }}/secrets/" data-search-item data-search-text="application secrets projects organization">Application-secret projects</a></li>
@@ -82,9 +82,9 @@
         {% for sandbox in view.sandboxes %}<li><a href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/" data-search-item data-search-text="sandbox {{ sandbox.name }} {{ sandbox.id }} {{ sandbox.state }}">Sandbox · {{ sandbox.name }}</a></li>{% endfor %}
         {% endif %}
         <li><a href="{{ view.settings_url }}" data-search-item data-search-text="settings account security sessions">Settings</a></li>
-        <li><a href="/settings/{{ view.global_context_query }}" data-search-item data-search-text="personal account details security active sessions">Account</a></li>
-        <li><a href="/settings/credentials/{{ view.global_context_query }}" data-search-item data-search-text="personal credentials provider accounts github profiles git commit identity">Credentials</a></li>
-        <li><a href="/settings/secrets/{{ view.global_context_query }}" data-search-item data-search-text="personal application secrets">Personal application secrets</a></li>
+        <li><a href="/settings/" data-search-item data-search-text="personal account details security active sessions">Account</a></li>
+        <li><a href="/settings/credentials/" data-search-item data-search-text="personal credentials provider accounts github profiles git commit identity">Credentials</a></li>
+        <li><a href="/settings/secrets/" data-search-item data-search-text="personal application secrets">Personal application secrets</a></li>
       </ul>
       <p class="cw-command-empty" data-quick-search-empty hidden>No matching destination.</p>
     </form>

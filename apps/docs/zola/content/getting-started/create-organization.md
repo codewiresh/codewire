@@ -8,7 +8,7 @@ Organizations are the top-level container in Codewire. Each organization has its
 
 ## Create your first organization
 
-1. From the [dashboard](https://codewire.sh/dashboard), click **New Organization**
+1. From the [dashboard](https://codewire.sh/dashboard/), open the organization switcher and click **New Organization**
 2. Enter an **organization name** (e.g., "Acme Engineering")
 3. Choose a **slug** — this is used in URLs and must be unique
 4. Click **Create**

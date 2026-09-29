@@ -65,7 +65,7 @@ test.describe.serial("cookie-owned Account session controls", () => {
     expect(new Set(ids)).toEqual(new Set([current.id, ...sessions.map((session) => session.id)]));
     for (const section of ["security", "sessions"]) {
       await page.goto(`/settings/${section}/?org=${slug}`);
-      await expect(page).toHaveURL(`/settings/?org=${slug}#${section}`);
+      await expect(page).toHaveURL(`/settings/#${section}`);
       await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
     }
     expect(await page.content()).not.toContain(current.token);

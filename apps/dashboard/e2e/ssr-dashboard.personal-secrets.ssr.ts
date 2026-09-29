@@ -156,8 +156,8 @@ test("Delete requires its own confirmation, Cancel is default and no value is se
 
 test("empty and unavailable states remain distinct and pagination never implies a total", async ({ page }) => {
   const pages = page.getByRole("navigation", { name: "Secret pages", exact: true });
-  await expect(pages.getByRole("link", { name: "First page" })).toHaveAttribute("href", "settings-secrets.html?org=fixture-org&creation_draft=00000000-0000-4000-8000-000000000003");
-  await expect(pages.getByRole("link", { name: "Next page" })).toHaveAttribute("href", "settings-secrets.html?org=fixture-org&cursor=DATABASE_URL&creation_draft=00000000-0000-4000-8000-000000000003");
+  await expect(pages.getByRole("link", { name: "First page" })).toHaveAttribute("href", "settings-secrets.html?creation_draft=00000000-0000-4000-8000-000000000003");
+  await expect(pages.getByRole("link", { name: "Next page" })).toHaveAttribute("href", "settings-secrets.html?cursor=DATABASE_URL&creation_draft=00000000-0000-4000-8000-000000000003");
   await page.goto(fixture("settings-secrets-empty"));
   await expect(page.getByText("No personal secrets yet. Add a secret when a workload needs one.", { exact: true })).toBeVisible();
   await expect(action(page, "Add secret")).toBeVisible();

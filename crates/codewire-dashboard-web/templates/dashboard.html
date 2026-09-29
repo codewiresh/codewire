@@ -17,46 +17,13 @@
       <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
       <main class="cw-main">
-        <header class="cw-console-header"><div class="cw-console-breadcrumb"><span>{% if view.has_selected_organization %}{{ view.selected_organization_slug }}{% else %}account{% endif %}</span><span>/</span><strong>dashboard</strong></div>{% include "console-account.html" %}</header>
+        <header class="cw-console-header"><div class="cw-console-breadcrumb"><span>account</span><span>/</span><strong>dashboard</strong></div>{% include "console-account.html" %}</header>
         <div class="cw-main-inner"><div class="cw-page cw-page--wide">
           <header class="cw-page-header">
-            <div><p class="cw-eyebrow">Account home</p><h1 class="cw-page-title">Dashboard</h1><p class="cw-page-description">{% if view.has_selected_organization %}Operational overview for {{ view.selected_organization_name }}.{% else %}Create an organization to start building.{% endif %}</p></div>
-            {% if view.has_selected_organization %}<a class="cw-button cw-button--pill" href="{{ view.selected_organization_url }}new/">＋ Create Sandbox</a>{% else %}<a class="cw-button cw-button--pill" href="{{ view.new_organization_url }}">New Organization</a>{% endif %}
+            <div><h1 class="cw-page-title">Dashboard</h1><p class="cw-page-description">Create an organization to start building.</p></div>
+            <a class="cw-button cw-button--pill" href="{{ view.new_organization_url }}">New Organization</a>
           </header>
-
-          {% if view.has_selected_organization %}
-          <section class="cw-metric-grid" aria-label="Sandbox status">
-            <a href="{{ view.selected_organization_url }}"><span>Total</span><strong>{{ view.sandbox_total }}</strong><small>Sandboxes</small></a>
-            <a href="{{ view.selected_organization_url }}?state=running"><span>Running</span><strong>{{ view.sandbox_running }}</strong><small>Available now</small></a>
-            <a href="{{ view.selected_organization_url }}?state=stopped"><span>Stopped</span><strong>{{ view.sandbox_stopped }}</strong><small>Ready to resume</small></a>
-            <a href="{{ view.selected_organization_url }}?state=error"><span>Attention</span><strong>{{ view.sandbox_attention }}</strong><small>Needs review</small></a>
-          </section>
-          <section class="cw-dashboard-grid">
-            <div class="cw-console-panel">
-              <div class="cw-console-panel-header"><div><p class="cw-eyebrow">Inventory</p><h2>Recently created</h2></div><a href="{{ view.selected_organization_url }}">All Sandboxes →</a></div>
-              {% if view.recent_sandboxes.is_empty() %}
-              <div class="cw-state"><strong>No Sandboxes yet</strong><p>Create one from a repository or an image.</p><a class="cw-button cw-button--pill" href="{{ view.selected_organization_url }}new/">Create Sandbox</a></div>
-              {% else %}
-              <div class="cw-recent-list">
-                {% for sandbox in view.recent_sandboxes %}<a href="/{{ view.selected_organization_slug }}/{{ sandbox.id }}/"><span class="cw-rail-dot" data-tone="{{ sandbox.state_tone }}" aria-hidden="true"></span><strong>{{ sandbox.name }}</strong><span>{{ sandbox.resources }}</span><span>{{ sandbox.created }}</span><span>{{ sandbox.state }}</span></a>{% endfor %}
-              </div>
-              {% endif %}
-            </div>
-            <div class="cw-console-panel cw-resource-panel">
-              <div class="cw-console-panel-header"><div><p class="cw-eyebrow">Provisioned</p><h2>Resources</h2></div></div>
-              <dl><div><dt>CPU</dt><dd>{{ view.provisioned_cpu_millicores }}m</dd></div><div><dt>Memory</dt><dd>{{ view.provisioned_memory_mb }} MiB</dd></div><div><dt>Disk</dt><dd>{{ view.provisioned_disk_gb }} GiB</dd></div></dl>
-            </div>
-          </section>
-
-          {% if view.show_checklist %}
-          <section id="get-started" class="cw-console-panel cw-onboarding" aria-labelledby="setup-title">
-            <div class="cw-console-panel-header"><div><p class="cw-eyebrow">First run</p><h2 id="setup-title">Get started</h2></div></div>
-            <ol><li data-complete="{{ view.has_organizations }}"><span>1</span><div><strong>Create an organization</strong><p>Choose the stable URL namespace for your team.</p></div></li><li><span>2</span><div><strong>Create a Sandbox</strong><p>Launch an isolated workspace from a repository or image.</p><a href="{{ view.selected_organization_url }}new/">Create Sandbox</a></div></li></ol>
-          </section>
-          {% endif %}
-          {% else %}
           <section class="cw-console-panel cw-onboarding"><div class="cw-state"><strong>No organizations yet</strong><p>Create an organization to reserve its clean Codewire URL.</p><a class="cw-button cw-button--pill" href="{{ view.new_organization_url }}">Create Organization</a></div></section>
-          {% endif %}
         </div></div>
       </main>
     </div>

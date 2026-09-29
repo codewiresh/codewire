@@ -192,17 +192,16 @@ async fn inventory_response(
         0
     };
     let end = (start + ORGANIZATIONS_PER_PAGE).min(context.view.organizations.len());
-    let selected_org = &context.view.selected_organization_slug;
     if start > 0 {
-        page.first_page_url = format!("{PATH}{}", context_query(selected_org, ""));
+        page.first_page_url = format!("{PATH}{}", context_query(""));
     }
     if end < context.view.organizations.len() {
         page.next_page_url = format!(
             "{PATH}{}",
-            context_query(selected_org, &context.view.organizations[end - 1].id)
+            context_query(&context.view.organizations[end - 1].id)
         );
     }
-    page.action_query = context_query(selected_org, if start > 0 { &query.cursor } else { "" });
+    page.action_query = context_query(if start > 0 { &query.cursor } else { "" });
     if context.organizations_available {
         page.groups = context.view.organizations[start..end]
             .iter()
@@ -598,10 +597,7 @@ fn render(
     page.account_id = context.account_id.clone();
     page.organizations = context.view.organizations.clone();
     page.organizations_available = context.organizations_available;
-    page.reload_url = format!(
-        "{PATH}{}",
-        context_query(&context.view.selected_organization_slug, "")
-    );
+    page.reload_url = format!("{PATH}{}", context_query(""));
     page.csrf_token = context.view.csrf_token.to_string();
     let response = with_csrf_cookie(
         render_template(
@@ -701,11 +697,8 @@ fn approved_error(code: &str) -> &'static str {
     }
 }
 
-fn context_query(org: &str, cursor: &str) -> String {
+fn context_query(cursor: &str) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !org.is_empty() && org.len() <= 128 {
-        query.append_pair("org", org);
-    }
     if account_sessions::valid_id(cursor) {
         query.append_pair("cursor", cursor);
     }
@@ -718,7 +711,7 @@ fn context_query(org: &str, cursor: &str) -> String {
 }
 
 fn feedback(headers: &HeaderMap, query: &PageQuery, key: &str, code: &str) -> Response {
-    let mut query = context_query(&query.org, &query.cursor);
+    let mut query = context_query(&query.cursor);
     query.push(if query.is_empty() { '?' } else { '&' });
     query.push_str(key);
     query.push('=');

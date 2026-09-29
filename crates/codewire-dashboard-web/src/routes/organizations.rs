@@ -117,8 +117,9 @@ pub(super) async fn create_organization(
     match create_organization_rpc(&state, cookie, &form).await {
         Ok(()) => {
             let rotated = new_csrf_token();
+            // A new organization opens on its own home.
             with_csrf_cookie(
-                redirect(DASHBOARD_PATH.to_owned(), &headers),
+                redirect(format!("/{}/", form.slug), &headers),
                 csrf_cookie(&state.public_origin, &rotated),
             )
         }
