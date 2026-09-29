@@ -327,45 +327,79 @@ test.describe("server-rendered public, auth, and account routes", () => {
     }
   });
 
-  test("global routes preserve only an accessible organization context", async ({ page, isMobile }) => {
-    test.skip(!!isMobile, "desktop global-context contract");
+  test("personal and admin routes carry no organization and switching stays on the page", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop organization-context contract");
 
-    for (const route of ["/settings/", "/settings/credentials/", "/settings/secrets/", "/settings/security/", "/settings/sessions/"]) {
+    for (const route of ["/settings/", "/settings/credentials/", "/settings/secrets/"]) {
+      const switched = await page.request.get(`${route}?org=${cleanRoutesOrgSlug}`, { maxRedirects: 0 });
+      expect(switched.status()).toBe(303);
+      expect(switched.headers().location).toBe(route);
       const response = await page.goto(`${route}?org=${cleanRoutesOrgSlug}`);
       expect(response?.status()).toBe(200);
+      await expect(page).toHaveURL(route);
       await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
         "Clean Routes Organization",
       );
       await expect(page.locator(".cw-sidebar-slot").getByRole("link", { name: "Settings" }))
-        .toHaveAttribute("href", `/settings/?org=${cleanRoutesOrgSlug}`);
+        .toHaveAttribute("href", "/settings/");
+      // Only the switcher's relative links name an organization.
+      await expect(page.locator('a[href*="org="]:not([href^="?org="])')).toHaveCount(0);
+      await expect(page.locator('form[action*="org="]')).toHaveCount(0);
     }
+    for (const section of ["security", "sessions"]) {
+      await page.goto(`/settings/${section}/`);
+      await expect(page).toHaveURL(`/settings/#${section}`);
+      await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
+        "Clean Routes Organization",
+      );
+    }
+
+    // Switching organization from a personal page keeps the page.
+    await page.goto("/settings/credentials/");
+    await page.locator(".cw-sidebar-slot .cw-org-switcher summary").click();
+    const choices = page.locator('.cw-sidebar-slot .cw-org-menu a[href^="?org="]');
+    const other = (await choices.evaluateAll((links) => links.map((link) => link.getAttribute("href")!.slice(5))))
+      .find((slug) => slug !== cleanRoutesOrgSlug);
+    expect(other).toBeTruthy();
+    await page.locator(`.cw-sidebar-slot .cw-org-menu a[href="?org=${other}"]`).click();
+    await expect(page).toHaveURL("/settings/credentials/");
+    await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).not.toHaveText(
+      "Clean Routes Organization",
+    );
+
+    // Switching from an organization page keeps its section.
+    await page.goto(`/${cleanRoutesOrgSlug}/snapshots/`);
+    await page.locator(".cw-sidebar-slot .cw-org-switcher summary").click();
+    await page.locator(`.cw-sidebar-slot .cw-org-menu a[href="?org=${other}"]`).click();
+    await expect(page).toHaveURL(`/${other}/snapshots/`);
+
+    // The account home is the remembered organization's home.
+    const home = await page.request.get("/dashboard/", { maxRedirects: 0 });
+    expect(home.status()).toBe(303);
+    expect(home.headers().location).toBe(`/${other}/`);
 
     const adminRedirect = await page.request.get(`/admin/?org=${cleanRoutesOrgSlug}`, {
       maxRedirects: 0,
     });
     expect(adminRedirect.status()).toBe(303);
-    expect(adminRedirect.headers().location).toBe(`/dashboard/?org=${cleanRoutesOrgSlug}`);
+    expect(adminRedirect.headers().location).toBe("/admin/");
 
     for (const route of [
       "/settings/?org=not-a-member",
       "/settings/credentials/?org=not-a-member",
       "/settings/secrets/?org=not-a-member",
-      "/settings/security/?org=not-a-member",
-      "/settings/sessions/?org=not-a-member",
     ]) {
       const response = await page.goto(route);
       expect(response?.status()).toBe(200);
+      await expect(page).toHaveURL(route.split("?")[0]);
       await expect(page.locator(".cw-settings-subnav").getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
-      await expect(page.locator('.cw-settings-subnav a[href*="not-a-member"]')).toHaveCount(0);
-      await expect(page.locator(".cw-sidebar-slot").getByRole("link", { name: "Settings" }))
-        .toHaveAttribute("href", "/settings/");
+      await expect(page.locator('a[href*="not-a-member"]')).toHaveCount(0);
+      await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText("Choose organization");
     }
-    for (const route of [
-      "/admin/?org=not-a-member",
-      "/admin/billing/?org=not-a-member",
-      "/admin/audit/?org=not-a-member",
-    ]) {
-      expect((await page.request.get(route)).status()).toBe(404);
+    for (const route of ["/admin/?org=not-a-member", "/admin/billing/?org=not-a-member", "/admin/audit/?org=not-a-member"]) {
+      const response = await page.goto(route);
+      expect(page.url()).not.toContain("not-a-member");
+      expect(response?.status()).toBe(200);
     }
   });
 

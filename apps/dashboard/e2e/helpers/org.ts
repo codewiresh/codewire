@@ -63,3 +63,6 @@ export async function getOrgForUser(
     slug: String(result.slug),
   } : null;
 }
+
+/** The account home: an organization's home, or the dashboard for an account without one. */
+export const ACCOUNT_HOME = /\/(?:dashboard|[a-z0-9]+(?:-[a-z0-9]+)*)\/$/;

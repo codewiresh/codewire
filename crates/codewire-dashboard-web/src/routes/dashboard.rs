@@ -10,7 +10,7 @@ use crate::{
     connect::organizations,
     dependency::{DependencyResult, PageDependency, resolve_web},
     error::WebError,
-    response::{error_page, login_redirect, render_page, two_factor_redirect},
+    response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     routes::{DASHBOARD_PATH, NEW_ORGANIZATION_PATH},
     security::canonical_cookie,
     state::AppState,
@@ -24,48 +24,30 @@ pub(super) struct DashboardQuery {
     org: String,
 }
 
+/// The account home. With an organization it is that organization's home,
+/// `/{slug}/`, chosen from the remembered organization or else the first one;
+/// without one it offers to create an organization.
 pub(super) async fn dashboard(
     State(state): State<AppState>,
     Query(query): Query<DashboardQuery>,
     headers: HeaderMap,
 ) -> Response {
-    match dashboard_overview_view(&state, &headers, &query.org).await {
-        Ok(view) => render_page(DashboardTemplate { view: &view }),
+    match dashboard_view(&state, &headers).await {
+        Ok(view) => {
+            let home = view
+                .organizations
+                .iter()
+                .find(|organization| organization.slug == query.org)
+                .or_else(|| view.organizations.first());
+            match home {
+                Some(organization) => redirect(format!("/{}/", organization.slug), &headers),
+                None => render_page(DashboardTemplate { view: &view }),
+            }
+        }
         Err(WebError::Unauthorized) => login_redirect(DASHBOARD_PATH, &headers),
         Err(WebError::TwoFactorRequired) => two_factor_redirect(DASHBOARD_PATH, &headers),
         Err(error) => error_page(error),
     }
-}
-
-async fn dashboard_overview_view(
-    state: &AppState,
-    headers: &HeaderMap,
-    selected_slug: &str,
-) -> Result<DashboardView, WebError> {
-    let mut view = dashboard_view(state, headers).await?;
-    let selected = if selected_slug.is_empty() {
-        view.organizations.first()
-    } else {
-        view.organizations
-            .iter()
-            .find(|organization| organization.slug == selected_slug)
-    };
-    let Some(selected) = selected else {
-        if selected_slug.is_empty() {
-            view.show_checklist = true;
-            return Ok(view);
-        }
-        return Err(WebError::NotFound);
-    };
-    let organization = crate::view::OrganizationContext::from_row(selected);
-    let cookie = canonical_cookie(headers).map_err(|()| WebError::Unauthorized)?;
-    let sandboxes =
-        crate::environment_connect::environments(state, cookie, &organization.id, false)
-            .await
-            .map_err(WebError::Connect)?;
-    view.show_checklist = sandboxes.is_empty();
-    view.select_organization(&organization, sandboxes, true);
-    Ok(view)
 }
 
 pub(super) async fn dashboard_view(
@@ -83,7 +65,6 @@ pub(super) async fn dashboard_view(
         }
     };
     let has_organizations = !organizations.is_empty();
-    let show_checklist = !has_organizations;
 
     Ok(DashboardView {
         user_name: identity.display_name().to_owned(),
@@ -92,10 +73,8 @@ pub(super) async fn dashboard_view(
         organizations,
         has_organizations,
         organization_navigation_unavailable: false,
-        show_checklist,
         new_organization_url: NEW_ORGANIZATION_PATH.to_owned(),
         settings_url: "/settings/".to_owned(),
-        global_context_query: String::new(),
         has_selected_organization: false,
         selected_organization_name: String::new(),
         selected_organization_slug: String::new(),
@@ -159,10 +138,8 @@ fn shell_from_organizations(
         organizations,
         has_organizations,
         organization_navigation_unavailable,
-        show_checklist: false,
         new_organization_url: NEW_ORGANIZATION_PATH.to_owned(),
         settings_url: "/settings/".to_owned(),
-        global_context_query: String::new(),
         has_selected_organization: false,
         selected_organization_name: String::new(),
         selected_organization_slug: String::new(),
@@ -276,11 +253,15 @@ pub(super) async fn select_shell_organization(
     if selected_slug.is_empty() {
         return Ok(());
     }
-    let row = view
+    // The selection is only navigation: a slug the caller cannot see selects
+    // nothing rather than failing the page.
+    let Some(row) = view
         .organizations
         .iter()
         .find(|organization| organization.slug == selected_slug)
-        .ok_or(WebError::NotFound)?;
+    else {
+        return Ok(());
+    };
     let organization = crate::view::OrganizationContext::from_row(row);
     let rail =
         crate::environment_connect::environments(state, cookie, &organization.id, false).await;

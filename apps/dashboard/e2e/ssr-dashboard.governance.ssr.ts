@@ -180,7 +180,7 @@ test.describe.serial("server-rendered organization governance", () => {
       await page.getByRole("link", { name: "Go to dashboard" }).click();
       await page.locator(".cw-sidebar-slot .cw-org-switcher summary").click();
       await expect(
-        page.locator(`.cw-sidebar-slot .cw-org-menu a[href="/dashboard/?org=${slug}"]`),
+        page.locator(`.cw-sidebar-slot .cw-org-menu a[href="?org=${slug}"]`),
       ).toBeVisible();
     } finally {
       await disableTwoFactor(USERS.outsider.email);

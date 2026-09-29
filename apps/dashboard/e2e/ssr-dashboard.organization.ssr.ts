@@ -39,9 +39,9 @@ test.describe("server-rendered organization creation", () => {
     await page.getByRole("button", { name: "Create Organization" }).click();
     const response = await post;
     expect(response.status()).toBe(200);
-    expect(response.headers()["hx-redirect"]).toBe("/dashboard/");
+    expect(response.headers()["hx-redirect"]).toBe(`/${slug}/`);
 
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
     await page.locator(".cw-sidebar-slot .cw-org-switcher > summary").click();
     const organization = page.locator(".cw-sidebar-slot .cw-org-menu a", { hasText: "SSR HTMX Organization" });
     await expect(organization).toBeVisible();
@@ -79,8 +79,8 @@ test.describe("server-rendered organization creation", () => {
     await page.getByRole("button", { name: "Create Organization" }).click();
     const response = await post;
     expect(response.status()).toBe(200);
-    expect(response.headers()["hx-redirect"]).toBe("/dashboard/");
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
+    expect(response.headers()["hx-redirect"]).toBe(`/${slug}/`);
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
     await expect(page.locator(".cw-sidebar-slot .cw-org-menu a", {
       hasText: "SSR Legacy Cookie Organization",
     })).toContainText("Owner");
@@ -137,7 +137,7 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Organization Name").fill("First Organization");
     await page.getByLabel("Slug").fill(slug);
     await page.getByRole("button", { name: "Create Organization" }).click();
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
 
     await page.goto("/organizations/new/");
     await page.getByLabel("Organization Name").fill("Duplicate Organization");
@@ -172,8 +172,8 @@ test.describe("server-rendered organization creation", () => {
     await page.getByLabel("Slug").press("Enter");
     const response = await post;
     expect(response.status()).toBe(303);
-    expect(response.headers().location).toBe("/dashboard/");
-    await expect(page).toHaveURL(`${ssrUrl}/dashboard/`);
+    expect(response.headers().location).toBe(`/${slug}/`);
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
     await expect(page.locator(".cw-sidebar-slot .cw-org-menu a", { hasText: "SSR No JavaScript Organization" })).toContainText("Owner");
     await context.close();
   });

@@ -169,7 +169,7 @@ pub(super) async fn overview(
     Query(query): Query<AdminQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = global_path(ADMIN_PATH, &query.org);
+    let continuation = ADMIN_PATH.to_owned();
     let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
     {
         Ok(context) => context,
@@ -189,7 +189,7 @@ pub(super) async fn accounts(
     Query(query): Query<AdminQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = global_path(ACCOUNTS_PATH, &query.org);
+    let continuation = ACCOUNTS_PATH.to_owned();
     let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
     {
         Ok(context) => context,
@@ -250,7 +250,7 @@ pub(super) async fn set_account_enabled(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.user_id) {
-        return account_redirect(&state, "", "invalid", &query.org, &headers);
+        return account_redirect(&state, "", "invalid", &headers);
     }
     let path = format!("/api/admin/accounts/{}/enabled", submission.user_id);
     let identity = match post_json::<_, SetAccountEnabledResponse>(
@@ -265,7 +265,7 @@ pub(super) async fn set_account_enabled(
     {
         Ok(identity) => identity,
         Err(()) => {
-            return account_redirect(&state, "", "unavailable", &query.org, &headers);
+            return account_redirect(&state, "", "unavailable", &headers);
         }
     };
     match identity.status {
@@ -284,20 +284,17 @@ pub(super) async fn set_account_enabled(
                     "account-disabled"
                 },
                 "",
-                &query.org,
                 &headers,
             )
         }
-        StatusCode::UNAUTHORIZED => {
-            login_redirect(&global_path(ACCOUNTS_PATH, &query.org), &headers)
-        }
+        StatusCode::UNAUTHORIZED => login_redirect(ACCOUNTS_PATH, &headers),
         StatusCode::FORBIDDEN => error_page(WebError::Forbidden),
-        StatusCode::NOT_FOUND => account_redirect(&state, "", "not-found", &query.org, &headers),
-        StatusCode::BAD_REQUEST => account_redirect(&state, "", "invalid", &query.org, &headers),
+        StatusCode::NOT_FOUND => account_redirect(&state, "", "not-found", &headers),
+        StatusCode::BAD_REQUEST => account_redirect(&state, "", "invalid", &headers),
         StatusCode::SERVICE_UNAVAILABLE => {
-            account_redirect(&state, "", "email-unavailable", &query.org, &headers)
+            account_redirect(&state, "", "email-unavailable", &headers)
         }
-        _ => account_redirect(&state, "", "unavailable", &query.org, &headers),
+        _ => account_redirect(&state, "", "unavailable", &headers),
     }
 }
 
@@ -306,7 +303,7 @@ pub(super) async fn audit(
     Query(query): Query<AuditQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = global_path(AUDIT_PATH, &query.org);
+    let continuation = AUDIT_PATH.to_owned();
     let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
     {
         Ok(context) => context,
@@ -331,13 +328,11 @@ pub(super) async fn audit(
         query.offset.saturating_sub(50),
         &query.action,
         &query.severity,
-        &query.org,
     );
     let next_url = audit_url(
         query.offset.saturating_add(50),
         &query.action,
         &query.severity,
-        &query.org,
     );
     render_page(AdminAuditTemplate {
         view: &dashboard,
@@ -358,7 +353,7 @@ pub(super) async fn billing(
     Query(query): Query<AdminQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let continuation = global_path(BILLING_PATH, &query.org);
+    let continuation = BILLING_PATH.to_owned();
     let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
     {
         Ok(context) => context,
@@ -397,13 +392,12 @@ pub(super) async fn create_plan(
         Err(response) => return response,
     };
     let Some(mutation) = plan_mutation(submission) else {
-        return admin_redirect(&state, "", "invalid", &query.org, &headers);
+        return admin_redirect(&state, "", "invalid", &headers);
     };
     mutation_response(
         &state,
         admin_connect::create_plan(&state, cookie, mutation).await,
         "plan-created",
-        &query.org,
         &headers,
     )
 }
@@ -419,13 +413,12 @@ pub(super) async fn update_plan(
         Err(response) => return response,
     };
     let Some(mutation) = plan_mutation(submission) else {
-        return admin_redirect(&state, "", "invalid", &query.org, &headers);
+        return admin_redirect(&state, "", "invalid", &headers);
     };
     mutation_response(
         &state,
         admin_connect::update_plan(&state, cookie, mutation).await,
         "plan-saved",
-        &query.org,
         &headers,
     )
 }
@@ -441,7 +434,7 @@ pub(super) async fn archive_plan(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.resource_type) || !valid_identifier(&submission.plan_key) {
-        return admin_redirect(&state, "", "invalid", &query.org, &headers);
+        return admin_redirect(&state, "", "invalid", &headers);
     }
     mutation_response(
         &state,
@@ -454,7 +447,6 @@ pub(super) async fn archive_plan(
         )
         .await,
         "plan-archived",
-        &query.org,
         &headers,
     )
 }
@@ -495,13 +487,12 @@ pub(super) async fn archive_price(
         stripe_price_id: String::new(),
     };
     if !valid_price(&price, false) {
-        return admin_redirect(&state, "", "invalid", &query.org, &headers);
+        return admin_redirect(&state, "", "invalid", &headers);
     }
     mutation_response(
         &state,
         admin_connect::set_price_archived(&state, cookie, price, submission.archived).await,
         "price-archived",
-        &query.org,
         &headers,
     )
 }
@@ -517,14 +508,13 @@ pub(super) async fn update_setting(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.setting_key) {
-        return admin_redirect(&state, "", "invalid", &query.org, &headers);
+        return admin_redirect(&state, "", "invalid", &headers);
     }
     mutation_response(
         &state,
         admin_connect::update_setting(&state, cookie, submission.setting_key, submission.int_value)
             .await,
         "setting-saved",
-        &query.org,
         &headers,
     )
 }
@@ -541,7 +531,7 @@ pub(super) async fn preview_migration(
             Err(response) => return response,
         };
     if !valid_migration(&submission) {
-        return admin_redirect(&state, "", "invalid", &query.org, &headers);
+        return admin_redirect(&state, "", "invalid", &headers);
     }
     let mut catalog = match admin_connect::catalog(
         &state,
@@ -554,7 +544,7 @@ pub(super) async fn preview_migration(
     {
         Ok(catalog) => catalog,
         Err(error) => {
-            return admin_connect_error(error, &global_path(BILLING_PATH, &query.org), &headers);
+            return admin_connect_error(error, BILLING_PATH, &headers);
         }
     };
     catalog.preview = match admin_connect::preview_migration(
@@ -568,7 +558,7 @@ pub(super) async fn preview_migration(
     {
         Ok(preview) => preview,
         Err(error) => {
-            return admin_connect_error(error, &global_path(BILLING_PATH, &query.org), &headers);
+            return admin_connect_error(error, BILLING_PATH, &headers);
         }
     };
     catalog.message = "Migration preview updated.".to_owned();
@@ -589,7 +579,7 @@ pub(super) async fn run_migration(
         Err(response) => return response,
     };
     if !valid_migration(&submission) {
-        return admin_redirect(&state, "", "invalid", &query.org, &headers);
+        return admin_redirect(&state, "", "invalid", &headers);
     }
     mutation_response(
         &state,
@@ -604,7 +594,6 @@ pub(super) async fn run_migration(
         .await
         .map(|_| ()),
         "migration-ran",
-        &query.org,
         &headers,
     )
 }
@@ -628,7 +617,7 @@ async fn price_action(
         stripe_price_id: submission.stripe_price_id,
     };
     if !valid_price(&price, true) {
-        return admin_redirect(state, "", "invalid", selected_slug, headers);
+        return admin_redirect(state, "", "invalid", headers);
     }
     let result = if create {
         admin_connect::create_price(state, cookie, price).await
@@ -643,7 +632,6 @@ async fn price_action(
         } else {
             "price-saved"
         },
-        selected_slug,
         headers,
     )
 }
@@ -668,7 +656,7 @@ async fn admin_context(
         .await
         .map_err(|error| admin_route_error(error, continuation, headers))?;
     if !identity.is_admin {
-        return Err(redirect(global_path("/dashboard/", selected_slug), headers));
+        return Err(redirect("/dashboard/".to_owned(), headers));
     }
     Ok((dashboard, cookie))
 }
@@ -703,7 +691,7 @@ async fn admin_action_page_context_for(
     if !request_has_same_origin(headers, &state.public_origin) || !valid_csrf_token(headers, csrf) {
         return Err(error_page(WebError::CsrfRejected));
     }
-    let continuation = global_path(path, selected_slug);
+    let continuation = path.to_owned();
     admin_context(state, headers, &continuation, selected_slug).await
 }
 
@@ -814,11 +802,8 @@ fn normalize_audit_query(mut query: AuditQuery) -> AuditQuery {
     query
 }
 
-fn audit_url(offset: i32, action: &str, severity: &str, selected_slug: &str) -> String {
+fn audit_url(offset: i32, action: &str, severity: &str) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !selected_slug.is_empty() {
-        query.append_pair("org", selected_slug);
-    }
     if !action.is_empty() {
         query.append_pair("action", action);
     }
@@ -836,50 +821,27 @@ fn audit_url(offset: i32, action: &str, severity: &str, selected_slug: &str) -> 
     }
 }
 
-fn global_path(path: &str, selected_slug: &str) -> String {
-    if selected_slug.is_empty() {
-        path.to_owned()
-    } else {
-        let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("org", selected_slug);
-        format!("{path}?{}", query.finish())
-    }
-}
-
 fn mutation_response(
     state: &AppState,
     result: Result<(), ConnectError>,
     message: &str,
-    selected_slug: &str,
     headers: &HeaderMap,
 ) -> Response {
     match result {
-        Ok(()) => admin_redirect(state, message, "", selected_slug, headers),
+        Ok(()) => admin_redirect(state, message, "", headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
-            login_redirect(&global_path(BILLING_PATH, selected_slug), headers)
+            login_redirect(BILLING_PATH, headers)
         }
-        Err(error) => admin_redirect(state, "", mutation_error(&error), selected_slug, headers),
+        Err(error) => admin_redirect(state, "", mutation_error(&error), headers),
     }
 }
 
-fn admin_redirect(
-    state: &AppState,
-    message: &str,
-    error: &str,
-    selected_slug: &str,
-    headers: &HeaderMap,
-) -> Response {
-    admin_redirect_to(state, BILLING_PATH, message, error, selected_slug, headers)
+fn admin_redirect(state: &AppState, message: &str, error: &str, headers: &HeaderMap) -> Response {
+    admin_redirect_to(state, BILLING_PATH, message, error, headers)
 }
 
-fn account_redirect(
-    state: &AppState,
-    message: &str,
-    error: &str,
-    selected_slug: &str,
-    headers: &HeaderMap,
-) -> Response {
-    admin_redirect_to(state, ACCOUNTS_PATH, message, error, selected_slug, headers)
+fn account_redirect(state: &AppState, message: &str, error: &str, headers: &HeaderMap) -> Response {
+    admin_redirect_to(state, ACCOUNTS_PATH, message, error, headers)
 }
 
 fn admin_redirect_to(
@@ -887,13 +849,9 @@ fn admin_redirect_to(
     path: &str,
     message: &str,
     error: &str,
-    selected_slug: &str,
     headers: &HeaderMap,
 ) -> Response {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !selected_slug.is_empty() {
-        query.append_pair("org", selected_slug);
-    }
     if !message.is_empty() {
         query.append_pair("message", message);
     } else if !error.is_empty() {
@@ -1003,8 +961,8 @@ mod tests {
         assert_eq!(query.action, "user.signin");
         assert_eq!(query.offset, 0);
         assert_eq!(
-            audit_url(50, "user sign-in", "warn", "selected-org"),
-            "/admin/audit/?org=selected-org&action=user+sign-in&severity=warn&offset=50"
+            audit_url(50, "user sign-in", "warn"),
+            "/admin/audit/?action=user+sign-in&severity=warn&offset=50"
         );
         assert!(
             normalize_audit_query(AuditQuery {
@@ -1015,10 +973,6 @@ mod tests {
             })
             .action
             .is_empty()
-        );
-        assert_eq!(
-            global_path(ADMIN_PATH, "selected org&mode=other"),
-            "/admin/?org=selected+org%26mode%3Dother"
         );
     }
 

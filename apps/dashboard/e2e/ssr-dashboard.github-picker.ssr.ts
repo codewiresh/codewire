@@ -59,7 +59,7 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
     await expect(browser).toHaveAttribute("data-github-state", "not-configured");
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
     await expect(browser.getByRole("link", { name: "Connect GitHub" }))
-      .toHaveAttribute("href", `/settings/credentials/?org=${slug}&creation_draft=${draft}`);
+      .toHaveAttribute("href", `/settings/credentials/?creation_draft=${draft}`);
     await expect(browser.getByRole("searchbox", { name: "Find a repository" })).toBeDisabled();
     await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("my-new-sandbox");
 

@@ -38,7 +38,7 @@ pub(super) async fn settings(
     headers: HeaderMap,
     Query(mut query): Query<SettingsQuery>,
 ) -> Response {
-    let continuation = global_settings_path(SETTINGS_PATH, &query.org);
+    let continuation = SETTINGS_PATH.to_owned();
     if !account_sessions::cookie_authority_is_unique(&headers) {
         return login_redirect(&continuation, &headers);
     }
@@ -76,7 +76,7 @@ pub(super) async fn settings(
         .as_deref()
         .is_some_and(|cursor| !account_sessions::valid_id(cursor))
     {
-        return settings_redirect("invalid-session-page", true, &query.org, &headers);
+        return settings_redirect("invalid-session-page", true, &headers);
     }
     let inventory =
         match account_sessions::inventory(&state, cookie, &identity.id, query.cursor.as_deref())
@@ -96,10 +96,7 @@ pub(super) async fn settings(
         email_verified: identity.email_verified(),
         account_created: display_time(Some(identity.created_at())),
         two_factor_enabled: identity.two_factor_enabled(),
-        first_sessions_url: format!(
-            "{}#sessions",
-            global_settings_path(SETTINGS_PATH, &query.org)
-        ),
+        first_sessions_url: format!("{}#sessions", SETTINGS_PATH.to_owned()),
         csrf_token: csrf.clone(),
         message: approved_message(&query.message).to_owned(),
         error: approved_error(&query.error).to_owned(),
@@ -121,9 +118,6 @@ pub(super) async fn settings(
             .collect();
         if let Some(next) = inventory.next_cursor {
             let mut query_string = url::form_urlencoded::Serializer::new(String::new());
-            if !query.org.is_empty() {
-                query_string.append_pair("org", &query.org);
-            }
             query_string.append_pair("cursor", &next);
             settings.next_sessions_url =
                 format!("{SETTINGS_PATH}?{}#sessions", query_string.finish());
@@ -150,7 +144,6 @@ pub(super) struct RevokeSessionForm {
 
 pub(super) async fn revoke_session_action(
     State(state): State<AppState>,
-    Query(query): Query<SettingsQuery>,
     headers: HeaderMap,
     form: Result<Form<RevokeSessionForm>, axum::extract::rejection::FormRejection>,
 ) -> Response {
@@ -158,10 +151,7 @@ pub(super) async fn revoke_session_action(
         return private(error_page(WebError::Forbidden));
     };
     if !account_sessions::cookie_authority_is_unique(&headers) {
-        return private(login_redirect(
-            &global_settings_path(SETTINGS_PATH, &query.org),
-            &headers,
-        ));
+        return private(login_redirect(SETTINGS_PATH, &headers));
     }
     if !account_sessions::mutation_origin_is_exact(&headers, &state.public_origin) {
         return private(error_page(WebError::CsrfRejected));
@@ -169,35 +159,25 @@ pub(super) async fn revoke_session_action(
     let identity = match authenticated_identity(&state, &headers).await {
         Ok(identity) => identity,
         Err(WebError::Unauthorized) => {
-            return private(login_redirect(
-                &global_settings_path(SETTINGS_PATH, &query.org),
-                &headers,
-            ));
+            return private(login_redirect(SETTINGS_PATH, &headers));
         }
         Err(error) => return private(error_page(error)),
     };
     if identity.id != form.account_id || !account_sessions::valid_id(&form.account_id) {
-        return private(settings_redirect(
-            "account-changed",
-            true,
-            &query.org,
-            &headers,
-        ));
+        return private(settings_redirect("account-changed", true, &headers));
     }
-    let cookie =
-        match mutation_cookie(&state, &headers, &form.csrf, &query.org, SETTINGS_PATH).await {
-            Ok(cookie) => cookie,
-            Err(response) => return private(response),
-        };
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, SETTINGS_PATH).await {
+        Ok(cookie) => cookie,
+        Err(response) => return private(response),
+    };
     let acknowledgement =
         account_sessions::revoke(&state, cookie, &form.account_id, &form.session_id).await;
-    revocation_response(&state.public_origin, &headers, &query.org, acknowledgement)
+    revocation_response(&state.public_origin, &headers, acknowledgement)
 }
 
 fn revocation_response(
     public_origin: &str,
     headers: &HeaderMap,
-    org: &str,
     acknowledgement: Result<account_sessions::Revoked, account_sessions::Failure>,
 ) -> Response {
     private(match acknowledgement {
@@ -209,17 +189,15 @@ fn revocation_response(
                 "/",
             ),
         ),
-        Ok(_) => settings_redirect("session-revoked", false, org, headers),
-        Err(account_sessions::Failure::Unauthorized) => {
-            login_redirect(&global_settings_path(SETTINGS_PATH, org), headers)
-        }
+        Ok(_) => settings_redirect("session-revoked", false, headers),
+        Err(account_sessions::Failure::Unauthorized) => login_redirect(SETTINGS_PATH, headers),
         Err(account_sessions::Failure::Forbidden) => {
-            settings_redirect("session-controls-unavailable", true, org, headers)
+            settings_redirect("session-controls-unavailable", true, headers)
         }
         Err(account_sessions::Failure::NoLongerAvailable) => {
-            settings_redirect("session-no-longer-available", true, org, headers)
+            settings_redirect("session-no-longer-available", true, headers)
         }
-        Err(_) => settings_redirect("session-outcome-unknown", true, org, headers),
+        Err(_) => settings_redirect("session-outcome-unknown", true, headers),
     })
 }
 
@@ -278,35 +256,26 @@ async fn section_redirect(
     selected_slug: &str,
     section: &'static str,
 ) -> Response {
-    let continuation = global_settings_path(path, selected_slug);
+    let continuation = path.to_owned();
     if !account_sessions::cookie_authority_is_unique(headers) {
         return private(login_redirect(&continuation, headers));
     }
-    let dashboard =
-        match super::dashboard::personal_settings_shell_view(state, headers, selected_slug).await {
-            Ok(dashboard) => dashboard,
-            Err(WebError::Unauthorized) => return login_redirect(&continuation, headers),
-            Err(WebError::TwoFactorRequired) => return two_factor_redirect(&continuation, headers),
-            Err(error) => return error_page(error),
-        };
-    private(redirect(
-        format!(
-            "{}#{section}",
-            global_settings_path(SETTINGS_PATH, &dashboard.selected_organization_slug)
-        ),
-        headers,
-    ))
+    match super::dashboard::personal_settings_shell_view(state, headers, selected_slug).await {
+        Ok(_) => {}
+        Err(WebError::Unauthorized) => return login_redirect(&continuation, headers),
+        Err(WebError::TwoFactorRequired) => return two_factor_redirect(&continuation, headers),
+        Err(error) => return error_page(error),
+    }
+    private(redirect(format!("{SETTINGS_PATH}#{section}"), headers))
 }
 
 pub(super) async fn mutation_cookie(
     state: &AppState,
     headers: &HeaderMap,
     csrf: &str,
-    selected_slug: &str,
     path: &str,
 ) -> Result<axum::http::HeaderValue, Response> {
-    let continuation = global_settings_path(path, selected_slug);
-    mutation_cookie_with_continuation(state, headers, csrf, &continuation).await
+    mutation_cookie_with_continuation(state, headers, csrf, path).await
 }
 
 // The caller supplies a closed, route-owned continuation. It changes only
@@ -338,27 +307,9 @@ pub(super) async fn mutation_cookie_with_continuation(
     canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))
 }
 
-fn global_settings_path(path: &str, selected_slug: &str) -> String {
-    if selected_slug.is_empty() {
-        path.to_owned()
-    } else {
-        let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("org", selected_slug);
-        format!("{path}?{}", query.finish())
-    }
-}
-
-fn settings_redirect(
-    code: &str,
-    error: bool,
-    selected_slug: &str,
-    headers: &HeaderMap,
-) -> Response {
+fn settings_redirect(code: &str, error: bool, headers: &HeaderMap) -> Response {
     let key = if error { "error" } else { "message" };
     let mut query = url::form_urlencoded::Serializer::new(String::new());
-    if !selected_slug.is_empty() {
-        query.append_pair("org", selected_slug);
-    }
     query.append_pair(key, code);
     redirect(
         format!("{SETTINGS_PATH}?{}#sessions", query.finish()),
@@ -409,10 +360,8 @@ mod tests {
             organizations: Vec::new(),
             has_organizations: false,
             organization_navigation_unavailable: false,
-            show_checklist: false,
             new_organization_url: "/organizations/new/".into(),
             settings_url: SETTINGS_PATH.into(),
-            global_context_query: String::new(),
             has_selected_organization: false,
             selected_organization_name: String::new(),
             selected_organization_slug: String::new(),
@@ -492,14 +441,6 @@ mod tests {
     }
 
     #[test]
-    fn global_settings_context_is_query_encoded() {
-        assert_eq!(
-            global_settings_path(SETTINGS_PATH, "selected org&mode=other"),
-            "/settings/?org=selected+org%26mode%3Dother"
-        );
-    }
-
-    #[test]
     fn account_inventory_renders_all_rows_and_exact_native_confirmations() {
         let settings = SettingsPageView {
             account_id: "account-1".into(),
@@ -572,7 +513,6 @@ mod tests {
             let response = revocation_response(
                 "https://app.example.test",
                 &headers,
-                "sample-org",
                 Ok(account_sessions::Revoked {
                     revoked: true,
                     current_session_revoked: current,
@@ -589,7 +529,7 @@ mod tests {
             } else {
                 assert_eq!(
                     response.headers()[header::LOCATION],
-                    "/settings/?org=sample-org&message=session-revoked#sessions"
+                    "/settings/?message=session-revoked#sessions"
                 );
             }
         }
@@ -598,12 +538,7 @@ mod tests {
             account_sessions::Failure::NoLongerAvailable,
             account_sessions::Failure::Forbidden,
         ] {
-            let response = revocation_response(
-                "https://app.example.test",
-                &headers,
-                "sample-org",
-                Err(failure),
-            );
+            let response = revocation_response("https://app.example.test", &headers, Err(failure));
             assert!(!response.headers().contains_key(header::SET_COOKIE));
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             assert!(
