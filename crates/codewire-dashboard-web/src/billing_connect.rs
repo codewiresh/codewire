@@ -421,6 +421,7 @@ mod tests {
     fn dashboard_view() -> DashboardView {
         DashboardView {
             user_name: "Dashboard User".into(),
+            csrf_token: Default::default(),
             is_admin: false,
             organizations: Vec::new(),
             has_organizations: false,

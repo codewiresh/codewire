@@ -18,8 +18,8 @@ use crate::{
         organization_governance::valid_identifier,
     },
     security::{
-        canonical_cookie, csrf_cookie, new_csrf_token, request_has_same_origin, valid_csrf_token,
-        with_csrf_cookie,
+        canonical_cookie, csrf_cookie, new_csrf_token, page_csrf_token, request_has_same_origin,
+        valid_csrf_token, with_csrf_cookie,
     },
     state::AppState,
     templates::{
@@ -217,7 +217,7 @@ pub(super) async fn accounts(
         .iter()
         .map(account_access_view)
         .collect::<Vec<_>>();
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let response = with_csrf_cookie(
         render_page(AdminAccountsTemplate {
             view: &dashboard,
@@ -364,7 +364,7 @@ pub(super) async fn billing(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let catalog = match admin_connect::catalog(
         &state,
         cookie,
@@ -660,9 +660,10 @@ async fn admin_context(
     enforce_two_factor(&identity)
         .map_err(|error| admin_route_error(error, continuation, headers))?;
     let cookie = canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))?;
-    let mut dashboard = dashboard_shell_view_from_identity(state, &identity, cookie.clone())
-        .await
-        .map_err(|error| admin_route_error(error, continuation, headers))?;
+    let mut dashboard =
+        dashboard_shell_view_from_identity(state, headers, &identity, cookie.clone())
+            .await
+            .map_err(|error| admin_route_error(error, continuation, headers))?;
     select_shell_organization(state, cookie.clone(), &mut dashboard, selected_slug)
         .await
         .map_err(|error| admin_route_error(error, continuation, headers))?;

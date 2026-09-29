@@ -17,7 +17,7 @@ use crate::{
         action_context, connect_page_error, get_context, mutation_redirect, valid_identifier,
     },
     secrets_presets_connect::{self, SecretBucket},
-    security::{csrf_cookie, new_csrf_token, with_csrf_cookie},
+    security::{csrf_cookie, page_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::{
         OrganizationPresetsContentTemplate, OrganizationPresetsTemplate,
@@ -59,7 +59,7 @@ pub(super) async fn secrets_page(
             Ok(projects) => projects,
             Err(error) => return connect_page_error(error, &continuation, &headers),
         };
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let page = SecretProjectsPageView {
         creation_draft_query: draft.query(),
         creation_return_url: secret_creation_return(&organization.slug, &draft),
@@ -94,7 +94,7 @@ pub(super) async fn secret_bucket_page(
             Ok(context) => context,
             Err(response) => return response,
         };
-    let page = match bucket_page(
+    let mut page = match bucket_page(
         &state,
         cookie,
         &organization,
@@ -108,6 +108,7 @@ pub(super) async fn secret_bucket_page(
         Ok(page) => page,
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
+    page.csrf_token = page_csrf_token(&headers);
     let token = page.csrf_token.clone();
     with_csrf_cookie(
         render_page(OrganizationSecretBucketTemplate {
@@ -439,7 +440,7 @@ pub(super) async fn presets_page(
         Ok(presets) => presets,
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let page = PresetsPageView {
         presets,
         csrf_token: token.clone(),
@@ -667,7 +668,7 @@ async fn bucket_page(
         secrets,
         can_manage,
         form,
-        csrf_token: new_csrf_token(),
+        csrf_token: String::new(),
         message: message.to_owned(),
         error: error.to_owned(),
     })

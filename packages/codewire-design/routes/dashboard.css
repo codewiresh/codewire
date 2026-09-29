@@ -160,8 +160,12 @@
 .cw-user-menu > summary .cw-user-chevrons { display: grid; width: 10px; height: 13px; grid-template-rows: 6px 6px; place-items: center; color: #6e6e6e; }
 .cw-user-chevrons .cw-icon { width: 9px; height: 9px; stroke-width: 1.8; }
 .cw-user-menu-panel { position: absolute; z-index: 72; top: calc(100% + 8px); right: 0; display: grid; width: 236px; overflow: hidden; border: 1px solid #2a2a2a; border-radius: 8px; background: #141414; box-shadow: 0 12px 32px rgba(0,0,0,.6); }
-.cw-user-menu-panel a { padding: 9px 12px; color: #dcdcdc; font-size: 13px; line-height: 18px; }
-.cw-user-menu-panel a:hover { background: #1e1e1e; }
+.cw-user-menu-panel a,
+.cw-user-menu-panel button { padding: 9px 12px; color: #dcdcdc; font-size: 13px; line-height: 18px; }
+.cw-user-menu-panel button { width: 100%; border: 0; background: transparent; font-family: inherit; text-align: left; cursor: pointer; }
+.cw-user-menu-panel a:hover,
+.cw-user-menu-panel button:hover,
+.cw-user-menu-panel button:focus-visible { background: #1e1e1e; }
 .cw-user-menu-identity { display: grid; gap: 2px; padding: 11px 12px; border-bottom: 1px solid #242424; }
 .cw-user-menu-identity strong { color: #ededed; font: 600 13px/18px var(--font-sans); }
 .cw-user-menu-identity span { color: #6e6e6e; font: 11px/16px var(--font-mono); }

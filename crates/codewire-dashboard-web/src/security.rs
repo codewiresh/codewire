@@ -1,5 +1,7 @@
 use axum::{
-    http::{HeaderMap, HeaderValue, header},
+    extract::{Request, State},
+    http::{HeaderMap, HeaderValue, Method, header},
+    middleware::Next,
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -8,6 +10,8 @@ use rand::{RngCore as _, rngs::OsRng};
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 use url::Url;
+
+use crate::state::AppState;
 
 const CSRF_COOKIE_NAME: &str = "codewire_ssr_csrf";
 const LEGACY_CSRF_COOKIE_NAME: &str = "codewire_csrf";
@@ -368,6 +372,73 @@ pub(crate) fn csrf_cookie_value(headers: &HeaderMap) -> Option<&str> {
     cookie_value(headers, CSRF_COOKIE_NAME)
 }
 
+/// The token a server-rendered page puts in its forms: the browser's current
+/// CSRF cookie when it is well formed, otherwise a fresh one. Reusing the
+/// cookie keeps forms in the browser's other open tabs valid.
+pub(crate) fn page_csrf_token(headers: &HeaderMap) -> String {
+    well_formed_csrf_cookie(headers).map_or_else(new_csrf_token, str::to_owned)
+}
+
+fn well_formed_csrf_cookie(headers: &HeaderMap) -> Option<&str> {
+    csrf_cookie_value(headers).filter(|value| decode_fixed_state(value).is_some())
+}
+
+/// Give a signed-in page read a well-formed CSRF cookie before its handler
+/// runs, so every form on the page, including the shared navigation's Sign
+/// Out, reads one token through [`page_csrf_token`]. Mutations are untouched:
+/// they still need a submitted token matching the cookie the browser sent.
+pub(crate) async fn ensure_page_csrf_cookie(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let headers = request.headers();
+    if !matches!(*request.method(), Method::GET | Method::HEAD)
+        || session_cookie(headers).is_none()
+        || well_formed_csrf_cookie(headers).is_some()
+    {
+        return next.run(request).await;
+    }
+    let token = new_csrf_token();
+    let cookies = std::iter::once(format!("{CSRF_COOKIE_NAME}={token}"))
+        .chain(
+            headers
+                .get_all(header::COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|raw| raw.split(';'))
+                .map(str::trim)
+                .filter(|pair| {
+                    !pair.is_empty()
+                        && pair
+                            .split_once('=')
+                            .is_none_or(|(name, _)| name != CSRF_COOKIE_NAME)
+                })
+                .map(str::to_owned),
+        )
+        .collect::<Vec<_>>()
+        .join("; ");
+    let Ok(cookies) = HeaderValue::from_str(&cookies) else {
+        return next.run(request).await;
+    };
+    request.headers_mut().insert(header::COOKIE, cookies);
+    let response = next.run(request).await;
+    let handler_set_token = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .any(|value| {
+            value
+                .as_bytes()
+                .strip_prefix(CSRF_COOKIE_NAME.as_bytes())
+                .is_some_and(|rest| rest.starts_with(b"="))
+        });
+    if handler_set_token {
+        return response;
+    }
+    with_csrf_cookie(response, csrf_cookie(&state.public_origin, &token))
+}
+
 pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     raw.split(';').find_map(|pair| {
@@ -411,6 +482,19 @@ mod tests {
                 .expect("valid cookie"),
         );
         headers
+    }
+
+    #[test]
+    fn page_tokens_reuse_a_well_formed_cookie_and_replace_anything_else() {
+        let token = new_csrf_token();
+        assert_eq!(page_csrf_token(&csrf_headers(&token)), token);
+        for malformed in ["", "short", "not base64 !!"] {
+            let replaced = page_csrf_token(&csrf_headers(malformed));
+            assert_ne!(replaced, malformed);
+            assert!(valid_csrf_token(&csrf_headers(&replaced), &replaced));
+        }
+        let fresh = page_csrf_token(&HeaderMap::new());
+        assert!(valid_csrf_token(&csrf_headers(&fresh), &fresh));
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::{
     security::{
         GitHubAppNavigation, canonical_cookie, clear_github_app_authorization_cookie, csrf_cookie,
         github_app_authorization_continuation, github_app_authorization_cookie, new_csrf_token,
-        with_csrf_cookie, with_response_cookie,
+        page_csrf_token, with_csrf_cookie, with_response_cookie,
     },
     state::AppState,
     templates::CredentialSettingsTemplate,
@@ -122,7 +122,7 @@ pub(super) async fn page(
         }
         Err(error) => return error_page(WebError::Connect(error)),
     };
-    let csrf = new_csrf_token();
+    let csrf = page_csrf_token(&headers);
     let page = CredentialSettingsView {
         navigation_query: page_query(&query),
         creation_return_url: if dashboard.has_selected_organization {
@@ -1370,6 +1370,7 @@ mod tests {
     ) -> String {
         let view = DashboardView {
             user_name: "Dashboard User".into(),
+            csrf_token: Default::default(),
             is_admin: false,
             organizations: Vec::new(),
             has_organizations: false,

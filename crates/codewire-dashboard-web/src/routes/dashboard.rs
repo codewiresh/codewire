@@ -15,7 +15,7 @@ use crate::{
     security::canonical_cookie,
     state::AppState,
     templates::DashboardTemplate,
-    view::{DashboardView, OrganizationRow},
+    view::{DashboardView, OrganizationRow, PageCsrfToken},
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -87,6 +87,7 @@ pub(super) async fn dashboard_view(
 
     Ok(DashboardView {
         user_name: identity.display_name().to_owned(),
+        csrf_token: PageCsrfToken::from_headers(headers),
         is_admin: identity.is_admin,
         organizations,
         has_organizations,
@@ -123,7 +124,7 @@ pub(super) async fn dashboard_shell_view(
     let identity = authenticated_identity(state, headers).await?;
     enforce_two_factor(&identity)?;
     let cookie = canonical_cookie(headers).map_err(|()| WebError::Unauthorized)?;
-    dashboard_shell_view_from_identity(state, &identity, cookie).await
+    dashboard_shell_view_from_identity(state, headers, &identity, cookie).await
 }
 
 /// Build the shared dashboard shell after a route has completed its own
@@ -131,14 +132,21 @@ pub(super) async fn dashboard_shell_view(
 /// until the local global-admin bit has been checked.
 pub(super) async fn dashboard_shell_view_from_identity(
     state: &AppState,
+    headers: &HeaderMap,
     identity: &IdentityUser,
     cookie: axum::http::HeaderValue,
 ) -> Result<DashboardView, WebError> {
     let organizations = organizations(state, cookie).await?;
-    Ok(shell_from_organizations(identity, organizations, false))
+    Ok(shell_from_organizations(
+        headers,
+        identity,
+        organizations,
+        false,
+    ))
 }
 
 fn shell_from_organizations(
+    headers: &HeaderMap,
     identity: &IdentityUser,
     organizations: Vec<OrganizationRow>,
     organization_navigation_unavailable: bool,
@@ -146,6 +154,7 @@ fn shell_from_organizations(
     let has_organizations = !organizations.is_empty();
     DashboardView {
         user_name: identity.display_name().to_owned(),
+        csrf_token: PageCsrfToken::from_headers(headers),
         is_admin: identity.is_admin,
         organizations,
         has_organizations,
@@ -185,11 +194,13 @@ pub(super) async fn personal_settings_shell_view(
     let identity = authenticated_identity(state, headers).await?;
     enforce_two_factor(&identity)?;
     let cookie = canonical_cookie(headers).map_err(|()| WebError::Unauthorized)?;
-    personal_settings_shell_view_from_identity(state, &identity, cookie, selected_slug).await
+    personal_settings_shell_view_from_identity(state, headers, &identity, cookie, selected_slug)
+        .await
 }
 
 pub(super) async fn personal_settings_shell_view_from_identity(
     state: &AppState,
+    headers: &HeaderMap,
     identity: &IdentityUser,
     cookie: axum::http::HeaderValue,
     selected_slug: &str,
@@ -204,6 +215,7 @@ pub(super) async fn personal_settings_shell_view_from_identity(
     };
     personal_settings_shell_view_from_organizations(
         state,
+        headers,
         identity,
         cookie,
         selected_slug,
@@ -218,13 +230,14 @@ pub(super) async fn personal_settings_shell_view_from_identity(
 /// metadata read after successfully receiving the new secret material.
 pub(super) async fn personal_settings_shell_view_from_organizations(
     state: &AppState,
+    headers: &HeaderMap,
     identity: &IdentityUser,
     cookie: axum::http::HeaderValue,
     selected_slug: &str,
     organizations: Vec<OrganizationRow>,
     unavailable: bool,
 ) -> Result<DashboardView, WebError> {
-    let mut view = shell_from_organizations(identity, organizations, unavailable);
+    let mut view = shell_from_organizations(headers, identity, organizations, unavailable);
     // Missing or inaccessible context is discarded without resolving any
     // organization that was not returned for this exact authenticated caller.
     let Some(organization) = view

@@ -44,7 +44,10 @@ use state::AppState;
 pub fn app(config: Config) -> Router {
     let state = AppState::new(config);
     Router::new()
-        .merge(routes::router())
+        .merge(routes::router().layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            security::ensure_page_csrf_cookie,
+        )))
         .merge(assets::router())
         .merge(docs::router())
         .with_state(state)

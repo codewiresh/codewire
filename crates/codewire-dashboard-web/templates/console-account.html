@@ -6,7 +6,7 @@
       <div class="cw-user-menu-identity"><strong>{{ view.user_name }}</strong><span>Authenticated account</span></div>
       <a href="{{ view.settings_url }}">Settings</a>
       <a href="/docs">Docs</a>
-      <a href="{{ view.settings_url }}#sign-out">Sign Out</a>
+      <form method="post" action="/settings/_actions/sign-out" data-sign-out><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button type="submit">Sign Out</button></form>
     </div>
   </details>
 </div>

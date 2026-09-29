@@ -282,10 +282,14 @@ async fn context(
     }
     let cookie = canonical_cookie(headers)
         .map_err(|()| failure(StatusCode::UNAUTHORIZED, "sign-in-required"))?;
-    let dashboard =
-        super::dashboard::dashboard_shell_view_from_identity(state, &identity, cookie.clone())
-            .await
-            .map_err(web_failure)?;
+    let dashboard = super::dashboard::dashboard_shell_view_from_identity(
+        state,
+        headers,
+        &identity,
+        cookie.clone(),
+    )
+    .await
+    .map_err(web_failure)?;
     let org_id = dashboard
         .organizations
         .iter()

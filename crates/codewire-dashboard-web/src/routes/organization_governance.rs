@@ -17,8 +17,8 @@ use crate::{
     },
     routes::dashboard::dashboard_shell_view,
     security::{
-        canonical_cookie, csrf_cookie, new_csrf_token, request_has_same_origin, valid_csrf_token,
-        with_csrf_cookie,
+        canonical_cookie, csrf_cookie, new_csrf_token, page_csrf_token, request_has_same_origin,
+        valid_csrf_token, with_csrf_cookie,
     },
     state::AppState,
     templates::{
@@ -64,7 +64,7 @@ pub(super) async fn members_page(
         Ok(data) => data,
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let page = MembersPageView {
         members,
         invitations,
@@ -164,7 +164,7 @@ pub(super) async fn invite_member(
             )
             .await
             .unwrap_or_default();
-            let token = new_csrf_token();
+            let token = page_csrf_token(&headers);
             let page = MembersPageView {
                 members,
                 invitations,
@@ -357,7 +357,7 @@ pub(super) async fn api_keys_page(
         Ok(keys) => keys,
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let page = ApiKeysPageView {
         keys,
         form: ApiKeyFormView {
@@ -462,7 +462,7 @@ pub(super) async fn create_api_key(
     let keys = organization_connect::api_keys(&state, cookie, &organization.id)
         .await
         .unwrap_or_default();
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let page = ApiKeysPageView {
         keys,
         form: ApiKeyFormView {

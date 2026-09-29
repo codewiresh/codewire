@@ -3,7 +3,7 @@ const app = document.querySelector("[data-dashboard-app]");
 (() => {
   "use strict";
   document.addEventListener("submit", (event) => {
-    if (!(event.target instanceof HTMLFormElement) || !event.target.matches("form#sign-out, form[data-sign-out-current]")) return;
+    if (!(event.target instanceof HTMLFormElement) || !event.target.matches("form#sign-out, form[data-sign-out-current], form[data-sign-out]")) return;
     try {
       const storage = window.sessionStorage;
       const keys = [];
