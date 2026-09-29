@@ -63,9 +63,9 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
         await expect(editor.locator('input[name="name"]')).toHaveCount(0);
         // One account-level connection: connected accounts see it and can
         // reconnect; others continue to GitHub.
-        const connection = editor.getByRole("region", { name: "Your GitHub connection", exact: true });
-        if (await connection.count()) {
-          await expect(connection.getByRole("button", { name: /^Reconnect / })).toBeVisible();
+        if (await editor.getByText(/is already connected/).count()) {
+          await expect(button(editor, "Reconnect")).toBeVisible();
+          await expect(button(editor, "Disconnect")).toBeVisible();
         } else {
           await expect(button(editor, "Continue to GitHub")).toBeVisible();
         }
@@ -145,9 +145,6 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
   // Read-only setup detours: do not create credentials or application secrets.
   for (const destination of ["secrets", "credentials"]) {
     await stage(`create-detour-${destination}-${width}`, async () => {
-      if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
-        await page.locator("[data-create-resources] > summary").click();
-      }
       await page.getByLabel("CPU", { exact: true }).selectOption("2000");
       await page.getByLabel("Delete after", { exact: true }).fill("8h");
       await page.getByLabel("Name", { exact: true }).fill(`dev-ux-draft-${destination}`);
@@ -211,9 +208,6 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await owned.admit(deadline);
     previewPattern = (await page.locator(".cw-preview-pattern").innerText()).trim();
     await page.getByLabel("Name", { exact: true }).fill(owned.name);
-    if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
-      await page.locator("[data-create-resources] > summary").click();
-    }
     await page.getByLabel("CPU", { exact: true }).selectOption("1000");
     await page.getByLabel("Memory", { exact: true }).selectOption("2048");
     await page.getByLabel("Disk", { exact: true }).selectOption("10");

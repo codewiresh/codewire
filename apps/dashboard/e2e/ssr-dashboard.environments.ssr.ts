@@ -89,9 +89,6 @@ async function assertExplicitCreateRecovery(page: Page) {
     const form = page.locator("[data-environment-form]");
     await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
     await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-    if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
-      await page.locator("[data-create-resources] > summary").click();
-    }
     await page.getByLabel("CPU", { exact: true }).selectOption("2000");
     await page.getByLabel("Delete after").fill("8h");
     await page.getByLabel("Name", { exact: true }).fill("draft-name-restored");
@@ -103,7 +100,6 @@ async function assertExplicitCreateRecovery(page: Page) {
     // place of the original, or interpret discarded inventory selectors.
     await page.goto(`/${slug}/new/`);
     await expect(form).not.toHaveAttribute("data-create-draft-id", requestedDraft!);
-    await page.locator("[data-create-resources] > summary").click();
     await page.getByLabel("CPU", { exact: true }).selectOption("4000");
     await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
     for (const suffix of [
@@ -375,7 +371,6 @@ async function openConfiguredImageForm(page: Page) {
   await page.goto(`/${slug}/new/`);
   await page.getByLabel("Workspace image").fill(workspaceRuntimeImage);
   await page.locator("[data-create-runtime] > summary").click();
-  await page.locator("[data-create-resources] > summary").click();
   await page.getByLabel("Install Command").fill("printf 'configured-explicitly\\n'");
   await page.getByLabel("Startup Script").fill("printf 'started-explicitly\\n'");
   await page.getByLabel("Delete after").fill("3600s");
@@ -463,7 +458,6 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("#environment-name")).toBeFocused();
     const ttl = page.getByLabel("Delete after");
     await expect(ttl).toHaveValue("infinity");
-    await page.locator("[data-create-resources] > summary").click();
     await ttl.fill("0");
     await ttl.press("Tab");
     await expect(ttl).toHaveValue("infinity");
@@ -713,7 +707,6 @@ test.describe.serial("server-rendered environments", () => {
     await project.selectOption("");
     // A separate ordinary validation error proves recovery without creating
     // another Sandbox or allowing stale metadata to silently attach resources.
-    await page.locator("[data-create-resources] > summary").click();
     await page.getByLabel("Delete after").fill("invalid-ttl");
     const recovered = page.waitForResponse((candidate) => (
       candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`)

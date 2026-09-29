@@ -2736,7 +2736,7 @@ mod tests {
         };
         let mut form = default_create_form("synthetic-csrf".into(), true);
         let html = render(&form);
-        assert!(html.contains("data-create-resources>"));
+        assert!(html.contains("data-create-resources aria-labelledby=\"create-resources-title\">"));
         assert!(html.contains("data-create-runtime>"));
         assert!(html.contains("1 vCPU</option>"));
         assert!(html.contains("2 GiB</option>"));
@@ -2747,7 +2747,6 @@ mod tests {
         form.cpu_error = "Choose a valid resource value".into();
         form.install_command = "printf '<preserved-command>'".into();
         let html = render(&form);
-        assert!(html.contains("data-create-resources open>"));
         assert!(html.contains("data-create-runtime open>"));
         assert!(html.contains("value=\"750\" selected>750 millicores"));
         assert!(!html.contains("<preserved-command>"));

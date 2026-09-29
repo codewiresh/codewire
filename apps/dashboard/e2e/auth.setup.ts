@@ -67,10 +67,11 @@ setup("authenticate", async ({ page }) => {
   // Verify we're logged in
   // The account home is the Dashboard without an organization, or the
   // organization's Sandboxes home with one; either proves the signed-in shell.
+  // Match the page title only: the sidebar also labels its Sandboxes region.
   await expect(page).toHaveURL(ACCOUNT_HOME);
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true })
-      .or(page.getByRole("heading", { name: "Sandboxes", exact: true })),
+    page.getByRole("heading", { level: 1, name: "Dashboard", exact: true })
+      .or(page.getByRole("heading", { level: 1, name: "Sandboxes", exact: true })),
   ).toBeVisible();
   const session = (await page.context().cookies()).find((cookie) => (
     cookie.name === "codewire.session_token"

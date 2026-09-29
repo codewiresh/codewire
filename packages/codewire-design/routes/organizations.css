@@ -85,13 +85,10 @@
 [data-dashboard-app] .cw-settings-navigation-notice { margin: 0 0 1rem; padding-inline: .55rem; color: var(--fg-secondary); font-size: .75rem; line-height: 1.5; }
 [data-dashboard-app] .cw-context-main { min-width: 0; padding: 1.5rem 1.25rem 3rem; }
 [data-dashboard-app] .cw-context-page-header { margin-bottom: 1.25rem; }
-[data-dashboard-app] .cw-context-page-header h2 { margin: 0; font: 500 .78rem/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
-[data-dashboard-app] .cw-context-page-header > p:last-child { margin: .4rem 0 0; color: #6e6e6e; font-size: .72rem; }
 [data-dashboard-app] .cw-org-management-layout .cw-org-content { gap: .8rem; }
 [data-dashboard-app] .cw-org-management-layout .cw-org-toolbar { min-height: 2.4rem; }
 [data-dashboard-app] .cw-org-management-layout .cw-org-toolbar > p,
 [data-dashboard-app] .cw-org-management-layout .cw-org-toolbar > div > p { color: #6e6e6e; font-size: .72rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-toolbar .cw-card-title { font: 500 .72rem var(--font-mono); }
 [data-dashboard-app] .cw-org-management-layout .cw-org-details > summary { border-radius: 999px; }
 [data-dashboard-app] .cw-org-management-layout .cw-org-details[open] > summary { margin-bottom: .75rem; }
 [data-dashboard-app] .cw-org-management-layout .cw-org-details > .cw-card { max-width: 48rem; border-color: #242424; background: #0d0d0d; }

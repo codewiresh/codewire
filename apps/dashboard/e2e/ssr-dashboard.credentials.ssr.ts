@@ -189,7 +189,6 @@ test.describe("managed provider credential browser journey", () => {
       await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
       const draft = await draftForm.getAttribute("data-create-draft-id");
       expect(draft).toMatch(/^[0-9a-f-]{36}$/);
-      await page.locator("[data-create-resources] > summary").click();
       await page.getByLabel("CPU", { exact: true }).selectOption("2000");
       const ttl = page.getByLabel("Delete after", { exact: true });
       await expect(ttl).toBeVisible();
@@ -380,9 +379,6 @@ test.describe("managed provider credential browser journey", () => {
       await source.getByRole("textbox", { name: "Branch", exact: true }).fill("main");
       await page.getByLabel("Workspace image").fill(githubCheckoutImage);
       await page.locator("[data-create-runtime] > summary").click();
-      if (await page.locator("[data-create-resources]").getAttribute("open") === null) {
-        await page.locator("[data-create-resources] > summary").click();
-      }
       await page.getByLabel("Install Command").fill(githubCheckoutInstall);
       await expect(page.getByLabel("Install Command")).toHaveValue(githubCheckoutInstall);
       await page.getByLabel("Delete after").fill("3600s");
@@ -400,9 +396,9 @@ test.describe("managed provider credential browser journey", () => {
       row = credentialRows.filter({ hasText: name });
       await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
       await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
-        .getByRole("button", { name: "Delete GitHub", exact: true }).click();
-      await page.getByRole("dialog", { name: "Delete GitHub?", exact: true })
-        .getByRole("button", { name: "Delete GitHub", exact: true }).click();
+        .getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
+      await page.getByRole("dialog", { name: "Disconnect GitHub?", exact: true })
+        .getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
       await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=credential-deleted/);
       await expect(credentialRows.filter({ hasText: name })).toHaveCount(0);
       expect(await githubConnectionMetadata(owner)).toEqual([]);

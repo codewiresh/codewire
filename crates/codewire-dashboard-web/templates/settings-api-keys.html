@@ -20,7 +20,7 @@
         <div class="cw-settings-layout">
           {% let settings_section = "api-keys" %}{% include "settings-nav.html" %}
           <div class="cw-settings-content cw-personal-api-keys-page">
-<header class="cw-page-header"><div><p class="cw-eyebrow">Personal</p><h1 class="cw-page-title">API Keys</h1><p class="cw-page-description">Keys you created, grouped by accessible organization. Each key belongs to its organization, not to a global account scope.</p></div></header>
+<header class="cw-page-header"><div><h1 class="cw-page-title">API Keys</h1><p class="cw-page-description">Keys you created, grouped by accessible organization. Each key belongs to its organization, not to a global account scope.</p></div></header>
 {% if !page.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ page.message }}</p>{% endif %}
 {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
 {% if !page.form.error.is_empty() && (!page.organizations_available || page.organizations.is_empty()) %}<p class="cw-alert cw-alert--error" role="alert">{{ page.form.error }}</p>{% endif %}

@@ -9,6 +9,8 @@ const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const cleanRoutesOrgSlug = "e2e-clean-routes";
+// A second organization, so switching never depends on data from other specs.
+const switchRoutesOrgSlug = "e2e-clean-routes-switch";
 
 test.describe("homepage", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
@@ -95,10 +97,13 @@ test.describe("server-rendered public, auth, and account routes", () => {
     const ownerId = await getUserId(USERS.master.email);
     if (!ownerId) throw new Error(`Missing clean-routes fixture owner ${USERS.master.email}`);
     await ensureTestOrg("Clean Routes Organization", cleanRoutesOrgSlug, ownerId);
+    await ensureTestOrg("Switch Routes Organization", switchRoutesOrgSlug, ownerId);
   });
 
   test.afterAll(async ({}, testInfo) => {
-    if (!testInfo.project.use.isMobile) await cleanupTestOrg(cleanRoutesOrgSlug);
+    if (testInfo.project.use.isMobile) return;
+    await cleanupTestOrg(cleanRoutesOrgSlug);
+    await cleanupTestOrg(switchRoutesOrgSlug);
   });
 
   test("password-reset token is moved to a scoped HttpOnly cookie and removed from the URL", async ({ browser, isMobile }) => {
@@ -357,14 +362,11 @@ test.describe("server-rendered public, auth, and account routes", () => {
     // Switching organization from a personal page keeps the page.
     await page.goto("/settings/credentials/");
     await page.locator(".cw-sidebar-slot .cw-org-switcher summary").click();
-    const choices = page.locator('.cw-sidebar-slot .cw-org-menu a[href^="?org="]');
-    const other = (await choices.evaluateAll((links) => links.map((link) => link.getAttribute("href")!.slice(5))))
-      .find((slug) => slug !== cleanRoutesOrgSlug);
-    expect(other).toBeTruthy();
+    const other = switchRoutesOrgSlug;
     await page.locator(`.cw-sidebar-slot .cw-org-menu a[href="?org=${other}"]`).click();
     await expect(page).toHaveURL("/settings/credentials/");
-    await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).not.toHaveText(
-      "Clean Routes Organization",
+    await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
+      "Switch Routes Organization",
     );
 
     // Switching from an organization page keeps its section.

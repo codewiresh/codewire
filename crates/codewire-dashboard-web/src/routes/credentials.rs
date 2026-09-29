@@ -787,29 +787,124 @@ pub(super) async fn enroll_oauth_action(
     tokio::spawn(credentials_connect::run_oauth_enrollment(
         state, cookie, request, events,
     ));
-    enrollment_response(receiver, &query)
+    if wants_enrollment_events(&headers) {
+        enrollment_events(receiver, &query)
+    } else {
+        enrollment_response(receiver, &query)
+    }
 }
+
+/// The Credentials dialog asks for the enrollment as events so the whole
+/// device authorization stays in the dialog; a plain form post gets the
+/// streamed fallback page.
+fn wants_enrollment_events(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|kind| kind.trim().starts_with("text/event-stream"))
+        })
+}
+
+fn enrollment_events(
+    receiver: tokio::sync::mpsc::Receiver<credentials_connect::OAuthEnrollmentEvent>,
+    context: &QueryParameters,
+) -> Response {
+    let connected = page_feedback_target(context, "message", "credential-connected", "");
+    let stream = ReceiverStream::new(receiver).map(move |event| {
+        Ok::<Bytes, Infallible>(Bytes::from(enrollment_event_frame(event, &connected)))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(stream))
+        .expect("static enrollment event headers")
+}
+
+fn enrollment_event_frame(
+    event: credentials_connect::OAuthEnrollmentEvent,
+    connected: &str,
+) -> String {
+    use credentials_connect::OAuthEnrollmentEvent as Event;
+    let (name, data) = match event {
+        Event::Challenge {
+            provider,
+            verification_url,
+            user_code,
+            expires_utc,
+        } => (
+            "challenge",
+            serde_json::json!({
+                "provider": provider,
+                "verificationUrl": verification_url,
+                "userCode": user_code,
+                "expires": expires_utc,
+            }),
+        ),
+        Event::Committed => ("connected", serde_json::json!({ "location": connected })),
+        Event::Failed { reason, uncertain } => (
+            "failed",
+            serde_json::json!({
+                "message": enrollment_failure_message(reason),
+                "uncertain": uncertain,
+            }),
+        ),
+    };
+    format!("event: {name}\ndata: {data}\n\n")
+}
+
+fn enrollment_failure_message(reason: credentials_connect::OAuthEnrollmentFailure) -> &'static str {
+    use credentials_connect::OAuthEnrollmentFailure as Failure;
+    match reason {
+        Failure::SignInRequired => "Your session ended. Sign in again, then connect from Credentials.",
+        Failure::Unavailable => "The credential service is busy or unavailable. Try again in a moment.",
+        Failure::AlreadyExists => {
+            "A credential with this name already exists. No credential was overwritten; choose another name or reconnect the existing one."
+        }
+        Failure::Changed => "This credential changed while connecting. Open it in Credentials and reconnect.",
+        Failure::Unsupported => {
+            "Codewire could not verify the provider's response. Try again; if it fails again, contact support."
+        }
+        Failure::Invalid => "That connection request was not valid. Start again from Credentials.",
+        Failure::NotCompleted => "Sign-in was not completed. Start again to get a new code.",
+        Failure::Expired => "The code expired before it was approved. Start again to get a new code.",
+        Failure::Cancelled => "Connection cancelled.",
+        Failure::UnexpectedResponse => {
+            "Codewire did not get a final answer from the provider, so the connection may or may not have been saved."
+        }
+    }
+}
+
+const ENROLLMENT_UNCERTAIN: &str =
+    "It may already be saved. Check Credentials before connecting again.";
 
 fn enrollment_response(
     receiver: tokio::sync::mpsc::Receiver<credentials_connect::OAuthEnrollmentEvent>,
     context: &QueryParameters,
 ) -> Response {
-    let prefix = concat!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
-        "<title>Connect credential · Codewire</title>",
-        "<link rel=\"stylesheet\" href=\"/assets/codewire/design-v1.css\">",
-        "</head><body class=\"cw-body\"><main class=\"cw-main\"><div class=\"cw-main-inner\">",
-        "<section class=\"cw-card\" aria-labelledby=\"credential-enrollment-title\">",
-        "<div class=\"cw-card-header\"><h1 id=\"credential-enrollment-title\" class=\"cw-card-title\">Connect credential</h1>",
-        "<p class=\"cw-card-description\">Keep this page open until Codewire confirms the credential.</p></div>",
-        "<div class=\"cw-card-content\">"
-    );
+    // Without JavaScript the form lands here. The page streams each step; CSS
+    // hides a step once the next one has arrived.
     let return_path = escape_html(&page_path(context));
-    let stream = tokio_stream::iter([Ok::<Bytes, Infallible>(Bytes::from_static(
-        prefix.as_bytes(),
-    ))])
-    .chain(
+    let prefix = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>Connect credential · Codewire</title>\
+<link rel=\"stylesheet\" href=\"/assets/codewire/design-v1.css\">\
+<link rel=\"stylesheet\" href=\"/assets/codewire/routes/dashboard-v1.css\">\
+<link rel=\"stylesheet\" href=\"/assets/codewire/routes/settings-v1.css\">\
+</head><body class=\"cw-body\"><div data-dashboard-app><main class=\"cw-connect\">\
+<section class=\"cw-card cw-connect-panel\" aria-labelledby=\"credential-enrollment-title\">\
+<header class=\"cw-card-header\"><a class=\"cw-connect-back\" href=\"{return_path}\">Credentials</a>\
+<h1 id=\"credential-enrollment-title\" class=\"cw-card-title\">Connect credential</h1></header>\
+<div class=\"cw-card-content\"><p class=\"cw-device-status\" data-connect-pending>Requesting a sign-in code…</p>"
+    );
+    let stream = tokio_stream::iter([Ok::<Bytes, Infallible>(Bytes::from(prefix))]).chain(
         ReceiverStream::new(receiver)
             .map(move |event| Ok(Bytes::from(render_enrollment_event(event, &return_path)))),
     );
@@ -834,6 +929,7 @@ fn render_enrollment_event(
     event: credentials_connect::OAuthEnrollmentEvent,
     return_path: &str,
 ) -> String {
+    const CLOSE: &str = "</div></section></main></div></body></html>";
     match event {
         credentials_connect::OAuthEnrollmentEvent::Challenge {
             provider,
@@ -841,57 +937,24 @@ fn render_enrollment_event(
             user_code,
             expires_utc,
         } => format!(
-            "<section aria-labelledby=\"credential-challenge-title\"><h2 id=\"credential-challenge-title\">Authorize {}</h2><p><a class=\"cw-button\" href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">Open {} authorization</a></p><p>Enter this one-time code:</p><p><code>{}</code></p><p>Codewire is waiting for the provider. This challenge expires at {}.</p></section>",
-            escape_html(provider),
-            escape_html(&verification_url),
-            escape_html(provider),
-            escape_html(&user_code),
-            escape_html(&expires_utc),
+            "<div class=\"cw-device-enrollment\" data-connect-challenge><p>Enter this code in {provider} to approve the connection.</p><p class=\"cw-device-code\"><code>{code}</code></p><a class=\"cw-button\" href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\">Open {provider}</a><p class=\"cw-device-status\">Waiting for approval. The code expires at {expires}.</p></div>",
+            provider = escape_html(provider),
+            url = escape_html(&verification_url),
+            code = escape_html(&user_code),
+            expires = escape_html(&expires_utc),
         ),
         credentials_connect::OAuthEnrollmentEvent::Committed => format!(
-            "<div class=\"cw-alert cw-alert--success\" role=\"status\">Credential connected.</div><p><a class=\"cw-button\" href=\"{return_path}\">Return to credentials</a></p></div></section></div></main></body></html>"
+            "<div class=\"cw-device-enrollment\" data-connect-result><p class=\"cw-alert cw-alert--success\" role=\"status\">Credential connected.</p><a class=\"cw-button\" href=\"{return_path}\">Back to Credentials</a></div>{CLOSE}"
         ),
         credentials_connect::OAuthEnrollmentEvent::Failed { reason, uncertain } => {
-            use credentials_connect::OAuthEnrollmentFailure as Failure;
-            let message = match reason {
-                Failure::SignInRequired => {
-                    "Your account session no longer permits this connection. Sign in again, then return to credentials."
-                }
-                Failure::Unavailable => {
-                    "The credential service is unavailable or busy. Return to credentials and try again later."
-                }
-                Failure::AlreadyExists => {
-                    "A credential with this account name already exists. No credential was overwritten. Return to credentials to inspect the existing connection and its connection reference before choosing Reconnect."
-                }
-                Failure::Changed => {
-                    "The credential changed or was removed while connecting. Return to credentials and use its current Reconnect action."
-                }
-                Failure::Unsupported => {
-                    "Codewire could not verify the provider login version or response. If another attempt fails, ask an administrator to check the credential service."
-                }
-                Failure::Invalid => {
-                    "The connection request was not valid. Return to credentials and start a new connection."
-                }
-                Failure::NotCompleted => {
-                    "Provider authorization did not complete. Return to credentials to start a new connection and finish the provider's authorization steps."
-                }
-                Failure::Expired => {
-                    "This connection attempt expired. Return to credentials to start a new authorization code."
-                }
-                Failure::Cancelled => {
-                    "This connection attempt was cancelled. Return to credentials to start again."
-                }
-                Failure::UnexpectedResponse => {
-                    "Codewire did not receive a valid final connection response. Return to credentials to check the account status."
-                }
-            };
-            let reconciliation = if uncertain {
-                "<p>The credential may already have been saved. Inspect the account in credentials before retrying; do not create another connection until its status is clear.</p>"
+            let message = enrollment_failure_message(reason);
+            let uncertain = if uncertain {
+                format!("<p class=\"cw-device-status\">{ENROLLMENT_UNCERTAIN}</p>")
             } else {
-                ""
+                String::new()
             };
             format!(
-                "<div class=\"cw-alert cw-alert--error\" role=\"alert\">{message}</div>{reconciliation}<p><a class=\"cw-button\" href=\"{return_path}\">Return to credentials</a></p></div></section></div></main></body></html>"
+                "<div class=\"cw-device-enrollment\" data-connect-result><p class=\"cw-alert cw-alert--error\" role=\"alert\">{message}</p>{uncertain}<a class=\"cw-button\" href=\"{return_path}\">Back to Credentials</a></div>{CLOSE}"
             )
         }
     }
@@ -1244,6 +1307,7 @@ fn approved_message(code: &str) -> &'static str {
         "credential-rotated" => "API key credential rotated.",
         "credential-revoked" => "Credential revoked.",
         "credential-deleted" => "Credential deleted.",
+        "credential-connected" => "Credential connected.",
         "github-app-connected" => "GitHub connected through the GitHub App.",
         "profile-created" => "Credential profile created.",
         "profile-updated" => "Credential profile updated.",
@@ -1470,10 +1534,11 @@ mod tests {
             .split("</dialog>")
             .next()
             .unwrap();
-        assert!(dialog.contains("Your GitHub connection"));
-        assert!(dialog.contains("Reconnect verified-user"));
+        assert!(dialog.contains("Your GitHub account <strong>verified-user</strong> is already connected."));
+        assert!(dialog.contains("disconnect this one and connect again"));
         assert!(dialog.contains("credential-00000000-0000-4000-8000-000000000001-reconnect"));
-        assert!(dialog.contains("Each account has one GitHub connection"));
+        assert!(dialog.contains("credential-00000000-0000-4000-8000-000000000001-delete"));
+        assert!(!dialog.contains("Your GitHub connection"));
         assert!(!dialog.contains("unrelated-api-key"));
         // A second authorization is never offered while one connection exists.
         assert!(!dialog.contains("Continue to GitHub"));
@@ -1629,7 +1694,7 @@ mod tests {
         assert!(!github.contains("name=\"provider\""));
         // The fixture account already has its one GitHub connection, so the
         // connect dialog routes to Reconnect instead of a second authorization.
-        assert!(github.contains("Your GitHub connection"));
+        assert!(github.contains("is already connected"));
         assert!(!github.contains("Continue to GitHub"));
         assert!(!github.contains("one-time code"));
         // Reconnect keeps the verified-account authorization and install link.
@@ -1828,7 +1893,7 @@ mod tests {
             "/settings/credentials/",
         );
         assert!(duplicate.contains("No credential was overwritten"));
-        assert!(!duplicate.contains("may already have been saved"));
+        assert!(!duplicate.contains("may already be saved"));
         let uncertain = render_enrollment_event(
             Event::Failed {
                 reason: Failure::Unavailable,
@@ -1836,8 +1901,8 @@ mod tests {
             },
             "/settings/credentials/",
         );
-        assert!(uncertain.contains("unavailable or busy"));
-        assert!(uncertain.contains("may already have been saved"));
+        assert!(uncertain.contains("busy or unavailable"));
+        assert!(uncertain.contains("may already be saved"));
         let unsupported = render_enrollment_event(
             Event::Failed {
                 reason: Failure::Unsupported,
@@ -1845,7 +1910,44 @@ mod tests {
             },
             "/settings/credentials/",
         );
-        assert!(unsupported.contains("administrator to check the credential service"));
+        assert!(unsupported.contains("could not verify the provider's response"));
+    }
+
+    #[test]
+    fn enrollment_events_carry_only_the_challenge_and_outcome() {
+        use credentials_connect::{
+            OAuthEnrollmentEvent as Event, OAuthEnrollmentFailure as Failure,
+        };
+        let frame = |event| enrollment_event_frame(event, "/settings/credentials/?message=credential-connected");
+        let challenge = frame(Event::Challenge {
+            provider: "OpenAI Codex",
+            verification_url: "https://auth.openai.com/codex/device".into(),
+            user_code: "ABCD-1234".into(),
+            expires_utc: "2026-09-29 14:01 UTC".into(),
+        });
+        assert!(challenge.starts_with("event: challenge\ndata: {"));
+        assert!(challenge.ends_with("}\n\n"));
+        let data: serde_json::Value =
+            serde_json::from_str(challenge.lines().nth(1).unwrap().strip_prefix("data: ").unwrap())
+                .unwrap();
+        assert_eq!(data["userCode"], "ABCD-1234");
+        assert_eq!(data["verificationUrl"], "https://auth.openai.com/codex/device");
+        assert_eq!(
+            frame(Event::Committed),
+            "event: connected\ndata: {\"location\":\"/settings/credentials/?message=credential-connected\"}\n\n"
+        );
+        let failed = frame(Event::Failed {
+            reason: Failure::Expired,
+            uncertain: true,
+        });
+        assert!(failed.starts_with("event: failed\n"));
+        assert!(failed.contains("\"uncertain\":true"));
+        assert!(failed.contains("expired before it was approved"));
+        let mut headers = HeaderMap::new();
+        assert!(!wants_enrollment_events(&headers));
+        headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
+        assert!(wants_enrollment_events(&headers));
+        assert_eq!(approved_message("credential-connected"), "Credential connected.");
     }
 
     #[test]
