@@ -1217,9 +1217,10 @@ mod tests {
             },
         );
         let spec = &gateway["spec"]["template"]["spec"];
-        assert!(
-            gateway["spec"]["progressDeadlineSeconds"].is_null(),
-            "commodity gateways must retain the Kubernetes progress deadline"
+        assert_eq!(
+            gateway["spec"]["progressDeadlineSeconds"],
+            json!(WORKSPACE_READY_TIMEOUT.as_secs()),
+            "the commodity gateway rollout deadline matches the tier ready timeout"
         );
         assert!(
             gateway["spec"]["template"]["metadata"]["labels"]["codewire.sh/isolation-tier"]
@@ -1234,9 +1235,9 @@ mod tests {
         assert_eq!(gateway_container["name"].as_str(), Some("codewire-gateway"));
         assert!(gateway_container.get("resources").is_some());
         assert_eq!(
-            gateway_container["startupProbe"]["failureThreshold"],
-            json!(COMMODITY_GATEWAY_STARTUP_FAILURE_THRESHOLD),
-            "commodity gateways retain the short startup contract"
+            startup_probe_budget_seconds(gateway_container),
+            WORKSPACE_READY_TIMEOUT.as_secs(),
+            "the kubelet must not restart a commodity gateway during a slow start"
         );
         assert!(
             spec["volumes"]
@@ -1281,14 +1282,25 @@ mod tests {
                 .any(|env| env["name"].as_str() == Some("CODEWIRE_GATEWAY_TOKEN")
                     && env["value"].as_str() == Some("gw-token"))
         );
+        assert_no_gateway_daemon_deadline(gateway_container);
+    }
+
+    /// The kubelet restarts a container whose startup probe fails this long.
+    fn startup_probe_budget_seconds(container: &Value) -> u64 {
+        let probe = &container["startupProbe"];
+        probe["failureThreshold"].as_u64().unwrap() * probe["periodSeconds"].as_u64().unwrap()
+    }
+
+    /// The gateway waits for its daemon without exiting; no rendered setting
+    /// may reintroduce the retired connect deadline.
+    fn assert_no_gateway_daemon_deadline(container: &Value) {
         assert!(
-            gateway_container["env"]
+            container["env"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|env| env["name"].as_str()
-                    != Some(GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV)),
-            "commodity gateways retain the gateway's 60-second default"
+                .all(|env| env["name"].as_str() != Some("CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS")),
+            "the gateway must not be given a daemon-connect deadline"
         );
     }
 
@@ -2347,27 +2359,16 @@ mod tests {
         let gateway = render_gateway_deployment("codewire-runtime", &opts);
         assert_eq!(
             gateway["spec"]["progressDeadlineSeconds"],
-            json!(CONFIDENTIAL_GATEWAY_PROGRESS_DEADLINE_SECONDS),
-            "confidential guest initialization needs the bounded cold-start budget"
+            json!(CONFIDENTIAL_WORKSPACE_READY_TIMEOUT.as_secs()),
+            "confidential guest initialization keeps the tier's cold-start budget"
         );
         let gateway_container = &gateway["spec"]["template"]["spec"]["containers"][0];
         assert_eq!(
-            gateway_container["startupProbe"]["failureThreshold"],
-            json!(CONFIDENTIAL_GATEWAY_STARTUP_FAILURE_THRESHOLD),
-            "the startup probe must outlive the confidential daemon-connect horizon"
+            startup_probe_budget_seconds(gateway_container),
+            CONFIDENTIAL_WORKSPACE_READY_TIMEOUT.as_secs(),
+            "the startup probe must last as long as the confidential ready wait"
         );
-        let confidential_daemon_timeout =
-            CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS.to_string();
-        assert!(
-            gateway_container["env"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|env| {
-                    env["name"].as_str() == Some(GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV)
-                        && env["value"].as_str() == Some(confidential_daemon_timeout.as_str())
-                })
-        );
+        assert_no_gateway_daemon_deadline(gateway_container);
         assert_eq!(
             gateway["spec"]["template"]["metadata"]["labels"]["codewire.sh/isolation-tier"]
                 .as_str(),

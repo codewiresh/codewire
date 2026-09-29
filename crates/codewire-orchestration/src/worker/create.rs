@@ -18,8 +18,9 @@ use crate::sandbox::client::{
     ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
 use crate::sandbox::template::{
-    DOCKER_MODE_LOCAL_DIND_DIRECT, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, confidential_init_data, runtime_profile_spec,
+    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts,
+    WORKSPACE_READY_TIMEOUT, confidential_init_data, runtime_profile_spec,
     validate_managed_runtime_profile,
 };
 use crate::sandbox::{
@@ -554,16 +555,14 @@ pub async fn update_backend_pod_info(
 
 // ── Handler (port of runEnvironmentCreate) ─────────────────────────────
 
-const CREATE_READY_TIMEOUT: Duration = Duration::from_secs(600); // SANDBOX_CREATE_READY_TIMEOUT_SECS default
-const CONFIDENTIAL_CREATE_READY_TIMEOUT: Duration = Duration::from_secs(1800);
 const RUNTIME_METADATA_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CREATE_MUTATION_STATES: &[&str] = &["pending", "creating", "starting"];
 
 pub(super) fn ready_timeout_for_isolation(isolation_tier: &str) -> Duration {
     if isolation_tier == "confidential" {
-        CONFIDENTIAL_CREATE_READY_TIMEOUT
+        CONFIDENTIAL_WORKSPACE_READY_TIMEOUT
     } else {
-        CREATE_READY_TIMEOUT
+        WORKSPACE_READY_TIMEOUT
     }
 }
 
