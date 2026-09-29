@@ -232,8 +232,10 @@ class Journey:
             "prefix=row*((n-2)//len(row)); padding=b'x'*(n-2-len(prefix)); "
             "sys.stdout.buffer.write(prefix+padding+b'\\x1b[31mPAGE_BOUNDARY_VISIBLE\\x1b[0m\\n'"
             "+row*30000+b'CLI_LOGS_PAGINATION_END\\n'); sys.stdout.buffer.flush(); "
-            "sys.stdin.readline(); sys.stdout.buffer.write(b'CLI_LOGS_FOLLOW_END\\n'); "
-            "sys.stdout.buffer.flush()"
+            "sys.stdin.readline(); sys.stdout.buffer.write(b'\\x1b['); sys.stdout.buffer.flush(); "
+            "sys.stdin.readline(); sys.stdout.buffer.write(b'32mCLI_LOGS_FOLLOW_END\\x1b'); "
+            "sys.stdout.buffer.flush(); sys.stdin.readline(); "
+            "sys.stdout.buffer.write(b'[0m\\n'); sys.stdout.buffer.flush()"
         )
         self.launch("history", [sys.executable, "-c", program])
         self.until(lambda: self.call("list", self.environment, "--output", "json", data=True),
@@ -251,22 +253,41 @@ class Journey:
         assert self.call("logs", self.environment, "history", "--tail", "30002", "--raw").stdout == (
             padding + b"\x1b[31m" + visible + b"\x1b[0m\n" + rows + marker).decode()
 
-        follower = subprocess.Popen(
-            [self.cw, "logs", self.environment, "history", "--tail", "1", "--follow"],
-            env=self.env, cwd=self.workspace, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        followers = []
         try:
-            ready, _, _ = select.select([follower.stdout], [], [], 10)
-            assert ready, "follow did not emit the initial history tail"
-            assert follower.stdout.readline() == marker.decode()
-            self.call("send", self.environment, "history", "finish")
-            output, errors = follower.communicate(timeout=15)
-            assert follower.returncode == 0, errors
-            assert output == "CLI_LOGS_FOLLOW_END\n", "follow replayed already drained history"
+            for raw in (False, True):
+                args = [self.cw, "logs", self.environment, "history", "--tail", "1", "--follow"]
+                if raw:
+                    args += ["--raw"]
+                follower = subprocess.Popen(args, env=self.env, cwd=self.workspace, text=True,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                followers.append((raw, follower))
+                ready, _, _ = select.select([follower.stdout], [], [], 10)
+                assert ready, "follow did not emit the initial history tail"
+                assert follower.stdout.readline() == marker.decode()
+
+            # Require durable observation of each partial CSI before the next
+            # write, so the live filter must retain state across output chunks.
+            live_end = len(encoded)
+            for command, piece in (("color", b"\x1b["),
+                                   ("text", b"32mCLI_LOGS_FOLLOW_END\x1b"),
+                                   ("reset", b"[0m\n")):
+                self.call("send", self.environment, "history", command)
+                live_end += len(piece)
+                self.until(lambda: self.call("list", self.environment, "--output", "json", data=True),
+                           lambda views: any(v["name"] == "history" and
+                                             v["output_end_offset"] == live_end for v in views))
+            for raw, follower in followers:
+                output, errors = follower.communicate(timeout=15)
+                assert follower.returncode == 0, errors
+                expected = ("\x1b[32mCLI_LOGS_FOLLOW_END\x1b[0m\n" if raw else
+                            "CLI_LOGS_FOLLOW_END\n")
+                assert output == expected, f"raw={raw}: follow changed bytes or replayed drained history"
         finally:
-            if follower.poll() is None:
-                follower.terminate()
-                follower.wait(timeout=5)
+            for _, follower in followers:
+                if follower.poll() is None:
+                    follower.terminate()
+                    follower.wait(timeout=5)
         self.call("wait", self.environment, "history", "--timeout", "10s")
         self.check("logs/paginated-history/final-tail/raw-ansi/bounded-read/follow-cursor")
 

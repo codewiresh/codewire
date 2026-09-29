@@ -21,9 +21,10 @@ cw env create --platform --type sandbox --name cloud-team --repo REPOSITORY_URL
 ```
 
 A trusted host runs as the local user with their ordinary HOME and installed
-tools. Its daemon state lives outside the workspace. It provides owned process
-cleanup, not filesystem or network containment. Stop and remove retire its
-owned runtime; they preserve the workspace. Linux is the admitted host
+tools. Its daemon uses a dedicated state directory, outside the workspace by
+default; `CW_HOST_DATA_DIR` selects another registry location. It provides
+owned process cleanup, not filesystem or network containment. Stop and remove
+retire its owned runtime; they preserve the workspace. Linux is the admitted host
 implementation. Other hosts fail before creation effects.
 
 Native sandboxes retain their protected credential and workspace contracts.
@@ -91,9 +92,9 @@ cw stop host-team runtime
 cw restart host-team runtime
 ```
 
-The launch and message commands return durable message IDs. `msg` sends a
-semantic task, follow-up or reply to the native agent protocol. A raw terminal
-write is refused for managed sessions. Parents are bound to canonical session
+Agent launches with `--prompt` and message commands return durable message
+IDs. `msg` sends a semantic task, follow-up or reply to the native agent protocol.
+A raw terminal write is refused for managed sessions. Parents are bound to canonical session
 and driver identities in the same host environment; an unmanaged process
 cannot receive semantic worker results.
 

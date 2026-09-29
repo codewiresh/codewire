@@ -820,6 +820,8 @@ async fn attach_host_environment_session(
     session: &EnvironmentSessionView,
     offset: u64,
     interactive: bool,
+    raw_output: bool,
+    ansi: &mut LogsAnsiFilter,
 ) -> anyhow::Result<AttachExit> {
     use codewire_gateway_proto::daemon::v1::session_attach_message::Payload;
     let client = host_session_client(environment).await?;
@@ -841,8 +843,19 @@ async fn attach_host_environment_session(
             event=attachment.next_event()=>{
                 let Some(event)=event? else{return Ok(AttachExit::StreamEnded{output_offset:cursor});};
                 match event.payload {
-                    Some(Payload::Output(chunk))=>{write_session_output(&mut std::io::stdout(),&chunk.data,true)?;cursor=chunk.next_offset;}
-                    Some(Payload::HistoryGap(gap))=>{eprintln!("[cw] older output unavailable; showing retained output");cursor=gap.retained_start_offset;}
+                    Some(Payload::Output(chunk))=>{
+                        if raw_output {
+                            write_session_output(&mut std::io::stdout(), &chunk.data, true)?;
+                        } else {
+                            write_session_output(&mut std::io::stdout(), &ansi.strip(&chunk.data), true)?;
+                        }
+                        cursor=chunk.next_offset;
+                    }
+                    Some(Payload::HistoryGap(gap))=>{
+                        eprintln!("[cw] older output unavailable; showing retained output");
+                        cursor=gap.retained_start_offset;
+                        *ansi=LogsAnsiFilter::default();
+                    }
                     Some(Payload::Status(status)) if (4..=7).contains(&status.state)=>return Ok(AttachExit::Terminal),
                     _=>{},
                 }
@@ -1174,8 +1187,15 @@ async fn attach_environment_session(
         let exit = match &target {
             #[cfg(unix)]
             EnvironmentSessionTarget::Host { environment, .. } => {
-                attach_host_environment_session(environment, &session, output_offset, session.pty)
-                    .await?
+                attach_host_environment_session(
+                    environment,
+                    &session,
+                    output_offset,
+                    session.pty,
+                    true,
+                    &mut LogsAnsiFilter::default(),
+                )
+                .await?
             }
             #[cfg(target_os = "linux")]
             EnvironmentSessionTarget::NativeLocal { name, .. } => {
@@ -1737,7 +1757,7 @@ pub(crate) async fn handle_logs_command(globals: &Globals, args: LogsArgs) -> an
         }
     }
     if args.follow && !session_is_terminal(&session) {
-        follow_session_output(&target, &session, output_offset, args.raw).await?;
+        follow_session_output(&target, &session, output_offset, args.raw, ansi).await?;
     }
     Ok(())
 }
@@ -1827,13 +1847,26 @@ async fn follow_session_output(
     session: &EnvironmentSessionView,
     mut output_offset: u64,
     raw_output: bool,
+    ansi: LogsAnsiFilter,
 ) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let mut ansi = ansi;
+    #[cfg(not(unix))]
+    let _ = ansi;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
     loop {
         let exit = match target {
             #[cfg(unix)]
             EnvironmentSessionTarget::Host { environment, .. } => {
-                attach_host_environment_session(environment, session, output_offset, false).await?
+                attach_host_environment_session(
+                    environment,
+                    session,
+                    output_offset,
+                    false,
+                    raw_output,
+                    &mut ansi,
+                )
+                .await?
             }
             #[cfg(target_os = "linux")]
             EnvironmentSessionTarget::NativeLocal { name, .. } => {
