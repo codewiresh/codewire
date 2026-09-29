@@ -39,7 +39,11 @@ same_json() {
 
 check() {
   local label="$1" program="$2" input="$3"
-  jq -e "$program" "$input" >/dev/null || fail "$label: $program"
+  if ! jq -e "$program" "$input" >/dev/null; then
+    jq -c . "$input" 2>&1 | head -c 6000 >&2 || true
+    printf '\n' >&2
+    fail "$label: $program"
+  fi
   pass
 }
 
@@ -303,7 +307,10 @@ pass
 smjq -n -e 'include "measure";
   (["2026-09-29T10:00:00Z", "2026-09-29T10:00:00.5Z", "2026-09-29T10:00:00.123456Z",
     "2026-09-29T10:00:00+00:00", "2026-09-29T10:00:00+02:00", null, "garbage"] | map(ts_ms))
-  == [1790676000000, 1790676000500, 1790676000123, 1790676000000, null, null, null]' >/dev/null ||
+  == [1790676000000, 1790676000500, 1790676000123, 1790676000000, null, null, null]
+  and (["2024-02-29T00:00:00Z", "2000-03-01T00:00:00Z", "1970-01-01T00:00:00Z",
+        "2100-12-31T23:59:59.999Z"] | map(ts_ms))
+  == [1709164800000, 951868800000, 0, 4133980799999]' >/dev/null ||
   fail 'ts_ms'
 pass
 smjq -n -e 'include "measure";

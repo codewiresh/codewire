@@ -2,16 +2,27 @@
 # Every duration is integer or decimal milliseconds; every size is MiB.
 # Nothing here reads the cluster, so fixtures cover all of it.
 
+# Days since 1970-01-01 for a proleptic Gregorian date (days_from_civil).
+def days_from_civil($y; $m; $d):
+  (if $m <= 2 then $y - 1 else $y end) as $yy
+  | ($yy / 400 | floor) as $era
+  | ($yy - $era * 400) as $yoe
+  | (((153 * (if $m > 2 then $m - 3 else $m + 9 end) + 2) / 5 | floor) + $d - 1) as $doy
+  | ($yoe * 365 + ($yoe / 4 | floor) - ($yoe / 100 | floor) + $doy) as $doe
+  | $era * 146097 + $doe - 719468;
+
 # RFC 3339 UTC timestamp, with optional fractional seconds, to epoch ms.
 # Anything else (null, empty, non-UTC) becomes null rather than a guess.
+# Computed directly: jq 1.6 fromdateiso8601 applies the host's DST.
 def ts_ms:
   if type != "string" then null
   else
-    [capture("^(?<base>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.(?<frac>[0-9]+))?(Z|\\+00:00)$")]
+    [capture("^(?<y>[0-9]{4})-(?<mo>[0-9]{2})-(?<d>[0-9]{2})T(?<h>[0-9]{2}):(?<mi>[0-9]{2}):(?<s>[0-9]{2})(\\.(?<frac>[0-9]+))?(Z|\\+00:00)$")]
     | if length == 0 then null
       else .[0]
-        | ((.base + "Z") | fromdateiso8601) * 1000
-          + (((.frac // "0") + "00")[0:3] | tonumber)
+        | (days_from_civil(.y | tonumber; .mo | tonumber; .d | tonumber) * 86400
+            + (.h | tonumber) * 3600 + (.mi | tonumber) * 60 + (.s | tonumber)) * 1000
+          + (((.frac // "") + "000")[0:3] | tonumber)
       end
   end;
 

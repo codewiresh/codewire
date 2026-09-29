@@ -722,13 +722,14 @@ volume_cycle() {
     delete_volume "$raw" "$name" "$name" || true
   fi
 
-  smjq -n --arg label "$label" --arg role "$role" --argjson warmup "$warmup" \
+  # jq 1.6 reserves the word label, so it is quoted as a key and renamed as a variable.
+  smjq -n --arg run_label "$label" --arg role "$role" --argjson warmup "$warmup" \
     --arg status "$status" --arg error "$error" --arg snapshot "$snapshot" \
     --argjson t_create "$t_create" --argjson t_bound "${t_bound:-null}" --argjson t_ready "${t_ready:-null}" \
     --argjson verified "$verified" \
     --slurpfile bundle "$raw/bundle.json" --slurpfile teardown "$raw/teardown.json" \
     'include "measure";
-     {label: $label, role: $role, warmup: $warmup, status: $status,
+     {"label": $run_label, role: $role, warmup: $warmup, status: $status,
       error: (if $error == "" then null else $error end),
       data_source: (if $snapshot == "" then null else {kind: "VolumeSnapshot", name: $snapshot} end),
       client: {
@@ -944,11 +945,11 @@ snapshot_measure() {
   get_json_or_null "$raw/volumesnapshot.json" -n "$NAMESPACE" get volumesnapshot "$name"
   get_json_or_null "$raw/volumesnapshotcontent.json" get volumesnapshotcontent \
     "$(jq -r '.status.boundVolumeSnapshotContentName // "none"' "$raw/volumesnapshot.json")"
-  smjq -n --arg label "$label" --arg class "$class" --arg status "$status" --arg error "$error" \
+  smjq -n --arg run_label "$label" --arg class "$class" --arg status "$status" --arg error "$error" \
     --argjson t0 "$t0" --argjson t1 "${t1:-null}" --argjson used "${used:-null}" \
     --slurpfile vs "$raw/volumesnapshot.json" --slurpfile vsc "$raw/volumesnapshotcontent.json" \
     'include "measure";
-     {label: $label, class: $class, status: $status,
+     {"label": $run_label, class: $class, status: $status,
       error: (if $error == "" then ($vs[0].status.error.message // null) else $error end),
       source_used_mib: $used,
       create_to_ready_ms: delta($t0; $t1),
