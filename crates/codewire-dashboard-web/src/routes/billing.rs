@@ -13,7 +13,7 @@ use crate::{
     routes::organization_governance::{
         action_context, connect_page_error, get_context, mutation_redirect,
     },
-    security::{csrf_cookie, new_csrf_token, with_csrf_cookie},
+    security::{csrf_cookie, page_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::OrganizationBillingTemplate,
 };
@@ -44,7 +44,7 @@ pub(super) async fn page(
             Ok(context) => context,
             Err(response) => return response,
         };
-    let token = new_csrf_token();
+    let token = page_csrf_token(&headers);
     let billing = match billing_connect::billing_page(
         &state,
         cookie,

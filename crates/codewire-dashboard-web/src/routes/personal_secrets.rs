@@ -21,7 +21,9 @@ use crate::{
     error::WebError,
     response::{error_page, login_redirect, redirect, render_template, two_factor_redirect},
     secrets_presets_connect::{self, SecretBucket},
-    security::{canonical_cookie, csrf_cookie, new_csrf_token, valid_csrf_token, with_csrf_cookie},
+    security::{
+        canonical_cookie, csrf_cookie, page_csrf_token, valid_csrf_token, with_csrf_cookie,
+    },
     state::AppState,
     templates::SettingsSecretsTemplate,
     view::{PersonalSecretsPageView, SecretFormView},
@@ -364,6 +366,7 @@ async fn render(
 ) -> Response {
     let dashboard = match super::dashboard::personal_settings_shell_view_from_identity(
         state,
+        headers,
         identity,
         cookie.clone(),
         &query.org,
@@ -433,7 +436,7 @@ async fn render(
         Err(error) => return private(error_page(WebError::Connect(error))),
     }
     resolve_editor(&mut page);
-    page.csrf_token = new_csrf_token();
+    page.csrf_token = page_csrf_token(headers);
     private(with_csrf_cookie(
         render_template(
             status,

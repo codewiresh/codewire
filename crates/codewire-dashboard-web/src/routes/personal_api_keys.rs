@@ -23,7 +23,7 @@ use crate::{
     error::WebError,
     personal_api_keys_connect as api,
     response::{error_page, login_redirect, redirect, render_template, two_factor_redirect},
-    security::{canonical_cookie, csrf_cookie, new_csrf_token, valid_csrf_token, with_csrf_cookie},
+    security::{canonical_cookie, csrf_cookie, valid_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::SettingsApiKeysTemplate,
     time_display::calendar_datetime,
@@ -130,6 +130,7 @@ async fn context(
     });
     let view = super::dashboard::personal_settings_shell_view_from_organizations(
         state,
+        headers,
         &identity,
         cookie.clone(),
         &query.org,
@@ -601,7 +602,7 @@ fn render(
         "{PATH}{}",
         context_query(&context.view.selected_organization_slug, "")
     );
-    page.csrf_token = new_csrf_token();
+    page.csrf_token = context.view.csrf_token.to_string();
     let response = with_csrf_cookie(
         render_template(
             status,

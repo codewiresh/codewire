@@ -15,8 +15,8 @@ use crate::{
     },
     routes::{DASHBOARD_PATH, NEW_ORGANIZATION_PATH},
     security::{
-        canonical_cookie, csrf_cookie, new_csrf_token, request_has_same_origin, valid_csrf_token,
-        with_csrf_cookie,
+        canonical_cookie, csrf_cookie, new_csrf_token, page_csrf_token, request_has_same_origin,
+        valid_csrf_token, with_csrf_cookie,
     },
     state::AppState,
     templates::{NewOrganizationTemplate, OrganizationListTemplate},
@@ -55,7 +55,7 @@ pub(super) async fn new_organization(
 ) -> Response {
     match super::dashboard::dashboard_view(&state, &headers).await {
         Ok(view) => {
-            let token = new_csrf_token();
+            let token = page_csrf_token(&headers);
             let form = OrganizationFormView::default();
             let response = render_page(NewOrganizationTemplate {
                 view: &view,

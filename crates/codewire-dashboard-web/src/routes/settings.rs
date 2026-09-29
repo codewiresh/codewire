@@ -12,7 +12,7 @@ use crate::{
     error::WebError,
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     security::{
-        canonical_cookie, clear_scoped_cookie, csrf_cookie, new_csrf_token,
+        canonical_cookie, clear_scoped_cookie, csrf_cookie, page_csrf_token,
         request_has_same_origin, valid_csrf_token, with_csrf_cookie, with_response_cookie,
     },
     state::AppState,
@@ -56,6 +56,7 @@ pub(super) async fn settings(
     };
     let dashboard = match super::dashboard::personal_settings_shell_view_from_identity(
         &state,
+        &headers,
         &identity,
         cookie.clone(),
         &query.org,
@@ -87,7 +88,7 @@ pub(super) async fn settings(
             }
             Err(_) => None,
         };
-    let csrf = new_csrf_token();
+    let csrf = page_csrf_token(&headers);
     let mut settings = SettingsPageView {
         account_id: identity.id.clone(),
         account_name: identity.display_name().into(),
@@ -403,6 +404,7 @@ mod tests {
     fn dashboard_view() -> DashboardView {
         DashboardView {
             user_name: "Dashboard User".into(),
+            csrf_token: Default::default(),
             is_admin: false,
             organizations: Vec::new(),
             has_organizations: false,

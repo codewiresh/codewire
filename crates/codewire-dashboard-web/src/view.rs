@@ -569,9 +569,33 @@ pub(crate) struct GitHubAppAuthorizationSubmission {
     pub(crate) confirm_reconnect: String,
 }
 
+/// The CSRF token rendered into the shared navigation's forms. It is written
+/// into HTML but kept out of debug output.
+#[derive(Clone, Default)]
+pub(crate) struct PageCsrfToken(String);
+
+impl PageCsrfToken {
+    pub(crate) fn from_headers(headers: &axum::http::HeaderMap) -> Self {
+        Self(crate::security::page_csrf_token(headers))
+    }
+}
+
+impl fmt::Display for PageCsrfToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for PageCsrfToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&redacted(&self.0), formatter)
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DashboardView {
     pub(crate) user_name: String,
+    pub(crate) csrf_token: PageCsrfToken,
     pub(crate) is_admin: bool,
     pub(crate) organizations: Vec<OrganizationRow>,
     pub(crate) has_organizations: bool,
