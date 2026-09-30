@@ -53,9 +53,9 @@ command -v skopeo >/dev/null 2>&1 || die "missing required command: skopeo"
 [[ -f "$LOCK_PATH" ]] || die "lock file does not exist: $LOCK_PATH"
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_SHA" != "0000000000000000000000000000000000000000" ]] || \
   die "--source-sha must be one exact non-zero lowercase object ID"
-# The active input comes from Deploy's private registry overlay. GHCR below is
+# The active input comes from Deploy's Harbor registry overlay. GHCR below is
 # only an independently readable digest/revision oracle for that same image.
-[[ "$GATEWAY_IMAGE" =~ ^nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:[0-9a-f]{64}$ ]] || \
+[[ "$GATEWAY_IMAGE" =~ ^registry\.example\.invalid/codewire/gateway@sha256:[0-9a-f]{64}$ ]] || \
   die "--gateway-image must be the digest-pinned canonical Dev gateway reference"
 
 jq -e '

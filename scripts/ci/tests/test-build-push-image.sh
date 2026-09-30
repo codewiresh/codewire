@@ -337,10 +337,8 @@ aws_secret_access_key = untrusted-secret-key
 EOF
 chmod 0600 "$r2_credentials_file"
 
-registry_username='nexus-publisher-test'
+registry_username='harbor-publisher-test'
 registry_password='registry-test-value'
-approved_registry_username='nexus-approved-reader-test'
-approved_registry_password='approved-registry-test-value'
 digest="sha256:$(printf 'd%.0s' {1..64})"
 second_digest="sha256:$(printf 'f%.0s' {1..64})"
 mismatch_digest="sha256:$(printf 'c%.0s' {1..64})"
@@ -356,22 +354,8 @@ trap cleanup EXIT
 base_digest="sha256:$(printf 'e%.0s' {1..64})"
 base_ref="registry.example.invalid/codewire/base@$base_digest"
 
-# Nexus serves only approved third-party inputs; publication must never ask it
-# for a publisher credential. Harbor supplies the only publisher identity.
-cat >"$work/bin/fetch-nexus" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${1:-}" != --approved ]]; then
-  echo 'Nexus publisher credential requested by publication' >&2
-  exit 97
-fi
-shift
-printf '%s' "${FAKE_APPROVED_REGISTRY_USERNAME:?}" >"$1"
-printf '%s' "${FAKE_APPROVED_REGISTRY_PASSWORD:?}" >"$2"
-chmod 0600 "$1" "$2"
-printf '%q %q\n' "$1" "$2" >>"${FAKE_FETCH_CALLS:?}"
-EOF
-
+# Harbor supplies the only registry identity: the publisher robot both pushes
+# codewire/ images and pulls the digest-pinned oci-approved/ inputs.
 cat >"$work/bin/fetch-harbor" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -407,38 +391,25 @@ set_manifest() {
 }
 
 case "${1:-} ${2:-} ${3:-}" in
-  login\ registry.example.invalid\ *|login\ nexus.example.invalid\ *)
-    registry_host="$2"
-    case "$registry_host" in
-      registry.example.invalid)
-        expected_username="${FAKE_REGISTRY_USERNAME:?}"
-        expected_password="${FAKE_REGISTRY_PASSWORD:?}"
-        ;;
-      nexus.example.invalid)
-        expected_username="${FAKE_APPROVED_REGISTRY_USERNAME:?}"
-        expected_password="${FAKE_APPROVED_REGISTRY_PASSWORD:?}"
-        ;;
-      *) exit 1 ;;
-    esac
+  login\ registry.example.invalid\ *)
     credential="$(cat)"
-    [[ "$credential" == "$expected_password" ]]
-    [[ "$*" == *" -u $expected_username "* ]]
+    [[ "$credential" == "${FAKE_REGISTRY_PASSWORD:?}" ]]
+    [[ "$*" == *" -u ${FAKE_REGISTRY_USERNAME:?} "* ]]
     if [ -n "${FAKE_LOGIN_FAILURES:-}" ]; then
       login_state="${FAKE_LOGIN_STATE:?}"
       login_count="$(cat "$login_state")"
       if [ "$login_count" -lt "$FAKE_LOGIN_FAILURES" ]; then
         printf '%s\n' "$((login_count + 1))" >"$login_state"
-        echo 'Error response from daemon: Nexus login failed with status: 401 Unauthorized' >&2
+        echo 'Error response from daemon: login failed with status: 401 Unauthorized' >&2
         exit 1
       fi
     fi
-    if [ "$registry_host" = registry.example.invalid ] \
-        && [ -n "${FAKE_LOGIN_NEXUS_FAILURES:-}" ]; then
+    if [ -n "${FAKE_LOGIN_NEXUS_FAILURES:-}" ]; then
       login_state="${FAKE_LOGIN_NEXUS_STATE:?}"
       login_count="$(cat "$login_state")"
       if [ "$login_count" -lt "$FAKE_LOGIN_NEXUS_FAILURES" ]; then
         printf '%s\n' "$((login_count + 1))" >"$login_state"
-        echo "Error response from daemon: login attempt to https://${registry_host}/v2/ failed with status: 503 Service Unavailable" >&2
+        echo "Error response from daemon: login attempt to https://registry.example.invalid/v2/ failed with status: 503 Service Unavailable" >&2
         exit 1
       fi
     fi
@@ -707,16 +678,13 @@ cat >"$work/bin/sleep" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_SLEEP_CALLS:?}"
 EOF
-chmod +x "$work/bin/fetch-nexus" "$work/bin/fetch-harbor" "$work/bin/docker" "$work/bin/sccache" \
+chmod +x "$work/bin/fetch-harbor" "$work/bin/docker" "$work/bin/sccache" \
   "$work/bin/sleep"
 
 export PATH="$work/bin:$PATH"
-export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/fetch-nexus"
 export OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/bin/fetch-harbor"
 export FAKE_REGISTRY_USERNAME="$registry_username"
 export FAKE_REGISTRY_PASSWORD="$registry_password"
-export FAKE_APPROVED_REGISTRY_USERNAME="$approved_registry_username"
-export FAKE_APPROVED_REGISTRY_PASSWORD="$approved_registry_password"
 export FAKE_FETCH_CALLS="$work/fetch-calls"
 export FAKE_DOCKER_CALLS="$work/docker-calls"
 export FAKE_SCCACHE_CALLS="$work/sccache-calls"
@@ -779,17 +747,15 @@ grep -qF -- 'GIT_REMOTE=https://git.example.invalid/codewire/codewire.git' \
   "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not build from the canonical source remote'
 grep -qF -- 'Provenance.SLSA' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication did not verify its emitted SLSA predicate'
-grep -qF -- '--sbom=generator=nexus.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
+grep -qF -- '--sbom=generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
   "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not request an SBOM from the approved exact generator'
 grep -qF ' login registry.example.invalid ' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not use its scoped promoted-output login'
-grep -qF ' login nexus.example.invalid ' "$FAKE_DOCKER_CALLS" ||
-  fail 'protected publication did not use its scoped approved-input login'
-# Publication targets Harbor only: no retired Nexus publication host appears in
-# any login, build, push or tag call.
-if grep -qF 'nexus-system-cluster' "$FAKE_DOCKER_CALLS"; then
-  fail 'protected publication contacted the retired Nexus publication registry'
+# Publication targets Harbor only: no retired Nexus host appears in any login,
+# build, push or tag call.
+if grep -qF 'nexus' "$FAKE_DOCKER_CALLS"; then
+  fail 'protected publication contacted the retired Nexus registry'
 fi
 if grep -Eq '(--tag|-t)[ =]nexus|\.tags=nexus' "$FAKE_DOCKER_CALLS"; then
   fail 'protected publication pushed or tagged an image in Nexus'
@@ -863,7 +829,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 ) >"$work/transient-login.out" 2>&1
 grep -qF 'Registry login was rejected; retrying authentication' \
   "$work/transient-login.out" || fail 'transient initial registry login was not reported'
-[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 2)) ]] ||
   fail 'transient initial registry login was not retried exactly once'
 
 printf '0\n' >"$work/login-nexus-state"
@@ -876,14 +842,14 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ) >"$work/transient-nexus-login.out" 2>&1
 [[ "$(cat "$work/login-nexus-state")" -eq 2 ]] ||
-  fail 'transient Nexus login did not consume both simulated failures'
-[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 4)) ]] ||
-  fail 'transient Nexus login did not retry twice before the approved login'
+  fail 'transient registry login did not consume both simulated failures'
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
+  fail 'transient registry login did not retry exactly twice'
 [[ "$(grep -cxF '60' "$FAKE_SLEEP_CALLS")" -eq 2 ]] ||
-  fail 'transient Nexus login did not use the bounded retry delay'
+  fail 'transient registry login did not use the bounded retry delay'
 grep -qF 'retrying registry.example.invalid (2/61)' \
   "$work/transient-nexus-login.out" ||
-  fail 'transient Nexus login retry was not attributable'
+  fail 'transient registry login retry was not attributable'
 
 : >"$GITHUB_OUTPUT"
 (
@@ -973,7 +939,7 @@ create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CAL
 ) >"$work/transient-auth.out" 2>&1
 grep -qF 'Registry authentication expired while inspecting' \
   "$work/transient-auth.out" || fail 'transient registry auth was not reported'
-[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 2)) ]] ||
   fail 'transient registry auth did not perform exactly one bounded re-login'
 [[ "$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS")" -eq $((create_calls_before_auth + 1)) ]] ||
   fail 'transient registry auth did not resume immutable alias creation'
@@ -991,7 +957,7 @@ create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CAL
 ) >"$work/transient-create-auth.out" 2>&1
 grep -qF 'Registry authentication expired while creating' \
   "$work/transient-create-auth.out" || fail 'transient create auth was not reported'
-[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 2)) ]] ||
   fail 'transient create auth did not perform exactly one bounded re-login'
 [[ "$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS")" -eq $((create_calls_before_auth + 2)) ]] ||
   fail 'transient create auth was not retried exactly once'
@@ -1025,7 +991,7 @@ grep -qF 'Unable to determine whether immutable image tag exists' \
   "$work/inspect-error.out" || fail 'registry inspection error was not reported'
 [[ "$(build_invocation_count)" -eq 2 ]] ||
   fail 'registry inspection error reached a build'
-[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 4)) ]] ||
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
   fail 'persistent registry auth did not stop after two bounded re-logins'
 
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
@@ -1064,10 +1030,7 @@ fi
 
 if grep -qF "$registry_username" "$FAKE_FETCH_CALLS" \
   || grep -qF "$registry_password" "$FAKE_DOCKER_CALLS" \
-  || grep -qF "$registry_password" "$FAKE_FETCH_CALLS" \
-  || grep -qF "$approved_registry_username" "$FAKE_FETCH_CALLS" \
-  || grep -qF "$approved_registry_password" "$FAKE_DOCKER_CALLS" \
-  || grep -qF "$approved_registry_password" "$FAKE_FETCH_CALLS"; then
+  || grep -qF "$registry_password" "$FAKE_FETCH_CALLS"; then
   fail 'a registry credential reached command arguments or fetch logs'
 fi
 

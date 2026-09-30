@@ -96,7 +96,7 @@ rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
 rg -F 'if [[ "$RUN_COCO_PRODUCT" != "1" ]]; then' "$SMOKE" >/dev/null
 rg -F 'log "skipping product release image resolution"' "$SMOKE" >/dev/null
 rg -F 'if [[ "$RUN_COCO_PRODUCT" == "1" ]]; then' "$SMOKE" >/dev/null
-rg -F 'nexus\.example\.invalid/oci-approved/codewire/gateway@sha256:' "$SMOKE" >/dev/null
+rg -F 'registry\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" >/dev/null
 if rg -F 'git\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" "$RESOLVER"; then
   printf 'confidential smoke accepts the retired Gitea gateway authority\n' >&2
   exit 1

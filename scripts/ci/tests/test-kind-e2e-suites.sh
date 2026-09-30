@@ -590,7 +590,7 @@ CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release
     KIND_INGRESS_CONTROLLER_IMAGE=unaccepted CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci \
     bash -seuc 'source "$1"; python3() { printf "%s\n" "$2"; }; kind_workspace_runtime_image' \
     _ "$COMMON" "$source_alias"
-  grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+  grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
     "$FIXTURE/invalid-sealed-source-workspace.out" || fail 'source receipt bypassed sealed input rejection'
 )
 
@@ -813,7 +813,7 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   ' "$CALLS" || fail 'source image import omitted API recovery'
 )
 
-# Forgejo CI names only the five approved Nexus platform manifests. They must
+# Forgejo CI names only the five approved Harbor platform manifests. They must
 # already exist in the private DinD store. The two digest-pinned public
 # service dependencies are also side-loaded before the rendered deployment.
 : >"$CALLS"
@@ -1042,7 +1042,7 @@ expect_failure partial-platform-images env \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/partial-platform-images.out" ||
   fail 'partial sealed platform tuple did not explain its rejection'
 
@@ -1052,7 +1052,7 @@ expect_failure partial-workspace-only env \
   KIND_AGENT_SANDBOX_IMAGE='' \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/partial-workspace-only.out" ||
   fail 'workspace-only sealed tuple did not explain its rejection'
 
@@ -1063,7 +1063,7 @@ expect_failure substituted-agent-image env \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/substituted-agent-image.out" ||
   fail 'agent-sandbox index substitution did not explain its rejection'
 
@@ -1074,7 +1074,7 @@ expect_failure substituted-workspace-image env \
   KIND_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/substituted-workspace-image.out" ||
   fail 'workspace digest substitution did not explain its rejection'
 
@@ -1085,7 +1085,7 @@ expect_failure substituted-dind-image env \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/substituted-dind-image.out" ||
   fail 'DinD digest substitution did not explain its rejection'
 
