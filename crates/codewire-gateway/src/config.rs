@@ -1,16 +1,13 @@
 use crate::docker_proxy::DockerProxySettings;
 use codewire_gateway_proto::DaemonAuthToken;
 use codewire_tls::{ClientTlsEndpoint, ServerTlsFiles};
-use std::{env, fmt, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{env, fmt, net::SocketAddr, path::PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub const SHIM_ADDR_ENV: &str = "CODEWIRE_WORKSPACE_SHIM_ADDR";
 pub const DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
-pub const DAEMON_CONNECT_TIMEOUT_SECONDS_ENV: &str = "CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS";
 pub const DEFAULT_SHIM_ADDR: &str = "127.0.0.1:7777";
-pub const DEFAULT_DAEMON_CONNECT_TIMEOUT_SECONDS: u64 = 60;
-pub const MAX_DAEMON_CONNECT_TIMEOUT_SECONDS: u64 = 3_600;
 pub const DEFAULT_SSH_LISTEN_ADDR: &str = "0.0.0.0:2222";
 pub const DEFAULT_READYZ_LISTEN_ADDR: &str = "0.0.0.0:2223";
 pub const DEFAULT_DOCKER_UPSTREAM_SOCK: &str = "/var/run/docker/docker.sock";
@@ -223,7 +220,6 @@ impl CredentialRuntimeConfig {
 pub struct GatewayConfig {
     pub shim_addr: String,
     pub daemon_auth_token: DaemonAuthToken,
-    pub daemon_connect_timeout: Duration,
     pub ssh_listen_addr: String,
     pub readyz_listen_addr: String,
     pub host_key_path: String,
@@ -286,12 +282,6 @@ pub enum ConfigError {
     InvalidEnvironmentId(String),
     #[error("invalid Docker proxy config: {0}")]
     InvalidDockerProxy(String),
-    #[error("{name} must be whole seconds from 1 to {max}, got {value:?}")]
-    InvalidDurationSeconds {
-        name: &'static str,
-        value: String,
-        max: u64,
-    },
 }
 
 impl GatewayConfig {
@@ -326,12 +316,6 @@ impl GatewayConfig {
             .and_then(|value| {
                 DaemonAuthToken::new(value).map_err(|_| ConfigError::InvalidDaemonAuthToken)
             })?;
-        let daemon_connect_timeout = parse_duration_seconds_env(
-            &getenv,
-            DAEMON_CONNECT_TIMEOUT_SECONDS_ENV,
-            DEFAULT_DAEMON_CONNECT_TIMEOUT_SECONDS,
-            MAX_DAEMON_CONNECT_TIMEOUT_SECONDS,
-        )?;
         let ssh_listen_addr = resolve_ssh_listen_addr(&getenv);
         let readyz_listen_addr =
             env_or(&getenv, READYZ_LISTEN_ADDR_ENV, DEFAULT_READYZ_LISTEN_ADDR);
@@ -360,7 +344,6 @@ impl GatewayConfig {
         Ok(Self {
             shim_addr,
             daemon_auth_token,
-            daemon_connect_timeout,
             ssh_listen_addr,
             readyz_listen_addr,
             host_key_path,
@@ -390,7 +373,6 @@ impl fmt::Debug for GatewayConfig {
             .debug_struct("GatewayConfig")
             .field("shim_addr", &self.shim_addr)
             .field("daemon_auth_token", &self.daemon_auth_token)
-            .field("daemon_connect_timeout", &self.daemon_connect_timeout)
             .field("ssh_listen_addr", &self.ssh_listen_addr)
             .field("readyz_listen_addr", &self.readyz_listen_addr)
             .field("host_key_path", &self.host_key_path)
@@ -617,28 +599,6 @@ fn parse_u16_env(name: &'static str, value: &str) -> Result<u16, ConfigError> {
     }
 }
 
-fn parse_duration_seconds_env<F>(
-    getenv: &F,
-    name: &'static str,
-    default_seconds: u64,
-    max_seconds: u64,
-) -> Result<Duration, ConfigError>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    let Some(value) = trim_env(getenv, name) else {
-        return Ok(Duration::from_secs(default_seconds));
-    };
-    match value.parse::<u64>() {
-        Ok(seconds) if (1..=max_seconds).contains(&seconds) => Ok(Duration::from_secs(seconds)),
-        _ => Err(ConfigError::InvalidDurationSeconds {
-            name,
-            value,
-            max: max_seconds,
-        }),
-    }
-}
-
 fn parse_socket_addr_env(name: &'static str, value: &str) -> Result<SocketAddr, ConfigError> {
     value
         .parse::<SocketAddr>()
@@ -720,10 +680,6 @@ mod tests {
     fn defaults_match_gateway_contract() {
         let cfg = config(&[]).unwrap();
         assert_eq!(cfg.shim_addr, DEFAULT_SHIM_ADDR);
-        assert_eq!(
-            cfg.daemon_connect_timeout,
-            Duration::from_secs(DEFAULT_DAEMON_CONNECT_TIMEOUT_SECONDS)
-        );
         assert_eq!(cfg.ssh_listen_addr, DEFAULT_SSH_LISTEN_ADDR);
         assert_eq!(cfg.readyz_listen_addr, DEFAULT_READYZ_LISTEN_ADDR);
         assert_eq!(cfg.host_key_path, "/codewire/gateway/ssh/host_ed25519");
@@ -777,19 +733,13 @@ mod tests {
     }
 
     #[test]
-    fn daemon_connect_timeout_is_bounded_and_explicit() {
-        let cfg = config(&[(DAEMON_CONNECT_TIMEOUT_SECONDS_ENV, "1500")]).unwrap();
-        assert_eq!(cfg.daemon_connect_timeout, Duration::from_secs(1_500));
-
-        for value in ["0", "3601", "not-seconds"] {
-            assert_eq!(
-                config(&[(DAEMON_CONNECT_TIMEOUT_SECONDS_ENV, value)]),
-                Err(ConfigError::InvalidDurationSeconds {
-                    name: DAEMON_CONNECT_TIMEOUT_SECONDS_ENV,
-                    value: value.into(),
-                    max: MAX_DAEMON_CONNECT_TIMEOUT_SECONDS,
-                })
-            );
+    fn daemon_wait_has_no_deadline_setting() {
+        // The gateway waits for its daemon until shutdown. Orchestration's
+        // tier ready timeout is the only startup bound, so the retired
+        // deadline variable neither applies nor fails configuration.
+        let retired = "CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS";
+        for value in ["60", "1500", "0", "not-seconds"] {
+            assert_eq!(config(&[(retired, value)]), config(&[]));
         }
     }
 

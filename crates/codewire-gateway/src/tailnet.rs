@@ -777,7 +777,6 @@ mod tests {
     ) -> GatewayConfig {
         GatewayConfig {
             shim_addr: "127.0.0.1:7777".into(),
-            daemon_connect_timeout: Duration::from_secs(60),
             ssh_listen_addr: "127.0.0.1:2222".into(),
             readyz_listen_addr: "127.0.0.1:2223".into(),
             host_key_path: "/tmp/key".into(),
