@@ -152,8 +152,9 @@ if [ "$SERVICE" = daemon ]; then
   # Loading a new tag alone would leave it using the original gateway image.
   deployment=codewire-orchestration
 fi
-# Preserve #2273's acceptance boundary: rollout completion can precede the old
-# Pod's deletion, so an immediate retained test must also wait for that Pod.
+# A rollout reports done while the previous pods are still terminating and can
+# still answer requests; wait for them to go so the next request, such as
+# `make kind-test`, reaches the current source.
 # shellcheck disable=SC2016 # a Go template, expanded by kubectl
 selector="$(kube get "deployment/${deployment}" \
   -o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')"
