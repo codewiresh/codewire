@@ -1807,6 +1807,9 @@ jobs:
 
       - name: Run Kind
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        env:
+          CLUSTER: codewire-e2e-ci-${{ github.run_id }}
+          CODEWIRE_KIND_PROFILE_ROOT: ${{ runner.temp }}/kind-profiles
         run: scripts/ci/verify/kind-e2e.sh
 
       - name: Cancel the run after this failure

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Named gate regressions with synthetic endpoints and command boundaries."""
+import json
 import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -45,7 +47,41 @@ log() {{ :; }}
 {body}
 '''
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                              env=os.environ.copy(), timeout=15)
+                              stdin=subprocess.DEVNULL, env=os.environ.copy(), timeout=15)
+
+    def test_remote_dind_forwarder_receives_all_saved_host_ports(self):
+        fixture = self.directory / "capture-forwarder.py"
+        arguments = self.directory / "forwarder-arguments.json"
+        fixture.write_text(f'''import json, os, signal, sys
+from pathlib import Path
+Path({str(arguments)!r}).write_text(json.dumps({{"argv": sys.argv[1:], "pid": os.getpid()}}))
+print("remote DinD Kind loopback forwarder ready", flush=True)
+signal.pause()
+''')
+        result = self.shell(f'''
+KIND_INGRESS_HTTP_HOST_PORT=60400
+KIND_INGRESS_TLS_HOST_PORT=60401
+KIND_TEMPORAL_HOST_PORT=60404
+KIND_ORCHESTRATION_HOST_PORT=60402
+KIND_COORDINATOR_HOST_PORT=60403
+KIND_POSTGRES_HOST_PORT=60405
+python3() {{ exec {shlex.quote(sys.executable)} -u {shlex.quote(str(fixture))} "$@"; }}
+trap stop_remote_dind_kind_forwarding EXIT
+start_remote_dind_kind_forwarding synthetic-profile-control-plane
+stop_remote_dind_kind_forwarding
+trap - EXIT
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        captured = json.loads(arguments.read_text())
+        self.assertEqual(captured["argv"], [
+            "-u", str(ROOT / "scripts/ci/verify/kind/forward-remote-dind-ports.py"),
+            "--target", "synthetic-profile-control-plane",
+            "--forward", "60400:80", "--forward", "60401:443",
+            "--forward", "60404:30733", "--forward", "60402:30084",
+            "--forward", "60403:30090", "--forward", "60405:30432",
+        ])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(captured["pid"], 0)
 
     def test_archive_import_failure_stops_before_support_import(self):
         result = self.shell('''

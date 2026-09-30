@@ -185,6 +185,17 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertTrue(admitted(receipt=True, producer_results=("skipped",) * 3))
         self.assertFalse(admitted(selection_ok=False, kind=False, producer_results=("skipped",) * 3))
 
+    def test_kind_consumer_selects_a_private_saved_profile(self) -> None:
+        edge = self.jobs["edge-kind"]
+        kind = named_step(edge, "Run Kind")
+        self.assertEqual(kind["if"], KIND_STEP_IF)
+        self.assertEqual(kind.get("env"), {
+            "CLUSTER": edge["env"]["KIND_CLUSTER_NAME"],
+            "CODEWIRE_KIND_PROFILE_ROOT": "${{ runner.temp }}/kind-profiles",
+        })
+        self.assertNotIn("CLUSTER", edge["env"],
+                         "static fixtures must not inherit an uncreated profile")
+
     def test_consumer_downloads_bound_manifests_outside_checkout(self) -> None:
         edge = self.jobs["edge-kind"]
         self.assertEqual(edge["env"]["CODEWIRE_KIND_PRODUCT_IMAGE_MODE"], "prebuilt-ci")
