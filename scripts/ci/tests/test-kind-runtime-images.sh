@@ -4,6 +4,7 @@
 # into every Kind node under the reference the product renders, is idempotent,
 # and fails closed. Fake kind, kubectl and docker stand in for the cluster.
 set -euo pipefail
+unset CLUSTER KIND_PROFILE
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "$ROOT/.tmp"
@@ -34,6 +35,7 @@ fail() {
 mkdir -p "$BIN" "$STATE" "$(dirname "$SCRIPT")" "$(dirname "$WORKSPACE_CONSTANTS")" \
   "$(dirname "$DIND_CONSTANTS")"
 cp "$ROOT/scripts/dev/kind/dev-loop.sh" "$SCRIPT"
+cp "$ROOT/scripts/dev/kind/profile.sh" "$TREE/scripts/dev/kind/profile.sh"
 
 write_constants() {
   printf 'pub const DEFAULT_WORKSPACE_IMAGE: &str = "%s";\n' "$1" >"$WORKSPACE_CONSTANTS"

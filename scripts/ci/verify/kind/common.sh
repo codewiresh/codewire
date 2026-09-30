@@ -5,6 +5,13 @@ set -euo pipefail
 
 export KIND_E2E_COMMON_LOADED=1
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+KIND_PROFILE=0
+if [ -n "${CLUSTER:-}" ]; then
+  # shellcheck source=scripts/dev/kind/profile.sh
+  source "$ROOT/scripts/dev/kind/profile.sh"
+  kind_profile_load "$ROOT" || return $?
+  KIND_CLUSTER_NAME_EXPLICIT=1
+fi
 # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
 source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
 # shellcheck source=scripts/ci/verify/kind-host-runtime.sh
@@ -13,7 +20,12 @@ CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"
 export CARGO_TARGET_DIR
-CARGO_CI_DIR="$CARGO_TARGET_DIR/ci"
+KIND_SMOKE_BUILD_DIR="$CARGO_TARGET_DIR/ci"
+if [ "$KIND_PROFILE" = 1 ]; then
+  CARGO_CI_DIR="$KIND_PROFILE_SMOKE_DIR"
+else
+  CARGO_CI_DIR="$KIND_SMOKE_BUILD_DIR"
+fi
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 KIND_CONFIG="${KIND_CONFIG:-$ROOT/tests/e2e/kind/kind-config.yaml}"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-kind-e2e-${KIND_CLUSTER_NAME}}"
@@ -22,6 +34,14 @@ mkdir -p "$RUN_DIR"
 # coordinator TLS ingress intentionally owns Host/SNI localhost below.
 KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:8090}"
 KIND_INGRESS_TLS_URL="${KIND_INGRESS_TLS_URL:-https://localhost:10443}"
+KIND_INGRESS_HTTP_HOST_PORT="${KIND_INGRESS_HTTP_HOST_PORT:-8090}"
+KIND_INGRESS_TLS_HOST_PORT="${KIND_INGRESS_TLS_HOST_PORT:-10443}"
+KIND_ORCHESTRATION_HOST_PORT="${KIND_ORCHESTRATION_HOST_PORT:-8084}"
+KIND_COORDINATOR_HOST_PORT="${KIND_COORDINATOR_HOST_PORT:-18092}"
+KIND_TEMPORAL_HOST_PORT="${KIND_TEMPORAL_HOST_PORT:-7233}"
+KIND_ORCHESTRATION_URL="${KIND_ORCHESTRATION_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}"
+KIND_COORDINATOR_DIRECT_URL="${KIND_COORDINATOR_DIRECT_URL:-http://127.0.0.1:${KIND_COORDINATOR_HOST_PORT}}"
+KIND_TEMPORAL_ADDRESS="${KIND_TEMPORAL_ADDRESS:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}"
 KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
 if ! [[ "$KIND_POSTGRES_HOST_PORT" =~ ^[0-9]+$ ]] \
     || [ "$KIND_POSTGRES_HOST_PORT" -lt 1024 ] \
@@ -39,6 +59,7 @@ if ! [[ "$KIND_HOST_LOCK_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
 fi
 KIND_HOST_LOCK_FILE="${KIND_HOST_LOCK_FILE:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/codewire-kind-e2e-${UID}.lock}"
 KIND_HOST_LOCK_FD=""
+KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE=0
 NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
 # shellcheck source=scripts/ci/verify/kind/credentials.sh
@@ -54,6 +75,9 @@ RETAINED_KUBECONFIG=""
 REMOTE_DIND_JOB_CONTAINER=""
 REMOTE_DIND_KIND_NETWORK=""
 REMOTE_DIND_FORWARDER_PID=""
+KIND_CREATED_BY_TRANSACTION=0
+KIND_TRANSACTION_NODE_ID=""
+KIND_PROFILE_ARTIFACTS_VERIFIED=0
 if [ -z "${DEFAULT_KIND_WORKSPACE_IMAGE+x}" ]; then
   DEFAULT_KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff'
 fi
@@ -132,6 +156,10 @@ log() {
 }
 
 acquire_kind_host_lock() {
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    kind_profile_lock "$ROOT"
+    return $?
+  fi
   mkdir -p "$(dirname "$KIND_HOST_LOCK_FILE")"
   exec {KIND_HOST_LOCK_FD}>"$KIND_HOST_LOCK_FILE"
   log "waiting for exclusive local Kind transaction lock"
@@ -140,6 +168,73 @@ acquire_kind_host_lock() {
     return 1
   fi
   log "acquired exclusive local Kind transaction lock"
+}
+
+acquire_kind_build_publication_lock() {
+  local lock_file inherited="${KIND_BUILD_PUBLICATION_LOCK_FD:-}" descriptor_path
+  lock_file="${KIND_BUILD_PUBLICATION_LOCK_FILE:-}"
+  if [ -z "$lock_file" ]; then
+    lock_file="$(python3 "$ROOT/scripts/dev/kind/cluster-profile.py" build-lock-path)" || return $?
+  fi
+  [ -f "$lock_file" ] && [ ! -L "$lock_file" ] \
+    && [ "$(stat -c '%u:%a:%h' "$lock_file")" = "$(id -u):600:1" ] || {
+    echo '::error::Kind build publication lock is not owner-private' >&2
+    return 1
+  }
+  if [ -n "$inherited" ]; then
+    [[ "$inherited" =~ ^[0-9]+$ ]] || return 1
+    descriptor_path="/proc/$BASHPID/fd/$inherited"
+    [ "$(readlink "$descriptor_path" 2>/dev/null)" = "$lock_file" ] \
+      && [ "$(stat -Lc '%d:%i:%u:%a:%h' "$descriptor_path" 2>/dev/null)" \
+        = "$(stat -c '%d:%i:%u:%a:%h' "$lock_file")" ] || {
+      echo '::error::inherited Kind publication lock differs from the selected registry' >&2
+      return 1
+    }
+  else
+    exec {KIND_BUILD_PUBLICATION_LOCK_FD}<>"$lock_file" || return $?
+    KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE=1
+  fi
+  export KIND_BUILD_PUBLICATION_LOCK_FD
+  flock -w "$KIND_HOST_LOCK_TIMEOUT_SECONDS" "$KIND_BUILD_PUBLICATION_LOCK_FD" || return $?
+  descriptor_path="/proc/$BASHPID/fd/$KIND_BUILD_PUBLICATION_LOCK_FD"
+  [ ! -L "$lock_file" ] \
+    && [ "$(stat -Lc '%d:%i:%u:%a:%h' "$descriptor_path")" \
+      = "$(stat -c '%d:%i:%u:%a:%h' "$lock_file")" ] \
+    && [ "$(stat -c '%u:%a:%h' "$lock_file")" = "$(id -u):600:1" ] || {
+    echo '::error::Kind publication lock was replaced while waiting' >&2
+    return 1
+  }
+}
+
+release_kind_build_publication_lock() {
+  [ "$KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE" = 1 ] || return 0
+  [ -n "${KIND_BUILD_PUBLICATION_LOCK_FD:-}" ] || return 0
+  exec {KIND_BUILD_PUBLICATION_LOCK_FD}>&-
+  unset KIND_BUILD_PUBLICATION_LOCK_FD
+  KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE=0
+}
+
+use_kind_profile_smokes() {
+  CARGO_CI_DIR="$KIND_PROFILE_SMOKE_DIR"
+  for jsonl in credential-bootstrap-build.jsonl billing-contract-build.jsonl; do
+    cp -- "$KIND_PROFILE_ARTIFACT_DIR/$jsonl" "$RUN_DIR/$jsonl" || return $?
+  done
+}
+
+delete_owned_kind_cluster() {
+  kind_profile_verify_node "$ROOT" || return $?
+  kind delete cluster --name "$KIND_CLUSTER_NAME" || return $?
+  python3 "$ROOT/scripts/dev/kind/cluster-profile.py" mark-deleted \
+    --cluster "$CLUSTER" --nonce "$KIND_PROFILE_NONCE" >/dev/null
+}
+
+run_kind_down() {
+  [ "${KIND_PROFILE:-0}" = 1 ] || {
+    echo '::error::kind-down requires an explicit saved CLUSTER profile' >&2
+    return 2
+  }
+  kind_profile_lock "$ROOT" || return $?
+  delete_owned_kind_cluster
 }
 
 dump_cluster_state() {
@@ -184,7 +279,30 @@ cleanup() {
   fi
   stop_remote_dind_kind_forwarding
   if [ "$KEEP_KIND_CLUSTER" != "1" ]; then
-    kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1 || true
+    if [ "${KIND_PROFILE:-0}" = 1 ]; then
+      # No deletion on a failed precondition or failed ownership read. A name
+      # alone is never authority over an existing retained cluster.
+      if [ "$KIND_CREATED_BY_TRANSACTION" = 1 ]; then
+        if ! delete_owned_kind_cluster; then
+          [ "$status" -ne 0 ] || status=1
+        fi
+      fi
+    else
+      if [ "$KIND_CREATED_BY_TRANSACTION" = 1 ]; then
+        local current_node_id
+        current_node_id="$(docker container inspect --format '{{.Id}}' \
+          "${KIND_CLUSTER_NAME}-control-plane" 2>/dev/null)" || current_node_id=""
+        if [ "$current_node_id" = "$KIND_TRANSACTION_NODE_ID" ] \
+            && [[ "$current_node_id" =~ ^[0-9a-f]{64}$ ]]; then
+          kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1 || {
+            [ "$status" -ne 0 ] || status=1
+          }
+        else
+          echo '::error::legacy transaction node identity changed; preserving the cluster' >&2
+          [ "$status" -ne 0 ] || status=1
+        fi
+      fi
+    fi
   fi
   if [ -n "$AUTHZ_TMPDIR" ]; then
     rm -rf "$AUTHZ_TMPDIR"
@@ -199,16 +317,16 @@ assert_kind_idp_topology() {
   local issuer ingress_paths
 
   issuer="$(kubectl -n "$NS" get configmap codewire-config \
-    -o jsonpath='{.data.PUBLIC_OIDC_ISSUER_URL}')"
+    -o jsonpath='{.data.PUBLIC_OIDC_ISSUER_URL}')" || return $?
   if [ "$issuer" != "$KIND_INGRESS_URL" ]; then
     echo "::error::Kind IdP issuer must match the host ingress: expected ${KIND_INGRESS_URL}, got ${issuer:-missing}"
     return 1
   fi
 
-  kubectl -n "$NS" get deployment/codewire-idp >/dev/null
-  kubectl -n "$NS" get service/codewire-idp >/dev/null
+  kubectl -n "$NS" get deployment/codewire-idp >/dev/null || return $?
+  kubectl -n "$NS" get service/codewire-idp >/dev/null || return $?
   ingress_paths="$(kubectl -n "$NS" get ingress codewire-idp-e2e \
-    -o jsonpath='{range .spec.rules[*].http.paths[*]}{.path}{"\n"}{end}')"
+    -o jsonpath='{range .spec.rules[*].http.paths[*]}{.path}{"\n"}{end}')" || return $?
   for required_path in \
       /api/oauth /api/auth/sign-up /api/auth/sign-in /api/oidc \
       /.well-known/openid-configuration /.well-known/jwks.json; do
@@ -277,6 +395,13 @@ validate_retained_cluster_identity() {
     return 1
   fi
   expected_context="kind-${KIND_CLUSTER_NAME}"
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    kind_profile_lock "$ROOT" || return $?
+    kind_profile_verify_node "$ROOT" || return $?
+    kind_profile_verify_artifacts "$ROOT" || return $?
+    KIND_PROFILE_ARTIFACTS_VERIFIED=1
+    use_kind_profile_smokes || return $?
+  fi
 
   if ! clusters="$(kind get clusters 2>&1)"; then
     echo "::error::failed to enumerate Kind clusters for retained suite: ${clusters}"
@@ -304,6 +429,7 @@ validate_retained_cluster_identity() {
   if is_remote_dind_kind_job; then
     kubeconfig_args+=(--internal)
   fi
+  if [ "${KIND_PROFILE:-0}" != 1 ]; then
   RETAINED_KUBECONFIG="$(mktemp "$RUN_DIR/retained-kubeconfig.XXXXXX")" || return $?
   if ! kind get kubeconfig "${kubeconfig_args[@]}" --name "$KIND_CLUSTER_NAME" \
       >"$RETAINED_KUBECONFIG"; then
@@ -311,17 +437,18 @@ validate_retained_cluster_identity() {
     return 1
   fi
   export KUBECONFIG="$RETAINED_KUBECONFIG"
+  fi
   if ! kubectl --context "$expected_context" cluster-info --request-timeout=10s >/dev/null 2>&1; then
     echo "::error::retained Kind context ${expected_context} is not reachable"
     return 1
   fi
 
-  require_available_deployment "$NS" postgres
-  require_available_deployment "$NS" temporal
-  require_available_deployment "$NS" codewire-billing
-  require_available_deployment "$NS" codewire-orchestration
-  require_available_deployment "$NS" codewire-coordinator
-  require_available_deployment agent-sandbox-system agent-sandbox-controller
+  require_available_deployment "$NS" postgres || return $?
+  require_available_deployment "$NS" temporal || return $?
+  require_available_deployment "$NS" codewire-billing || return $?
+  require_available_deployment "$NS" codewire-orchestration || return $?
+  require_available_deployment "$NS" codewire-coordinator || return $?
+  require_available_deployment agent-sandbox-system agent-sandbox-controller || return $?
   if ! kubectl --request-timeout=10s get \
       crd/sandboxclaims.extensions.agents.x-k8s.io >/dev/null 2>&1; then
     echo "::error::retained Kind cluster is missing the SandboxClaim CRD"
@@ -355,25 +482,52 @@ validate_retained_cluster() {
     echo '::error::retained Kind workspace image does not match its verified source' >&2
     return 1
   fi
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    local binding node_id manifest_sha
+    node_id="$(docker container inspect --format '{{.Id}}' "${KIND_CLUSTER_NAME}-control-plane")" || return $?
+    manifest_sha="$(sha256sum "$KIND_PROFILE_IMAGE_MANIFEST" | cut -d' ' -f1)" || return $?
+    binding="$(kubectl --request-timeout=10s -n "$NS" get \
+      "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" -o json)" || return $?
+    if ! jq -e --arg nonce "$KIND_PROFILE_NONCE" --arg node "$node_id" \
+        --arg manifest "$manifest_sha" --arg head "$KIND_PROFILE_SOURCE_HEAD" \
+        --arg tree "$KIND_PROFILE_SOURCE_TREE" '
+          .data["profile-nonce"] == $nonce and .data["node-id"] == $node and
+          .data["artifact-sha256"] == $manifest and .data["source-head"] == $head and
+          .data["source-tree"] == $tree' <<<"$binding" >/dev/null; then
+      echo '::error::retained prepared marker does not match the saved profile/node/artifact identity' >&2
+      return 1
+    fi
+  fi
 
   log "retained Kind cluster ${KIND_CLUSTER_NAME} accepted at compatibility version ${KIND_E2E_COMPATIBILITY_VERSION}"
 }
 
 mark_retained_cluster_prepared() {
   local workspace_image
+  local -a profile_binding=()
   workspace_image="$(kind_workspace_runtime_image)" || return $?
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    local node_id manifest_sha
+    kind_profile_verify_node "$ROOT" || return $?
+    node_id="$(docker container inspect --format '{{.Id}}' "${KIND_CLUSTER_NAME}-control-plane")" || return $?
+    manifest_sha="$(sha256sum "$KIND_PROFILE_IMAGE_MANIFEST" | cut -d' ' -f1)" || return $?
+    profile_binding=(--from-literal="profile-nonce=$KIND_PROFILE_NONCE"
+      --from-literal="node-id=$node_id" --from-literal="artifact-sha256=$manifest_sha"
+      --from-literal="source-head=$KIND_PROFILE_SOURCE_HEAD"
+      --from-literal="source-tree=$KIND_PROFILE_SOURCE_TREE")
+  fi
   log "marking Kind cluster ${KIND_CLUSTER_NAME} prepared for retained suites"
   kubectl -n "$NS" create configmap "$KIND_E2E_PREPARED_CONFIGMAP" \
     --from-literal="compatibility_version=${KIND_E2E_COMPATIBILITY_VERSION}" \
     --from-literal="cluster-name=${KIND_CLUSTER_NAME}" \
     --from-literal="workspace-image=$workspace_image" \
+    "${profile_binding[@]}" \
     --dry-run=client -o yaml | kubectl_apply -f -
 }
 
 reclaim_cancelled_ci_clusters() {
   local kind_config="$1"
-  local ci_cluster_prefix='codewire-e2e-ci-'
-  local clusters cluster remaining running_containers ports port owners
+  local clusters cluster running_containers ports port owners
 
   if ! clusters="$(kind get clusters 2>&1)"; then
     echo "::error::failed to enumerate Kind clusters before e2e startup: ${clusters}"
@@ -382,28 +536,12 @@ reclaim_cancelled_ci_clusters() {
 
   while IFS= read -r cluster; do
     case "$cluster" in
-      "$KIND_CLUSTER_NAME"|"${ci_cluster_prefix}"*)
-        log "reclaiming cancelled-run kind cluster ${cluster}"
-        if ! kind delete cluster --name "$cluster"; then
-          echo "::error::failed to reclaim cancelled-run kind cluster ${cluster}"
-          return 1
-        fi
-        ;;
-    esac
-  done <<< "$clusters"
-
-  if ! remaining="$(kind get clusters 2>&1)"; then
-    echo "::error::failed to verify Kind cluster cleanup: ${remaining}"
-    return 1
-  fi
-  while IFS= read -r cluster; do
-    case "$cluster" in
-      "$KIND_CLUSTER_NAME"|"${ci_cluster_prefix}"*)
-        echo "::error::cancelled-run kind cluster ${cluster} survived cleanup"
+      "$KIND_CLUSTER_NAME")
+        echo "::error::Kind cluster ${cluster} already exists; use a fresh verification profile or make kind-test"
         return 1
         ;;
     esac
-  done <<< "$remaining"
+  done <<< "$clusters"
 
   if ! ports="$(
     awk '
@@ -578,19 +716,59 @@ ingress_path_drift_check() {
   done
 }
 
+prepare_kind_profile_runtime_inputs() {
+  # Product images and clients are sealed in the profile. Workspace acceptance
+  # belongs to the invoking checkout, and fixed support images may have been
+  # removed from Docker. Resolve both before creating a replacement node.
+  acquire_kind_build_publication_lock || return $?
+  case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
+    build-ci)
+      "$ROOT/scripts/ci/verify/verify-workspace-image.sh" || return $?
+      ;;
+    prebuilt-ci)
+      RUN_DIR="$RUN_DIR" \
+        EXPECTED_MANIFEST_SHA256="${CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256:?missing workspace producer digest}" \
+        python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" consume workspace \
+          "${CODEWIRE_KIND_ARTIFACT_ROOT:?missing private artifact directory}/workspace" || return $?
+      ;;
+    *) return 2 ;;
+  esac
+  prepare_kind_support_images || return $?
+  release_kind_build_publication_lock
+}
+
 build_images_and_smokes() {
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    local reuse_status=0
+    python3 "$ROOT/scripts/ci/verify/kind/profile-artifacts.py" reuse \
+      --root "$ROOT" --cargo-ci-dir "$KIND_SMOKE_BUILD_DIR" --run-dir "$RUN_DIR" || reuse_status=$?
+    case "$reuse_status" in
+      0)
+        log 'reusing the admitted exact source image archive and smoke inventory'
+        prepare_kind_profile_runtime_inputs || return $?
+        use_kind_profile_smokes
+        return $?
+        ;;
+      3) ;; # No admitted base yet: run the bounded producer transaction.
+      *) return "$reuse_status" ;;
+    esac
+  fi
+  acquire_kind_build_publication_lock || return $?
   case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
     build-ci)
       log "verifying the canonical source workspace image once for Kind"
-      "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh"
-      "$ROOT/scripts/ci/verify/verify-workspace-image.sh"
+      "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh" || return $?
+      "$ROOT/scripts/ci/verify/verify-workspace-image.sh" || return $?
       log "building exact candidate product images once through the CI Bake profile"
-      CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
-        "$ROOT/scripts/ci/images/build-kind-images.sh"
+      local source_head
+      source_head="$(git -C "$ROOT" rev-parse HEAD)" || return $?
+      CODEWIRE_IMAGE_SOURCE_SHA="$source_head" \
+        CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
+        "$ROOT/scripts/ci/images/build-kind-images.sh" || return $?
       ;;
     prebuilt-release)
       log "using exact prebuilt protected release images without rebuilding"
-      assert_prebuilt_release_product_images
+      assert_prebuilt_release_product_images || return $?
       ;;
     prebuilt-ci)
       log "importing exact same-run CI artifacts without rebuilding"
@@ -603,7 +781,7 @@ build_images_and_smokes() {
         esac
         RUN_DIR="$RUN_DIR" EXPECTED_MANIFEST_SHA256="$manifest" \
           python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" consume "$group" \
-            "${CODEWIRE_KIND_ARTIFACT_ROOT:?missing private artifact directory}/$group"
+            "${CODEWIRE_KIND_ARTIFACT_ROOT:?missing private artifact directory}/$group" || return $?
       done
       ;;
     *)
@@ -613,22 +791,43 @@ build_images_and_smokes() {
   esac
 
   log "verifying the exact dashboard candidate runtime contract"
-  "$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"
+  "$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e" || return $?
 
-  prepare_kind_support_images
+  prepare_kind_support_images || return $?
 
   # `kind-e2e.sh up` deploys for manual testing and runs no smoke suite.
   if [ "${KIND_BUILD_SMOKES:-1}" = 1 ] \
       && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
     log "building Rust kind smoke binaries"
     "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
-      "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
+      "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl" || return $?
   fi
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    # A named retained cluster saves the complete smoke inventory at creation;
+    # future tests never read a concurrent worktree's mutable target directory.
+    if [ "${KIND_BUILD_SMOKES:-1}" != 1 ] \
+        && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
+      "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
+        "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl" || return $?
+    fi
+    python3 "$ROOT/scripts/ci/verify/kind/profile-artifacts.py" seal \
+      --root "$ROOT" --cargo-ci-dir "$KIND_SMOKE_BUILD_DIR" --run-dir "$RUN_DIR" || return $?
+    kind_profile_load "$ROOT" || return $?
+    use_kind_profile_smokes || return $?
+  fi
+  release_kind_build_publication_lock
 }
 
 # Retained suites rerun gate steps on a kept cluster. `up` builds no smoke
 # binaries, so build them here; cargo makes repeated builds incremental.
 build_retained_kind_smokes() {
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    if [ "$KIND_PROFILE_ARTIFACTS_VERIFIED" != 1 ]; then
+      kind_profile_verify_artifacts "$ROOT" || return $?
+    fi
+    use_kind_profile_smokes
+    return $?
+  fi
   mkdir -p "$RUN_DIR"
   log "building Rust kind smoke binaries for the retained suite"
   "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
@@ -662,29 +861,59 @@ assert_prebuilt_release_product_images() {
 
 create_cluster() {
   local kind_config rendered_kind_config
-  if kind get clusters | grep -qx "$KIND_CLUSTER_NAME"; then
-    log "deleting existing kind cluster ${KIND_CLUSTER_NAME}"
-    kind delete cluster --name "$KIND_CLUSTER_NAME"
+  local clusters
+  clusters="$(kind get clusters)" || return $?
+  if grep -Fxq "$KIND_CLUSTER_NAME" <<<"$clusters"; then
+    echo "::error::Kind cluster already exists; it cannot be replaced implicitly"
+    return 1
   fi
 
   log "checking Docker runtime for kind"
-  docker version
+  docker version || return $?
   docker info --format 'Server={{.ServerVersion}} Driver={{.Driver}} CgroupDriver={{.CgroupDriver}} SecurityOptions={{json .SecurityOptions}}' || docker info || true
 
   log "creating kind cluster ${KIND_CLUSTER_NAME}"
   kind_config="$KIND_CONFIG"
   rendered_kind_config="$RUN_DIR/kind-config.yaml"
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    python3 "$ROOT/scripts/dev/kind/cluster-profile.py" render-config \
+      --cluster "$CLUSTER" --template "$ROOT/tests/e2e/kind/kind-config.yaml" >/dev/null || return $?
+    rendered_kind_config="$KIND_CONFIG"
+  else
   if [ "$(grep -Fc 'hostPort: 25432' "$kind_config")" -ne 1 ]; then
     echo "::error::Kind config must contain exactly one default Postgres host-port mapping"
     exit 1
   fi
   sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/" \
-    "$kind_config" >"$rendered_kind_config"
-  if ! kind create cluster --name "$KIND_CLUSTER_NAME" --config "$rendered_kind_config" --wait 120s; then
-    echo "::error::kind cluster creation failed. This gate needs a runner with a real privileged Docker runtime capable of starting kind node containers; rootless Podman/netavark runners are not sufficient."
-    exit 1
+    "$kind_config" >"$rendered_kind_config" || return $?
   fi
-  configure_remote_dind_kind_network
+  local create_status=0
+  kind create cluster --name "$KIND_CLUSTER_NAME" --config "$rendered_kind_config" --wait 120s || create_status=$?
+  if [ "$create_status" -ne 0 ]; then
+    # A failed create cannot prove that a node now visible under this name was
+    # created by this transaction. Preserve it for diagnosis rather than adopt
+    # and delete it from the exit handler.
+    echo "::error::kind cluster creation failed; preserving any node with unconfirmed ownership. This gate needs a privileged Docker runtime capable of starting kind node containers."
+    return "$create_status"
+  fi
+  if docker container inspect "${KIND_CLUSTER_NAME}-control-plane" >/dev/null 2>&1; then
+    local node_id
+    node_id="$(docker container inspect --format '{{.Id}}' "${KIND_CLUSTER_NAME}-control-plane")" || return $?
+    if ! [[ "$node_id" =~ ^[0-9a-f]{64}$ ]]; then
+      echo '::error::created Kind node identity is invalid' >&2
+      return 1
+    fi
+    if [ "${KIND_PROFILE:-0}" = 1 ]; then
+      python3 "$ROOT/scripts/dev/kind/cluster-profile.py" record-node \
+        --cluster "$CLUSTER" --nonce "$KIND_PROFILE_NONCE" --node-id "$node_id" >/dev/null || return $?
+    fi
+    KIND_TRANSACTION_NODE_ID="$node_id"
+    KIND_CREATED_BY_TRANSACTION=1
+  else
+    echo '::error::Kind reported creation success without the expected node; ownership is unconfirmed' >&2
+    return 1
+  fi
+  configure_remote_dind_kind_network || return $?
 }
 
 stop_remote_dind_kind_forwarding() {
@@ -707,11 +936,11 @@ start_remote_dind_kind_forwarding() {
 
   python3 -u "$ROOT/scripts/ci/verify/kind/forward-remote-dind-ports.py" \
     --target "$node" \
-    --forward 8090:80 \
-    --forward 10443:443 \
-    --forward 7233:30733 \
-    --forward 8084:30084 \
-    --forward 18092:30090 \
+    --forward "${KIND_INGRESS_HTTP_HOST_PORT}:80" \
+    --forward "${KIND_INGRESS_TLS_HOST_PORT}:443" \
+    --forward "${KIND_TEMPORAL_HOST_PORT}:30733" \
+    --forward "${KIND_ORCHESTRATION_HOST_PORT}:30084" \
+    --forward "${KIND_COORDINATOR_HOST_PORT}:30090" \
     --forward "${KIND_POSTGRES_HOST_PORT}:30432" \
     >"$forwarder_log" 2>&1 &
   REMOTE_DIND_FORWARDER_PID=$!
@@ -771,26 +1000,26 @@ configure_remote_dind_kind_network() {
   REMOTE_DIND_JOB_CONTAINER="$self_container"
   REMOTE_DIND_KIND_NETWORK="${node_networks[0]}"
   docker network connect "$REMOTE_DIND_KIND_NETWORK" \
-    "$REMOTE_DIND_JOB_CONTAINER"
+    "$REMOTE_DIND_JOB_CONTAINER" || return $?
 
   kubeconfig_path="${KUBECONFIG:-$HOME/.kube/config}"
   if [[ "$kubeconfig_path" == *:* ]]; then
     echo "::error::remote DinD Kind requires one explicit kubeconfig path"
     return 1
   fi
-  mkdir -p "$(dirname "$kubeconfig_path")"
+  mkdir -p "$(dirname "$kubeconfig_path")" || return $?
   kubeconfig_tmp="$(mktemp "${kubeconfig_path}.internal.XXXXXX")"
-  chmod 600 "$kubeconfig_tmp"
+  chmod 600 "$kubeconfig_tmp" || return $?
   if ! kind get kubeconfig --internal --name "$KIND_CLUSTER_NAME" \
       >"$kubeconfig_tmp"; then
     shred -u "$kubeconfig_tmp"
     echo "::error::failed to render internal Kind kubeconfig for remote DinD"
     return 1
   fi
-  install -m 600 "$kubeconfig_tmp" "$kubeconfig_path"
-  shred -u "$kubeconfig_tmp"
+  install -m 600 "$kubeconfig_tmp" "$kubeconfig_path" || return $?
+  shred -u "$kubeconfig_tmp" || return $?
 
-  start_remote_dind_kind_forwarding "$node"
+  start_remote_dind_kind_forwarding "$node" || return $?
   log "remote DinD Kind API and host-port topology configured"
 }
 
@@ -861,7 +1090,7 @@ prepare_kind_support_images() {
     fi
     if ! docker image inspect "$source" >/dev/null 2>&1; then
       log "pulling exact Kind support image ${source}"
-      docker pull "$source"
+      docker pull "$source" || return $?
     fi
   done
   for source in \
@@ -869,9 +1098,9 @@ prepare_kind_support_images() {
       "$KIND_TEMPORAL_IMAGE|$KIND_TEMPORAL_LOCAL_IMAGE"; do
     alias="${source#*|}"
     source="${source%%|*}"
-    docker image tag "$source" "$alias"
+    docker image tag "$source" "$alias" || return $?
   done
-  prepare_kind_credential_support_images
+  prepare_kind_credential_support_images || return $?
 }
 
 load_images_into_kind() {
@@ -881,25 +1110,35 @@ load_images_into_kind() {
   # kube-apiserver temporarily unavailable while containerd commits layers.
   # Admit one image at a time and require the control plane to recover before
   # adding the next source of I/O pressure.
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    kind_profile_verify_node "$ROOT" || return $?
+    kind_profile_verify_artifacts "$ROOT" || return $?
+    log 'loading sealed source-bound product image archive into Kind'
+    kind load image-archive --name "$KIND_CLUSTER_NAME" "$KIND_PROFILE_ARTIFACT_DIR/images.tar" || return $?
+    wait_for_kind_api_after_image_load || return $?
+  else
   for image in \
       codewire-dashboard:e2e \
       codewire-services:e2e \
       codewire-mesh:e2e \
-      codewire-gateway:e2e \
-      "$KIND_POSTGRES_LOCAL_IMAGE" \
-      "$KIND_TEMPORAL_LOCAL_IMAGE"; do
+      codewire-gateway:e2e; do
     log "loading ${image} into kind"
-    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
-    wait_for_kind_api_after_image_load
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+    wait_for_kind_api_after_image_load || return $?
+  done
+  fi
+  for image in "$KIND_POSTGRES_LOCAL_IMAGE" "$KIND_TEMPORAL_LOCAL_IMAGE"; do
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+    wait_for_kind_api_after_image_load || return $?
   done
 
-  load_kind_credential_support_images
+  load_kind_credential_support_images || return $?
 
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
     image="$(kind_workspace_runtime_image)" || return $?
     log "loading the exact verified source workspace image into Kind"
-    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
-    wait_for_kind_api_after_image_load
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+    wait_for_kind_api_after_image_load || return $?
   fi
 
   if validate_sealed_kind_images; then
@@ -924,10 +1163,10 @@ load_images_into_kind() {
       # name after proving the exact approved digest, then render only that
       # side-loaded name with imagePullPolicy Never. No registry credential is
       # copied into the nested cluster.
-      docker image tag "$source" "$alias"
+      docker image tag "$source" "$alias" || return $?
       log "loading approved platform image into kind"
-      kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias"
-      wait_for_kind_api_after_image_load
+      kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias" || return $?
+      wait_for_kind_api_after_image_load || return $?
     done
   else
     local sealed_status=$?
@@ -941,7 +1180,7 @@ render_ingress_manifest() {
 
   if validate_sealed_kind_images; then
     python3 - "$source" "$rendered" \
-      "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY'
+      "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import sys
 
@@ -974,9 +1213,9 @@ render_agent_sandbox_manifest() {
   local source="$ROOT/deployments/k8s/agent-sandbox/base"
   local rendered="$RUN_DIR/agent-sandbox-deploy.yaml"
 
-  kubectl kustomize "$source" >"$rendered"
+  kubectl kustomize "$source" >"$rendered" || return $?
   if validate_sealed_kind_images; then
-    python3 - "$rendered" "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" <<'PY'
+    python3 - "$rendered" "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import re
 import sys
@@ -1009,8 +1248,20 @@ render_kind_overlay_manifest() {
   local source="$ROOT/tests/e2e/kind"
   local rendered="$RUN_DIR/codewire-kind-overlay.yaml"
 
-  kubectl kustomize "$source" >"$rendered"
-  python3 - "$rendered" "$KIND_POSTGRES_LOCAL_IMAGE" "$KIND_TEMPORAL_LOCAL_IMAGE" <<'PY'
+  kubectl kustomize "$source" >"$rendered" || return $?
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    python3 - "$rendered" "$KIND_INGRESS_URL" <<'PY' || return $?
+from pathlib import Path
+import sys
+
+path, origin = Path(sys.argv[1]), sys.argv[2]
+text = path.read_text()
+if text.count("http://127.0.0.1:8090") != 4:
+    raise SystemExit("Kind public origin inventory changed; review every consumer")
+path.write_text(text.replace("http://127.0.0.1:8090", origin))
+PY
+  fi
+  python3 - "$rendered" "$KIND_POSTGRES_LOCAL_IMAGE" "$KIND_TEMPORAL_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import re
 import sys
@@ -1038,7 +1289,7 @@ for public, (local, expected) in replacements.items():
 path.write_text(text)
 PY
   if validate_sealed_kind_images; then
-    python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" <<'PY'
+    python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import sys
 
@@ -1101,28 +1352,28 @@ wait_for_kind_api_after_image_load() {
 
 deploy_overlay() {
   local ingress_manifest kind_overlay
-  ingress_manifest="$(render_ingress_manifest)"
+  ingress_manifest="$(render_ingress_manifest)" || return $?
   log "deploying vendored ingress-nginx"
-  kubectl_apply --validate=false -f "$ingress_manifest"
+  kubectl_apply --validate=false -f "$ingress_manifest" || return $?
   kubectl wait --namespace ingress-nginx \
     --for=condition=ready pod \
     --selector=app.kubernetes.io/component=controller \
-    --timeout=180s
+    --timeout=180s || return $?
 
-  deploy_kind_credential_cert_manager
+  deploy_kind_credential_cert_manager || return $?
 
   log "ensuring isolated kind sandbox namespace"
   kubectl create namespace "$SANDBOX_NS" --dry-run=client -o yaml |
-    kubectl_apply -f -
+    kubectl_apply -f - || return $?
   kubectl label namespace "$SANDBOX_NS" \
     app.kubernetes.io/managed-by=codewire \
     codewire.sh/resource-type=sandbox \
     codewire.sh/runtime-scope=shared \
-    --overwrite
+    --overwrite || return $?
 
   log "deploying kind e2e overlay"
-  kubectl -n "$NS" delete job codewire-db-migrate --ignore-not-found --wait=true
-  kind_overlay="$(render_kind_overlay_manifest)"
+  kubectl -n "$NS" delete job codewire-db-migrate --ignore-not-found --wait=true || return $?
+  kind_overlay="$(render_kind_overlay_manifest)" || return $?
   local applied=0
   for i in $(seq 1 12); do
     if [ -n "$kind_overlay" ]; then
@@ -1138,8 +1389,8 @@ deploy_overlay() {
     echo "::error::rendered Kind overlay did not apply"
     exit 1
   fi
-  assert_kind_idp_topology
-  deploy_kind_credential_issuers
+  assert_kind_idp_topology || return $?
+  deploy_kind_credential_issuers || return $?
   # Staged rollout: the services fail fast (correctly) when Postgres or
   # Temporal is unreachable, so park them at zero replicas until their
   # dependencies are Ready — otherwise a slow runner leaves them in
@@ -1155,11 +1406,11 @@ deploy_overlay() {
     deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
-    --replicas=0
+    --replicas=0 || return $?
 
   log "waiting for postgres and temporal (service dependencies)"
-  kubectl -n "$NS" rollout status deploy/postgres --timeout=300s
-  kubectl -n "$NS" rollout status deploy/temporal --timeout=600s
+  kubectl -n "$NS" rollout status deploy/postgres --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/temporal --timeout=600s || return $?
 
   log "waiting for the standard SQLx application baseline"
   if ! kubectl -n "$NS" wait --for=condition=complete \
@@ -1167,7 +1418,7 @@ deploy_overlay() {
     kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true || true
     return 1
   fi
-  kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true
+  kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true || return $?
   local expected_migration_rows migration_rows
   expected_migration_rows="$(find "$ROOT/crates/codewire-server-core/migrations" \
     -maxdepth 1 -type f -name '*.sql' -print | wc -l | tr -d '[:space:]')"
@@ -1181,11 +1432,11 @@ deploy_overlay() {
 
   log "loading billing and coordinator contract fixtures"
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/fixtures/billing/seed.sql"
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/fixtures/billing/seed.sql" || return $?
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/coordinator-seed.sql"
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/coordinator-seed.sql" || return $?
 
-  start_kind_credential_fixture
+  start_kind_credential_fixture || return $?
 
   log "starting billing, IdP, primary authorization, Mesh, and coordinator (dependencies ready)"
   kubectl -n "$NS" scale \
@@ -1194,13 +1445,13 @@ deploy_overlay() {
     deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
-    --replicas=1
-  kubectl -n "$NS" rollout status deploy/codewire-billing --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-dashboard --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-idp --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
+    --replicas=1 || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-billing --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-dashboard --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-idp --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s || return $?
 }
 
 require_dashboard_browser_host_dependencies() {
@@ -1227,8 +1478,20 @@ require_dashboard_browser_host_dependencies() {
   prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
 }
 
-dashboard_browser_e2e() {
+dashboard_browser_e2e() (
   local playwright chromium workspace_image credential_fixture
+  # Playwright's shared auth/report files belong to this checkout. Serialize
+  # only the browser phase within one checkout; distinct worktrees and cluster
+  # runtime phases remain independent. The subshell releases the descriptor.
+  local browser_lock="$ROOT/.tmp/codewire-kind-browser.lock" browser_lock_fd
+  mkdir -p "$ROOT/.tmp"
+  [ ! -L "$browser_lock" ] || return 1
+  if [ ! -e "$browser_lock" ]; then
+    (umask 077; set -C; : >"$browser_lock") 2>/dev/null || [ -f "$browser_lock" ] || return 1
+  fi
+  [ "$(stat -c '%u:%a' "$browser_lock")" = "$(id -u):600" ] || return 1
+  exec {browser_lock_fd}<>"$browser_lock"
+  flock -w "$KIND_HOST_LOCK_TIMEOUT_SECONDS" "$browser_lock_fd" || return $?
   require_dashboard_browser_host_dependencies || return $?
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   credential_fixture=0
@@ -1278,7 +1541,7 @@ dashboard_browser_e2e() {
     PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture" \
     "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts"
-}
+)
 
 mesh_product_connect_ownership_smoke() {
   log "proving Mesh generated Connect ownership and private HMAC authorization"
@@ -1966,7 +2229,7 @@ connect_edge_probes() {
   log "Connect edge probes OK (${events} stream chunks over ${spread}s)"
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
     "$CARGO_CI_DIR/prepare-stream-smoke"
@@ -2244,7 +2507,7 @@ SQL
     # boundary and was accepted by the coordinator, not only parsed by the
     # issuer.
     for i in $(seq 1 20); do
-      if KIND_COORDINATOR_DIRECT_URL="http://127.0.0.1:18092" \
+      if KIND_COORDINATOR_DIRECT_URL="$KIND_COORDINATOR_DIRECT_URL" \
         KIND_COORDINATOR_ENVIRONMENT="$bound_environment_id" \
         KIND_COORDINATOR_SIDECAR_TOKEN="$sidecar_token" \
         KIND_COORDINATOR_BINDING_PROBE=1 \
@@ -2270,7 +2533,7 @@ coordinator_ingress_smoke() {
   local certificate_dir certificate_pem certificate_der alpn_output
 
   curl_settled -X GET \
-    "http://127.0.0.1:18092/api/v1/internal/gateway/coordinate"
+    "${KIND_COORDINATOR_DIRECT_URL}/api/v1/internal/gateway/coordinate"
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::retired primary coordinator WebSocket returned ${PROBE_CODE}, want 404"
     exit 1
@@ -2278,7 +2541,7 @@ coordinator_ingress_smoke() {
   curl_settled -X POST \
     -H 'content-type: application/connect+proto' \
     --data-binary '' \
-    "http://127.0.0.1:18092/coordinator.v1.CoordinatorService/Coordinate"
+    "${KIND_COORDINATOR_DIRECT_URL}/coordinator.v1.CoordinatorService/Coordinate"
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::retired coordinator.v1 route returned ${PROBE_CODE}, want 404"
     exit 1
@@ -2292,7 +2555,7 @@ coordinator_ingress_smoke() {
   openssl x509 -in "$certificate_pem" -outform DER -out "$certificate_der"
 
   if ! alpn_output="$(openssl s_client \
-    -connect localhost:10443 \
+    -connect "localhost:${KIND_INGRESS_TLS_HOST_PORT}" \
     -servername localhost \
     -CAfile "$certificate_pem" \
     -verify_return_error \
@@ -2310,9 +2573,13 @@ coordinator_ingress_smoke() {
   fi
 
   KIND_COORDINATOR_URL="$KIND_INGRESS_TLS_URL" \
-    KIND_COORDINATOR_DIRECT_URL="http://127.0.0.1:18092" \
+    KIND_COORDINATOR_DIRECT_URL="$KIND_COORDINATOR_DIRECT_URL" \
     KIND_COORDINATOR_CA_DER="$certificate_der" \
-    "$CARGO_CI_DIR/examples/coordinator-ingress-smoke"
+    "$CARGO_CI_DIR/examples/coordinator-ingress-smoke" || {
+    local smoke_status=$?
+    rm -rf "$certificate_dir"
+    return "$smoke_status"
+  }
   rm -rf "$certificate_dir"
 }
 
@@ -2323,7 +2590,7 @@ exec_service_connect_smoke() {
   local invalid_command invalid_connect_payload invalid_connect
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
@@ -2547,7 +2814,7 @@ SQL
   environment_session_protocol_smoke "$environment_id"
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
@@ -2689,7 +2956,7 @@ environment_session_protocol_smoke() {
   kubectl -n "$NS" get secret/codewire-kind-ingress-ca \
     -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem"
 
-  if ! SMOKE_SESSION_BASE_URL=http://127.0.0.1:8084 \
+  if ! SMOKE_SESSION_BASE_URL="$KIND_ORCHESTRATION_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_ACCESS_TOKEN=at_kind_connect_oidc_codewire_api \
@@ -2760,11 +3027,13 @@ environment_daemon_proxy_smoke() {
 }
 
 deploy_agent_sandbox() {
+  local manifest
   log "deploying agent-sandbox controller and CRDs"
-  kubectl_apply --validate=false -f "$(render_agent_sandbox_manifest)"
+  manifest="$(render_agent_sandbox_manifest)" || return $?
+  kubectl_apply --validate=false -f "$manifest" || return $?
   kubectl wait --for=condition=established --timeout=60s \
-    crd/sandboxclaims.extensions.agents.x-k8s.io
-  kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=180s
+    crd/sandboxclaims.extensions.agents.x-k8s.io || return $?
+  kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=180s || return $?
 }
 
 workspace_service_smokes() {
@@ -3096,7 +3365,7 @@ VALUES ('$env_id', 'org_contract_1', 'usr_contract_admin', 'sandbox', 'pending',
         2000, 4096, 10, 'preset_contract_1',
         '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 SQL
-  if ! DATABASE_URL="$KIND_DATABASE_URL" \
+  if ! DATABASE_URL="$KIND_DATABASE_URL" TEMPORAL_ADDRESS="$KIND_TEMPORAL_ADDRESS" \
     SMOKE_ENV_ID="$env_id" "$CARGO_CI_DIR/temporal-smoke"; then
     kubectl -n "$NS" logs deploy/codewire-orchestration --tail=80 || true
     kubectl -n "$NS" logs deploy/temporal --tail=50 || true
@@ -3118,8 +3387,8 @@ temporal_fencing_smoke() {
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   log "running final Temporal activity-fencing smoke"
   DATABASE_URL="$KIND_DATABASE_URL" \
-    TEMPORAL_ADDRESS="http://127.0.0.1:7233" \
-    SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
+    TEMPORAL_ADDRESS="$KIND_TEMPORAL_ADDRESS" \
+    SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_URL" \
     SMOKE_WORKSPACE_IMAGE="$workspace_image" \
     "$CARGO_CI_DIR/temporal-fencing-smoke"
 }
@@ -3456,7 +3725,7 @@ rust_reconciler_ttl_e2e() {
   log "running Rust reconciler TTL Kubernetes e2e"
   KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" \
     DATABASE_URL="$KIND_DATABASE_URL" \
-    SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
+    SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_URL" \
     SMOKE_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     SMOKE_SESSION_TOKEN=contract-admin-session-token \
     SMOKE_ORG_ID=org_contract_1 \
