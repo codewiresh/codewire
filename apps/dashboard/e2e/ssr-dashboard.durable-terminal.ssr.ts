@@ -709,7 +709,12 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
     // Switching tabs can schedule a fit/repaint. Copy the visible rendered
     // output, not stale row text while that presentation is still hidden.
     await expect(renderedOutput).toBeVisible();
-    const bounds = (await renderedOutput.boundingBox())!;
+    // A repaint between the visibility check and the measurement can briefly
+    // detach the row, so wait for a real box rather than assume one.
+    const measured = { box: null as Awaited<ReturnType<typeof renderedOutput.boundingBox>> };
+    await expect.poll(async () => (measured.box = await renderedOutput.boundingBox())).not.toBeNull();
+    const bounds = measured.box;
+    if (!bounds) throw new Error("rendered terminal output has no bounding box");
     await page.mouse.move(bounds.x, bounds.y + bounds.height / 2);
     await page.mouse.down();
     await page.mouse.move(bounds.x + bounds.width, bounds.y + bounds.height / 2, { steps: 12 });
@@ -738,6 +743,38 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
   expect(state.stops).toBe(0);
 });
 
+
+test("a terminal refit after copying keeps the copy announcement", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "refit-output\r\n");
+  const panel = page.getByRole("tabpanel");
+  const rendered = panel.locator(".xterm-rows").getByText("refit-output", { exact: true });
+  await expect(rendered).toBeVisible();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(page.url()).origin });
+  const measured = { box: null as Awaited<ReturnType<typeof rendered.boundingBox>> };
+  await expect.poll(async () => (measured.box = await rendered.boundingBox())).not.toBeNull();
+  const bounds = measured.box;
+  if (!bounds) throw new Error("rendered terminal output has no bounding box");
+  await page.mouse.move(bounds.x, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width, bounds.y + bounds.height / 2, { steps: 12 });
+  await page.mouse.up();
+  await panel.getByRole("button", { name: "Copy selection", exact: true }).click();
+  const status = panel.locator("[data-terminal-copy-status]");
+  await expect(status).toHaveText("Selection copied.");
+  // A narrower viewport refits the terminal and redraws its selection. That is
+  // not a new user selection, so the announcement must stay.
+  const screen = panel.locator(".xterm-screen");
+  const width = await screen.evaluate((element) => element.getBoundingClientRect().width);
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("the fixture page has no viewport");
+  await page.setViewportSize({ width: viewport.width - 60, height: viewport.height });
+  await expect.poll(() => screen.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThan(width);
+  await expect(status).toHaveText("Selection copied.");
+});
 test("terminal names survive reload and reconnect, render literally, and clear only the closed tab", async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);

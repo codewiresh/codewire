@@ -91,13 +91,14 @@ failures.
 
 ## Test projects
 
-`apps/dashboard/playwright.config.ts` defines three projects:
+`apps/dashboard/playwright.config.ts` defines these projects:
 
 | Project | Purpose |
 |---|---|
 | `setup` | Performs a real Rust form login, proves the dashboard and scoped HttpOnly session cookie, then writes local storage state |
 | `dashboard-ssr-desktop` | Runs the complete server-rendered behavior suite at desktop size |
 | `dashboard-ssr-mobile` | Runs the responsive behavior and visual contracts; desktop-only secret and lifecycle mutations are explicitly skipped |
+| `design-fixtures-desktop`, `design-fixtures-mobile` | Run the editable design-fixture specs at 1440 and 390 pixels; defined only when `CODEWIRE_DESIGN_ORIGIN` is set, as `make design-check` does |
 
 The desktop and mobile projects depend on `setup`. There are no `chromium`,
 `lifecycle`, `signup`, `billing`, or `oidc` projects; those were names from the
@@ -167,6 +168,23 @@ The synthetic password and roster live in
 `apps/dashboard/e2e/helpers/seed.ts`. The generated authenticated storage file
 under `apps/dashboard/playwright/.auth/` and Playwright reports are ignored by
 Git.
+
+## Design fixture browser specs
+
+`make design-check` runs every spec listed in
+`apps/dashboard/e2e/helpers/design-fixtures.ts` against the editable fixtures in
+`packages/codewire-design/reference/fixtures/`, at 1440 and 390 pixels, with the
+pinned Chromium. It needs no dashboard, database or Kind cluster. It serves the
+fixtures on the first free loopback port from 4180 to 4199, so it does not
+collide with `make design-system` on 4174 or with checks in other worktrees. The same runner is part of the `web` verification. It fails when
+a test fails or is skipped, or when either viewport runs nothing.
+
+Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to a pinned Chromium to reuse it.
+Otherwise the runner reuses a pinned-version download already in this checkout's
+`.tmp/`, or downloads and verifies one with
+`scripts/ci/install-pinned-playwright-chromium.sh`.
+A new spec that reads `CODEWIRE_DESIGN_ORIGIN` must be added to that list; the
+`test:fixtures` unit test enforces this.
 
 ## Focused static gates
 

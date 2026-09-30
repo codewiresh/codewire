@@ -847,7 +847,11 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       apps/dashboard/*|apps/docs/*|favicon.svg|logo/*|\
-      scripts/dev/design-system-server.py|scripts/ci/tests/test-dashboard-browser-gate.sh)
+      scripts/dev/design-system-server.py|scripts/ci/tests/test-dashboard-browser-gate.sh|\
+      scripts/ci/verify/run-design-fixtures.sh|scripts/ci/tests/test-run-design-fixtures.sh|\
+      scripts/ci/verify/playwright-browser-runtime.sh|scripts/ci/install-pinned-playwright-chromium.sh)
+        # The design-fixture browser gate in run_web runs the pinned Chromium
+        # through the shared browser runtime, so its inputs also select web.
         select_token web
         recognized=true
         ;;
@@ -873,6 +877,25 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      apps/dashboard/e2e/ssr-dashboard.account-dialogs.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.create-help.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.creation-disclosure.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.credential-dialogs.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.date-picker.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.durable-terminal.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.organization-layout.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.personal-api-keys.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.personal-secrets.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.preview-ports.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.repository-picker.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.resize.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.source-recovery.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.terminal-renderer.ssr.ts)
+        # Design-fixture specs run in the web gate's fixture runner and never
+        # in Kind, whose dashboard projects ignore them. Keep this list equal
+        # to apps/dashboard/e2e/helpers/design-fixtures.ts; its unit test checks.
+        ;;
       apps/dashboard/e2e/*)
         # Browser specs run only under Edge/Kind. A push to main runs them
         # post-merge so an edited spec cannot reach main unexecuted; a pull
@@ -1078,6 +1101,7 @@ if [ "$event_selected" = false ]; then
         select_token database
         select_token rust_pkg_codewire_credential_broker
         ;;
+      crates/codewire-credential-service/src/runtime/kind.rs|\
       crates/codewire-credential-service/src/runtime/kind/*)
         # This is the real in-cluster credential-service fixture, rather than
         # a unit-only helper. Like the direct Kind smoke owners, its changes

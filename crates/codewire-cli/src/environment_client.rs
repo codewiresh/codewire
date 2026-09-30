@@ -734,39 +734,59 @@ impl EnvironmentClient {
         Ok(logs)
     }
 
-    pub async fn stream_environment_logs<F>(
+    /// Opens one following `StreamLogs` connection that resumes strictly
+    /// after `after_log_id` (the server's composite cursor). Heartbeats are
+    /// surfaced so the caller can detect a silent connection; returning `false`
+    /// from `on_event` closes the stream.
+    pub async fn follow_environment_log_stream<F>(
         &self,
         org_id: &str,
         environment_id: &str,
+        after_log_id: Option<&str>,
         mut on_event: F,
-    ) -> anyhow::Result<()>
+    ) -> Result<(), EnvironmentLogStreamFailure>
     where
-        F: FnMut(EnvironmentLog) -> bool,
+        F: FnMut(EnvironmentLogStreamEvent) -> bool,
     {
         let mut conversion_error = None;
-        self.inner
+        let result = self
+            .inner
             .stream_logs(
                 rpc::StreamLogsRequest {
                     org_id: org_id.to_string(),
                     environment_id: environment_id.to_string(),
                     follow: true,
+                    after_log_id: after_log_id.unwrap_or_default().to_string(),
                     ..Default::default()
                 },
-                |message| match legacy_stream_log(message) {
-                    Ok(Some(log)) => on_event(log),
-                    Ok(None) => true,
-                    Err(error) => {
-                        conversion_error = Some(error);
-                        false
+                |message| match message.event {
+                    Some(rpc::stream_logs_response::Event::Log(log)) => {
+                        match legacy_environment_log(*log) {
+                            Ok(log) => on_event(EnvironmentLogStreamEvent::Log(log)),
+                            Err(error) => {
+                                conversion_error = Some(error);
+                                false
+                            }
+                        }
                     }
+                    Some(rpc::stream_logs_response::Event::Heartbeat(_)) => {
+                        on_event(EnvironmentLogStreamEvent::Heartbeat)
+                    }
+                    None => true,
                 },
             )
-            .await
-            .map_err(display_client_error)?;
+            .await;
         if let Some(error) = conversion_error {
-            return Err(error);
+            // The same row would fail again after a reconnect.
+            return Err(EnvironmentLogStreamFailure {
+                error,
+                recovery: LogStreamRecovery::Fatal,
+            });
         }
-        Ok(())
+        result.map_err(|error| EnvironmentLogStreamFailure {
+            recovery: log_stream_recovery(error.code()),
+            error: display_client_error(error),
+        })
     }
 
     pub async fn upload_environment_file(
@@ -857,6 +877,46 @@ pub(crate) fn display_client_error(error: ClientError) -> anyhow::Error {
         return anyhow::anyhow!("session expired or invalid");
     }
     error.into()
+}
+
+/// One event from a following environment-log stream.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EnvironmentLogStreamEvent {
+    Log(EnvironmentLog),
+    Heartbeat,
+}
+
+/// Why one environment-log stream connection ended early.
+#[derive(Debug)]
+pub struct EnvironmentLogStreamFailure {
+    pub error: anyhow::Error,
+    pub recovery: LogStreamRecovery,
+}
+
+/// How a follower recovers from an ended log stream connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogStreamRecovery {
+    /// The client's whole-call deadline, which also bounds streams, ended the
+    /// connection. Resume at once.
+    Resume,
+    /// A transient failure. Resume after a backoff, within a bounded budget.
+    Retry,
+    /// Reconnecting cannot help: authorization, a missing environment, a
+    /// rejected request, or a row this client cannot decode.
+    Fatal,
+}
+
+pub(crate) fn log_stream_recovery(code: ErrorCode) -> LogStreamRecovery {
+    match code {
+        ErrorCode::DeadlineExceeded => LogStreamRecovery::Resume,
+        ErrorCode::Unauthenticated
+        | ErrorCode::PermissionDenied
+        | ErrorCode::NotFound
+        | ErrorCode::InvalidArgument
+        | ErrorCode::FailedPrecondition
+        | ErrorCode::Unimplemented => LogStreamRecovery::Fatal,
+        _ => LogStreamRecovery::Retry,
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2103,6 +2163,143 @@ credentials: {profile: platform:user/work}
             .unwrap()
             .is_none()
         );
+    }
+
+    const STREAM_LOGS_PATH: &str = "/codewire.v1.EnvironmentService/StreamLogs";
+
+    fn connect_envelope(flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![flags];
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    async fn mount_log_stream(
+        server: &MockServer,
+        messages: &[rpc::StreamLogsResponse],
+        end: serde_json::Value,
+    ) {
+        let mut body = Vec::new();
+        for message in messages {
+            body.extend(connect_envelope(0, &message.encode_to_vec()));
+        }
+        body.extend(connect_envelope(2, &serde_json::to_vec(&end).unwrap()));
+        Mock::given(method("POST"))
+            .and(path(STREAM_LOGS_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/connect+proto")
+                    .set_body_bytes(body),
+            )
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn log_follow_resumes_after_the_cursor_and_surfaces_heartbeats() {
+        let server = MockServer::start().await;
+        let mut log = rpc::EnvironmentLog {
+            id: "log_3".into(),
+            environment_id: "env_test".into(),
+            phase: "git_clone".into(),
+            status: "progress".into(),
+            message: "Cloning repositories".into(),
+            created_at: Some(rpc::Timestamp {
+                seconds: 1_767_225_600,
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        log.metadata = Some(
+            serde_json::from_value(serde_json::json!({
+                "repo_index": 1,
+                "repo_count": 2,
+                "stage": "receiving_objects",
+                "percent": 45
+            }))
+            .unwrap(),
+        )
+        .into();
+        mount_log_stream(
+            &server,
+            &[
+                rpc::StreamLogsResponse {
+                    event: Some(rpc::stream_logs_response::Event::Heartbeat(
+                        Default::default(),
+                    )),
+                    ..Default::default()
+                },
+                rpc::StreamLogsResponse {
+                    event: Some(rpc::stream_logs_response::Event::Log(Box::new(log))),
+                    ..Default::default()
+                },
+            ],
+            serde_json::json!({}),
+        )
+        .await;
+
+        let mut events = Vec::new();
+        test_client(&server)
+            .follow_environment_log_stream("org_test", "env_test", Some("log_2"), |event| {
+                events.push(event);
+                true
+            })
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let body = &requests[0].body;
+        assert_eq!(body[0], 0, "uncompressed request envelope");
+        let mut payload = &body[5..];
+        let request = rpc::StreamLogsRequest::decode(&mut payload).unwrap();
+        assert_eq!(request.org_id, "org_test");
+        assert_eq!(request.environment_id, "env_test");
+        assert!(request.follow);
+        assert_eq!(request.after_log_id, "log_2");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], EnvironmentLogStreamEvent::Heartbeat);
+        let EnvironmentLogStreamEvent::Log(log) = &events[1] else {
+            panic!("expected a log row");
+        };
+        assert_eq!(log.id, "log_3");
+        assert_eq!(log.created_at, "2026-01-01T00:00:00Z");
+        // google.protobuf.Struct carries numbers as doubles.
+        let metadata = log.metadata.as_ref().unwrap();
+        assert!(metadata["repo_index"].is_f64(), "{metadata}");
+        assert_eq!(metadata["repo_index"].as_f64(), Some(1.0));
+        assert_eq!(metadata["stage"], "receiving_objects");
+    }
+
+    #[tokio::test]
+    async fn log_follow_failures_carry_their_recovery() {
+        for (code, recovery) in [
+            ("deadline_exceeded", LogStreamRecovery::Resume),
+            ("unavailable", LogStreamRecovery::Retry),
+            ("internal", LogStreamRecovery::Retry),
+            ("unauthenticated", LogStreamRecovery::Fatal),
+            ("permission_denied", LogStreamRecovery::Fatal),
+            ("not_found", LogStreamRecovery::Fatal),
+        ] {
+            let server = MockServer::start().await;
+            mount_log_stream(
+                &server,
+                &[],
+                serde_json::json!({"error": {"code": code, "message": "synthetic"}}),
+            )
+            .await;
+            let failure = test_client(&server)
+                .follow_environment_log_stream("org_test", "env_test", None, |_| true)
+                .await
+                .unwrap_err();
+            assert_eq!(failure.recovery, recovery, "{code}");
+            let request = &server.received_requests().await.unwrap()[0];
+            let mut payload = &request.body[5..];
+            let request = rpc::StreamLogsRequest::decode(&mut payload).unwrap();
+            assert_eq!(request.after_log_id, "", "{code}");
+        }
     }
 
     #[test]

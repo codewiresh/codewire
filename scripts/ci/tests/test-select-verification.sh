@@ -544,6 +544,12 @@ run_paths_case material_free_credential_bridge pull_request refs/pull/6011/head 
 run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/authority.rs
+run_paths_case credential_service_kind_entrypoint_without_opt_in pull_request refs/pull/6011/head false \
+  'database policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind.rs
+run_paths_case credential_service_kind_entrypoint_with_opt_in pull_request refs/pull/6011/head true \
+  'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind.rs
 run_paths_case credential_service_kind_runtime_without_opt_in pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/runtime/kind/provider.rs
@@ -809,6 +815,18 @@ run_paths_case dashboard_browser_gate pull_request refs/pull/1202/head false \
   'policy web' scripts/ci/tests/test-dashboard-browser-gate.sh
 run_paths_case dashboard_design_preview pull_request refs/pull/120/head false \
   'policy web' scripts/dev/design-system-server.py
+run_paths_case design_fixture_spec_push push refs/heads/main false \
+  'policy web' apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts
+run_paths_case design_fixture_spec_kind_opt_in pull_request refs/pull/2206/head true \
+  'policy web' apps/dashboard/e2e/ssr-dashboard.date-picker.ssr.ts
+run_paths_case design_fixture_list_push push refs/heads/main false \
+  'edge_kind kind policy web' apps/dashboard/e2e/helpers/design-fixtures.ts
+run_paths_case design_fixture_runner pull_request refs/pull/2203/head false \
+  'policy web' scripts/ci/verify/run-design-fixtures.sh
+run_paths_case design_fixture_runner_test pull_request refs/pull/2204/head false \
+  'policy web' scripts/ci/tests/test-run-design-fixtures.sh
+run_paths_case design_fixture_browser_runtime pull_request refs/pull/2205/head false \
+  'policy web' scripts/ci/verify/playwright-browser-runtime.sh
 run_paths_case marketing_brand_assets pull_request refs/pull/1201/head false \
   'policy web' favicon.svg logo/wordmark.svg
 run_paths_case dashboard_runtime_inventory pull_request refs/pull/121/head false \
@@ -942,9 +960,9 @@ run_paths_case edge_harness pull_request refs/pull/153/head false \
 run_paths_case edge_host_runtime pull_request refs/pull/1529/head true \
   'edge_kind kind policy' scripts/ci/verify/kind-host-runtime.sh
 run_paths_case edge_browser_runtime pull_request refs/pull/1530/head true \
-  'edge_kind kind policy' scripts/ci/verify/playwright-browser-runtime.sh
+  'edge_kind kind policy web' scripts/ci/verify/playwright-browser-runtime.sh
 run_paths_case pinned_browser_installer pull_request refs/pull/1531/head true \
-  'edge_kind kind policy' scripts/ci/install-pinned-playwright-chromium.sh
+  'edge_kind kind policy web' scripts/ci/install-pinned-playwright-chromium.sh
 run_paths_case mixed_sdk_and_runtime pull_request refs/pull/154/head false \
   'policy rust rust_pkg_codewire_server_core sdk_python service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   libs/sdk-python/codewire/client.py crates/codewire-server-core/src/lib.rs

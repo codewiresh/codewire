@@ -380,7 +380,100 @@ def verify_archive(path: Path, expected: dict[str, str]) -> None:
         raise SealError("Docker archive metadata is invalid") from error
 
 
+def archive_bytes(archive, members: dict, name: str, bound: int) -> bytes:
+    member = members.get(name)
+    require(member is not None and member.isfile() and 0 <= member.size <= bound,
+            "Docker archive metadata member is absent or oversized")
+    with archive.extractfile(member) as incoming:
+        data = incoming.read()
+    require(len(data) == member.size, "Docker archive metadata member is truncated")
+    return data
+
+
+def verify_oci_blob(archive, members: dict, descriptor: dict, media: set[str],
+                    hashes: dict[str, str], deadline: float, *, bound: int = FILE_BOUND,
+                    annotations: bool = False) -> str:
+    keys = {"digest", "mediaType", "size"} | ({"annotations"} if annotations else set())
+    require(isinstance(descriptor, dict) and set(descriptor) == keys
+            and isinstance(descriptor["mediaType"], str) and descriptor["mediaType"] in media
+            and isinstance(descriptor["digest"], str)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", descriptor["digest"]) is not None
+            and type(descriptor["size"]) is int and 0 <= descriptor["size"] <= bound,
+            "unsupported OCI archive descriptor")
+    name = "blobs/sha256/" + descriptor["digest"].removeprefix("sha256:")
+    member = members.get(name)
+    require(member is not None and member.isfile() and member.size == descriptor["size"],
+            "OCI archive descriptor does not match its member size")
+    require(time.monotonic() < deadline, "OCI archive hashing exceeded its deadline")
+    if name not in hashes:
+        value, consumed = hashlib.sha256(), 0
+        with archive.extractfile(member) as incoming:
+            while chunk := incoming.read(1024**2):
+                consumed += len(chunk)
+                require(consumed <= member.size and time.monotonic() < deadline,
+                        "OCI archive hashing exceeded its size or deadline")
+                value.update(chunk)
+        require(consumed == member.size, "OCI archive blob is truncated")
+        hashes[name] = "sha256:" + value.hexdigest()
+    require(hashes[name] == descriptor["digest"], "OCI archive blob digest differs")
+    return name
+
+
+def verify_oci_index(archive, members: dict, expected: dict[str, str], compatibility: dict,
+                     deadline: float) -> dict[str, str]:
+    """Admit only Docker-save's observed single-platform OCI manifest chain."""
+    require(decode(archive_bytes(archive, members, "oci-layout", JSON_BOUND))
+            == {"imageLayoutVersion": "1.0.0"}, "unsupported OCI archive layout")
+    index = decode(archive_bytes(archive, members, "index.json", 1024**2))
+    require(isinstance(index, dict) and set(index) == {"schemaVersion", "mediaType", "manifests"}
+            and type(index["schemaVersion"]) is int and index["schemaVersion"] == 2
+            and index["mediaType"] == "application/vnd.oci.image.index.v1+json"
+            and isinstance(index["manifests"], list) and len(index["manifests"]) == len(expected),
+            "unsupported OCI archive index")
+    found, hashes, digests = {}, {}, set()
+    for descriptor in index["manifests"]:
+        require(isinstance(descriptor, dict), "invalid OCI archive index descriptor")
+        annotations = descriptor.get("annotations")
+        require(isinstance(annotations, dict)
+                and {"io.containerd.image.name", "org.opencontainers.image.ref.name"} <= set(annotations)
+                and set(annotations) <= {"io.containerd.image.name", "org.opencontainers.image.ref.name",
+                                         "org.opencontainers.image.created"}
+                and all(isinstance(value, str) and len(value) <= 512 for value in annotations.values()),
+                "unsupported OCI archive tag annotations")
+        reference = annotations["io.containerd.image.name"]
+        tag = reference.removeprefix("docker.io/library/")
+        require(reference == "docker.io/library/" + tag and tag in expected and tag not in found
+                and annotations["org.opencontainers.image.ref.name"] == tag.rsplit(":", 1)[-1]
+                and descriptor.get("digest") == expected[tag] and descriptor["digest"] not in digests,
+                "OCI archive tag or manifest identity differs")
+        name = verify_oci_blob(archive, members, descriptor,
+                               {"application/vnd.oci.image.manifest.v1+json"}, hashes, deadline,
+                               bound=1024**2, annotations=True)
+        manifest = decode(archive_bytes(archive, members, name, 1024**2))
+        require(isinstance(manifest, dict) and set(manifest) == {"schemaVersion", "mediaType", "config", "layers"}
+                and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 2
+                and manifest["mediaType"] == "application/vnd.oci.image.manifest.v1+json"
+                and isinstance(manifest["layers"], list) and len(manifest["layers"]) <= 256,
+                "unsupported OCI archive image manifest")
+        config = verify_oci_blob(archive, members, manifest["config"],
+                                 {"application/vnd.oci.image.config.v1+json"}, hashes, deadline,
+                                 bound=INPUT_BOUND)
+        selected = compatibility[tag]
+        require(config == selected["config"] and manifest["config"]["digest"] == selected["config_id"],
+                "OCI image config differs from the Docker compatibility manifest")
+        layer_names = [verify_oci_blob(archive, members, layer,
+                                      {"application/vnd.oci.image.layer.v1.tar+gzip",
+                                       "application/vnd.oci.image.layer.v1.tar"}, hashes, deadline)
+                       for layer in manifest["layers"]]
+        require(layer_names == selected["layers"] and len(set(layer_names)) == len(layer_names),
+                "OCI ordered layers differ from the Docker compatibility manifest")
+        found[tag] = descriptor["digest"]
+        digests.add(descriptor["digest"])
+    return found
+
+
 def verify_archive_contents(path: Path, expected: dict[str, str]) -> None:
+    deadline = time.monotonic() + 120
     with regular_reader(path) as (descriptor, before):
         with os.fdopen(os.dup(descriptor), "rb") as stream:
             preflight_archive(stream, before.st_size)
@@ -397,7 +490,7 @@ def verify_archive_contents(path: Path, expected: dict[str, str]) -> None:
                 entries = decode(archive.extractfile(manifest).read())
                 require(isinstance(entries, list) and len(entries) == len(expected),
                         "Docker archive product inventory differs")
-                found = {}
+                found, compatibility = {}, {}
                 for entry in entries:
                     require(isinstance(entry, dict) and isinstance(entry.get("RepoTags"), list),
                             "invalid Docker archive entry")
@@ -416,6 +509,10 @@ def verify_archive_contents(path: Path, expected: dict[str, str]) -> None:
                         require(isinstance(tag, str) and tag not in found and tag in expected,
                                 "unexpected or duplicate Docker archive tag")
                         found[tag] = image_id
+                        compatibility[tag] = {"config": config_name, "config_id": image_id, "layers": layers}
+                require(set(found) == set(expected), "Docker archive tag inventory differs")
+                if "index.json" in members:
+                    found = verify_oci_index(archive, members, expected, compatibility, deadline)
                 require(found == expected, "Docker archive tags do not match admitted image IDs")
 
 

@@ -3,7 +3,10 @@ use std::path::Path;
 
 use super::*;
 
+mod progress;
 mod sources;
+
+use progress::{FollowPolicy, StartProgress, format_env_ready_text, format_environment_logs_plain};
 
 // Match the server-owned sandbox lifecycle first, then give daemon setup its
 // own post-running window. Confidential guests deliberately have a longer boot
@@ -326,6 +329,7 @@ pub(crate) async fn handle_platform_env_command(
 
     match command {
         EnvCommand::Create(args) => {
+            let began = Instant::now();
             let mut request = prepare_platform_env_create_request(&args)?;
             if let Some(bootstrap) = resolve_env_create_mesh_bootstrap(
                 &paths,
@@ -375,7 +379,13 @@ pub(crate) async fn handle_platform_env_command(
                 OutputFormat::Text => print!("{}", format_env_create_text(&environment)),
             }
             if matches!(args.output, OutputFormat::Text) && args.follow && !args.no_wait {
-                follow_environment_logs(&environment_client, &org_id, &environment.id).await?;
+                wait_for_platform_environment_setup(
+                    &environment_client,
+                    &org_id,
+                    &environment,
+                    began,
+                )
+                .await?;
             }
         }
         EnvCommand::Update(args) => {
@@ -423,8 +433,20 @@ pub(crate) async fn handle_platform_env_command(
             print_env_status(&args.environment, &response, args.output)?;
         }
         EnvCommand::Start(args) => {
+            let began = Instant::now();
             let environment_id =
                 resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
+            if matches!(args.output, OutputFormat::Text) {
+                start_platform_environment_with_progress(
+                    &environment_client,
+                    &org_id,
+                    &environment_id,
+                    &args.environment,
+                    began,
+                )
+                .await?;
+                return Ok(());
+            }
             let response = environment_client
                 .start_environment(&org_id, &environment_id)
                 .await
@@ -2806,22 +2828,131 @@ pub(crate) fn resolve_environment_port(
     anyhow::bail!("port {port_ref:?} not found")
 }
 
+/// `cw env logs --follow`: renders rows until the stream's terminal row,
+/// resuming after the last rendered row when the connection drops.
 pub(crate) async fn follow_environment_logs(
     client: &EnvironmentClient,
     org_id: &str,
     environment_id: &str,
 ) -> anyhow::Result<()> {
-    let mut phases = HashMap::new();
-    client
-        .stream_environment_logs(org_id, environment_id, |event| {
-            eprint!(
-                "{}",
-                format_environment_log_event(&event, &mut phases, None)
-            );
-            !is_terminal_environment_log(&event)
-        })
+    let feed = progress::PlatformLogFeed {
+        client,
+        org_id,
+        environment_id,
+    };
+    let mut view = StartProgress::new(
+        std::io::stderr(),
+        progress::live_progress_enabled(),
+        Instant::now(),
+        "Waiting for logs",
+    );
+    let mut cursor = None;
+    let result =
+        progress::follow_start_progress(&feed, &mut view, &mut cursor, &FollowPolicy::default())
+            .await;
+    view.finish()?;
+    // A failed stage was rendered; following it successfully is not an error.
+    result.map(|_| ())
+}
+
+/// `cw env create`: every setup stage through `complete`, then daemon
+/// readiness. Exits non-zero when a stage fails.
+async fn wait_for_platform_environment_setup(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment: &Environment,
+    began: Instant,
+) -> anyhow::Result<()> {
+    let environment_id = environment.id.as_str();
+    let feed = progress::PlatformLogFeed {
+        client,
+        org_id,
+        environment_id,
+    };
+    let mut view = StartProgress::new(
+        std::io::stderr(),
+        progress::live_progress_enabled(),
+        began,
+        "Starting",
+    );
+    progress::await_environment_setup(
+        &feed,
+        &mut view,
+        &FollowPolicy::default(),
+        environment_id,
+        progress::watch_setup_failure(client, org_id, environment_id),
+        || async {
+            wait_for_platform_environment_daemon_ready(client, org_id, environment_id)
+                .await
+                .context("wait for environment daemon readiness")
+        },
+    )
+    .await?;
+    let name = environment.name.as_deref().unwrap_or(environment_id);
+    print!(
+        "{}",
+        format_env_ready_text(name, view.total_elapsed(Instant::now()))
+    );
+    Ok(())
+}
+
+/// `cw env start` with text output: the start's stages, then daemon
+/// readiness. Exits non-zero when a stage fails.
+async fn start_platform_environment_with_progress(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+    environment_ref: &str,
+    began: Instant,
+) -> anyhow::Result<()> {
+    // Rows up to now belong to earlier operations, including the terminal
+    // row that would otherwise end the stream at once.
+    let cursor = client
+        .get_environment_logs(org_id, environment_id)
         .await
-        .context("connect to log stream")
+        .map(|logs| progress::last_log_id(&logs));
+    client
+        .start_environment(org_id, environment_id)
+        .await
+        .context("start environment")?;
+    let mut view = StartProgress::new(
+        std::io::stderr(),
+        progress::live_progress_enabled(),
+        began,
+        "Starting",
+    );
+    let daemon_ready = async {
+        wait_for_platform_environment_daemon_ready(client, org_id, environment_id)
+            .await
+            .context("wait for environment daemon readiness")
+    };
+    match cursor {
+        Ok(cursor) => {
+            let feed = progress::PlatformLogFeed {
+                client,
+                org_id,
+                environment_id,
+            };
+            progress::await_environment_start(
+                &feed,
+                &mut view,
+                &FollowPolicy::default(),
+                environment_id,
+                cursor,
+                daemon_ready,
+            )
+            .await?;
+        }
+        Err(error) => {
+            view.note(&format!("Start progress is unavailable: {error:#}"))?;
+            progress::await_daemon_ready(&mut view, &FollowPolicy::default(), daemon_ready).await?;
+        }
+    }
+    print!(
+        "{}",
+        format_env_ready_text(environment_ref, view.total_elapsed(Instant::now()))
+    );
+    Ok(())
 }
 
 pub(crate) fn print_environment_logs_historical(logs: &[EnvironmentLog]) {
@@ -2829,64 +2960,7 @@ pub(crate) fn print_environment_logs_historical(logs: &[EnvironmentLog]) {
         println!("No logs yet.");
         return;
     }
-
-    let mut phases = HashMap::new();
-    for event in logs {
-        eprint!(
-            "{}",
-            format_environment_log_event_historical(event, &mut phases)
-        );
-    }
-}
-
-pub(crate) fn format_environment_log_event_historical(
-    event: &EnvironmentLog,
-    phases: &mut HashMap<String, DateTime<Utc>>,
-) -> String {
-    let created_at = parse_environment_log_time(&event.created_at);
-    format_environment_log_event(event, phases, created_at)
-}
-
-pub(crate) fn format_environment_log_event(
-    event: &EnvironmentLog,
-    phases: &mut HashMap<String, DateTime<Utc>>,
-    event_time: Option<DateTime<Utc>>,
-) -> String {
-    match event.status.as_str() {
-        "started" => {
-            let start = event_time.unwrap_or_else(Utc::now);
-            phases.insert(event.phase.clone(), start);
-            format!("  ◌ {}...\n", event.message)
-        }
-        "completed" => {
-            let elapsed = phases.get(&event.phase).and_then(|start| {
-                event_time.map(|end| format!("  {}", format_elapsed_seconds(end - *start)))
-            });
-            format!(
-                "  ✓ {}{}\n",
-                event.message,
-                elapsed.as_deref().unwrap_or("")
-            )
-        }
-        "warning" => format!("  ! {}\n", event.message),
-        "failed" => format!("  ✗ {}\n", event.message),
-        _ => format!("  · {}\n", event.message),
-    }
-}
-
-pub(crate) fn parse_environment_log_time(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|value| value.with_timezone(&Utc))
-}
-
-pub(crate) fn format_elapsed_seconds(duration: ChronoDuration) -> String {
-    let seconds = duration.num_seconds().max(0);
-    format!("{seconds}s")
-}
-
-pub(crate) fn is_terminal_environment_log(event: &EnvironmentLog) -> bool {
-    event.phase == "complete" || event.status == "failed"
+    eprint!("{}", format_environment_logs_plain(logs));
 }
 
 pub(crate) fn filter_environments(

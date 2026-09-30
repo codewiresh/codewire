@@ -142,15 +142,29 @@ struct Counters {
 }
 
 #[derive(Clone)]
-pub(super) struct SyntheticProvider(Arc<Mutex<Counters>>, Option<Arc<super::git::Fixture>>);
+pub(super) struct SyntheticProvider(
+    Arc<Mutex<Counters>>,
+    Option<Arc<super::git::Fixture>>,
+    Arc<str>,
+);
 
 impl SyntheticProvider {
     pub(super) fn new() -> Self {
-        Self(Arc::new(Mutex::new(Counters::default())), None)
+        Self::with_callback(GITHUB_APP_CALLBACK_URL.into())
     }
 
-    pub(super) fn with_git(git: Arc<super::git::Fixture>) -> Self {
-        Self(Arc::new(Mutex::new(Counters::default())), Some(git))
+    pub(super) fn with_callback(callback: String) -> Self {
+        Self(
+            Arc::new(Mutex::new(Counters::default())),
+            None,
+            callback.into(),
+        )
+    }
+
+    pub(super) fn with_git(git: Arc<super::git::Fixture>, callback: String) -> Self {
+        let mut provider = Self::with_callback(callback);
+        provider.1 = Some(git);
+        provider
     }
 
     async fn github_git(
@@ -216,7 +230,7 @@ impl SyntheticProvider {
         ) {
             return Err(BrokerUpstreamError::Protocol);
         }
-        if body == github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0]).as_bytes() {
+        if body == github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0], &self.2).as_bytes() {
             // 60 seconds is valid for GitHub App user tokens, but inside the
             // five-minute renewal skew. The managed browser journey therefore
             // proves durable controlled refresh before its protected checkout.
@@ -228,7 +242,7 @@ impl SyntheticProvider {
                 "refresh_token_expires_in": 15_897_600,
             }));
         }
-        if body == github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[1]).as_bytes() {
+        if body == github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[1], &self.2).as_bytes() {
             // The duplicate-account browser path retains a non-expiring
             // response as a compatibility check; it is never persisted.
             return json_response(json!({
@@ -236,7 +250,7 @@ impl SyntheticProvider {
                 "token_type": "bearer",
             }));
         }
-        if body == github_app_exchange_body("kind-synthetic-code-uninstalled").as_bytes() {
+        if body == github_app_exchange_body("kind-synthetic-code-uninstalled", &self.2).as_bytes() {
             return json_response(json!({
                 "access_token": GITHUB_APP_UNINSTALLED_USER_TOKEN,
                 "token_type": "bearer",
@@ -502,10 +516,13 @@ impl BrokerUpstreamTransport for SyntheticProvider {
     }
 }
 
-fn github_app_exchange_body(code: &str) -> String {
-    format!(
-        "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code={code}&redirect_uri=http%3A%2F%2F127.0.0.1%3A8090%2Fapi%2Fv1%2Fgithub%2Foauth%2Fcallback"
-    )
+fn github_app_exchange_body(code: &str, callback: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("client_id", GITHUB_APP_CLIENT_ID);
+    serializer.append_pair("client_secret", GITHUB_APP_CLIENT_SECRET);
+    serializer.append_pair("code", code);
+    serializer.append_pair("redirect_uri", callback);
+    serializer.finish()
 }
 
 fn github_app_refresh_body() -> String {
@@ -663,6 +680,63 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn github_app_fixture_binds_all_exchange_branches_to_selected_origin() {
+        use codewire_credential_broker::{
+            GitHubAppAuthorizationConfig, GitHubAppAuthorizationError, GitHubAppAuthorizationOwner,
+        };
+        for port in [8090, 32767] {
+            let callback = format!("http://127.0.0.1:{port}/api/v1/github/oauth/callback");
+            let provider = SyntheticProvider::with_callback(callback.clone());
+            let config = GitHubAppAuthorizationConfig::new(
+                GITHUB_APP_CLIENT_ID.into(),
+                zeroize::Zeroizing::new(GITHUB_APP_CLIENT_SECRET.into()),
+                GITHUB_APP_SLUG.into(),
+                callback.clone(),
+            )
+            .unwrap();
+            let owner = GitHubAppAuthorizationOwner::new(config, Arc::new(provider.clone()));
+            for code in GITHUB_APP_AUTHORIZATION_CODES {
+                assert!(
+                    owner
+                        .complete(zeroize::Zeroizing::new(code.as_bytes().to_vec()))
+                        .await
+                        .is_ok(),
+                    "selected port {port} rejected installed exchange"
+                );
+            }
+            assert!(
+                matches!(
+                    owner
+                        .complete(zeroize::Zeroizing::new(
+                            b"kind-synthetic-code-uninstalled".to_vec()
+                        ))
+                        .await,
+                    Err(GitHubAppAuthorizationError::InstallationRequired)
+                ),
+                "selected port {port} rejected uninstalled exchange"
+            );
+            let wrong_port = if port == 8090 { 32767 } else { 8090 };
+            let wrong = GitHubAppAuthorizationConfig::new(
+                GITHUB_APP_CLIENT_ID.into(),
+                zeroize::Zeroizing::new(GITHUB_APP_CLIENT_SECRET.into()),
+                GITHUB_APP_SLUG.into(),
+                format!("http://127.0.0.1:{wrong_port}/api/v1/github/oauth/callback"),
+            )
+            .unwrap();
+            let wrong_owner = GitHubAppAuthorizationOwner::new(wrong, Arc::new(provider));
+            assert!(
+                wrong_owner
+                    .complete(zeroize::Zeroizing::new(
+                        GITHUB_APP_AUTHORIZATION_CODES[0].as_bytes().to_vec()
+                    ))
+                    .await
+                    .is_err(),
+                "mismatched port {wrong_port} was accepted by selected port {port}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn github_fetch_counts_only_authenticated_successful_backend_responses() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -674,7 +748,7 @@ mod tests {
         let git = super::super::git::Fixture::create(runtime.path())
             .await
             .unwrap();
-        let provider = SyntheticProvider::with_git(git.clone());
+        let provider = SyntheticProvider::with_git(git.clone(), GITHUB_APP_CALLBACK_URL.into());
         let advertisement =
             "https://github.com/synthetic-user/repository-01.git/info/refs?service=git-upload-pack"
                 .parse()
@@ -829,7 +903,11 @@ mod tests {
             provider
                 .github_app_exchange(
                     &exchange_headers,
-                    github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0]).as_bytes(),
+                    github_app_exchange_body(
+                        GITHUB_APP_AUTHORIZATION_CODES[0],
+                        GITHUB_APP_CALLBACK_URL
+                    )
+                    .as_bytes(),
                 )
                 .is_ok()
         );

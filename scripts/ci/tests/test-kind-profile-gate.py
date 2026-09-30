@@ -329,6 +329,128 @@ if deploy_agent_sandbox; then exit 90; else exit "$?"; fi
         self.assertEqual(result.returncode, 48, result.stderr)
         self.assertFalse((self.directory / "later").exists())
 
+    def credential_diagnostics(self, deployment_command=None, marker=None,
+                               pod_command=None, failing_reader=None, failure=None):
+        fixture_command = ["/codewire-kind-fixtures/credential-service"]
+        scenario = {
+            "deployment_command": fixture_command if deployment_command is None else deployment_command,
+            "marker": ["1"] if marker is None else marker,
+            "pod_command": fixture_command if pod_command is None else pod_command,
+            "failing_reader": failing_reader,
+        }
+        (self.directory / "diagnostic-scenario.json").write_text(json.dumps(scenario))
+        calls = self.directory / "diagnostic-calls.jsonl"
+        calls.write_text("")
+        fixture = self.directory / "diagnostic-kubectl.py"
+        fixture.write_text('''import json, sys
+from pathlib import Path
+root = Path(__file__).parent
+scenario = json.loads((root / "diagnostic-scenario.json").read_text())
+args = sys.argv[1:]
+with (root / "diagnostic-calls.jsonl").open("a") as stream:
+    stream.write(json.dumps(args) + "\\n")
+stage = None
+if "get" in args and "deployment/codewire-credential-service" in args:
+    stage = "deployment"
+elif "get" in args and "pods" in args and "-l" in args:
+    stage = "pod-names"
+elif "get" in args and "pod/credential-synthetic-abc" in args:
+    stage = "pod-identity" if any(".spec.containers" in arg for arg in args) else "status"
+elif "logs" in args and "pod/credential-synthetic-abc" in args:
+    stage = "previous" if "--previous" in args else "current"
+if stage == scenario["failing_reader"] and stage is not None:
+    print("private reader error must not be dumped", file=sys.stderr)
+    sys.exit(61)
+if stage in ("deployment", "pod-identity"):
+    command = scenario["deployment_command" if stage == "deployment" else "pod_command"]
+    print(json.dumps([command]))
+    print(json.dumps(scenario["marker"]))
+elif stage == "pod-names":
+    print(json.dumps(["credential-synthetic-abc"]))
+elif stage == "status":
+    print("current reason=Error exit_code=23\\nprevious reason=OOMKilled exit_code=137")
+elif stage in ("current", "previous"):
+    print(stage + " synthetic credential log")
+''')
+        finish = "dump_cluster_state" if failure is None else f"trap cleanup EXIT\nexit {failure}"
+        result = self.shell(f'''
+NS=synthetic-namespace
+SANDBOX_NS=synthetic-sandbox
+KEEP_KIND_CLUSTER=1
+AUTHZ_TMPDIR=
+GATEWAY_SMOKE_TMPDIR=
+kind() {{ printf '%s\\n' synthetic-profile; }}
+kubectl() {{ {shlex.quote(sys.executable)} {shlex.quote(str(fixture))} "$@"; }}
+stop_gateway_port_forward() {{ :; }}
+stop_remote_dind_kind_forwarding() {{ :; }}
+{finish}
+''')
+        captured = [json.loads(line) for line in calls.read_text().splitlines()]
+        credential_calls = [args for args in captured if
+                            "deployment/codewire-credential-service" in args or
+                            "pod/credential-synthetic-abc" in args or
+                            ("get" in args and "pods" in args and "-l" in args)]
+        return result, credential_calls
+
+    def test_synthetic_credential_failure_diagnostics_are_scoped_and_bounded(self):
+        result, calls = self.credential_diagnostics()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("current reason=Error exit_code=23", result.stdout)
+        self.assertIn("previous reason=OOMKilled exit_code=137", result.stdout)
+        self.assertIn("current synthetic credential log", result.stdout)
+        self.assertIn("previous synthetic credential log", result.stdout)
+        self.assertEqual(len(calls), 6)
+        for args in calls:
+            self.assertEqual(args[:4], ["--context", "kind-synthetic-profile", "-n", "synthetic-namespace"])
+            self.assertIn("--request-timeout=5s", args)
+            self.assertNotIn("json", args, "do not read or dump a complete deployment/pod")
+        identity_reads = [args for args in calls if any(".command}" in arg for arg in args)]
+        self.assertEqual(len(identity_reads), 2)
+        for args in identity_reads:
+            self.assertIn("CODEWIRE_KIND_CREDENTIAL_FIXTURE", args[-1])
+            self.assertIn('].value}', args[-1])
+        status = [args for args in calls if any("containerStatuses" in arg for arg in args)]
+        self.assertEqual(len(status), 1)
+        self.assertIn("lastState.terminated.reason", status[0][-1])
+        self.assertIn("lastState.terminated.exitCode", status[0][-1])
+        logs = [args for args in calls if "logs" in args]
+        self.assertEqual(len(logs), 2)
+        for args in logs:
+            self.assertIn("--tail=80", args)
+            self.assertIn("--limit-bytes=16384", args)
+            self.assertEqual(args[args.index("-c") + 1], "credential-service")
+        self.assertEqual(sum("--previous" in args for args in logs), 1)
+
+    def test_real_or_unknown_credential_deployment_is_not_logged(self):
+        for command, marker in [
+            (["/codewire-credential-service"], ["1"]),
+            (["/codewire-kind-fixtures/credential-service", "extra"], ["1"]),
+            ([], ["1"]),
+            (["/codewire-kind-fixtures/credential-service"], []),
+            (["/codewire-kind-fixtures/credential-service"], ["0"]),
+            (["/codewire-kind-fixtures/credential-service"], ["1", "1"]),
+        ]:
+            with self.subTest(command=command, marker=marker):
+                result, calls = self.credential_diagnostics(command, marker)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(calls), 1)
+                self.assertNotIn("synthetic credential log", result.stdout)
+                self.assertNotIn("exit_code=", result.stdout)
+
+    def test_old_real_pod_is_not_logged_under_a_fixture_deployment(self):
+        result, calls = self.credential_diagnostics(pod_command=["/codewire-credential-service"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("synthetic credential log", result.stdout)
+        self.assertNotIn("exit_code=", result.stdout)
+
+    def test_credential_diagnostic_read_failure_preserves_original_failure(self):
+        for stage in ["deployment", "pod-names", "pod-identity", "status", "current", "previous"]:
+            with self.subTest(stage=stage):
+                result, _ = self.credential_diagnostics(failing_reader=stage, failure=57)
+                self.assertEqual(result.returncode, 57, result.stderr)
+                self.assertNotIn("private reader error", result.stderr)
+
     def test_reuse_resolves_workspace_before_runtime_or_support_mutations(self):
         result = self.shell('''
 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci

@@ -35,6 +35,10 @@ files, and does not modify generated or production assets. Open files beneath
 `reference/source/` in the design authoring host when editing the original
 handoff; use the fixtures for the repository-owned, fully offline preview.
 
+`make design-check` runs the fixture browser specs against these pages at desktop
+and mobile widths, with the pinned Chromium. The `web` verification gate runs the
+same check.
+
 ## Conventions
 
 Use the `cw-` prefix for public classes and the documented custom properties
