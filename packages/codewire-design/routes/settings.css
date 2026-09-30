@@ -45,6 +45,7 @@
 /* Session and security rows: what it is on the left, its one action on the right. */
 [data-dashboard-app] :is(.cw-account-session, .cw-security-row) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; }
 [data-dashboard-app] :is(.cw-account-session > header, .cw-security-row > div) p { margin: var(--space-1) 0 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+[data-dashboard-app] .cw-account-session > header code { color: var(--fg-tertiary); font-size: var(--text-small); }
 [data-dashboard-app] .cw-session-pagination { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-block: var(--space-4); }
 [data-dashboard-app] .cw-credential-row > div:first-child { display: grid; gap: var(--space-1); }
 [data-dashboard-app] .cw-credential-row > div:first-child span,

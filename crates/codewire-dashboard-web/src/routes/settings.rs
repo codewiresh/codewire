@@ -116,6 +116,8 @@ pub(super) async fn settings(
                 expires: display_time(Some(&session.expires_at)),
             })
             .collect();
+        // This browser leads its page; the rest keep the IdP's order.
+        settings.sessions.sort_by_key(|session| !session.current);
         settings.current_session_listed = settings.sessions.iter().any(|session| session.current);
         settings.later_sessions_page = query
             .cursor
