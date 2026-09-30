@@ -28,7 +28,7 @@ case "$*" in
     jq -cn '{spec:{template:{spec:{containers:[{name:"orchestration",envFrom:[{secretRef:{name:"codewire-secrets"}},{configMapRef:{name:"codewire-config-live"}}]}]}}}}'
     ;;
   '-n dev get configmap codewire-config-live -o json')
-    jq -cn '{data:{SANDBOX_GATEWAY_IMAGE:"nexus.example.invalid/oci-approved/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",SANDBOX_DIND_IMAGE:"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",SANDBOX_KATA_COCO_KBS_URL:"https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080",SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI:"kbs:///default/containers/auth",SANDBOX_KATA_COCO_TEST_RESOURCE_URI:"kbs:///default/codewire/runtime-test-resource",SANDBOX_KATA_COCO_INIT_DATA_ENABLED:"true"}}'
+    jq -cn '{data:{SANDBOX_GATEWAY_IMAGE:"registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",SANDBOX_DIND_IMAGE:"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",SANDBOX_KATA_COCO_KBS_URL:"https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080",SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI:"kbs:///default/containers/auth",SANDBOX_KATA_COCO_TEST_RESOURCE_URI:"kbs:///default/codewire/runtime-test-resource",SANDBOX_KATA_COCO_INIT_DATA_ENABLED:"true"}}'
     ;;
   '-n flux-system get kustomization codewire-deploy-workloads-dev -o json')
     jq -cn '{metadata:{annotations:{"deploy.codewire.sh/source-sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},status:{lastAppliedRevision:"main@sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
@@ -37,7 +37,7 @@ case "$*" in
     jq -cn '{data:{"ca.crt":"-----BEGIN CERTIFICATE-----\nPUBLIC-TEST-CA\n-----END CERTIFICATE-----\n"}}'
     ;;
   '-n dev-sandboxes get serviceaccount codewire-sandbox -o json')
-    jq -cn '{imagePullSecrets:[{name:"nexus-registry"}]}'
+    jq -cn '{imagePullSecrets:[{name:"harbor-registry"}]}'
     ;;
   'apply -f '*)
     cp "${*: -1}" "$FAKE_KUBECTL_CAPTURE/probe.yaml"
@@ -142,8 +142,8 @@ manifest="$FAKE_KUBECTL_CAPTURE/probe.yaml"
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].volumeMounts[] | select(.name == "secure-scratch") | .mountPath' "$manifest")" == \
   '/tmp/codewire-secure-mount-probe' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].image' "$manifest")" == \
-  'nexus.example.invalid/oci-approved/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]]
-rg -F 'matchName: nexus.example.invalid' "$manifest" >/dev/null
+  'registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]]
+rg -F 'matchName: registry.example.invalid' "$manifest" >/dev/null
 rg -F 'matchName: codewire-trustee-kbs.codewire-trustee.svc.cluster.local' "$manifest" >/dev/null
 policy_json="$(yq -o=json 'select(.kind == "CiliumNetworkPolicy")' "$manifest")"
 jq -e '
@@ -206,7 +206,7 @@ PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
 EVIDENCE_DIR="$product_evidence" \
   "$SCRIPT" --wait-seconds 301 --image-role product --assert-rest-disabled
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.initContainers[0].image' "$manifest")" == \
-  'nexus.example.invalid/oci-approved/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]]
+  'registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].image' "$manifest")" == \
   'ghcr.io/codewiresh/workspace@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].resources.limits.memory' "$manifest")" == '16384Mi' ]]
@@ -222,7 +222,7 @@ if rg -qF '/tmp/cdh-resource.out' <<<"$product_script"; then
   exit 1
 fi
 product_policy_json="$(yq -o=json 'select(.kind == "CiliumNetworkPolicy")' "$manifest")"
-jq -e '[.spec.egress[] | select(.toFQDNs[0].matchName == "nexus.example.invalid")] | length == 1' \
+jq -e '[.spec.egress[] | select(.toFQDNs[0].matchName == "registry.example.invalid")] | length == 1' \
   <<<"$product_policy_json" >/dev/null
 workspace_policy_json="$(yq -o=json 'select(.kind == "CiliumNetworkPolicy")' "$manifest")"
 jq -e '

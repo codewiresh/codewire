@@ -56,7 +56,7 @@ OBSERVATION_FAILURE_CODES = {
     "invalid fixture ready metadata": "ready-metadata",
     "invalid public key": "ready-metadata",
 }
-IMAGE = re.compile(r"(?:ghcr\.io/codewiresh/workspace|nexus\.example\.invalid/oci-approved/codewire/workspace)@sha256:[0-9a-f]{64}")
+IMAGE = re.compile(r"(?:ghcr\.io/codewiresh/workspace|registry\.example\.invalid/codewire/workspace)@sha256:[0-9a-f]{64}")
 # Public route/trust binding from owning Infra clusters/kubernetes-access.json
 # main a7cb24de1ed865e44cc728530d4f47f64c33202c, dev-cluster. No alternatives.
 DEV_CONTEXT = "dev-cluster"

@@ -23,17 +23,17 @@ layer_cache_mode="${CODEWIRE_BUILDKIT_CACHE_MODE:-local}"
 build_runtime_set="${CODEWIRE_BUILD_RUNTIME_SET:-0}"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
-# Harbor is the only publication registry. Nexus remains a read-only source of
-# approved third-party inputs (below); nothing is pushed there.
+# Harbor is the only registry: publication targets the codewire/ project and
+# every digest-pinned approved third-party input lives in its oci-approved/
+# project.
 readonly REGISTRY_HOST='registry.example.invalid'
 readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/codewire"
 source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
-readonly APPROVED_REGISTRY_HOST='nexus.example.invalid'
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
-# Docker keys credentials by registry hostname. The Harbor publisher pushes
-# codewire/ images, while this canonical Nexus hostname uses the separate
-# read-only approved-input identity for the pinned SBOM tool.
-readonly SBOM_GENERATOR_IMAGE='nexus.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
+# Docker keys credentials by registry hostname. The single Harbor publisher
+# login below both pushes codewire/ images and pulls oci-approved/ inputs such
+# as the pinned SBOM tool; a second login on the same host would replace it.
+readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
 readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
 readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 
@@ -175,13 +175,10 @@ umask 077
 work="$(mktemp -d)"
 registry_username_file="$work/harbor-username"
 registry_password_file="$work/harbor-password"
-approved_registry_username_file="$work/nexus-approved-username"
-approved_registry_password_file="$work/nexus-approved-password"
 build_metadata="$work/build-metadata.json"
 bake_metadata="$work/bake-metadata.json"
 docker_config="${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-$work/docker-config}"
 credential_fetcher="${OPENBAO_HARBOR_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-harbor-credentials.sh}"
-approved_credential_fetcher="${OPENBAO_NEXUS_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-nexus-credentials.sh}"
 buildx_builder=''
 buildx_builder_owned=0
 source_remote_url=''
@@ -248,13 +245,7 @@ if [ ! -x "$credential_fetcher" ]; then
   echo "OpenBao Harbor credential fetcher is missing or not executable" >&2
   exit 1
 fi
-if [ ! -x "$approved_credential_fetcher" ]; then
-  echo "OpenBao approved-input credential fetcher is missing or not executable" >&2
-  exit 1
-fi
 "$credential_fetcher" "$registry_username_file" "$registry_password_file"
-"$approved_credential_fetcher" --approved \
-  "$approved_registry_username_file" "$approved_registry_password_file"
 
 registry_auth_error() {
   grep -Eqi \
@@ -316,13 +307,7 @@ registry_login() {
   registry_login_host "$REGISTRY_HOST" "$registry_username_file" "$registry_password_file"
 }
 
-approved_registry_login() {
-  registry_login_host "$APPROVED_REGISTRY_HOST" \
-    "$approved_registry_username_file" "$approved_registry_password_file"
-}
-
 registry_login
-approved_registry_login
 
 create_buildx_builder() {
   [ -z "$buildx_builder" ] || return 0
