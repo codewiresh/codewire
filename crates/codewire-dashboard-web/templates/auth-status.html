@@ -6,17 +6,21 @@
     <title>{{ title }} · Codewire</title>
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/auth-v2.css">
+    <link rel="stylesheet" href="/assets/codewire/cosmos-v1.css">
+    <script src="/assets/codewire/cosmos-v1.js" defer></script>
   </head>
   <body class="cw-body cw-auth-body" data-route="auth-status">
+    <div class="cw-cosmos" aria-hidden="true">
+      <canvas id="cosmos-canvas"></canvas>
+    </div>
     <main class="cw-auth-shell">
-      <a class="cw-auth-brand" href="/"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
-      <section class="cw-card cw-auth-card">
-        <header class="cw-card-header cw-auth-header">
-          <div class="cw-auth-mark cw-auth-mark--success" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg></div>
-          <h1 class="cw-page-title">{{ title }}</h1>
-          <p class="cw-card-description">{{ description }}</p>
+      <a class="cw-auth-brand" href="/" aria-label="Codewire home"><img src="/assets/codewire/brand-icon-v1.svg" width="48" height="48" alt="Codewire"></a>
+      <section class="cw-auth-panel" aria-labelledby="status-title">
+        <header class="cw-auth-header">
+          <h1 id="status-title" class="cw-page-title">{{ title }}</h1>
+          <p class="cw-auth-copy">{{ description }}</p>
         </header>
-        <div class="cw-card-content"><a class="cw-button cw-auth-submit" href="{{ primary_url }}">{{ primary_label }}</a></div>
+        <a class="cw-button cw-button--pill cw-button--large cw-auth-submit" href="{{ primary_url }}">{{ primary_label }}</a>
       </section>
     </main>
   </body>

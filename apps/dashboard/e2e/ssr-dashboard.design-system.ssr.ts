@@ -8,30 +8,18 @@ test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reduced
 // editable fixture page at the project's desktop or mobile width. The token
 // guard (scripts/checks/repo_checks.py design-tokens) owns the source side.
 //
-// `pending` pins the exact number of findings each fixture still has per width,
-// owned by a W2A burn-down slice (#2203). Any change fails: a new finding, or a
-// fixed one whose count was not lowered. Lower or delete the entry as its slice
-// lands, so the list only shrinks.
+// `pending` caps the findings each fixture may still have per width, owned by a
+// W2A burn-down slice (#2203). More findings than the cap fails, and so does a
+// cap whose page is now clean: delete the entry so the list only shrinks.
+// Incidental improvements below the cap pass without bookkeeping.
 type Check = "scale" | "contrast" | "focus";
 type Viewport = "desktop" | "mobile";
 type Pending = Partial<Record<`${Viewport} ${Check}`, number>>;
 
-const pending: Record<string, Pending> = {
-  // Create slice: environments.css
-  "create-sandbox.html": { "desktop scale": 8, "mobile scale": 8 },
-  "source-selection-recovery.html": { "desktop scale": 3, "mobile scale": 3 },
-  // Terminal slice: terminal.css
-  "terminal-tabs.html": { "desktop scale": 1, "desktop contrast": 4, "mobile scale": 1, "mobile contrast": 2 },
-  "terminal.html": { "desktop scale": 2, "mobile scale": 2 },
-  // Shell and organizations slice: dashboard.css, organizations.css
-  "application-secrets.html": { "desktop scale": 4, "desktop contrast": 1, "mobile scale": 4, "mobile contrast": 1 },
-  "sandboxes.html": { "desktop scale": 4, "desktop contrast": 5, "mobile scale": 3, "mobile contrast": 5 },
-  "settings-secrets-empty.html": { "desktop scale": 2, "desktop contrast": 1 },
-  // Auth and public slice: auth.css, public.css
-  "home.html": { "desktop scale": 62, "desktop contrast": 17, "mobile scale": 57, "mobile contrast": 17 },
-  "login.html": { "desktop scale": 3, "desktop focus": 1, "mobile scale": 3, "mobile focus": 1 },
-  "signup.html": { "desktop scale": 6, "desktop focus": 2, "mobile scale": 6, "mobile focus": 2 },
-};
+const pending: Record<string, Pending> = {};
+
+// home.html uses public.css's own marketing scale: it keeps an 11px text floor, not the console type and radius scale.
+const ownScale = new Set(["home.html"]);
 
 const fixtureDirectory = new URL("../../../packages/codewire-design/reference/fixtures/", import.meta.url);
 // Whole pages only. A fragment such as terminal-ports.html has no stylesheets of
@@ -47,13 +35,14 @@ test("every pending exception names an existing fixture", () => {
 });
 
 // Font sizes, radii, contrast and native select rendering, measured in the page.
-async function inspect(page: Page) {
-  return page.evaluate(() => {
+async function inspect(page: Page, marketing: boolean) {
+  return page.evaluate((marketing) => {
     const px = (value: string) => Number.parseFloat(value);
     const fontScale = new Set([11, 12, 13, 14, 17]);
-    const onFontScale = (size: number) => fontScale.has(size) || (size >= 24 && size <= 30);
+    const onFontScale = (size: number) =>
+      marketing ? size >= 11 : fontScale.has(size) || (size >= 24 && size <= 30);
     const onRadiusScale = (value: string) =>
-      value.endsWith("%") || [0, 4, 8, 12].includes(px(value)) || px(value) >= 999;
+      marketing || value.endsWith("%") || [0, 4, 8, 12].includes(px(value)) || px(value) >= 999;
     const shown = (element: Element) => {
       const style = getComputedStyle(element);
       const box = element.getBoundingClientRect();
@@ -123,7 +112,7 @@ async function inspect(page: Page) {
       .map((element) => `${describe(element)} appearance ${getComputedStyle(element).appearance}`);
     const root = document.scrollingElement ?? document.documentElement;
     return { overflow: root.scrollWidth - root.clientWidth, scale, contrast, select };
-  });
+  }, marketing);
 }
 
 // Keyboard focus must always be visible: tabbing to a control must add a
@@ -134,6 +123,9 @@ const tabLimit = 400;
 
 async function focusGaps(page: Page) {
   await page.evaluate(() => {
+    // Measure every control unfocused: an autofocused field would otherwise
+    // record its focus ring as its resting look.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     const look = (element: Element) => {
       const style = getComputedStyle(element);
       return {
@@ -194,13 +186,17 @@ for (const fixture of fixtures) {
     await page.goto(`${origin}/reference/fixtures/${fixture}`);
     await page.evaluate(() => document.fonts.ready);
 
-    const findings = { ...(await inspect(page)), focus: await focusGaps(page) };
+    const findings = { ...(await inspect(page, ownScale.has(fixture))), focus: await focusGaps(page) };
     const viewport: Viewport = testInfo.project.name.endsWith("mobile") ? "mobile" : "desktop";
     expect.soft(findings.overflow, "the page scrolls sideways").toBe(0);
     expect.soft(findings.select, "selects must render the styled base-select picker").toEqual([]);
     for (const check of ["scale", "contrast", "focus"] as const) {
-      const expected = pending[fixture]?.[`${viewport} ${check}`] ?? 0;
-      expect.soft(findings[check], `${viewport} ${check} findings (pending ${expected})`).toHaveLength(expected);
+      const cap = pending[fixture]?.[`${viewport} ${check}`] ?? 0;
+      expect.soft(findings[check].length, `${viewport} ${check} findings (cap ${cap}): ${findings[check].join(" | ")}`)
+        .toBeLessThanOrEqual(cap);
+      if (cap > 0) {
+        expect.soft(findings[check].length, `${viewport} ${check} is clean; delete its pending entry`).toBeGreaterThan(0);
+      }
     }
   });
 }

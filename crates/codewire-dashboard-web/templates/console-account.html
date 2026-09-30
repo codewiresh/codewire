@@ -1,12 +1,12 @@
 <div class="cw-console-account">
   <a class="cw-console-support" href="/docs">Support</a>
   <details class="cw-menu cw-user-menu">
-    <summary class="cw-button cw-button--outline cw-button--small cw-button--pill">{{ view.user_name }}<span class="cw-user-chevrons" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-chevron-up"/></svg><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-chevron-down"/></svg></span></summary>
+    <summary class="cw-button cw-button--outline cw-button--small cw-button--pill">{{ view.user_name }}<svg class="cw-icon cw-user-chevrons" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevrons-up-down"/></svg></summary>
     <div class="cw-menu-panel cw-menu-panel--end">
       <div class="cw-user-menu-identity"><strong>{{ view.user_name }}</strong><span>Authenticated account</span></div>
       <a href="{{ view.settings_url }}">Settings</a>
       <a href="/docs">Docs</a>
-      <form method="post" action="/settings/_actions/sign-out" data-sign-out><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button type="submit">Sign Out</button></form>
+      <form method="post" action="/settings/_actions/sign-out" data-sign-out><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button class="cw-menu-item" type="submit">Sign Out</button></form>
     </div>
   </details>
 </div>

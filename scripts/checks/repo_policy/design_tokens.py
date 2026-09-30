@@ -11,7 +11,6 @@ from html.parser import HTMLParser
 
 
 DESIGN_POLICY_REL = "scripts/checks/contracts/design-token-policy.json"
-DESIGN_BASELINE_REL = "scripts/checks/contracts/design-token-baseline.json"
 DESIGN_PACKAGE = "packages/codewire-design"
 DESIGN_FIXTURES = f"{DESIGN_PACKAGE}/reference/fixtures"
 DESIGN_TEMPLATES = "crates/codewire-dashboard-web/templates"
@@ -42,7 +41,6 @@ DESIGN_POLICY_KEYS = {
     "ownership_properties",
     "control_classes",
     "js_hook_classes",
-    "strict_files",
 }
 DESIGN_LITERAL_KINDS = {
     "typography",
@@ -55,13 +53,6 @@ DESIGN_LITERAL_KINDS = {
     "layout_size",
 }
 DESIGN_OWNERSHIP_KINDS = {"visual", "control_visual", "layout"}
-DESIGN_BASELINE_KEYS = {"$comment", "schema_version", "fingerprints"}
-DESIGN_BASELINE_COMMENT = (
-    "Design-system violations inherited from the protected base. Entries may only be "
-    "removed: a new violation fails as unapproved, a fixed one fails as stale until "
-    "`repo_checks.py design-tokens --prune` deletes it, and files listed in the policy "
-    "strict_files may have no entries."
-)
 DESIGN_FINGERPRINT_LIMIT = 160
 DESIGN_MARKUP_REQUIRED = {
     "select": ("cw-select",),
@@ -223,43 +214,28 @@ RUST_CLASS_ATTRIBUTE = re.compile(r'class=\\"([^"\\]*)\\"|class="([^"\\]*)"')
 
 def check_design_tokens(args: argparse.Namespace) -> int:
     root = Path(getattr(args, "root", None) or ROOT).resolve()
-    violations: list[str] = []
-    baseline: list[str] = []
+    corpus: dict[str, str] = {}
     self_test_cases = 0
     try:
         policy = load_design_token_policy(root)
         corpus = design_token_corpus(root)
         violations, failures = design_token_violations(corpus, policy)
-        if not failures:
-            if getattr(args, "write_baseline", False) or getattr(args, "prune", False):
-                write_design_token_baseline(
-                    root,
-                    violations,
-                    mode="write" if getattr(args, "write_baseline", False) else "prune",
-                )
-            baseline = load_design_token_baseline(root)
-            failures = design_token_baseline_failures(violations, baseline, policy, corpus)
+        failures = [*failures, *design_token_failures(violations)]
         if not failures and args.self_test:
-            self_test_cases = design_tokens_self_test(policy, violations, baseline, corpus)
+            self_test_cases = design_tokens_self_test(policy, violations, corpus)
     except Exception as error:  # noqa: BLE001 - repository guard boundary
         failures = [str(error)]
 
     if failures:
         return report("design tokens", failures)
-    files = {design_fingerprint_parts(entry)[1] for entry in baseline}
-    print(
-        f"design tokens: OK ({len(baseline)} baselined violations in {len(files)} files; "
-        f"{len(policy['strict_files'])} strict files)"
-    )
-    for line in design_token_summary(baseline):
-        print(line)
+    print(f"design tokens: OK (no violations in {len(corpus)} design inputs)")
     if self_test_cases:
         print(f"design tokens: self-test OK ({self_test_cases} fixtures)")
     return 0
 
 
 # ---------------------------------------------------------------------------
-# Policy, corpus, and baseline
+# Policy, corpus, and fingerprints
 
 
 def load_design_token_policy(root: Path) -> dict[str, Any]:
@@ -274,9 +250,6 @@ def load_design_token_policy(root: Path) -> dict[str, Any]:
         raise RuntimeError("design token policy must have a non-empty $comment")
     for key in ("token_files", "isolated_token_files", "core_files", "breakpoints", "control_classes"):
         design_string_list(policy.get(key), f"design token policy {key}", allow_empty=False)
-    design_string_list(policy.get("strict_files"), "design token policy strict_files", allow_empty=True)
-    if policy["strict_files"] != sorted(policy["strict_files"]):
-        raise RuntimeError("design token policy strict_files must be sorted")
     if not set(policy["isolated_token_files"]) <= set(policy["token_files"]):
         raise RuntimeError("design token policy isolated_token_files must be token files")
     if not isinstance(policy.get("gallery_file"), str) or not policy["gallery_file"].endswith(".html"):
@@ -352,56 +325,6 @@ def design_token_corpus(root: Path) -> dict[str, str]:
     return corpus
 
 
-def load_design_token_baseline(root: Path) -> list[str]:
-    path = root / DESIGN_BASELINE_REL
-    if not path.is_file():
-        raise RuntimeError(f"{DESIGN_BASELINE_REL} is missing; run design-tokens --write-baseline")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or set(data) != DESIGN_BASELINE_KEYS:
-        raise RuntimeError(
-            f"design token baseline keys must be exactly {stable_json(sorted(DESIGN_BASELINE_KEYS))}"
-        )
-    if data.get("schema_version") != 1:
-        raise RuntimeError("design token baseline schema_version must equal 1")
-    fingerprints = data.get("fingerprints")
-    if not isinstance(fingerprints, list) or not all(isinstance(item, str) for item in fingerprints):
-        raise RuntimeError("design token baseline fingerprints must be a list of strings")
-    for fingerprint in fingerprints:
-        design_fingerprint_parts(fingerprint)
-    if fingerprints != sorted(fingerprints):
-        raise RuntimeError("design token baseline fingerprints must be sorted; run design-tokens --prune")
-    return fingerprints
-
-
-def design_token_baseline_update(existing: list[str] | None, current: list[str], mode: str) -> list[str]:
-    if existing is None:
-        if mode != "write":
-            raise RuntimeError(f"{DESIGN_BASELINE_REL} is missing; run design-tokens --write-baseline")
-        return sorted(current)
-    kept = Counter(existing) & Counter(current)
-    if mode == "write":
-        additions = Counter(current) - Counter(existing)
-        if additions:
-            sample = sorted(additions)[:5]
-            raise RuntimeError(
-                f"refusing to add {sum(additions.values())} entries to an existing baseline; "
-                f"fix the violations instead: {stable_json(sample)}"
-            )
-    return sorted(kept.elements())
-
-
-def write_design_token_baseline(root: Path, current: list[str], *, mode: str) -> None:
-    path = root / DESIGN_BASELINE_REL
-    existing = load_design_token_baseline(root) if path.exists() else None
-    fingerprints = design_token_baseline_update(existing, current, mode)
-    document = {
-        "$comment": DESIGN_BASELINE_COMMENT,
-        "schema_version": 1,
-        "fingerprints": fingerprints,
-    }
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
 def design_fingerprint(rule: str, file: str, context: str, name: str, value: str) -> str:
     return "|".join((rule, file, design_clip(context), name, design_clip(value)))
 
@@ -420,51 +343,20 @@ def design_clip(text: str) -> str:
     return f"{text[:120]}...sha256:{digest}"
 
 
-def design_token_baseline_failures(
-    violations: list[str], baseline: list[str], policy: dict[str, Any], corpus: dict[str, str]
-) -> list[str]:
-    failures: list[str] = []
-    current = Counter(violations)
-    approved = Counter(baseline)
-    groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
-    for status, counter in (("unapproved", current - approved), ("stale: run --prune", approved - current)):
-        for fingerprint, count in counter.items():
-            rule, file, detail = design_fingerprint_parts(fingerprint)
-            groups.setdefault((file, rule), []).extend([(status, detail)] * count)
-    if groups:
-        unapproved_total = sum((current - approved).values())
-        failures.append(
-            f"{unapproved_total} unapproved and {sum((approved - current).values())} stale violations "
-            "(selector|property|value); fix unapproved ones, the baseline cannot grow; "
-            "delete stale ones with --prune"
-        )
-    for file, rule in sorted(groups):
-        entries = sorted(groups[(file, rule)])
-        unapproved = sum(1 for status, _ in entries if status == "unapproved")
-        failures.append(
-            f"{file} [{rule}]: {unapproved} unapproved, {len(entries) - unapproved} stale"
-        )
-        failures.extend(f"  {status}: {detail}" for status, detail in entries)
-    strict = set(policy["strict_files"])
-    for file in sorted(strict - set(corpus)):
-        failures.append(f"strict file is not a scanned design input: {file}")
-    for fingerprint in sorted(set(baseline)):
+def design_token_failures(violations: list[str]) -> list[str]:
+    """Every violation fails: the design system has no baseline of exceptions."""
+    if not violations:
+        return []
+    groups: dict[tuple[str, str], list[str]] = {}
+    for fingerprint in violations:
         rule, file, detail = design_fingerprint_parts(fingerprint)
-        if file in strict:
-            failures.append(f"strict file {file} still has a baseline entry [{rule}]: {detail}")
+        groups.setdefault((file, rule), []).append(detail)
+    failures = [f"{len(violations)} violations (selector|property|value); fix each one"]
+    for file, rule in sorted(groups):
+        details = sorted(groups[(file, rule)])
+        failures.append(f"{file} [{rule}]: {len(details)}")
+        failures.extend(f"  {detail}" for detail in details)
     return failures
-
-
-def design_token_summary(fingerprints: list[str]) -> list[str]:
-    counts: dict[str, Counter[str]] = {}
-    for fingerprint in fingerprints:
-        rule, file, _ = design_fingerprint_parts(fingerprint)
-        counts.setdefault(file, Counter())[rule] += 1
-    lines = []
-    for file in sorted(counts):
-        detail = " ".join(f"{rule}={counts[file][rule]}" for rule in DESIGN_RULES if counts[file][rule])
-        lines.append(f"  {file}: {detail}")
-    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -1441,6 +1333,8 @@ def design_token_violations(
                 emit("literal", rel, context, f"@{at}", length)
 
     # R2 forbidden: !important, removed focus outlines, and tracking outside core.
+    # An isolated token file is its own design system: its tracking and uppercase
+    # are allowed (letter-spacing values are still literals checked by R1).
     for declaration in scan.declarations:
         name = design_unprefixed(declaration.name)
         if declaration.important and not declaration.hidden and not declaration.reduced_motion:
@@ -1449,7 +1343,7 @@ def design_token_violations(
             name == "outline-style" and declaration.text.lower() == "none"
         ):
             emit("forbidden", declaration.file, declaration.context, declaration.name, declaration.text)
-        if declaration.file not in core and (
+        if declaration.file not in core and declaration.file not in isolated and (
             name == "letter-spacing"
             or (
                 name == "text-transform"
@@ -1573,9 +1467,7 @@ def design_self_test_base(policy: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def design_tokens_self_test(
-    policy: dict[str, Any], violations: list[str], baseline: list[str], corpus: dict[str, str]
-) -> int:
+def design_tokens_self_test(policy: dict[str, Any], violations: list[str], corpus: dict[str, str]) -> int:
     cases = 0
 
     def expect(label: str, condition: bool) -> None:
@@ -1584,8 +1476,8 @@ def design_tokens_self_test(
         if not condition:
             raise RuntimeError(f"design token self-test failed: {label}")
 
-    # The real tree plus the committed baseline passes.
-    expect("real tree matches baseline", not design_token_baseline_failures(violations, baseline, policy, corpus))
+    # The real tree has no violations.
+    expect("real tree has no violations", not violations and not design_token_failures(violations))
 
     # Tokenizer: opaque data URIs, comments, nested blocks, and !important.
     chevron = css_items(
@@ -1811,6 +1703,36 @@ def design_tokens_self_test(
         found = violations_for(extra)
         expect(f"accepts {label}: {found}", not found)
 
+    # Tracking and uppercase: an isolated token file may use them as tokens; the
+    # exemption does not extend to any other non-core route.
+    marketing = f"{DESIGN_PACKAGE}/routes/marketing.css"
+    isolated_policy = copy.deepcopy(policy)
+    isolated_policy["token_files"] = [*policy["token_files"], marketing]
+    isolated_policy["isolated_token_files"] = [*policy["isolated_token_files"], marketing]
+    marketing_css = (
+        ":root { --tracking-label: 0.04em; }\n"
+        ".x { letter-spacing: var(--tracking-label); text-transform: uppercase; }\n"
+    )
+    found, failed = design_token_violations({**base, marketing: marketing_css}, isolated_policy)
+    expect(f"isolated token file may use tracking and uppercase: {found} {failed}", not found and not failed)
+    found, _ = design_token_violations(
+        {**base, marketing: marketing_css.replace("var(--tracking-label)", "0.04em")}, isolated_policy
+    )
+    expect(
+        f"isolated token file tracking is still a token: {found}",
+        found == [f"literal|{marketing}|.x|letter-spacing|0.04em"],
+    )
+    found, _ = design_token_violations(
+        {**base, marketing: marketing_css, route: ".y { letter-spacing: var(--tracking); text-transform: uppercase; }"},
+        isolated_policy,
+    )
+    expect(
+        f"non-isolated route still rejects tracking and uppercase: {found}",
+        f"forbidden|{route}|.y|letter-spacing|var(--tracking)" in found
+        and f"forbidden|{route}|.y|text-transform|uppercase" in found
+        and not any(f"|{marketing}|" in item for item in found),
+    )
+
     hooked = copy.deepcopy(policy)
     hooked["js_hook_classes"] = {"cw-hook": "fixture hook"}
     hook_violations, hook_failures = design_token_violations(
@@ -1819,43 +1741,11 @@ def design_tokens_self_test(
     expect("JS hook allowlist admits a used hook", not hook_violations and not hook_failures)
     expect("unused JS hook is stale", bool(design_token_violations(base, hooked)[1]))
 
-    # Baseline: two-sided comparison, swaps, multiplicity, strict files, and writes.
+    # No baseline: every violation fails and is reported under its file and rule.
     first = f"literal|{route}|.x|color|red"
-    second = f"literal|{route}|.y|color|blue"
-    fixture_corpus = {**base, route: ""}
-    policy = copy.deepcopy(policy)
-    policy["strict_files"] = []
-    expect("matching baseline passes", not design_token_baseline_failures([first], [first], policy, fixture_corpus))
-    stale = design_token_baseline_failures([first], [first, second], policy, fixture_corpus)
-    expect("stale baseline entry fails", any("stale: run --prune" in item for item in stale))
-    swapped = design_token_baseline_failures([second], [first], policy, fixture_corpus)
+    reported = design_token_failures([first, first])
     expect(
-        "swapping one violation for another fails",
-        any("unapproved:" in item and ".y" in item for item in swapped)
-        and any("stale: run --prune" in item and ".x" in item for item in swapped),
+        "every violation fails, repeats included",
+        reported[:2] == ["2 violations (selector|property|value); fix each one", f"{route} [literal]: 2"],
     )
-    expect(
-        "duplicate occurrence fails",
-        any("unapproved:" in item for item in design_token_baseline_failures([first, first], [first], policy, fixture_corpus)),
-    )
-    strict_policy = copy.deepcopy(policy)
-    strict_policy["strict_files"] = [route]
-    expect(
-        "strict file cannot keep baseline entries",
-        any("strict file" in item for item in design_token_baseline_failures([first], [first], strict_policy, fixture_corpus)),
-    )
-    strict_policy["strict_files"] = [DESIGN_SELF_TEST_OTHER_ROUTE]
-    expect(
-        "strict file must be a scanned input",
-        any("not a scanned design input" in item for item in design_token_baseline_failures([], [], strict_policy, fixture_corpus)),
-    )
-    try:
-        design_token_baseline_update([first], [first, second], "write")
-    except RuntimeError:
-        refused = True
-    else:
-        refused = False
-    expect("write-baseline refuses to add entries", refused)
-    expect("first write-baseline creates", design_token_baseline_update(None, [second, first], "write") == [first, second])
-    expect("prune only deletes", design_token_baseline_update([first, second], [first, "extra"], "prune") == [first])
     return cases

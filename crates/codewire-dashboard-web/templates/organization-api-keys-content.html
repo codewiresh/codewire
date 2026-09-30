@@ -11,17 +11,17 @@
       <h2 class="cw-card-title">API Keys</h2>
       <p>Manage API keys for programmatic access</p>
     </div>
-    <details class="cw-org-details"{% if page.form.expanded %} open{% endif %}>
-      <summary class="cw-button">
+    <details class="cw-menu cw-org-details"{% if page.form.expanded %} open{% endif %}>
+      <summary class="cw-button cw-button--pill">
         <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>
         Create Key
       </summary>
-      <section class="cw-card" aria-labelledby="create-key-title">
-        <div class="cw-card-header">
+      <section class="cw-drawer" aria-labelledby="create-key-title">
+        <header class="cw-drawer-header">
           <h3 id="create-key-title" class="cw-card-title">Create API Key</h3>
           <p class="cw-card-description">Generate a new API key for this organization.</p>
-        </div>
-        <div class="cw-card-content">
+        </header>
+        <div class="cw-drawer-body">
           {% if !page.form.form_error.is_empty() %}
           <div class="cw-alert cw-alert--error" role="alert">{{ page.form.form_error }}</div>
           {% endif %}
@@ -93,9 +93,9 @@
               </form>
               {% endif %}
               {% if organization.can_admin %}
-              <details class="cw-delete-confirmation">
+              <details class="cw-menu">
                 <summary class="cw-button cw-button--outline cw-button--small cw-danger-button" aria-label="Delete API key">Delete</summary>
-                <div class="cw-delete-panel">
+                <div class="cw-menu-panel cw-menu-panel--form cw-menu-panel--end">
                   <p>Permanently revoke <strong>{{ key.name }}</strong>? Integrations using it will stop immediately.</p>
                   <form method="post" action="/{{ organization.slug }}/api-keys/_actions/delete" hx-post="/{{ organization.slug }}/api-keys/_actions/delete">
                     <input type="hidden" name="_csrf" value="{{ page.csrf_token }}">

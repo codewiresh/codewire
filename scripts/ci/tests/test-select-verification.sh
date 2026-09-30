@@ -760,9 +760,6 @@ run_paths_case permanent_raw_policy_guard pull_request refs/pull/117/head false 
   'policy' scripts/checks/contracts/permanent-raw-surface-policy.json
 run_present_paths_case design_token_policy pull_request refs/pull/2203/head false \
   'policy' scripts/checks/contracts/design-token-policy.json
-run_present_paths_case design_token_baseline pull_request refs/pull/22031/head false \
-  'policy' scripts/checks/contracts/design-token-baseline.json \
-  scripts/checks/contracts/design-token-policy.json
 run_present_paths_case design_token_guard_module pull_request refs/pull/22032/head false \
   'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_policy/design_tokens.py
