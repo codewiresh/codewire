@@ -24,6 +24,7 @@
     "docs/**",
     "scripts/ci/images/cosign-private-signing-config.json",
     "scripts/ci/images/sign-runtime-image-set.sh",
+    "scripts/ci/tests/test-kind-e2e-suites.sh",
     "scripts/ci/tests/test-sign-runtime-image-set.sh",
     "scripts/ci/trust/codewire-runtime-signing.pub",
     "scripts/runtime/dev/provider-anthropic-output.py",
