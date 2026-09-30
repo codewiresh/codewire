@@ -17,5 +17,11 @@ pub(crate) mod repository_mount;
 pub mod resize_metrics;
 pub mod runtime_transport;
 pub mod sandbox;
+pub mod start_metrics;
 pub mod temporal;
+/// Isolated-database fixtures shared by the crate's ignored database tests.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../codewire-platform-credentials/tests/support/mod.rs"]
+pub(crate) mod test_database_support;
 pub mod worker;

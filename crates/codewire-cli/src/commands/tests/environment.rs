@@ -2366,66 +2366,6 @@ fn env_port_text_matches_go_messages() {
 }
 
 #[test]
-fn env_log_text_matches_go_event_shapes() {
-    let started = EnvironmentLog {
-        id: "log-1".to_string(),
-        environment_id: "env-1".to_string(),
-        phase: "clone".to_string(),
-        status: "started".to_string(),
-        message: "Cloning repository".to_string(),
-        metadata: None,
-        created_at: "2026-07-05T03:00:00Z".to_string(),
-    };
-    let completed = EnvironmentLog {
-        id: "log-2".to_string(),
-        environment_id: "env-1".to_string(),
-        phase: "clone".to_string(),
-        status: "completed".to_string(),
-        message: "Repository cloned".to_string(),
-        metadata: None,
-        created_at: "2026-07-05T03:00:07Z".to_string(),
-    };
-    let warning = EnvironmentLog {
-        id: "log-3".to_string(),
-        environment_id: "env-1".to_string(),
-        phase: "install".to_string(),
-        status: "warning".to_string(),
-        message: "Package cache unavailable".to_string(),
-        metadata: None,
-        created_at: "2026-07-05T03:00:08Z".to_string(),
-    };
-    let failed = EnvironmentLog {
-        id: "log-4".to_string(),
-        environment_id: "env-1".to_string(),
-        phase: "install".to_string(),
-        status: "failed".to_string(),
-        message: "Install failed".to_string(),
-        metadata: None,
-        created_at: "2026-07-05T03:00:09Z".to_string(),
-    };
-    let mut phases = HashMap::new();
-
-    assert_eq!(
-        format_environment_log_event_historical(&started, &mut phases),
-        "  ◌ Cloning repository...\n"
-    );
-    assert_eq!(
-        format_environment_log_event_historical(&completed, &mut phases),
-        "  ✓ Repository cloned  7s\n"
-    );
-    assert_eq!(
-        format_environment_log_event_historical(&warning, &mut phases),
-        "  ! Package cache unavailable\n"
-    );
-    assert_eq!(
-        format_environment_log_event_historical(&failed, &mut phases),
-        "  ✗ Install failed\n"
-    );
-    assert!(is_terminal_environment_log(&failed));
-    assert_eq!(format_elapsed_seconds(ChronoDuration::seconds(-1)), "0s");
-}
-
-#[test]
 fn env_port_resolution_matches_label_number_or_id() {
     let ports = vec![EnvironmentPort {
         id: "port-1".to_string(),

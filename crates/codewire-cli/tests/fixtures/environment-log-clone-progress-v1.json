@@ -1,0 +1,22 @@
+{
+  "contract": "Program #2238 A5a clone progress rows, version 1. See crates/codewire-cli/src/commands/environment/progress.rs.",
+  "rows": [
+    {"id": "log-01", "environment_id": "env-fixture", "phase": "ensure_namespace", "status": "started", "message": "Creating namespace", "created_at": "2026-09-29T10:00:00Z"},
+    {"id": "log-02", "environment_id": "env-fixture", "phase": "ensure_namespace", "status": "completed", "message": "Creating namespace", "created_at": "2026-09-29T10:00:00Z"},
+    {"id": "log-03", "environment_id": "env-fixture", "phase": "create_claim", "status": "started", "message": "Creating sandbox", "created_at": "2026-09-29T10:00:00Z"},
+    {"id": "log-04", "environment_id": "env-fixture", "phase": "create_claim", "status": "completed", "message": "Creating sandbox", "metadata": {"duration_ms": 21600}, "created_at": "2026-09-29T10:00:22Z"},
+    {"id": "log-05", "environment_id": "env-fixture", "phase": "store_backend", "status": "completed", "message": "Storing backend info", "created_at": "2026-09-29T10:00:22Z"},
+    {"id": "log-06", "environment_id": "env-fixture", "phase": "health_check", "status": "started", "message": "Checking sidecar readiness", "created_at": "2026-09-29T10:00:22Z"},
+    {"id": "log-07", "environment_id": "env-fixture", "phase": "health_check", "status": "completed", "message": "Checking sidecar readiness", "metadata": {"duration_ms": 180}, "created_at": "2026-09-29T10:00:22Z"},
+    {"id": "log-08", "environment_id": "env-fixture", "phase": "git_clone", "status": "started", "message": "Cloning repositories", "created_at": "2026-09-29T10:00:23Z"},
+    {"id": "log-09", "environment_id": "env-fixture", "phase": "git_clone", "status": "started", "message": "Cloning repository 1 of 2", "metadata": {"repo_index": 1, "repo_count": 2}, "created_at": "2026-09-29T10:00:23Z"},
+    {"id": "log-10", "environment_id": "env-fixture", "phase": "git_clone", "status": "progress", "message": "Cloning repositories", "metadata": {"repo_index": 1, "repo_count": 2, "stage": "receiving_objects", "percent": 45}, "created_at": "2026-09-29T10:00:24Z"},
+    {"id": "log-11", "environment_id": "env-fixture", "phase": "git_clone", "status": "progress", "message": "Cloning repositories", "metadata": {"repo_index": 1, "repo_count": 2, "stage": "resolving_deltas", "percent": 100}, "created_at": "2026-09-29T10:00:26Z"},
+    {"id": "log-12", "environment_id": "env-fixture", "phase": "git_clone", "status": "completed", "message": "Cloned repository 1 of 2", "metadata": {"repo_index": 1, "repo_count": 2}, "created_at": "2026-09-29T10:00:26Z"},
+    {"id": "log-13", "environment_id": "env-fixture", "phase": "git_clone", "status": "started", "message": "Cloning repository 2 of 2", "metadata": {"repo_index": 2, "repo_count": 2}, "created_at": "2026-09-29T10:00:26Z"},
+    {"id": "log-14", "environment_id": "env-fixture", "phase": "git_clone", "status": "progress", "message": "Cloning repositories", "metadata": {"repo_index": 2, "repo_count": 2, "stage": "receiving_objects", "percent": 100}, "created_at": "2026-09-29T10:00:27Z"},
+    {"id": "log-15", "environment_id": "env-fixture", "phase": "git_clone", "status": "completed", "message": "Cloned repository 2 of 2", "metadata": {"repo_index": 2, "repo_count": 2}, "created_at": "2026-09-29T10:00:28Z"},
+    {"id": "log-16", "environment_id": "env-fixture", "phase": "git_clone", "status": "completed", "message": "Cloning repositories", "created_at": "2026-09-29T10:00:28Z"},
+    {"id": "log-17", "environment_id": "env-fixture", "phase": "complete", "status": "completed", "message": "Setup complete", "created_at": "2026-09-29T10:00:29Z"}
+  ]
+}
