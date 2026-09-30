@@ -462,7 +462,7 @@ class FixtureTests(unittest.TestCase):
             ("name", "private-name-canary", "runtime-container-identity"),
             ("ready", False, "runtime-container-identity"),
             ("image", "ghcr.io/codewiresh/workspace:private-tag-canary", "runtime-image-name-approved-repository-tag"),
-            ("image", "nexus.example.invalid/oci-approved/codewire/workspace@sha256:" + "a" * 64,
+            ("image", "registry.example.invalid/codewire/workspace@sha256:" + "a" * 64,
              "runtime-image-name-approved-repository-digest"),
             ("image", "sha256:" + "B" * 64, "runtime-image-name-unrecognized"),
             ("image", "private-image-key-event-canary", "runtime-image-name-unrecognized"),
@@ -503,7 +503,7 @@ class FixtureTests(unittest.TestCase):
         container = self.kube.objects[("pods", state["name"])]["status"]["containerStatuses"][0]
         digest = "sha256:" + "7" * 64
         selected_id = "ghcr.io/codewiresh/workspace@" + digest
-        wrong_id = "nexus.example.invalid/oci-approved/codewire/workspace@" + digest
+        wrong_id = "registry.example.invalid/codewire/workspace@" + digest
         cases = [
             (IMAGE, selected_id, True),
             (IMAGE, "docker-pullable://" + selected_id, True),
@@ -538,7 +538,7 @@ class FixtureTests(unittest.TestCase):
         original_observe = FIXTURE.observe
         for index, (image_id, code) in enumerate([
             ("sha256:" + "7" * 64, "runtime-image-id-digest-only"),
-            ("nexus.example.invalid/oci-approved/codewire/workspace@sha256:" + "7" * 64,
+            ("registry.example.invalid/codewire/workspace@sha256:" + "7" * 64,
              "runtime-image-id-approved-repository-digest"),
             ("private-imageid-canary", "runtime-image-id-unrecognized"),
         ]):

@@ -56,7 +56,7 @@ if [ "${FAKE_TRANSIENT_REGISTRY_IMAGE:-}" = "$name" ]; then
       printf 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/%s/blobs/sha256:test: 503 Service Temporarily Unavailable\n' \
         "$name" >&2
     else
-      printf 'login attempt to https://nexus.example.invalid/v2/ failed with status: 503 Service Unavailable\n' >&2
+      printf 'login attempt to https://registry.example.invalid/v2/ failed with status: 503 Service Unavailable\n' >&2
     fi
     exit 1
   fi

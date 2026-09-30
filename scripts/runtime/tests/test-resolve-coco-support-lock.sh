@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RESOLVER="$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh"
 LOCK="$ROOT/deployments/k8s/runtime-profiles/confidential/coco-support-images.lock.json"
 SOURCE_SHA="c0a265c6eb6cea7353a632b92e7c5819f0629583"
-GATEWAY_IMAGE="nexus.example.invalid/oci-approved/codewire/gateway@sha256:b606b5e4b119c4117b9163943702ff3fcea56d1c0e2f85a6ad3bf2ffa3dfc1c1"
+GATEWAY_IMAGE="registry.example.invalid/codewire/gateway@sha256:b606b5e4b119c4117b9163943702ff3fcea56d1c0e2f85a6ad3bf2ffa3dfc1c1"
 mkdir -p "$ROOT/.tmp"
 TMPDIR_TEST="$(mktemp -d "$ROOT/.tmp/codewire-coco-support-lock.XXXXXX")"
 trap 'rm -rf "$TMPDIR_TEST"' EXIT

@@ -20,12 +20,6 @@ other_digest="sha256:$(printf 'b%.0s' {1..64})"
 source_sha="$(printf 'c%.0s' {1..40})"
 harbor="registry.example.invalid/codewire"
 
-# Publication never reads Nexus: this fetcher fails the run if it is called.
-cat >"$work/bin/nexus-fetcher" <<'SH'
-#!/usr/bin/env bash
-echo 'Nexus credential requested during Harbor publication' >&2
-exit 97
-SH
 cat >"$work/bin/harbor-fetcher" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -93,7 +87,6 @@ esac
 SH
 chmod +x "$work/bin/"*
 
-export OPENBAO_NEXUS_CREDENTIAL_FETCHER="$work/bin/nexus-fetcher"
 export OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/bin/harbor-fetcher"
 export HARBOR_COPY_HELPER="$work/bin/copy-helper"
 export SKOPEO_RUNNER="$work/bin/skopeo-runner"
