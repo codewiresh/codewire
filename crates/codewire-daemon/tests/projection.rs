@@ -452,30 +452,37 @@ impl Harness {
         String::from_utf8(bytes).unwrap()
     }
 
-    fn assert_persisted_inputs(&self, id: &str, pty: bool, term: &str) {
+    fn persisted_metadata(&self, id: &str) -> Vec<u8> {
         let path = self
             .root
             .path()
             .join("home/.codewire/daemon/sessions")
             .join(id)
             .join("session.json");
-        let bytes = std::fs::read(path).unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    fn assert_persisted_inputs(&self, id: &str, pty: bool, term: &str) {
+        let bytes = self.persisted_metadata(id);
         let metadata: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(metadata["env"], serde_json::json!(REQUEST_ENV));
+        assert!(metadata.get("env").is_none());
+        assert_eq!(metadata["environment_projection_required"], true);
         assert_eq!(metadata["term"], term);
         assert_eq!(metadata["pty"], pty);
         assert_eq!(
             metadata["command"],
             serde_json::json!(["/bin/sh", "-c", PROBE])
         );
-        for absent in [
+        for absent in REQUEST_ENV.into_iter().chain([
+            "explicit-request-value",
+            "request-input",
             FIRST,
             SECOND,
             "projected-shadow",
             "projected-not-empty",
             "projected-term",
             "image-rotating",
-        ] {
+        ]) {
             assert!(
                 !bytes
                     .windows(absent.len())
@@ -603,17 +610,8 @@ async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen
     assert_probe(&output, FIRST, pty);
     harness.assert_persisted_inputs(&id, pty, term);
 
-    if reopen_daemon {
-        // Reap the old daemon, retain only its owned persisted store, and
-        // reconnect a new bridge with the exact same admitted authority.
-        // Carry recipient/request history so freshness spans both daemons.
-        let (root, environment, history) = harness.stop_preserving_store(1, 0).await;
-        harness = Harness::open(root, environment, history, None).await;
-        let recovered = harness.exited(&id).await;
-        assert_eq!(recovered.output_end_offset, first.output_end_offset);
-        harness.assert_persisted_inputs(&id, pty, term);
-    }
-
+    // The live daemon retains the explicitly supplied launch values in RAM;
+    // restart obtains a fresh sealed projection without persisting either.
     let restarted = bounded(harness.client.restart_session(authorized(
         v1::RestartSessionRequest {
             session_id: id.clone(),
@@ -631,6 +629,47 @@ async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen
     assert_probe(&output, SECOND, pty);
     assert!(!output.contains(FIRST));
     harness.assert_persisted_inputs(&id, pty, term);
+
+    if reopen_daemon {
+        // Reap the old daemon and retain only its redacted store. Reconnecting
+        // the same projection authority cannot recover the inline overrides.
+        let metadata = harness.persisted_metadata(&id);
+        let output = harness.output(&id, 0, pty).await;
+        let launcher_pid = std::fs::read(harness.root.path().join("launcher.pid")).unwrap();
+        let (root, environment, history) = harness.stop_preserving_store(2, 0).await;
+        harness = Harness::open(root, environment, history, None).await;
+        let recovered = harness.exited(&id).await;
+        assert_eq!(recovered, second);
+        assert_eq!(harness.persisted_metadata(&id), metadata);
+        harness.assert_persisted_inputs(&id, pty, term);
+
+        let error = bounded(harness.client.restart_session(authorized(
+            v1::RestartSessionRequest {
+                session_id: id.clone(),
+            },
+        )))
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains(
+            "the launch environment projection is no longer available after daemon recovery"
+        ));
+        assert_eq!(harness.exited(&id).await, recovered);
+        assert_eq!(harness.persisted_metadata(&id), metadata);
+        assert_eq!(harness.output(&id, 0, pty).await, output);
+        assert_eq!(
+            std::fs::read(harness.root.path().join("launcher.pid")).unwrap(),
+            launcher_pid
+        );
+        assert_eq!(
+            std::fs::read_dir(harness.root.path().join("processes"))
+                .unwrap()
+                .count(),
+            0
+        );
+        // stop() checks the carried bridge history: exactly the two admitted
+        // projections and no cancellation or extra launch after refusal.
+    }
     harness.stop().await;
 }
 
