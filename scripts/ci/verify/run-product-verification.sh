@@ -191,7 +191,8 @@ isolate_kind_fixture_environment() {
   unset CLUSTER KUBECONFIG KUBE_CONTEXT RUN_DIR CARGO_CI_DIR
 }
 
-run_policy_core() (
+run_policy_core() {
+  (
   isolate_kind_fixture_environment
   run_verification_shell_syntax
   scripts/ci/tests/test-setup-kubeconfig.sh
@@ -244,7 +245,8 @@ run_policy_core() (
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/source/check-native-desktop-ui.py
   python3 scripts/checks/repo_checks.py go-source-classification
-)
+  )
+}
 
 run_policy() {
   # A legacy trusted selector does not know when omission is authoritative, so
@@ -688,7 +690,8 @@ install_caddy() {
   export PATH="$HOME/.local/bin:$PATH"
 }
 
-run_edge() (
+run_edge() {
+  (
   isolate_kind_fixture_environment
   install_caddy
   caddy validate --config Caddyfile --adapter caddyfile
@@ -726,7 +729,8 @@ run_edge() (
   scripts/ci/tests/test-kind-forwards.sh
   python3 -B scripts/ci/tests/test-kind-codex-session.py
   python3 -B scripts/ci/tests/test-kind-credentials.py
-)
+  )
+}
 
 run_release() {
   scripts/ci/tests/test-base-image-source.sh
