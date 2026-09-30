@@ -147,3 +147,36 @@ subjects:
   - kind: ServiceAccount
     name: codewire-orchestration
     namespace: prod
+---
+# The runtime image cache orders its image sets by release: the revision of
+# the ReplicaSet that controls this Pod (a rollback renumbers the reused
+# ReplicaSet). Read-only, in orchestration's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: codewire-orchestration-release-revision
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+rules:
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: codewire-orchestration-release-revision
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: codewire-orchestration-release-revision
+subjects:
+  - kind: ServiceAccount
+    name: codewire-orchestration
+    namespace: prod

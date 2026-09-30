@@ -22,6 +22,7 @@ pub mod env_log;
 #[cfg(feature = "kind-e2e")]
 pub mod fencing_evidence;
 pub mod gatewayauth;
+pub mod image_cache;
 pub mod lifecycle;
 pub mod loops;
 pub mod organization_deletion;

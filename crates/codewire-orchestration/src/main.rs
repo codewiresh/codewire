@@ -7,7 +7,8 @@
 //!   path after the D3 NATS retirement (owner decision 2026-06-12)
 //! - leader-gated background loops (`WORKER_LOOPS`): the env reconciler,
 //!   sandbox-liveness, and billing-session controller, whose enqueues
-//!   SignalWithStart workflows
+//!   SignalWithStart workflows; plus the per-replica `image-cache`
+//!   reconciler for the runtime-node image cache DaemonSet
 //!
 //! NATS is gone: there is no consumer plane and no `TENANT_LOCKS`
 //! distributed lock — one workflow per environment id serializes
@@ -24,7 +25,12 @@ use codewire_orchestration::worker::{self, cloudflare::CloudflareClient};
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use tokio::net::TcpListener;
 
-const DEFAULT_WORKER_LOOPS: &[&str] = &["env-reconciler", "sandbox-liveness", "billing-session"];
+const DEFAULT_WORKER_LOOPS: &[&str] = &[
+    "env-reconciler",
+    "sandbox-liveness",
+    "billing-session",
+    "image-cache",
+];
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
 const PUBLIC_CONNECT_METHODS: [&str; 1] = ["/codewire.v1.OrganizationService/GetInvitationByToken"];
@@ -410,7 +416,12 @@ mod tests {
     fn worker_loops_default_to_rust_owned_set() {
         assert_eq!(
             env_list_from(None),
-            vec!["env-reconciler", "sandbox-liveness", "billing-session",]
+            vec![
+                "env-reconciler",
+                "sandbox-liveness",
+                "billing-session",
+                "image-cache",
+            ]
         );
     }
 
