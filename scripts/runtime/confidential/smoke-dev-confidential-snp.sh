@@ -360,6 +360,9 @@ resolve_active_release() {
     '.data.SANDBOX_RUNTIME_PROFILE == "commodity"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "active Docker mode is not profile-default" \
     '.data.SANDBOX_DOCKER_MODE == "profile-default"' "$EVIDENCE_DIR/active-runtime-config.json"
+  # The confidential activation profile still pins ordinary Longhorn for
+  # commodity workspaces; the Dev commodity profile uses local-path while Dev's
+  # Longhorn is retired (Program #2238).
   assert_jq "active default workspace storage class is not ordinary Longhorn" \
     '.data.SANDBOX_WORKSPACE_STORAGE_CLASS == "longhorn"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "confidential creation is not enabled" \
