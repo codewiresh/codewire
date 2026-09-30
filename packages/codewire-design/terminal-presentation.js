@@ -75,8 +75,12 @@
     }
     copyFeedback("");
     const selectionSubscription = terminal.onSelectionChange(() => {
-      copyRevision += 1;
       if (copyButton) copyButton.disabled = !terminal.hasSelection();
+      // A refit redraws or clears the selection; it is not a new user
+      // selection. The copy announcement itself can add a mobile toolbar row
+      // and trigger that refit, so it must not retract its own message.
+      if (fitting) return;
+      copyRevision += 1;
       copyFeedback("");
     });
     terminal.attachCustomKeyEventHandler((event) => {
