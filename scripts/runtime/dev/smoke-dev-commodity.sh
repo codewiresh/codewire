@@ -2337,21 +2337,21 @@ assert_pod_shape() {
     die "gateway Deployment is missing codewire-gateway container"
   [[ "$gateway_host_key_env" == "/codewire/gateway/ssh/host_ed25519" ]] || \
     die "gateway CODEWIRE_SSH_HOST_KEY_PATH=$gateway_host_key_env, want /codewire/gateway/ssh/host_ed25519"
+  # The gateway waits for its daemon without a deadline. Its startup probe
+  # (2s period) and rollout deadline match the tier's workspace ready timeout.
+  local want_startup_failure_threshold=300 want_progress_deadline=600
   if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
-    [[ "$gateway_daemon_timeout" == "1500" ]] || \
-      die "confidential gateway daemon-connect timeout=$gateway_daemon_timeout, want 1500"
-    [[ "$gateway_startup_failure_threshold" == "780" ]] || \
-      die "confidential gateway startup failureThreshold=$gateway_startup_failure_threshold, want 780"
-    [[ "$gateway_progress_deadline" == "1800" ]] || \
-      die "confidential gateway progressDeadlineSeconds=$gateway_progress_deadline, want 1800"
-    [[ "$gateway_restart_count" == "0" ]] || \
-      die "confidential gateway restarted $gateway_restart_count time(s) during bounded startup"
-  else
-    [[ -z "$gateway_daemon_timeout" ]] || \
-      die "non-confidential gateway overrides daemon-connect timeout=$gateway_daemon_timeout"
-    [[ "$gateway_startup_failure_threshold" == "45" ]] || \
-      die "non-confidential gateway startup failureThreshold=$gateway_startup_failure_threshold, want 45"
+    want_startup_failure_threshold=900
+    want_progress_deadline=1800
   fi
+  [[ -z "$gateway_daemon_timeout" ]] || \
+    die "gateway has a daemon-connect deadline=$gateway_daemon_timeout, want none"
+  [[ "$gateway_startup_failure_threshold" == "$want_startup_failure_threshold" ]] || \
+    die "gateway startup failureThreshold=$gateway_startup_failure_threshold, want $want_startup_failure_threshold"
+  [[ "$gateway_progress_deadline" == "$want_progress_deadline" ]] || \
+    die "gateway progressDeadlineSeconds=$gateway_progress_deadline, want $want_progress_deadline"
+  [[ "$gateway_restart_count" == "0" ]] || \
+    die "gateway restarted $gateway_restart_count time(s) during startup"
   # Bind readiness and the exact host-key projection/copy shape to this one
   # observed Pod. General end-to-end modes separately prove the live gateway
   # path; inspecting Secret objects or their data would add no behavior proof.

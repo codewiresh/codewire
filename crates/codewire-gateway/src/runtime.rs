@@ -21,13 +21,48 @@ use crate::credentials::CredentialIngress;
 use crate::daemon::{DaemonClientError, DaemonSessionClient};
 use crate::docker_proxy::{DockerProxySettings, serve_docker_socket_proxy};
 use crate::host_key;
-use crate::readiness::{CredentialReadiness, ReadinessState, router as readiness_router};
+use crate::readiness::{
+    CredentialReadiness, ReadinessState, StartupGate, router as readiness_router,
+};
 use crate::scp::DaemonScpRunner;
 use crate::sftp::DaemonSftpRunner;
 use crate::ssh::{DaemonBackedSshRunner, GatewaySshHandler, gateway_server_config};
 use crate::tailnet;
 
-const DAEMON_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+/// How the gateway retries its workspace daemon. There is deliberately no
+/// deadline: a slow workspace start (image pull, volume attach, guest boot)
+/// must not turn into gateway exits and CrashLoopBackOff. `/readyz` stays
+/// unavailable until the daemon connects, and orchestration's tier ready
+/// timeout, which the gateway startup probe matches, bounds a daemon that
+/// never comes up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DaemonConnectBackoff {
+    initial_delay: Duration,
+    max_delay: Duration,
+    attempt_timeout: Duration,
+}
+
+impl DaemonConnectBackoff {
+    /// Doubles from `initial_delay` after each consecutive failure and holds
+    /// at `max_delay`.
+    fn delay_after(&self, failures: u32) -> Duration {
+        let doublings = failures.saturating_sub(1).min(16);
+        self.initial_delay
+            .saturating_mul(1 << doublings)
+            .min(self.max_delay)
+    }
+}
+
+/// The cap equals the 2-second startup probe period orchestration renders, so
+/// retrying delays readiness by at most one probe. One attempt is an in-cluster
+/// TCP and HTTP/2 handshake; its timeout only bounds a dropped connection.
+const DAEMON_CONNECT_BACKOFF: DaemonConnectBackoff = DaemonConnectBackoff {
+    initial_delay: Duration::from_millis(250),
+    max_delay: Duration::from_secs(2),
+    attempt_timeout: Duration::from_secs(5),
+};
+/// Failed attempts are logged at debug; this interval bounds the warnings.
+const DAEMON_WAIT_WARN_INTERVAL: Duration = Duration::from_secs(30);
 
 pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
     run_gateway_until_shutdown(config, shutdown_signal()).await
@@ -145,12 +180,29 @@ async fn run_gateway_services(
         None
     };
 
-    let daemon_client = connect_daemon_with_retry(
-        &config.shim_addr,
-        config.daemon_auth_token.clone(),
-        config.daemon_connect_timeout,
-    )
-    .await?;
+    let ssh_addr = ssh_listener
+        .local_addr()
+        .context("read SSH listener addr")?;
+    let readyz_addr = readyz_listener
+        .local_addr()
+        .context("read readyz listener addr")?;
+    // Serve /readyz before the daemon wait so probes see an explicit 503.
+    // The gate opens where the listener used to start, so a ready response
+    // still means the daemon connected and startup reached the SSH path.
+    let startup = StartupGate::default();
+    tasks.spawn(serve_readiness_listener(
+        readyz_listener,
+        ssh_addr.to_string(),
+        startup.clone(),
+        credential_readiness,
+        shutdown_rx.clone(),
+    ));
+
+    tracing::info!(
+        shim_addr = %config.shim_addr,
+        "rust gateway waiting for workspace daemon; readyz reports not ready until connected"
+    );
+    let daemon_client = wait_for_daemon(&config, tasks).await?;
     let host_key = host_key::load_or_create(&config.host_key_path)
         .with_context(|| format!("load host key {}", config.host_key_path))?;
 
@@ -164,13 +216,6 @@ async fn run_gateway_services(
         )));
     }
 
-    let ssh_addr = ssh_listener
-        .local_addr()
-        .context("read SSH listener addr")?;
-    let readyz_addr = readyz_listener
-        .local_addr()
-        .context("read readyz listener addr")?;
-
     let runner = Arc::new(DaemonBackedSshRunner::new(daemon_client.clone()));
     let sftp = Arc::new(DaemonSftpRunner::new(daemon_client.clone()));
     let scp = Arc::new(DaemonScpRunner::new(daemon_client));
@@ -178,12 +223,7 @@ async fn run_gateway_services(
     ssh_config.keys.push(host_key.key);
     let ssh_config = Arc::new(ssh_config);
 
-    tasks.spawn(serve_readiness_listener(
-        readyz_listener,
-        ssh_addr.to_string(),
-        credential_readiness,
-        shutdown_rx.clone(),
-    ));
+    startup.open();
     if let Some(docker_proxy) = config.docker_proxy.clone() {
         tasks.spawn(serve_docker_proxy(docker_proxy, shutdown_rx.clone()));
     }
@@ -546,72 +586,104 @@ async fn serve_tailnet_tcp_proxy_listener(
     }
 }
 
+/// Wait for the daemon while still failing on any listener started before it
+/// (credential HTTPS, `/readyz`). The owner cancels this future on shutdown.
+async fn wait_for_daemon(
+    config: &GatewayConfig,
+    tasks: &mut JoinSet<Result<()>>,
+) -> Result<DaemonSessionClient> {
+    let connect = connect_daemon_with_retry(
+        &config.shim_addr,
+        config.daemon_auth_token.clone(),
+        DAEMON_CONNECT_BACKOFF,
+    );
+    tokio::pin!(connect);
+    loop {
+        tokio::select! {
+            client = &mut connect => return client,
+            joined = tasks.join_next(), if !tasks.is_empty() => match joined {
+                Some(Ok(Ok(()))) | None => {}
+                Some(Ok(Err(err))) => return Err(err),
+                Some(Err(err)) => return Err(err).context("gateway task join"),
+            },
+        }
+    }
+}
+
+/// Retry until connected. Only a connection failure or an attempt timeout is
+/// retried; an invalid endpoint or client configuration cannot recover.
 async fn connect_daemon_with_retry(
     shim_addr: &str,
     auth_token: DaemonAuthToken,
-    connect_timeout: Duration,
+    backoff: DaemonConnectBackoff,
 ) -> Result<DaemonSessionClient> {
-    let deadline = Instant::now() + connect_timeout;
+    let started = Instant::now();
+    let mut last_warning: Option<Instant> = None;
     let mut attempts = 0u32;
 
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(anyhow::anyhow!(
-                "connect daemon shim {shim_addr} within {} seconds after {attempts} attempts",
-                connect_timeout.as_secs()
-            ));
-        }
-        attempts += 1;
-        match timeout(
-            remaining,
+        attempts = attempts.saturating_add(1);
+        let error = match timeout(
+            backoff.attempt_timeout,
             DaemonSessionClient::connect_shim(shim_addr, auth_token.clone()),
         )
         .await
         {
             Ok(Ok(client)) => {
                 if attempts > 1 {
-                    tracing::info!(shim_addr, attempts, "connected to daemon shim after retry");
+                    tracing::info!(
+                        shim_addr,
+                        attempts,
+                        waited_ms = elapsed_ms(started),
+                        "connected to workspace daemon after retry"
+                    );
                 }
                 return Ok(client);
             }
+            Ok(Err(err @ DaemonClientError::Connect { .. })) => {
+                format!("{:#}", anyhow::Error::new(err))
+            }
+            Ok(Err(err @ DaemonClientError::InvalidEndpoint { .. })) => {
+                return Err(err)
+                    .with_context(|| format!("connect daemon shim {shim_addr}: invalid endpoint"));
+            }
             Ok(Err(err)) => {
-                if matches!(&err, DaemonClientError::InvalidEndpoint { .. }) {
-                    return Err(err).with_context(|| {
-                        format!("connect daemon shim {shim_addr}: invalid endpoint")
-                    });
-                }
-                if Instant::now() >= deadline {
-                    return Err(err).with_context(|| {
-                        format!(
-                            "connect daemon shim {shim_addr} within {} seconds after {attempts} attempts",
-                            connect_timeout.as_secs()
-                        )
-                    });
-                }
-                if attempts == 1 || attempts.is_multiple_of(20) {
-                    tracing::warn!(
-                        shim_addr,
-                        attempts,
-                        error = %err,
-                        "daemon shim unavailable; retrying"
-                    );
-                }
-                let retry_delay = deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(DAEMON_CONNECT_RETRY_INTERVAL);
-                if !retry_delay.is_zero() {
-                    sleep(retry_delay).await;
-                }
+                return Err(err).with_context(|| format!("connect daemon shim {shim_addr}"));
             }
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "connect daemon shim {shim_addr} within {} seconds after {attempts} attempts",
-                    connect_timeout.as_secs()
-                ));
-            }
+            Err(_) => format!(
+                "connect attempt exceeded {} ms",
+                backoff.attempt_timeout.as_millis()
+            ),
+        };
+        let next_retry = backoff.delay_after(attempts);
+        let now = Instant::now();
+        if last_warning.is_none_or(|warned| now.duration_since(warned) >= DAEMON_WAIT_WARN_INTERVAL)
+        {
+            last_warning = Some(now);
+            tracing::warn!(
+                shim_addr,
+                attempts,
+                waited_ms = elapsed_ms(started),
+                next_retry_ms = next_retry.as_millis() as u64,
+                error = %error,
+                "workspace daemon unavailable; gateway stays not ready and keeps retrying"
+            );
+        } else {
+            tracing::debug!(
+                shim_addr,
+                attempts,
+                waited_ms = elapsed_ms(started),
+                next_retry_ms = next_retry.as_millis() as u64,
+                error = %error,
+                "workspace daemon unavailable; retrying"
+            );
         }
+        sleep(next_retry).await;
     }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 async fn serve_tailnet_ssh_listener(
@@ -657,10 +729,15 @@ async fn serve_tailnet_ssh_listener(
 async fn serve_readiness_listener(
     listener: TcpListener,
     ssh_listen_addr: String,
+    startup: StartupGate,
     credentials: Option<CredentialReadiness>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let app = readiness_router(ReadinessState::new(ssh_listen_addr).with_credentials(credentials));
+    let app = readiness_router(
+        ReadinessState::new(ssh_listen_addr)
+            .with_startup_gate(startup)
+            .with_credentials(credentials),
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
         .await
@@ -783,7 +860,6 @@ mod tests {
             .join("host_ed25519");
         let config = GatewayConfig {
             shim_addr: daemon_addr.to_string(),
-            daemon_connect_timeout: Duration::from_secs(60),
             ssh_listen_addr: ssh_addr.clone(),
             readyz_listen_addr: readyz_addr.clone(),
             host_key_path: host_key_path.display().to_string(),
@@ -816,7 +892,7 @@ mod tests {
         ));
 
         wait_for_tcp(&ssh_addr).await;
-        assert_readyz_ok(&readyz_addr).await;
+        wait_for_readyz_ok(&readyz_addr).await;
 
         let _ = shutdown_tx.send(());
         timeout(Duration::from_secs(3), task)
@@ -827,13 +903,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_runtime_waits_for_delayed_daemon_shim() {
+    async fn gateway_stays_unready_without_exiting_until_the_daemon_listens() {
         let daemon_addr = reserve_local_addr().await;
-        let delayed_daemon_addr = daemon_addr.clone();
-        tokio::spawn(async move {
-            sleep(Duration::from_millis(200)).await;
-            spawn_minimal_daemon_at(&delayed_daemon_addr).await;
-        });
 
         let ssh_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ssh_addr = ssh_listener.local_addr().unwrap().to_string();
@@ -846,8 +917,7 @@ mod tests {
             ))
             .join("host_ed25519");
         let config = GatewayConfig {
-            shim_addr: daemon_addr,
-            daemon_connect_timeout: Duration::from_secs(1),
+            shim_addr: daemon_addr.clone(),
             ssh_listen_addr: ssh_addr.clone(),
             readyz_listen_addr: readyz_addr.clone(),
             host_key_path: host_key_path.display().to_string(),
@@ -879,8 +949,19 @@ mod tests {
             },
         ));
 
+        // The SSH listener accepts TCP from the start, yet /readyz answers an
+        // explicit 503 while the daemon is unavailable and the gateway keeps
+        // running instead of exiting.
         wait_for_tcp(&ssh_addr).await;
-        assert_readyz_ok(&readyz_addr).await;
+        let unavailable_until = Instant::now() + Duration::from_millis(1_500);
+        while Instant::now() < unavailable_until {
+            assert_eq!(readyz_status(&readyz_addr).await, 503);
+            assert!(!task.is_finished(), "gateway exited while waiting");
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        spawn_minimal_daemon_at(&daemon_addr).await;
+        wait_for_readyz_ok(&readyz_addr).await;
 
         let _ = shutdown_tx.send(());
         timeout(Duration::from_secs(3), task)
@@ -890,27 +971,48 @@ mod tests {
             .expect("gateway runtime result");
     }
 
+    #[test]
+    fn daemon_connect_backoff_doubles_to_its_cap() {
+        let delays: Vec<_> = (1..=6)
+            .map(|failures| DAEMON_CONNECT_BACKOFF.delay_after(failures))
+            .collect();
+        assert_eq!(
+            delays,
+            [250, 500, 1_000, 2_000, 2_000, 2_000].map(Duration::from_millis)
+        );
+        assert_eq!(
+            DAEMON_CONNECT_BACKOFF.delay_after(u32::MAX),
+            Duration::from_secs(2)
+        );
+    }
+
     #[tokio::test]
-    async fn daemon_connect_timeout_is_enforced() {
+    async fn daemon_connect_retries_past_the_retired_deadline_until_connected() {
+        // The retired default deadline failed this wait after 60 seconds, and
+        // its old test after 1. Keep a scaled-down backoff failing well past
+        // that, then let the daemon listen.
         let daemon_addr = reserve_local_addr().await;
-        let result = timeout(
-            Duration::from_secs(3),
+        let delayed_daemon_addr = daemon_addr.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(1_200)).await;
+            spawn_minimal_daemon_at(&delayed_daemon_addr).await;
+        });
+        let backoff = DaemonConnectBackoff {
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(20),
+            attempt_timeout: Duration::from_secs(1),
+        };
+        timeout(
+            Duration::from_secs(5),
             connect_daemon_with_retry(
                 &daemon_addr,
-                DaemonAuthToken::new("gateway-runtime-timeout-test-token").unwrap(),
-                Duration::from_secs(1),
+                DaemonAuthToken::new("gateway-runtime-retry-test-token").unwrap(),
+                backoff,
             ),
         )
         .await
-        .expect("daemon connection exceeded its configured timeout");
-        let err = match result {
-            Ok(_) => panic!("unreachable daemon unexpectedly connected"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("within 1 seconds"),
-            "unexpected timeout error: {err:#}"
-        );
+        .expect("daemon connection did not follow the listening daemon")
+        .expect("daemon retry gave up");
     }
 
     #[tokio::test]
@@ -920,7 +1022,7 @@ mod tests {
             connect_daemon_with_retry(
                 "http://[",
                 DaemonAuthToken::new("gateway-runtime-invalid-endpoint-test-token").unwrap(),
-                Duration::from_secs(60),
+                DAEMON_CONNECT_BACKOFF,
             ),
         )
         .await
@@ -948,7 +1050,7 @@ mod tests {
         .expect("TCP listener ready");
     }
 
-    async fn assert_readyz_ok(addr: &str) {
+    async fn readyz_response(addr: &str) -> String {
         let mut stream = timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(addr))
             .await
             .expect("readyz connect")
@@ -958,12 +1060,35 @@ mod tests {
             .await
             .unwrap();
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.unwrap();
-        let response = String::from_utf8_lossy(&response);
-        assert!(
-            response.starts_with("HTTP/1.1 200 OK"),
-            "unexpected readyz response: {response}"
-        );
+        timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+            .await
+            .expect("readyz answered")
+            .unwrap();
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    async fn readyz_status(addr: &str) -> u16 {
+        let response = readyz_response(addr).await;
+        response
+            .strip_prefix("HTTP/1.1 ")
+            .and_then(|rest| rest.get(..3))
+            .and_then(|status| status.parse().ok())
+            .unwrap_or_else(|| panic!("unexpected readyz response: {response}"))
+    }
+
+    /// Readiness is served before the daemon connects, so wait for it.
+    async fn wait_for_readyz_ok(addr: &str) {
+        let response = timeout(Duration::from_secs(5), async {
+            loop {
+                let response = readyz_response(addr).await;
+                if response.starts_with("HTTP/1.1 200 OK") {
+                    return response;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("readyz became ready");
         assert!(response.ends_with("ok\n"));
     }
 

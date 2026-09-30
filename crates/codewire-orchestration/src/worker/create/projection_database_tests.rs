@@ -14,10 +14,7 @@ use tokio::sync::oneshot;
 
 use super::*;
 
-#[allow(dead_code)]
-#[path = "../../../../codewire-platform-credentials/tests/support/mod.rs"]
-mod support;
-
+use crate::test_database_support as support;
 use support::TestDatabase;
 
 const CREATOR: &str = "projection-capture-creator";

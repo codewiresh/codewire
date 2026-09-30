@@ -79,3 +79,20 @@ for (const fixture of ["create-sandbox.html", "edit-sandbox-sources.html"]) {
     await page.locator(".cw-secret-panel").screenshot({ path: test.info().outputPath(`${fixture}-secret-panel.png`) });
   });
 }
+
+test("source help without a trigger id stays open while its container scrolls", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
+  await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
+
+  const trigger = page.getByRole("button", { name: "About application secrets" });
+  await expect(trigger).not.toHaveAttribute("id");
+  await trigger.click();
+  const help = page.locator("#environment-create-secrets-help");
+  await expect(help).toBeVisible();
+  // Focusing or scrolling to a trigger scrolls the drawer; the open help must
+  // follow its trigger rather than close.
+  await page.locator(".cw-drawer-body").evaluate((body) => body.dispatchEvent(new Event("scroll")));
+  await expect(help).toBeVisible();
+  await expect(help).not.toHaveAttribute("data-field-help-trigger");
+});

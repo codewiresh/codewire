@@ -17,7 +17,25 @@ use tokio::net::TcpStream;
 pub struct ReadinessState {
     ssh_listen_addr: String,
     timeout: Duration,
+    startup: Option<StartupGate>,
     credentials: Option<CredentialReadiness>,
+}
+
+/// Closed while the gateway waits for its workspace daemon. `/readyz` is
+/// served during that wait so probes get an immediate 503 rather than a
+/// timeout. The bound SSH listener already accepts TCP then, so the SSH probe
+/// alone would report ready before the gateway can serve a session.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StartupGate(Arc<AtomicBool>);
+
+impl StartupGate {
+    pub(crate) fn open(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_open(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +74,7 @@ impl ReadinessState {
         Self {
             ssh_listen_addr: ssh_listen_addr.into(),
             timeout: Duration::from_secs(1),
+            startup: None,
             credentials: None,
         }
     }
@@ -67,6 +86,11 @@ impl ReadinessState {
 
     pub(crate) fn with_credentials(mut self, credentials: Option<CredentialReadiness>) -> Self {
         self.credentials = credentials;
+        self
+    }
+
+    pub(crate) fn with_startup_gate(mut self, startup: StartupGate) -> Self {
+        self.startup = Some(startup);
         self
     }
 }
@@ -104,6 +128,13 @@ pub fn readiness_dial_addr(listen_addr: &str) -> String {
 }
 
 async fn readyz(State(state): State<ReadinessState>) -> impl IntoResponse {
+    if state
+        .startup
+        .as_ref()
+        .is_some_and(|startup| !startup.is_open())
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response();
+    }
     // One short deadline covers both the existing SSH probe and current TLS
     // file validation. A slow projection cannot accumulate serial timeouts.
     let result = tokio::time::timeout(state.timeout, async {
@@ -264,6 +295,43 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
+        assert_eq!(&body[..], b"ok\n");
+    }
+
+    #[tokio::test]
+    async fn readyz_is_unavailable_until_the_startup_gate_opens() {
+        // A bound listener accepts TCP before the gateway serves SSH.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let startup = StartupGate::default();
+        let app = router(
+            ReadinessState::new(listener.local_addr().unwrap().to_string())
+                .with_startup_gate(startup.clone()),
+        );
+        let probe = || async {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/readyz")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            (status, body)
+        };
+
+        let (status, body) = probe().await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(&body[..], b"not ready\n");
+
+        startup.open();
+        let (status, body) = probe().await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(&body[..], b"ok\n");
     }
 
