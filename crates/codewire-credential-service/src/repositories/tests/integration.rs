@@ -40,6 +40,8 @@ struct Provider {
     reject_first_refreshed_app_repository: AtomicBool,
     initial_app_access_lifetime: AtomicUsize,
     refreshed_app_access_lifetime: AtomicUsize,
+    initial_refresh_used: AtomicBool,
+    refreshed_refresh_used: AtomicBool,
     hold: AtomicBool,
     entered: Notify,
     released: Notify,
@@ -54,6 +56,8 @@ impl Default for Provider {
             reject_first_refreshed_app_repository: AtomicBool::new(false),
             initial_app_access_lifetime: AtomicUsize::new(28_800),
             refreshed_app_access_lifetime: AtomicUsize::new(28_800),
+            initial_refresh_used: AtomicBool::new(false),
+            refreshed_refresh_used: AtomicBool::new(false),
             hold: AtomicBool::new(false),
             entered: Notify::new(),
             released: Notify::new(),
@@ -181,10 +185,19 @@ impl Provider {
                     Some(GITHUB_APP_REFRESH_TOKEN | GITHUB_APP_REFRESHED_REFRESH_TOKEN)
                 ) =>
             {
-                self.app_refreshes.fetch_add(1, Ordering::SeqCst);
-                // Each rotation consumes its refresh token and issues the next.
+                // Each rotation consumes its refresh token and issues the next;
+                // GitHub rejects a refresh token that was already used.
                 let second = form.get("refresh_token").map(|value| value.as_ref())
                     == Some(GITHUB_APP_REFRESHED_REFRESH_TOKEN);
+                let used = if second {
+                    &self.refreshed_refresh_used
+                } else {
+                    &self.initial_refresh_used
+                };
+                if used.swap(true, Ordering::SeqCst) {
+                    return json_response(StatusCode::OK, json!({"error": "bad_refresh_token"}));
+                }
+                self.app_refreshes.fetch_add(1, Ordering::SeqCst);
                 json_response(
                     StatusCode::OK,
                     json!({
