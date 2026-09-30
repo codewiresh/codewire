@@ -1207,13 +1207,28 @@ test("initial terminal restoration waits for fresh status rather than rendered r
   let release!: () => void;
   state.statusGate = new Promise<void>((resolve) => { release = resolve; });
   await openFixture(page);
-  await expect(page.locator("[data-terminal-message]")).toContainText("Checking Sandbox status");
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Checking Sandbox status before restoring terminals…");
+  await expect(page.locator("[data-terminal-message]")).toBeHidden();
+  await expect(page.locator("[data-sandbox-observation-status]")).toBeHidden();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   expect(state.lists).toBe(0);
   expect(state.connections).toHaveLength(0);
   expect(state.launches).toBe(0);
   release();
   await expect.poll(() => state.connections.length).toBe(1);
+  expect(state.launches).toBe(0);
+});
+
+test("a Sandbox stopped at load says how to use its terminals instead of checking forever", async ({ page }) => {
+  const state = await transport(page);
+  state.running = false;
+  state.sessions = [{ sessionId: sessionId(1), state: "interrupted" }];
+  await openFixture(page);
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Start this Sandbox to use its terminals.");
+  // The explanation appears once, not also in the status line.
+  await expect(page.locator("[data-terminal-message]")).toBeHidden();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  expect(state.lists).toBe(0);
   expect(state.launches).toBe(0);
 });
 

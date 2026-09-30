@@ -72,9 +72,11 @@
     let runtimeRunning = false;
     let setupComplete = false;
     let initialStatusReceived = false;
+    let runtimeChecking = true;
     const runtimeControlReady = () => runtimeAvailable && runtimeRunning;
     const runtimeReady = () => runtimeControlReady() && setupComplete;
-    const readinessMessage = () => !runtimeAvailable ? "Sandbox status is unavailable. Terminal controls are paused."
+    const readinessMessage = () => runtimeChecking ? "Checking Sandbox status before restoring terminals…"
+      : !runtimeAvailable ? "Sandbox status is unavailable. Terminal controls are paused."
       : !runtimeRunning ? "Start this Sandbox to use its terminals."
         : "Sandbox setup is not complete. Terminal controls will be available when setup completes.";
 
@@ -886,6 +888,7 @@
         || typeof status.available !== "boolean" || typeof status.setupComplete !== "boolean") return;
       const wasReady = runtimeReady();
       runtimeAvailable = status.available;
+      runtimeChecking = !status.available && status.checking === true;
       runtimeRunning = status.running;
       setupComplete = status.setupComplete;
       const ready = runtimeReady();
@@ -934,7 +937,9 @@
       announce("Terminal settings are unavailable. Reload this page.");
       return;
     }
-    announce("Checking Sandbox status before restoring terminals…");
+    // Until a Sandbox status arrives, the empty state explains the wait.
+    announce("");
+    root.querySelector("[data-terminal-empty]").textContent = readinessMessage();
     updateControls();
   }
 

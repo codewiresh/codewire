@@ -1203,9 +1203,9 @@ test.describe.serial("server-rendered environments", () => {
     expect(await sourceDeletionDeadline()).toBe(stopDeadline);
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", stopDeadline);
     await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
-    // The stopped Sandbox pauses its terminal instead of offering a new one.
-    await expect(page.getByRole("tab")).toHaveCount(1);
-    await expect(page.locator("[data-terminal-message]")).toHaveText("Start this Sandbox to use its terminals.", { timeout: 30_000 });
+    // Stop reloads the page; a stopped Sandbox restores no tabs and says why.
+    await expect(page.locator("[data-terminal-empty]")).toHaveText("Start this Sandbox to use its terminals.", { timeout: 30_000 });
+    await expect(page.getByRole("tab")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
     // A lifecycle action submitted for the wrong state is rejected by the
     // service and shown on the detail page; the state does not change (#2138).
