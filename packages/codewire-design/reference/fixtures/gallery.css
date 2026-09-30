@@ -206,6 +206,71 @@
   position: static;
 }
 
+/* The shell frames its stage instead of the page. */
+.gallery-shell-stage {
+  justify-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+
+.gallery-shell-stage .cw-app {
+  min-height: 0;
+  flex-wrap: wrap;
+}
+
+.gallery-shell-stage :is(.cw-sidebar-slot, .cw-mobile-bar) {
+  position: relative;
+}
+
+.gallery-shell-stage .cw-mobile-bar {
+  width: 100%;
+}
+
+.gallery-shell-stage .cw-main {
+  margin-left: 0;
+}
+
+@media (max-width: 1023px) {
+  .gallery-shell-stage .cw-main {
+    flex-basis: 100%;
+  }
+}
+
+/* The backdrop and error page fill their stage, not the viewport. */
+.gallery-backdrop-stage {
+  justify-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+
+.gallery-backdrop-stage .cw-dialog-backdrop {
+  position: relative;
+}
+
+.gallery-backdrop-stage dialog {
+  position: static;
+}
+
+.gallery-stage > .cw-error-page {
+  min-height: 0;
+}
+
+/* The drawer opens inside its stage instead of over the page. */
+.gallery-drawer-stage {
+  position: relative;
+  min-height: 22rem;
+  overflow: hidden;
+}
+
+.gallery-drawer-stage :is(.cw-drawer-layer, .cw-drawer) {
+  position: absolute;
+}
+
+.gallery-drawer-stage .cw-drawer {
+  width: min(var(--drawer-width-sm), 90%);
+  animation: none;
+}
+
 .gallery-links {
   display: grid;
   gap: var(--space-1);

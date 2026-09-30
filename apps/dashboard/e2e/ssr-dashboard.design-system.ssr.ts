@@ -16,17 +16,10 @@ type Check = "scale" | "contrast" | "focus";
 type Viewport = "desktop" | "mobile";
 type Pending = Partial<Record<`${Viewport} ${Check}`, number>>;
 
-const pending: Record<string, Pending> = {
-  // Shell and organizations slice: dashboard.css, organizations.css
-  "application-secrets.html": { "desktop scale": 4, "desktop contrast": 1, "mobile scale": 4, "mobile contrast": 1 },
-  "sandboxes.html": { "desktop scale": 1, "desktop contrast": 2, "mobile contrast": 2 },
-  "settings-secrets-empty.html": { "desktop scale": 2, "desktop contrast": 1 },
-  "terminal-tabs.html": { "desktop contrast": 2 },
-  // Auth and public slice: auth.css, public.css
-  "home.html": { "desktop scale": 62, "desktop contrast": 17, "mobile scale": 57, "mobile contrast": 17 },
-  "login.html": { "desktop scale": 3, "desktop focus": 1, "mobile scale": 3, "mobile focus": 1 },
-  "signup.html": { "desktop scale": 6, "desktop focus": 2, "mobile scale": 6, "mobile focus": 2 },
-};
+const pending: Record<string, Pending> = {};
+
+// home.html uses public.css's own marketing scale: it keeps an 11px text floor, not the console type and radius scale.
+const ownScale = new Set(["home.html"]);
 
 const fixtureDirectory = new URL("../../../packages/codewire-design/reference/fixtures/", import.meta.url);
 // Whole pages only. A fragment such as terminal-ports.html has no stylesheets of
@@ -42,13 +35,14 @@ test("every pending exception names an existing fixture", () => {
 });
 
 // Font sizes, radii, contrast and native select rendering, measured in the page.
-async function inspect(page: Page) {
-  return page.evaluate(() => {
+async function inspect(page: Page, marketing: boolean) {
+  return page.evaluate((marketing) => {
     const px = (value: string) => Number.parseFloat(value);
     const fontScale = new Set([11, 12, 13, 14, 17]);
-    const onFontScale = (size: number) => fontScale.has(size) || (size >= 24 && size <= 30);
+    const onFontScale = (size: number) =>
+      marketing ? size >= 11 : fontScale.has(size) || (size >= 24 && size <= 30);
     const onRadiusScale = (value: string) =>
-      value.endsWith("%") || [0, 4, 8, 12].includes(px(value)) || px(value) >= 999;
+      marketing || value.endsWith("%") || [0, 4, 8, 12].includes(px(value)) || px(value) >= 999;
     const shown = (element: Element) => {
       const style = getComputedStyle(element);
       const box = element.getBoundingClientRect();
@@ -118,7 +112,7 @@ async function inspect(page: Page) {
       .map((element) => `${describe(element)} appearance ${getComputedStyle(element).appearance}`);
     const root = document.scrollingElement ?? document.documentElement;
     return { overflow: root.scrollWidth - root.clientWidth, scale, contrast, select };
-  });
+  }, marketing);
 }
 
 // Keyboard focus must always be visible: tabbing to a control must add a
@@ -129,6 +123,9 @@ const tabLimit = 400;
 
 async function focusGaps(page: Page) {
   await page.evaluate(() => {
+    // Measure every control unfocused: an autofocused field would otherwise
+    // record its focus ring as its resting look.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     const look = (element: Element) => {
       const style = getComputedStyle(element);
       return {
@@ -189,7 +186,7 @@ for (const fixture of fixtures) {
     await page.goto(`${origin}/reference/fixtures/${fixture}`);
     await page.evaluate(() => document.fonts.ready);
 
-    const findings = { ...(await inspect(page)), focus: await focusGaps(page) };
+    const findings = { ...(await inspect(page, ownScale.has(fixture))), focus: await focusGaps(page) };
     const viewport: Viewport = testInfo.project.name.endsWith("mobile") ? "mobile" : "desktop";
     expect.soft(findings.overflow, "the page scrolls sideways").toBe(0);
     expect.soft(findings.select, "selects must render the styled base-select picker").toEqual([]);

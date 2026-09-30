@@ -4,7 +4,7 @@
 
 /* Inventory toolbar and table. */
 .cw-list-title { display: flex; align-items: center; gap: var(--space-3); }
-.cw-environment-toolbar { position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-5) 0 var(--space-4); }
+.cw-environment-toolbar { position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .cw-environment-toolbar > .cw-button { margin-left: auto; }
 .cw-environment-filters { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .cw-environment-filters .cw-input { width: min(var(--control-width), 100%); }
@@ -33,19 +33,12 @@
 .cw-menu-resize label { display: grid; gap: var(--space-1); color: var(--fg-secondary); font-size: var(--text-small); }
 .cw-menu-confirm p { margin: 0; padding: var(--space-2) var(--space-2) 0; color: var(--fg-secondary); font-size: var(--text-small); line-height: var(--leading-body); }
 
-/* The Create and Edit sources drawer. */
-.cw-drawer-layer { position: fixed; inset: 0; z-index: 80; }
-.cw-drawer-backdrop { position: absolute; inset: 0; background: var(--backdrop); }
-.cw-environment-create { position: fixed; z-index: 81; top: 0; right: 0; bottom: 0; display: flex; width: 43.75rem; max-width: 94vw; min-width: 0; flex-direction: column; overflow: hidden; border-left: var(--border-width) solid var(--border); background: var(--bg-secondary); box-shadow: var(--shadow-overlay); animation: cw-drawer-in 160ms ease; }
+/* The Create and Edit sources drawer is a .cw-drawer. */
 .cw-environment-create .cw-card-content, .cw-environment-form, .cw-environment-form > * { min-width: 0; }
-.cw-environment-create-header { flex: none; padding: var(--space-5) var(--space-5) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); background: var(--bg-secondary); }
 .cw-create-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .cw-create-title-row h2 { margin: 0; font-size: var(--text-title); font-weight: var(--weight-semibold); line-height: var(--leading-tight); }
 .cw-environment-form { display: grid; width: 100%; gap: var(--space-4); }
 .cw-environment-create .cw-environment-form { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 0; }
-.cw-drawer-body { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: var(--space-5); overflow-y: auto; padding: var(--space-4) var(--space-5) var(--space-6); scrollbar-color: var(--border-hover) transparent; scrollbar-width: thin; }
-.cw-drawer-footer { flex: none; padding: var(--space-4) var(--space-5) var(--space-5); border-top: var(--border-width) solid var(--border-subtle); background: var(--bg-secondary); }
-.cw-drawer-footer .cw-button { width: 100%; }
 .cw-environment-form[data-create-submitting="true"] .cw-submit-idle { display: none; }
 .cw-environment-form:not([data-create-submitting="true"]) .cw-submit-busy { display: none; }
 .cw-environment-form[data-create-submitting="true"] .cw-submit-busy { display: inline; }
@@ -144,11 +137,6 @@
 .cw-port-preview-url { display: block; overflow-wrap: anywhere; font-size: var(--text-small); }
 .cw-port-dialog { width: min(42rem, calc(100% - var(--space-8))); }
 
-@keyframes cw-drawer-in {
-  from { transform: translateX(28px); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
-}
-
 @media (max-width: 64rem) {
   .cw-sandbox-table th:nth-child(4), .cw-sandbox-table td:nth-child(4),
   .cw-sandbox-table th:nth-child(5), .cw-sandbox-table td:nth-child(5) { display: none; }
@@ -167,17 +155,10 @@
   .cw-sandbox-table th:nth-child(1) { width: auto; }
   .cw-sandbox-table th:nth-child(2) { width: 6rem; }
   .cw-sandbox-table th:last-child { width: var(--space-10); }
-  .cw-environment-create-header { padding-inline: var(--space-4); }
-  .cw-drawer-body { padding: var(--space-4) var(--space-4) var(--space-5); }
-  .cw-drawer-footer { padding-inline: var(--space-4); }
   .cw-create-resources { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cw-repository-row, .cw-app-port-row, .cw-port-form, .cw-port-row,
   .cw-environment-create .cw-repository-row,
   .cw-environment-create .cw-app-port-row { grid-template-columns: minmax(0, 1fr); }
   .cw-repository-row > .cw-icon-button,
   .cw-app-port-row > .cw-icon-button { justify-self: end; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cw-environment-create { animation: none; }
 }

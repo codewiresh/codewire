@@ -1,137 +1,47 @@
-.cw-auth-body {
-  min-height: 100vh;
-  background:
-    radial-gradient(circle at 50% 0, rgba(14, 165, 233, 0.12), transparent 34rem),
-    var(--bg-base);
-}
-
-.cw-auth-shell {
-  display: grid;
-  width: min(100% - 2rem, 28rem);
-  min-height: 100vh;
-  margin: 0 auto;
-  align-content: center;
-  gap: var(--space-6);
-  padding: var(--space-8) 0;
-}
-
-.cw-auth-shell--wide { width: min(100% - 2rem, 48rem); }
-
-.cw-auth-brand {
-  display: inline-flex;
-  justify-self: center;
-  align-items: center;
-  gap: var(--space-2);
-  font-weight: 650;
-}
-
-.cw-auth-brand img { width: 1.5rem; height: 1.5rem; }
-.cw-auth-brand--wordmark img { width: 139px; height: 25px; }
-.cw-auth-brand--icon {
-  overflow: hidden;
-  border: 1px solid var(--border-hover);
-  border-radius: 14px;
-}
-.cw-auth-brand--icon img { display: block; width: 48px; height: 48px; }
-
-.cw-auth-body--minimal { background: var(--bg-base); isolation: isolate; }
-.cw-auth-body--minimal .cw-cosmos { opacity: .65; }
-.cw-auth-shell--minimal {
-  position: relative;
-  z-index: 1;
-  width: min(100%, 35rem);
-  min-height: 100svh;
-  padding: var(--space-8) var(--space-6);
-  gap: var(--space-6);
-}
-.cw-auth-panel {
-  display: grid;
-  gap: var(--space-8);
-}
-.cw-auth-panel .cw-page-title { font-size: 1.625rem; font-weight: 600; letter-spacing: -.025em; }
-.cw-auth-switch { margin: var(--space-3) 0 0; color: var(--fg-secondary); font-size: .875rem; }
-.cw-auth-switch a { color: var(--fg-primary); font-weight: 600; }
-.cw-auth-panel .cw-input {
-  min-height: 48px;
-  padding: 12px 16px;
-  border-color: var(--border-hover);
-  border-radius: 16px;
-  background: rgba(255, 255, 255, .045);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, .035);
-  font-size: 1rem;
-}
-.cw-auth-panel .cw-input:focus { border-color: var(--accent); }
-.cw-auth-panel .cw-auth-reason { min-height: 7rem; resize: vertical; }
-.cw-auth-turnstile { min-height: 65px; }
-.cw-auth-panel .cw-auth-submit {
-  min-height: 48px;
-  background: var(--fg-primary);
-  color: var(--bg-base);
-}
-.cw-auth-panel .cw-auth-submit:hover { background: #fff; }
-.cw-auth-panel .cw-auth-submit:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-}
-.cw-auth-panel .cw-field-heading a { color: var(--fg-secondary); font-size: .75rem; }
-.cw-auth-panel .cw-field-heading a:hover { color: var(--fg-primary); }
-
-.cw-auth-card { width: 100%; box-shadow: var(--shadow-overlay); }
-.cw-auth-card--wide { max-width: 48rem; }
-.cw-auth-header { display: grid; justify-items: center; text-align: center; }
-
-.cw-auth-mark {
-  display: grid;
-  width: 3rem;
-  height: 3rem;
-  margin-bottom: var(--space-3);
-  place-items: center;
-  border-radius: var(--radius-md);
-  background: var(--accent-muted);
-  color: var(--accent);
-}
-
-.cw-auth-mark--success { background: rgba(34, 197, 94, 0.12); color: var(--success); }
-.cw-auth-mark .cw-icon { width: 1.4rem; height: 1.4rem; }
+/* Sign-in, sign-up, device, invitation and two-factor pages: one centred panel
+   over the Cosmos background under the small C mark. Primitives own the
+   visuals; this sheet lays the pages out. Every value is a design token. */
+.cw-auth-body { min-height: 100vh; background: var(--bg-base); isolation: isolate; }
+.cw-auth-shell { position: relative; z-index: 1; display: grid; width: min(100%, 35rem); min-height: 100svh; margin: 0 auto; align-content: center; gap: var(--space-6); padding: var(--space-8) var(--space-6); }
+.cw-auth-brand { display: inline-flex; justify-self: center; overflow: hidden; border: 1px solid var(--border-hover); border-radius: var(--radius-lg); }
+.cw-auth-brand img { display: block; width: var(--control-height-lg); height: var(--control-height-lg); }
+.cw-auth-panel { display: grid; gap: var(--space-8); }
+.cw-auth-header { display: grid; justify-items: center; gap: var(--space-3); text-align: center; }
+.cw-auth-switch, .cw-auth-copy { max-width: var(--measure); margin: 0; color: var(--fg-secondary); font-size: var(--text-body); line-height: var(--leading-body); }
+.cw-auth-switch a { color: var(--fg-primary); font-weight: var(--weight-semibold); }
+.cw-auth-secondary { margin: 0; color: var(--fg-secondary); text-align: center; font-size: var(--text-body); }
+.cw-auth-secondary a { color: var(--accent-text); }
+.cw-field-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.cw-field-heading a { color: var(--fg-secondary); font-size: var(--text-small); }
+.cw-field-heading a:hover { color: var(--fg-primary); }
+.cw-auth-reason { min-height: 7rem; resize: vertical; }
 .cw-auth-submit { width: 100%; margin-top: var(--space-2); }
-.cw-auth-secondary, .cw-auth-copy { color: var(--fg-secondary); text-align: center; font-size: .875rem; }
-.cw-auth-secondary a, .cw-field-heading a { color: var(--accent); }
-.cw-auth-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
-.cw-field-heading { display: flex; justify-content: space-between; gap: var(--space-3); }
-.cw-auth-code { text-align: center; font-size: 1.4rem; letter-spacing: .22em; }
-.cw-device-code-field { margin: 0; padding: 0; border: 0; }
-.cw-device-code {
-  display: grid;
-  width: 100%;
-  max-width: 23rem;
-  margin: var(--space-2) auto 0;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) auto repeat(4, minmax(0, 1fr));
-  align-items: center;
-  gap: clamp(.2rem, 1.2vw, var(--space-2));
-}
-.cw-device-code-slot {
-  min-height: 3rem;
-  padding: var(--space-2) 0;
-  text-align: center;
-  text-transform: uppercase;
-  font-size: 1.25rem;
-}
-.cw-device-code-separator {
-  color: var(--fg-secondary);
-  font-family: var(--font-mono);
-  font-size: 1.5rem;
-}
+.cw-auth-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.cw-auth-code { text-align: center; }
+
+/* Device authorization: eight one-character slots with a fixed separator. */
+.cw-device-code-field { min-width: 0; margin: 0; padding: 0; border: 0; }
+.cw-device-code { display: grid; width: 100%; max-width: 23rem; margin: var(--space-2) auto 0; grid-template-columns: repeat(4, minmax(0, 1fr)) auto repeat(4, minmax(0, 1fr)); align-items: center; gap: clamp(var(--space-1), 1.2vw, var(--space-2)); }
+.cw-device-code-slot { min-height: var(--control-height-lg); padding-inline: 0; text-align: center; font-size: var(--text-title); }
+.cw-device-code-separator { color: var(--fg-secondary); font-family: var(--font-mono); font-size: var(--text-title); }
+.cw-device-code-field > .cw-label { margin-inline: auto; }
 .cw-device-code-field .cw-field-help { text-align: center; }
+
+/* Two-factor setup and recovery codes. */
 .cw-setup-grid { display: grid; gap: var(--space-6); }
-.cw-qr { display: grid; margin-top: var(--space-3); place-items: center; padding: var(--space-4); border-radius: var(--radius-md); background: #fff; }
-.cw-qr svg { display: block; width: min(16rem, 100%); height: auto; }
-.cw-backup-codes { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--space-2); padding: 0; list-style: none; }
+.cw-setup-grid h2 { margin: 0 0 var(--space-3); }
+.cw-qr { display: grid; width: fit-content; margin: 0 auto var(--space-3); place-items: center; padding: var(--space-4); border-radius: var(--radius-md); background: var(--qr-light); }
+.cw-qr svg { display: block; width: min(12rem, 60vw); height: auto; aspect-ratio: 1; }
+.cw-backup-codes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .cw-backup-codes li { padding: var(--space-2); border-radius: var(--radius-sm); background: var(--bg-surface-hover); text-align: center; }
-.cw-invite-details { display: grid; gap: var(--space-3); margin: 0 0 var(--space-4); }
+
+/* Invitation details. */
+.cw-invite-details { display: grid; gap: var(--space-3); margin: 0; }
 .cw-invite-details div { display: flex; justify-content: space-between; gap: var(--space-4); }
 .cw-invite-details dt { color: var(--fg-secondary); }
 .cw-invite-details dd { margin: 0; text-align: right; }
 
 @media (max-width: 34rem) {
-  .cw-auth-actions, .cw-backup-codes { grid-template-columns: 1fr; }
+  .cw-auth-shell { padding-inline: var(--space-4); }
+  .cw-auth-actions, .cw-backup-codes { grid-template-columns: minmax(0, 1fr); }
 }

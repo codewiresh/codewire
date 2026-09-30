@@ -32,7 +32,7 @@
   </dialog>
 
   {% match page.resize_confirmation %}{% when Some with (resize) %}
-  <section class="cw-card cw-detail-panel" aria-labelledby="resize-confirmation-title">
+  <section class="cw-card" aria-labelledby="resize-confirmation-title">
     <div class="cw-card-header"><div><h2 id="resize-confirmation-title" class="cw-card-title">Confirm resize · {{ resize.environment_name }}</h2><p class="cw-card-description">{{ resize.previous_resources }} → {{ resize.desired_resources }}</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Cancel</a></div>
     <div class="cw-card-content">
       {% if let Some(detail_url) = resize.detail_url(organization.slug) %}<p><a href="{{ detail_url }}">Back to Sandbox</a></p>{% endif %}
@@ -53,7 +53,7 @@
   {% match page.resize_operation %}{% when Some with (operation) %}{% include "environment-resize-operation.html" %}{% when None %}{% endmatch %}
 
   {% match page.port_panel %}{% when Some with (panel) %}
-  <section class="cw-card cw-port-panel cw-detail-panel" aria-labelledby="port-panel-title">
+  <section class="cw-card cw-port-panel" aria-labelledby="port-panel-title">
     <div class="cw-card-header"><div><h2 id="port-panel-title" class="cw-card-title">Ports · {{ panel.environment_name }}</h2><p class="cw-card-description">Expose a port to yourself, the organization, or the public.</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Close</a></div>
     <div class="cw-card-content">
       {% let csrf_token = page.create_form.csrf_token %}
@@ -65,6 +65,6 @@
   {% when None %}{% endmatch %}
 
   {% match page.trust_summary %}{% when Some with (trust) %}
-  <section class="cw-card cw-detail-panel"><div class="cw-card-header"><div><h2 class="cw-card-title">Trust · {{ trust.environment_name }}</h2><p class="cw-card-description">Product-level attestation summary.</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Close</a></div><div class="cw-card-content"><p><strong>Trust level:</strong> {{ trust.trust_level }}</p><p><strong>Production verified:</strong> {% if trust.production_verified %}yes{% else %}no{% endif %}</p><p><strong>Attestation:</strong> {{ trust.attestation_status }}{% if !trust.tee.is_empty() %} ({{ trust.tee }}){% endif %}</p>{% if !trust.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in trust.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}</div></section>
+  <section class="cw-card"><div class="cw-card-header"><div><h2 class="cw-card-title">Trust · {{ trust.environment_name }}</h2><p class="cw-card-description">Product-level attestation summary.</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Close</a></div><div class="cw-card-content"><p><strong>Trust level:</strong> {{ trust.trust_level }}</p><p><strong>Production verified:</strong> {% if trust.production_verified %}yes{% else %}no{% endif %}</p><p><strong>Attestation:</strong> {{ trust.attestation_status }}{% if !trust.tee.is_empty() %} ({{ trust.tee }}){% endif %}</p>{% if !trust.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in trust.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}</div></section>
   {% when None %}{% endmatch %}
 </section>

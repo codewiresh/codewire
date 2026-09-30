@@ -1,5 +1,5 @@
-<section id="environment-sources-card" class="cw-environment-create" role="dialog" aria-modal="true" aria-labelledby="environment-sources-title" tabindex="-1" data-drawer-panel>
-  <header class="cw-environment-create-header"><div class="cw-create-title-row"><h2 id="environment-sources-title">Edit Sandbox sources</h2><a class="cw-icon-button" href="{{ organization.environments_url }}" data-drawer-close aria-label="Close Edit Sandbox sources">×</a></div></header>
+<section id="environment-sources-card" class="cw-drawer cw-environment-create" role="dialog" aria-modal="true" aria-labelledby="environment-sources-title" tabindex="-1" data-drawer-panel>
+  <header class="cw-drawer-header"><div class="cw-create-title-row"><h2 id="environment-sources-title">Edit Sandbox sources</h2><a class="cw-icon-button" href="{{ organization.environments_url }}" data-drawer-close aria-label="Close Edit Sandbox sources">×</a></div></header>
   <form class="cw-environment-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/sources" aria-label="Edit Sandbox sources">
     <input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}">
     <input type="hidden" name="environment_id" value="{{ editor.environment_id }}">

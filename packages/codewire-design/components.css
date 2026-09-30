@@ -5,12 +5,6 @@
   gap: var(--space-4);
 }
 
-.cw-cluster {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-}
 
 .cw-table-shell {
   width: 100%;
@@ -135,6 +129,72 @@ dialog.cw-discard-dialog {
   justify-content: flex-end;
   gap: var(--space-2);
   border-top: 1px solid var(--border-subtle);
+}
+
+/* Drawer: a side sheet over the page for a create or edit form. The header and
+   footer stay put while the body scrolls. A .cw-drawer-layer holds the drawer
+   and its backdrop when the page opens it; a details element can open it too. */
+.cw-drawer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+
+.cw-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--backdrop);
+}
+
+.cw-drawer {
+  position: fixed;
+  z-index: 81;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  width: min(var(--drawer-width), 94vw);
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-overlay);
+  color: var(--fg-primary);
+  animation: cw-drawer-in 160ms ease;
+}
+
+.cw-drawer-header {
+  flex: none;
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.cw-drawer-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-5);
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5) var(--space-6);
+  scrollbar-color: var(--border-hover) transparent;
+  scrollbar-width: thin;
+}
+
+.cw-drawer-footer {
+  flex: none;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.cw-drawer-footer > .cw-button { width: 100%; }
+
+@keyframes cw-drawer-in {
+  from { transform: translateX(28px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 
 .cw-state {
@@ -274,6 +334,13 @@ dialog.cw-discard-dialog {
   padding: var(--space-3);
 }
 
+.cw-menu-panel--form > p {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--text-small);
+  line-height: var(--leading-body);
+}
+
 .cw-menu-panel > ul {
   display: grid;
   gap: var(--space-0-5);
@@ -282,6 +349,8 @@ dialog.cw-discard-dialog {
   list-style: none;
 }
 
+/* Menu items: links and buttons directly inside a panel, or a .cw-menu-item. */
+.cw-menu-item,
 :is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > :is(a, button):not(.cw-button, .cw-icon-button, .cw-link-button),
 :is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > form > button:not(.cw-button),
 :is(.cw-menu-panel, .cw-menu-panel > section) > details > summary {
@@ -302,6 +371,7 @@ dialog.cw-discard-dialog {
   cursor: pointer;
 }
 
+.cw-menu-item:hover,
 :is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > :is(a, button):not(.cw-button, .cw-icon-button, .cw-link-button):hover,
 :is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > form > button:not(.cw-button):hover,
 :is(.cw-menu-panel, .cw-menu-panel > section) > details > summary:hover,
@@ -499,16 +569,15 @@ dialog.cw-discard-dialog {
   letter-spacing: var(--tracking-code);
 }
 
-.cw-skeleton {
-  min-height: var(--space-4);
+/* A key prefix or identifier shown inline, such as an API key's first
+   characters; code in a table cell reads the same way. */
+.cw-key,
+.cw-table code {
+  padding: var(--space-0-5) var(--space-1-5);
   border-radius: var(--radius-sm);
   background: var(--bg-surface-hover);
-  animation: cw-pulse 1.4s ease-in-out infinite alternate;
-}
-
-@keyframes cw-pulse {
-  from { opacity: 0.45; }
-  to { opacity: 0.9; }
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
 }
 
 /* A secret shown once, such as a new API key: one selectable monospace value. */
@@ -648,6 +717,15 @@ dialog.cw-discard-dialog {
 }
 
 @media (max-width: 48rem) {
+  .cw-drawer-header,
+  .cw-drawer-footer {
+    padding-inline: var(--space-4);
+  }
+
+  .cw-drawer-body {
+    padding: var(--space-4) var(--space-4) var(--space-5);
+  }
+
   .cw-context-nav {
     gap: var(--space-2);
     overflow: hidden;
@@ -688,5 +766,5 @@ dialog.cw-discard-dialog {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .cw-skeleton { animation: none; }
+  .cw-drawer { animation: none; }
 }

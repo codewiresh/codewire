@@ -177,7 +177,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
   await expect(page.getByRole("status").filter({ hasText: "Personal secrets are temporarily unavailable" })).toBeVisible();
   await expect(page.getByText(/No personal secrets yet/)).toHaveCount(0);
   await expect(action(page, "Add secret")).toHaveCount(0);
-  await expect(page.locator("form")).toHaveCount(0);
+  await expect(page.locator("form:not([data-sign-out])")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Reload secrets" })).toHaveAttribute("href", "settings-secrets.html");
   if ((page.viewportSize()?.width || 0) <= 768) {
     expect(await page.locator(".cw-context-nav").evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(200);
@@ -260,7 +260,7 @@ test.describe("Personal Secrets without JavaScript", () => {
     await expect(page.locator('[id^="fallback-secret-"]')).toHaveCount(0);
     await page.goto(fixture("settings-secrets-unavailable"));
     await expect(page.getByRole("status").filter({ hasText: "Personal secrets are temporarily unavailable" })).toBeVisible();
-    await expect(page.locator("form")).toHaveCount(0);
+    await expect(page.locator("form:not([data-sign-out])")).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Reload secrets" })).toBeVisible();
     await fits(page);
   });
