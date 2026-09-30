@@ -5,6 +5,7 @@
 //! `WORKER_LOOPS` is the allow-list of loops this worker runs; the
 //! orchestration replicas elect a leader among themselves under a
 //! dedicated pg advisory lock so only one runs the loops at a time.
+//! The `image-cache` loop is the exception: it runs on every replica.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,6 +78,15 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
                 let namespace = ctx.sandbox_cfg.sandbox_namespace.clone();
                 tokio::spawn(async move {
                     super::billing_sessions::billing_session_loop(ctx, is_leader, namespace).await;
+                });
+            }
+            // Not leader-gated: every orchestration Pod adds the image set it
+            // renders, so a rolling deploy's new Pods warm their release
+            // before the old leader steps down.
+            "image-cache" => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    super::image_cache::image_cache_loop(ctx).await;
                 });
             }
             other => {
