@@ -1010,6 +1010,18 @@ pub(crate) fn validate_platform_resize_force(
     Ok(())
 }
 
+/// Refuse an unconsented replacement with the planner's reason, such as a VM
+/// that the runtime sizes only when the Pod starts.
+pub(crate) fn platform_resize_restart_consent_error(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return "this resize requires workspace Pod replacement; non-interactive use requires --allow-restart".into();
+    }
+    format!(
+        "this resize requires workspace Pod replacement ({reason}); non-interactive use requires --allow-restart"
+    )
+}
+
 fn prompt_resize_quantity(label: &str, current: &str) -> anyhow::Result<Option<String>> {
     eprint!("{label} [{current}]: ");
     std::io::stderr()
@@ -1359,9 +1371,7 @@ async fn handle_platform_environment_resize(
     };
     let interactive = stdin_is_interactive() && matches!(args.output, OutputFormat::Text);
     if !interactive && plan.execution_mode == "restart" && !args.allow_restart {
-        anyhow::bail!(
-            "this resize requires workspace Pod replacement; non-interactive use requires --allow-restart"
-        );
+        anyhow::bail!("{}", platform_resize_restart_consent_error(&plan.reason));
     }
     validate_platform_resize_force(
         plan.active_session_count,
