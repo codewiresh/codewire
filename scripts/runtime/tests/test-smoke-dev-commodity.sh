@@ -526,6 +526,87 @@ run_explicit_isolation_tier_case() {
   ' "$args_file" || fail "environment create did not request confidential isolation explicitly"
 }
 
+run_resize_guest_case() {
+  local case_dir="$1" after_nproc="$2" after_mem_kib="$3" existing_env="${4:-}"
+
+  mkdir -p "$case_dir"
+  rm -f -- "$case_dir/probe-count" "$case_dir/resize-args"
+  (
+    # The smoke parses its positional options when sourced.
+    set --
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    declare TMPDIR_SMOKE="$case_dir" ENV_ID="11111111-1111-4111-8111-111111111111" \
+      SMOKE_EXISTING_ENV_ID="$existing_env" SMOKE_TIMEOUT_SECONDS=60 \
+      SMOKE_RESIZE_GUEST_CPU_DELTA=1000 SMOKE_RESIZE_GUEST_MEMORY_DELTA=2048
+    cw() {
+      [[ "$*" == "env info 11111111-1111-4111-8111-111111111111 --output json" ]] || return 97
+      printf '{"cpu_millicores":1000,"memory_mb":2048}\n'
+    }
+    cw_with_timeout() {
+      shift
+      printf '%s\n' "$@" >"$case_dir/resize-args"
+      jq -n '{operation: {state: "completed", applied_mode: "restart", pod_replaced: true,
+        last_applied_resources: {cpu_millicores: 2000, memory_mb: 4096, disk_gb: 10}}}'
+    }
+    run_cw_session_script() {
+      local count=0
+      [[ ! -f "$case_dir/probe-count" ]] || count="$(<"$case_dir/probe-count")"
+      printf '%s\n' "$((count + 1))" >"$case_dir/probe-count"
+      printf 'unrelated login banner\n'
+      if ((count == 0)); then
+        printf 'guest_compute_v1 nproc=4 memtotal_kib=4061436\n'
+      else
+        printf 'guest_compute_v1 nproc=%s memtotal_kib=%s\n' "$after_nproc" "$after_mem_kib"
+      fi
+    }
+    wait_environment() { :; }
+    wait_for_cw_run() { :; }
+    run_resize_guest_smoke
+  )
+}
+
+run_resize_guest_truth_cases() {
+  local case_dir="$TEST_TMP/resize-guest"
+  local error="$case_dir/error"
+
+  mkdir -p "$case_dir"
+  # #2266 replay: the operation completed, but the guest kept its boot size.
+  if run_resize_guest_case "$case_dir/defect" 4 4061436 >/dev/null 2>"$error"; then
+    fail "resize guest truth accepted a memory resize that never reached the guest"
+  fi
+  grep -Fq 'the memory limit is not backed by guest RAM (#2266)' "$error" ||
+    fail "resize guest truth did not name the unbacked memory limit"
+
+  run_resize_guest_case "$case_dir/replaced" 5 6158588 >/dev/null 2>"$error" ||
+    fail "resize guest truth rejected a replacement VM that grew: $(<"$error")"
+  for expected in 2000m 4096MB --allow-restart --force --yes; do
+    grep -Fxq -- "$expected" "$case_dir/replaced/resize-args" ||
+      fail "resize guest truth did not request $expected"
+  done
+  [[ "$(<"$case_dir/replaced/probe-count")" == 2 ]] ||
+    fail "resize guest truth did not probe the guest before and after"
+
+  if run_resize_guest_case "$case_dir/existing" 5 6158588 existing-env >/dev/null 2>"$error"; then
+    fail "resize guest truth resized a kept environment"
+  fi
+  grep -Fq 'run it on a fresh disposable environment' "$error" ||
+    fail "resize guest truth did not explain the kept-environment refusal"
+  [[ ! -e "$case_dir/existing/resize-args" ]] ||
+    fail "resize guest truth reached the resize command for a kept environment"
+
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    assert_resize_guest_truth 4061436 2 4061436 2048 3000 2048
+  ) >/dev/null 2>"$error"; then
+    fail "resize guest truth accepted a CPU limit above the guest CPU count"
+  fi
+  grep -Fq 'the CPU limit is not backed by guest vCPUs (#2266)' "$error" ||
+    fail "resize guest truth did not name the unbacked CPU limit"
+}
+
 run_confidential_preview_response_cases() {
   local case_dir="$TEST_TMP/confidential-preview-response"
   local headers="$case_dir/headers"
@@ -1103,6 +1184,7 @@ run_application_only_boundary_case
 run_missing_server_namespace_case
 run_docker_socket_contract_cases
 run_explicit_isolation_tier_case
+run_resize_guest_truth_cases
 run_confidential_preview_response_cases
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case

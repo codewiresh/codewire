@@ -25,8 +25,26 @@ use crate::confidential_storage::require_interactive_access;
 use crate::resize_metrics::{self, RequestOutcome};
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::client::WorkspacePodResizeState;
+use crate::sandbox::template::{RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC};
 
 const ACTIVE_OPERATION_STATES: [&str; 3] = ["pending", "applying", "restarting"];
+
+/// Runtime classes whose Kata VM is sized once, when the Pod sandbox starts.
+///
+/// `commodity` runs the `kata-clh` handler: Kata runtime-rs with the upstream
+/// Cloud Hypervisor configuration, which sets
+/// `static_sandbox_resource_mgmt = true`. Kata derives the VM's vCPUs and
+/// memory from the Pod's container limits at sandbox creation. A later Pod
+/// `/resize` changes only the in-guest cgroup limits, so a larger memory limit
+/// is not backed by guest RAM, and CPU above the boot vCPU count is not backed
+/// by vCPUs (#2266).
+///
+/// The boot vCPU count also depends on the node's Kata defaults and sizing
+/// formula, which orchestration cannot read, and a Pod resized in place before
+/// #2266 no longer shows its boot limits. Codewire therefore cannot prove CPU
+/// headroom from the Pod spec: every CPU or memory increase replaces the Pod,
+/// and only CPU decreases stay live.
+const STATIC_VM_RUNTIME_CLASSES: [&str; 2] = [RUNTIME_CLASS_COMMODITY, "kata-clh"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct EnvironmentResources {
@@ -260,20 +278,37 @@ pub(crate) fn classify_execution_mode(
                 .unwrap_or_else(|| "workspace container resize policy requires restart".into()),
         ));
     }
-    if !matches!(
-        pod.runtime_class_name.as_str(),
-        "" | "commodity" | "kata-clh" | "runc"
-    ) {
+    let runtime_class = pod.runtime_class_name.as_str();
+    if STATIC_VM_RUNTIME_CLASSES.contains(&runtime_class) {
+        // Memory shrink already returned above, so memory is equal or larger.
+        if desired.memory_mb > previous.memory_mb {
+            return Ok((
+                EnvironmentResizeExecutionMode::Restart,
+                format!(
+                    "runtime class {runtime_class} sizes the workspace VM when the Pod starts; \
+                     memory growth needs a replacement Pod to reach the guest"
+                ),
+            ));
+        }
+        if desired.cpu_millicores > previous.cpu_millicores {
+            return Ok((
+                EnvironmentResizeExecutionMode::Restart,
+                format!(
+                    "runtime class {runtime_class} fixes the workspace VM's vCPUs when the Pod \
+                     starts; a CPU increase needs a replacement Pod to reach the guest"
+                ),
+            ));
+        }
+        return Ok((
+            EnvironmentResizeExecutionMode::InPlace,
+            "the CPU reduction will be applied through the Kubernetes Pod /resize subresource"
+                .into(),
+        ));
+    }
+    if !matches!(runtime_class, "" | RUNTIME_CLASS_RUNC) {
         return Ok((
             EnvironmentResizeExecutionMode::Restart,
-            format!(
-                "runtime class {} does not provide verified live compute resize",
-                if pod.runtime_class_name.is_empty() {
-                    "<default>"
-                } else {
-                    &pod.runtime_class_name
-                }
-            ),
+            format!("runtime class {runtime_class} does not provide verified live compute resize"),
         ));
     }
     Ok((
@@ -1117,16 +1152,7 @@ mod tests {
             memory_mb: 2_048,
             disk_gb: 10,
         };
-        let compatible = WorkspacePodResizeState {
-            identity: crate::sandbox::client::WorkspacePodIdentity {
-                name: "workspace".into(),
-                uid: "uid-1".into(),
-            },
-            runtime_class_name: "commodity".into(),
-            restart_count: 0,
-            live_resize_compatible: true,
-            incompatibility_reason: None,
-        };
+        let compatible = pod_with_runtime_class("runc");
         let desired = EnvironmentResources {
             cpu_millicores: 2_000,
             ..previous
@@ -1138,12 +1164,9 @@ mod tests {
             EnvironmentResizeExecutionMode::InPlace
         );
 
-        let kata_clh = WorkspacePodResizeState {
-            runtime_class_name: "kata-clh".into(),
-            ..compatible.clone()
-        };
+        let default_runtime = pod_with_runtime_class("");
         assert_eq!(
-            classify_execution_mode("running", previous, desired, Some(&kata_clh))
+            classify_execution_mode("running", previous, desired, Some(&default_runtime))
                 .unwrap()
                 .0,
             EnvironmentResizeExecutionMode::InPlace
@@ -1177,6 +1200,97 @@ mod tests {
                 .0,
             EnvironmentResizeExecutionMode::ApplyOnStart
         );
+    }
+
+    fn pod_with_runtime_class(runtime_class_name: &str) -> WorkspacePodResizeState {
+        WorkspacePodResizeState {
+            identity: crate::sandbox::client::WorkspacePodIdentity {
+                name: "workspace".into(),
+                uid: "uid-1".into(),
+            },
+            runtime_class_name: runtime_class_name.into(),
+            restart_count: 0,
+            live_resize_compatible: true,
+            incompatibility_reason: None,
+        }
+    }
+
+    /// #2266: on Dev, kata-clh reported a live 1 CPU / 2 GiB -> 2 CPU / 4 GiB
+    /// resize while guest `nproc` and `MemTotal` stayed at their boot values.
+    #[test]
+    fn static_vm_runtime_classes_replace_the_pod_for_any_compute_growth() {
+        let previous = EnvironmentResources {
+            cpu_millicores: 1_000,
+            memory_mb: 2_048,
+            disk_gb: 10,
+        };
+        let with = |cpu_millicores, memory_mb| EnvironmentResources {
+            cpu_millicores,
+            memory_mb,
+            ..previous
+        };
+        for runtime_class in ["commodity", "kata-clh"] {
+            let pod = pod_with_runtime_class(runtime_class);
+            let classify = |desired| {
+                classify_execution_mode("running", previous, desired, Some(&pod)).unwrap()
+            };
+
+            // The measured defect: CPU and memory growth together.
+            let (mode, reason) = classify(with(2_000, 4_096));
+            assert_eq!(mode, EnvironmentResizeExecutionMode::Restart);
+            assert!(reason.contains("memory growth"), "{reason}");
+            assert!(reason.contains(runtime_class), "{reason}");
+
+            let (mode, reason) = classify(with(1_000, 3_072));
+            assert_eq!(mode, EnvironmentResizeExecutionMode::Restart);
+            assert!(reason.contains("memory growth"), "{reason}");
+
+            // Kata's boot vCPU count is not provable from the Pod spec, so even
+            // a fractional CPU increase replaces the Pod.
+            for cpu_millicores in [1_001, 1_500, 2_000] {
+                let (mode, reason) = classify(with(cpu_millicores, 2_048));
+                assert_eq!(mode, EnvironmentResizeExecutionMode::Restart);
+                assert!(reason.contains("CPU increase"), "{reason}");
+            }
+
+            // Lowering the in-guest CPU quota is real, so it stays live.
+            let (mode, _) = classify(with(500, 2_048));
+            assert_eq!(mode, EnvironmentResizeExecutionMode::InPlace);
+
+            // Memory shrink keeps its existing all-runtime restart reason.
+            let (mode, reason) = classify(with(500, 1_024));
+            assert_eq!(mode, EnvironmentResizeExecutionMode::Restart);
+            assert!(reason.contains("memory shrink"), "{reason}");
+
+            // Stopped environments boot a new VM at the desired size.
+            assert_eq!(
+                classify_execution_mode("stopped", previous, with(2_000, 4_096), None)
+                    .unwrap()
+                    .0,
+                EnvironmentResizeExecutionMode::ApplyOnStart
+            );
+
+            // Storage-only growth never touches the VM's compute size.
+            assert_eq!(
+                classify(EnvironmentResources {
+                    disk_gb: 20,
+                    ..previous
+                })
+                .0,
+                EnvironmentResizeExecutionMode::InPlace
+            );
+        }
+
+        // runc (Kind) keeps live CPU and memory growth.
+        for runtime_class in ["runc", ""] {
+            let pod = pod_with_runtime_class(runtime_class);
+            assert_eq!(
+                classify_execution_mode("running", previous, with(2_000, 4_096), Some(&pod))
+                    .unwrap()
+                    .0,
+                EnvironmentResizeExecutionMode::InPlace
+            );
+        }
     }
 
     #[tokio::test]
