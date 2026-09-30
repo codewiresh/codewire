@@ -34,39 +34,34 @@
         </section>
         <section id="security" class="cw-card cw-settings-card" aria-labelledby="security-title">
           <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>
-          <div class="cw-card-content">
-            <p class="cw-settings-muted">Two-factor authentication: <strong>{% if settings.two_factor_enabled %}Enabled{% else %}Not enabled{% endif %}</strong>.</p>
-            <p class="cw-settings-muted">Two-factor authentication protects your account.</p>
-            {% if !settings.two_factor_enabled %}<p><a href="/setup-2fa?return_to=%2Fsettings%2F">Set up two-factor authentication</a></p>{% endif %}
-            <p><a href="/forgot-password">Request a password reset</a></p>
-            <p class="cw-settings-muted">If email delivery is available for your account, the reset flow will send instructions. This page cannot confirm delivery.</p>
-          </div>
+          <div class="cw-card-content"><ul class="cw-row-list">
+            <li class="cw-security-row"><div><h3>Two-factor authentication</h3><p>{% if settings.two_factor_enabled %}Sign-in asks for a code from your authenticator. Your recovery codes each work once if you lose it.{% else %}Add a code from an authenticator app to every sign-in.{% endif %}</p></div>{% if settings.two_factor_enabled %}<span class="cw-status cw-status--pill" data-tone="success">Enabled</span>{% else %}<a class="cw-button cw-button--outline cw-button--small" href="/setup-2fa?return_to=%2Fsettings%2F">Set up</a>{% endif %}</li>
+            <li class="cw-security-row"><div><h3>Password</h3><p>Get a reset link by email.</p></div><a class="cw-button cw-button--outline cw-button--small" href="/forgot-password">Reset password</a></li>
+          </ul></div>
         </section>
         <section id="sessions" class="cw-card cw-settings-card" aria-labelledby="sessions-title">
-          <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2><p class="cw-card-description">Browser sign-ins for this account. Signing out a session blocks subsequent requests; it does not stop Sandbox terminals, existing connections, provider credentials or API keys.</p></header>
+          <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2></header>
           <div class="cw-card-content">
             {% if !settings.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ settings.message }}</p>{% endif %}
             {% if !settings.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ settings.error }}</p>{% endif %}
             {% if settings.sessions_available %}
-            <p class="cw-settings-muted">This browser: <code>{{ settings.current_session_id }}</code>. Expires {{ settings.current_session_expiry }}. Expiry may extend with activity.</p>
             <ul class="cw-row-list cw-account-sessions">
               {% for session in settings.sessions %}<li class="cw-account-session">
-                <header><h3>{% if session.current %}This browser{% else %}Browser session{% endif %}</h3><code>{{ session.id }}</code></header>
-                <dl class="cw-settings-details"><div><dt>Created</dt><dd>{{ session.created }}</dd></div><div><dt>Expires</dt><dd>{{ session.expires }}</dd></div></dl>
-                <button class="cw-button cw-button--outline" type="button" data-dialog-open="revoke-session-{{ session.id }}" aria-haspopup="dialog" aria-controls="revoke-session-{{ session.id }}">Sign out {% if session.current %}this browser{% else %}session{% endif %}</button>
+                <header><h3>{% if session.current %}This browser{% else %}Browser session{% endif %}</h3><code>{{ session.id }}</code><p>Signed in {{ session.created }} · Expires {{ session.expires }}</p></header>
+                {% if session.current %}<form id="sign-out" method="post" action="/settings/_actions/sign-out" data-sign-out><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Sign out of this browser</button></form>{% else %}<button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="revoke-session-{{ session.id }}" aria-haspopup="dialog" aria-controls="revoke-session-{{ session.id }}">Sign out session</button>
                 <dialog class="cw-dialog" data-dialog id="revoke-session-{{ session.id }}" aria-labelledby="revoke-title-{{ session.id }}">
-                  <header class="cw-dialog-header"><h2 id="revoke-title-{{ session.id }}">Sign out {% if session.current %}this browser{% else %}session{% endif %}?</h2></header>
-                  <div class="cw-dialog-body"><p>Sign out <code>{{ session.id }}</code>{% if session.current %}, the browser you are using now{% endif %}? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div>
-                  <form method="post" action="/settings/_actions/sessions/revoke"{% if session.current %} data-sign-out-current{% endif %}>
+                  <header class="cw-dialog-header"><h2 id="revoke-title-{{ session.id }}">Sign out session?</h2></header>
+                  <div class="cw-dialog-body"><p>Sign out <code>{{ session.id }}</code>? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div>
+                  <form method="post" action="/settings/_actions/sessions/revoke">
                     <input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="account_id" value="{{ settings.account_id }}"><input type="hidden" name="session_id" value="{{ session.id }}">
-                    <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out {% if session.current %}this browser{% else %}session{% endif %}</button></footer>
+                    <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out session</button></footer>
                   </form>
-                </dialog>
+                </dialog>{% endif %}
               </li>{% endfor %}
             </ul>
-            <nav class="cw-session-pagination" aria-label="Session pages"><a href="{{ settings.first_sessions_url }}">First page</a>{% if !settings.next_sessions_url.is_empty() %}<a href="{{ settings.next_sessions_url }}">Next page</a>{% endif %}</nav>
+            {% if settings.later_sessions_page || !settings.next_sessions_url.is_empty() %}<nav class="cw-session-pagination" aria-label="Session pages">{% if settings.later_sessions_page %}<a href="{{ settings.first_sessions_url }}">First page</a>{% endif %}{% if !settings.next_sessions_url.is_empty() %}<a href="{{ settings.next_sessions_url }}">Next page</a>{% endif %}</nav>{% endif %}
             {% else %}<p class="cw-alert cw-alert--warning" role="status">Session controls are unavailable. Reload to try again. No unknown sessions can be signed out here.</p>{% endif %}
-            <form id="sign-out" method="post" action="/settings/_actions/sign-out"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out of this browser</button></form>
+            {% if !settings.current_session_listed %}<form id="sign-out" method="post" action="/settings/_actions/sign-out"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out of this browser</button></form>{% endif %}
           </div>
         </section>
           </div>

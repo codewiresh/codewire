@@ -593,7 +593,7 @@ These tests and instructions authorize no live reset.
 
 Migration `0030_two_factor_setup_skip.sql` adds one nullable
 `sessions.two_factor_setup_skipped_at` timestamp. It records that one browser
-session chose **Skip for now** on the two-factor setup page. The choice ends
+session chose **Set up later** (first labelled **Skip for now**) on the two-factor setup page. The choice ends
 with that session: sign-out, revocation, expiry and account disablement delete
 the row, and every newly created session starts with the column unset.
 Enabling a factor clears it for all of the account's sessions. The IdP reports

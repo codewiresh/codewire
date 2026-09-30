@@ -318,6 +318,10 @@ pub(crate) struct SettingsPageView {
     pub(crate) current_session_id: String,
     pub(crate) current_session_expiry: String,
     pub(crate) sessions: Vec<AccountSessionRowView>,
+    // The current session is one of the listed rows, so its row owns sign-out.
+    pub(crate) current_session_listed: bool,
+    // A later page of sessions links back to the first.
+    pub(crate) later_sessions_page: bool,
     pub(crate) next_sessions_url: String,
     pub(crate) first_sessions_url: String,
     pub(crate) csrf_token: String,
