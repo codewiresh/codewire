@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Serve the editable design system with production browser asset paths."""
 
+import argparse
+import errno
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,10 +41,48 @@ class DesignSystemHandler(SimpleHTTPRequestHandler):
         return super().translate_path(path)
 
 
+class DesignSystemServer(ThreadingHTTPServer):
+    """Never share a port with another listener; bind() moves to the next one."""
+
+    allow_reuse_port = False
+
+
+def port_range(value: str) -> range:
+    """Parse PORT or FIRST-LAST into the ports to try in order."""
+    first, _, last = value.partition("-")
+    try:
+        ports = range(int(first), int(last or first) + 1)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected PORT or FIRST-LAST, got {value!r}") from None
+    if not ports or ports.start < 0 or ports.stop > 65536:
+        raise argparse.ArgumentTypeError(f"invalid port range {value!r}")
+    return ports
+
+
+def bind(ports: range, handler) -> DesignSystemServer:
+    """Bind the first free loopback port, so concurrent previews can coexist."""
+    for port in ports:
+        try:
+            return DesignSystemServer(("127.0.0.1", port), handler)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+    raise SystemExit(f"no free loopback port in {ports.start}-{ports.stop - 1}")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--port",
+        type=port_range,
+        default=port_range("4174"),
+        help="loopback PORT or FIRST-LAST range; the first free port is used (default: 4174)",
+    )
+    args = parser.parse_args()
     handler = partial(DesignSystemHandler, directory=str(DESIGN_ROOT))
-    with ThreadingHTTPServer(("127.0.0.1", 4174), handler) as server:
-        print("Codewire design system: http://127.0.0.1:4174/reference/fixtures/")
+    with bind(args.port, handler) as server:
+        port = server.server_address[1]
+        print(f"Codewire design system: http://127.0.0.1:{port}/reference/fixtures/", flush=True)
         server.serve_forever()
 
 

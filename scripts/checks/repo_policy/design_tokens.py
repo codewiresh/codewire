@@ -21,7 +21,7 @@ DESIGN_STYLESHEET_PATTERNS = (
     f"{DESIGN_PACKAGE}/components.css",
     f"{DESIGN_PACKAGE}/cosmos.css",
     f"{DESIGN_PACKAGE}/routes/*.css",
-    f"{DESIGN_FIXTURES}/terminal.css",
+    f"{DESIGN_FIXTURES}/*.css",
 )
 DESIGN_MARKUP_PATTERNS = (f"{DESIGN_FIXTURES}/**/*.html", f"{DESIGN_TEMPLATES}/**/*.html")
 DESIGN_SCRIPT_FILES = (f"{DESIGN_PACKAGE}/dashboard.js", f"{DESIGN_PACKAGE}/environments.js")

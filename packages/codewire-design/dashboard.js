@@ -20,6 +20,8 @@ const app = document.querySelector("[data-dashboard-app]");
     const target = document.getElementById(trigger.getAttribute("popovertarget") || "");
     return target instanceof HTMLElement && target.matches("[data-field-help-popover]") ? target : null;
   };
+  // Help triggers need no id: remember each open help's trigger by reference.
+  const fieldHelpTriggers = new WeakMap();
   const positionFieldHelp = (trigger, help) => {
     const bounds = trigger.getBoundingClientRect();
     const width = Math.min(288, window.innerWidth - 16);
@@ -35,7 +37,7 @@ const app = document.querySelector("[data-dashboard-app]");
   const showFieldHelp = (trigger) => {
     const help = fieldHelp(trigger);
     if (!help || typeof help.showPopover !== "function") return;
-    help.dataset.fieldHelpTrigger = trigger.id;
+    fieldHelpTriggers.set(help, trigger);
     positionFieldHelp(trigger, help);
     if (!help.matches(":popover-open")) help.showPopover();
     positionFieldHelp(trigger, help);
@@ -44,7 +46,7 @@ const app = document.querySelector("[data-dashboard-app]");
   const hideFieldHelpAfterPointerExit = (help) => {
     window.clearTimeout(fieldHelpHideTimer);
     fieldHelpHideTimer = window.setTimeout(() => {
-      const trigger = document.getElementById(help.dataset.fieldHelpTrigger || "");
+      const trigger = fieldHelpTriggers.get(help);
       if (help.matches(":popover-open") && !help.matches(":hover") &&
           !trigger?.matches(":hover") && !trigger?.matches(":focus-visible")) help.hidePopover();
     }, 120);
@@ -73,14 +75,14 @@ const app = document.querySelector("[data-dashboard-app]");
     const trigger = event.target instanceof Element && event.target.closest("[data-field-help-trigger]");
     const help = fieldHelp(trigger);
     if (!help) return;
-    help.dataset.fieldHelpTrigger = trigger.id;
+    fieldHelpTriggers.set(help, trigger);
     positionFieldHelp(trigger, help);
     window.requestAnimationFrame(() => { if (help.matches(":popover-open")) positionFieldHelp(trigger, help); });
   });
   document.addEventListener("scroll", () => {
     const help = document.querySelector("[data-field-help-popover]:popover-open");
     if (!help) return;
-    const trigger = document.getElementById(help.dataset.fieldHelpTrigger || "");
+    const trigger = fieldHelpTriggers.get(help);
     if (trigger?.getClientRects().length) positionFieldHelp(trigger, help);
     else help.hidePopover();
   }, true);

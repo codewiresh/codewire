@@ -2,9 +2,12 @@ import { defineConfig, devices } from "@playwright/test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { designFixtureSpecPattern } from "./e2e/helpers/design-fixtures";
+
 const dashboardDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(dashboardDir, "../..");
 const dashboardUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
+const designOrigin = (process.env.CODEWIRE_DESIGN_ORIGIN || "http://127.0.0.1:4174").replace(/\/$/, "");
 const apiOrigin = process.env.CODEWIRE_API_ORIGIN
   || process.env.SERVER_URL
   || "http://127.0.0.1:8080";
@@ -17,6 +20,29 @@ const snapshotEnvironment = process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV || "{pl
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const skipSharedSetup = process.env.PLAYWRIGHT_SKIP_SHARED_SETUP === "1";
 const localOnlyResolverRule = "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1";
+const designFixtureProjects = [
+  {
+    name: "design-fixtures-desktop",
+    testMatch: designFixtureSpecPattern,
+    use: {
+      ...devices["Desktop Chrome"],
+      baseURL: designOrigin,
+      viewport: { width: 1440, height: 900 },
+      trace: "on-first-retry" as const,
+      screenshot: "only-on-failure" as const,
+    },
+  },
+  {
+    name: "design-fixtures-mobile",
+    testMatch: designFixtureSpecPattern,
+    use: {
+      ...devices["Pixel 5"],
+      baseURL: designOrigin,
+      viewport: { width: 390, height: 844 },
+      trace: "on-first-retry" as const,
+    },
+  },
+];
 
 export default defineConfig({
   testDir: repoRoot,
@@ -46,6 +72,7 @@ export default defineConfig({
     {
       name: "dashboard-ssr-desktop",
       testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\..*\.ssr\.ts/,
+      testIgnore: designFixtureSpecPattern,
       dependencies: skipSharedSetup ? [] : ["setup"],
       use: {
         ...devices["Desktop Chrome"],
@@ -59,6 +86,7 @@ export default defineConfig({
     {
       name: "dashboard-ssr-mobile",
       testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\..*\.ssr\.ts/,
+      testIgnore: designFixtureSpecPattern,
       dependencies: skipSharedSetup ? [] : ["setup"],
       use: {
         ...devices["Pixel 5"],
@@ -68,6 +96,10 @@ export default defineConfig({
         trace: "on-first-retry",
       },
     },
+    // Editable design fixtures need no dashboard, identity or shared setup.
+    // scripts/ci/verify/run-design-fixtures.sh serves them, sets the origin and
+    // owns this gate; without an origin these projects are not defined at all.
+    ...(process.env.CODEWIRE_DESIGN_ORIGIN ? designFixtureProjects : []),
   ],
   webServer: process.env.PLAYWRIGHT_BASE_URL ? undefined : {
     command: 'CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh)" cargo run --locked -p codewire-dashboard-web',
