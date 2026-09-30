@@ -1,12 +1,18 @@
 //! Reconcile loop and telemetry for the `cw-image-cache` DaemonSet.
 //!
 //! Runs on every orchestration Pod, not only the leader: each Pod adds the
-//! image set it renders (see `sandbox::image_cache` for the monotonic
-//! merge). Writes are optimistic: a replace carries the observed
-//! `resourceVersion`, and a conflict re-reads and re-plans.
+//! image set it renders (see `sandbox::image_cache` for the monotonic,
+//! release-ordered merge). Writes are optimistic: a replace carries the
+//! observed `resourceVersion`, and a conflict re-reads and re-plans.
 //!
-//! Orchestration's grant is a Role in the sandbox namespace that can create
-//! DaemonSets and get, update or patch only `cw-image-cache`; the
+//! A Pod's release is its ReplicaSet's `deployment.kubernetes.io/revision`,
+//! read each pass (a rollback renumbers the reused ReplicaSet). Orchestration
+//! may already read Pods; reading its own namespace's ReplicaSets is a
+//! separate read-only Role. Without it the release is 0 and sets fall back
+//! to arrival order.
+//!
+//! Orchestration's DaemonSet grant is a Role in the sandbox namespace that
+//! can create DaemonSets and get, update or patch only `cw-image-cache`; the
 //! `codewire-orchestration-image-cache` admission policy bounds the shape.
 //!
 //! Slice 1 does not hold this Pod's readiness on the cache;
@@ -15,6 +21,8 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use k8s_openapi::api::apps::v1::ReplicaSet;
+use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, ApiResource, DynamicObject, PostParams};
 use kube::core::GroupVersionKind;
 use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts};
@@ -24,12 +32,12 @@ use serde_json::Value;
 use super::WorkerContext;
 use super::create::SandboxWorkerCfg;
 use crate::sandbox::image_cache::{
-    CacheState, DEFAULT_IMAGE_CACHE_NODE_SELECTOR, DesiredSet, IMAGE_CACHE_ENV, IMAGE_CACHE_NAME,
-    IMAGE_CACHE_NODE_SELECTOR_ENV, Plan, RenderConfig, parse_node_selector, plan, rollout,
+    CacheState, DesiredSet, IMAGE_CACHE_ENV, IMAGE_CACHE_NAME, Plan, RenderConfig, plan, rollout,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const CONFLICT_ATTEMPTS: usize = 3;
+const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
 
 /// Everything one Pod reconciles toward.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,45 +47,90 @@ pub struct ImageCacheConfig {
 }
 
 impl ImageCacheConfig {
-    /// `Ok(None)` when `SANDBOX_IMAGE_CACHE=disabled`.
+    /// `Ok(None)` when `SANDBOX_IMAGE_CACHE=disabled`. Disabling stops
+    /// reconciling; an operator deletes the DaemonSet.
     pub fn from_env(sandbox: &SandboxWorkerCfg) -> anyhow::Result<Option<Self>> {
-        Self::from_values(
-            std::env::var(IMAGE_CACHE_ENV).ok().as_deref(),
-            std::env::var(IMAGE_CACHE_NODE_SELECTOR_ENV).ok().as_deref(),
-            sandbox,
-        )
+        Self::from_values(std::env::var(IMAGE_CACHE_ENV).ok().as_deref(), sandbox)
     }
 
-    fn from_values(
-        mode: Option<&str>,
-        node_selector: Option<&str>,
-        sandbox: &SandboxWorkerCfg,
-    ) -> anyhow::Result<Option<Self>> {
+    fn from_values(mode: Option<&str>, sandbox: &SandboxWorkerCfg) -> anyhow::Result<Option<Self>> {
         match mode.map(str::trim).unwrap_or_default() {
             "" | "enabled" => {}
             "disabled" => return Ok(None),
             other => anyhow::bail!("{IMAGE_CACHE_ENV}={other:?} must be enabled or disabled"),
         }
-        let node_selector = match node_selector.map(str::trim) {
-            None | Some("") => DEFAULT_IMAGE_CACHE_NODE_SELECTOR,
-            Some(value) => value,
-        };
         let namespace = sandbox.sandbox_namespace.trim();
         anyhow::ensure!(!namespace.is_empty(), "sandbox namespace is not configured");
         Ok(Some(Self {
             render: RenderConfig {
                 namespace: namespace.to_owned(),
-                node_selector: parse_node_selector(node_selector)
-                    .map_err(|error| anyhow::anyhow!("{IMAGE_CACHE_NODE_SELECTOR_ENV}: {error}"))?,
             },
             desired: DesiredSet::from_rendered(&sandbox.gateway_image, &sandbox.dind_image),
         }))
     }
 }
 
+/// This Pod's identity, for its release lookup.
+#[derive(Clone, Debug)]
+struct Own {
+    namespace: String,
+    name: String,
+    uid: String,
+}
+
+impl Own {
+    fn from_env() -> Option<Self> {
+        let var = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        Some(Self {
+            namespace: var("POD_NAMESPACE")?,
+            name: var("POD_NAME")?,
+            uid: var("POD_UID")?,
+        })
+    }
+}
+
+/// The revision of the ReplicaSet that controls this Pod.
+async fn own_release(client: &kube::Client, own: &Own) -> anyhow::Result<u64> {
+    let pod = Api::<Pod>::namespaced(client.clone(), &own.namespace)
+        .get(&own.name)
+        .await?;
+    anyhow::ensure!(
+        pod.metadata.uid.as_deref() == Some(own.uid.as_str()),
+        "Pod {} is not this process's Pod",
+        own.name
+    );
+    let owner = pod
+        .metadata
+        .owner_references
+        .unwrap_or_default()
+        .into_iter()
+        .find(|owner| owner.kind == "ReplicaSet" && owner.controller == Some(true))
+        .ok_or_else(|| anyhow::anyhow!("Pod {} has no controlling ReplicaSet", own.name))?;
+    let replica_set = Api::<ReplicaSet>::namespaced(client.clone(), &own.namespace)
+        .get(&owner.name)
+        .await?;
+    anyhow::ensure!(
+        replica_set.metadata.uid.as_deref() == Some(owner.uid.as_str()),
+        "ReplicaSet {} was replaced",
+        owner.name
+    );
+    replica_set
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(REVISION_ANNOTATION))
+        .and_then(|revision| revision.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("ReplicaSet {} has no revision", owner.name))
+}
+
 /// Runs until the process exits. Never gates readiness (slice 1).
 pub async fn image_cache_loop(ctx: Arc<WorkerContext>) {
-    let config = match ImageCacheConfig::from_env(&ctx.sandbox_cfg) {
+    let mut config = match ImageCacheConfig::from_env(&ctx.sandbox_cfg) {
         Ok(Some(config)) => config,
         Ok(None) => {
             tracing::info!("image cache: disabled");
@@ -93,14 +146,35 @@ pub async fn image_cache_loop(ctx: Arc<WorkerContext>) {
         tracing::warn!("image cache: Kubernetes access unavailable; not reconciling");
         return;
     };
+    let own = Own::from_env();
     tracing::info!(
         namespace = %config.render.namespace,
         images = config.desired.images.len(),
         skipped = config.desired.skipped,
         "image cache: reconciling this release's image set"
     );
-    let api = daemon_sets(client, &config.render.namespace);
+    let api = daemon_sets(client.clone(), &config.render.namespace);
+    let mut release_known = true;
     loop {
+        let release = match &own {
+            Some(own) => own_release(&client, own).await,
+            None => Err(anyhow::anyhow!(
+                "POD_NAMESPACE, POD_NAME or POD_UID is unset"
+            )),
+        };
+        config.desired.release = match release {
+            Ok(release) => {
+                release_known = true;
+                release
+            }
+            Err(error) => {
+                if release_known {
+                    tracing::warn!(%error, "image cache: release unknown; ordering by arrival");
+                }
+                release_known = false;
+                0
+            }
+        };
         match reconcile_once(&api, &config).await {
             Ok(observation) => observation.record(&config.desired),
             Err(error) => {
@@ -249,7 +323,8 @@ async fn reconcile_once(
             }
             Plan::Superseded { state } => {
                 tracing::warn!(
-                    "image cache: a newer release retired this release's image set; leaving it"
+                    release = config.desired.release,
+                    "image cache: a newer release holds the cache; this release's set is not cached"
                 );
                 return Ok(Observation {
                     result: ReconcileResult::Superseded,
@@ -266,7 +341,7 @@ fn log_write(action: &str, state: &CacheState) {
     tracing::info!(
         action,
         generation = state.generation,
-        sets = state.sets.len(),
+        releases = ?state.sets.iter().map(|set| set.release).collect::<Vec<_>>(),
         images = crate::sandbox::image_cache::cached_images(&state.sets).len(),
         "image cache: DaemonSet written"
     );
@@ -354,37 +429,30 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_to_enabled_on_runtime_nodes() {
-        let config = ImageCacheConfig::from_values(None, None, &sandbox_cfg())
+    fn config_defaults_to_enabled_in_the_sandbox_namespace() {
+        let config = ImageCacheConfig::from_values(None, &sandbox_cfg())
             .unwrap()
             .unwrap();
         assert_eq!(config.render.namespace, "dev-sandboxes");
-        assert_eq!(
-            config.render.node_selector,
-            parse_node_selector(DEFAULT_IMAGE_CACHE_NODE_SELECTOR).unwrap()
-        );
         assert_eq!(config.desired.images.len(), 3);
+        assert_eq!(config.desired.release, 0);
     }
 
     #[test]
-    fn config_can_be_disabled_or_retargeted_and_rejects_typos() {
+    fn config_can_be_disabled_and_rejects_typos() {
         assert!(
-            ImageCacheConfig::from_values(Some("disabled"), None, &sandbox_cfg())
+            ImageCacheConfig::from_values(Some("disabled"), &sandbox_cfg())
                 .unwrap()
                 .is_none()
         );
-        let config = ImageCacheConfig::from_values(
-            Some("enabled"),
-            Some("kubernetes.io/os=linux"),
-            &sandbox_cfg(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(config.render.node_selector.len(), 1);
-        assert!(ImageCacheConfig::from_values(Some("on"), None, &sandbox_cfg()).is_err());
-        assert!(ImageCacheConfig::from_values(None, Some("nonsense"), &sandbox_cfg()).is_err());
+        assert!(
+            ImageCacheConfig::from_values(Some("enabled"), &sandbox_cfg())
+                .unwrap()
+                .is_some()
+        );
+        assert!(ImageCacheConfig::from_values(Some("on"), &sandbox_cfg()).is_err());
         let mut no_namespace = sandbox_cfg();
         no_namespace.sandbox_namespace.clear();
-        assert!(ImageCacheConfig::from_values(None, None, &no_namespace).is_err());
+        assert!(ImageCacheConfig::from_values(None, &no_namespace).is_err());
     }
 }

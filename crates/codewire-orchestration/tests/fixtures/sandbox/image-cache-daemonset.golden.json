@@ -3,7 +3,7 @@
   "kind": "DaemonSet",
   "metadata": {
     "annotations": {
-      "codewire.sh/image-cache-state": "{\"version\":1,\"generation\":2,\"sets\":[{\"generation\":2,\"tool\":\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\",\"images\":[\"registry.example.invalid/codewire/workspace@sha256:920add04d53620ffbefc5df89738381c5268466538211d297a81d16fba10338a\",\"registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]},{\"generation\":1,\"tool\":\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\",\"images\":[\"registry.example.invalid/codewire/workspace@sha256:920add04d53620ffbefc5df89738381c5268466538211d297a81d16fba10338a\",\"registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]}],\"retired\":[],\"spec_sha256\":\"14ec59437568ae4a09386cd093a0ad6a04605710b16aed09857f6599d12b940c\"}"
+      "codewire.sh/image-cache-state": "{\"version\":1,\"generation\":2,\"sets\":[{\"release\":2,\"generation\":2,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]},{\"release\":1,\"generation\":1,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]}],\"retired\":[],\"spec_sha256\":\"d1f20498b4b3d5d2dd156333b012a6dd89ee6cbab09a7e00c1ff435db341cf8e\"}"
     },
     "labels": {
       "app.kubernetes.io/component": "image-cache",
@@ -35,11 +35,13 @@
           {
             "command": [
               "/cw-image-cache/ld-musl-x86_64.so.1",
+              "--library-path=",
+              "--preload=",
               "/cw-image-cache/busybox",
               "sleep",
               "2147483647"
             ],
-            "image": "registry.example.invalid/codewire/workspace@sha256:920add04d53620ffbefc5df89738381c5268466538211d297a81d16fba10338a",
+            "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
             "imagePullPolicy": "IfNotPresent",
             "name": "image-0",
             "resources": {
@@ -72,6 +74,8 @@
           {
             "command": [
               "/cw-image-cache/ld-musl-x86_64.so.1",
+              "--library-path=",
+              "--preload=",
               "/cw-image-cache/busybox",
               "sleep",
               "2147483647"
@@ -109,6 +113,8 @@
           {
             "command": [
               "/cw-image-cache/ld-musl-x86_64.so.1",
+              "--library-path=",
+              "--preload=",
               "/cw-image-cache/busybox",
               "sleep",
               "2147483647"
@@ -146,6 +152,8 @@
           {
             "command": [
               "/cw-image-cache/ld-musl-x86_64.so.1",
+              "--library-path=",
+              "--preload=",
               "/cw-image-cache/busybox",
               "sleep",
               "2147483647"
@@ -182,6 +190,7 @@
           }
         ],
         "enableServiceLinks": false,
+        "hostUsers": false,
         "imagePullSecrets": [
           {
             "name": "harbor-registry"

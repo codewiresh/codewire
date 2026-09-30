@@ -107,6 +107,11 @@ def assert_credential_bootstrap(resources: list[str], target: dict[str, str], la
 
 IMAGE_CACHE_ROLE = "codewire-orchestration-image-cache"
 IMAGE_CACHE_NAME = "cw-image-cache"
+RELEASE_REVISION_ROLE = "codewire-orchestration-release-revision"
+IMAGE_CACHE_TOOL_IMAGE = (
+    "docker.io/library/docker:29.7.1-dind@sha256:"
+    "e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
+)
 IMAGE_CACHE_IMAGE_PATTERN = (
     "^(registry[.]example[.]invalid|docker[.]io/library)/[a-z0-9]+([._/-][a-z0-9]+)*"
     "(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$"
@@ -119,6 +124,19 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
     cluster_role = exactly_one(resources, "ClusterRole", "codewire-orchestration", label, output)
     if cluster_role and re.search(r"^\s*- daemonsets\s*$", cluster_role, re.MULTILINE):
         output.append(f"{label}: cluster-wide orchestration role must not grant DaemonSets")
+    revision_role = exactly_one(resources, "Role", RELEASE_REVISION_ROLE, label, output)
+    revision_binding = exactly_one(resources, "RoleBinding", RELEASE_REVISION_ROLE, label, output)
+    expected_revision_rules = compact("rules: - apiGroups: - apps resources: - replicasets verbs: - get")
+    if revision_role and (metadata_field(revision_role, "namespace") != target["subject_namespace"]
+            or compact(top_level_block(revision_role, "rules")) != expected_revision_rules):
+        output.append(f"{label}: release revision Role must grant only ReplicaSet get in orchestration's namespace")
+    if revision_binding:
+        expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {RELEASE_REVISION_ROLE}")
+        expected_subject = compact(f"subjects: - kind: ServiceAccount name: codewire-orchestration namespace: {target['subject_namespace']}")
+        if (metadata_field(revision_binding, "namespace") != target["subject_namespace"]
+                or compact(top_level_block(revision_binding, "roleRef")) != expected_ref
+                or compact(top_level_block(revision_binding, "subjects")) != expected_subject):
+            output.append(f"{label}: release revision binding escaped its namespace or identity")
     role = exactly_one(resources, "Role", IMAGE_CACHE_ROLE, label, output)
     binding = exactly_one(resources, "RoleBinding", IMAGE_CACHE_ROLE, label, output)
     account = exactly_one(resources, "ServiceAccount", IMAGE_CACHE_NAME, label, output)
@@ -168,13 +186,17 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
             "operations: - CREATE - UPDATE", "resources: - daemonsets",
             "request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')",
             "request.name == 'cw-image-cache'",
+            "object.metadata.labels == variables.labels",
+            "object.spec.template.metadata.labels == variables.labels",
             "object.spec.selector.matchLabels == {'app.kubernetes.io/name': 'cw-image-cache'}",
             "variables.pod.serviceAccountName == 'cw-image-cache'",
             "never codewire-sandbox",
             "variables.pod.automountServiceAccountToken == false",
             "!has(variables.pod.runtimeClassName)",
             "!variables.pod.hostNetwork", "!variables.pod.hostPID", "!variables.pod.hostIPC",
-            "variables.pod.volumes.all(v, has(v.emptyDir))",
+            "variables.pod.hostUsers == false",
+            "size(variables.pod.volumes) == 1",
+            "has(variables.pod.volumes[0].emptyDir)",
             f"c.image.matches('{IMAGE_CACHE_IMAGE_PATTERN}')",
             "(!has(c.securityContext.privileged) || !c.securityContext.privileged)",
             "!c.securityContext.allowPrivilegeEscalation",
@@ -183,8 +205,14 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
             "!has(c.securityContext.capabilities.add)",
             "variables.pod.securityContext.runAsNonRoot",
             "variables.pod.securityContext.seccompProfile.type == 'RuntimeDefault'",
-            "c.command == ['/cw-image-cache/ld-musl-x86_64.so.1', '/cw-image-cache/busybox', 'sleep', '2147483647']",
+            f"c.image == '{IMAGE_CACHE_TOOL_IMAGE}'",
+            "size(variables.initContainers) == 1",
+            "size(object.spec.template.spec.containers) <= 6",
+            "c.command == ['/cw-image-cache/ld-musl-x86_64.so.1', '--library-path=', '--preload=', '/cw-image-cache/busybox', 'sleep', '2147483647']",
             "c.command == ['/bin/busybox', 'cp', '/bin/busybox', '/lib/ld-musl-x86_64.so.1', '/cw-image-cache/']",
+            "m.name == 'cw-image-cache-tool' && has(m.readOnly) && m.readOnly",
+            "c.resources == {'requests': {'cpu': '1m', 'memory': '4Mi'}, 'limits': {'cpu': '10m', 'memory': '16Mi'}}",
+            "variables.pod.nodeSelector == {'katacontainers.io/kata-runtime': 'true', 'node.codewire.sh/runtime-candidate': 'true'}",
             "!has(c.env) && !has(c.envFrom) && !has(c.ports)",
             "t.key == 'node.codewire.sh/runtime-candidate'",
             "!has(variables.pod.priorityClassName)",
@@ -345,6 +373,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
                 f"RoleBinding/{target['role_namespace']}/{name}",
                 f"RoleBinding/{target['role_namespace']}/codewire-orchestration-credential-bootstrap",
                 f"RoleBinding/{target['role_namespace']}/{IMAGE_CACHE_ROLE}",
+                f"RoleBinding/{target['subject_namespace']}/{RELEASE_REVISION_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
             ]
         )
@@ -521,13 +550,23 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             else resource for resource in resources
         ])
         def image_cache_rejected(label: str, kind: str, before: str, after: str, name: str = IMAGE_CACHE_ROLE) -> None:
-            # Rendered CEL folds across lines at spaces; match any whitespace.
-            indent = before[: len(before) - len(before.lstrip(" "))]
-            pattern = re.compile(re.escape(indent) + r"\s+".join(re.escape(part) for part in re.split(r" +", before.strip(" "))))
+            # Rendered CEL folds across lines at spaces, and single-quoted
+            # YAML scalars double embedded apostrophes; match either spelling.
+            def spelling(text: str) -> re.Pattern[str]:
+                indent = text[: len(text) - len(text.lstrip(" "))]
+                return re.compile(re.escape(indent) + r"\s+".join(re.escape(part) for part in re.split(r" +", text.strip(" "))))
+
+            patterns = [spelling(before), spelling(before.replace("'", "''"))]
+
+            def rewrite(resource: str) -> str:
+                for pattern in patterns:
+                    if pattern.search(resource):
+                        return pattern.sub(lambda _: after.replace("'", "''") if pattern is patterns[1] else after, resource)
+                return resource
 
             def mutate(resources: list[str]) -> list[str]:
                 changed = [
-                    pattern.sub(lambda _: after, resource)
+                    rewrite(resource)
                     if top_level_field(resource, "kind") == kind and metadata_field(resource, "name") == name
                     else resource
                     for resource in resources
@@ -544,7 +583,13 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         image_cache_rejected("token automount", "ServiceAccount", "automountServiceAccountToken: false", "automountServiceAccountToken: true", IMAGE_CACHE_NAME)
         image_cache_rejected("open egress", "NetworkPolicy", "  - Egress", "  - Egress\n  egress:\n  - {}", IMAGE_CACHE_NAME)
         image_cache_rejected("runtime class allowed", "ValidatingAdmissionPolicy", "!has(variables.pod.runtimeClassName)", "true")
-        image_cache_rejected("host path allowed", "ValidatingAdmissionPolicy", "has(v.emptyDir)", "true")
+        image_cache_rejected("host path allowed", "ValidatingAdmissionPolicy", "has(variables.pod.volumes[0].emptyDir)", "true")
+        image_cache_rejected("any init image", "ValidatingAdmissionPolicy", f"c.image == '{IMAGE_CACHE_TOOL_IMAGE}'", "true")
+        image_cache_rejected("unbounded containers", "ValidatingAdmissionPolicy", "size(object.spec.template.spec.containers) <= 6", "true")
+        image_cache_rejected("loader environment honoured", "ValidatingAdmissionPolicy", "'--library-path=', '--preload=', ", "")
+        image_cache_rejected("any node", "ValidatingAdmissionPolicy", "'katacontainers.io/kata-runtime': 'true', ", "")
+        image_cache_rejected("host users", "ValidatingAdmissionPolicy", "variables.pod.hostUsers == false", "true")
+        image_cache_rejected("ReplicaSet list", "Role", "  - get", "  - get\n  - list", RELEASE_REVISION_ROLE)
         image_cache_rejected("tag images allowed", "ValidatingAdmissionPolicy", "@sha256:[0-9a-f]{64}$", "")
         image_cache_rejected("sandbox identity allowed", "ValidatingAdmissionPolicy", "serviceAccountName == 'cw-image-cache'", "serviceAccountName != ''")
         image_cache_rejected("any command allowed", "ValidatingAdmissionPolicy", "'sleep', '2147483647'", "'sh'")
