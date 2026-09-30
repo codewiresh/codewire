@@ -47,6 +47,12 @@ pub(super) struct PageQuery {
     #[serde(default)]
     cursor: String,
     #[serde(default)]
+    search: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    organization: String,
+    #[serde(default)]
     message: String,
     #[serde(default)]
     error: String,
@@ -202,6 +208,17 @@ async fn inventory_response(
         );
     }
     page.action_query = context_query(if start > 0 { &query.cursor } else { "" });
+    if start > 0 {
+        page.cursor.clone_from(&query.cursor);
+    }
+    page.filter = crate::view::ApiKeyFilterView::new(&query.search, &query.status);
+    // Only an organization on this page narrows the list; anything else shows all.
+    if context.view.organizations[start..end]
+        .iter()
+        .any(|org| org.id == query.organization)
+    {
+        page.filter.organization.clone_from(&query.organization);
+    }
     if context.organizations_available {
         page.groups = context.view.organizations[start..end]
             .iter()
@@ -336,7 +353,6 @@ fn key_row(key: ApiKey) -> PersonalApiKeyRow {
             expired,
         },
         expires: expires.map_or_else(|| "Never".into(), |value| calendar_datetime(value.seconds)),
-        scopes: key.scopes,
     }
 }
 
@@ -675,7 +691,7 @@ fn approved_message(code: &str) -> &'static str {
 fn approved_error(code: &str) -> &'static str {
     match code {
         "account-changed" => {
-            "Your account changed or the form expired. Review API Keys before trying again."
+            "Your account changed or the form expired. Review your API keys before trying again."
         }
         "invalid-page" => "That organization page is no longer available. Showing the first page.",
         "not-authorized" => {

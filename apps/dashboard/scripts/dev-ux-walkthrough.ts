@@ -106,7 +106,7 @@ async function settings(page: Page, slug: string, width: number): Promise<void> 
       }
       await fits(page);
     });
-    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API Keys"]]) {
+    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API keys"]]) {
       await stage(`settings-${path}-${scope}-${width}`, async () => {
         await visit(page, `/settings/${path}/${query}`);
         await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
