@@ -17,25 +17,16 @@ type Viewport = "desktop" | "mobile";
 type Pending = Partial<Record<`${Viewport} ${Check}`, number>>;
 
 const pending: Record<string, Pending> = {
-  // Settings slice: settings.css, secret-management.css
-  "application-secrets.html": { "desktop scale": 18, "desktop contrast": 8, "desktop focus": 1, "mobile scale": 18, "mobile contrast": 8, "mobile focus": 1 },
-  "settings-account.html": { "desktop scale": 6, "desktop contrast": 8, "mobile scale": 6, "mobile contrast": 8 },
-  "settings-api-keys-empty.html": { "desktop scale": 2, "desktop contrast": 1, "mobile scale": 2, "mobile contrast": 1 },
-  "settings-api-keys-one-time.html": { "desktop scale": 3, "desktop contrast": 4, "mobile scale": 3, "mobile contrast": 4 },
-  "settings-api-keys-unavailable.html": { "desktop scale": 2, "desktop contrast": 1, "mobile scale": 2, "mobile contrast": 1 },
-  "settings-api-keys.html": { "desktop scale": 12, "desktop contrast": 10, "mobile scale": 12, "mobile contrast": 10 },
-  "settings-credentials.html": { "desktop scale": 19, "desktop contrast": 10, "mobile scale": 19, "mobile contrast": 10 },
-  "settings-secrets-empty.html": { "desktop scale": 4, "desktop contrast": 2, "mobile scale": 2, "mobile contrast": 1 },
-  "settings-secrets-unavailable.html": { "desktop scale": 2, "desktop contrast": 1, "mobile scale": 2, "mobile contrast": 1 },
-  "settings-secrets.html": { "desktop scale": 4, "desktop contrast": 1, "mobile scale": 4, "mobile contrast": 1 },
   // Create slice: environments.css
   "create-sandbox.html": { "desktop scale": 8, "mobile scale": 8 },
   "source-selection-recovery.html": { "desktop scale": 3, "mobile scale": 3 },
   // Terminal slice: terminal.css
   "terminal-tabs.html": { "desktop scale": 1, "desktop contrast": 4, "mobile scale": 1, "mobile contrast": 2 },
   "terminal.html": { "desktop scale": 2, "mobile scale": 2 },
-  // Shell slice: dashboard.css
+  // Shell and organizations slice: dashboard.css, organizations.css
+  "application-secrets.html": { "desktop scale": 4, "desktop contrast": 1, "mobile scale": 4, "mobile contrast": 1 },
   "sandboxes.html": { "desktop scale": 4, "desktop contrast": 5, "mobile scale": 3, "mobile contrast": 5 },
+  "settings-secrets-empty.html": { "desktop scale": 2, "desktop contrast": 1 },
   // Auth and public slice: auth.css, public.css
   "home.html": { "desktop scale": 62, "desktop contrast": 17, "mobile scale": 57, "mobile contrast": 17 },
   "login.html": { "desktop scale": 3, "desktop focus": 1, "mobile scale": 3, "mobile focus": 1 },

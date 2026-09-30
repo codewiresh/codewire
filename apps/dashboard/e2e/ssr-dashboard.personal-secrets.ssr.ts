@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }) => {
 test("Settings uses one subtitle-free heading and personal destinations independent of organization navigation", async ({ page }) => {
   for (const [path, active] of [["settings-account", "Account"], ["settings-credentials", "Credentials"], ["settings-secrets", "Secrets"]]) {
     await page.goto(fixture(path));
-    const aside = page.locator(".cw-settings-subnav");
+    const aside = page.locator(".cw-context-nav");
     await expect(aside.locator("header")).toHaveText("Settings");
     await expect(aside.getByRole("list", { name: "Personal", exact: true }).getByRole("link")).toHaveText(["Account", "Credentials", "Secrets", "API Keys"]);
     await expect(aside.locator('[aria-current="page"]')).toHaveText(active);
@@ -180,7 +180,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
   await expect(page.locator("form")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Reload secrets" })).toHaveAttribute("href", "settings-secrets.html");
   if ((page.viewportSize()?.width || 0) <= 768) {
-    expect(await page.locator(".cw-settings-subnav").evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(200);
+    expect(await page.locator(".cw-context-nav").evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(200);
   }
   await fits(page);
   await page.screenshot({ path: test.info().outputPath("personal-secrets-unavailable.png") });
