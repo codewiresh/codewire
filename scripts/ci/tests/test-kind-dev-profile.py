@@ -94,7 +94,10 @@ elif tool == "docker":
         aliases[args[2]] = args[1]
         aliases_path.write_text(json.dumps(aliases))
     elif args[:2] == ["buildx", "bake"]:
-        output = args[args.index("--set") + 1]
+        outputs = [args[i + 1] for i, arg in enumerate(args[:-1])
+                   if arg == "--set" and args[i + 1].startswith("kind-dev-binary.output=")]
+        if len(outputs) != 1: sys.exit(64)
+        output = outputs[0]
         destination = pathlib.Path(output.split("dest=", 1)[1])
         binary = destination / os.environ["KIND_DEV_BIN"]
         binary.write_text(os.environ.get("FAKE_BINARY_CONTENT", "synthetic-current-source"))
