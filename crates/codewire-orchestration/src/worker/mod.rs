@@ -32,6 +32,7 @@ pub mod scripts;
 pub mod secrets;
 pub mod setup;
 pub mod setup_lease;
+mod start_timing;
 pub mod tenant_secret_teardown;
 
 use serde::{Deserialize, Serialize};

@@ -5,6 +5,7 @@
 //! modules. This facade owns their stable internal API.
 
 use std::fmt;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -28,12 +29,7 @@ pub use credentials::{
 #[cfg(test)]
 use encoding::gzip_base64;
 #[cfg(test)]
-use gateway::{
-    COMMODITY_GATEWAY_STARTUP_FAILURE_THRESHOLD,
-    CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS,
-    CONFIDENTIAL_GATEWAY_PROGRESS_DEADLINE_SECONDS, CONFIDENTIAL_GATEWAY_STARTUP_FAILURE_THRESHOLD,
-    GATEWAY_BINDING_TOKEN_VOLUME, build_sidecar_env,
-};
+use gateway::{GATEWAY_BINDING_TOKEN_VOLUME, build_sidecar_env};
 pub use gateway::{
     render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
     render_gateway_service,
@@ -75,6 +71,14 @@ pub(crate) fn confidential_init_data(opts: &TemplateOpts) -> anyhow::Result<Stri
     Ok(encoding::build_codewire_kata_policy_init_data(opts, true))
 }
 
+/// How long one create or start waits for a workspace to become ready. The
+/// gateway's startup probe and rollout deadline use the same budget, so
+/// Kubernetes never restarts or fails a gateway during a start that can still
+/// succeed.
+pub const WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(600);
+/// Confidential guests initialize encrypted storage before the daemon listens.
+pub const CONFIDENTIAL_WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(1_800);
+
 // Canonical sandbox and daemon contract constants.
 pub const DEFAULT_GATEWAY_IMAGE: &str = codewire_server_core::runtime_images::DEFAULT_GATEWAY_IMAGE;
 pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
@@ -90,8 +94,6 @@ pub const WORKSPACE_DAEMON_LISTEN_ADDR: &str = "0.0.0.0:7777";
 pub const SANDBOX_SERVICE_ACCOUNT: &str = codewire_gateway_proto::GATEWAY_BINDING_SERVICE_ACCOUNT;
 pub const DIND_SOCKET_PATH: &str = "/var/run/docker/docker.sock";
 pub const DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
-pub const GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV: &str =
-    "CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS";
 pub const GATEWAY_BINDING_URL_ENV: &str = "CODEWIRE_BINDING_URL";
 pub const GATEWAY_TAILNET_UDP_LISTEN_ADDR_ENV: &str = "CODEWIRE_TAILNET_UDP_LISTEN_ADDR";
 pub const GATEWAY_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS_ENV: &str =

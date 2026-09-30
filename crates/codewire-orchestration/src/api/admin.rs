@@ -16,6 +16,9 @@ use sqlx::Row;
 use super::ApiState;
 use super::environments::format_time;
 
+#[cfg(test)]
+mod startup_database_tests;
+
 /// Mirrors `api.AdminStatsResponse`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AdminStatsResponse {
@@ -379,12 +382,34 @@ pub struct AdminEnvironmentStartupSummary {
     pub phase_durations: Vec<AdminEnvironmentStartupPhaseSummary>,
 }
 
-const STARTUP_PHASES: [&str; 4] = [
+/// Summarized startup phases, in presentation order. Every stage that
+/// `start_metrics` observes is listed, so the admin summary and Prometheus
+/// describe the same stages.
+const STARTUP_PHASES: [&str; 8] = [
     "create_claim",
     "wait_for_ready",
     "gateway_ready",
+    "pod_scheduled",
+    "pod_initialized",
+    "pod_running",
+    "pod_containers_ready",
     "file_ready",
 ];
+
+/// Environment states that still owe a start while `desired_state` is
+/// `started`.
+const STARTING_BACKLOG_STATES: [&str; 6] = [
+    "pending",
+    "pending_build",
+    "building",
+    "pulling_snapshot",
+    "creating",
+    "starting",
+];
+
+/// Transitions that begin a new runtime incarnation. A running environment's
+/// gateway readiness counts only when recorded at or after the latest one.
+const INCARNATION_START_STATES: [&str; 2] = ["creating", "starting"];
 
 fn round_f64_to_i64(v: f64) -> i64 {
     v.round() as i64
@@ -403,20 +428,32 @@ pub(crate) async fn get_admin_environment_startup_summary_core(
     state: &ApiState,
     window_minutes: i32,
 ) -> AppResult<AdminEnvironmentStartupSummary> {
+    startup_summary(&state.pool, window_minutes).await
+}
+
+/// `running_without_gateway_ready_count` counts running environments whose
+/// current incarnation has no completed `gateway_ready`. Create and restart
+/// both record it, so a completed row from an earlier incarnation no longer
+/// hides a start whose gateway never became ready. An environment with no
+/// recorded incarnation transition falls back to any completed row.
+async fn startup_summary(
+    pool: &sqlx::PgPool,
+    window_minutes: i32,
+) -> AppResult<AdminEnvironmentStartupSummary> {
     let row = sqlx::query(
         r#"SELECT
              COUNT(*) FILTER (
                WHERE desired_state = 'started'
-                 AND state IN ('pending', 'pending_build', 'building', 'pulling_snapshot', 'creating', 'starting')
+                 AND state = ANY($1)
              )::int AS starting_backlog_count,
              COUNT(*) FILTER (
                WHERE desired_state = 'started'
-                 AND state IN ('pending', 'pending_build', 'building', 'pulling_snapshot', 'creating', 'starting')
+                 AND state = ANY($1)
                  AND created_at <= NOW() - INTERVAL '5 minutes'
              )::int AS starting_backlog_over_5m_count,
              COUNT(*) FILTER (
                WHERE desired_state = 'started'
-                 AND state IN ('pending', 'pending_build', 'building', 'pulling_snapshot', 'creating', 'starting')
+                 AND state = ANY($1)
                  AND created_at <= NOW() - INTERVAL '10 minutes'
              )::int AS starting_backlog_over_10m_count,
              COUNT(*) FILTER (
@@ -428,11 +465,20 @@ pub(crate) async fn get_admin_environment_startup_summary_core(
                     WHERE l.environment_id = environments.id
                       AND l.phase = 'gateway_ready'
                       AND l.status = 'completed'
+                      AND l.created_at >= COALESCE((
+                        SELECT MAX(j.created_at)
+                          FROM environment_lifecycle_journal j
+                         WHERE j.environment_id = environments.id
+                           AND j.kind = 'transition'
+                           AND j.to_state = ANY($2)
+                      ), '-infinity'::timestamptz)
                  )
              )::int AS running_without_gateway_ready_count
            FROM environments"#,
     )
-    .fetch_one(&state.pool)
+    .bind(&STARTING_BACKLOG_STATES[..])
+    .bind(&INCARNATION_START_STATES[..])
+    .fetch_one(pool)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "admin: query startup backlog summary failed");
@@ -459,7 +505,7 @@ pub(crate) async fn get_admin_environment_startup_summary_core(
              SELECT phase, (metadata->>'duration_ms')::double precision AS duration_ms
                FROM environment_logs
               WHERE created_at >= NOW() - make_interval(mins => $1::int)
-                AND phase IN ('create_claim', 'wait_for_ready', 'gateway_ready', 'file_ready')
+                AND phase = ANY($2)
                 AND status = 'completed'
                 AND metadata ? 'duration_ms'
            )
@@ -471,7 +517,8 @@ pub(crate) async fn get_admin_environment_startup_summary_core(
             GROUP BY phase"#,
     )
     .bind(window_minutes)
-    .fetch_all(&state.pool)
+    .bind(&STARTUP_PHASES[..])
+    .fetch_all(pool)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "admin: query startup duration summary failed");
@@ -541,10 +588,17 @@ pub(crate) async fn get_admin_environment_startup_timings_core(
     state: &ApiState,
     environment_id: &str,
 ) -> AppResult<AdminEnvironmentStartupTimings> {
+    startup_timings(&state.pool, environment_id).await
+}
+
+async fn startup_timings(
+    pool: &sqlx::PgPool,
+    environment_id: &str,
+) -> AppResult<AdminEnvironmentStartupTimings> {
     let created_at: chrono::NaiveDateTime =
         sqlx::query_scalar(r#"SELECT created_at FROM environments WHERE id = $1"#)
             .bind(environment_id)
-            .fetch_optional(&state.pool)
+            .fetch_optional(pool)
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "admin: load environment failed");
@@ -557,11 +611,12 @@ pub(crate) async fn get_admin_environment_startup_timings_core(
                   phase, status, COALESCE(message, '') AS message, metadata, created_at
            FROM environment_logs
            WHERE environment_id = $1
-             AND phase IN ('create_claim', 'wait_for_ready', 'gateway_ready', 'file_ready')
+             AND phase = ANY($2)
            ORDER BY phase, created_at DESC"#,
     )
     .bind(environment_id)
-    .fetch_all(&state.pool)
+    .bind(&STARTUP_PHASES[..])
+    .fetch_all(pool)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "admin: query startup timings failed");
@@ -620,6 +675,28 @@ mod tests {
 
         assert_eq!(value["monthly_cpu_hours"], json!(2));
         assert_eq!(value["monthly_memory_gb_hours"], json!(4.5));
+    }
+
+    #[test]
+    fn startup_phases_summarize_every_measured_start_stage_once() {
+        let mut unique = STARTUP_PHASES.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), STARTUP_PHASES.len());
+        for stage in crate::start_metrics::StartStage::ALL {
+            assert!(
+                STARTUP_PHASES.contains(&stage.as_str()),
+                "{} is observed but not summarized",
+                stage.as_str()
+            );
+        }
+        for phase in STARTUP_PHASES {
+            assert_ne!(
+                crate::worker::env_log::env_phase_label(phase),
+                phase,
+                "{phase} needs a label"
+            );
+        }
     }
 
     #[test]

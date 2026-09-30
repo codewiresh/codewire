@@ -1,8 +1,9 @@
 //! Rust-owned deploy-shaped proof for TTL eviction in Kind.
 //!
 //! Creates a real environment through the Rust Connect service, waits for its
-//! SandboxClaim and workspace Pod, verifies live image provenance, expires it
-//! in PostgreSQL, then proves the
+//! SandboxClaim and workspace Pod, verifies the create's start-stage timing
+//! rows and metrics and live image provenance, expires it in PostgreSQL, then
+//! proves the
 //! Rust reconciler and Temporal lifecycle delete every Kubernetes runtime and
 //! record the authoritative journal trail.
 
@@ -97,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         !pods_before.is_empty(),
         "running environment had no workspace Pod"
     );
+    verify_start_stage_timing(&pool, &base_url, &environment_id).await?;
 
     // Observe the product-created template before TTL cleanup removes it.
     // Reuse the checked-in assertion; an empty template set must still fail.
@@ -196,6 +198,81 @@ async fn main() -> anyhow::Result<()> {
     println!(
         "reconciler-ttl-smoke: Connect create, expiry reconcile, Temporal destroy, journal, SandboxClaim, and Pod cleanup green"
     );
+    Ok(())
+}
+
+/// Create records its measured stages as log rows with a duration, keeps the
+/// workspace Pod's start marks out of the lifecycle journal, and observes the
+/// same stages in the bounded start-stage histogram. The container marks
+/// (`pod_running`, `pod_containers_ready`) are omitted by design after a
+/// container restart, so only the condition-derived Pod marks are required.
+async fn verify_start_stage_timing(
+    pool: &PgPool,
+    base_url: &str,
+    environment_id: &str,
+) -> anyhow::Result<()> {
+    for phase in [
+        "create_claim",
+        "gateway_ready",
+        "pod_scheduled",
+        "pod_initialized",
+    ] {
+        let duration_ms: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT (metadata->>'duration_ms')::bigint
+               FROM environment_logs
+              WHERE environment_id = $1 AND phase = $2 AND status = 'completed'
+              ORDER BY created_at DESC
+              LIMIT 1",
+        )
+        .bind(environment_id)
+        .bind(phase)
+        .fetch_optional(pool)
+        .await
+        .with_context(|| format!("query {phase} stage row"))?
+        .flatten();
+        anyhow::ensure!(
+            duration_ms.is_some_and(|duration_ms| duration_ms >= 0),
+            "create omitted a completed {phase} stage row with duration_ms"
+        );
+    }
+    let journaled: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM environment_lifecycle_journal
+          WHERE environment_id = $1 AND phase LIKE 'pod\\_%'",
+    )
+    .bind(environment_id)
+    .fetch_one(pool)
+    .await
+    .context("query journaled Pod start marks")?;
+    anyhow::ensure!(
+        journaled == 0,
+        "Pod start marks must not be lifecycle journal checkpoints"
+    );
+
+    let metrics = reqwest::get(format!("{}/metrics", base_url.trim_end_matches('/')))
+        .await
+        .context("fetch orchestration metrics")?
+        .error_for_status()
+        .context("orchestration metrics status")?
+        .text()
+        .await
+        .context("read orchestration metrics")?;
+    for stage in ["create_claim", "gateway_ready", "pod_scheduled"] {
+        let stage_label = format!("stage=\"{stage}\"");
+        let observed = metrics.lines().any(|line| {
+            line.starts_with("codewire_environment_start_stage_seconds_count{")
+                && line.contains("path=\"cold\"")
+                && line.contains(&stage_label)
+                && line
+                    .rsplit(' ')
+                    .next()
+                    .and_then(|count| count.parse::<f64>().ok())
+                    .is_some_and(|count| count >= 1.0)
+        });
+        anyhow::ensure!(
+            observed,
+            "orchestration metrics omitted a cold {stage} start-stage observation"
+        );
+    }
     Ok(())
 }
 

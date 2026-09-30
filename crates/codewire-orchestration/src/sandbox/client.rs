@@ -10,9 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use crc32fast::Hasher as Crc32Hasher;
-use k8s_openapi::api::core::v1::{Namespace, PersistentVolume, PersistentVolumeClaim, Pod};
+use k8s_openapi::api::core::v1::{
+    ContainerStatus, Namespace, PersistentVolume, PersistentVolumeClaim, Pod,
+};
 use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::jiff::Timestamp;
 use kube::Client;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
@@ -51,6 +54,72 @@ pub struct ProbeResult {
     pub pod_name: String,
     pub pod_uid: String,
     pub pod_ip: String,
+    /// Start marks of the probed Pod, read from the same Pod object.
+    pub pod_timeline: PodStartTimeline,
+}
+
+/// Kubernetes-reported start marks for one workspace Pod incarnation, taken
+/// from the Pod's own metadata and status. Kubernetes records these times at
+/// one-second resolution. A condition's mark is its latest transition to
+/// `True`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PodStartTimeline {
+    pub created_at: Option<Timestamp>,
+    /// `PodScheduled=True`.
+    pub scheduled_at: Option<Timestamp>,
+    /// `Initialized=True`: every init container completed.
+    pub initialized_at: Option<Timestamp>,
+    /// The latest `state.running.startedAt`, set only when every container is
+    /// running on its first start. A restarted container's start time
+    /// describes the restart rather than the Pod start, so it leaves this
+    /// unset.
+    pub running_at: Option<Timestamp>,
+    /// `ContainersReady=True`.
+    pub containers_ready_at: Option<Timestamp>,
+}
+
+impl PodStartTimeline {
+    pub fn from_pod(pod: &Pod) -> Self {
+        let status = pod.status.as_ref();
+        let condition_true_at = |kind: &str| {
+            status
+                .and_then(|status| status.conditions.as_deref())
+                .into_iter()
+                .flatten()
+                .find(|condition| condition.type_ == kind && condition.status == "True")
+                .and_then(|condition| condition.last_transition_time.as_ref())
+                .map(|time| time.0)
+        };
+        let containers = status
+            .and_then(|status| status.container_statuses.as_deref())
+            .unwrap_or_default();
+        let running_at = containers
+            .iter()
+            .map(first_start_running_at)
+            .collect::<Option<Vec<_>>>()
+            .and_then(|started| started.into_iter().max());
+        Self {
+            created_at: pod.metadata.creation_timestamp.as_ref().map(|time| time.0),
+            scheduled_at: condition_true_at("PodScheduled"),
+            initialized_at: condition_true_at("Initialized"),
+            running_at,
+            containers_ready_at: condition_true_at("ContainersReady"),
+        }
+    }
+}
+
+fn first_start_running_at(container: &ContainerStatus) -> Option<Timestamp> {
+    if container.restart_count != 0 {
+        return None;
+    }
+    let started_at = container
+        .state
+        .as_ref()?
+        .running
+        .as_ref()?
+        .started_at
+        .as_ref()?;
+    Some(started_at.0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3665,6 +3734,7 @@ impl SandboxClient {
         };
         if let Ok(pod) = self.pods().get(&pod_lookup).await {
             result.pod_exists = true;
+            result.pod_timeline = PodStartTimeline::from_pod(&pod);
             result.pod_uid = pod.metadata.uid.clone().unwrap_or_default();
             if let Some(status) = &pod.status {
                 result.pod_phase = status.phase.clone().unwrap_or_default();
@@ -4480,6 +4550,88 @@ mod tests {
             Some(("StartError".into(), "start failed".into()))
         );
         assert!(pod_requires_product_replacement(&failed_phase));
+    }
+
+    fn timeline_pod(workspace_restarts: i32, dind_state: Value) -> Pod {
+        serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "workspace",
+                "uid": "uid-1",
+                "creationTimestamp": "2026-09-29T10:00:00Z"
+            },
+            "spec": {"containers": [
+                {"name": "workspace", "image": "workspace:test"},
+                {"name": "dind", "image": "dind:test"}
+            ]},
+            "status": {
+                "phase": "Running",
+                "startTime": "2026-09-29T10:00:03Z",
+                "conditions": [
+                    {"type": "PodReadyToStartContainers", "status": "True",
+                     "lastTransitionTime": "2026-09-29T10:00:14Z"},
+                    {"type": "Initialized", "status": "True",
+                     "lastTransitionTime": "2026-09-29T10:00:36Z"},
+                    {"type": "Ready", "status": "True",
+                     "lastTransitionTime": "2026-09-29T10:00:40Z"},
+                    {"type": "ContainersReady", "status": "True",
+                     "lastTransitionTime": "2026-09-29T10:00:40Z"},
+                    {"type": "PodScheduled", "status": "True",
+                     "lastTransitionTime": "2026-09-29T10:00:03Z"}
+                ],
+                "containerStatuses": [
+                    {"name": "workspace", "image": "workspace:test", "imageID": "",
+                     "ready": true, "restartCount": workspace_restarts,
+                     "state": {"running": {"startedAt": "2026-09-29T10:00:37Z"}}},
+                    {"name": "dind", "image": "dind:test", "imageID": "",
+                     "ready": true, "restartCount": 0, "state": dind_state}
+                ]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn pod_start_timeline_reads_conditions_and_first_container_starts() {
+        let at = |value: &str| Some(value.parse::<Timestamp>().unwrap());
+        let started = json!({"running": {"startedAt": "2026-09-29T10:00:38Z"}});
+        assert_eq!(
+            PodStartTimeline::from_pod(&timeline_pod(0, started.clone())),
+            PodStartTimeline {
+                created_at: at("2026-09-29T10:00:00Z"),
+                scheduled_at: at("2026-09-29T10:00:03Z"),
+                initialized_at: at("2026-09-29T10:00:36Z"),
+                // The last container to start marks the Pod fully running.
+                running_at: at("2026-09-29T10:00:38Z"),
+                containers_ready_at: at("2026-09-29T10:00:40Z"),
+            }
+        );
+
+        // A restart or a container not yet running leaves the mark unknown
+        // rather than reporting a restart time as the Pod start.
+        let restarted = PodStartTimeline::from_pod(&timeline_pod(1, started));
+        assert_eq!(restarted.running_at, None);
+        assert_eq!(restarted.initialized_at, at("2026-09-29T10:00:36Z"));
+        let waiting = PodStartTimeline::from_pod(&timeline_pod(
+            0,
+            json!({"waiting": {"reason": "ContainerCreating"}}),
+        ));
+        assert_eq!(waiting.running_at, None);
+
+        let mut unscheduled = timeline_pod(0, json!({}));
+        let status = unscheduled.status.as_mut().unwrap();
+        status
+            .conditions
+            .as_mut()
+            .unwrap()
+            .retain(|condition| condition.type_ != "PodScheduled");
+        status.conditions.as_mut().unwrap().push(
+            serde_json::from_value(json!({"type": "PodScheduled", "status": "False",
+                "lastTransitionTime": "2026-09-29T10:00:01Z"}))
+            .unwrap(),
+        );
+        assert_eq!(PodStartTimeline::from_pod(&unscheduled).scheduled_at, None);
     }
 
     #[test]

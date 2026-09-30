@@ -122,7 +122,7 @@ async fn https_runtime_keeps_ssh_ready_and_drains_an_unconsumed_stream_before_ex
     call.start(&request.request_id).await;
     let response = bounded(response).await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    bounded(assert_readyz_ok(&ready_address)).await;
+    wait_for_readyz_ok(&ready_address).await;
     // Retain the unconsumed HTTP body and private response writer. Graceful
     // HTTP waiting before ingress cancellation would hang this shutdown.
     stop.send(()).unwrap();
@@ -137,10 +137,13 @@ async fn runtime_startup_failure_drains_live_credential_transport() {
     let mut broker = Broker::with_tls(false, true).await;
     let identity = Identity::new("localhost");
     let daemon = reserve_local_addr().await;
-    let (mut config, ssh, ready, url, _host) = configured(&broker, &identity, daemon).await;
-    // The HTTPS owner starts before daemon retry completes. A real unreachable
-    // daemon causes the normal error return, not an injected shutdown hook.
-    config.daemon_connect_timeout = Duration::from_secs(2);
+    let (mut config, ssh, ready, url, host) = configured(&broker, &identity, daemon.clone()).await;
+    // The HTTPS owner starts while the gateway still waits for its daemon.
+    // Once the daemon listens, a real host-key failure causes the normal
+    // error return, not an injected shutdown hook.
+    let not_a_directory = host.path().join("not-a-directory");
+    std::fs::write(&not_a_directory, "").unwrap();
+    config.host_key_path = not_a_directory.join("host_ed25519").display().to_string();
     let task = tokio::spawn(run_gateway_with_listeners(
         config,
         ssh,
@@ -154,7 +157,13 @@ async fn runtime_startup_failure_drains_live_credential_transport() {
     call.start(&request.request_id).await;
     let response = bounded(response).await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert!(bounded(task).await.unwrap().is_err());
+    assert!(
+        !task.is_finished(),
+        "gateway exited while waiting for its daemon"
+    );
+    spawn_minimal_daemon_at(&daemon).await;
+    let error = bounded(task).await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("load host key"), "{error:#}");
     call.closed().await;
     drop(response);
     broker.stop().await;
@@ -200,6 +209,7 @@ async fn https_runtime_rejects_untrusted_clients_and_reloads_its_server_identity
     }));
     let parsed = url::Url::parse(&url).unwrap();
     wait_for_tcp(&format!("127.0.0.1:{}", parsed.port().unwrap())).await;
+    wait_for_readyz_ok(&ready_address).await;
     // No authorization means a successfully authenticated TLS connection must
     // reach the closed HTTP admission path without contacting the broker.
     assert_eq!(

@@ -12,6 +12,10 @@ pub fn env_phase_label(phase: &str) -> &str {
         "wait_for_ready" => "Waiting for sandbox ready",
         "store_backend" => "Storing backend info",
         "gateway_ready" => "Gateway ready",
+        "pod_scheduled" => "Workspace pod scheduled",
+        "pod_initialized" => "Workspace pod initialized",
+        "pod_running" => "Workspace containers started",
+        "pod_containers_ready" => "Workspace containers ready",
         "mark_running" => "Marking running",
         "publish_setup" => "Starting setup",
         "health_check" => "Checking sidecar readiness",
@@ -27,7 +31,9 @@ pub fn env_phase_label(phase: &str) -> &str {
     }
 }
 
-/// Mirrors `environmentlifecycle.ShouldRecordWorkerCheckpoint`.
+/// Mirrors `environmentlifecycle.ShouldRecordWorkerCheckpoint`. Fine-grained
+/// timing rows (the `pod_*` start marks) are deliberately not checkpoints:
+/// they describe how long a start took, not a lifecycle transition.
 pub fn should_record_worker_checkpoint(phase: &str, status: &str) -> bool {
     if status == "warning" {
         return false;
@@ -295,6 +301,27 @@ mod tests {
         assert!(!should_record_worker_checkpoint("ssh_public_key", "info"));
         assert!(!should_record_worker_checkpoint(
             "unknown_phase",
+            "completed"
+        ));
+    }
+
+    #[test]
+    fn every_measured_start_stage_has_a_label_and_pod_marks_are_not_checkpoints() {
+        for stage in crate::start_metrics::StartStage::ALL {
+            let phase = stage.as_str();
+            assert_ne!(env_phase_label(phase), phase, "{phase} needs a label");
+        }
+        for phase in [
+            "pod_scheduled",
+            "pod_initialized",
+            "pod_running",
+            "pod_containers_ready",
+        ] {
+            assert!(!should_record_worker_checkpoint(phase, "completed"));
+        }
+        assert!(should_record_worker_checkpoint("gateway_ready", "started"));
+        assert!(should_record_worker_checkpoint(
+            "gateway_ready",
             "completed"
         ));
     }
