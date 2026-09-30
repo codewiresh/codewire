@@ -402,6 +402,7 @@ dialog.cw-discard-dialog {
 }
 
 .cw-menu-danger,
+:is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > :is(a, button).cw-menu-danger,
 :is(.cw-menu-panel, .cw-menu-panel > section) > details.cw-menu-danger > summary {
   color: var(--destructive);
 }

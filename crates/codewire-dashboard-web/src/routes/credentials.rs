@@ -1271,9 +1271,8 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
     ) || requested_row_id(requested, "credential").is_some_and(|id| {
         data.credentials.iter().any(|credential| {
             credential.id == id
-                && (requested == row_dialog("credential", id)
-                    || requested == row_action_dialog("credential", id, "rename")
-                        && credential.oauth_provider != "github"
+                && (requested == row_action_dialog("credential", id, "rename")
+                    && credential.oauth_provider != "github"
                     || requested == row_action_dialog("credential", id, "reconnect")
                         && credential.oauth
                     || requested == row_action_dialog("credential", id, "rotate")
@@ -1284,8 +1283,11 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
                     || requested == row_action_dialog("credential", id, "delete")
                         && (credential.revoked || credential.oauth_provider == "github"))
         })
-    }) || requested_row_id(requested, "profile")
-        .is_some_and(|id| data.profiles.iter().any(|profile| profile.id == id));
+    }) || requested_row_id(requested, "profile").is_some_and(|id| {
+        // Rows open their actions directly; there is no per-row manage dialog.
+        requested != row_dialog("profile", id)
+            && data.profiles.iter().any(|profile| profile.id == id)
+    });
     if allowed {
         requested.to_owned()
     } else {
@@ -1593,8 +1595,6 @@ mod tests {
             "generate-ssh",
             "import-ssh",
             "create-profile",
-            "credential-00000000-0000-4000-8000-000000000001",
-            "profile-00000000-0000-4000-8000-000000000002",
             "credential-00000000-0000-4000-8000-000000000001-reconnect",
             "credential-00000000-0000-4000-8000-000000000001-delete",
             "profile-00000000-0000-4000-8000-000000000002-edit",
@@ -1610,6 +1610,9 @@ mod tests {
             "connect-github\" autofocus",
             "credential-00000000-0000-4000-8000-000000000099",
             "profile-00000000-0000-4000-8000-000000000001",
+            // Rows open their actions from a menu; the old manage dialogs are gone.
+            "credential-00000000-0000-4000-8000-000000000001",
+            "profile-00000000-0000-4000-8000-000000000002",
             "credential-00000000-0000-4000-8000-000000000099-reconnect",
             "credential-00000000-0000-4000-8000-000000000001-edit",
             "credential-00000000-0000-4000-8000-000000000001-rename",
@@ -1638,7 +1641,9 @@ mod tests {
             html.find("id=\"profiles-title\"").unwrap()
                 < html.find("id=\"create-profile\"").unwrap()
         );
-        assert_eq!(html.matches("data-dialog id=").count(), 15);
+        // Two fewer than before rows opened their actions from a menu: the
+        // per-row manage dialogs for the credential and the profile are gone.
+        assert_eq!(html.matches("data-dialog id=").count(), 13);
         assert!(!html.contains("data-dialog-auto-open"));
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));
@@ -1648,6 +1653,8 @@ mod tests {
         assert!(!credential_primary.contains("Generation"));
         assert!(!credential_primary.contains("Expires"));
         assert!(credential_primary.contains("Active"));
+        assert!(credential_primary.contains("aria-label=\"Actions for "));
+        assert!(!credential_primary.contains("Manage "));
         // The GitHub connection dialog carries no Details or Generation copy.
         assert!(
             !credential_dialog
@@ -1659,6 +1666,7 @@ mod tests {
         let profile_row = html.split("class=\"cw-profile-row\"").nth(1).unwrap();
         let (profile_primary, profile_dialog) = profile_row.split_once("<dialog").unwrap();
         assert!(!profile_primary.contains("Revision"));
+        assert!(profile_primary.contains(">Edit identities</button>"));
         assert!(
             profile_dialog
                 .split("</dialog>")

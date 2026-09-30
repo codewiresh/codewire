@@ -30,6 +30,10 @@
 [data-dashboard-app] .cw-profile-row,
 [data-dashboard-app] .cw-personal-secret-row,
 [data-dashboard-app] .cw-personal-api-key-row { display: grid; gap: var(--space-3); min-width: 0; }
+/* Credential and profile rows: identity, then status and a trailing actions menu. */
+[data-dashboard-app] .cw-credential-row { grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
+[data-dashboard-app] .cw-credential-row > :not(.cw-credential-identity, .cw-credential-status, .cw-menu) { grid-column: 1 / -1; }
+[data-dashboard-app] .cw-profile-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 [data-dashboard-app] .cw-account-session > header,
 [data-dashboard-app] .cw-personal-secret-row > header { display: grid; gap: var(--space-1); min-width: 0; }
 [data-dashboard-app] :is(.cw-account-session, .cw-profile-row, .cw-personal-secret-row) h3,
