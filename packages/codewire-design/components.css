@@ -511,6 +511,157 @@ dialog.cw-discard-dialog {
   to { opacity: 0.9; }
 }
 
+/* A secret shown once, such as a new API key: one selectable monospace value. */
+.cw-key-secret {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: var(--space-3);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-base);
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  line-height: var(--leading-body);
+  user-select: all;
+}
+
+/* Row list: repeated records inside a card. Rows are separated by hairlines
+   and align to the card's inset instead of nesting boxes of their own. */
+.cw-row-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cw-row-list > li {
+  min-width: 0;
+  padding-block: var(--space-4);
+}
+
+.cw-row-list > li + li {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.cw-row-list > li:first-child {
+  padding-top: 0;
+}
+
+.cw-row-list > li:last-child {
+  padding-bottom: 0;
+}
+
+/* Context navigation: the side panel of Settings and Organization pages.
+   Group labels are .cw-section-label and links are .cw-nav-link, as in the
+   main sidebar, so every navigation row shares one inset. */
+.cw-context-nav {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-5) var(--space-3);
+  border-right: var(--border-width) solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.cw-context-nav-heading {
+  display: grid;
+  gap: var(--space-0-5);
+  padding: 0 var(--space-3);
+}
+
+.cw-context-nav-heading :is(h1, h2) {
+  overflow: hidden;
+  margin: 0;
+  color: var(--fg-primary);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cw-context-nav-heading span {
+  overflow: hidden;
+  color: var(--fg-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cw-context-nav-notice {
+  margin: 0;
+  padding: 0 var(--space-3);
+  color: var(--fg-secondary);
+  font-size: var(--text-small);
+  line-height: var(--leading-body);
+}
+
+.cw-context-nav-links {
+  display: grid;
+  min-width: 0;
+}
+
+.cw-context-nav-links ul {
+  display: grid;
+  gap: var(--space-0-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cw-context-nav-links ul + .cw-section-label {
+  margin-top: var(--space-5);
+}
+
+.cw-context-nav-links .cw-section-label {
+  overflow-wrap: anywhere;
+}
+
+.cw-context-nav-links .cw-nav-link > .cw-badge {
+  margin-left: auto;
+}
+
+@media (max-width: 48rem) {
+  .cw-context-nav {
+    gap: var(--space-2);
+    overflow: hidden;
+    padding: var(--space-3) var(--space-4);
+    border-right: 0;
+    border-bottom: var(--border-width) solid var(--border-subtle);
+  }
+
+  .cw-context-nav-heading,
+  .cw-context-nav-notice {
+    padding: 0;
+  }
+
+  .cw-context-nav-links {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    overflow-x: auto;
+  }
+
+  .cw-context-nav-links ul {
+    display: flex;
+    flex: none;
+    gap: var(--space-1);
+  }
+
+  .cw-context-nav-links .cw-section-label,
+  .cw-context-nav-links ul + .cw-section-label {
+    flex: none;
+    margin: 0 0 0 var(--space-2);
+    white-space: nowrap;
+  }
+
+  .cw-context-nav-links .cw-nav-link {
+    width: auto;
+    white-space: nowrap;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .cw-skeleton { animation: none; }
 }

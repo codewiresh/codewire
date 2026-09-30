@@ -394,7 +394,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
       const response = await page.goto(route);
       expect(response?.status()).toBe(200);
       await expect(page).toHaveURL(route.split("?")[0]);
-      await expect(page.locator(".cw-settings-subnav").getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+      await expect(page.locator(".cw-context-nav").getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
       await expect(page.locator('a[href*="not-a-member"]')).toHaveCount(0);
       await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText("Choose organization");
     }
