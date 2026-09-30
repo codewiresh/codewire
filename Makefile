@@ -91,7 +91,7 @@ export
 export DATABASE_URL ?= postgres://codewire:codewire@localhost:54320/codewire?sslmode=disable
 export RUST_LOG ?= codewire_server=debug,tower_http=debug
 export DRY_RUN ?= true
-export KUBE_CONTEXT ?= kind-codewire
+export KUBE_CONTEXT ?= $(if $(strip $(CLUSTER)),kind-$(CLUSTER),kind-codewire)
 DASHBOARD_PORT ?= 5173
 KUBECTL ?= kubectl --context $(KUBE_CONTEXT)
 AGENT_SANDBOX_REPO ?= https://github.com/noeljackson/agent-sandbox.git

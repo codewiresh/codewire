@@ -1,104 +1,82 @@
+/* Settings: the shared context navigation beside one content column.
+   Primitives own the visuals; this sheet lays the pages out and styles only
+   the Settings-specific rows. Every value is a design token. */
 [data-dashboard-app] .cw-settings-page { max-width: none; padding: 0; }
-[data-dashboard-app] .cw-settings-layout { display: grid; grid-template-columns: 14rem minmax(0, 1fr); min-height: calc(100vh - 3.25rem); margin-inline: -1.25rem; }
-[data-dashboard-app] .cw-settings-subnav { padding: 1.35rem .75rem; border-right: 1px solid #1e1e1e; background: #0b0b0b; }
-[data-dashboard-app] .cw-settings-subnav-heading { display: grid; gap: .2rem; padding: 0 .55rem 1rem; }
-[data-dashboard-app] .cw-settings-subnav-heading strong,
-[data-dashboard-app] .cw-settings-subnav-heading h2 { margin: 0; font-size: .9rem; font-weight: 600; }
-[data-dashboard-app] .cw-settings-subnav-heading span { overflow: hidden; color: #606060; font: .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-[data-dashboard-app] .cw-settings-subnav nav { display: grid; gap: .08rem; }
-[data-dashboard-app] .cw-settings-subnav nav ul { display: grid; gap: .08rem; margin: 0; padding: 0; list-style: none; }
-[data-dashboard-app] .cw-settings-subnav nav li { display: grid; }
-[data-dashboard-app] .cw-settings-subnav .cw-context-nav-label { margin: 14px 6px 5px; color: #5c5c5c; font: 500 10px/14px var(--font-mono); letter-spacing: .09em; text-transform: uppercase; }
-[data-dashboard-app] .cw-settings-subnav .cw-context-nav-label:first-child { margin-top: 0; }
-[data-dashboard-app] .cw-settings-subnav .cw-context-nav-label { overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-settings-navigation-notice { margin: 0 0 1rem; padding-inline: .55rem; color: var(--fg-secondary); font-size: .75rem; line-height: 1.5; }
-[data-dashboard-app] .cw-settings-subnav small { margin-left: auto; color: #565656; font: 9px/12px var(--font-mono); text-transform: uppercase; }
-[data-dashboard-app] .cw-settings-subnav a { display: flex; padding: .48rem .6rem; border-radius: 999px; color: #888; font-size: .75rem; }
-[data-dashboard-app] .cw-settings-subnav a:hover,
-[data-dashboard-app] .cw-settings-subnav a[aria-current="page"] { background: #191919; color: #ededed; }
-[data-dashboard-app] .cw-settings-content { width: min(100%, 52rem); min-width: 0; padding: 1.5rem 1.25rem 3rem; }
-[data-dashboard-app] .cw-settings-content > .cw-alert { margin-bottom: 1rem; }
+[data-dashboard-app] .cw-settings-layout { display: grid; grid-template-columns: var(--context-nav-width) minmax(0, 1fr); min-height: calc(100vh - var(--console-header)); }
+[data-dashboard-app] .cw-settings-content { display: grid; align-content: start; gap: var(--space-4); width: min(100%, var(--content-default)); min-width: 0; padding: var(--space-6) var(--space-6) var(--space-12); }
+[data-dashboard-app] .cw-settings-content > .cw-page-header { margin-bottom: var(--space-2); }
 [data-dashboard-app] .cw-settings-card { overflow: visible; }
-[data-dashboard-app] .cw-settings-card + .cw-settings-card { margin-top: var(--space-4); }
-[data-dashboard-app] .cw-settings-card .cw-card-title { display: flex; align-items: center; gap: .5rem; }
+[data-dashboard-app] .cw-settings-card .cw-card-title { display: flex; align-items: center; gap: var(--space-2); }
 [data-dashboard-app] .cw-settings-card form + p,
-[data-dashboard-app] .cw-settings-card p + form { margin-top: .75rem; }
+[data-dashboard-app] .cw-settings-card p + form { margin-top: var(--space-3); }
 [data-dashboard-app] .cw-settings-muted { margin: 0; color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
-[data-dashboard-app] .cw-settings-account-links { display: flex; flex-wrap: wrap; align-items: center; gap: .85rem; }
-[data-dashboard-app] .cw-settings-account-links > a { color: #3aa7c2; font-size: .72rem; }
+[data-dashboard-app] .cw-settings-account-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+[data-dashboard-app] .cw-settings-account-links > a:not(.cw-button) { color: var(--accent-text); font-size: var(--text-secondary); }
 [data-dashboard-app] .cw-settings-account-links form { margin-left: auto; }
-[data-dashboard-app] .cw-settings-details { display: grid; gap: .75rem; margin: 0; }
-[data-dashboard-app] .cw-settings-details div { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 1rem; }
-[data-dashboard-app] .cw-settings-details dt { color: #777; }
+[data-dashboard-app] .cw-settings-details { display: grid; gap: var(--space-3); margin: 0; font-size: var(--text-secondary); }
+[data-dashboard-app] .cw-settings-details div { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: var(--space-4); }
+[data-dashboard-app] .cw-settings-details dt { color: var(--fg-tertiary); }
 [data-dashboard-app] .cw-settings-details dd { margin: 0; overflow-wrap: anywhere; }
 [data-dashboard-app] .cw-settings-content :is(code, strong) { overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-account-sessions { display: grid; gap: .75rem; margin: 1rem 0; padding: 0; list-style: none; }
-[data-dashboard-app] .cw-account-session { display: grid; gap: .75rem; padding: .9rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--bg-secondary); }
-[data-dashboard-app] .cw-account-session > header { display: grid; gap: .25rem; }
-[data-dashboard-app] .cw-account-session h3 { margin: 0; font-size: .78rem; }
-[data-dashboard-app] .cw-account-session code { overflow-wrap: anywhere; font-size: .7rem; }
-[data-dashboard-app] .cw-account-session > .cw-button { justify-self: start; }
-[data-dashboard-app] .cw-session-pagination { display: flex; flex-wrap: wrap; gap: 1rem; margin-block: 1rem; }
-[data-dashboard-app] .cw-credential-list,
-[data-dashboard-app] .cw-profile-list { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
+[data-dashboard-app] .cw-settings-list-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+[data-dashboard-app] .cw-settings-list-heading > .cw-button { flex: none; }
+
+/* Rows: sessions, credentials, profiles, secrets and API keys are .cw-row-list
+   rows inside their card; this sheet lays out each row's contents. */
+[data-dashboard-app] .cw-personal-api-key-groups { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+[data-dashboard-app] .cw-account-sessions { margin-block: var(--space-4); }
+[data-dashboard-app] .cw-account-session,
 [data-dashboard-app] .cw-credential-row,
-[data-dashboard-app] .cw-profile-row { display: grid; gap: .75rem; padding: .9rem; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
-[data-dashboard-app] .cw-credential-row > div:first-child { display: grid; gap: .2rem; }
+[data-dashboard-app] .cw-profile-row,
+[data-dashboard-app] .cw-personal-secret-row,
+[data-dashboard-app] .cw-personal-api-key-row { display: grid; gap: var(--space-3); min-width: 0; }
+[data-dashboard-app] .cw-account-session > header,
+[data-dashboard-app] .cw-personal-secret-row > header { display: grid; gap: var(--space-1); min-width: 0; }
+[data-dashboard-app] :is(.cw-account-session, .cw-profile-row, .cw-personal-secret-row) h3,
+[data-dashboard-app] .cw-personal-api-key-row h4 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-medium); overflow-wrap: anywhere; }
+[data-dashboard-app] .cw-profile-row h3 { margin-bottom: var(--space-1); }
+[data-dashboard-app] .cw-account-session code,
+[data-dashboard-app] .cw-public-key code { overflow-wrap: anywhere; font-size: var(--text-code); }
+[data-dashboard-app] :is(.cw-account-session, .cw-credential-row, .cw-profile-row) > .cw-button { justify-self: start; }
+[data-dashboard-app] .cw-session-pagination { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-block: var(--space-4); }
+[data-dashboard-app] .cw-credential-row > div:first-child { display: grid; gap: var(--space-1); }
 [data-dashboard-app] .cw-credential-row > div:first-child span,
 [data-dashboard-app] .cw-profile-row header p,
-[data-dashboard-app] .cw-profile-row header small { margin: 0; color: #777; font-size: .7rem; }
-[data-dashboard-app] .cw-credential-status { justify-self: start; padding: .18rem .45rem; border: 1px solid #333; border-radius: 999px; font: .62rem var(--font-mono); }
-[data-dashboard-app] .cw-credential-status--success { border-color: #245a42; color: #67c891; }
-[data-dashboard-app] .cw-credential-status--warning { border-color: #665425; color: #d8b85b; }
-[data-dashboard-app] .cw-credential-status--danger { border-color: #6b3030; color: #e57f7f; }
-[data-dashboard-app] .cw-public-key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .45rem .75rem; align-items: center; }
+[data-dashboard-app] .cw-profile-row header small,
 [data-dashboard-app] .cw-public-key > span,
-[data-dashboard-app] .cw-public-key > small { grid-column: 1 / -1; color: #777; font-size: .68rem; }
-[data-dashboard-app] .cw-public-key code { overflow-wrap: anywhere; font-size: .68rem; }
+[data-dashboard-app] .cw-public-key > small { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+[data-dashboard-app] .cw-credential-status { justify-self: start; }
+[data-dashboard-app] .cw-public-key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2) var(--space-3); align-items: center; }
+[data-dashboard-app] .cw-public-key > span,
+[data-dashboard-app] .cw-public-key > small { grid-column: 1 / -1; }
 [data-dashboard-app] .cw-profile-form { margin-top: 0; }
 [data-dashboard-app] .cw-profile-form .cw-profile-name { grid-column: 1 / -1; }
-[data-dashboard-app] .cw-profile-row header { display: flex; justify-content: space-between; gap: 1rem; }
-[data-dashboard-app] .cw-profile-row h3 { margin: 0 0 .25rem; font-size: .78rem; }
-
-[data-dashboard-app] .cw-settings-list-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-[data-dashboard-app] .cw-settings-list-heading > .cw-button { flex: none; }
-[data-dashboard-app] .cw-credential-row > .cw-button,
-[data-dashboard-app] .cw-profile-row > .cw-button { justify-self: start; }
-[data-dashboard-app] .cw-credential-dialog { width: min(34rem, calc(100vw - 2rem)); }
-[data-dashboard-app] .cw-credential-dialog .cw-dialog-actions { flex-wrap: wrap; }
-[data-dashboard-app] .cw-credential-dialog .cw-dialog-actions .cw-button { white-space: normal; }
-[data-dashboard-app] .cw-credential-types { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
-[data-dashboard-app] .cw-credential-types li { display: grid; }
-[data-dashboard-app] .cw-credential-choice { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr) 1rem; align-items: center; gap: .8rem; width: 100%; padding: .85rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-primary); font: inherit; text-align: left; cursor: pointer; }
-[data-dashboard-app] .cw-credential-choice:hover { border-color: var(--border-hover); background: var(--bg-surface-hover); }
-[data-dashboard-app] .cw-credential-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-[data-dashboard-app] .cw-credential-choice > span { display: grid; gap: .25rem; min-width: 0; }
-[data-dashboard-app] .cw-credential-choice strong { font-size: .85rem; font-weight: 600; }
-[data-dashboard-app] .cw-credential-choice span > span { color: var(--fg-secondary); font-size: .75rem; line-height: 1.5; }
-[data-dashboard-app] .cw-credential-row > .cw-credential-identity:first-child { display: flex; align-items: start; gap: .65rem; }
-[data-dashboard-app] .cw-credential-identity > div { display: grid; gap: .25rem; min-width: 0; overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-credential-action-list { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0; margin: 0; list-style: none; }
+[data-dashboard-app] .cw-profile-row header { display: flex; justify-content: space-between; gap: var(--space-4); }
+[data-dashboard-app] .cw-credential-row > .cw-credential-identity:first-child { display: flex; align-items: start; gap: var(--space-3); }
+[data-dashboard-app] .cw-credential-identity > div { display: grid; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
+[data-dashboard-app] .cw-credential-action-list { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 [data-dashboard-app] .cw-credential-secondary { grid-column: 1 / -1; }
 [data-dashboard-app] .cw-credential-secondary p { margin: var(--space-2) 0 0; color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-body); overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-personal-secrets-page > .cw-card { margin-top: 1rem; }
-[data-dashboard-app] .cw-personal-secrets-page .cw-card-content { display: grid; gap: .75rem; }
-[data-dashboard-app] .cw-personal-secrets { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
-[data-dashboard-app] .cw-personal-secret-row { display: grid; gap: .75rem; padding: .9rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); }
-[data-dashboard-app] .cw-personal-secret-row > header { display: grid; gap: .25rem; min-width: 0; }
-[data-dashboard-app] .cw-personal-secret-row h3 { margin: 0; font-size: .85rem; overflow-wrap: anywhere; }
 
-[data-dashboard-app] .cw-personal-api-keys-page > .cw-card { margin-top: 1rem; }
-[data-dashboard-app] .cw-personal-api-keys-page .cw-card-content { display: grid; gap: .85rem; }
-[data-dashboard-app] .cw-personal-api-key-groups,
-[data-dashboard-app] .cw-personal-api-keys { display: grid; gap: 1rem; margin: 0; padding: 0; list-style: none; }
-[data-dashboard-app] .cw-personal-api-key-group { display: grid; gap: .75rem; min-width: 0; }
-[data-dashboard-app] .cw-personal-api-key-group > header h3 { margin: 0; font-size: .9rem; overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-personal-api-key-row { display: grid; gap: .75rem; min-width: 0; padding: .9rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); }
-[data-dashboard-app] .cw-personal-api-key-row > header { display: flex; align-items: start; justify-content: space-between; gap: .75rem; }
-[data-dashboard-app] .cw-personal-api-key-row h4 { margin: 0; font-size: .8rem; overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-personal-api-key-row .cw-settings-details { font-size: .75rem; }
-[data-dashboard-app] .cw-personal-api-key-row dd ul { margin: 0; padding-left: 1rem; }
-[data-dashboard-app] .cw-personal-api-keys-page .cw-key-secret { display: block; overflow-wrap: anywhere; padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); user-select: all; }
+/* Credential dialogs: provider choices open focused editors. */
+[data-dashboard-app] .cw-credential-dialog { width: min(var(--dialog-width), calc(100vw - var(--space-8))); }
+[data-dashboard-app] .cw-credential-dialog .cw-dialog-actions { flex-wrap: wrap; }
+[data-dashboard-app] .cw-credential-dialog .cw-dialog-actions .cw-button { white-space: normal; }
+[data-dashboard-app] .cw-credential-types { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+[data-dashboard-app] .cw-credential-types li { display: grid; }
+[data-dashboard-app] .cw-credential-choice { display: grid; grid-template-columns: var(--icon-size) minmax(0, 1fr) var(--icon-size); align-items: center; gap: var(--space-3); width: 100%; padding: var(--space-3) var(--space-4); border: var(--border-width) solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-primary); font: inherit; text-align: left; cursor: pointer; }
+[data-dashboard-app] .cw-credential-choice:hover { border-color: var(--border-hover); background: var(--bg-surface-hover); }
+[data-dashboard-app] .cw-credential-choice > span { display: grid; gap: var(--space-1); min-width: 0; }
+[data-dashboard-app] .cw-credential-choice strong { font-size: var(--text-body); font-weight: var(--weight-medium); }
+[data-dashboard-app] .cw-credential-choice span > span { color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
+
+/* Personal secrets and API keys. */
+[data-dashboard-app] :is(.cw-personal-secrets-page, .cw-personal-api-keys-page) > .cw-card { margin-top: var(--space-4); }
+[data-dashboard-app] :is(.cw-personal-secrets-page, .cw-personal-api-keys-page) .cw-card-content { display: grid; gap: var(--space-3); }
+[data-dashboard-app] .cw-personal-api-key-group { display: grid; gap: var(--space-3); min-width: 0; }
+[data-dashboard-app] .cw-personal-api-key-group > header h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+[data-dashboard-app] .cw-personal-api-key-row > header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); }
+[data-dashboard-app] .cw-personal-api-key-row dd ul { margin: 0; padding-left: var(--space-4); }
 
 @media (scripting: none) {
   [data-dashboard-app] .cw-personal-api-keys-page [data-dialog-open],
@@ -107,29 +85,23 @@
 }
 
 @media (max-width: 63.9375rem) {
-  [data-dashboard-app] .cw-settings-content :is(#security, #sessions) { scroll-margin-top: calc(var(--console-header) + var(--space-2)); }
-  [data-dashboard-app] .cw-settings-layout { min-height: calc(100vh - 3.5rem); }
+  [data-dashboard-app] .cw-settings-content :is(#security, #sessions) { scroll-margin-top: calc(var(--console-header) + var(--space-3)); }
 }
 
 @media (max-width: 48rem) {
-  [data-dashboard-app] .cw-settings-layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; margin-inline: -.8rem; }
-  [data-dashboard-app] .cw-settings-subnav { width: 100%; min-width: 0; overflow: hidden; padding: .7rem .8rem; border-right: 0; border-bottom: 1px solid #1e1e1e; }
-  [data-dashboard-app] .cw-settings-subnav-heading { padding: 0 0 .55rem; }
-  [data-dashboard-app] .cw-settings-subnav nav { display: flex; align-items: center; width: 100%; min-width: 0; gap: .25rem; overflow-x: auto; overflow-y: hidden; }
-  [data-dashboard-app] .cw-settings-subnav .cw-context-nav-label { flex: none; margin: 0 .375rem; white-space: nowrap; }
-  [data-dashboard-app] .cw-settings-subnav nav ul { display: flex; flex: none; gap: .25rem; }
-  [data-dashboard-app] .cw-settings-subnav a { flex: none; }
-  [data-dashboard-app] .cw-settings-content { padding: 1rem .8rem 2rem; }
-  [data-dashboard-app] .cw-settings-details div { grid-template-columns: 1fr; gap: .25rem; }
+  [data-dashboard-app] .cw-settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  [data-dashboard-app] .cw-settings-content { padding: var(--space-4) var(--space-4) var(--space-8); }
+  [data-dashboard-app] .cw-settings-details div { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
   [data-dashboard-app] .cw-settings-list-heading { align-items: start; flex-direction: column; }
   [data-dashboard-app] .cw-settings-account-links { align-items: stretch; flex-direction: column; }
   [data-dashboard-app] .cw-settings-account-links form { width: 100%; margin-left: 0; }
   [data-dashboard-app] .cw-settings-account-links form .cw-button { width: 100%; }
-  [data-dashboard-app] .cw-public-key { grid-template-columns: 1fr; }
+  [data-dashboard-app] .cw-public-key { grid-template-columns: minmax(0, 1fr); }
   [data-dashboard-app] .cw-public-key > span,
   [data-dashboard-app] .cw-public-key > small { grid-column: auto; }
   [data-dashboard-app] .cw-profile-row header { align-items: stretch; flex-direction: column; }
 }
+
 /* Device authorization in a credential dialog replaces the form with its steps. */
 [data-dashboard-app] .cw-credential-dialog[data-enrollment-state] .cw-dialog-body > :not(.cw-device-enrollment),
 [data-dashboard-app] .cw-credential-dialog[data-enrollment-state] .cw-dialog-actions [type="submit"] { display: none; }
@@ -139,7 +111,7 @@
 [data-dashboard-app] .cw-device-status { margin: 0; color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
 /* Without JavaScript the same steps stream into one centered panel; each step hides the one before it. */
 [data-dashboard-app] .cw-connect { display: grid; min-height: 100vh; place-items: center; padding: var(--space-6) var(--space-4); }
-[data-dashboard-app] .cw-connect-panel { width: min(100%, 30rem); }
+[data-dashboard-app] .cw-connect-panel { width: min(100%, var(--dialog-width)); }
 [data-dashboard-app] .cw-connect-back { color: var(--fg-secondary); font-size: var(--text-secondary); }
 [data-dashboard-app] .cw-connect-panel .cw-card-title { margin-top: var(--space-2); }
 [data-dashboard-app] .cw-connect-panel:has([data-connect-challenge]) [data-connect-pending],

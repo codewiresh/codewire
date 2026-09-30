@@ -180,6 +180,8 @@
     "packages/codewire-design/reference/fixtures/terminal-ports.html",
     "packages/codewire-design/reference/fixtures/terminal-tabs.html",
     "packages/codewire-design/reference/fixtures/terminal.html",
+    "packages/codewire-design/routes/secret-management.css",
+    "packages/codewire-design/routes/settings.css",
     "packages/codewire-design/styles.css"
   ]
 }

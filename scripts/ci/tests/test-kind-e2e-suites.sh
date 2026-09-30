@@ -1065,6 +1065,13 @@ env \
   ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
   fail() { printf "[sealed-kind-test] ERROR: %s\n" "$*" >&2; exit 1; }
   record() { printf "%s\n" "$1" >>"$CALLS"; }
+  assert_no_public_dind_images() {
+    # Admission expressions name allowed images without launching them. Check
+    # workload image fields and the runtime configuration instead of CEL text.
+    if grep -Eq '^[[:space:]]*(-[[:space:]]+)?(image|SANDBOX_DIND_IMAGE):.*docker[.]io/library/docker:29[.]7[.]1-dind' "$1"; then
+      fail 'sealed Kind overlay retained the public DinD image'
+    fi
+  }
   # shellcheck source=scripts/ci/verify/kind/common.sh
   source "$COMMON"
   [ "$(kind_workspace_runtime_image)" = "$KIND_WORKSPACE_LOCAL_IMAGE" ] ||
@@ -1126,9 +1133,43 @@ env \
   if grep -Eq 'image: (postgres:17-alpine|temporalio/auto-setup:1.29.0)' "$kind_rendered"; then
     fail 'sealed Kind overlay retained a mutable support-image reference'
   fi
-  if grep -Fq 'docker.io/library/docker:29.7.1-dind' "$kind_rendered"; then
-    fail 'sealed Kind overlay retained the public DinD image'
-  fi
+  assert_no_public_dind_images "$kind_rendered"
+  grep -Fq "c.image == '$DEFAULT_KIND_DIND_IMAGE'" "$kind_rendered" ||
+    fail 'sealed Kind overlay changed the image-cache admission pin'
+
+  # Both actual pull surfaces must still fail even though the pinned admission
+  # expression above is permitted. Use the real render for the config fixture.
+  python3 - "$kind_rendered" "$KIND_DIND_LOCAL_IMAGE" "$DEFAULT_KIND_DIND_IMAGE" <<'PY'
+from pathlib import Path
+import sys
+
+rendered, local_dind, public_dind = sys.argv[1:]
+text = Path(rendered).read_text()
+config = f"  SANDBOX_DIND_IMAGE: {local_dind}\n"
+if text.count(config) != 1:
+    raise SystemExit("sealed DinD config fixture occurrence mismatch")
+Path(rendered + ".public-config").write_text(
+    text.replace(config, f"  SANDBOX_DIND_IMAGE: {public_dind}\n")
+)
+Path(rendered + ".public-workload").write_text(
+    text + "\n---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: unsealed-dind-fixture\n"
+    + "spec:\n  containers:\n  - image: " + public_dind + "\n    name: dind\n"
+)
+Path(rendered + ".public-init").write_text(
+    text + "\n---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: unsealed-dind-init-fixture\n"
+    + "spec:\n  initContainers:\n  - image: " + public_dind + "\n    name: dind"
+    + "\n  containers:\n  - name: fixture\n    image: codewire-services:e2e\n"
+)
+PY
+  for surface in config workload init; do
+    if (assert_no_public_dind_images "${kind_rendered}.public-${surface}") \
+        >"${kind_rendered}.public-${surface}.out" 2>&1; then
+      fail "sealed Kind overlay accepted a public DinD ${surface}"
+    fi
+    grep -Fq 'sealed Kind overlay retained the public DinD image' \
+      "${kind_rendered}.public-${surface}.out" ||
+      fail "public DinD ${surface} did not fail at the image guard"
+  done
   if grep -Fq 'ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff' "$kind_rendered"; then
     fail 'sealed Kind overlay retained the public workspace image'
   fi

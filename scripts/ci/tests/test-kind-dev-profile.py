@@ -15,6 +15,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
 CONSUMERS = Path(os.environ.get("CODEWIRE_KIND_DEV_PROFILE_CONSUMERS_DIR", ROOT))
+MAKEFILE_SOURCE = (ROOT / "Makefile").read_text()
 IMAGE_ID = "sha256:" + "a" * 64
 FAKE_CORE = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -93,7 +94,10 @@ elif tool == "docker":
         aliases[args[2]] = args[1]
         aliases_path.write_text(json.dumps(aliases))
     elif args[:2] == ["buildx", "bake"]:
-        output = args[args.index("--set") + 1]
+        outputs = [args[i + 1] for i, arg in enumerate(args[:-1])
+                   if arg == "--set" and args[i + 1].startswith("kind-dev-binary.output=")]
+        if len(outputs) != 1: sys.exit(64)
+        output = outputs[0]
         destination = pathlib.Path(output.split("dest=", 1)[1])
         binary = destination / os.environ["KIND_DEV_BIN"]
         binary.write_text(os.environ.get("FAKE_BINARY_CONTENT", "synthetic-current-source"))
@@ -121,6 +125,7 @@ import json, os, pathlib, sys
 with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
     log.write(json.dumps({"tool":"suite", "args":sys.argv[1:],
         "cluster":os.environ.get("KIND_CLUSTER_NAME"), "profile":os.environ.get("CLUSTER"),
+        "kube_context":os.environ.get("KUBE_CONTEXT"),
         "kubeconfig":os.environ.get("KUBECONFIG"), "smokes":os.environ.get("CARGO_CI_DIR"),
         "lock_fd":os.environ.get("KIND_PROFILE_LOCK_FD")}) + "\n")
 sys.exit(int(os.environ.get("FAKE_SUITE_STATUS", "0")))
@@ -214,6 +219,23 @@ class DeveloperProfileTests(unittest.TestCase):
         return subprocess.run(["bash", "-c", 'set -euo pipefail; source "$FIXTURE_TREE/scripts/dev/kind/profile.sh"; ' + command],
                               env=env, text=True, capture_output=True, timeout=8)
 
+    def run_make_up(self, *arguments: str, dotenv: str = "", **environment: str) -> subprocess.CompletedProcess[str]:
+        # Exercise the actual Makefile in a synthetic checkout. Never include
+        # the workstation's .env or run its optional tool-discovery commands.
+        (self.tree / "Makefile").write_text(MAKEFILE_SOURCE)
+        (self.tree / ".env").write_text("AGENT_SANDBOX_SHA=synthetic\nBUF=synthetic-buf\nGO_BIN=/synthetic/bin\n" + dotenv)
+        self.write_program(self.tree / "scripts/ci/verify/make-up-fixture.py", FAKE_SUITE)
+        self.write_program(self.tree / "scripts/ci/verify/kind-e2e.sh", '''#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+source "$ROOT/scripts/dev/kind/profile.sh"
+kind_profile_load "$ROOT" || exit $?
+exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
+''')
+        return subprocess.run(["make", "--no-print-directory", "kind-up", *arguments],
+                              cwd=self.tree, env=self.env | environment,
+                              text=True, capture_output=True, timeout=8)
+
     def calls(self, tool: str | None = None) -> list[dict[str, object]]:
         calls = [json.loads(line) for line in self.calls_path.read_text().splitlines()]
         return [call for call in calls if tool is None or call["tool"] == tool]
@@ -229,6 +251,34 @@ class DeveloperProfileTests(unittest.TestCase):
         for call in self.calls("kubectl"):
             self.assertEqual(call["args"][1], "kind-dev-a")
             self.assertEqual(call["kubeconfig"], self.values["KUBECONFIG"])
+
+    def test_actual_makefile_named_up_uses_saved_context(self) -> None:
+        result = self.run_make_up("CLUSTER=dev-a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch, = self.calls("suite")
+        self.assertEqual(launch["args"], ["up"])
+        self.assertEqual(launch["profile"], "dev-a")
+        self.assertEqual(launch["kube_context"], "kind-dev-a")
+        self.assertEqual(launch["kubeconfig"], self.values["KUBECONFIG"])
+
+    def test_actual_makefile_legacy_up_keeps_default_context(self) -> None:
+        result = self.run_make_up("CLUSTER=")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch, = self.calls("suite")
+        self.assertEqual(launch["kube_context"], "kind-codewire")
+        self.assertFalse(self.calls("profile"))
+
+    def test_actual_makefile_preserves_explicit_context_conflicts(self) -> None:
+        for arguments, dotenv, environment in [
+            ([], "", {"KUBE_CONTEXT": "kind-other"}),
+            (["KUBE_CONTEXT=kind-other"], "", {}),
+            ([], "KUBE_CONTEXT=kind-other\n", {}),
+        ]:
+            with self.subTest(arguments=arguments, dotenv=dotenv, environment=environment):
+                result = self.run_make_up("CLUSTER=dev-a", *arguments, dotenv=dotenv, **environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("KUBE_CONTEXT conflicts with saved", result.stderr)
+        self.assert_no_runtime_calls()
 
     def test_legacy_review_origins_and_name_survive(self) -> None:
         result = self.run_script("dev-loop.sh", "status", CLUSTER="", KIND_CLUSTER_NAME="codewire-ux-2099",

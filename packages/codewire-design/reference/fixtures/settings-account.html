@@ -8,11 +8,11 @@
   <script src="../../dashboard.js" defer></script><script src="../../organizations.js" defer></script>
 </head>
 <body class="cw-body" data-dashboard-app>
-<main class="cw-main"><div class="cw-main-inner"><div class="cw-page cw-settings-page"><div class="cw-settings-layout">
-  <aside class="cw-settings-subnav"><header class="cw-settings-subnav-heading cw-context-nav-heading"><h2>Settings</h2></header>
+<main class="cw-main"><div class="cw-page cw-settings-page"><div class="cw-settings-layout">
+  <aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
 <nav class="cw-context-nav-links" aria-label="Settings">
-  <h3 id="settings-personal-title" class="cw-context-nav-label">Personal</h3>
-  <ul aria-labelledby="settings-personal-title"><li><a href="settings-account.html" aria-current="page">Account</a></li><li><a href="settings-credentials.html">Credentials</a></li><li><a href="settings-secrets.html">Secrets</a></li><li><a href="settings-api-keys.html">API Keys</a></li></ul>
+  <h3 id="settings-personal-title" class="cw-section-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title"><li><a class="cw-nav-link" href="settings-account.html" aria-current="page">Account</a></li><li><a class="cw-nav-link" href="settings-credentials.html">Credentials</a></li><li><a class="cw-nav-link" href="settings-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="settings-api-keys.html">API Keys</a></li></ul>
 
 </nav></aside>
   <div class="cw-settings-content">
@@ -29,7 +29,7 @@
       <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2><p class="cw-card-description">Browser sign-ins for this account. Signing out a session blocks subsequent requests; it does not stop Sandbox terminals, existing connections, provider credentials or API keys.</p></header>
       <div class="cw-card-content">
         <p class="cw-settings-muted">This browser: <code>session-current</code>. Expires Sep 17, 2026, 00:00 UTC. Expiry may extend with activity.</p>
-        <ul class="cw-account-sessions">
+        <ul class="cw-row-list cw-account-sessions">
           <li class="cw-account-session"><header><h3>This browser</h3><code>session-current</code></header><dl class="cw-settings-details"><div><dt>Created</dt><dd>Sep 16, 2026, 10:00 UTC</dd></div><div><dt>Expires</dt><dd>Sep 17, 2026, 00:00 UTC</dd></div></dl><button class="cw-button cw-button--outline" type="button" data-dialog-open="revoke-session-current" aria-haspopup="dialog" aria-controls="revoke-session-current">Sign out this browser</button></li>
           <li class="cw-account-session"><header><h3>Browser session</h3><code>session-other</code></header><dl class="cw-settings-details"><div><dt>Created</dt><dd>Sep 15, 2026, 08:30 UTC</dd></div><div><dt>Expires</dt><dd>Sep 17, 2026, 00:00 UTC</dd></div></dl><button class="cw-button cw-button--outline" type="button" data-dialog-open="revoke-session-other" aria-haspopup="dialog" aria-controls="revoke-session-other">Sign out session</button></li>
         </ul>
@@ -40,6 +40,6 @@
     <dialog class="cw-dialog" data-dialog id="revoke-session-current" aria-labelledby="revoke-title-current"><header class="cw-dialog-header"><h2 id="revoke-title-current">Sign out this browser?</h2></header><div class="cw-dialog-body"><p>Sign out <code>session-current</code>, the browser you are using now? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div><form method="post" action="/settings/_actions/sessions/revoke"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="session_id" value="session-current"><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out this browser</button></footer></form></dialog>
     <dialog class="cw-dialog" data-dialog id="revoke-session-other" aria-labelledby="revoke-title-other"><header class="cw-dialog-header"><h2 id="revoke-title-other">Sign out session?</h2></header><div class="cw-dialog-body"><p>Sign out <code>session-other</code>? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div><form method="post" action="/settings/_actions/sessions/revoke"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="session_id" value="session-other"><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out session</button></footer></form></dialog>
   </div>
-</div></div></div></main>
+</div></div></main>
 </body>
 </html>
