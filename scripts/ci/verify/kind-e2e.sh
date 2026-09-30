@@ -3,10 +3,24 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-if [ "${KIND_CLUSTER_NAME+x}" = x ]; then
+if [ "${KIND_CLUSTER_NAME+x}" = x ] || [ -n "${CLUSTER:-}" ]; then
   KIND_CLUSTER_NAME_EXPLICIT=1
 else
   KIND_CLUSTER_NAME_EXPLICIT=0
+fi
+
+# Only create entrypoints allocate a saved profile. Read/test/remove commands
+# require an existing profile and cannot claim a cluster merely by its name.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]] && [ -n "${CLUSTER:-}" ] \
+    && { [ "$#" -eq 0 ] || [ "${1:-}" = up ]; }; then
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
+    echo '::error::named Kind profiles currently require the synthetic CI product image contract' >&2
+    exit 2
+  fi
+  profile_args=(--cluster "$CLUSTER")
+  [ -z "${KIND_PUBLIC_ORIGIN:-}" ] || profile_args+=(--public-origin "$KIND_PUBLIC_ORIGIN")
+  [ -z "${KIND_BROWSER_API_ORIGIN:-}" ] || profile_args+=(--browser-api-origin "$KIND_BROWSER_API_ORIGIN")
+  python3 "$ROOT/scripts/dev/kind/cluster-profile.py" ensure "${profile_args[@]}" >/dev/null
 fi
 
 # shellcheck source=scripts/ci/verify/kind/common.sh
@@ -38,6 +52,8 @@ kind_e2e_usage() {
   cat >&2 <<'EOF'
 usage:
   scripts/ci/verify/kind-e2e.sh
+  CLUSTER=<new-profile> scripts/ci/verify/kind-e2e.sh up
+  CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh down
   KIND_CLUSTER_NAME=<new-cluster> scripts/ci/verify/kind-e2e.sh up
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite edge-contract
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite credentials
@@ -59,6 +75,10 @@ dispatch_kind_e2e() {
   fi
   if [ "${1:-}" = "up" ] && [ "$#" -eq 1 ]; then
     run_kind_up
+    return
+  fi
+  if [ "${1:-}" = down ] && [ "$#" -eq 1 ]; then
+    run_kind_down
     return
   fi
   if [ "${1:-}" = "credentials" ]; then

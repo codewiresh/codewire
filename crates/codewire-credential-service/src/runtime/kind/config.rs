@@ -11,7 +11,6 @@ use super::super::{Listeners, RuntimeError};
 pub(super) const NAMESPACE: &str = "codewire-e2e";
 const DATABASE_URL: &str = "postgres://codewire_credential_broker:kind-credential-broker-synthetic-only@postgres.codewire-e2e.svc.cluster.local:5432/codewire?sslmode=disable";
 const ROLE: &str = "codewire_credential_broker";
-const PUBLIC_ORIGIN: &str = "http://127.0.0.1:8090";
 
 pub(super) struct Config {
     pub(super) database_url: Zeroizing<String>,
@@ -76,22 +75,37 @@ impl Config {
             path("CREDENTIAL_BROKER_TLS_KEY_FILE")?,
         )
         .map_err(|_| RuntimeError::Tls)?;
-        if required("CREDENTIAL_PUBLIC_ORIGIN")? != PUBLIC_ORIGIN {
-            return Err(RuntimeError::Configuration(
-                "managed Kind credential public origin",
-            ));
-        }
+        let public_origin = parse_kind_public_origin(&required("CREDENTIAL_PUBLIC_ORIGIN")?)?;
         Ok(Self {
             database_url,
             listeners: Listeners {
                 public: ([0, 0, 0, 0], 8086).into(),
-                public_origin: http::HeaderValue::from_static(PUBLIC_ORIGIN),
+                public_origin,
                 private: ([0, 0, 0, 0], 9443).into(),
                 tls,
             },
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
         })
     }
+}
+
+fn parse_kind_public_origin(value: &str) -> Result<http::HeaderValue, RuntimeError> {
+    // Saved profiles vary only the host ingress port. Do not normalize URLs:
+    // other hosts, aliases, userinfo and trailing components are not admitted.
+    let port = value
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .ok_or(RuntimeError::Configuration(
+            "managed Kind credential public origin",
+        ))?;
+    if value != format!("http://127.0.0.1:{port}") {
+        return Err(RuntimeError::Configuration(
+            "managed Kind credential public origin",
+        ));
+    }
+    http::HeaderValue::from_str(value)
+        .map_err(|_| RuntimeError::Configuration("managed Kind credential public origin"))
 }
 
 fn required(name: &'static str) -> Result<String, RuntimeError> {
@@ -183,6 +197,44 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kind_public_origin_accepts_saved_ports_and_rejects_unmanaged_origins() {
+        for port in [1, 8090, 32767, 65535] {
+            let origin = format!("http://127.0.0.1:{port}");
+            assert_eq!(
+                super::parse_kind_public_origin(&origin)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                origin
+            );
+        }
+        for origin in [
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:08090",
+            "http://127.0.0.1:+8090",
+            "http://127.0.0.1:8090/",
+            "http://127.0.0.1:8090/path",
+            "http://127.0.0.1:8090?x=1",
+            "http://127.0.0.1:8090#fragment",
+            "http://user@127.0.0.1:8090",
+            "http://localhost:8090",
+            "http://127.1:8090",
+            "http://[::1]:8090",
+            "http://0.0.0.0:8090",
+            "https://127.0.0.1:8090",
+            "http://127.0.0.1",
+            " http://127.0.0.1:8090",
+            "http://127.0.0.1:8090\n",
+        ] {
+            assert!(
+                super::parse_kind_public_origin(origin).is_err(),
+                "accepted {origin:?}"
+            );
+        }
+    }
+
     use anyhow::{Context, Result, ensure};
 
     use super::*;

@@ -29,17 +29,18 @@ run_integrated_kind_suite() {
   # kind serializes each image through the host temp filesystem before
   # importing it. Reject or replace a saturated default before compiling or
   # creating a cluster, rather than misreporting the later bootstrap fallout.
-  prepare_kind_temp_runtime
+  prepare_kind_temp_runtime || return $?
 
-  # CI gives each replica a private DinD sidecar, while local worktrees share
-  # fixed host ports, image tags, and the default cluster name. Serialize the
-  # complete local transaction before reclaiming any CI-owned prior run.
-  acquire_kind_host_lock
+  # Saved profiles serialize only their own runtime. Legacy fixed-port callers
+  # retain the host transaction lock; builds share a bounded publication lock.
+  acquire_kind_host_lock || return $?
 
-  # At job startup, the current transaction name and every cluster with this
-  # CI-owned run-ID prefix on the current daemon are stale. Reclaim them only
-  # after taking the host lock and before checking their fixed host ports.
-  reclaim_cancelled_ci_clusters "$KIND_CONFIG"
+  # An existing cluster is never implicitly replaced, including legacy names.
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    python3 "$ROOT/scripts/dev/kind/cluster-profile.py" render-config \
+      --cluster "$CLUSTER" --template "$ROOT/tests/e2e/kind/kind-config.yaml" >/dev/null || return $?
+  fi
+  reclaim_cancelled_ci_clusters "$KIND_CONFIG" || return $?
 
   trap cleanup EXIT
 
@@ -47,10 +48,10 @@ run_integrated_kind_suite() {
   # Cold image and smoke-binary compilation must not compete with an idle
   # nested control plane. Provision Kind only when every host-side build input
   # is ready, then prove the API settles between every large image import.
-  build_images_and_smokes
-  create_cluster
-  load_images_into_kind
-  deploy_overlay
+  build_images_and_smokes || return $?
+  create_cluster || return $?
+  load_images_into_kind || return $?
+  deploy_overlay || return $?
   host_key_authorization_smoke
   edge_routing_probes
   connect_edge_probes
@@ -60,5 +61,8 @@ run_integrated_kind_suite() {
   dashboard_browser_e2e
   # TTL verifies provenance while its product-created workspace still exists.
   rust_reconciler_ttl_e2e
+  if [ "$KEEP_KIND_CLUSTER" = 1 ]; then
+    mark_retained_cluster_prepared || return $?
+  fi
   log "green"
 }

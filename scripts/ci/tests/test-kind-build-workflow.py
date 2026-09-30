@@ -185,6 +185,17 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertTrue(admitted(receipt=True, producer_results=("skipped",) * 3))
         self.assertFalse(admitted(selection_ok=False, kind=False, producer_results=("skipped",) * 3))
 
+    def test_kind_consumer_selects_a_private_saved_profile(self) -> None:
+        edge = self.jobs["edge-kind"]
+        kind = named_step(edge, "Run Kind")
+        self.assertEqual(kind["if"], KIND_STEP_IF)
+        self.assertEqual(kind.get("env"), {
+            "CLUSTER": edge["env"]["KIND_CLUSTER_NAME"],
+            "CODEWIRE_KIND_PROFILE_ROOT": "${{ runner.temp }}/kind-profiles",
+        })
+        self.assertNotIn("CLUSTER", edge["env"],
+                         "static fixtures must not inherit an uncreated profile")
+
     def test_consumer_downloads_bound_manifests_outside_checkout(self) -> None:
         edge = self.jobs["edge-kind"]
         self.assertEqual(edge["env"]["CODEWIRE_KIND_PRODUCT_IMAGE_MODE"], "prebuilt-ci")
@@ -292,7 +303,7 @@ class WorkflowContractTests(unittest.TestCase):
     def test_integrated_runtime_order_remains_atomic(self) -> None:
         source = INTEGRATED.read_text(encoding="utf-8")
         body = source.split("  trap cleanup EXIT", 1)[1].split('  log "green"', 1)[0]
-        calls = re.findall(r"^  ([a-z][a-z0-9_]*)$", body, flags=re.MULTILINE)
+        calls = [call for call in re.findall(r"^  ([a-z][a-z0-9_]*)(?: \|\| return \$\?)?$", body, flags=re.MULTILINE) if call != "fi"]
         self.assertEqual(calls, [
             "ingress_path_drift_check",
             "build_images_and_smokes",
@@ -337,6 +348,7 @@ set -euo pipefail
 NS=codewire-e2e
 ROOT=/synthetic-codewire
 KIND_INGRESS_URL=http://127.0.0.1:8090
+KIND_COORDINATOR_DIRECT_URL=http://127.0.0.1:18092
 KIND_POSTGRES_LOCAL_IMAGE=synthetic-postgres
 CARGO_CI_DIR=/synthetic-codewire/target/ci
 PROBE_HEADERS="$FIXTURE/headers"
@@ -618,6 +630,10 @@ class CommonConsumerContractTests(unittest.TestCase):
                 export KIND_DIND_IMAGE=sealed-dind:fixture
                 mkdir -p "$RUN_DIR" "$FIXTURE_ROOT/artifacts"
                 source "$ROOT/scripts/ci/verify/kind/common.sh"
+                # Publication locking has its own real-lock/profile fixture.
+                # This fixture owns only the closed producer/consumer calls.
+                acquire_kind_build_publication_lock() { :; }
+                release_kind_build_publication_lock() { :; }
 
                 record() { printf '%s\n' "$*" >>"$CALLS"; }
                 fail() { printf 'fixture failure: %s\n' "$*" >&2; exit 1; }

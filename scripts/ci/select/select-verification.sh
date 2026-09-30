@@ -1101,6 +1101,7 @@ if [ "$event_selected" = false ]; then
         select_token database
         select_token rust_pkg_codewire_credential_broker
         ;;
+      crates/codewire-credential-service/src/runtime/kind.rs|\
       crates/codewire-credential-service/src/runtime/kind/*)
         # This is the real in-cluster credential-service fixture, rather than
         # a unit-only helper. Like the direct Kind smoke owners, its changes
@@ -1444,7 +1445,9 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
-      scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-credentials.py)
+      scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-credentials.py|\
+      scripts/ci/tests/test-kind-cluster-profiles.py|scripts/ci/tests/test-kind-dev-profile.py|\
+      scripts/ci/tests/test-kind-profile-artifacts.py|scripts/ci/tests/test-kind-profile-gate.py)
         # These hermetic fixtures exercise the dispatcher and cleanup contract
         # without provisioning a cluster. A real harness/runtime path in the
         # same change still marks the selection Kind-relevant above.
