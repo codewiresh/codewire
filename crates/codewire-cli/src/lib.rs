@@ -12,7 +12,7 @@ mod update;
 
 pub use hosted_exec::run_hosted_exec_from;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{IsTerminal as _, Write as _};
@@ -21,7 +21,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use codewire_client::{
