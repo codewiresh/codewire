@@ -1078,6 +1078,7 @@ if [ "$event_selected" = false ]; then
         select_token database
         select_token rust_pkg_codewire_credential_broker
         ;;
+      crates/codewire-credential-service/src/runtime/kind.rs|\
       crates/codewire-credential-service/src/runtime/kind/*)
         # This is the real in-cluster credential-service fixture, rather than
         # a unit-only helper. Like the direct Kind smoke owners, its changes

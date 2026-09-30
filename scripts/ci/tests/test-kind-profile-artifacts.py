@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise immutable archive identity and copied executable admission."""
+import copy
 import hashlib
 import importlib.util
 import io
@@ -70,6 +71,164 @@ class ArtifactTests(unittest.TestCase):
         path, expected = self.archive(link=True)
         with self.assertRaises(ARTIFACTS.SealError):
             ARTIFACTS.verify_archive(path, expected)
+
+    def oci_archive(self, change=None, *, rebind_manifest=False):
+        """Docker29's compatibility manifest plus its single-platform OCI index."""
+        tag = "codewire-services:e2e"
+        config = b'{"architecture":"amd64","os":"linux"}'
+        layers = [b"first synthetic compressed layer", b"second synthetic compressed layer"]
+        blob = lambda data: "blobs/sha256/" + hashlib.sha256(data).hexdigest()
+        descriptor = lambda data, media: {"digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+                                           "mediaType": media, "size": len(data)}
+        config_path, layer_paths = blob(config), [blob(data) for data in layers]
+        manifest = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "config": descriptor(config, "application/vnd.oci.image.config.v1+json"),
+                    "layers": [descriptor(data, "application/vnd.oci.image.layer.v1.tar+gzip")
+                               for data in layers]}
+        raw = ARTIFACTS.encode(manifest)
+        manifest_path = blob(raw)
+        index = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+                 "manifests": [{**descriptor(raw, manifest["mediaType"]), "annotations": {
+                     "io.containerd.image.name": "docker.io/library/" + tag,
+                     "org.opencontainers.image.ref.name": "e2e",
+                     "org.opencontainers.image.created": "2026-09-30T15:58:28Z"}}]}
+        state = {"files": {config_path: config, manifest_path: raw,
+                           **dict(zip(layer_paths, layers))}, "index": index, "oci": manifest,
+                 "docker": [{"Config": config_path, "RepoTags": [tag], "Layers": layer_paths.copy()}],
+                 "config_path": config_path, "layer_paths": layer_paths, "oci_path": manifest_path,
+                 "expected": {tag: "sha256:" + hashlib.sha256(raw).hexdigest()}}
+        if change is not None:
+            change(state)
+        if rebind_manifest:
+            state["files"].pop(manifest_path)
+            raw = ARTIFACTS.encode(state["oci"])
+            state["oci_path"] = blob(raw)
+            state["files"][state["oci_path"]] = raw
+            selected = state["index"]["manifests"][0]
+            selected["digest"] = state["expected"][tag] = "sha256:" + hashlib.sha256(raw).hexdigest()
+            selected["size"] = len(raw)
+        state["files"]["manifest.json"] = ARTIFACTS.encode(state["docker"])
+        state["files"]["index.json"] = state.get("index_bytes", ARTIFACTS.encode(state["index"]))
+        state["files"]["oci-layout"] = b'{"imageLayoutVersion":"1.0.0"}'
+        path = self.root / "oci.tar"
+        with tarfile.open(path, "w") as archive:
+            for name, data in state["files"].items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+        return path, state["expected"]
+
+    def test_oci_archive_resolves_admitted_manifest_id(self):
+        path, expected = self.oci_archive()
+        ARTIFACTS.verify_archive(path, expected)
+
+    def test_oci_index_tag_and_inventory_are_exact(self):
+        changes = {
+            "foreign tag": lambda s: s["index"]["manifests"][0]["annotations"].update(
+                {"io.containerd.image.name": "docker.io/library/other:e2e"}),
+            "wrong short tag": lambda s: s["index"]["manifests"][0]["annotations"].update(
+                {"org.opencontainers.image.ref.name": "other"}),
+            "duplicate descriptor": lambda s: s["index"]["manifests"].append(s["index"]["manifests"][0]),
+            "missing descriptor": lambda s: s["index"]["manifests"].clear(),
+            "foreign compat tag": lambda s: s["docker"][0].update(RepoTags=["other:e2e"]),
+            "duplicate compat tag": lambda s: s["docker"][0]["RepoTags"].append("codewire-services:e2e"),
+            "duplicate JSON field": lambda s: s.update(index_bytes=b'{"schemaVersion":2,"schemaVersion":2}'),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                path, expected = self.oci_archive(change)
+                with self.assertRaises(ARTIFACTS.SealError):
+                    ARTIFACTS.verify_archive(path, expected)
+
+    def test_oci_index_schema_and_descriptor_are_closed(self):
+        changes = {
+            "schema": lambda s: s["index"].update(schemaVersion=1),
+            "boolean schema": lambda s: s["index"].update(schemaVersion=True),
+            "index media": lambda s: s["index"].update(mediaType="other"),
+            "nested index": lambda s: s["index"]["manifests"][0].update(
+                mediaType="application/vnd.oci.image.index.v1+json"),
+            "invalid media type": lambda s: s["index"]["manifests"][0].update(mediaType=[]),
+            "platform selector": lambda s: s["index"]["manifests"][0].update(platform={"architecture": "arm64"}),
+            "manifest digest": lambda s: s["index"]["manifests"][0].update(digest="sha256:" + "0" * 64),
+            "manifest size": lambda s: s["index"]["manifests"][0].update(size=1),
+            "boolean size": lambda s: s["index"]["manifests"][0].update(size=True),
+            "remote descriptor": lambda s: s["index"]["manifests"][0].update(urls=["https://outside.invalid"]),
+            "unexpected annotation": lambda s: s["index"]["manifests"][0]["annotations"].update({"other": "x"}),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                path, expected = self.oci_archive(change)
+                with self.assertRaises(ARTIFACTS.SealError):
+                    ARTIFACTS.verify_archive(path, expected)
+
+    def test_oci_manifest_hash_and_config_bytes_cannot_be_substituted(self):
+        for name, change in (
+            ("manifest bytes", lambda s: s["files"].update({s["oci_path"]: s["files"][s["oci_path"]] + b"\n"})),
+            ("config bytes", lambda s: s["files"].update({s["config_path"]: b"X" * len(s["files"][s["config_path"]])})),
+            ("missing index", lambda s: s.update(index_bytes=b"{}")),
+        ):
+            with self.subTest(name=name):
+                path, expected = self.oci_archive(change)
+                with self.assertRaises(ARTIFACTS.SealError):
+                    ARTIFACTS.verify_archive(path, expected)
+
+    def test_oci_manifest_config_and_layer_descriptors_bind_compatibility_entry(self):
+        changes = {
+            "config digest": lambda s: s["oci"]["config"].update(digest="sha256:" + "0" * 64),
+            "config size": lambda s: s["oci"]["config"].update(size=1),
+            "config media": lambda s: s["oci"]["config"].update(mediaType="other"),
+            "layer size": lambda s: s["oci"]["layers"][0].update(size=1),
+            "layer media": lambda s: s["oci"]["layers"][0].update(mediaType="other"),
+            "layer order": lambda s: s["oci"]["layers"].reverse(),
+            "layer missing": lambda s: s["oci"]["layers"].pop(),
+            "duplicate layer": lambda s: (
+                s["oci"]["layers"].append(s["oci"]["layers"][0]),
+                s["docker"][0]["Layers"].append(s["layer_paths"][0])),
+            "manifest schema": lambda s: s["oci"].update(schemaVersion=1),
+            "manifest subject": lambda s: s["oci"].update(subject={}),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                path, expected = self.oci_archive(change, rebind_manifest=True)
+                with self.assertRaises(ARTIFACTS.SealError):
+                    ARTIFACTS.verify_archive(path, expected)
+
+    def test_oci_layer_payload_hashes_are_checked(self):
+        def change(state):
+            selected = state["layer_paths"][0]
+            state["files"][selected] = b"X" * len(state["files"][selected])
+        path, expected = self.oci_archive(change)
+        with self.assertRaises(ARTIFACTS.SealError):
+            ARTIFACTS.verify_archive(path, expected)
+
+    def test_present_index_cannot_fall_back_to_classic_config_id(self):
+        def change(state):
+            state["expected"]["codewire-services:e2e"] = "sha256:" + hashlib.sha256(
+                state["files"][state["config_path"]]).hexdigest()
+            state["index"]["manifests"][0]["annotations"]["io.containerd.image.name"] = "other:e2e"
+        path, expected = self.oci_archive(change)
+        with self.assertRaises(ARTIFACTS.SealError):
+            ARTIFACTS.verify_archive(path, expected)
+
+    def test_oci_index_refuses_duplicate_manifest_digest_across_distinct_tags(self):
+        def change(state):
+            tag = "codewire-gateway:e2e"
+            state["expected"][tag] = state["expected"]["codewire-services:e2e"]
+            descriptor = copy.deepcopy(state["index"]["manifests"][0])
+            descriptor["annotations"]["io.containerd.image.name"] = "docker.io/library/" + tag
+            state["index"]["manifests"].append(descriptor)
+            entry = copy.deepcopy(state["docker"][0])
+            entry["RepoTags"] = [tag]
+            state["docker"].append(entry)
+        path, expected = self.oci_archive(change)
+        with self.assertRaises(ARTIFACTS.SealError):
+            ARTIFACTS.verify_archive(path, expected)
+
+    def test_oci_hashing_uses_one_total_deadline(self):
+        path, expected = self.oci_archive()
+        with patch.object(ARTIFACTS.time, "monotonic", side_effect=[0, 121]):
+            with self.assertRaisesRegex(ARTIFACTS.SealError, "deadline"):
+                ARTIFACTS.verify_archive(path, expected)
 
     def test_copy_owns_inode_and_survives_build_overwrite(self):
         source, destination = self.root / "mutable", self.root / "sealed"

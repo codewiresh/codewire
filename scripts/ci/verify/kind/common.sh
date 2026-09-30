@@ -259,6 +259,49 @@ dump_cluster_state() {
   kubectl --context "$context" -n "$NS" logs deploy/codewire-idp --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-orchestration --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-coordinator --tail=160 || true
+
+  # Credential logs are safe only for the selected synthetic fixture. Read
+  # command/marker projections, never a full object: kubectl template errors
+  # can otherwise include the complete object in stderr. Check each pod too,
+  # because an older real pod may still exist during a mode transition.
+  local credential_identity credential_pods_json credential_pods credential_pod
+  local credential_deployment_projection credential_pod_projection
+  credential_deployment_projection='{.spec.template.spec.containers[?(@.name=="credential-service")].command}{.spec.template.spec.containers[?(@.name=="credential-service")].env[?(@.name=="CODEWIRE_KIND_CREDENTIAL_FIXTURE")].value}'
+  credential_pod_projection='{.spec.containers[?(@.name=="credential-service")].command}{.spec.containers[?(@.name=="credential-service")].env[?(@.name=="CODEWIRE_KIND_CREDENTIAL_FIXTURE")].value}'
+  if credential_identity="$(kubectl --context "$context" -n "$NS" \
+      get deployment/codewire-credential-service --request-timeout=5s \
+      -o "jsonpath-as-json=$credential_deployment_projection" 2>/dev/null)" \
+      && jq -es 'length == 2 and .[0] == [["/codewire-kind-fixtures/credential-service"]] and .[1] == ["1"]' \
+        <<<"$credential_identity" >/dev/null 2>&1 \
+      && credential_pods_json="$(kubectl --context "$context" -n "$NS" get pods \
+        -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=credential-service \
+        --request-timeout=5s -o 'jsonpath-as-json={.items[*].metadata.name}' 2>/dev/null)" \
+      && credential_pods="$(jq -er '
+        select(type == "array" and length > 0 and length <= 8 and
+          all(.[]; type == "string" and length <= 253 and
+            test("^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"))) | .[]
+      ' <<<"$credential_pods_json" 2>/dev/null)"; then
+    while IFS= read -r credential_pod; do
+      if credential_identity="$(kubectl --context "$context" -n "$NS" \
+          get "pod/$credential_pod" --request-timeout=5s \
+          -o "jsonpath-as-json=$credential_pod_projection" 2>/dev/null)" \
+          && jq -es 'length == 2 and .[0] == [["/codewire-kind-fixtures/credential-service"]] and .[1] == ["1"]' \
+            <<<"$credential_identity" >/dev/null 2>&1; then
+        printf '\nSynthetic credential fixture diagnostics: %s\n' "$credential_pod"
+        kubectl --context "$context" -n "$NS" get "pod/$credential_pod" \
+          --request-timeout=5s \
+          -o 'jsonpath={range .status.containerStatuses[?(@.name=="credential-service")]}{"current reason="}{.state.terminated.reason}{" exit_code="}{.state.terminated.exitCode}{"\nprevious reason="}{.lastState.terminated.reason}{" exit_code="}{.lastState.terminated.exitCode}{"\n"}{end}' \
+          2>/dev/null || true
+        kubectl --context "$context" -n "$NS" logs "pod/$credential_pod" \
+          -c credential-service --request-timeout=5s --tail=80 --limit-bytes=16384 \
+          2>/dev/null || true
+        kubectl --context "$context" -n "$NS" logs "pod/$credential_pod" \
+          -c credential-service --request-timeout=5s --tail=80 --limit-bytes=16384 --previous \
+          2>/dev/null || true
+      fi
+    done <<<"$credential_pods"
+  fi
+
   kubectl --context "$context" -n "$NS" get svc/codewire-coordinator-nodeport -o wide || true
   kubectl --context "$context" -n "$NS" logs deploy/temporal --tail=80 || true
   kubectl --context "$context" -n "$SANDBOX_NS" get sandboxclaim,sandbox,sandboxtemplate,sandboxwarmpool,pvc,pv -o wide || true
