@@ -130,6 +130,8 @@ run_workspace_failure_fixture() (
   local target="$1" failure="$2"
   local NS=codewire-e2e SANDBOX_NS=dev-sandboxes
   local KIND_INGRESS_URL=http://fixture.invalid KIND_INGRESS_TLS_URL=https://fixture.invalid
+  # shellcheck disable=SC2034 # Read by the extracted smoke function below.
+  local KIND_ORCHESTRATION_URL=http://fixture-direct.invalid
   local CARGO_CI_DIR="$FIXTURE/workspace-bin" GATEWAY_SMOKE_TMPDIR="$FIXTURE/gateway"
   local RUN_DIR="$FIXTURE" GATEWAY_PUBLIC_FINGERPRINT
   local claim_deletes=0
@@ -283,8 +285,10 @@ expect_workspace_failure() {
   else
     status=$?
   fi
-  [[ "$status" -eq "$expected_status" ]] ||
+  if [[ "$status" -ne "$expected_status" ]]; then
+    cat "$FIXTURE/workspace-failure.out" >&2
     fail "$target changed failed $failure status: got $status, want $expected_status"
+  fi
   if grep -Eq "$forbidden" "$CALLS"; then
     fail "$target continued or emitted green after failed $failure"
   fi
