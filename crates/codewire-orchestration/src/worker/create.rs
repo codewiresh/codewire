@@ -12,6 +12,7 @@ use super::env_data::{
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
 use super::gatewayauth::issue_environment_tokens;
+use super::start_timing::{duration_ms, pod_stage_timings, start_profile};
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{
@@ -27,6 +28,7 @@ use crate::sandbox::{
     ClaimOpts, claim_name, environment_template_name, is_canonical_workspace_runtime_image,
     shadow_warm_pool_name,
 };
+use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
 
 #[cfg(test)]
 mod projection_tests;
@@ -850,6 +852,7 @@ async fn run_environment_create(
             return Ok(());
         }
 
+        let profile = start_profile(cfg, &env.isolation_tier);
         // No backend row yet is fine — first iteration.
         let backend = load_backend_row(&ctx.pool, env_id).await.ok();
 
@@ -994,15 +997,17 @@ async fn run_environment_create(
                     .await?;
                     return Err(e);
                 }
+                let elapsed = started.elapsed();
                 emit_authoritative_environment_log_for_states(
                     authority,
                     CREATE_MUTATION_STATES,
                     "wait_for_ready",
                     "completed",
                     "",
-                    duration_meta(started),
+                    elapsed_meta(elapsed),
                 )
                 .await?;
+                observe_create_stage(StartStage::WaitForReady, profile, elapsed);
             }
 
             CreateAction::EnsureNamespace => {
@@ -1020,6 +1025,10 @@ async fn run_environment_create(
                 emit_create_log(authority, "ensure_namespace", "completed", "", None).await?;
             }
 
+            // `create_claim` measures creating the environment-scoped
+            // template, shadow pool, claim and gateway objects. The readiness
+            // wait that follows is its own `gateway_ready` stage; earlier
+            // `create_claim` samples included that wait.
             CreateAction::CreateClaim => {
                 let started = std::time::Instant::now();
                 emit_create_log(authority, "create_claim", "started", "", None).await?;
@@ -1323,24 +1332,12 @@ async fn run_environment_create(
                         return Err(e);
                     }
                 };
-                if let Err(e) = async {
-                    run_template_mutation(
-                        authority,
-                        &template_opts,
-                        CREATE_MUTATION_STATES,
-                        client.ensure_gateway_stack(&template_opts),
-                    )
-                    .await?;
-                    authority
-                        .run_while_authoritative_for_states(
-                            CREATE_MUTATION_STATES,
-                            client.wait_for_credential_gateway_ready(
-                                &template_opts,
-                                ready_timeout_for_isolation(&env.isolation_tier),
-                            ),
-                        )
-                        .await
-                }
+                if let Err(e) = run_template_mutation(
+                    authority,
+                    &template_opts,
+                    CREATE_MUTATION_STATES,
+                    client.ensure_gateway_stack(&template_opts),
+                )
                 .await
                 {
                     emit_create_log(
@@ -1354,18 +1351,78 @@ async fn run_environment_create(
                     record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
                     return Err(e);
                 }
+                let claim_elapsed = started.elapsed();
                 emit_create_log(
                     authority,
                     "create_claim",
                     "completed",
                     "",
-                    duration_meta(started),
+                    elapsed_meta(claim_elapsed),
                 )
                 .await?;
+                observe_create_stage(StartStage::CreateClaim, profile, claim_elapsed);
+
+                // The gateway serves readiness only after it reaches the
+                // workspace daemon, so this wait covers the workspace cold
+                // start. Same metadata shape as the restart path, less the
+                // Pod IP, which `store_backend` records once the probe sees it.
+                let gateway_started = std::time::Instant::now();
+                emit_create_log(
+                    authority,
+                    "gateway_ready",
+                    "started",
+                    GATEWAY_READY_STARTED_MESSAGE,
+                    None,
+                )
+                .await?;
+                let gateway_result = authority
+                    .run_while_authoritative_for_states(
+                        CREATE_MUTATION_STATES,
+                        client.wait_for_credential_gateway_ready(
+                            &template_opts,
+                            ready_timeout_for_isolation(&env.isolation_tier),
+                        ),
+                    )
+                    .await;
+                let gateway_elapsed = gateway_started.elapsed();
+                let gateway_meta = Some(serde_json::json!({
+                    "duration_ms": duration_ms(gateway_elapsed),
+                    "namespace": backend.namespace,
+                }));
+                if let Err(e) = gateway_result {
+                    emit_create_log(
+                        authority,
+                        "gateway_ready",
+                        "failed",
+                        &format!("{e:#}"),
+                        gateway_meta,
+                    )
+                    .await?;
+                    record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
+                    return Err(e);
+                }
+                emit_create_log(authority, "gateway_ready", "completed", "", gateway_meta).await?;
+                observe_create_stage(StartStage::GatewayReady, profile, gateway_elapsed);
             }
 
             CreateAction::StoreBackend => {
                 update_backend_pod_info(authority, &probe.pod_ip, &probe.pod_name).await?;
+                // This arm runs only when a verified Pod first differs from
+                // the stored backend, so each Pod's own start marks are
+                // recorded once. A bootstrap-recovered replacement publishes
+                // itself and is not timed here. The marks are not journal
+                // checkpoints.
+                for timing in pod_stage_timings(&probe.pod_timeline) {
+                    emit_create_log(
+                        authority,
+                        timing.stage.as_str(),
+                        "completed",
+                        "",
+                        Some(timing.metadata()),
+                    )
+                    .await?;
+                    observe_create_stage(timing.stage, profile, timing.duration);
+                }
                 emit_create_log(authority, "store_backend", "completed", "", None).await?;
             }
 
@@ -1430,7 +1487,18 @@ async fn emit_running_log(
 }
 
 fn duration_meta(started: std::time::Instant) -> Option<serde_json::Value> {
-    Some(serde_json::json!({ "duration_ms": started.elapsed().as_millis() as i64 }))
+    elapsed_meta(started.elapsed())
+}
+
+fn elapsed_meta(elapsed: Duration) -> Option<serde_json::Value> {
+    Some(serde_json::json!({ "duration_ms": duration_ms(elapsed) }))
+}
+
+const GATEWAY_READY_STARTED_MESSAGE: &str = "Waiting for gateway";
+
+/// Observe a completed create stage after its durable log row committed.
+fn observe_create_stage(stage: StartStage, profile: StartProfile, elapsed: Duration) {
+    start_metrics::observe_stage(stage, StartPath::Cold, profile, elapsed);
 }
 
 fn require_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {

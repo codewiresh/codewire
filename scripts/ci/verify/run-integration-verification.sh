@@ -397,6 +397,13 @@ run_database() {
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "environment source admission matrix" "$logfile" 6
 
+  logfile="$RUN_DIR/admin-startup-summary.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::startup_database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "admin startup summary matrix" "$logfile" 2
+
 }
 
 prepare_idp_keyring() {
