@@ -10,4 +10,4 @@ target:
   group: rbac.authorization.k8s.io
   version: v1
   kind: Role|RoleBinding
-  name: codewire-orchestration-(gateway-host-key|credential-bootstrap)
+  name: codewire-orchestration-(gateway-host-key|credential-bootstrap|image-cache)

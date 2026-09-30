@@ -104,6 +104,102 @@ def assert_credential_bootstrap(resources: list[str], target: dict[str, str], la
             if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
                 output.append(f"{label}: {policy_name} must deny by identity without mutable namespace selectors")
 
+
+IMAGE_CACHE_ROLE = "codewire-orchestration-image-cache"
+IMAGE_CACHE_NAME = "cw-image-cache"
+IMAGE_CACHE_IMAGE_PATTERN = (
+    "^(registry[.]example[.]invalid|docker[.]io/library)/[a-z0-9]+([._/-][a-z0-9]+)*"
+    "(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$"
+)
+
+
+def assert_image_cache(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+    """Static grant/intent checks. The renderer's golden and policy-binding
+    tests pin the admitted shape; CEL behaviour is proven on Dev."""
+    cluster_role = exactly_one(resources, "ClusterRole", "codewire-orchestration", label, output)
+    if cluster_role and re.search(r"^\s*- daemonsets\s*$", cluster_role, re.MULTILINE):
+        output.append(f"{label}: cluster-wide orchestration role must not grant DaemonSets")
+    role = exactly_one(resources, "Role", IMAGE_CACHE_ROLE, label, output)
+    binding = exactly_one(resources, "RoleBinding", IMAGE_CACHE_ROLE, label, output)
+    account = exactly_one(resources, "ServiceAccount", IMAGE_CACHE_NAME, label, output)
+    network = exactly_one(resources, "NetworkPolicy", IMAGE_CACHE_NAME, label, output)
+    expected_rules = compact('''
+        rules:
+        - apiGroups:
+          - apps
+          resources:
+          - daemonsets
+          verbs:
+          - create
+        - apiGroups:
+          - apps
+          resourceNames:
+          - cw-image-cache
+          resources:
+          - daemonsets
+          verbs:
+          - get
+          - update
+          - patch
+    ''')
+    if role and (metadata_field(role, "namespace") != target["role_namespace"] or compact(top_level_block(role, "rules")) != expected_rules):
+        output.append(f"{label}: image cache Role must grant only DaemonSet create and cw-image-cache get/update/patch in the sandbox namespace")
+    if binding:
+        expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {IMAGE_CACHE_ROLE}")
+        expected_subject = compact(f"subjects: - kind: ServiceAccount name: codewire-orchestration namespace: {target['subject_namespace']}")
+        if (metadata_field(binding, "namespace") != target["role_namespace"]
+                or compact(top_level_block(binding, "roleRef")) != expected_ref
+                or compact(top_level_block(binding, "subjects")) != expected_subject):
+            output.append(f"{label}: image cache binding escaped its namespace or identity")
+    if account and (metadata_field(account, "namespace") != target["role_namespace"]
+            or top_level_field(account, "automountServiceAccountToken") != "false"
+            or top_level_block(account, "secrets") or top_level_block(account, "imagePullSecrets")):
+        output.append(f"{label}: image cache ServiceAccount must be tokenless and credential-free in the sandbox namespace")
+    expected_network = compact(f"spec: podSelector: matchLabels: app.kubernetes.io/name: {IMAGE_CACHE_NAME} policyTypes: - Ingress - Egress")
+    if network and (metadata_field(network, "namespace") != target["role_namespace"]
+            or compact(top_level_block(network, "spec")) != expected_network):
+        output.append(f"{label}: image cache NetworkPolicy must deny all ingress and egress in the sandbox namespace")
+    policy = exactly_one(resources, "ValidatingAdmissionPolicy", IMAGE_CACHE_ROLE, label, output)
+    policy_binding = exactly_one(resources, "ValidatingAdmissionPolicyBinding", IMAGE_CACHE_ROLE, label, output)
+    if policy:
+        normalized = compact(top_level_block(policy, "spec")).replace("''", "'")
+        for fragment in [
+            "failurePolicy: Fail", "matchPolicy: Equivalent",
+            "operations: - CREATE - UPDATE", "resources: - daemonsets",
+            "request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')",
+            "request.name == 'cw-image-cache'",
+            "object.spec.selector.matchLabels == {'app.kubernetes.io/name': 'cw-image-cache'}",
+            "variables.pod.serviceAccountName == 'cw-image-cache'",
+            "never codewire-sandbox",
+            "variables.pod.automountServiceAccountToken == false",
+            "!has(variables.pod.runtimeClassName)",
+            "!variables.pod.hostNetwork", "!variables.pod.hostPID", "!variables.pod.hostIPC",
+            "variables.pod.volumes.all(v, has(v.emptyDir))",
+            f"c.image.matches('{IMAGE_CACHE_IMAGE_PATTERN}')",
+            "(!has(c.securityContext.privileged) || !c.securityContext.privileged)",
+            "!c.securityContext.allowPrivilegeEscalation",
+            "c.securityContext.readOnlyRootFilesystem",
+            "c.securityContext.capabilities.drop == ['ALL']",
+            "!has(c.securityContext.capabilities.add)",
+            "variables.pod.securityContext.runAsNonRoot",
+            "variables.pod.securityContext.seccompProfile.type == 'RuntimeDefault'",
+            "c.command == ['/cw-image-cache/ld-musl-x86_64.so.1', '/cw-image-cache/busybox', 'sleep', '2147483647']",
+            "c.command == ['/bin/busybox', 'cp', '/bin/busybox', '/lib/ld-musl-x86_64.so.1', '/cw-image-cache/']",
+            "!has(c.env) && !has(c.envFrom) && !has(c.ports)",
+            "t.key == 'node.codewire.sh/runtime-candidate'",
+            "!has(variables.pod.priorityClassName)",
+            "s.name == 'harbor-registry'",
+        ]:
+            if fragment not in normalized:
+                output.append(f"{label}: {IMAGE_CACHE_ROLE} missing {fragment}")
+        if metadata_field(policy, "namespace") is not None:
+            output.append(f"{label}: {IMAGE_CACHE_ROLE} must remain cluster-scoped")
+    if policy_binding:
+        expected = compact(f"spec: policyName: {IMAGE_CACHE_ROLE} validationActions: - Deny")
+        if metadata_field(policy_binding, "namespace") is not None or compact(top_level_block(policy_binding, "spec")) != expected:
+            output.append(f"{label}: {IMAGE_CACHE_ROLE} must deny by identity without mutable namespace selectors")
+
+
 def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
     name = "codewire-orchestration-gateway-host-key"
     orchestration = "codewire-orchestration"
@@ -248,6 +344,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
                 f"ClusterRoleBinding/<cluster>/{orchestration}",
                 f"RoleBinding/{target['role_namespace']}/{name}",
                 f"RoleBinding/{target['role_namespace']}/codewire-orchestration-credential-bootstrap",
+                f"RoleBinding/{target['role_namespace']}/{IMAGE_CACHE_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
             ]
         )
@@ -309,6 +406,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         assert_bound_surface(resources, target, label, output)
         assert_admission(resources, label, output)
         assert_credential_bootstrap(resources, target, label, output)
+        assert_image_cache(resources, target, label, output)
         if target["path"] != "deployments/k8s/orchestration":
             assert_credential_service(resources, target, label, output)
         return output
@@ -420,6 +518,41 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         expect_rejected("credential namespace-label bypass", lambda resources: [
             resource.replace("spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n", 1)
             if top_level_field(resource, "kind") == "ValidatingAdmissionPolicyBinding" and metadata_field(resource, "name") == "codewire-orchestration-credential-bootstrap"
+            else resource for resource in resources
+        ])
+        def image_cache_rejected(label: str, kind: str, before: str, after: str, name: str = IMAGE_CACHE_ROLE) -> None:
+            # Rendered CEL folds across lines at spaces; match any whitespace.
+            indent = before[: len(before) - len(before.lstrip(" "))]
+            pattern = re.compile(re.escape(indent) + r"\s+".join(re.escape(part) for part in re.split(r" +", before.strip(" "))))
+
+            def mutate(resources: list[str]) -> list[str]:
+                changed = [
+                    pattern.sub(lambda _: after, resource)
+                    if top_level_field(resource, "kind") == kind and metadata_field(resource, "name") == name
+                    else resource
+                    for resource in resources
+                ]
+                if changed == resources:
+                    raise RuntimeError(f"image cache negative fixture {label} did not change the render")
+                return changed
+            expect_rejected(f"image cache {label}", mutate)
+
+        image_cache_rejected("delete verb", "Role", "  - patch", "  - patch\n  - delete")
+        image_cache_rejected("unnamed get", "Role", "  resourceNames:\n  - cw-image-cache\n", "")
+        image_cache_rejected("pods grant", "Role", "  - daemonsets\n  verbs:\n  - create", "  - daemonsets\n  - pods\n  verbs:\n  - create")
+        image_cache_rejected("application namespace", "RoleBinding", "namespace: prod-sandboxes", "namespace: prod")
+        image_cache_rejected("token automount", "ServiceAccount", "automountServiceAccountToken: false", "automountServiceAccountToken: true", IMAGE_CACHE_NAME)
+        image_cache_rejected("open egress", "NetworkPolicy", "  - Egress", "  - Egress\n  egress:\n  - {}", IMAGE_CACHE_NAME)
+        image_cache_rejected("runtime class allowed", "ValidatingAdmissionPolicy", "!has(variables.pod.runtimeClassName)", "true")
+        image_cache_rejected("host path allowed", "ValidatingAdmissionPolicy", "has(v.emptyDir)", "true")
+        image_cache_rejected("tag images allowed", "ValidatingAdmissionPolicy", "@sha256:[0-9a-f]{64}$", "")
+        image_cache_rejected("sandbox identity allowed", "ValidatingAdmissionPolicy", "serviceAccountName == 'cw-image-cache'", "serviceAccountName != ''")
+        image_cache_rejected("any command allowed", "ValidatingAdmissionPolicy", "'sleep', '2147483647'", "'sh'")
+        image_cache_rejected("namespace-label bypass", "ValidatingAdmissionPolicyBinding",
+                             "spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n")
+        expect_rejected("image cache cluster-wide DaemonSets", lambda resources: [
+            resource.replace("  - deployments\n", "  - deployments\n  - daemonsets\n", 1)
+            if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration
             else resource for resource in resources
         ])
         if expected_admission_allows("CREATE", "unrelated-secret", {"type": "Opaque", "metadata": {"labels": {}}}) or expected_admission_allows("DELETE", "unrelated-secret"):

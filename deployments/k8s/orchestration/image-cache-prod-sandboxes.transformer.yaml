@@ -1,0 +1,11 @@
+apiVersion: builtin
+kind: PatchTransformer
+metadata:
+  name: codewire-image-cache-prod-sandboxes
+patch: |-
+  - op: replace
+    path: /metadata/namespace
+    value: prod-sandboxes
+target:
+  kind: ServiceAccount|NetworkPolicy
+  name: cw-image-cache

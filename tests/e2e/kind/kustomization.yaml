@@ -266,7 +266,7 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: Role|RoleBinding
-      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap)|credential-service-runtime)
+      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -280,7 +280,7 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: RoleBinding
-      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap)|credential-service-runtime)
+      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -293,4 +293,16 @@ transformers:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup)
+      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup|image-cache)
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-image-cache-dev-sandboxes
+    patch: |-
+      - op: replace
+        path: /metadata/namespace
+        value: dev-sandboxes
+    target:
+      kind: ServiceAccount|NetworkPolicy
+      name: cw-image-cache

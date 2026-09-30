@@ -9,12 +9,14 @@ resources:
   - rbac.yaml
   - gateway-host-key-authz.yaml
   - credential-bootstrap-authz.yaml
+  - image-cache-authz.yaml
 
 transformers:
   # These run after the package namespace transformer. Parent overlays repeat
   # the small environment-specific transform after their own namespace pass.
   - gateway-host-key-prod-sandboxes.transformer.yaml
   - gateway-host-key-admission-cluster-scope.transformer.yaml
+  - image-cache-prod-sandboxes.transformer.yaml
 
 labels:
   - pairs:
