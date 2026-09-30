@@ -434,7 +434,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     });
   } finally { await anonymous.dispose(); }
   await stage("ports-close", async () => {
-    await button(ports, "Close").click();
+    await button(ports, "Done").click();
     expect(page.url()).toBe(before);
     // The dialog must leave the live terminal intact. Check its latest
     // output: earlier lines may have scrolled out of the visible rows.

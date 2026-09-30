@@ -730,6 +730,10 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
   }
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeInViewport();
+  // The limit is explained where it applies, not only by a disabled button.
+  const limit = page.locator("[data-terminal-limit]");
+  await expect(limit).toHaveText("Up to 8 terminals can be open at once. Close one to open another.");
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toHaveAccessibleDescription("Up to 8 terminals can be open at once. Close one to open another.");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
   const stored = await page.evaluate(() => ({ ...sessionStorage }));
   const references = JSON.parse(stored[`${prefix}account-a:${org}:${environment}`]);
@@ -743,6 +747,59 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
   expect(state.stops).toBe(0);
 });
 
+
+test("the tab limit note appears only at the limit", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  const limit = page.locator("[data-terminal-limit]");
+  const create = page.getByRole("button", { name: "New terminal", exact: true });
+  for (let count = 1; count <= 8; count += 1) {
+    await expect(limit).toBeHidden();
+    await expect(create).not.toHaveAttribute("aria-describedby");
+    await create.click();
+    await expect(page.getByRole("tab")).toHaveCount(count);
+  }
+  await expect(limit).toBeVisible();
+  await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+  await page.getByRole("dialog", { name: "Close terminal?", exact: true }).getByRole("button", { name: "Close terminal", exact: true }).click();
+  await expect(page.getByRole("tab")).toHaveCount(7);
+  await expect(limit).toBeHidden();
+  await expect(create).toBeEnabled();
+  expect(state.stops).toBe(1);
+});
+
+test("an ended session offers Replay, not Reconnect", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "last-output\r\n");
+  state.connections[0].route.send(JSON.stringify({ type: "status", state: "exited", exitCode: 0 }));
+  await expect(page.locator("[data-terminal-connection]")).toHaveText("exited (0)");
+  // The session inventory reports the exit too, as the daemon does.
+  state.sessions = [{ sessionId: sessionId(1), state: "exited" }];
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Replay recent output", exact: true })).toBeEnabled();
+  expect(state.launches).toBe(0);
+});
+
+test("a failed Sandbox operation is announced and Start retries it", async ({ page }) => {
+  const state = await transport(page);
+  state.running = false;
+  state.detail = { state: "error", desiredState: "started", tone: "danger", lastEvent: "just now",
+    resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
+    startEligible: true, stopEligible: false, deleteEligible: true, actionsAllowed: true, pending: false,
+    deletionState: "unscheduled", shutdownAt: null };
+  await openFixture(page);
+  const status = page.locator("[data-sandbox-observation-status]");
+  await expect(status).toHaveText("The Sandbox operation failed. Choose Start to try again.");
+  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
+  state.detail = { ...state.detail, startEligible: false };
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(status).toHaveText("The Sandbox operation failed. Refresh status to check its current state; no action was retried.");
+  expect(state.launches).toBe(0);
+});
 
 test("a terminal refit after copying keeps the copy announcement", async ({ page }) => {
   const state = await transport(page);

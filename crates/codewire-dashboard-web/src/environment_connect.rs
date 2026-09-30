@@ -784,7 +784,8 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         memory_mb: environment.memory_mb,
         disk_gb: environment.disk_gb,
         hourly_rate: format!("${:.2}/h", per_second * 3_600.0),
-        can_start: state == "stopped",
+        // Start from error asks the runtime to retry creation.
+        can_start: matches!(state, "stopped" | "error"),
         can_stop: state == "running",
         can_destroy: !matches!(state, "destroying" | "destroyed"),
         confidential_actions_allowed: true,

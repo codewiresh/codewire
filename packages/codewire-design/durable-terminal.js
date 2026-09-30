@@ -32,6 +32,7 @@
     const panels = root.querySelector("[data-terminal-panels]");
     const template = root.querySelector("[data-terminal-tab-template]");
     const newButton = root.querySelector("[data-terminal-new]");
+    const limitNote = root.querySelector("[data-terminal-limit]");
     const renameButton = root.querySelector("[data-terminal-rename]");
     const refreshButton = root.querySelector("[data-terminal-refresh]");
     const message = root.querySelector("[data-terminal-message]");
@@ -116,11 +117,20 @@
       renameButton.disabled = renameSave.disabled || !tabs.has(active);
       root.querySelector("[data-terminal-reload]").hidden = !needsReload;
       newButton.disabled = blocked || tabs.size >= maxTabs;
+      // Explain the tab limit where it applies instead of only disabling New.
+      const atLimit = authorized && !suspended && tabs.size >= maxTabs;
+      if (limitNote) {
+        limitNote.hidden = !atLimit;
+        if (atLimit) newButton.setAttribute("aria-describedby", limitNote.id);
+        else newButton.removeAttribute("aria-describedby");
+      }
       refreshButton.disabled = pending || suspended;
       existing.disabled = blocked || tabs.size >= maxTabs || existing.options.length <= 1;
       existingForm.querySelector("button").disabled = existing.disabled || !existing.value;
       for (const tab of tabs.values()) {
-        tab.toggle.disabled = blocked || !tab.available || tab.renderFailed;
+        // An ended session has nothing to reconnect to; Replay still shows its output.
+        tab.toggle.disabled = blocked || !tab.available || tab.renderFailed
+          || (ended(tab.state) && tab.socket?.readyState !== WebSocket.OPEN);
         tab.reset.disabled = blocked || !tab.available;
         const removable = !tab.available || ended(tab.state);
         tab.close.hidden = removable;
@@ -569,7 +579,7 @@
       tab.toggle.addEventListener("click", () => {
         // Disconnect is sticky until Reconnect. Reconnect acts immediately,
         // including while an automatic attempt is waiting or connecting.
-        if ([WebSocket.OPEN, WebSocket.CLOSING].includes(tab.socket?.readyState)) { detach(tab); return; }
+        if ([WebSocket.OPEN, WebSocket.CLOSING].includes(tab.socket?.readyState)) { detach(tab); updateControls(); return; }
         tab.failures = 0;
         void refresh(tab.id);
       });

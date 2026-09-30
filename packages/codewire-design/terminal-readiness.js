@@ -85,7 +85,9 @@
           ? "The submitted action's outcome is not confirmed. Reload this page to reconcile it before taking another action. No action was retried."
           : "Action submitted. Waiting for its response; no action will be retried automatically."
         : detail.pending ? "A Sandbox operation is pending. Waiting for the observed state to match its requested state."
-        : ["error", "build failed"].includes(detail.state) ? "The Sandbox operation failed. Refresh status to check its current state; no action was retried."
+        : ["error", "build failed"].includes(detail.state) ? detail.startEligible
+          ? "The Sandbox operation failed. Choose Start to try again."
+          : "The Sandbox operation failed. Refresh status to check its current state; no action was retried."
         : "";
       status.hidden = status.textContent.length === 0;
       if (reload) reload.hidden = !returnedAfterSubmission;
