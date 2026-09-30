@@ -1,7 +1,6 @@
 <!doctype html>
 {% let is_login = view.action == "/login/_actions/sign-in" %}
 {% let is_signup = view.action == "/signup/_actions/sign-up" %}
-{% let is_minimal = is_login || is_signup %}
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -10,118 +9,99 @@
     <link rel="icon" href="/assets/codewire/brand-icon-v1.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/auth-v2.css">
-    {% if is_minimal %}
     <link rel="stylesheet" href="/assets/codewire/cosmos-v1.css">
     <script src="/assets/codewire/cosmos-v1.js" defer></script>
-    {% endif %}
     {% if is_signup && !view.turnstile_site_key.is_empty() %}
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
     {% endif %}
   </head>
-  <body class="cw-body cw-auth-body{% if is_minimal %} cw-auth-body--minimal{% endif %}" data-route="auth">
-    {% if is_minimal %}
+  <body class="cw-body cw-auth-body" data-route="auth">
     <div class="cw-cosmos" aria-hidden="true">
       <canvas id="cosmos-canvas"></canvas>
     </div>
-    {% endif %}
-    <main class="cw-auth-shell{% if is_minimal %} cw-auth-shell--minimal{% endif %}">
-      <a class="cw-auth-brand {% if is_minimal %}cw-auth-brand--icon{% else %}cw-auth-brand--wordmark{% endif %}" href="/" aria-label="Codewire home">
-        {% if is_minimal %}
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="/" aria-label="Codewire home">
         <img src="/assets/codewire/brand-icon-v1.svg" width="48" height="48" alt="Codewire">
-        {% else %}
-        <img src="/assets/codewire/brand-wordmark-v1.svg" width="139" height="25" alt="Codewire">
-        {% endif %}
       </a>
-      <section class="{% if is_minimal %}cw-auth-panel{% else %}cw-card cw-auth-card{% endif %}" aria-labelledby="auth-title">
-        <header class="cw-auth-header{% if !is_minimal %} cw-card-header{% endif %}">
-          {% if !is_minimal %}
-          <div class="cw-auth-mark" aria-hidden="true">
-            <svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg>
-          </div>
-          {% endif %}
+      <section class="cw-auth-panel" aria-labelledby="auth-title">
+        <header class="cw-auth-header">
           <h1 id="auth-title" class="cw-page-title">{% if is_login %}Log in to Codewire{% else %}{{ view.title }}{% endif %}</h1>
           {% if is_login %}
           <p class="cw-auth-switch">Don't have an account? <a href="{{ view.secondary_url }}">Sign up.</a></p>
           {% else if is_signup %}
           <p class="cw-auth-switch">Already have an account? <a href="{{ view.secondary_url }}">Sign in.</a></p>
           {% endif %}
-          {% if !is_minimal %}
-          <p class="cw-card-description">{{ view.description }}</p>
+          {% if !is_login && !is_signup %}
+          <p class="cw-auth-copy">{{ view.description }}</p>
           {% endif %}
         </header>
-        {% if !is_minimal %}
-        <div class="cw-card-content">
+        {% if !view.error.is_empty() %}
+        <div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>
         {% endif %}
-          {% if !view.error.is_empty() %}
-          <div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>
+        <form class="cw-form" method="post" action="{{ view.action }}">
+          <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
+          {% if !view.auth_request_id.is_empty() %}
+          <input type="hidden" name="authRequestID" value="{{ view.auth_request_id }}">
           {% endif %}
-          <form class="cw-form" method="post" action="{{ view.action }}">
-            <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
-            {% if !view.auth_request_id.is_empty() %}
-            <input type="hidden" name="authRequestID" value="{{ view.auth_request_id }}">
-            {% endif %}
-            {% if !view.return_to.is_empty() %}
-            <input type="hidden" name="return_to" value="{{ view.return_to }}">
-            {% endif %}
-            {% if view.show_name %}
-            <div class="cw-field">
-              <label class="cw-label" for="name">Name</label>
-              <input class="cw-input" id="name" name="name" autocomplete="name" required>
-            </div>
-            {% endif %}
-            {% if view.show_email %}
-            <div class="cw-field">
-              <label class="cw-label" for="email">Email</label>
-              <input class="cw-input" id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required>
-            </div>
-            {% endif %}
-            {% if view.show_password %}
-            <div class="cw-field">
-              <div class="cw-field-heading">
-                <label class="cw-label" for="password">{% if is_signup %}Password{% else if view.new_password %}New password{% else %}Password{% endif %}</label>
-                {% if view.forgot_password_link %}<a href="/forgot-password">Forgot password?</a>{% endif %}
-              </div>
-              <input class="cw-input" id="password" name="password" type="password" {% if view.new_password %}autocomplete="new-password" minlength="12"{% else %}autocomplete="current-password"{% endif %} required>
-              {% if view.new_password %}<p class="cw-help">Use at least 12 characters with uppercase, lowercase, a number, and a symbol.</p>{% endif %}
-            </div>
-            {% endif %}
-            {% if view.show_confirm_password %}
-            <div class="cw-field">
-              <label class="cw-label" for="confirm-password">{% if is_signup %}Confirm password{% else %}Confirm new password{% endif %}</label>
-              <input class="cw-input" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" required>
-            </div>
-            {% endif %}
-            {% if view.show_invite_code %}
-            <div class="cw-field">
-              <label class="cw-label" for="invite-code">Invite code <span class="cw-muted">(optional)</span></label>
-              <input class="cw-input cw-input--mono" id="invite-code" name="invite_code" autocomplete="off">
-            </div>
-            {% endif %}
-            {% if view.show_reason %}
-            <div class="cw-field">
-              <label class="cw-label" for="reason">What would you like to build?</label>
-              <textarea class="cw-textarea" id="reason" name="reason" rows="4" maxlength="2000" required></textarea>
-              <p class="cw-help">This helps us review your request.</p>
-            </div>
-            {% endif %}
-            {% if is_signup && !view.turnstile_site_key.is_empty() %}
-            <div class="cw-field">
-              <div class="cf-turnstile" data-sitekey="{{ view.turnstile_site_key }}" data-action="signup"></div>
-            </div>
-            {% endif %}
-            {% if view.show_totp_code %}
-            <div class="cw-field">
-              <label class="cw-label" for="code">Verification code</label>
-              <input class="cw-input cw-input--mono cw-auth-code" id="code" name="code" autocomplete="one-time-code" pattern="[0-9A-Fa-f]{6,10}" maxlength="10" required autofocus>
-            </div>
-            {% endif %}
-            <button class="cw-button cw-button--pill cw-auth-submit" type="submit">{{ view.submit_label }}</button>
-          </form>
-          {% if !is_minimal && !view.secondary_label.is_empty() %}
-          <p class="cw-auth-secondary"><a href="{{ view.secondary_url }}">{{ view.secondary_label }}</a></p>
+          {% if !view.return_to.is_empty() %}
+          <input type="hidden" name="return_to" value="{{ view.return_to }}">
           {% endif %}
-        {% if !is_minimal %}
-        </div>
+          {% if view.show_name %}
+          <div class="cw-field">
+            <label class="cw-label" for="name">Name</label>
+            <input class="cw-input cw-input--large" id="name" name="name" autocomplete="name" required>
+          </div>
+          {% endif %}
+          {% if view.show_email %}
+          <div class="cw-field">
+            <label class="cw-label" for="email">Email</label>
+            <input class="cw-input cw-input--large" id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required>
+          </div>
+          {% endif %}
+          {% if view.show_password %}
+          <div class="cw-field">
+            <div class="cw-field-heading">
+              <label class="cw-label" for="password">{% if is_signup %}Password{% else if view.new_password %}New password{% else %}Password{% endif %}</label>
+              {% if view.forgot_password_link %}<a href="/forgot-password">Forgot password?</a>{% endif %}
+            </div>
+            <input class="cw-input cw-input--large" id="password" name="password" type="password" {% if view.new_password %}autocomplete="new-password" minlength="12"{% else %}autocomplete="current-password"{% endif %} required>
+            {% if view.new_password %}<p class="cw-help">Use at least 12 characters with uppercase, lowercase, a number, and a symbol.</p>{% endif %}
+          </div>
+          {% endif %}
+          {% if view.show_confirm_password %}
+          <div class="cw-field">
+            <label class="cw-label" for="confirm-password">{% if is_signup %}Confirm password{% else %}Confirm new password{% endif %}</label>
+            <input class="cw-input cw-input--large" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" required>
+          </div>
+          {% endif %}
+          {% if view.show_invite_code %}
+          <div class="cw-field">
+            <label class="cw-label" for="invite-code">Invite code <span class="cw-muted">(optional)</span></label>
+            <input class="cw-input cw-input--mono cw-input--large" id="invite-code" name="invite_code" autocomplete="off">
+          </div>
+          {% endif %}
+          {% if view.show_reason %}
+          <div class="cw-field">
+            <label class="cw-label" for="reason">What would you like to build?</label>
+            <textarea class="cw-textarea cw-auth-reason" id="reason" name="reason" rows="4" maxlength="2000" required></textarea>
+            <p class="cw-help">This helps us review your request.</p>
+          </div>
+          {% endif %}
+          {% if is_signup && !view.turnstile_site_key.is_empty() %}
+          <div class="cw-field">
+            <div class="cf-turnstile" data-sitekey="{{ view.turnstile_site_key }}" data-action="signup"></div>
+          </div>
+          {% endif %}
+          {% if view.show_totp_code %}
+          <div class="cw-field">
+            <label class="cw-label" for="code">Verification code</label>
+            <input class="cw-input cw-input--mono cw-input--large cw-auth-code" id="code" name="code" autocomplete="one-time-code" pattern="[0-9A-Fa-f]{6,10}" maxlength="10" required autofocus>
+          </div>
+          {% endif %}
+          <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">{{ view.submit_label }}</button>
+        </form>
+        {% if !is_login && !is_signup && !view.secondary_label.is_empty() %}
+        <p class="cw-auth-secondary"><a href="{{ view.secondary_url }}">{{ view.secondary_label }}</a></p>
         {% endif %}
       </section>
     </main>

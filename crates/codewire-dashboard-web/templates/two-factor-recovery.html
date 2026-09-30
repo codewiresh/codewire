@@ -6,24 +6,28 @@
     <title>Save recovery codes · Codewire</title>
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/auth-v2.css">
+    <link rel="stylesheet" href="/assets/codewire/cosmos-v1.css">
+    <script src="/assets/codewire/cosmos-v1.js" defer></script>
   </head>
   <body class="cw-body cw-auth-body" data-route="two-factor-recovery">
-    <main class="cw-auth-shell cw-auth-shell--wide">
-      <a class="cw-auth-brand" href="/"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
-      <section class="cw-card cw-auth-card cw-auth-card--wide" aria-labelledby="recovery-title">
-        <header class="cw-card-header cw-auth-header">
-          <div class="cw-auth-mark" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-shield"/></svg></div>
+    <div class="cw-cosmos" aria-hidden="true">
+      <canvas id="cosmos-canvas"></canvas>
+    </div>
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="/" aria-label="Codewire home"><img src="/assets/codewire/brand-icon-v1.svg" width="48" height="48" alt="Codewire"></a>
+      <section class="cw-auth-panel" aria-labelledby="recovery-title">
+        <header class="cw-auth-header">
           <h1 id="recovery-title" class="cw-page-title">Two-factor authentication enabled</h1>
-          <p class="cw-card-description">Save these recovery codes now. Each code works once, and Codewire will not show this set again.</p>
+          <p class="cw-auth-copy">Save these recovery codes now. Each code works once, and Codewire will not show this set again.</p>
         </header>
-        <div class="cw-card-content cw-setup-grid">
+        <div class="cw-setup-grid">
           <section aria-labelledby="backup-title">
             <h2 id="backup-title" class="cw-card-title">Save recovery codes</h2>
             <ul class="cw-backup-codes">
               {% for code in view.backup_codes %}<li><code data-testid="recovery-code">{{ code }}</code></li>{% endfor %}
             </ul>
           </section>
-          <a class="cw-button cw-auth-submit" href="{{ view.return_to }}">Continue to Codewire</a>
+          <a class="cw-button cw-button--pill cw-button--large cw-auth-submit" href="{{ view.return_to }}">Continue to Codewire</a>
         </div>
       </section>
     </main>
