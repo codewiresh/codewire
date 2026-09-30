@@ -207,6 +207,46 @@
     </div>
   </section>
 
+  <section class="cw-card" aria-labelledby="row-list-title">
+    <header class="cw-card-header"><h2 id="row-list-title" class="cw-card-title">Row list</h2><p class="cw-card-description">Repeated records inside a card share one inset and are separated by hairlines, never boxes inside the box.</p></header>
+    <div class="cw-card-content">
+      <ul class="cw-row-list">
+        <li><strong>Work Codex</strong><p class="cw-muted">OpenAI Codex · OAuth</p></li>
+        <li><strong>Work SSH</strong><p class="cw-muted">SSH key</p></li>
+        <li><strong>Old Anthropic</strong><p class="cw-muted">Anthropic · API key</p></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="key-secret-title">
+    <header class="cw-card-header"><h2 id="key-secret-title" class="cw-card-title">One-time secret</h2><p class="cw-card-description">A value shown once, such as a new API key. One click selects all of it.</p></header>
+    <div class="cw-card-content">
+      <code class="cw-key-secret">cw_gallery_example_value_not_a_real_credential</code>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="context-nav-title">
+    <header class="cw-card-header"><h2 id="context-nav-title" class="cw-card-title">Context navigation</h2><p class="cw-card-description">The Settings and Organization side panel: group labels and links reuse the sidebar's section label and navigation row, so every row shares one inset.</p></header>
+    <div class="cw-card-body">
+      <aside class="cw-context-nav">
+        <header class="cw-context-nav-heading"><h2>Settings</h2><span>example organization</span></header>
+        <p class="cw-context-nav-notice" role="status">Organization navigation is temporarily unavailable. Personal settings still work.</p>
+        <nav class="cw-context-nav-links" aria-label="Example settings">
+          <h3 id="gallery-nav-personal" class="cw-section-label">Personal</h3>
+          <ul aria-labelledby="gallery-nav-personal">
+            <li><a class="cw-nav-link" href="#context-nav-title">Account</a></li>
+            <li><a class="cw-nav-link" href="#context-nav-title" aria-current="page">Credentials</a></li>
+          </ul>
+          <h3 id="gallery-nav-organization" class="cw-section-label">Organization · Example organization</h3>
+          <ul aria-labelledby="gallery-nav-organization">
+            <li><a class="cw-nav-link" href="#context-nav-title">Snapshots <span class="cw-badge">Soon</span></a></li>
+            <li><a class="cw-nav-link" href="#context-nav-title">Members</a></li>
+          </ul>
+        </nav>
+      </aside>
+    </div>
+  </section>
+
   <section class="cw-card" aria-labelledby="table-title">
     <header class="cw-card-header"><h2 id="table-title" class="cw-card-title">Table</h2><p class="cw-card-description">Headers use the small role in normal case.</p></header>
     <div class="cw-card-content">
