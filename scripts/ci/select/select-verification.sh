@@ -318,6 +318,16 @@ if [ "$event_selected" = false ]; then
         ;;
     esac
 
+    # The Kind dev-binary build is local-only (`make kind-deploy`): no CI,
+    # release or deploy workflow and no bake group builds it, so it is not a
+    # product image input and needs only Policy.
+    case "$path" in
+      deployments/docker/kind-dev-binary.Dockerfile)
+        recognized=true
+        continue
+        ;;
+    esac
+
     # These frozen pre-Rust CLI assets are documentation or retirement inputs,
     # not deployable image, edge, database, or Kind inputs. Keep this before
     # generic Dockerfile and compose classification so their deletion stays

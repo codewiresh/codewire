@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "$ROOT/.tmp"
 TMP="$(mktemp -d "$ROOT/.tmp/pre-push-worktree.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+# The hook reads push refs from any non-terminal stdin. Cases that push refs
+# pipe them in explicitly; every other invocation must see EOF, as in CI,
+# instead of blocking forever on a caller's open pipe or socket.
+exec </dev/null
 
 fail() {
   printf '[test-pre-push-worktree] ERROR: %s\n' "$*" >&2

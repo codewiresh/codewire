@@ -97,8 +97,20 @@ if [ "$SERVICE" = daemon ]; then
   log "sandboxes created from now on run the current daemon"
   exit 0
 fi
-kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" \
-  rollout restart "deployment/${deployment}" >/dev/null
-kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" \
-  rollout status "deployment/${deployment}" --timeout=180s
+kube() { kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" "$@"; }
+# A rollout reports done while the previous pods are still terminating and can
+# still answer requests; wait for them to go so the next request, such as
+# `make kind-test`, reaches the current source.
+# shellcheck disable=SC2016 # a Go template, expanded by kubectl
+selector="$(kube get "deployment/${deployment}" \
+  -o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')"
+selector="${selector%,}"
+[ -n "$selector" ] || die "deployment/${deployment} has no label selector"
+previous="$(kube get pods -l "$selector" -o name)"
+kube rollout restart "deployment/${deployment}" >/dev/null
+kube rollout status "deployment/${deployment}" --timeout=180s
+if [ -n "$previous" ]; then
+  # shellcheck disable=SC2086 # one argument per previous pod
+  kube wait --for=delete $previous --timeout=120s >/dev/null
+fi
 log "${SERVICE} is running the current source"

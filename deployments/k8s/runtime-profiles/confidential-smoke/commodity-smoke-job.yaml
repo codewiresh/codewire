@@ -1,3 +1,6 @@
+# Rendered only by kustomization.confidential-snp.yaml. Its `longhorn` volume
+# matches the inactive confidential activation profile, not the Dev commodity
+# default (`local-path` while Dev's Longhorn is retired, Program #2238).
 apiVersion: batch/v1
 kind: Job
 metadata:

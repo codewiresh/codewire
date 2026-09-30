@@ -225,6 +225,12 @@ run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head fa
   'policy' .env.example secret-authority.example.json
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
   'deploy policy policy_shell' scripts/ci/tests/test-ci-tool-downloads.sh
+# The local Kind dev-binary Dockerfile is not a product image input.
+run_paths_case kind_dev_binary_dockerfile pull_request refs/pull/2091/head false \
+  'policy' deployments/docker/kind-dev-binary.Dockerfile
+run_paths_case kind_dev_binary_with_product_dockerfile pull_request refs/pull/2092/head false \
+  'deploy go_consumer_interop go_support policy release runtime_confidential' \
+  deployments/docker/kind-dev-binary.Dockerfile docker-bake.hcl
 run_paths_case product_image_build_graph pull_request refs/pull/2003/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   docker-bake.hcl scripts/ci/images/build-kind-images.sh \
