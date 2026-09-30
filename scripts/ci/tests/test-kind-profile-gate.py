@@ -174,6 +174,7 @@ exit "$status"
         script = 'set -euo pipefail\n' + helper + '''
 CLUSTER=synthetic-profile
 KIND_PROFILE=1
+KEEP_KIND_CLUSTER=1
 KUBECONFIG=synthetic-private-context
 CARGO_CI_DIR=synthetic-private-smokes
 exec 7>operation.lock
@@ -181,9 +182,10 @@ flock 7
 KIND_PROFILE_LOCK_FD=7
 (
   isolate_kind_fixture_environment
-  [ -z "${CLUSTER+x}${KIND_PROFILE+x}${KIND_PROFILE_LOCK_FD+x}${KUBECONFIG+x}${CARGO_CI_DIR+x}" ]
+  [ -z "${CLUSTER+x}${KIND_PROFILE+x}${KIND_PROFILE_LOCK_FD+x}${KEEP_KIND_CLUSTER+x}${KUBECONFIG+x}${CARGO_CI_DIR+x}" ]
 )
 [ "$CLUSTER" = synthetic-profile ]
+[ "$KEEP_KIND_CLUSTER" = 1 ]
 [ "$KUBECONFIG" = synthetic-private-context ]
 [ "$KIND_PROFILE_LOCK_FD" = 7 ]
 if flock -n operation.lock true; then exit 90; fi

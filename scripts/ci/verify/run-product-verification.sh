@@ -188,7 +188,7 @@ isolate_kind_fixture_environment() {
   for key in ${!KIND_@}; do
     unset "$key"
   done
-  unset CLUSTER KUBECONFIG KUBE_CONTEXT RUN_DIR CARGO_CI_DIR
+  unset CLUSTER KEEP_KIND_CLUSTER KUBECONFIG KUBE_CONTEXT RUN_DIR CARGO_CI_DIR
 }
 
 run_policy_core() {
