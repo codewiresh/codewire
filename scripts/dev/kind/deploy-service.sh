@@ -75,8 +75,12 @@ docker buildx inspect "$BUILDER" >/dev/null 2>&1 \
 log "compiling ${crate} ${bin}${features:+ (features ${features})}"
 out="$(mktemp -d "$STATE/out.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
+# One build target per worktree: crates built from another worktree's source
+# must never be reused here.
+tree="$(printf '%s' "$ROOT" | sha256sum | cut -c1-16)"
 KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bin" KIND_DEV_FEATURES="$features" \
   docker buildx bake --builder "$BUILDER" --file "$ROOT/docker-bake.hcl" \
+    --set "kind-dev-binary.args.KIND_DEV_TREE=${tree}" \
     --set "kind-dev-binary.output=type=local,dest=${out}" kind-dev-binary
 [ -x "$out/$bin" ] || die "the build produced no ${bin} binary"
 install -m 0755 "$out/$bin" "$STATE/bin/$bin"
