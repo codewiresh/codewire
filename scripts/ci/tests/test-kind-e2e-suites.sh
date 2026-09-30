@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Synthetic ownership fixtures must not inherit the caller's live CI cluster.
 export KIND_CLUSTER_NAME=codewire-e2e-ci
+unset CLUSTER KIND_PROFILE
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT/scripts/ci/verify/kind-e2e.sh"
@@ -823,7 +824,7 @@ CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release
     KIND_INGRESS_CONTROLLER_IMAGE=unaccepted CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci \
     bash -seuc 'source "$1"; python3() { printf "%s\n" "$2"; }; kind_workspace_runtime_image' \
     _ "$COMMON" "$source_alias"
-  grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+  grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
     "$FIXTURE/invalid-sealed-source-workspace.out" || fail 'source receipt bypassed sealed input rejection'
 )
 
@@ -839,38 +840,23 @@ acquire_kind_host_lock
 grep -Eq '^flock:-w 37 [0-9]+$' "$CALLS" ||
   fail 'Kind host lock is not acquired with the configured bound'
 
-# Cancelled-run cleanup owns the current transaction and run-ID-suffixed CI
-# clusters, but it must preserve every unrelated local Kind cluster.
+# Startup never replaces an existing cluster, even when its selected name or
+# prefix matches a disposable CI convention.
 : >"$CALLS"
 cat >"$FIXTURE/kind-config.yaml" <<'EOF'
 hostPort: 8090
 EOF
 kind() {
   case "${1:-} ${2:-}" in
-    'get clusters')
-      if grep -q '^kind:delete ' "$CALLS"; then
-        printf '%s\n' agent-sandbox codewire e2e-test
-      else
-        printf '%s\n' codewire-e2e-ci codewire-e2e-ci-873 agent-sandbox codewire e2e-test
-      fi
-      ;;
+    'get clusters') printf '%s\n' codewire-e2e-ci codewire-e2e-ci-873 agent-sandbox codewire e2e-test ;;
     'delete cluster') record "kind:delete ${4:-}" ;;
-    *) fail "unexpected Kind cleanup invocation: $*" ;;
+    *) fail "unexpected Kind startup invocation: $*" ;;
   esac
 }
-docker() {
-  [ "${1:-}" = ps ] || fail "unexpected Docker cleanup invocation: $*"
-}
+docker() { record "docker:$*"; }
 log() { :; }
-reclaim_cancelled_ci_clusters "$FIXTURE/kind-config.yaml"
-cat >"$FIXTURE/want-cancelled-cleanup" <<'EOF'
-kind:delete codewire-e2e-ci
-kind:delete codewire-e2e-ci-873
-EOF
-cmp -s "$FIXTURE/want-cancelled-cleanup" "$CALLS" || {
-  diff -u "$FIXTURE/want-cancelled-cleanup" "$CALLS" >&2 || true
-  fail 'cancelled-run cleanup did not preserve the exact current/prefixed CI ownership boundary'
-}
+expect_failure existing-startup reclaim_cancelled_ci_clusters "$FIXTURE/kind-config.yaml"
+[ ! -s "$CALLS" ] || fail 'startup touched an existing selected or same-prefix cluster'
 
 # Support services are pulled before cluster creation by immutable digest and
 # receive disposable local aliases. A missing upstream digest fails before any
@@ -1061,7 +1047,7 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   ' "$CALLS" || fail 'source image import omitted API recovery'
 )
 
-# Forgejo CI names only the five approved Nexus platform manifests. They must
+# Forgejo CI names only the five approved Harbor platform manifests. They must
 # already exist in the private DinD store. The two digest-pinned public
 # service dependencies are also side-loaded before the rendered deployment.
 : >"$CALLS"
@@ -1290,7 +1276,7 @@ expect_failure partial-platform-images env \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/partial-platform-images.out" ||
   fail 'partial sealed platform tuple did not explain its rejection'
 
@@ -1300,7 +1286,7 @@ expect_failure partial-workspace-only env \
   KIND_AGENT_SANDBOX_IMAGE='' \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/partial-workspace-only.out" ||
   fail 'workspace-only sealed tuple did not explain its rejection'
 
@@ -1311,7 +1297,7 @@ expect_failure substituted-agent-image env \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/substituted-agent-image.out" ||
   fail 'agent-sandbox index substitution did not explain its rejection'
 
@@ -1322,7 +1308,7 @@ expect_failure substituted-workspace-image env \
   KIND_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/substituted-workspace-image.out" ||
   fail 'workspace digest substitution did not explain its rejection'
 
@@ -1333,7 +1319,7 @@ expect_failure substituted-dind-image env \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
-grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/substituted-dind-image.out" ||
   fail 'DinD digest substitution did not explain its rejection'
 
