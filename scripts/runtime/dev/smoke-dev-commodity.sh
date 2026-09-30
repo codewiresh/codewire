@@ -39,6 +39,9 @@ SMOKE_DOCKER_OOM_STRESS="${SMOKE_DOCKER_OOM_STRESS:-1}"
 SMOKE_APP_PREVIEW="${SMOKE_APP_PREVIEW:-0}"
 SMOKE_APP_PREVIEW_PORT="${SMOKE_APP_PREVIEW_PORT:-8080}"
 SMOKE_APP_PREVIEW_LABEL="${SMOKE_APP_PREVIEW_LABEL:-app}"
+SMOKE_RESIZE_GUEST="${SMOKE_RESIZE_GUEST:-0}"
+SMOKE_RESIZE_GUEST_CPU_DELTA="${SMOKE_RESIZE_GUEST_CPU_DELTA:-1000}"
+SMOKE_RESIZE_GUEST_MEMORY_DELTA="${SMOKE_RESIZE_GUEST_MEMORY_DELTA:-2048}"
 SMOKE_TMP_PARENT="${SMOKE_TMP_PARENT:-$ROOT/.tmp}"
 SMOKE_ARTIFACT_DIR="${SMOKE_ARTIFACT_DIR:-}"
 SMOKE_CW_BUILD_TIMEOUT="${SMOKE_CW_BUILD_TIMEOUT:-600s}"
@@ -114,6 +117,8 @@ APP_SECRET_CREATE_ATTEMPTED=0
 APP_SECRET_ALL_SCOPES=0
 APP_WORKSPACE_MARKER_SHA256=""
 APP_RESTART_WITNESS_SESSION_ID=""
+GUEST_NPROC=""
+GUEST_MEMTOTAL_KIB=""
 SMOKE_OAUTH_LOGIN_ATTEMPTED=0
 SMOKE_OAUTH_LOGIN_DIR=""
 SMOKE_OAUTH_RUNTIME_PARENT=""
@@ -140,8 +145,11 @@ Options:
   --only PHASE             Run only one smoke phase; repeatable. Phases:
                            kube, exec, coco, docker, doctor, ssh,
                            tailnet-ssh, derp-ssh, websocket-ssh,
-                           host-key, app-preview, application-secrets,
+                           host-key, app-preview, resize-guest,
+                           application-secrets,
                            application-secrets-all-scopes, provider-ssh
+                           resize-guest requires a fresh disposable env; see
+                           SMOKE_RESIZE_GUEST.
                            application-secrets requires the dedicated smoke
                            API key, a fresh disposable env and Kubernetes checks.
                            It tests project application secrets, not personal
@@ -237,6 +245,17 @@ Environment:
                            port, and verifies the preview no longer serves it
   SMOKE_APP_PREVIEW_PORT   Defaults to 8080
   SMOKE_APP_PREVIEW_LABEL  Defaults to app
+  SMOKE_RESIZE_GUEST       Defaults to 0; when set to 1, grows the fresh
+                           environment's CPU and memory with restart consent
+                           after the other checks, then requires the guest to
+                           show them: nproc must cover the new CPU limit and
+                           MemTotal must grow by at least 90% of the memory
+                           increase. Catches a resize that changes only cgroup
+                           limits inside a VM sized at start (#2266).
+  SMOKE_RESIZE_GUEST_CPU_DELTA
+                           Defaults to 1000; CPU increase in millicores
+  SMOKE_RESIZE_GUEST_MEMORY_DELTA
+                           Defaults to 2048; memory increase in MiB
   SMOKE_COLLECT_FAILURE_DIAGNOSTICS
                            Defaults to 1. On failure, captures Kubernetes
                            claim/template/pod/event/log evidence into the
@@ -406,7 +425,7 @@ while (($# > 0)); do
     --only)
       [[ $# -ge 2 ]] || die "--only requires a phase"
       case "$2" in
-        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|application-secrets|application-secrets-all-scopes|provider-ssh)
+        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
           SMOKE_ONLY_PHASES+=("$2")
           ;;
         *)
@@ -3854,6 +3873,100 @@ printf "app-preview-service-cleaned\n"'
   fi
 }
 
+# Read the guest's usable CPUs and total RAM through the ordinary session path.
+# Sets GUEST_NPROC and GUEST_MEMTOTAL_KIB.
+read_guest_compute() {
+  local label="$1"
+  local out="$TMPDIR_SMOKE/resize-guest-$label.out"
+  local script line
+
+  # shellcheck disable=SC2016 # Expanded by the guest shell, not here.
+  script='printf "guest_compute_v1 nproc=%s memtotal_kib=%s\n" "$(nproc)" "$(sed -n "s/^MemTotal:[[:space:]]*\([0-9]*\) kB$/\1/p" /proc/meminfo)"'
+  run_cw_session_script "$script" >"$out" || die "guest compute probe failed ($label)"
+  line="$(grep -E '^guest_compute_v1 nproc=[0-9]+ memtotal_kib=[0-9]+$' "$out" | tail -n 1 || true)"
+  [[ -n "$line" ]] || die "guest compute probe returned no parseable line ($label)"
+  GUEST_NPROC="${line#*nproc=}"
+  GUEST_NPROC="${GUEST_NPROC%% *}"
+  GUEST_MEMTOTAL_KIB="${line##*memtotal_kib=}"
+}
+
+# A completed resize must be visible in the guest, not only in cgroup limits.
+# CPU: the guest must have at least as many CPUs as the workspace CPU limit.
+# Memory: MemTotal must grow by at least 90% of the increase; the rest allows
+# for the kernel's per-page bookkeeping. (#2266)
+assert_resize_guest_truth() {
+  local before_mem_kib="$1" after_nproc="$2" after_mem_kib="$3"
+  local previous_memory_mib="$4" desired_cpu_millicores="$5" desired_memory_mib="$6"
+  local growth_kib required_kib
+
+  if (( after_nproc * 1000 < desired_cpu_millicores )); then
+    die "guest has $after_nproc CPUs after a resize to ${desired_cpu_millicores}m; the CPU limit is not backed by guest vCPUs (#2266)"
+  fi
+  if (( desired_memory_mib > previous_memory_mib )); then
+    growth_kib=$(( after_mem_kib - before_mem_kib ))
+    required_kib=$(( (desired_memory_mib - previous_memory_mib) * 1024 * 9 / 10 ))
+    if (( growth_kib < required_kib )); then
+      die "guest MemTotal grew by ${growth_kib} KiB after a $(( desired_memory_mib - previous_memory_mib )) MiB memory increase (needs at least ${required_kib} KiB); the memory limit is not backed by guest RAM (#2266)"
+    fi
+  fi
+}
+
+run_resize_guest_smoke() {
+  local info_json="$TMPDIR_SMOKE/resize-guest-environment.json"
+  local resize_json="$TMPDIR_SMOKE/resize-guest-result.json"
+  local resize_err="$TMPDIR_SMOKE/resize-guest-result.err"
+  local previous_cpu previous_memory desired_cpu desired_memory
+  local before_nproc before_mem_kib applied_mode pod_replaced
+
+  require_uint SMOKE_RESIZE_GUEST_CPU_DELTA "$SMOKE_RESIZE_GUEST_CPU_DELTA"
+  require_uint SMOKE_RESIZE_GUEST_MEMORY_DELTA "$SMOKE_RESIZE_GUEST_MEMORY_DELTA"
+  (( SMOKE_RESIZE_GUEST_CPU_DELTA + SMOKE_RESIZE_GUEST_MEMORY_DELTA > 0 )) ||
+    die "resize-guest needs a CPU or memory increase"
+  [[ -z "$SMOKE_EXISTING_ENV_ID" ]] ||
+    die "resize-guest changes resources and may replace the workspace Pod; run it on a fresh disposable environment"
+
+  cw env info "$ENV_ID" --output json >"$info_json" ||
+    die "failed to read environment resources before resize"
+  previous_cpu="$(jq -er '.cpu_millicores' "$info_json")"
+  previous_memory="$(jq -er '.memory_mb' "$info_json")"
+  require_uint previous_cpu "$previous_cpu"
+  require_uint previous_memory "$previous_memory"
+  desired_cpu=$(( previous_cpu + SMOKE_RESIZE_GUEST_CPU_DELTA ))
+  desired_memory=$(( previous_memory + SMOKE_RESIZE_GUEST_MEMORY_DELTA ))
+
+  read_guest_compute before
+  before_nproc="$GUEST_NPROC"
+  before_mem_kib="$GUEST_MEMTOTAL_KIB"
+  log "guest before resize: nproc=$before_nproc MemTotal=${before_mem_kib}kB (workspace ${previous_cpu}m/${previous_memory}Mi)"
+
+  log "resizing to ${desired_cpu}m/${desired_memory}Mi with restart consent"
+  if ! cw_with_timeout "$SMOKE_TIMEOUT_SECONDS" env resize "$ENV_ID" \
+      --cpu "${desired_cpu}m" \
+      --memory "${desired_memory}MB" \
+      --allow-restart \
+      --force \
+      --yes \
+      --output json >"$resize_json" 2>"$resize_err"; then
+    sed 's/[[:cntrl:]]//g' "$resize_err" >&2 || true
+    die "cw env resize failed"
+  fi
+  jq -e --argjson cpu "$desired_cpu" --argjson memory "$desired_memory" '
+    .operation.state == "completed"
+    and .operation.last_applied_resources.cpu_millicores == $cpu
+    and .operation.last_applied_resources.memory_mb == $memory
+  ' "$resize_json" >/dev/null || die "resize did not complete at the requested resources"
+  applied_mode="$(jq -r '.operation.applied_mode' "$resize_json")"
+  pod_replaced="$(jq -r '.operation.pod_replaced' "$resize_json")"
+
+  wait_environment
+  wait_for_cw_run
+  read_guest_compute after
+  log "guest after resize: nproc=$GUEST_NPROC MemTotal=${GUEST_MEMTOTAL_KIB}kB (mode=$applied_mode pod_replaced=$pod_replaced)"
+  assert_resize_guest_truth "$before_mem_kib" "$GUEST_NPROC" "$GUEST_MEMTOTAL_KIB" \
+    "$previous_memory" "$desired_cpu" "$desired_memory"
+  log "resize reached the guest: nproc $before_nproc -> $GUEST_NPROC, MemTotal ${before_mem_kib}kB -> ${GUEST_MEMTOTAL_KIB}kB"
+}
+
 assert_tailnet_path_probe() {
   local stderr="$1"
   local expected_transport="${2:-$EXPECTED_TAILNET_PATH_TRANSPORT}"
@@ -4946,6 +5059,10 @@ run_selected_phase() {
       wait_for_cw_run
       run_app_preview_smoke
       ;;
+    resize-guest)
+      wait_for_cw_run
+      run_resize_guest_smoke
+      ;;
     *)
       die "unknown smoke phase: $phase"
       ;;
@@ -4961,7 +5078,23 @@ run_selected_phases() {
   done
 }
 
+resize_guest_requested() {
+  local phase
+
+  if smoke_only_configured; then
+    for phase in "${SMOKE_ONLY_PHASES[@]}"; do
+      [[ "$phase" != resize-guest ]] || return 0
+    done
+    return 1
+  fi
+  [[ "$SMOKE_RESIZE_GUEST" == "1" ]]
+}
+
 main() {
+  require_bool01 SMOKE_RESIZE_GUEST "$SMOKE_RESIZE_GUEST"
+  if resize_guest_requested && [[ -n "$SMOKE_EXISTING_ENV_ID" ]]; then
+    die "resize-guest changes resources and may replace the workspace Pod; run it on a fresh disposable environment"
+  fi
   validate_dev_smoke_browser_auth
   if [[ -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]]; then
     [[ ${#SMOKE_ONLY_PHASES[@]} == 1 ]] ||
@@ -5008,6 +5141,9 @@ main() {
       run_app_preview_smoke
     fi
     run_ssh_smoke
+    if [[ "$SMOKE_RESIZE_GUEST" == "1" ]]; then
+      run_resize_guest_smoke
+    fi
   fi
   log "runtime smoke passed for $ENV_ID"
 }

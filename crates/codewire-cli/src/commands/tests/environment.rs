@@ -321,6 +321,19 @@ fn platform_resize_plan_preserves_millicores_and_requires_force_for_automation()
 }
 
 #[test]
+fn platform_resize_restart_consent_error_names_the_runtime_reason() {
+    let message = platform_resize_restart_consent_error(
+        "runtime class commodity sizes the workspace VM when the Pod starts; memory growth needs a replacement Pod to reach the guest",
+    );
+    assert!(message.contains("sizes the workspace VM when the Pod starts"), "{message}");
+    assert!(message.ends_with("non-interactive use requires --allow-restart"), "{message}");
+    assert_eq!(
+        platform_resize_restart_consent_error("  "),
+        "this resize requires workspace Pod replacement; non-interactive use requires --allow-restart"
+    );
+}
+
+#[test]
 fn native_resize_requires_whole_cores_and_never_shrinks_disk() {
     let current = NativeResizeResources {
         vcpus: 2,
