@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-deploy kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-deploy kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
 
 # Default target
@@ -18,6 +18,7 @@ help:
 	@echo "  make dashboard-watch - Rebuild/restart only the local dashboard on frontend changes"
 	@echo "  make dashboard-watch-kind - Watch the dashboard against the existing Kind stack"
 	@echo "  make design-system - Preview editable design sources and production fixtures"
+	@echo "  make design-check  - Run every design-fixture browser spec (the web gate's fixture check)"
 	@echo "  make wasm         - Build WASM package for the dashboard"
 	@echo ""
 	@echo "Testing:"
@@ -229,6 +230,9 @@ kind-status:
 
 design-system:
 	python3 scripts/dev/design-system-server.py
+
+design-check:
+	scripts/ci/verify/run-design-fixtures.sh
 
 # Build WASM package
 wasm:

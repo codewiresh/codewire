@@ -357,6 +357,8 @@ run_web() {
   ./apps/dashboard/node_modules/.bin/playwright test \
     --config apps/dashboard/playwright.config.ts --list
   scripts/ci/tests/test-dashboard-browser-gate.sh
+  scripts/ci/tests/test-run-design-fixtures.sh
+  scripts/ci/verify/run-design-fixtures.sh
   scripts/checks/security/audit-js-supply-chain.sh
   scripts/checks/security/audit-runtime-images.sh --self-test
   scripts/checks/security/audit-runtime-images.sh

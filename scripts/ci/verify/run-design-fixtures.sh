@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Run every editable design-fixture browser spec against the static design
+# server with the pinned Chromium. The specs skip when CODEWIRE_DESIGN_ORIGIN is
+# unset, so this runner owns their gate: it fails when a test fails, when any
+# test is skipped, or when either viewport project runs nothing.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+PLAYWRIGHT="$ROOT/apps/dashboard/node_modules/.bin/playwright"
+PROJECTS=(design-fixtures-desktop design-fixtures-mobile)
+
+log() {
+  printf '[design-fixtures] %s\n' "$*"
+}
+
+die() {
+  printf '[design-fixtures] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+# Judge a Playwright JSON report. Flaky tests pass after a retry and are
+# reported; anything unexpected, skipped or missing fails the gate.
+check_report() {
+  python3 - "$1" "${PROJECTS[@]}" <<'PY'
+import json
+import sys
+from collections import Counter
+
+report_path, *projects = sys.argv[1:]
+try:
+    with open(report_path, encoding="utf-8") as handle:
+        report = json.load(handle)
+except (OSError, ValueError) as error:
+    sys.exit(f"[design-fixtures] ERROR: unreadable Playwright report: {error}")
+
+outcomes = {project: Counter() for project in projects}
+failures = []
+
+
+def walk(suite):
+    for spec in suite.get("specs", []):
+        for test in spec.get("tests", []):
+            project = test.get("projectName")
+            status = test.get("status")
+            if project not in outcomes:
+                failures.append(f"unexpected project {project!r} ran {spec.get('title')!r}")
+                continue
+            outcomes[project][status] += 1
+            if status != "expected" and status != "flaky":
+                failures.append(f"{project} {status}: {spec.get('file')} › {spec.get('title')}")
+    for child in suite.get("suites", []):
+        walk(child)
+
+
+for suite in report.get("suites", []):
+    walk(suite)
+for error in report.get("errors", []):
+    failures.append(f"run error: {str(error.get('message', error)).splitlines()[0]}")
+
+summary = []
+for project in projects:
+    counts = outcomes[project]
+    passed = counts["expected"] + counts["flaky"]
+    if passed == 0:
+        failures.append(f"{project} ran no passing tests")
+    summary.append(f"{project} {passed} passed, {counts['flaky']} flaky")
+print("[design-fixtures] " + "; ".join(summary))
+if failures:
+    for failure in failures[:40]:
+        print(f"[design-fixtures] ERROR: {failure}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+if [ "${1:-}" = --check-report ]; then
+  [ "$#" -eq 2 ] || die "usage: $0 --check-report <playwright-json-report>"
+  check_report "$2"
+  exit
+fi
+[ "$#" -eq 0 ] || die "usage: $0 [--check-report <playwright-json-report>]"
+
+# shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
+source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
+
+[ -x "$PLAYWRIGHT" ] || die "dashboard Playwright dependencies are missing; run PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts"
+
+# Prefer an explicit browser, then a pinned download already verified into this
+# checkout, and only then download and verify the pinned archive.
+resolve_chromium() {
+  local expected candidate
+  if [ -n "${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}" ]; then
+    printf '%s\n' "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+    return
+  fi
+  expected="$(sed -n "s/^readonly chromium_version='\([^']*\)'/\1/p" \
+    "$ROOT/scripts/ci/install-pinned-playwright-chromium.sh")"
+  for candidate in "$ROOT"/.tmp/playwright-chromium.*/chrome-linux64/chrome; do
+    if [ -x "$candidate" ] && "$candidate" --version 2>/dev/null | grep -Fq " $expected"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  "$ROOT/scripts/ci/install-pinned-playwright-chromium.sh"
+}
+
+chromium="$(resolve_chromium)"
+prepare_playwright_browser_runtime "$chromium" "$ROOT"
+
+mkdir -p "$ROOT/.tmp"
+work="$(mktemp -d "$ROOT/.tmp/design-fixtures.XXXXXX")"
+server_pid=""
+# shellcheck disable=SC2329 # Invoked by the EXIT trap.
+cleanup() {
+  if [ -n "$server_pid" ]; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
+
+# A dedicated range keeps the review preview on 4174 free and lets concurrent
+# checks from other worktrees each take the next free port.
+python3 "$ROOT/scripts/dev/design-system-server.py" --port 4180-4199 >"$work/server.log" 2>&1 &
+server_pid=$!
+origin=""
+for _ in $(seq 1 100); do
+  origin="$(sed -n 's|^Codewire design system: \(http://127\.0\.0\.1:[0-9]*\)/reference/fixtures/$|\1|p' "$work/server.log")"
+  [ -z "$origin" ] || break
+  kill -0 "$server_pid" 2>/dev/null || die "design server exited: $(cat "$work/server.log")"
+  sleep 0.1
+done
+[ -n "$origin" ] || die "design server did not report its origin within ten seconds"
+curl -fsS "$origin/reference/fixtures/index.html" >/dev/null
+log "serving fixtures at $origin"
+
+project_args=()
+for project in "${PROJECTS[@]}"; do
+  project_args+=("--project=$project")
+done
+
+status=0
+(
+  cd "$ROOT"
+  PLAYWRIGHT_SKIP_SHARED_SETUP=1 \
+    PLAYWRIGHT_BASE_URL="$origin" \
+    CODEWIRE_DESIGN_ORIGIN="$origin" \
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
+    CODEWIRE_PLAYWRIGHT_USE_DEV_SHM="$CODEWIRE_PLAYWRIGHT_USE_DEV_SHM" \
+    PLAYWRIGHT_JSON_OUTPUT_FILE="$work/report.json" \
+    "$PLAYWRIGHT" test --config apps/dashboard/playwright.config.ts \
+      "${project_args[@]}" --retries=0 --forbid-only --reporter=line,json \
+      --workers="${CODEWIRE_DESIGN_FIXTURE_WORKERS:-4}"
+) || status=$?
+
+check_report "$work/report.json" || status=1
+exit "$status"
