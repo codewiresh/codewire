@@ -226,3 +226,9 @@
 }
 
 .gallery-menus > .cw-menu:nth-child(2) { justify-self: center; }
+
+.gallery-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

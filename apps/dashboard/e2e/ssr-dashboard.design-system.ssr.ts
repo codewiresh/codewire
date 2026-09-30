@@ -8,25 +8,20 @@ test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reduced
 // editable fixture page at the project's desktop or mobile width. The token
 // guard (scripts/checks/repo_checks.py design-tokens) owns the source side.
 //
-// `pending` pins the exact number of findings each fixture still has per width,
-// owned by a W2A burn-down slice (#2203). Any change fails: a new finding, or a
-// fixed one whose count was not lowered. Lower or delete the entry as its slice
-// lands, so the list only shrinks.
+// `pending` caps the findings each fixture may still have per width, owned by a
+// W2A burn-down slice (#2203). More findings than the cap fails, and so does a
+// cap whose page is now clean: delete the entry so the list only shrinks.
+// Incidental improvements below the cap pass without bookkeeping.
 type Check = "scale" | "contrast" | "focus";
 type Viewport = "desktop" | "mobile";
 type Pending = Partial<Record<`${Viewport} ${Check}`, number>>;
 
 const pending: Record<string, Pending> = {
-  // Create slice: environments.css
-  "create-sandbox.html": { "desktop scale": 8, "mobile scale": 8 },
-  "source-selection-recovery.html": { "desktop scale": 3, "mobile scale": 3 },
-  // Terminal slice: terminal.css
-  "terminal-tabs.html": { "desktop scale": 1, "desktop contrast": 4, "mobile scale": 1, "mobile contrast": 2 },
-  "terminal.html": { "desktop scale": 2, "mobile scale": 2 },
   // Shell and organizations slice: dashboard.css, organizations.css
   "application-secrets.html": { "desktop scale": 4, "desktop contrast": 1, "mobile scale": 4, "mobile contrast": 1 },
-  "sandboxes.html": { "desktop scale": 4, "desktop contrast": 5, "mobile scale": 3, "mobile contrast": 5 },
+  "sandboxes.html": { "desktop scale": 1, "desktop contrast": 2, "mobile contrast": 2 },
   "settings-secrets-empty.html": { "desktop scale": 2, "desktop contrast": 1 },
+  "terminal-tabs.html": { "desktop contrast": 2 },
   // Auth and public slice: auth.css, public.css
   "home.html": { "desktop scale": 62, "desktop contrast": 17, "mobile scale": 57, "mobile contrast": 17 },
   "login.html": { "desktop scale": 3, "desktop focus": 1, "mobile scale": 3, "mobile focus": 1 },
@@ -199,8 +194,12 @@ for (const fixture of fixtures) {
     expect.soft(findings.overflow, "the page scrolls sideways").toBe(0);
     expect.soft(findings.select, "selects must render the styled base-select picker").toEqual([]);
     for (const check of ["scale", "contrast", "focus"] as const) {
-      const expected = pending[fixture]?.[`${viewport} ${check}`] ?? 0;
-      expect.soft(findings[check], `${viewport} ${check} findings (pending ${expected})`).toHaveLength(expected);
+      const cap = pending[fixture]?.[`${viewport} ${check}`] ?? 0;
+      expect.soft(findings[check].length, `${viewport} ${check} findings (cap ${cap}): ${findings[check].join(" | ")}`)
+        .toBeLessThanOrEqual(cap);
+      if (cap > 0) {
+        expect.soft(findings[check].length, `${viewport} ${check} is clean; delete its pending entry`).toBeGreaterThan(0);
+      }
     }
   });
 }

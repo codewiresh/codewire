@@ -137,7 +137,6 @@
 .cw-sandbox-detail-main > .cw-sandbox-terminal { flex: 1 0 auto; }
 .cw-sandbox-terminal { min-height: 0; background: #080808; }
 .cw-sandbox-terminal .cw-terminal-panel { min-width: 0; height: 100%; overflow: hidden; }
-.cw-terminal-footer { display: flex; min-width: 0; flex-wrap: wrap; gap: .5rem 1rem; padding: .5rem 1rem; border-top: 1px solid #1e1e1e; color: #666; font: .62rem var(--font-mono); }
 
 @keyframes cw-drawer-in {
   from { transform: translateX(28px); opacity: 0; }

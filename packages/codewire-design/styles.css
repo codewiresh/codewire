@@ -91,6 +91,8 @@
 
   --control-height: 2.25rem;
   --control-height-sm: 1.875rem;
+  --control-width: 20rem;
+  --control-width-sm: 9rem;
   --control-padding-x: 0.75rem;
   --touch-target: 1.5rem;
   --nav-row-height: 2rem;
