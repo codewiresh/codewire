@@ -15,14 +15,15 @@
 //! loop also records `workspace_pvc_uid` the first time it resolves the PVC of
 //! any environment that has a Sandbox, stopped ones included.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use codewire_gateway_proto::{GATEWAY_BINDING_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use k8s_openapi::api::core::v1::{Container, ContainerStatus, Pod};
 use kube::api::DynamicObject;
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 
 use super::WorkerContext;
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
@@ -31,7 +32,7 @@ use super::gatewayauth::WorkspaceCredentialScope;
 use crate::sandbox::client::{SandboxClient, WorkspacePvc};
 use crate::sandbox::{ClaimOpts, LABEL_OPERATION_GENERATION};
 
-/// Environments examined per pass and per loop tick.
+/// Environments examined per pass.
 const BACKFILL_BATCH: i64 = 16;
 /// Name of the projected binding-token volume a binding-mode Pod mounts.
 pub const WORKSPACE_BINDING_VOLUME: &str = "workspace-binding-identity";
@@ -219,7 +220,7 @@ pub(crate) async fn write_binding(
             // The partial unique index allows one live binding per
             // environment, so release the previous one first.
             sqlx::query(
-                "UPDATE sandbox_workspace_bindings SET released_at = now()
+                "UPDATE sandbox_workspace_bindings SET released_at = GREATEST(now(), bound_at)
                   WHERE environment_id = $1 AND released_at IS NULL",
             )
             .bind(&record.environment_id)
@@ -604,7 +605,9 @@ pub(crate) async fn record_workspace_binding_shadow(
     ctx: &WorkerContext,
     environment_id: &str,
 ) -> RecordResult {
-    let result = match record(ctx, environment_id).await {
+    let attempt = tokio::time::timeout(RECORD_ATTEMPT_TIMEOUT, record(ctx, environment_id)).await;
+    let result = match attempt.unwrap_or_else(|_| Err(anyhow::anyhow!("binding attempt timed out")))
+    {
         Ok(result) => result,
         Err(error) if is_authority_lost(&error) => RecordResult::NotReady,
         Err(error) => match error.downcast_ref::<WriteRefused>() {
@@ -755,7 +758,9 @@ pub(crate) async fn record_first_workspace_pvc(
     ctx: &WorkerContext,
     environment_id: &str,
 ) -> RecordResult {
-    let result = match first_pvc(ctx, environment_id).await {
+    let attempt =
+        tokio::time::timeout(RECORD_ATTEMPT_TIMEOUT, first_pvc(ctx, environment_id)).await;
+    let result = match attempt.unwrap_or_else(|_| Err(anyhow::anyhow!("PVC attempt timed out"))) {
         Ok(result) => result,
         Err(error) if is_authority_lost(&error) => RecordResult::NotReady,
         Err(error) => {
@@ -819,29 +824,84 @@ async fn first_pvc(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<
 
 // ------------------------------------------------------------- backfill
 
-/// Rotation state of the bounded backfill, kept by the leader's loop.
+/// Pause between backfill passes. The backfill runs as its own leader task,
+/// never inside the reconciler's cadence.
+pub(crate) const BACKFILL_INTERVAL: Duration = Duration::from_secs(30);
+/// One pass starts no new attempt after this budget.
+const BACKFILL_PASS_BUDGET: Duration = Duration::from_secs(20);
+/// Upper bound on one attempt: its Kubernetes reads and its fenced write.
+/// Dropping the attempt rolls its transaction back.
+const RECORD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A failing environment waits this long, doubling per failure up to the cap,
+/// so persistent failures cannot crowd out everything else.
+const BACKOFF_BASE: Duration = Duration::from_secs(30);
+const BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+const MAX_BACKOFF_ENTRIES: usize = 4096;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Backoff {
+    failures: u32,
+    retry_at: Instant,
+}
+
+fn backoff_delay(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    BACKOFF_BASE
+        .saturating_mul(1_u32 << doublings)
+        .min(BACKOFF_MAX)
+}
+
+/// Per-environment failure backoff for one kind of attempt.
 #[derive(Default)]
-pub(crate) struct BackfillCursor {
-    bindings: Option<String>,
+struct Backoffs(HashMap<String, Backoff>);
+
+impl Backoffs {
+    fn ready(&self, environment_id: &str, now: Instant) -> bool {
+        self.0
+            .get(environment_id)
+            .is_none_or(|backoff| now >= backoff.retry_at)
+    }
+
+    fn observe(&mut self, environment_id: &str, result: RecordResult, now: Instant) {
+        if matches!(result, RecordResult::Recorded | RecordResult::Unchanged) {
+            self.0.remove(environment_id);
+            return;
+        }
+        if !self.0.contains_key(environment_id) && self.0.len() >= MAX_BACKOFF_ENTRIES {
+            self.0.retain(|_, backoff| backoff.retry_at > now);
+            if self.0.len() >= MAX_BACKOFF_ENTRIES {
+                // Untracked, it is simply retried on its next turn.
+                return;
+            }
+        }
+        let failures = self
+            .0
+            .get(environment_id)
+            .map_or(1, |backoff| backoff.failures.saturating_add(1));
+        self.0.insert(
+            environment_id.to_owned(),
+            Backoff {
+                failures,
+                retry_at: now + backoff_delay(failures),
+            },
+        );
+    }
+}
+
+/// Rotation cursors and backoff of the bounded backfill, kept by its task.
+#[derive(Default)]
+pub(crate) struct BackfillState {
+    unbound: Option<String>,
+    bound: Option<String>,
     pvcs: Option<String>,
+    binding_backoff: Backoffs,
+    pvc_backoff: Backoffs,
 }
 
-async fn next_batch(
-    ctx: &WorkerContext,
-    query: &str,
-    after: Option<&str>,
-    limit: i64,
-) -> anyhow::Result<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as(query)
-        .bind(after.unwrap_or_default())
-        .bind(limit)
-        .fetch_all(&ctx.pool)
-        .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
-}
-
-/// Running environments without a binding first, then a rotating pass over
-/// the bound ones, so a Pod replaced since its binding is recorded too.
+/// Running environments without a binding, then a rotation over the bound
+/// ones so a Pod replaced since its binding is recorded too. Each query has
+/// its own cursor, so no fixed set of failing environments is retried ahead
+/// of everything else.
 const UNBOUND_RUNNING: &str = "SELECT e.id FROM environments e
       JOIN sandbox_environment_backend b ON b.environment_id = e.id
      WHERE e.type = 'sandbox' AND e.state = 'running' AND e.desired_state = 'started'
@@ -861,43 +921,115 @@ const UNRESOLVED_PVC: &str = "SELECT e.id FROM environments e
        AND b.workspace_pvc_uid IS NULL AND e.id > $1
      ORDER BY e.id LIMIT $2";
 
-/// Selects up to `limit` ids after the cursor, wrapping once to the start.
+async fn next_batch(
+    pool: &PgPool,
+    query: &str,
+    after: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(query)
+        .bind(after.unwrap_or_default())
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// Up to `limit` ids after the cursor, wrapping once to the start. The caller
+/// moves the cursor past each id it takes its turn on.
 async fn rotate(
-    ctx: &WorkerContext,
+    pool: &PgPool,
     query: &str,
     cursor: &mut Option<String>,
     limit: i64,
 ) -> anyhow::Result<Vec<String>> {
-    let mut ids = next_batch(ctx, query, cursor.as_deref(), limit).await?;
-    if ids.is_empty() && cursor.is_some() {
-        ids = next_batch(ctx, query, None, limit).await?;
+    if limit <= 0 {
+        return Ok(Vec::new());
     }
-    *cursor = ids.last().cloned();
+    let ids = next_batch(pool, query, cursor.as_deref(), limit).await?;
+    if ids.is_empty() && cursor.is_some() {
+        *cursor = None;
+        return next_batch(pool, query, None, limit).await;
+    }
     Ok(ids)
 }
 
-/// One bounded backfill pass, run by the leader on each reconciler tick.
-pub(crate) async fn backfill_workspace_bindings(ctx: &WorkerContext, cursor: &mut BackfillCursor) {
+/// One bounded backfill pass.
+pub(crate) async fn backfill_pass(ctx: &WorkerContext, state: &mut BackfillState) {
     if ctx.kube.is_none() {
         return;
     }
+    let deadline = Instant::now() + BACKFILL_PASS_BUDGET;
     let result: anyhow::Result<()> = async {
-        let mut ids = next_batch(ctx, UNBOUND_RUNNING, None, BACKFILL_BATCH).await?;
-        let remaining = BACKFILL_BATCH - ids.len() as i64;
-        if remaining > 0 {
-            ids.extend(rotate(ctx, BOUND_RUNNING, &mut cursor.bindings, remaining).await?);
+        let unbound = rotate(
+            &ctx.pool,
+            UNBOUND_RUNNING,
+            &mut state.unbound,
+            BACKFILL_BATCH,
+        )
+        .await?;
+        let bound = rotate(
+            &ctx.pool,
+            BOUND_RUNNING,
+            &mut state.bound,
+            BACKFILL_BATCH - unbound.len() as i64,
+        )
+        .await?;
+        for (id, bound_turn) in unbound
+            .into_iter()
+            .map(|id| (id, false))
+            .chain(bound.into_iter().map(|id| (id, true)))
+        {
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+            // The cursor moves past every environment that had its turn,
+            // including one still backing off.
+            if bound_turn {
+                state.bound = Some(id.clone());
+            } else {
+                state.unbound = Some(id.clone());
+            }
+            if state.binding_backoff.ready(&id, Instant::now()) {
+                let result = record_workspace_binding_shadow(ctx, &id).await;
+                state.binding_backoff.observe(&id, result, Instant::now());
+            }
         }
-        for id in ids {
-            record_workspace_binding_shadow(ctx, &id).await;
-        }
-        for id in rotate(ctx, UNRESOLVED_PVC, &mut cursor.pvcs, BACKFILL_BATCH).await? {
-            record_first_workspace_pvc(ctx, &id).await;
+        for id in rotate(&ctx.pool, UNRESOLVED_PVC, &mut state.pvcs, BACKFILL_BATCH).await? {
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+            state.pvcs = Some(id.clone());
+            if state.pvc_backoff.ready(&id, Instant::now()) {
+                let result = record_first_workspace_pvc(ctx, &id).await;
+                state.pvc_backoff.observe(&id, result, Instant::now());
+            }
         }
         Ok(())
     }
     .await;
     if let Err(error) = result {
         tracing::warn!(error = %error, "workspace binding backfill pass failed");
+    }
+}
+
+/// The leader-gated backfill task. It keeps its own cursors and backoff for as
+/// long as this replica leads, and starts fresh after a leadership change.
+pub(crate) async fn workspace_binding_backfill_loop(
+    ctx: std::sync::Arc<WorkerContext>,
+    is_leader: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut state = BackfillState::default();
+    let mut ticker = tokio::time::interval(BACKFILL_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        if is_leader.load(std::sync::atomic::Ordering::SeqCst) {
+            backfill_pass(&ctx, &mut state).await;
+        } else {
+            state = BackfillState::default();
+        }
     }
 }
 

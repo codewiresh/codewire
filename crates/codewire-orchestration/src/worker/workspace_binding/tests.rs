@@ -339,3 +339,49 @@ fn record_results_are_closed_categories() {
         assert_eq!(result.as_str(), label);
     }
 }
+
+#[test]
+fn a_failing_environment_backs_off_exponentially_and_success_clears_it() {
+    let mut backoffs = Backoffs::default();
+    let start = Instant::now();
+    assert!(backoffs.ready("env", start));
+    backoffs.observe("env", RecordResult::Denied, start);
+    assert!(!backoffs.ready("env", start + BACKOFF_BASE - Duration::from_secs(1)));
+    assert!(backoffs.ready("env", start + BACKOFF_BASE));
+    // Each further failure doubles the wait, up to the cap.
+    let mut expected = BACKOFF_BASE;
+    for result in [
+        RecordResult::Unavailable,
+        RecordResult::NotReady,
+        RecordResult::Conflict,
+    ] {
+        backoffs.observe("env", result, start);
+        expected = (expected * 2).min(BACKOFF_MAX);
+        assert!(!backoffs.ready("env", start + expected - Duration::from_secs(1)));
+        assert!(backoffs.ready("env", start + expected));
+    }
+    for _ in 0..40 {
+        backoffs.observe("env", RecordResult::Denied, start);
+    }
+    assert!(backoffs.ready("env", start + BACKOFF_MAX));
+    // Other environments are unaffected, and success forgets the failures.
+    assert!(backoffs.ready("other", start));
+    backoffs.observe("env", RecordResult::Unchanged, start);
+    assert!(backoffs.ready("env", start));
+    backoffs.observe("env", RecordResult::Denied, start);
+    backoffs.observe("env", RecordResult::Recorded, start);
+    assert!(backoffs.ready("env", start));
+}
+
+#[test]
+fn the_backoff_table_stays_bounded() {
+    let mut backoffs = Backoffs::default();
+    let start = Instant::now();
+    for index in 0..MAX_BACKOFF_ENTRIES + 10 {
+        backoffs.observe(&format!("env-{index}"), RecordResult::Denied, start);
+    }
+    assert_eq!(backoffs.0.len(), MAX_BACKOFF_ENTRIES);
+    // Expired entries make room again.
+    backoffs.observe("late", RecordResult::Denied, start + BACKOFF_MAX);
+    assert!(backoffs.0.len() <= MAX_BACKOFF_ENTRIES && backoffs.0.contains_key("late"));
+}

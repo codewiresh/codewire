@@ -54,6 +54,19 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
     for name in loops {
         match name.as_str() {
             "env-reconciler" => {
+                // Program #2238 B1: shadow-record claim-time workspace
+                // bindings and first PVC UIDs as their own leader task, off
+                // the reconciler's cadence and with their own time budget.
+                // Nothing reads the records yet.
+                let backfill_ctx = ctx.clone();
+                let backfill_leader = is_leader.clone();
+                tokio::spawn(async move {
+                    super::workspace_binding::workspace_binding_backfill_loop(
+                        backfill_ctx,
+                        backfill_leader,
+                    )
+                    .await;
+                });
                 let ctx = ctx.clone();
                 let is_leader = is_leader.clone();
                 let leader_notify = leader_notify.clone();
@@ -159,7 +172,6 @@ async fn reconciler_loop(
     ticker.tick().await; // align with Go's NewTicker (first fire after interval)
     let mut startup_recovery_observed = false;
     let mut legacy_warm_pool_retirement_complete = false;
-    let mut workspace_binding_backfill = super::workspace_binding::BackfillCursor::default();
     loop {
         tokio::select! {
             _ = leader_notify.notified() => {
@@ -183,13 +195,6 @@ async fn reconciler_loop(
                         legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(&ctx).await;
                     }
                     run_reconciliation(&ctx).await;
-                    // Program #2238 B1: shadow-record claim-time workspace
-                    // bindings and first PVC UIDs; nothing reads them yet.
-                    super::workspace_binding::backfill_workspace_bindings(
-                        &ctx,
-                        &mut workspace_binding_backfill,
-                    )
-                    .await;
                 } else {
                     startup_recovery_observed = false;
                     legacy_warm_pool_retirement_complete = false;

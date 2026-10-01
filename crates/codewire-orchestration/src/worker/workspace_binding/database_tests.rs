@@ -258,6 +258,50 @@ async fn db_a_replacement_pod_releases_the_previous_binding() -> Result<()> {
             .expect_err("a released binding was revived");
         ensure!(refused(&error) == Some(WriteRefused::Released));
         ensure!(pointer(&db.pool, ENV_A).await?.0.as_deref() == Some(POD_2));
+
+        // A binding stamped ahead of this transaction's clock is still
+        // released, at its own bind time, never before it.
+        let ahead = "0c1d2e3f-4a5b-4c6d-8e7f-8091a2b3c4d5";
+        let mut tx = db.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO sandbox_workspace_bindings \
+             (pod_uid, environment_id, namespace, pod_name, claim_uid, sandbox_uid, \
+              operation_generation, managed_credential_clients, credential_scope, bound_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'environment', now() + interval '1 hour')",
+        )
+        .bind(ahead)
+        .bind(ENV_B)
+        .bind(NAMESPACE)
+        .bind(format!("sandbox-{ENV_B}"))
+        .bind(claim_uid(ENV_B))
+        .bind(sandbox_uid(ENV_B))
+        .bind(GENERATION)
+        .bind(codewire_access::ManagedCredentialClients::default().encode())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE sandbox_environment_backend SET pod_uid = $2, bound_at = now() \
+              WHERE environment_id = $1",
+        )
+        .bind(ENV_B)
+        .bind(ahead)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let mut replacement = record(ENV_B, POD_1);
+        replacement.pod_uid = "1d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6".into();
+        replacement.workspace_pvc_uid = None;
+        ensure!(fenced_write(&db.pool, &replacement).await? == WriteOutcome::Recorded);
+        let released: bool = sqlx::query_scalar(
+            "SELECT released_at = bound_at FROM sandbox_workspace_bindings WHERE pod_uid = $1",
+        )
+        .bind(ahead)
+        .fetch_one(&db.pool)
+        .await?;
+        ensure!(
+            released,
+            "a future-stamped binding was not released at its bind time"
+        );
         Ok(())
     }
     .await;
@@ -496,6 +540,71 @@ async fn db_the_gateway_credential_authority_reads_the_live_binding() -> Result<
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             ensure!(authority.is_some() == served, "{state}");
         }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_the_backfill_rotation_reaches_every_environment() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        // Twenty more unbound running environments than one batch holds.
+        let ids: Vec<String> = (0..20)
+            .map(|index| format!("7a3b0c1d-0000-4000-8000-{index:012}"))
+            .collect();
+        for id in &ids {
+            sqlx::query(
+                "INSERT INTO environments \
+                 (id,org_id,created_by,preset_id,type,state,desired_state,project_spec, \
+                  environment_operation_generation) \
+                 VALUES ($1,$2,$3,$4,'sandbox','running','started', \
+                 '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb,1)",
+            )
+            .bind(id)
+            .bind(ORGANIZATION)
+            .bind(CREATOR)
+            .bind(PRESET)
+            .execute(&db.pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO sandbox_environment_backend \
+                 (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid) VALUES ($1,$2,$3,$4)",
+            )
+            .bind(id)
+            .bind(NAMESPACE)
+            .bind(format!("sandbox-{id}"))
+            .bind(claim_uid(id))
+            .execute(&db.pool)
+            .await?;
+        }
+        // ENV_A and ENV_B are unbound too: 22 in all. Taking every turn in
+        // batches of 16 reaches all 22 before any environment repeats, even
+        // when every one of them keeps failing.
+        let mut cursor = None;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..2 {
+            for id in rotate(&db.pool, UNBOUND_RUNNING, &mut cursor, BACKFILL_BATCH).await? {
+                ensure!(seen.insert(id.clone()), "{id} repeated before every environment had a turn");
+                cursor = Some(id);
+            }
+        }
+        ensure!(seen.len() == 22, "{} environments reached", seen.len());
+        // Then it wraps to the start.
+        let again = rotate(&db.pool, UNBOUND_RUNNING, &mut cursor, BACKFILL_BATCH).await?;
+        ensure!(again.first().map(String::as_str) == seen.iter().next().map(String::as_str));
+
+        // A bound environment leaves the unbound rotation and joins the bound one.
+        fenced_write(&db.pool, &record(ENV_A, POD_1)).await?;
+        let mut unbound_cursor = None;
+        let mut bound_cursor = None;
+        let unbound = rotate(&db.pool, UNBOUND_RUNNING, &mut unbound_cursor, 64).await?;
+        let bound = rotate(&db.pool, BOUND_RUNNING, &mut bound_cursor, 64).await?;
+        ensure!(unbound.len() == 21 && !unbound.contains(&ENV_A.to_owned()));
+        ensure!(bound == vec![ENV_A.to_owned()]);
         Ok(())
     }
     .await;

@@ -170,3 +170,45 @@ fn a_recorded_uid_decides_and_a_same_name_substitute_fails() {
         WorkspacePvc::Claim { bound: false, .. }
     ));
 }
+
+/// The exact PVC the pinned agent-sandbox fork (4c528d39,
+/// `controllers/sandbox_controller.go` `reconcilePVCs`) creates from the
+/// `workspace` volume claim template: named `workspace-<sandbox>`, labelled
+/// with the Sandbox name hash, and owned through
+/// `ctrl.SetControllerReference`, which sets `controller` and
+/// `blockOwnerDeletion`.
+#[test]
+fn the_pvc_shape_the_pinned_fork_creates_resolves_on_first_resolution() {
+    let fork_created: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": pvc_name(),
+            "namespace": NAMESPACE,
+            "uid": PVC_UID,
+            "labels": { "agents.x-k8s.io/sandbox-name-hash": "1a2b3c4d" },
+            "ownerReferences": [{
+                "apiVersion": "agents.x-k8s.io/v1beta1",
+                "kind": "Sandbox",
+                "name": SANDBOX_NAME,
+                "uid": SANDBOX_UID,
+                "controller": true,
+                "blockOwnerDeletion": true,
+            }],
+        },
+        "spec": { "accessModes": ["ReadWriteOnce"], "storageClassName": "linstor-local" },
+        "status": { "phase": "Bound" },
+    }))
+    .unwrap();
+    assert_eq!(
+        identity(&fork_created, None).unwrap(),
+        WorkspacePvc::Claim {
+            name: pvc_name(),
+            uid: PVC_UID.into(),
+            bound: true,
+        }
+    );
+    // The fork's adoption path patches the same controller reference onto an
+    // unowned PVC, so an adopted PVC also resolves, by its recorded UID.
+    assert!(identity(&fork_created, Some(PVC_UID)).is_ok());
+}
