@@ -13,7 +13,12 @@
 //!   accept by closing the socket.
 //! - A header read timeout, a header count and a header buffer cap.
 //! - A request body cap, checked from `Content-Length` and while streaming.
+//! - One whole-request deadline: the head and the complete body must arrive
+//!   within it, before the handler runs, so a trickled body cannot hold a
+//!   connection for the full connection deadline without authenticating.
 //! - One request per connection and a total connection deadline.
+//! - A short, growing pause after accept errors (such as running out of file
+//!   descriptors) with a bounded log rate, so the loop never spins.
 //!
 //! The peer address is attached to every request as a [`PeerAddr`]
 //! extension so request-level limits can key on it.
@@ -54,6 +59,10 @@ pub struct BoundedHttp1Limits {
     /// Request body bytes. A larger body is answered with 413 or fails while
     /// streaming.
     pub max_body_bytes: usize,
+    /// Time from accept until the head and the whole body have arrived. A
+    /// request still incomplete is answered with 408 and the handler never
+    /// runs. It must not exceed the connection deadline.
+    pub request_read_timeout: Duration,
     /// Lifetime of one connection from accept to close, response included.
     pub connection_deadline: Duration,
 }
@@ -85,13 +94,23 @@ pub async fn serve_bounded_http1_until(
     let graceful = GracefulShutdown::new();
     tokio::pin!(shutdown);
 
+    let mut backoff = AcceptBackoff::default();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, peer) = match accepted {
-                    Ok(accepted) => accepted,
+                    Ok(accepted) => {
+                        backoff.reset();
+                        accepted
+                    }
                     Err(error) => {
-                        tracing::warn!(error = ?error, "bounded listener accept failed");
+                        let (pause, log) = backoff.on_error(&error, std::time::Instant::now());
+                        if log {
+                            tracing::warn!(error = ?error, pause_ms = pause.as_millis() as u64, "bounded listener accept failed");
+                        }
+                        if !pause.is_zero() {
+                            tokio::time::sleep(pause).await;
+                        }
                         continue;
                     }
                 };
@@ -106,11 +125,12 @@ pub async fn serve_bounded_http1_until(
                 };
                 let app = app.clone();
                 let max_body_bytes = limits.max_body_bytes;
+                let read_deadline = tokio::time::Instant::now() + limits.request_read_timeout;
                 let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                     let app = app.clone();
                     async move {
                         Ok::<_, std::convert::Infallible>(
-                            handle_request(app, peer, max_body_bytes, request).await,
+                            handle_request(app, peer, max_body_bytes, read_deadline, request).await,
                         )
                     }
                 });
@@ -148,8 +168,15 @@ fn validate(limits: &BoundedHttp1Limits) -> anyhow::Result<()> {
         "bounded listener per-peer limit exceeds the global limit"
     );
     anyhow::ensure!(
-        !limits.header_read_timeout.is_zero() && !limits.connection_deadline.is_zero(),
+        !limits.header_read_timeout.is_zero()
+            && !limits.request_read_timeout.is_zero()
+            && !limits.connection_deadline.is_zero(),
         "bounded listener timeouts must be positive"
+    );
+    anyhow::ensure!(
+        limits.header_read_timeout <= limits.request_read_timeout
+            && limits.request_read_timeout <= limits.connection_deadline,
+        "bounded listener timeouts must nest: head, whole request, connection"
     );
     anyhow::ensure!(limits.max_headers > 0, "bounded listener needs headers");
     // hyper panics below its minimum read buffer.
@@ -176,6 +203,7 @@ async fn handle_request(
     app: Router,
     peer: SocketAddr,
     max_body_bytes: usize,
+    read_deadline: tokio::time::Instant,
     request: Request<Incoming>,
 ) -> Response<Body> {
     // hyper has already rejected a malformed or duplicated Content-Length.
@@ -188,12 +216,74 @@ async fn handle_request(
         return status(StatusCode::PAYLOAD_TOO_LARGE);
     }
     let (mut parts, body) = request.into_parts();
+    // The whole request must be here before the handler runs: a trickled body
+    // never reaches authentication and never holds the connection longer.
+    let limited = http_body_util::Limited::new(body, max_body_bytes);
+    let collected =
+        match tokio::time::timeout_at(read_deadline, http_body_util::BodyExt::collect(limited))
+            .await
+        {
+            Err(_) => return status(StatusCode::REQUEST_TIMEOUT),
+            Ok(Err(error)) if error.is::<http_body_util::LengthLimitError>() => {
+                return status(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            Ok(Err(_)) => return status(StatusCode::BAD_REQUEST),
+            Ok(Ok(collected)) => collected.to_bytes(),
+        };
     parts.extensions.insert(PeerAddr(peer));
-    let body = Body::new(http_body_util::Limited::new(body, max_body_bytes));
     use tower::ServiceExt;
-    match app.oneshot(Request::from_parts(parts, body)).await {
+    match app
+        .oneshot(Request::from_parts(parts, Body::from(collected)))
+        .await
+    {
         Ok(response) => response,
         Err(never) => match never {},
+    }
+}
+
+/// Pause after an accept error, growing while errors repeat (for example the
+/// process is out of file descriptors), and log at most once per
+/// [`ACCEPT_ERROR_LOG_INTERVAL`]. Per-connection errors such as a reset before
+/// accept completed are not the listener's fault and do not pause.
+#[derive(Default)]
+struct AcceptBackoff {
+    pause: Duration,
+    last_log: Option<std::time::Instant>,
+}
+
+const ACCEPT_BACKOFF_INITIAL: Duration = Duration::from_millis(10);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
+const ACCEPT_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+impl AcceptBackoff {
+    fn on_error(&mut self, error: &std::io::Error, now: std::time::Instant) -> (Duration, bool) {
+        use std::io::ErrorKind;
+        let pause = if matches!(
+            error.kind(),
+            ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::ConnectionReset
+        ) {
+            Duration::ZERO
+        } else {
+            self.pause = if self.pause.is_zero() {
+                ACCEPT_BACKOFF_INITIAL
+            } else {
+                (self.pause * 2).min(ACCEPT_BACKOFF_MAX)
+            };
+            self.pause
+        };
+        let log = self
+            .last_log
+            .is_none_or(|last| now.saturating_duration_since(last) >= ACCEPT_ERROR_LOG_INTERVAL);
+        if log {
+            self.last_log = Some(now);
+        }
+        (pause, log)
+    }
+
+    fn reset(&mut self) {
+        self.pause = Duration::ZERO;
     }
 }
 

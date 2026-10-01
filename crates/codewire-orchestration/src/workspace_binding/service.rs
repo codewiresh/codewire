@@ -177,7 +177,8 @@ impl WorkspaceBindingState {
             .await?
             .ok_or(BindError::NotFound)?;
 
-        // §4.6: the Pod may have changed during the wait; re-read the chain.
+        // §4.6: the Pod may have changed during the wait; re-read the chain,
+        // then the binding itself.
         let pod = read_pod(kube, &identity)
             .await?
             .ok_or(BindError::NotFound)?;
@@ -191,6 +192,21 @@ impl WorkspaceBindingState {
         }
         // A legacy Pod keeps its environment token; it never binds here.
         if binding.credential_scope != WorkspaceCredentialScope::Pod {
+            return Err(BindError::PermissionDenied);
+        }
+        // The binding may have been released or moved while the chain was
+        // re-read; answer only from a binding that is still the same and live.
+        let current = self
+            .store
+            .live_binding(
+                identity.pod_uid(),
+                identity.namespace(),
+                identity.pod_name(),
+            )
+            .await
+            .map_err(|_| BindError::Unavailable)?
+            .ok_or(BindError::NotFound)?;
+        if current != binding {
             return Err(BindError::PermissionDenied);
         }
 

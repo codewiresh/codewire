@@ -420,7 +420,8 @@ async fn a_bound_pod_gets_its_binding_and_a_pod_scoped_credential() {
     let debug = format!("{response:?}");
     assert!(!debug.contains(&response.daemon_credential));
     assert_eq!(fixture.reviews(), 1);
-    assert_eq!(fixture.store.queries(), 1);
+    // The lookup, then the re-check after the live re-reads.
+    assert_eq!(fixture.store.queries(), 2);
 }
 
 #[tokio::test]
@@ -615,7 +616,29 @@ async fn a_recorded_binding_wakes_the_waiter_before_the_requery() {
     let started = tokio::time::Instant::now();
     assert!(fixture.bind(20).await.is_ok());
     assert!(started.elapsed() < Duration::from_secs(5));
-    assert_eq!(fixture.store.queries(), 2);
+    // None, then the binding, then the re-check after the live re-reads.
+    assert_eq!(fixture.store.queries(), 3);
+}
+
+#[tokio::test]
+async fn a_binding_released_or_moved_during_the_re_reads_is_not_served() {
+    let mut moved = binding(WorkspaceCredentialScope::Pod);
+    moved.operation_generation += 1;
+    for (after, expected) in [
+        (Ok(None), BindError::NotFound),
+        (Ok(Some(moved)), BindError::PermissionDenied),
+        (Err(BindingStoreUnavailable), BindError::Unavailable),
+    ] {
+        let fixture = fixture(
+            FakeCluster::valid(),
+            FakeStore::returning(vec![
+                Ok(Some(binding(WorkspaceCredentialScope::Pod))),
+                after,
+            ]),
+        );
+        assert_eq!(fixture.bind(0).await, Err(expected));
+        assert_eq!(fixture.store.queries(), 2);
+    }
 }
 
 #[tokio::test]

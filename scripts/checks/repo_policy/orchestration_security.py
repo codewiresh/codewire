@@ -231,6 +231,28 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
             output.append(f"{label}: {IMAGE_CACHE_ROLE} must deny by identity without mutable namespace selectors")
 
 
+GATEWAY_REPLICASET_ROLE = "codewire-orchestration-gateway-replicaset"
+
+
+def assert_gateway_replicaset(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+    """IssueGatewayDaemonCredential reads the gateway Pod's controlling
+    ReplicaSet in the sandbox namespace. Without this exact grant every call is
+    a 403 and the RPC can only answer unavailable."""
+    role = exactly_one(resources, "Role", GATEWAY_REPLICASET_ROLE, label, output)
+    binding = exactly_one(resources, "RoleBinding", GATEWAY_REPLICASET_ROLE, label, output)
+    expected_rules = compact("rules: - apiGroups: - apps resources: - replicasets verbs: - get")
+    if role and (metadata_field(role, "namespace") != target["role_namespace"]
+            or compact(top_level_block(role, "rules")) != expected_rules):
+        output.append(f"{label}: gateway ReplicaSet Role must grant only ReplicaSet get in the sandbox namespace")
+    if binding:
+        expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {GATEWAY_REPLICASET_ROLE}")
+        expected_subject = compact(f"subjects: - kind: ServiceAccount name: codewire-orchestration namespace: {target['subject_namespace']}")
+        if (metadata_field(binding, "namespace") != target["role_namespace"]
+                or compact(top_level_block(binding, "roleRef")) != expected_ref
+                or compact(top_level_block(binding, "subjects")) != expected_subject):
+            output.append(f"{label}: gateway ReplicaSet binding escaped its namespace or identity")
+
+
 def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
     name = "codewire-orchestration-gateway-host-key"
     orchestration = "codewire-orchestration"
@@ -376,6 +398,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
                 f"RoleBinding/{target['role_namespace']}/{name}",
                 f"RoleBinding/{target['role_namespace']}/codewire-orchestration-credential-bootstrap",
                 f"RoleBinding/{target['role_namespace']}/{IMAGE_CACHE_ROLE}",
+                f"RoleBinding/{target['role_namespace']}/{GATEWAY_REPLICASET_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{RELEASE_REVISION_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
             ]
@@ -439,6 +462,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         assert_admission(resources, label, output)
         assert_credential_bootstrap(resources, target, label, output)
         assert_image_cache(resources, target, label, output)
+        assert_gateway_replicaset(resources, target, label, output)
         if target["path"] != "deployments/k8s/orchestration":
             assert_credential_service(resources, target, label, output)
         return output
@@ -599,6 +623,17 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         image_cache_rejected("any command allowed", "ValidatingAdmissionPolicy", "'sleep', '2147483647'", "'sh'")
         image_cache_rejected("namespace-label bypass", "ValidatingAdmissionPolicyBinding",
                              "spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n")
+        expect_rejected("missing gateway ReplicaSet grant", lambda resources: [
+            resource for resource in resources
+            if metadata_field(resource, "name") != GATEWAY_REPLICASET_ROLE
+        ])
+        image_cache_rejected("gateway ReplicaSet list", "Role", "  - get", "  - get\n  - list", GATEWAY_REPLICASET_ROLE)
+        image_cache_rejected("gateway ReplicaSet Pods", "Role", "  - replicasets", "  - replicasets\n  - pods", GATEWAY_REPLICASET_ROLE)
+        image_cache_rejected("gateway ReplicaSet in orchestration namespace", "Role",
+                             "namespace: prod-sandboxes", "namespace: prod", GATEWAY_REPLICASET_ROLE)
+        image_cache_rejected("gateway ReplicaSet other identity", "RoleBinding",
+                             "kind: ServiceAccount\n  name: codewire-orchestration", "kind: ServiceAccount\n  name: default",
+                             GATEWAY_REPLICASET_ROLE)
         expect_rejected("image cache cluster-wide DaemonSets", lambda resources: [
             resource.replace("  - deployments\n", "  - deployments\n  - daemonsets\n", 1)
             if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration

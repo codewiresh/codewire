@@ -266,7 +266,7 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: Role|RoleBinding
-      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache)|credential-service-runtime)
+      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache|gateway-replicaset)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -280,7 +280,7 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: RoleBinding
-      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache)|credential-service-runtime)
+      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache|gateway-replicaset)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer

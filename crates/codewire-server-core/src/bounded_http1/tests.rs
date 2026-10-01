@@ -17,6 +17,7 @@ fn limits() -> BoundedHttp1Limits {
         max_headers: 16,
         max_header_bytes: 16 * 1024,
         max_body_bytes: 64,
+        request_read_timeout: Duration::from_secs(5),
         connection_deadline: Duration::from_secs(10),
     }
 }
@@ -43,6 +44,13 @@ async fn start(limits: BoundedHttp1Limits) -> Server {
                     format!("{} {}", peer.ip(), body.len())
                 },
             ),
+        )
+        .route(
+            "/counted",
+            post(|body: axum::body::Bytes| async move {
+                HANDLED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                format!("{}", body.len())
+            }),
         )
         .route(
             "/slow",
@@ -90,6 +98,8 @@ async fn read_until_closed(stream: &mut TcpStream, within: Duration) -> Option<S
     read.ok()
         .map(|()| String::from_utf8_lossy(&buffer).into_owned())
 }
+
+static HANDLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 const ECHO: &str = "POST /echo HTTP/1.1\r\nhost: binding\r\ncontent-length: 2\r\n\r\nhi";
 
@@ -269,6 +279,8 @@ async fn too_many_or_too_large_headers_are_refused() {
 #[tokio::test]
 async fn the_connection_deadline_closes_a_stalled_response() {
     let server = start(BoundedHttp1Limits {
+        header_read_timeout: Duration::from_millis(300),
+        request_read_timeout: Duration::from_millis(300),
         connection_deadline: Duration::from_millis(400),
         ..limits()
     })
@@ -305,6 +317,14 @@ async fn invalid_limits_fail_before_serving() {
             header_read_timeout: Duration::ZERO,
             ..limits()
         },
+        BoundedHttp1Limits {
+            request_read_timeout: Duration::from_secs(11),
+            ..limits()
+        },
+        BoundedHttp1Limits {
+            header_read_timeout: Duration::from_secs(6),
+            ..limits()
+        },
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         assert!(
@@ -313,4 +333,77 @@ async fn invalid_limits_fail_before_serving() {
                 .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn a_trickled_body_is_refused_before_the_handler_runs() {
+    let server = start(BoundedHttp1Limits {
+        header_read_timeout: Duration::from_millis(300),
+        request_read_timeout: Duration::from_millis(400),
+        ..limits()
+    })
+    .await;
+    let before = HANDLED.load(std::sync::atomic::Ordering::SeqCst);
+    let mut stream = TcpStream::connect(server.addr).await.unwrap();
+    let started = Instant::now();
+    // A valid head inside the header timeout, then only part of the body.
+    stream
+        .write_all(b"POST /counted HTTP/1.1\r\nhost: binding\r\ncontent-length: 10\r\n\r\nab")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("trickled body is closed");
+    assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "held for {:?}",
+        started.elapsed()
+    );
+    assert_eq!(HANDLED.load(std::sync::atomic::Ordering::SeqCst), before);
+
+    // A complete request inside the deadline still reaches the handler.
+    let mut complete = TcpStream::connect(server.addr).await.unwrap();
+    complete
+        .write_all(b"POST /counted HTTP/1.1\r\nhost: binding\r\ncontent-length: 2\r\n\r\nab")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut complete, Duration::from_secs(5))
+        .await
+        .expect("complete request closes");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(HANDLED.load(std::sync::atomic::Ordering::SeqCst) > before);
+}
+
+#[test]
+fn accept_errors_pause_with_growing_backoff_and_a_bounded_log_rate() {
+    let mut backoff = AcceptBackoff::default();
+    let start = std::time::Instant::now();
+    let exhausted = std::io::Error::from_raw_os_error(24); // EMFILE
+    let (first, logged) = backoff.on_error(&exhausted, start);
+    assert_eq!(first, ACCEPT_BACKOFF_INITIAL);
+    assert!(logged);
+    let mut pause = first;
+    for step in 1..20 {
+        let (next, logged) = backoff.on_error(&exhausted, start + Duration::from_millis(step));
+        assert!(next >= pause && next <= ACCEPT_BACKOFF_MAX);
+        assert!(!logged, "logged again within the interval");
+        pause = next;
+    }
+    assert_eq!(pause, ACCEPT_BACKOFF_MAX);
+    // The next log is allowed only after the interval.
+    assert!(
+        backoff
+            .on_error(&exhausted, start + ACCEPT_ERROR_LOG_INTERVAL)
+            .1
+    );
+    // A peer that reset before accept completed does not pause the loop.
+    let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+    assert_eq!(backoff.on_error(&reset, start).0, Duration::ZERO);
+    // A successful accept restarts the backoff.
+    backoff.reset();
+    assert_eq!(
+        backoff.on_error(&exhausted, start).0,
+        ACCEPT_BACKOFF_INITIAL
+    );
 }

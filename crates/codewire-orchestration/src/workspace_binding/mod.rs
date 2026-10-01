@@ -45,8 +45,10 @@ pub const BINDING_REQUERY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Connection bounds for the tenant-reachable listener (design §3.5): HTTP/1.1
 /// only, two connections per peer IP and 512 in total, a 5s header timeout,
-/// 16 headers, a head bounded below 32 KiB, a 64-byte body, one request per
-/// connection and a 35s connection deadline (the 20s wait plus margin).
+/// 16 headers, a head bounded below 32 KiB, a 64-byte body, the whole request
+/// (head and body) within 5s of accept and before any authentication, one
+/// request per connection and a 35s connection deadline (the 20s wait plus
+/// margin).
 pub const LISTENER_LIMITS: BoundedHttp1Limits = BoundedHttp1Limits {
     max_connections: 512,
     max_connections_per_peer: 2,
@@ -55,6 +57,7 @@ pub const LISTENER_LIMITS: BoundedHttp1Limits = BoundedHttp1Limits {
     // hyper accepts a head below twice its read buffer.
     max_header_bytes: 16 * 1024,
     max_body_bytes: 64,
+    request_read_timeout: Duration::from_secs(5),
     connection_deadline: Duration::from_secs(35),
 };
 

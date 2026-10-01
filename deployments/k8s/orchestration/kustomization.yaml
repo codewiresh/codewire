@@ -10,6 +10,7 @@ resources:
   - gateway-host-key-authz.yaml
   - credential-bootstrap-authz.yaml
   - image-cache-authz.yaml
+  - gateway-daemon-credential-authz.yaml
 
 transformers:
   # These run after the package namespace transformer. Parent overlays repeat
