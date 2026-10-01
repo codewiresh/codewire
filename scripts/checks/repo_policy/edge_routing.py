@@ -104,6 +104,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
     assert_internal_connect_listener_exemption(unrouted, per_file, fail)
     assert_mesh_primary_origin_rest_edge(fail)
     assert_github_browser_callback_edges(fail)
+    assert_idp_session_edges(fail)
     if getattr(_args, "self_test", False):
         try:
             internal_connect_listener_self_test()
@@ -111,6 +112,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
             mesh_coordinator_transport_self_test()
             mesh_primary_origin_rest_edge_self_test()
             github_browser_callback_edges_self_test()
+            idp_session_edges_self_test()
             credential_mutation_edges_self_test(per_file)
             credential_delegation_edges_self_test(per_file)
             github_repository_edges_self_test(per_file)
@@ -167,6 +169,83 @@ GITHUB_BROWSER_INGRESSES = {
     "deployments/k8s/overlays/local-kind-static/ingress.yaml": ("codewire-local", "dashboard", "number: 5173"),
     "tests/e2e/kind/ingress.yaml": ("codewire-preview-e2e", "codewire-dashboard", "name: http"),
 }
+
+# Local edges only. The Kind-watch and Caddy dashboards reach the IdP through
+# the public edge; Dev and Production dashboards call it inside the cluster, so
+# the production ingress does not expose this raw IdP path.
+IDP_SESSION_INGRESSES = {
+    "deployments/k8s/overlays/local-kind/ingress.yaml": "codewire-idp-local",
+    "deployments/k8s/overlays/local-kind-static/ingress.yaml": "codewire-idp-local",
+    "tests/e2e/kind/ingress.yaml": "codewire-idp-e2e",
+}
+
+
+def assert_idp_session_edges(
+    fail: Callable[[str], None], reader: Callable[[str], str] = read_text
+) -> None:
+    # The browser-facing Account inventory and revoke action both use this
+    # cookie-only IdP boundary. The broader /api fallback is orchestration.
+    for file in ("Caddyfile", "Caddyfile.docker"):
+        source = reader(file)
+        matchers = re.findall(r"^[ \t]*@idp path ([^\n]+)$", source, re.MULTILINE)
+        paths = matchers[0].split() if len(matchers) == 1 else []
+        for path in ("/api/auth/sessions", "/api/auth/sessions/revoke"):
+            if paths.count(path) != 1:
+                fail(f"{file}: Account sessions need one exact IdP matcher for {path}")
+        handlers = re.findall(r"handle @idp\s*\{([^}]*)\}", source, re.DOTALL)
+        if len(handlers) != 1 or not re.search(
+            r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8091\b", handlers[0]
+        ):
+            fail(f"{file}: Account sessions must use the IdP listener on 8091")
+    for file, name in IDP_SESSION_INGRESSES.items():
+        document = ingress_document_by_name(reader(file), name, file, fail)
+        if document is None:
+            continue
+        entries = re.findall(
+            r"^[ \t]*- path: /api/auth/sessions[ \t]*\n[\s\S]*?(?=^[ \t]*- path:|\Z)",
+            document, re.MULTILINE,
+        )
+        if len(entries) != 1:
+            fail(f"{file}: Account sessions need one IdP ingress path")
+            continue
+        shape = re.sub(r"\s+", " ", entries[0])
+        if not re.search(
+            r"path: /api/auth/sessions pathType: Prefix backend: service: "
+            r"name: codewire-idp port: name: http(?: |$)", shape
+        ):
+            fail(f"{file}: Account sessions must use IdP http with Prefix routing")
+
+
+def idp_session_edges_self_test() -> None:
+    for file in ("Caddyfile", "Caddyfile.docker", *IDP_SESSION_INGRESSES):
+        original = read_text(file)
+        if file.startswith("Caddyfile"):
+            attacks = {
+                "missing inventory": original.replace("/api/auth/sessions ", "", 1),
+                "missing revoke": original.replace("/api/auth/sessions/revoke", "/api/auth/other", 1),
+                "wrong backend": original.replace(":8091", ":8084", 1),
+            }
+        else:
+            entry = re.search(
+                r"^[ \t]*- path: /api/auth/sessions[ \t]*\n[\s\S]*?(?=^[ \t]*- path:|\Z)",
+                original, re.MULTILINE,
+            )
+            if entry is None:
+                raise RuntimeError(f"{file}: missing Account session route fixture")
+            block = entry.group(0)
+            attacks = {
+                "missing": original.replace(block, "", 1),
+                "wrong backend": original.replace(block, block.replace("name: codewire-idp", "name: codewire-orchestration"), 1),
+                "wrong path type": original.replace(block, block.replace("pathType: Prefix", "pathType: Exact"), 1),
+                "duplicate": original.replace(block, block + block, 1),
+            }
+        for attack, changed in attacks.items():
+            failures: list[str] = []
+            assert_idp_session_edges(
+                failures.append, lambda path: changed if path == file else read_text(path)
+            )
+            if not any(file in failure for failure in failures):
+                raise RuntimeError(f"{file}: accepted {attack} Account session edge")
 
 
 def assert_github_browser_callback_ingress(

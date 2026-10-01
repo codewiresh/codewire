@@ -1,5 +1,5 @@
 {
-  "$comment": "Permanent Connect-RPC raw HTTP policy. Generated Connect owns every control-plane procedure; this exact list is limited to identity/OIDC, third-party webhooks, browser terminal/SSH transports, and probes.",
+  "$comment": "Permanent Connect-RPC raw HTTP policy. Generated Connect owns every control-plane procedure; this exact list is limited to identity/OIDC, third-party webhooks, browser terminal/SSH transports, the session-owned preview browser handoff, and probes.",
   "schema_version": 1,
   "allowed_raw_routes": [
     "/.well-known/jwks.json",
@@ -18,6 +18,9 @@
     "/api/auth/sign-up",
     "/api/auth/two-factor/disable",
     "/api/auth/two-factor/enable",
+    "/api/auth/two-factor/recovery-codes/regenerate",
+    "/api/auth/two-factor/replace/confirm",
+    "/api/auth/two-factor/replace/start",
     "/api/auth/two-factor/skip-setup",
     "/api/auth/two-factor/validate",
     "/api/auth/two-factor/verify",
@@ -34,6 +37,7 @@
     "/api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy",
     "/api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy/check",
     "/api/v1/organizations/{org_id}/environments/{env_id}/terminal",
+    "/api/v1/preview-auth/authorize",
     "/api/webhooks/stripe",
     "/healthz",
     "/readyz"

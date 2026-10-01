@@ -593,7 +593,7 @@ These tests and instructions authorize no live reset.
 
 Migration `0030_two_factor_setup_skip.sql` adds one nullable
 `sessions.two_factor_setup_skipped_at` timestamp. It records that one browser
-session chose **Skip for now** on the two-factor setup page. The choice ends
+session chose **Set up later** (first labelled **Skip for now**) on the two-factor setup page. The choice ends
 with that session: sign-out, revocation, expiry and account disablement delete
 the row, and every newly created session starts with the column unset.
 Enabling a factor clears it for all of the account's sessions. The IdP reports
@@ -614,6 +614,135 @@ source into only an empty, disposable application `public` schema. The fixture
 proves the ledger and migration 29 checksum are restored, the column is absent,
 session records are discarded, the pre-0030 fingerprint returns, and a
 separate schema survives. These tests and instructions authorize no live reset.
+
+### Preview browser authorization
+
+Migration `0031_preview_browser_authorization.sql` adds two tables without
+changing versions 1–30, previous rows, credential formats or existing helpers.
+`preview_auth_challenges` stores bounded short-lived handoffs, with digests for
+the nonce, client binding and optional one-use authorization code. Anonymous
+starts use an encrypted stateless continuation; the application allocates a row
+only after authenticated automatic handoff. Consumption retains the ID and
+`consumed_at` tombstone until expiry, preventing the same continuation from
+allocating a replacement code. A consumed row requires a bound code and cannot
+record consumption after its challenge expiry.
+
+`preview_browser_grants` stores only the digest of the preview capability,
+bound to the exact session, organization, environment, port and host. Neither
+table stores raw session cookies, authorization codes or preview tokens.
+
+The database constrains lowercase SHA-256 digest shapes, host/path lengths,
+the five-minute challenge ceiling, the complete optional session/code/expiry
+tuple and one grant per originating session and exact preview scope. Grants
+have no independent expiry; every use requires a live parent session and
+current policy. Immediate foreign keys cascade after
+session, port, environment or organization deletion; existing account
+disablement removes sessions and therefore their preview capabilities. Exact
+cross-resource ownership, canonical host/path validation, current audience and
+membership, atomic code consumption and earlier runtime expiry remain the
+application's responsibility; foreign-key existence alone is not authorization.
+Challenge-expiry and parent/client indexes support bounded lookup and
+retirement. This
+migration grants no new role, privilege, provider material access or public
+preview audience.
+
+The 30→31 fixture independently pins the complete prior history and migration30
+from accepted canonical `3ac1cfcb3b840aef5d96af55246897d552a094dd`.
+The accepted version30 schema fingerprint remains separately pinned as
+`ACCEPTED_PRE_PREVIEW_SCHEMA_FINGERPRINT`. Fixtures
+cover fresh apply, retained sessions and protected application/credential rows,
+unchanged prior helper definitions and ledger, second-startup no-op with saved
+preview capabilities and consumed tombstones, constraints/indexes and all owner
+cascades. A disposable database event trigger fails after both new tables exist,
+proving SQLx rolls
+back their DDL and ledger before a successful retry. These are database proof,
+not evidence of deployed browser authorization or audience enforcement.
+
+Because 0031 only adds two tables, it has an in-place rollback that keeps
+every other row: stop the version-31 binaries, then in one transaction drop
+`preview_browser_grants` and `preview_auth_challenges` and delete ledger
+version 31 from `_sqlx_migrations`, then start the version-30 binaries. Open
+preview grants are lost and are re-earned by opening the preview again. The
+fixture `preview_down_restores30_in_place_and_keeps_every_other_row` runs that
+exact statement and proves the accepted version-30 fingerprint, unchanged
+rows, helpers and ledger, and a clean roll-forward. A full recovery remains
+available: stop preview authorization writers, then replay
+the selected version30 source into only an empty, disposable application
+`public` schema. The rollback fixture proves removal of preview capabilities,
+restoration of prior ledger/schema/helpers, discarded credential/session rows,
+and preservation of a separate schema. Other databases, schemas, cluster roles,
+and external OpenBao material remain outside this boundary. This documents a
+recovery boundary and authorizes no live reset or direct credential access.
+
+### Authenticator replacement
+
+Migration `0032_two_factor_replacements.sql` is additive. It changes no
+existing row, helper, credential format or earlier migration.
+
+`two_factor_replacements` holds at most one pending replacement per account.
+Each row belongs to the one browser session that proved the account, with a
+foreign key to that session and to the user, and both cascade. It stores only
+the encrypted pending secret, in the same base64 AES-256-GCM layout as
+`two_factor.secret`; the database rejects a value too short to hold a nonce
+and tag, or one outside the base64 alphabet. The database also enforces:
+
+- a lowercase 32-hex identifier;
+- a lifetime of at most ten minutes;
+- between zero and five recorded confirmation attempts.
+
+The existing `codewire_require_enabled_account()` trigger refuses an insert
+for a disabled account. Account disablement deletes sessions, so it also
+removes any pending replacement. The enrolled factor stays in `two_factor`
+and keeps working until a code from the new authenticator verifies; the IdP
+then swaps the secret and recovery codes in place in one transaction.
+
+`two_factor.last_totp_step` is a nullable, non-negative `bigint`. It records
+the newest TOTP time step that sign-in or a fresh proof accepted. A fresh
+proof must use a later step, so a code already used to sign in cannot be
+replayed to replace the authenticator or regenerate recovery codes. Upgrade
+leaves the column NULL for existing factors.
+
+**Compatibility.** Running version-31 pods ignore both changes: they never
+read the new table or column. Old IdP pods answer the new routes with 404,
+and the dashboard reports the controls as unavailable. As with every
+migration, a version-31 binary cannot restart against a version-32 ledger.
+
+**Fixtures.** The 31→32 fixture pins the staged history and migration 31's
+SHA-384 from preview-login branch head
+`da7bf6a031e98ffdf1df62bb8299d4947a13cdce`. Like the preview fixture, this is
+a staged predecessor boundary, not a claim that version 31 alone was
+deployed. The version-31 fingerprint stays pinned as
+`ACCEPTED_PRE_TWO_FACTOR_REPLACEMENT_SCHEMA_FINGERPRINT`. The fixtures prove:
+
+- fresh apply, every constraint, the trigger, the indexes and the one row per
+  account;
+- upgrade from version 31, with factors, sessions, challenges, credentials and
+  secrets unchanged, no step invented, and a second startup that is a no-op;
+- cascades on session deletion, account deletion and account disablement,
+  each of which leaves the enrolled factor in place;
+- a forced failure on the last statement, which rolls back the table, the
+  column and the ledger, followed by a clean retry.
+
+**Rollback.** Because 0032 only adds a table, its trigger and one nullable
+column, it has an in-place rollback that keeps every other row:
+
+1. Stop the version-32 binaries.
+2. In one transaction, drop `two_factor_replacements`, drop
+   `two_factor.last_totp_step`, and delete ledger version 32 from
+   `_sqlx_migrations`.
+3. Start the version-31 binaries.
+
+Pending replacements are lost; their accounts keep the authenticator they
+already had. The fixture
+`two_factor_replacement_down_restores31_in_place_and_keeps_every_other_row`
+runs that exact statement. It proves the version-31 fingerprint, unchanged
+rows, helpers and ledger, and a clean roll-forward. The full recovery also
+remains available: replay the selected version-31 source into only an empty,
+disposable application `public` schema. Its fixture proves the ledger and
+migration 31 checksum are restored, records are discarded, and a separate
+schema survives. Other databases, schemas, cluster roles and external key
+material remain outside this boundary. These tests and instructions
+authorize no live reset.
 
 ## Mesh Database
 

@@ -635,9 +635,8 @@ if [ "$event_selected" = false ]; then
         # in the same change continue through their own classifiers.
         recognized=true
         ;;
-      scripts/checks/contracts/design-token-policy.json|\
-      scripts/checks/contracts/design-token-baseline.json)
-        # The design-system guard reads only these contracts and runs in
+      scripts/checks/contracts/design-token-policy.json)
+        # The design-system guard reads only this contract and runs in
         # Policy; product paths in the same change keep their own classifiers.
         recognized=true
         ;;

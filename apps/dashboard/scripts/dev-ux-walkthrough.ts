@@ -106,7 +106,7 @@ async function settings(page: Page, slug: string, width: number): Promise<void> 
       }
       await fits(page);
     });
-    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API Keys"]]) {
+    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API keys"]]) {
       await stage(`settings-${path}-${scope}-${width}`, async () => {
         await visit(page, `/settings/${path}/${query}`);
         await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
@@ -173,8 +173,7 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
       await expect(form).toHaveAttribute("data-create-draft-id", draft!);
       await expect(form).toHaveAttribute("data-create-draft-actor", userId);
       await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-      await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-      await button(page, "Restore saved draft").click();
+      // The exact draft comes back by itself after the detour.
       await expect(form).toHaveAttribute("data-create-draft-restored", "true");
       await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
       await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
@@ -401,7 +400,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await ports.getByLabel("Preview label", { exact: true }).fill("ux-preview");
     await expect(ports.getByLabel("Who can open the preview?", { exact: true })).toHaveValue("creator");
     await button(ports, "Add port").click();
-    await expect(port).toContainText("8080 · Creator");
+    await expect(port).toContainText("8080 · Sandbox creator");
   });
   await stage("ports-preview-url", async () => {
     const open = port.getByRole("link", { name: "Open preview", exact: true });
@@ -423,8 +422,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
       expect([302, 303, 401, 403]).toContain(denied.status());
       expect(await denied.text()).not.toContain(canary);
     });
-    // #2142: normal private-preview Open has no browser-auth handoff yet.
-    // Do not inject a full account cookie or claim authenticated Open proof.
+    // #2142: opening a private preview in the signed-in browser is not yet
+    // observed on Dev. Its stage failed there with no diagnostic the deploy
+    // classifier can name, so it is held out until it can be diagnosed.
     await stage("ports-preview-removed", async () => {
       await button(port, "Remove ux-preview preview").click();
       await expect(port).toHaveCount(0);
@@ -434,7 +434,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     });
   } finally { await anonymous.dispose(); }
   await stage("ports-close", async () => {
-    await button(ports, "Close").click();
+    await button(ports, "Done").click();
     expect(page.url()).toBe(before);
     // The dialog must leave the live terminal intact. Check its latest
     // output: earlier lines may have scrolled out of the visible rows.

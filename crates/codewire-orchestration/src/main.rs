@@ -246,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
         frontend_url: std::env::var("FRONTEND_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:5173".into()),
-        http_client: reqwest::Client::new(),
+        http_client: codewire_orchestration::api::preview::http_client()?,
         temporal_trigger,
         secrets: secrets.clone(),
         auth: auth.clone(),

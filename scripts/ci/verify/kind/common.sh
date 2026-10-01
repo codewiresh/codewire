@@ -371,7 +371,7 @@ assert_kind_idp_topology() {
   ingress_paths="$(kubectl -n "$NS" get ingress codewire-idp-e2e \
     -o jsonpath='{range .spec.rules[*].http.paths[*]}{.path}{"\n"}{end}')" || return $?
   for required_path in \
-      /api/oauth /api/auth/sign-up /api/auth/sign-in /api/oidc \
+      /api/oauth /api/auth/sign-up /api/auth/sign-in /api/auth/sessions /api/oidc \
       /.well-known/openid-configuration /.well-known/jwks.json; do
     if ! grep -Fqx "$required_path" <<<"$ingress_paths"; then
       echo "::error::Kind IdP ingress is missing permanent raw path ${required_path}"

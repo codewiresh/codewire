@@ -106,6 +106,7 @@ buffa-types = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 base64 = { workspace = true }
+aes-gcm = { workspace = true }
 crc32fast = { workspace = true }
 # OS entropy for SSH keypair generation (ssh_keys.rs); version-pinned to the
 # ssh-key/rand_core 0.10 tree already in the lock.

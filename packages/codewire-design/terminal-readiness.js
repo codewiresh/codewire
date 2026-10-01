@@ -52,6 +52,9 @@
     let returnedAfterSubmission = false;
     let resizeLocked = false;
     let lastObservation = null;
+    // Until the first readiness response settles, keep the rendered values and
+    // controls (disabled) instead of calling status unavailable.
+    let settled = false;
     function observe(available, value) {
       if (!observesDetail) return;
       const detail = value?.detail;
@@ -80,12 +83,15 @@
           if (fallback && document.querySelector('dialog[data-resize-enhanced="true"]')) fallback.hidden = true;
         }
       }
-      status.textContent = !available ? "Sandbox status is unavailable. Last known values are shown; actions are paused."
+      status.textContent = !available ? !settled ? ""
+          : "Sandbox status is unavailable. Last known values are shown; actions are paused."
         : submissionPending ? returnedAfterSubmission
           ? "The submitted action's outcome is not confirmed. Reload this page to reconcile it before taking another action. No action was retried."
           : "Action submitted. Waiting for its response; no action will be retried automatically."
         : detail.pending ? "A Sandbox operation is pending. Waiting for the observed state to match its requested state."
-        : ["error", "build failed"].includes(detail.state) ? "The Sandbox operation failed. Refresh status to check its current state; no action was retried."
+        : ["error", "build failed"].includes(detail.state) ? detail.startEligible
+          ? "The Sandbox operation failed. Choose Start to try again."
+          : "The Sandbox operation failed. Refresh status to check its current state; no action was retried."
         : "";
       status.hidden = status.textContent.length === 0;
       if (reload) reload.hidden = !returnedAfterSubmission;
@@ -103,7 +109,7 @@
         }
         // Keep an open confirmation and its Cancel/Close usable while disabling
         // its stale submit. Only header controls change their visibility.
-        if (!control.hasAttribute("data-sandbox-confirm")) {
+        if (!control.hasAttribute("data-sandbox-confirm") && settled) {
           control.hidden = !eligible && available && !submissionPending;
         }
       }
@@ -119,7 +125,7 @@
       document.dispatchEvent(new CustomEvent("codewire:sandbox-status", {
         detail: { environmentId, available, running: value?.running === true,
           setupComplete: value?.setupComplete === true, actionsAllowed: value?.detail?.actionsAllowed === true,
-          pending: value?.detail?.pending !== false },
+          pending: value?.detail?.pending !== false, checking: !settled },
       }));
     };
     document.addEventListener("codewire:resize-mutation-status", (event) => {
@@ -172,9 +178,9 @@
         if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"])
           || value.environmentId !== environmentId || typeof value.running !== "boolean"
           || typeof value.setupComplete !== "boolean" || !validDetail(value.detail)) throw new Error("Invalid readiness");
-        if (version === epoch && !paused && !document.hidden && root.isConnected) report(true, value);
+        if (version === epoch && !paused && !document.hidden && root.isConnected) { settled = true; report(true, value); }
       } catch {
-        if (version === epoch && !paused && root.isConnected) report(false);
+        if (version === epoch && !paused && root.isConnected) { settled = true; report(false); }
       } finally {
         clearTimeout(timeout);
         if (pending === controller) pending = null;
@@ -195,6 +201,7 @@
       if (event.persisted) {
         returnedAfterSubmission = submissionPending;
         paused = document.hidden;
+        settled = false;
         report(false);
         void refresh();
       }

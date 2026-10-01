@@ -1,5 +1,6 @@
 .terminal-fixture:not(.cw-sandbox-detail-main) { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100dvh; padding: var(--space-4); gap: var(--space-4); }
-.terminal-fixture > header h1 { margin: var(--space-3) 0; font-size: 1.25rem; }
-.terminal-fixture > header p { margin: 0; color: var(--text-muted); }
-.terminal-fixture .cw-sandbox-terminal { min-height: 0; border: 1px solid #27272a; }
+.terminal-fixture > header h1 { margin: var(--space-3) 0; font-size: var(--text-title); }
+.terminal-fixture > header p { margin: 0; color: var(--fg-tertiary); }
+.terminal-fixture .cw-sandbox-terminal { min-height: 0; }
 [data-durable-terminal-page] .terminal-fixture { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+.terminal-fixture .cw-sandbox-heading h2 { margin: 0; font-size: var(--text-title); font-weight: var(--weight-semibold); }

@@ -47,6 +47,105 @@ with ICU collation and60 mixed-case/punctuation IDs across the50-row boundary;
 public/migrated tables are unchanged. Its old query fails byte-order equality,
 and the explicit C-collation query preserves both ordering and cursor progress.
 
+## Authenticator replacement and recovery codes
+
+Three more cookie-only IdP routes change an enrolled factor. They share the
+session controls' boundary: exactly one Origin equal to the public frontend
+origin, exactly one session cookie and no `Authorization` header, an
+`account_id` echo that must name the session's own account, closed JSON
+bodies of at most 2 KiB, a five-second budget, bounded server-side
+transactions and `no-store` responses. They are registered individually in
+the permanent raw identity policy.
+
+| Route | Request | Success |
+|---|---|---|
+| `POST /api/auth/two-factor/replace/start` | `account_id`, `password`, `proof` | `replacement_id`, `totp_uri`, `secret`, `expires_at` |
+| `POST /api/auth/two-factor/replace/confirm` | `account_id`, `replacement_id`, `code` | `backup_codes` (10), `signed_out_sessions`, and a new session cookie |
+| `POST /api/auth/two-factor/recovery-codes/regenerate` | `account_id`, `password`, `proof` | `backup_codes` (10) |
+
+**Fresh proof.** `start` and `regenerate` share one check, which needs the
+password **and** either a code from the enrolled authenticator or an unused
+recovery code. The authenticator code must come from a later TOTP time step
+than `two_factor.last_totp_step`; sign-in, enrollment and earlier proofs
+record the steps they accept, so a code already used cannot be replayed. A
+recovery code used as proof is consumed.
+
+The check verifies the password hash before opening the transaction, then
+works in this order:
+
+1. Lock the account, then the session, then the factor row.
+2. Refuse a locked account with 429 without checking or counting anything.
+3. Re-read the password hash; it must still match the one verified.
+
+Every wrong password or code counts against the lockout that sign-in uses and
+returns one generic 422. The fifth failure locks the account for 15 minutes
+and returns 429. A complete proof resets the counter.
+
+**Replacement.** `start` stores an encrypted pending secret bound to this
+browser session, replacing any older pending replacement for the account.
+It expires after ten minutes. The secret is returned only in that response;
+no route reads it again. The enrolled factor keeps working throughout.
+
+`confirm` behaves as follows:
+
+- Another session, an old `replacement_id` or no pending replacement gets the
+  same 404.
+- A wrong code returns 422 and counts against the replacement. The fifth wrong
+  code ends it, and expiry also ends it, both with 410. Neither affects the
+  account lockout.
+- A matching code, in one transaction:
+  1. swaps the secret and ten new recovery codes into `two_factor` in place;
+  2. deletes the pending row and every unfinished sign-in challenge;
+  3. deletes **every** session of the account;
+  4. issues a new session for this browser.
+
+`signed_out_sessions` counts the other browsers. The request budget covers
+every check, but the commit runs outside it, so a late timeout cannot hide a
+committed swap.
+
+**Regeneration** replaces only the recovery codes; the authenticator and
+sessions are unchanged. Direct `disable` stays closed.
+
+**Audit and notices.** The IdP writes these audit events after commit, with
+no secret, code, URI or password in them:
+
+- `user.2fa.proof_failed`, with the operation, the reason and whether the
+  account is locked;
+- `user.2fa.replace_started`;
+- `user.2fa.replaced`, with the number of browsers signed out;
+- `user.2fa.recovery_codes_regenerated`.
+
+A configured mail transport also sends a best-effort notice in the background
+after a replacement or regeneration. The notice carries no code and only a
+password-reset link.
+
+API keys and OAuth grants survive a replacement. The factor encryption key is
+still derived from the shared session secret. Both are known limits outside
+this change.
+
+Each audit event is written in the same transaction as its change, and the
+commit and the notice run in their own task, so a client that disconnects
+cannot cancel either one part-way. Sign-in issues its session in the same
+transaction that consumes its challenge, while it holds the account lock. A
+sign-in that completes during a replacement is therefore either revoked with
+every other session, or finds its challenge already gone.
+
+Focused proof is `cargo test -p codewire-idp --lib two_factor` and the eleven
+synthetic PostgreSQL tests in `tests/two_factor_replacement.rs`. They cover:
+
+- bearer, Origin and account rejection without side effects;
+- the shared lockout, and replay of a sign-in code;
+- recovery-code consumption, and pending-secret isolation;
+- the old factor working while a replacement is pending;
+- attempts, expiry and newer starts;
+- the swap, with session revocation and cookie rotation;
+- a sign-in completing during a replacement, which keeps no session;
+- concurrent confirmations, and concurrent proofs with one code;
+- audit hygiene.
+
+The checked-in service verification requires all eleven tests and rejects
+missing-database skips.
+
 ## Dashboard Account screen
 
 `/settings/` contains account details, security, and paginated active sessions.
@@ -80,6 +179,89 @@ stream bounds, redirect rejection, acknowledgement projection and signed-out
 scope rejection, and proves other/current-session revocation separately.
 Fixture request interception proves only presentation/submit shape; it does
 not substitute for the real IdP/database journey.
+
+### Security: replacing the authenticator
+
+For an enrolled account, the Security card offers **Replace authenticator** and
+**Regenerate recovery codes**. Each opens a focused dialog through a native GET
+launcher (`/settings/?dialog=…`), which also works without scripting; scripting
+opens the same dialog in place. Only these two proof dialogs open from a URL.
+The proof fields are labelled and required, are never prefilled, and are
+cleared when a dialog closes.
+
+The three POST actions are:
+
+- `/settings/_actions/two-factor/replace/start`
+- `/settings/_actions/two-factor/replace/confirm`
+- `/settings/_actions/two-factor/recovery-codes/regenerate`
+
+Each takes a closed form with a 2 KiB limit. Each action:
+
+1. requires one session cookie, no `Authorization` header, exactly one Origin
+   and the page CSRF token;
+2. requires fresh identity, an enrolled factor, and the form's `account_id`
+   to match that identity;
+3. reads every piece of page data before the IdP mutation, because a
+   confirmed replacement revokes the session the request arrived with;
+4. forwards the canonical cookie, the validated public Origin and the
+   browser's own User-Agent (one value of at most 512 bytes) through the
+   bounded, redirect-free account client, with a 10-second per-request
+   timeout. That timeout is above the IdP's 5-second budget, so a slow commit
+   is still reported; only a genuine timeout reads as an unknown outcome.
+
+The browser's X-Forwarded-For is not forwarded. The IdP takes the first hop
+of that header without a trusted-proxy list, and no other dashboard call to
+the IdP forwards it, so relaying it would let a browser choose the address
+the IdP records. Like dashboard sign-in, these audit rows and the rotated
+session record no client address until a trusted-proxy rule exists.
+
+The response is rendered directly as a private `no-store` page; no secret ever
+appears in a redirect or URL:
+
+- The setup key and QR code appear only in the `start` response.
+- The new recovery codes appear only in the `confirm` or `regenerate`
+  response.
+- A rejected code reopens confirmation without the key.
+- `confirm` forwards exactly one well-formed rotated session cookie. The
+  page then withholds the session list it read before the change, since every
+  one of those sessions is gone.
+
+Error messages say what still works:
+
+| Outcome | Dialog | Message |
+|---|---|---|
+| Wrong password or code | proof | "The password or code didn't match. Nothing changed: …" |
+| Account locked | proof | "Too many incorrect attempts. Wait 15 minutes, then try again. Your current authenticator and recovery codes still work." |
+| New code rejected | confirm | "That code doesn't match the new authenticator. … Your current authenticator still works." |
+| Five wrong codes or ten minutes | replace | "This replacement ended after five incorrect codes or ten minutes. Start again. …" |
+| Superseded or foreign replacement | replace | "This replacement is no longer available … Start again. …" |
+| IdP without these routes or unreachable before a change | proof | "… unavailable right now. Nothing changed: …" |
+| Lost confirmation or regeneration response | Security card or regenerate | Says the outcome is unknown and how to recover |
+
+An account mismatch redirects to `/settings/?security=account-changed#security`
+with no change.
+
+Focused proof includes:
+
+- adapter tests for closed results, rotated-cookie admission, redirect refusal
+  and the failure mapping;
+- registered-route tests against a synthetic identity service, proving
+  read-before-mutation, exact Origin, CSRF, account, bearer and unknown-field
+  rejection, and that no password or proof is echoed;
+- template tests;
+- the editable fixtures `settings-account.html`,
+  `settings-account-replace-authenticator.html` and
+  `settings-account-authenticator-replaced.html`, with their desktop, mobile
+  and no-JavaScript specs in `ssr-dashboard.account-dialogs.ssr.ts`.
+
+The managed journey `ssr-dashboard.account-two-factor.ssr.ts` enrolls a
+synthetic owner, then on the real IdP, dashboard and database:
+
+1. proves a wrong proof says what still works and counts one failure;
+2. regenerates codes with a recovery code;
+3. replaces the authenticator, rejecting a wrong new code first;
+4. proves both old cookies are refused, the rotated cookie opens Account with
+   one session, and sign-in accepts only the new authenticator and its codes.
 
 Account management goldens use an isolated synthetic owner with exactly two
 sessions, fixed creation/expiry dates, and the byte-lowest session as the current

@@ -5,12 +5,6 @@
   gap: var(--space-4);
 }
 
-.cw-cluster {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-}
 
 .cw-table-shell {
   width: 100%;
@@ -42,7 +36,7 @@
   vertical-align: middle;
 }
 
-.cw-table th {
+.cw-table thead th {
   height: 2.25rem;
   background: var(--bg-surface);
   color: var(--fg-tertiary);
@@ -50,10 +44,48 @@
   font-weight: var(--weight-medium);
 }
 
+/* A row header names its row; it reads as a cell, not a column heading. */
+.cw-table tbody th {
+  color: var(--fg-primary);
+  font-weight: var(--weight-regular);
+}
+
 .cw-table tbody tr:hover { background: var(--bg-primary); }
 
-.cw-table tbody tr:last-child td {
+.cw-table tbody tr:last-child :is(td, th) {
   border-bottom: 0;
+}
+
+/* A table whose rows open menus lets them overflow. It fits phones by hiding
+   secondary columns and tightening cell insets instead of scrolling sideways. */
+.cw-table-shell--menus { overflow: visible; }
+.cw-table-shell--menus .cw-table-actions { width: var(--space-12); text-align: right; }
+
+@media (max-width: 48rem) {
+  .cw-table-shell--menus .cw-table-secondary { display: none; }
+  .cw-table-shell--menus :is(th, td) { padding-inline: var(--space-2); }
+  .cw-table-shell--menus .cw-table-actions { width: var(--space-10); }
+}
+
+/* Inventory pages: search and filters above the table, wrapping on phones. */
+.cw-inventory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.cw-inventory-toolbar .cw-input { flex: 1 1 var(--control-width-sm); max-width: var(--control-width); }
+.cw-inventory-toolbar .cw-select { flex: none; width: var(--control-width-sm); }
+
+/* A cell whose name leads and whose identifier sits below it. */
+.cw-cell-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  overflow-wrap: anywhere;
 }
 
 .cw-dialog-backdrop {
@@ -137,6 +169,72 @@ dialog.cw-discard-dialog {
   border-top: 1px solid var(--border-subtle);
 }
 
+/* Drawer: a side sheet over the page for a create or edit form. The header and
+   footer stay put while the body scrolls. A .cw-drawer-layer holds the drawer
+   and its backdrop when the page opens it; a details element can open it too. */
+.cw-drawer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+
+.cw-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--backdrop);
+}
+
+.cw-drawer {
+  position: fixed;
+  z-index: 81;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  width: min(var(--drawer-width), 94vw);
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-overlay);
+  color: var(--fg-primary);
+  animation: cw-drawer-in 160ms ease;
+}
+
+.cw-drawer-header {
+  flex: none;
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.cw-drawer-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-5);
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5) var(--space-6);
+  scrollbar-color: var(--border-hover) transparent;
+  scrollbar-width: thin;
+}
+
+.cw-drawer-footer {
+  flex: none;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.cw-drawer-footer > .cw-button { width: 100%; }
+
+@keyframes cw-drawer-in {
+  from { transform: translateX(28px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
 .cw-state {
   display: grid;
   justify-items: center;
@@ -151,6 +249,7 @@ dialog.cw-discard-dialog {
   align-items: center;
   gap: var(--space-2);
   text-transform: capitalize;
+  white-space: nowrap;
 }
 
 .cw-status::before {
@@ -234,6 +333,52 @@ dialog.cw-discard-dialog {
   line-height: var(--leading-body);
 }
 
+/* Combobox: a text field whose choices open as a listbox below it, on the
+   same surface as menus. The option under the keyboard is aria-selected. */
+.cw-combobox { position: relative; }
+
+.cw-combobox-list {
+  position: absolute;
+  z-index: 70;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: var(--popover-max-height);
+  overflow-y: auto;
+  gap: var(--space-0-5);
+  margin: 0;
+  padding: var(--space-1);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-lg);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-popover);
+  list-style: none;
+}
+
+.cw-combobox-option {
+  display: grid;
+  gap: var(--space-0-5);
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+
+.cw-combobox-option:hover,
+.cw-combobox-option[aria-selected="true"] { background: var(--bg-surface-hover); }
+
+.cw-combobox-option strong { font-size: var(--text-secondary); font-weight: var(--weight-medium); }
+
+.cw-combobox-option code {
+  overflow-wrap: anywhere;
+  color: var(--fg-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+}
+
+.cw-combobox-option > span { color: var(--fg-secondary); font-size: var(--text-small); }
+
 /* Menus: a summary trigger and a floating panel of links and actions. The
    panel's direct items share one row; nested forms keep their own layout. */
 .cw-menu { position: relative; }
@@ -274,6 +419,13 @@ dialog.cw-discard-dialog {
   padding: var(--space-3);
 }
 
+.cw-menu-panel--form > p {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--text-small);
+  line-height: var(--leading-body);
+}
+
 .cw-menu-panel > ul {
   display: grid;
   gap: var(--space-0-5);
@@ -282,6 +434,8 @@ dialog.cw-discard-dialog {
   list-style: none;
 }
 
+/* Menu items: links and buttons directly inside a panel, or a .cw-menu-item. */
+.cw-menu-item,
 :is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > :is(a, button):not(.cw-button, .cw-icon-button, .cw-link-button),
 :is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > form > button:not(.cw-button),
 :is(.cw-menu-panel, .cw-menu-panel > section) > details > summary {
@@ -302,6 +456,7 @@ dialog.cw-discard-dialog {
   cursor: pointer;
 }
 
+.cw-menu-item:hover,
 :is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > :is(a, button):not(.cw-button, .cw-icon-button, .cw-link-button):hover,
 :is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > form > button:not(.cw-button):hover,
 :is(.cw-menu-panel, .cw-menu-panel > section) > details > summary:hover,
@@ -332,6 +487,7 @@ dialog.cw-discard-dialog {
 }
 
 .cw-menu-danger,
+:is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > :is(a, button).cw-menu-danger,
 :is(.cw-menu-panel, .cw-menu-panel > section) > details.cw-menu-danger > summary {
   color: var(--destructive);
 }
@@ -499,16 +655,15 @@ dialog.cw-discard-dialog {
   letter-spacing: var(--tracking-code);
 }
 
-.cw-skeleton {
-  min-height: var(--space-4);
+/* A key prefix or identifier shown inline, such as an API key's first
+   characters; code in a table cell reads the same way. */
+.cw-key,
+.cw-table code {
+  padding: var(--space-0-5) var(--space-1-5);
   border-radius: var(--radius-sm);
   background: var(--bg-surface-hover);
-  animation: cw-pulse 1.4s ease-in-out infinite alternate;
-}
-
-@keyframes cw-pulse {
-  from { opacity: 0.45; }
-  to { opacity: 0.9; }
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
 }
 
 /* A secret shown once, such as a new API key: one selectable monospace value. */
@@ -523,6 +678,41 @@ dialog.cw-discard-dialog {
   font-size: var(--text-code);
   line-height: var(--leading-body);
   user-select: all;
+}
+
+/* A one-time authenticator setup QR code on its light quiet zone, shown when
+   two-factor authentication is set up or its authenticator is replaced. */
+.cw-qr {
+  display: grid;
+  width: fit-content;
+  margin: 0 auto var(--space-3);
+  place-items: center;
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--qr-light);
+}
+
+.cw-qr svg { display: block; width: min(12rem, 60vw); height: auto; aspect-ratio: 1; }
+
+/* One-time recovery codes: a two-column list, one column on narrow screens. */
+.cw-backup-codes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cw-backup-codes li {
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-hover);
+  text-align: center;
+}
+
+@media (max-width: 34rem) {
+  .cw-backup-codes { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Row list: repeated records inside a card. Rows are separated by hairlines
@@ -550,6 +740,31 @@ dialog.cw-discard-dialog {
 .cw-row-list > li:last-child {
   padding-bottom: 0;
 }
+
+/* Row button: one choice in a picker list, such as a repository result. The
+   whole row is the target; separators and the focus ring stay inside the list. */
+.cw-row-button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: var(--border-width) solid var(--border-subtle);
+  background: none;
+  color: var(--fg-primary);
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.cw-row-button small { display: block; color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-row-button:hover { background: var(--bg-surface-hover); }
+.cw-row-button:focus-visible { outline-offset: calc(-1 * var(--focus-ring-width)); }
+.cw-row-button:disabled { color: var(--fg-disabled); cursor: not-allowed; }
 
 /* Context navigation: the side panel of Settings and Organization pages.
    Group labels are .cw-section-label and links are .cw-nav-link, as in the
@@ -623,6 +838,15 @@ dialog.cw-discard-dialog {
 }
 
 @media (max-width: 48rem) {
+  .cw-drawer-header,
+  .cw-drawer-footer {
+    padding-inline: var(--space-4);
+  }
+
+  .cw-drawer-body {
+    padding: var(--space-4) var(--space-4) var(--space-5);
+  }
+
   .cw-context-nav {
     gap: var(--space-2);
     overflow: hidden;
@@ -663,5 +887,5 @@ dialog.cw-discard-dialog {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .cw-skeleton { animation: none; }
+  .cw-drawer { animation: none; }
 }

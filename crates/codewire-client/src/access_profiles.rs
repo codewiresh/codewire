@@ -47,6 +47,19 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    /// Relabel the exact observed revision and name; no revision is published
+    /// and environment bindings are unchanged.
+    pub async fn rename_access_profile(
+        &self,
+        request: RenameAccessProfileRequest,
+    ) -> Result<RenameAccessProfileResponse, ClientError> {
+        self.access_profiles
+            .rename_access_profile_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn delete_access_profile(
         &self,
         request: DeleteAccessProfileRequest,
@@ -168,6 +181,28 @@ mod tests {
             .mount(&server)
             .await;
         client.update_access_profile(request).await.unwrap();
+        let request = RenameAccessProfileRequest {
+            access_profile_id: "profile".into(),
+            expected_revision: 9_007_199_254_740_993,
+            expected_name: "work".into(),
+            name: "renamed".into(),
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(path(
+                "/codewire.v1.AccessProfileService/RenameAccessProfile",
+            ))
+            .and(header("authorization", "Bearer synthetic-profile-token"))
+            .and(body_bytes(request.encode_to_vec()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(RenameAccessProfileResponse::default().encode_to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        client.rename_access_profile(request).await.unwrap();
         let request = DeleteAccessProfileRequest {
             access_profile_id: "profile".into(),
             expected_revision: 9_007_199_254_740_993,

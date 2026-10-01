@@ -26,7 +26,7 @@ use crate::{
         OrganizationMembersContentTemplate, OrganizationMembersTemplate,
     },
     view::{
-        ASSIGNMENTS, ApiKeyCreateSubmission, ApiKeyFormView, ApiKeyIdSubmission,
+        ASSIGNMENTS, ApiKeyCreateSubmission, ApiKeyFilterView, ApiKeyFormView, ApiKeyIdSubmission,
         ApiKeyToggleSubmission, ApiKeysPageView, DashboardView, InvitationIdSubmission,
         InviteFormView, InviteSubmission, MemberIdSubmission, MemberRoleSubmission,
         MembersPageView, OrganizationContext, RemoveMemberSubmission, bad_request_fields,
@@ -39,6 +39,10 @@ pub(super) struct OrganizationQuery {
     message: String,
     #[serde(default)]
     error: String,
+    #[serde(default)]
+    search: String,
+    #[serde(default)]
+    status: String,
 }
 
 pub(super) async fn members_page(
@@ -360,6 +364,7 @@ pub(super) async fn api_keys_page(
     let token = page_csrf_token(&headers);
     let page = ApiKeysPageView {
         keys,
+        filter: ApiKeyFilterView::new(&query.search, &query.status),
         form: ApiKeyFormView {
             expiration: "never".to_owned(),
             ..Default::default()
@@ -465,6 +470,7 @@ pub(super) async fn create_api_key(
     let token = page_csrf_token(&headers);
     let page = ApiKeysPageView {
         keys,
+        filter: ApiKeyFilterView::default(),
         form: ApiKeyFormView {
             expiration: "never".to_owned(),
             ..Default::default()
@@ -687,6 +693,7 @@ async fn render_api_key_form_error(
     };
     let page = ApiKeysPageView {
         keys,
+        filter: ApiKeyFilterView::default(),
         form,
         csrf_token: csrf.to_owned(),
         one_time_key: String::new(),
@@ -995,6 +1002,7 @@ mod tests {
         let render = |has_one_time_key| {
             let page = ApiKeysPageView {
                 keys: Vec::new(),
+                filter: ApiKeyFilterView::default(),
                 form: ApiKeyFormView::default(),
                 csrf_token: "synthetic-csrf".into(),
                 one_time_key: marker.into(),

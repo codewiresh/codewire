@@ -9,7 +9,7 @@ Two paths to get started — web dashboard or CLI.
 ## Prerequisites
 
 - An **invite code** (Codewire is in private beta)
-- After account creation, **2FA setup is mandatory** — you'll be redirected to configure it before accessing the dashboard
+- After account creation, you're offered **two-factor authentication** setup. We strongly recommend it; choose **Set up later** to continue to the dashboard.
 
 ## Web quickstart
 

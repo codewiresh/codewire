@@ -60,9 +60,6 @@ def main(argv: list[str] | None = None) -> int:
     turnstile_parser.set_defaults(func=check_turnstile_access_projection)
     design_parser = subparsers.add_parser("design-tokens")
     design_parser.add_argument("--self-test", action="store_true")
-    design_baseline = design_parser.add_mutually_exclusive_group()
-    design_baseline.add_argument("--write-baseline", action="store_true")
-    design_baseline.add_argument("--prune", action="store_true")
     design_parser.add_argument("--root", default=str(ROOT))
     design_parser.set_defaults(func=check_design_tokens)
 
