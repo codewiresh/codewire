@@ -46,8 +46,8 @@ test.beforeEach(async ({ page }) => {
 
 test("one inventory lists every key with its organization, status and permitted actions", async ({ page }) => {
   const personal = page.getByRole("list", { name: "Personal", exact: true });
-  await expect(personal.getByRole("link")).toHaveText(["Account", "Credentials", "Secrets", "API Keys"]);
-  await expect(personal.locator('[aria-current="page"]')).toHaveText("API Keys");
+  await expect(personal.getByRole("link")).toHaveText(["Account", "Credentials", "Secrets", "API keys"]);
+  await expect(personal.locator('[aria-current="page"]')).toHaveText("API keys");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("API keys");
   await expect(page.locator(".cw-page-title-row .cw-badge")).toHaveText("3 keys");
   // Organization names appear once; no "name · slug" pairs and no scope labels.

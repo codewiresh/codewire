@@ -43,7 +43,7 @@ test.describe.serial("personal Codewire API keys through the managed app", () =>
     expect(response?.status()).toBe(200);
     expect(response?.headers()["referrer-policy"]).toBe("same-origin");
     const personal = page.getByRole("list", { name: "Personal", exact: true });
-    await expect(personal.getByRole("link", { name: "API Keys", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(personal.getByRole("link", { name: "API keys", exact: true })).toHaveAttribute("aria-current", "page");
     await page.getByRole("button", { name: "Create key", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Create API key", exact: true });
     await dialog.getByLabel("Organization", { exact: true }).selectOption(organizationId);
