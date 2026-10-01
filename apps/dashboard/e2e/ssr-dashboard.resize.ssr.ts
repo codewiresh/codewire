@@ -69,8 +69,8 @@ async function open(page: Page) {
 
 async function review(page: Page) {
   const dialog = page.getByRole("dialog", { name: "Resize Fixture Sandbox" });
-  await dialog.getByLabel("CPU (millicores)", { exact: true }).fill("2000");
-  await dialog.getByLabel("Memory (MiB)", { exact: true }).fill("4096");
+  await dialog.getByLabel("CPU", { exact: true }).selectOption("2000");
+  await dialog.getByLabel("Memory", { exact: true }).selectOption("4096");
   await dialog.getByLabel("Disk (GiB)", { exact: true }).fill("20");
   await dialog.getByRole("button", { name: "Review resize", exact: true }).click();
   await expect(dialog.locator("[data-resize-plan]")).toBeVisible();
@@ -91,7 +91,7 @@ test("reviews consequences and resolves only a matching operation observation", 
   const close = (await dialog.getByRole("button", { name: "Close", exact: true }).boundingBox())!;
   expect(close.y).toBeGreaterThanOrEqual(0);
   expect(close.y + close.height).toBeLessThanOrEqual(page.viewportSize()!.height);
-  const memory = (await dialog.getByLabel("Memory (MiB)", { exact: true }).boundingBox())!;
+  const memory = (await dialog.getByLabel("Memory", { exact: true }).boundingBox())!;
   expect(memory.x + memory.width).toBeLessThanOrEqual(bounds.x + bounds.width);
   const reviewImage = test.info().outputPath("resize-resource-review.png");
   await dialog.screenshot({ path: reviewImage });
@@ -169,8 +169,8 @@ test("late or foreign review cannot install a stale plan", async ({ page }) => {
   let release = () => {};
   state.planGate = new Promise<void>((resolve) => { release = resolve; });
   const dialog = await open(page);
-  await dialog.getByLabel("CPU (millicores)", { exact: true }).fill("2000");
-  await dialog.getByLabel("Memory (MiB)", { exact: true }).fill("4096");
+  await dialog.getByLabel("CPU", { exact: true }).selectOption("2000");
+  await dialog.getByLabel("Memory", { exact: true }).selectOption("4096");
   await dialog.getByLabel("Disk (GiB)", { exact: true }).fill("20");
   await dialog.getByRole("button", { name: "Review resize", exact: true }).click();
   await expect.poll(() => state.plans).toBe(1);
@@ -243,8 +243,8 @@ test("oversized review is rejected without forwarding backend text", async ({ pa
   const state = await transport(page);
   state.oversized = true;
   const dialog = await open(page);
-  await dialog.getByLabel("CPU (millicores)", { exact: true }).fill("2000");
-  await dialog.getByLabel("Memory (MiB)", { exact: true }).fill("4096");
+  await dialog.getByLabel("CPU", { exact: true }).selectOption("2000");
+  await dialog.getByLabel("Memory", { exact: true }).selectOption("4096");
   await dialog.getByLabel("Disk (GiB)", { exact: true }).fill("20");
   await dialog.getByRole("button", { name: "Review resize", exact: true }).click();
   await expect(dialog.locator("[data-resize-status]")).toContainText("could not be reviewed");
@@ -264,4 +264,56 @@ test("readiness updates while closed invalidate an older reviewed tuple on reope
   await expect(dialog.locator("[data-resize-status]")).toContainText("resources changed");
   expect(state.plans).toBe(1);
   expect(state.applies).toBe(0);
+});
+
+test("a current value outside the fixed choices stays selected as its own choice across live polls", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN");
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const live = { cpuMillicores: 1500, memoryMib: 3072 };
+  await page.route("**/_fragments/terminal-readiness", async (route) => {
+    await held;
+    await route.fulfill({ json: {
+      environmentId: environment, running: true, setupComplete: true,
+      detail: { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
+        resources: "live", ...live, diskGib: 10, startEligible: false, stopEligible: true, deleteEligible: true,
+        deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false },
+    } });
+  });
+  await page.goto(`${origin}/reference/fixtures/sandbox-resize.html`);
+  // The closed dialog is not in the accessibility tree; its fields still are in the form.
+  const dialog = page.locator("#sandbox-resize");
+  const cpu = dialog.getByLabel("CPU", { exact: true });
+  const memory = dialog.getByLabel("Memory", { exact: true });
+  // Rendered before any poll: the Sandbox's own value is the selected choice.
+  await expect(cpu).toHaveValue("750");
+  await expect(cpu.locator("option")).toHaveText(["750 millicores (current)", "1 vCPU", "2 vCPU", "4 vCPU", "8 vCPU"]);
+  await expect(cpu.locator("option:checked")).toHaveText("750 millicores (current)");
+  await expect(memory.locator("option:checked")).toHaveText("1536 MiB (current)");
+  release();
+  // A different off-catalog live value replaces the one current choice
+  // instead of blanking the select or keeping a stale "(current)".
+  await expect(cpu).toHaveValue("1500");
+  await expect(cpu.locator("option:checked")).toHaveText("1500 millicores (current)");
+  await expect(cpu.locator("option", { hasText: "(current)" })).toHaveCount(1);
+  await expect(memory).toHaveValue("3072");
+  await expect(memory.locator("option:checked")).toHaveText("3072 MiB (current)");
+  await expect(page.getByRole("button", { name: "Resize", exact: true })).toBeEnabled({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Resize", exact: true }).click();
+  await expect(cpu).toBeVisible();
+  await expect(cpu.locator("option:checked")).toHaveText("1500 millicores (current)");
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  // A catalog value selects that choice and drops the extra option.
+  Object.assign(live, { cpuMillicores: 2000, memoryMib: 4096 });
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(cpu).toHaveValue("2000");
+  await expect(cpu.locator("option")).toHaveText(["1 vCPU", "2 vCPU", "4 vCPU", "8 vCPU"]);
+  await expect(memory.locator("option:checked")).toHaveText("4 GiB");
+  await expect(memory.locator("option")).toHaveText(["2 GiB", "4 GiB", "8 GiB", "16 GiB"]);
+  Object.assign(live, { cpuMillicores: 750, memoryMib: 1536 });
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(cpu).toHaveValue("750");
+  await expect(cpu.locator("option")).toHaveText(["750 millicores (current)", "1 vCPU", "2 vCPU", "4 vCPU", "8 vCPU"]);
+  await expect(memory.locator("option:checked")).toHaveText("1536 MiB (current)");
 });

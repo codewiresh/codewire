@@ -189,7 +189,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
       const draft = await draftForm.getAttribute("data-create-draft-id");
       expect(draft).toMatch(/^[0-9a-f-]{36}$/);
-      await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+      await page.locator("#environment-create-card").getByLabel("CPU", { exact: true }).selectOption("2000");
       const ttl = page.getByLabel("Delete after", { exact: true });
       await expect(ttl).toBeVisible();
       await ttl.fill("3600s");
@@ -348,7 +348,7 @@ test.describe("managed provider credential browser journey", () => {
       expect(restoreResponse.headers()["cache-control"]).toBe("private, no-store");
       await expect(draftForm.locator('[name="_csrf"]')).toHaveValue(currentCsrf);
       await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
-      await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("2000");
+      await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("2000");
       await expect(ttl).toHaveValue("3600s");
       await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
       expect(setupDispatches).toEqual([]);

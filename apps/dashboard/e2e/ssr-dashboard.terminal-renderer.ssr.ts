@@ -88,12 +88,12 @@ test("sandbox dialogs and resize dismiss without navigation or terminal replacem
   const resize = page.locator(".cw-action-menu");
   const summary = resize.locator("summary");
   await summary.click();
-  await resize.getByLabel("CPU (millicores)").fill("3000");
+  await resize.getByLabel("CPU", { exact: true }).selectOption("4000");
   await expect(resize).toHaveJSProperty("open", true);
   await page.getByRole("heading", { name: "Sandbox terminal", exact: true }).click();
   await expect(resize).toHaveJSProperty("open", false);
   await summary.click();
-  await expect(resize.getByLabel("CPU (millicores)")).toHaveValue("3000");
+  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("4000");
   await page.keyboard.press("Escape");
   await expect(resize).toHaveJSProperty("open", false);
   await expect(summary).toBeFocused();
