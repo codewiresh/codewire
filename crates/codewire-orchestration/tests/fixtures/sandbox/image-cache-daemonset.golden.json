@@ -3,7 +3,7 @@
   "kind": "DaemonSet",
   "metadata": {
     "annotations": {
-      "codewire.sh/image-cache-state": "{\"version\":1,\"generation\":2,\"sets\":[{\"release\":2,\"generation\":2,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]},{\"release\":1,\"generation\":1,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]}],\"retired\":[],\"spec_sha256\":\"d1f20498b4b3d5d2dd156333b012a6dd89ee6cbab09a7e00c1ff435db341cf8e\"}"
+      "codewire.sh/image-cache-state": "{\"version\":2,\"generation\":2,\"sets\":[{\"release\":2,\"generation\":2,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]},{\"release\":1,\"generation\":1,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]}],\"retired\":[],\"spec_sha256\":\"c46cf29f1834914680fef859418962896543769e8dda195062667229146aee8f\"}"
     },
     "labels": {
       "app.kubernetes.io/component": "image-cache",
@@ -34,94 +34,13 @@
         "containers": [
           {
             "command": [
-              "/cw-image-cache/ld-musl-x86_64.so.1",
-              "--library-path=",
-              "--preload=",
-              "/cw-image-cache/busybox",
-              "sleep",
-              "2147483647"
-            ],
-            "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
-            "imagePullPolicy": "IfNotPresent",
-            "name": "image-0",
-            "resources": {
-              "limits": {
-                "cpu": "10m",
-                "memory": "16Mi"
-              },
-              "requests": {
-                "cpu": "1m",
-                "memory": "4Mi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "readOnlyRootFilesystem": true
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/cw-image-cache",
-                "name": "cw-image-cache-tool",
-                "readOnly": true
-              }
-            ]
-          },
-          {
-            "command": [
-              "/cw-image-cache/ld-musl-x86_64.so.1",
-              "--library-path=",
-              "--preload=",
-              "/cw-image-cache/busybox",
-              "sleep",
-              "2147483647"
-            ],
-            "image": "registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "imagePullPolicy": "IfNotPresent",
-            "name": "image-1",
-            "resources": {
-              "limits": {
-                "cpu": "10m",
-                "memory": "16Mi"
-              },
-              "requests": {
-                "cpu": "1m",
-                "memory": "4Mi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "readOnlyRootFilesystem": true
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/cw-image-cache",
-                "name": "cw-image-cache-tool",
-                "readOnly": true
-              }
-            ]
-          },
-          {
-            "command": [
-              "/cw-image-cache/ld-musl-x86_64.so.1",
-              "--library-path=",
-              "--preload=",
-              "/cw-image-cache/busybox",
+              "/bin/busybox",
               "sleep",
               "2147483647"
             ],
             "image": "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
             "imagePullPolicy": "IfNotPresent",
-            "name": "image-2",
+            "name": "idle",
             "resources": {
               "limits": {
                 "cpu": "10m",
@@ -143,47 +62,18 @@
             },
             "volumeMounts": [
               {
-                "mountPath": "/cw-image-cache",
-                "name": "cw-image-cache-tool",
+                "mountPath": "/cw-image-cache/image-0",
+                "name": "image-0",
                 "readOnly": true
-              }
-            ]
-          },
-          {
-            "command": [
-              "/cw-image-cache/ld-musl-x86_64.so.1",
-              "--library-path=",
-              "--preload=",
-              "/cw-image-cache/busybox",
-              "sleep",
-              "2147483647"
-            ],
-            "image": "registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "imagePullPolicy": "IfNotPresent",
-            "name": "image-3",
-            "resources": {
-              "limits": {
-                "cpu": "10m",
-                "memory": "16Mi"
               },
-              "requests": {
-                "cpu": "1m",
-                "memory": "4Mi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "readOnlyRootFilesystem": true
-            },
-            "volumeMounts": [
               {
-                "mountPath": "/cw-image-cache",
-                "name": "cw-image-cache-tool",
+                "mountPath": "/cw-image-cache/image-1",
+                "name": "image-1",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/cw-image-cache/image-2",
+                "name": "image-2",
                 "readOnly": true
               }
             ]
@@ -194,45 +84,6 @@
         "imagePullSecrets": [
           {
             "name": "harbor-registry"
-          }
-        ],
-        "initContainers": [
-          {
-            "command": [
-              "/bin/busybox",
-              "cp",
-              "/bin/busybox",
-              "/lib/ld-musl-x86_64.so.1",
-              "/cw-image-cache/"
-            ],
-            "image": "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
-            "imagePullPolicy": "IfNotPresent",
-            "name": "tool",
-            "resources": {
-              "limits": {
-                "cpu": "10m",
-                "memory": "16Mi"
-              },
-              "requests": {
-                "cpu": "1m",
-                "memory": "4Mi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "readOnlyRootFilesystem": true
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/cw-image-cache",
-                "name": "cw-image-cache-tool"
-              }
-            ]
           }
         ],
         "nodeSelector": {
@@ -259,10 +110,25 @@
         ],
         "volumes": [
           {
-            "emptyDir": {
-              "sizeLimit": "8Mi"
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "reference": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111"
             },
-            "name": "cw-image-cache-tool"
+            "name": "image-0"
+          },
+          {
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "reference": "registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "name": "image-1"
+          },
+          {
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "reference": "registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "name": "image-2"
           }
         ]
       }
