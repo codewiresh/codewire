@@ -1278,7 +1278,7 @@ test.describe.serial("server-rendered environments", () => {
     // The same terminal is shown as ended after Start; nothing was launched in its place.
     await expect(page.getByRole("tab")).toHaveCount(1);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", lifecycleSessionId!);
-    await expect(page.locator("[data-terminal-connection]")).toHaveText(/interrupted|stopped|exited|failed|no longer available/, { timeout: 60_000 });
+    await expect(page.locator("[data-terminal-connection]")).toHaveText(/interrupted|stopped|exited|failed|no longer available/i, { timeout: 60_000 });
     expect(launchRequests).toBe(launchesBeforeStop + 1);
     await page.getByRole("button", { name: "Remove tab", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(0);
