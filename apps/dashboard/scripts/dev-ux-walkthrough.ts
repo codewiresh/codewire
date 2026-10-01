@@ -422,8 +422,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
       expect([302, 303, 401, 403]).toContain(denied.status());
       expect(await denied.text()).not.toContain(canary);
     });
-    // #2142: normal private-preview Open has no browser-auth handoff yet.
-    // Do not inject a full account cookie or claim authenticated Open proof.
+    // #2142: opening a private preview in the signed-in browser is not yet
+    // observed on Dev. Its stage failed there with no diagnostic the deploy
+    // classifier can name, so it is held out until it can be diagnosed.
     await stage("ports-preview-removed", async () => {
       await button(port, "Remove ux-preview preview").click();
       await expect(port).toHaveCount(0);

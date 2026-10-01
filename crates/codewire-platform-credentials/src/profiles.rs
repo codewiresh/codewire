@@ -6,6 +6,7 @@
 //! Authorized credential identities still come from that trusted caller.
 //! Only same-owner entries are supported. Profile edits publish a new immutable
 //! revision; an existing environment keeps its explicitly selected revision.
+//! A rename relabels the profile row and publishes no revision.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -315,6 +316,50 @@ impl PlatformAccessProfileStore {
         }
         tx.commit().await.map_err(database_error)?;
         Ok(profile)
+    }
+
+    /// Relabel the profile without publishing a revision. The name lives on
+    /// the profile row, not in its immutable revisions, so entries, history
+    /// and every environment binding are untouched. The expected revision and
+    /// name must both still be current under the row lock, rejecting a rename
+    /// prepared from a stale view, including one that raced another rename.
+    /// Renaming to the current name is a no-op. A name another profile of the
+    /// same owner already uses is `AlreadyExists`, exactly as on create.
+    pub async fn rename(
+        &self,
+        owner: &Owner,
+        id: &AccessProfileId,
+        expected_revision: u64,
+        expected_name: &AccessProfileName,
+        name: AccessProfileName,
+    ) -> Result<AccessProfile, Error> {
+        let expected = generation(expected_revision)?;
+        let mut tx = self.begin_transaction().await?;
+        lock_owner(&mut tx, owner).await?;
+        let current = load_profile(&mut tx, owner, id, None, true).await?;
+        if current.revision != expected_revision || current.name != *expected_name {
+            return Err(Error::StaleRevision);
+        }
+        if current.name == name {
+            tx.commit().await.map_err(database_error)?;
+            return Ok(current);
+        }
+        let changed = sqlx::query(
+            "UPDATE platform_access_profiles SET name=$4,updated_at=now() \
+             WHERE id=$1 AND current_revision=$2 AND name=$3",
+        )
+        .bind(id.as_str())
+        .bind(expected)
+        .bind(expected_name.as_str())
+        .bind(name.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(Error::StaleRevision);
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(AccessProfile { name, ..current })
     }
 
     pub async fn delete(

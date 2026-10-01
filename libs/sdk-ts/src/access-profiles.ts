@@ -133,6 +133,18 @@ export class AccessProfiles {
     } catch (error) { throw mapConnectError(error); }
   }
 
+  /** Relabel at the observed current revision and name; a stale view is
+   * rejected. No revision is published, the entries are unchanged and Sandbox
+   * bindings stay pinned. */
+  async rename(id: string, expectedRevision: bigint, expectedName: string, name: string): Promise<AccessProfile> {
+    try {
+      const response = await this.client.renameAccessProfile({
+        accessProfileId: id, expectedRevision: revision(expectedRevision), expectedName, name,
+      });
+      return fromProfile(response.accessProfile);
+    } catch (error) { throw mapConnectError(error); }
+  }
+
   async delete(id: string, expectedRevision: bigint): Promise<void> {
     try {
       await this.client.deleteAccessProfile({ accessProfileId: id, expectedRevision: revision(expectedRevision) });

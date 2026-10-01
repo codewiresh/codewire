@@ -392,6 +392,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(credentials::update_profile_action),
         )
         .route(
+            "/settings/credentials/_actions/profiles/rename",
+            post(credentials::rename_profile_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
             "/settings/credentials/_actions/profiles/delete",
             post(credentials::delete_profile_action),
         )
