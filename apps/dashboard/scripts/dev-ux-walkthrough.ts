@@ -401,7 +401,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await ports.getByLabel("Preview label", { exact: true }).fill("ux-preview");
     await expect(ports.getByLabel("Who can open the preview?", { exact: true })).toHaveValue("creator");
     await button(ports, "Add port").click();
-    await expect(port).toContainText("8080 · Creator");
+    await expect(port).toContainText("8080 · Sandbox creator");
   });
   await stage("ports-preview-url", async () => {
     const open = port.getByRole("link", { name: "Open preview", exact: true });
@@ -434,7 +434,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     });
   } finally { await anonymous.dispose(); }
   await stage("ports-close", async () => {
-    await button(ports, "Close").click();
+    await button(ports, "Done").click();
     expect(page.url()).toBe(before);
     // The dialog must leave the live terminal intact. Check its latest
     // output: earlier lines may have scrolled out of the visible rows.

@@ -890,6 +890,7 @@ fieldset.cw-field > legend {
 .cw-select {
   appearance: none;
   padding-right: calc(var(--control-padding-x) + var(--space-5));
+  white-space: nowrap;
   background-image: var(--icon-chevron-down);
   background-position: right var(--control-padding-x) center;
   background-repeat: no-repeat;

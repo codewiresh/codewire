@@ -7,8 +7,14 @@
   const maxTabs = 8;
   const validLabel = (value) => typeof value === "string" && value.length > 0 && value.length <= 64
     && value.isWellFormed() && value === value.trim()
-    && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value);
+    && !/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value);
   const live = (state) => ["starting", "running"].includes(state);
+  // Session states in plain words; an exit code is shown only when known.
+  const stateLabel = (state, exitCode) => ({
+    starting: "Starting…", running: "Running", stopping: "Stopping…", stopped: "Stopped",
+    failed: "Failed", interrupted: "Interrupted",
+    exited: exitCode === undefined ? "Exited" : `Exited with code ${exitCode}`,
+  })[state] ?? state;
   const ended = (state) => !["starting", "running", "stopping"].includes(state);
   // Automatic re-attachment waits 1, 2, 4 and 8 s, then 15 s, while the tab is
   // wanted and the page is visible. Only a connection that stays open resets it.
@@ -32,6 +38,7 @@
     const panels = root.querySelector("[data-terminal-panels]");
     const template = root.querySelector("[data-terminal-tab-template]");
     const newButton = root.querySelector("[data-terminal-new]");
+    const limitNote = root.querySelector("[data-terminal-limit]");
     const renameButton = root.querySelector("[data-terminal-rename]");
     const refreshButton = root.querySelector("[data-terminal-refresh]");
     const message = root.querySelector("[data-terminal-message]");
@@ -71,9 +78,11 @@
     let runtimeRunning = false;
     let setupComplete = false;
     let initialStatusReceived = false;
+    let runtimeChecking = true;
     const runtimeControlReady = () => runtimeAvailable && runtimeRunning;
     const runtimeReady = () => runtimeControlReady() && setupComplete;
-    const readinessMessage = () => !runtimeAvailable ? "Sandbox status is unavailable. Terminal controls are paused."
+    const readinessMessage = () => runtimeChecking ? "Checking Sandbox status before restoring terminals…"
+      : !runtimeAvailable ? "Sandbox status is unavailable. Terminal controls are paused."
       : !runtimeRunning ? "Start this Sandbox to use its terminals."
         : "Sandbox setup is not complete. Terminal controls will be available when setup completes.";
 
@@ -116,11 +125,20 @@
       renameButton.disabled = renameSave.disabled || !tabs.has(active);
       root.querySelector("[data-terminal-reload]").hidden = !needsReload;
       newButton.disabled = blocked || tabs.size >= maxTabs;
+      // Explain the tab limit where it applies instead of only disabling New.
+      const atLimit = authorized && !suspended && tabs.size >= maxTabs;
+      if (limitNote) {
+        limitNote.hidden = !atLimit;
+        if (atLimit) newButton.setAttribute("aria-describedby", limitNote.id);
+        else newButton.removeAttribute("aria-describedby");
+      }
       refreshButton.disabled = pending || suspended;
       existing.disabled = blocked || tabs.size >= maxTabs || existing.options.length <= 1;
       existingForm.querySelector("button").disabled = existing.disabled || !existing.value;
       for (const tab of tabs.values()) {
-        tab.toggle.disabled = blocked || !tab.available || tab.renderFailed;
+        // An ended session has nothing to reconnect to; Replay still shows its output.
+        tab.toggle.disabled = blocked || !tab.available || tab.renderFailed
+          || (ended(tab.state) && tab.socket?.readyState !== WebSocket.OPEN);
         tab.reset.disabled = blocked || !tab.available;
         const removable = !tab.available || ended(tab.state);
         tab.close.hidden = removable;
@@ -411,7 +429,7 @@
         if (tab.socket !== socket || suspended || !authorized) { socket.close(); return; }
         if (socket.protocol !== P.protocol) { detach(tab, "The terminal protocol is unavailable."); return; }
         tab.toggle.textContent = "Disconnect";
-        connectionText(tab, live(tab.state) ? "Connected" : tab.state);
+        connectionText(tab, live(tab.state) ? "Connected" : stateLabel(tab.state));
         // A server that accepts and then closes must not reset the backoff.
         tab.stableTimer = setTimeout(() => {
           tab.stableTimer = null;
@@ -429,7 +447,7 @@
             finalStatus = !["starting", "running", "stopping"].includes(frame.state);
             tab.state = frame.state;
             if (!live(tab.state)) { discardInput(tab); watchSendQueue(tab, socket); }
-            const text = `${frame.state}${frame.exitCode === undefined ? "" : ` (${frame.exitCode})`}`;
+            const text = stateLabel(frame.state, frame.exitCode);
             if (finalStatus) {
               finalText = text;
               finalAfterRender(tab, text);
@@ -569,7 +587,7 @@
       tab.toggle.addEventListener("click", () => {
         // Disconnect is sticky until Reconnect. Reconnect acts immediately,
         // including while an automatic attempt is waiting or connecting.
-        if ([WebSocket.OPEN, WebSocket.CLOSING].includes(tab.socket?.readyState)) { detach(tab); return; }
+        if ([WebSocket.OPEN, WebSocket.CLOSING].includes(tab.socket?.readyState)) { detach(tab); updateControls(); return; }
         tab.failures = 0;
         void refresh(tab.id);
       });
@@ -646,6 +664,7 @@
         if (!response.ok) {
           const error = new Error("Session request failed");
           error.reload = value?.error === "request-rejected";
+          error.limit = value?.error === "session-limit";
           error.authorization = response.status === 401 || (response.status === 403 && !error.reload) || value?.error === "account-changed";
           throw error;
         }
@@ -754,6 +773,8 @@
         } else if (error.reload) {
           needsReload = true;
           announce("Reload this page before changing terminals. The change was not retried.");
+        } else if (error.limit) {
+          announce("This Sandbox has reached its terminal session limit. Close a terminal you no longer need, then try again.");
         } else {
           uncertain = true;
           announce("The terminal change could not be confirmed. Refresh sessions to inspect the result before another change.");
@@ -876,6 +897,7 @@
         || typeof status.available !== "boolean" || typeof status.setupComplete !== "boolean") return;
       const wasReady = runtimeReady();
       runtimeAvailable = status.available;
+      runtimeChecking = !status.available && status.checking === true;
       runtimeRunning = status.running;
       setupComplete = status.setupComplete;
       const ready = runtimeReady();
@@ -924,7 +946,9 @@
       announce("Terminal settings are unavailable. Reload this page.");
       return;
     }
-    announce("Checking Sandbox status before restoring terminals…");
+    // Until a Sandbox status arrives, the empty state explains the wait.
+    announce("");
+    root.querySelector("[data-terminal-empty]").textContent = readinessMessage();
     updateControls();
   }
 
