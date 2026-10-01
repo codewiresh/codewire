@@ -1437,6 +1437,8 @@ grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner
 grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- "'api::admin::startup_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$integration_runner"
+grep -qF -- "'worker::workspace_binding::database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 9' "$integration_runner"
 grep -qF -- "'api::environment_resize::tests::db_'" "$integration_runner"
 grep -qF 'assert_passed_count "environment resize admission matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'api::ssh_proxy::database_tests::'" "$integration_runner"

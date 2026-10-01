@@ -159,6 +159,7 @@ async fn reconciler_loop(
     ticker.tick().await; // align with Go's NewTicker (first fire after interval)
     let mut startup_recovery_observed = false;
     let mut legacy_warm_pool_retirement_complete = false;
+    let mut workspace_binding_backfill = super::workspace_binding::BackfillCursor::default();
     loop {
         tokio::select! {
             _ = leader_notify.notified() => {
@@ -182,6 +183,13 @@ async fn reconciler_loop(
                         legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(&ctx).await;
                     }
                     run_reconciliation(&ctx).await;
+                    // Program #2238 B1: shadow-record claim-time workspace
+                    // bindings and first PVC UIDs; nothing reads them yet.
+                    super::workspace_binding::backfill_workspace_bindings(
+                        &ctx,
+                        &mut workspace_binding_backfill,
+                    )
+                    .await;
                 } else {
                     startup_recovery_observed = false;
                     legacy_warm_pool_retirement_complete = false;
