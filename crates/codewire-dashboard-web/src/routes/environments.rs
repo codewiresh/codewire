@@ -1260,13 +1260,12 @@ pub(super) async fn resize_plan(
             return login_redirect(&environments_path(&slug), &headers);
         }
         Err(error) => {
-            return mutation_redirect(
-                &state,
-                environments_path(&slug),
-                "",
-                mutation_error(&error),
-                &headers,
-            );
+            let code = if environment_connect::resize_refused_during_setup(&error) {
+                "setup-running"
+            } else {
+                mutation_error(&error)
+            };
+            return mutation_redirect(&state, environments_path(&slug), "", code, &headers);
         }
     };
     let (plan, environment) = response;
@@ -2450,6 +2449,9 @@ fn resize_operation_redirect(
 pub(super) fn page_error(value: &str) -> &'static str {
     match value {
         "invalid" => "The Sandbox request was invalid for its current state.",
+        "setup-running" => {
+            "Setup is still running. Nothing was applied. You can resize when it finishes."
+        }
         "not-authorized" => "You do not have permission to change that Sandbox.",
         "not-found" => "The Sandbox no longer exists.",
         "quota" => {
@@ -3187,6 +3189,7 @@ mod tests {
                 can_start: false,
                 can_stop: true,
                 can_destroy: true,
+                setup_running: false,
                 confidential_actions_allowed: false,
                 vscode_url: "https://vscode.invalid".into(),
                 ports: Vec::new(),
@@ -3266,11 +3269,62 @@ mod tests {
             can_start: false,
             can_stop: true,
             can_destroy: true,
+            setup_running: false,
             confidential_actions_allowed: true,
             vscode_url: "https://vscode.invalid".into(),
             ports: Vec::new(),
             sources: None,
         }
+    }
+
+    fn render_terminal(
+        organization: &OrganizationContext,
+        environment: crate::view::EnvironmentRow,
+    ) -> String {
+        let view = crate::view::DashboardView {
+            user_name: "Resize".into(),
+            csrf_token: Default::default(),
+            is_admin: false,
+            organizations: Vec::new(),
+            has_organizations: false,
+            organization_navigation_unavailable: false,
+            new_organization_url: "/organizations/new/".into(),
+            settings_url: "/settings/".into(),
+            has_selected_organization: false,
+            selected_organization_name: String::new(),
+            selected_organization_slug: String::new(),
+            selected_organization_url: String::new(),
+            sandboxes: Vec::new(),
+            recent_sandboxes: Vec::new(),
+            sandbox_rail_available: false,
+            sandbox_rail_loading: false,
+            sandbox_total: 0,
+            sandbox_running: 0,
+            sandbox_stopped: 0,
+            sandbox_attention: 0,
+            provisioned_cpu_millicores: 0,
+            provisioned_memory_mb: 0,
+            provisioned_disk_gb: 0,
+        };
+        let terminal_page = crate::view::TerminalPageView {
+            account_id: "account".into(),
+            organization_id: organization.id.clone(),
+            environment,
+            websocket_origin: "wss://dashboard.invalid".into(),
+            list_context: SandboxListContext::default(),
+            list_url: "/test/".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        crate::templates::TerminalTemplate {
+            view: &view,
+            organization,
+            page: &terminal_page,
+            csrf_token: "csrf",
+            style_nonce: "nonce",
+        }
+        .render()
+        .unwrap()
     }
 
     fn resize_ids(html: &str) -> Vec<&str> {
@@ -3325,50 +3379,7 @@ mod tests {
         assert_eq!(list.matches("data-resize-current").count(), 2);
         assert!(!list.contains("millicores)"));
 
-        let view = crate::view::DashboardView {
-            user_name: "Resize".into(),
-            csrf_token: Default::default(),
-            is_admin: false,
-            organizations: Vec::new(),
-            has_organizations: false,
-            organization_navigation_unavailable: false,
-            new_organization_url: "/organizations/new/".into(),
-            settings_url: "/settings/".into(),
-            has_selected_organization: false,
-            selected_organization_name: String::new(),
-            selected_organization_slug: String::new(),
-            selected_organization_url: String::new(),
-            sandboxes: Vec::new(),
-            recent_sandboxes: Vec::new(),
-            sandbox_rail_available: false,
-            sandbox_rail_loading: false,
-            sandbox_total: 0,
-            sandbox_running: 0,
-            sandbox_stopped: 0,
-            sandbox_attention: 0,
-            provisioned_cpu_millicores: 0,
-            provisioned_memory_mb: 0,
-            provisioned_disk_gb: 0,
-        };
-        let terminal_page = crate::view::TerminalPageView {
-            account_id: "account".into(),
-            organization_id: organization.id.clone(),
-            environment: off_catalog,
-            websocket_origin: "wss://dashboard.invalid".into(),
-            list_context: SandboxListContext::default(),
-            list_url: "/test/".into(),
-            message: String::new(),
-            error: String::new(),
-        };
-        let terminal = crate::templates::TerminalTemplate {
-            view: &view,
-            organization: &organization,
-            page: &terminal_page,
-            csrf_token: "csrf",
-            style_nonce: "nonce",
-        }
-        .render()
-        .unwrap();
+        let terminal = render_terminal(&organization, off_catalog);
         // The Resize dialog and its no-script fallback render the same fields.
         for form in ["resize", "resize-fallback"] {
             assert!(terminal.contains(&format!(
@@ -3380,12 +3391,12 @@ mod tests {
         }
         assert!(!terminal.contains("millicores)"));
         // One footer submits each step's form; no text Close duplicates
-        // Cancel or Done. Only the v2 controller reveals Apply in that footer,
+        // Cancel or Done. Only controllers from v2 reveal Apply in that footer,
         // so a cached v1 script must not pair with this markup.
         assert!(terminal.contains(crate::assets::SANDBOX_RESIZE_SCRIPT_PATH));
         assert_eq!(
             crate::assets::SANDBOX_RESIZE_SCRIPT_PATH,
-            "/assets/codewire/sandbox-resize-v2.js"
+            "/assets/codewire/sandbox-resize-v3.js"
         );
         let resize_dialog = terminal
             .split_once("id=\"sandbox-resize\"")
@@ -3416,6 +3427,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #2333: orchestration refuses Resize while setup owns a running Sandbox.
+    /// Without script, neither the detail page nor the inventory may offer it
+    /// then without saying why.
+    #[test]
+    fn resize_waits_for_setup_and_says_why_without_script() {
+        const READY: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        const SETUP: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        const NOTE: &str = "Resize is available when setup finishes.";
+        let organization = test_organization();
+        let ready = resize_test_row(READY, 1_000, 2_048);
+        let setup = crate::view::EnvironmentRow {
+            setup_running: true,
+            ..resize_test_row(SETUP, 1_000, 2_048)
+        };
+        let page = EnvironmentsPageView {
+            environments: vec![ready.clone(), setup.clone()],
+            environments_loading: false,
+            create_form: default_create_form("csrf".into(), false),
+            source_editor: None,
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: String::new(),
+            state: "all".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let list = EnvironmentListTemplate {
+            organization: &organization,
+            page: &page,
+        }
+        .render()
+        .unwrap();
+        assert_eq!(list.matches(">Resize</summary>").count(), 1);
+        assert!(list.contains(&format!("id=\"resize-{READY}-cpu\"")));
+        assert!(!list.contains(&format!("id=\"resize-{SETUP}-cpu\"")));
+        assert_eq!(
+            list.matches(&format!("<p class=\"cw-row-menu-note\">{NOTE}</p>"))
+                .count(),
+            1
+        );
+
+        let waiting = render_terminal(&organization, setup);
+        assert!(waiting.contains(&format!(
+            "<p class=\"cw-field-help\" id=\"sandbox-resize-setup-note\" data-resize-setup-note>{NOTE}</p>"
+        )));
+        assert!(waiting.contains(
+            "data-resize-open aria-describedby=\"sandbox-resize-setup-note\" hidden>Resize</button>"
+        ));
+        assert!(waiting.contains(
+            "data-sandbox-action=\"resize\" data-sandbox-confirm disabled aria-describedby=\"sandbox-resize-setup-note\">Review resize</button>"
+        ));
+
+        let offered = render_terminal(&organization, ready);
+        assert!(offered.contains(&format!("data-resize-setup-note hidden>{NOTE}</p>")));
+        assert!(!offered.contains("aria-describedby=\"sandbox-resize-setup-note\""));
+        assert!(offered.contains(
+            "data-sandbox-action=\"resize\" data-sandbox-confirm>Review resize</button>"
+        ));
+        // Only the readiness v2 and Resize v3 controllers keep this reason
+        // and the Resize button in step. A cached older script would leave
+        // the reason stale beside an enabled Resize, so both URLs moved.
+        for path in [
+            crate::assets::TERMINAL_READINESS_SCRIPT_PATH,
+            crate::assets::SANDBOX_RESIZE_SCRIPT_PATH,
+        ] {
+            assert!(waiting.contains(path), "{path}");
+        }
+        assert_eq!(
+            crate::assets::TERMINAL_READINESS_SCRIPT_PATH,
+            "/assets/codewire/terminal-readiness-v2.js"
+        );
+        assert_eq!(
+            page_error("setup-running"),
+            "Setup is still running. Nothing was applied. You can resize when it finishes."
+        );
     }
 
     #[test]

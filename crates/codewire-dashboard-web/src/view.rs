@@ -827,6 +827,10 @@ pub(crate) struct EnvironmentRow {
     pub(crate) can_start: bool,
     pub(crate) can_stop: bool,
     pub(crate) can_destroy: bool,
+    /// Setup still owns this running Sandbox: it has neither completed nor
+    /// recorded a failure. Orchestration refuses Resize in this window, so
+    /// Resize waits and says why. Presentation only, never authorization.
+    pub(crate) setup_running: bool,
     pub(crate) confidential_actions_allowed: bool,
     pub(crate) vscode_url: String,
     pub(crate) ports: Vec<EnvironmentPortRow>,
