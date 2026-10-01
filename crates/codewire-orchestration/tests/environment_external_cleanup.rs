@@ -1,9 +1,12 @@
 //! DB-backed acceptance for the durable environment external-cleanup marker.
 
-use codewire_orchestration::lifecycle::{PgLifecycleStore, Service};
+use codewire_orchestration::lifecycle::{PgLifecycleStore, RuntimeAbsenceProof, Service};
 use codewire_server_core::AppError;
 use codewire_server_core::org_deletion::{
-    acquire_environment_runtime_mutation_lease, unresolved_organization_mutation_leases,
+    OrganizationMutationClass, OrganizationMutationLease,
+    acquire_environment_runtime_mutation_lease, acquire_organization_mutation_lease,
+    mark_organization_mutation_resolution_required, release_organization_mutation_lease,
+    unresolved_organization_mutation_leases,
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -116,8 +119,8 @@ async fn cleanup(pool: &PgPool, fixture: &Fixture) {
         .bind(&fixture.org_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM environments WHERE id = $1")
-        .bind(&fixture.env_id)
+    let _ = sqlx::query("DELETE FROM environments WHERE org_id = $1")
+        .bind(&fixture.org_id)
         .execute(pool)
         .await;
     let _ = sqlx::query("DELETE FROM environment_presets WHERE id = $1")
@@ -134,13 +137,100 @@ async fn cleanup(pool: &PgPool, fixture: &Fixture) {
         .await;
 }
 
+/// Open a destroy attempt's runtime absence proof, as the destroy activity does
+/// before its first cleanup step.
+async fn proof(pool: &PgPool) -> RuntimeAbsenceProof {
+    RuntimeAbsenceProof::begin(pool)
+        .await
+        .expect("read runtime absence proof start")
+}
+
+/// Another Sandbox in the fixture's organization that is still running.
+async fn seed_running_environment(pool: &PgPool, fixture: &Fixture, name: &str) -> String {
+    let env_id = format!("{}_{name}", fixture.env_id);
+    sqlx::query(
+        r#"INSERT INTO environments
+               (id, org_id, created_by, type, state, desired_state, preset_id, project_spec)
+           VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4,
+                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+    )
+    .bind(&env_id)
+    .bind(&fixture.org_id)
+    .bind(&fixture.user_id)
+    .bind(&fixture.preset_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    env_id
+}
+
+/// Record Sandbox delete intent, as the destroy activity does before cleanup.
+async fn begin_destroy(pool: &PgPool, env_id: &str) {
+    sqlx::query(
+        "UPDATE environments SET state = 'destroying', desired_state = 'destroyed' WHERE id = $1",
+    )
+    .bind(env_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Admit a runtime dispatch on `env_id` and record its outcome as unknown,
+/// like a StopSession whose daemon did not acknowledge within its bound.
+async fn ambiguous_dispatch(pool: &PgPool, org_id: &str, env_id: &str) -> String {
+    let lease = acquire_environment_runtime_mutation_lease(pool, org_id, env_id)
+        .await
+        .unwrap();
+    assert_eq!(lease.environment_id.as_deref(), Some(env_id));
+    mark_ambiguous(pool, &lease.id).await;
+    lease.id
+}
+
+async fn mark_ambiguous(pool: &PgPool, lease_id: &str) {
+    mark_organization_mutation_resolution_required(
+        pool,
+        lease_id,
+        "environment_runtime_dispatch_ambiguous",
+    )
+    .await
+    .unwrap();
+}
+
+async fn lease(pool: &PgPool, lease_id: &str) -> OrganizationMutationLease {
+    sqlx::query_as("SELECT * FROM organization_mutation_leases WHERE id = $1")
+        .bind(lease_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn cleanup_marked(pool: &PgPool, env_id: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT state = 'destroyed' AND external_cleanup_completed_at IS NOT NULL
+           FROM environments WHERE id = $1",
+    )
+    .bind(env_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn assert_cleanup_refused(pool: &PgPool, env_id: &str, proof: RuntimeAbsenceProof) {
+    let error = Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(env_id, false, proof)
+        .await
+        .expect_err("external cleanup marker must stay blocked");
+    assert!(error.to_string().contains("preconditions"), "{error:#}");
+    assert!(!cleanup_marked(pool, env_id).await);
+}
+
 #[tokio::test]
 async fn normal_destroy_closes_sessions_removes_backend_and_marks_atomically() {
     let Some(pool) = pool().await else { return };
     let fixture = seed(&pool, "destroying").await;
 
     Service::<PgLifecycleStore>::for_pool(pool.clone())
-        .complete_external_cleanup(&fixture.env_id, false)
+        .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
         .await
         .unwrap();
 
@@ -198,7 +288,7 @@ async fn historical_destroyed_row_is_verified_not_backfilled_by_assumption() {
     assert!(before.is_none());
 
     Service::<PgLifecycleStore>::for_pool(pool.clone())
-        .complete_external_cleanup(&fixture.env_id, true)
+        .complete_external_cleanup(&fixture.env_id, true, proof(&pool).await)
         .await
         .unwrap();
     let after: Option<chrono::NaiveDateTime> =
@@ -231,7 +321,7 @@ async fn runtime_lease_and_port_discovery_each_block_the_marker() {
     let service = Service::<PgLifecycleStore>::for_pool(pool.clone());
     assert!(
         service
-            .complete_external_cleanup(&fixture.env_id, false)
+            .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
             .await
             .unwrap_err()
             .to_string()
@@ -257,7 +347,7 @@ async fn runtime_lease_and_port_discovery_each_block_the_marker() {
     .unwrap();
     assert!(
         service
-            .complete_external_cleanup(&fixture.env_id, false)
+            .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
             .await
             .unwrap_err()
             .to_string()
@@ -270,7 +360,7 @@ async fn runtime_lease_and_port_discovery_each_block_the_marker() {
         .unwrap();
     assert!(
         service
-            .complete_external_cleanup(&fixture.env_id, false)
+            .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
             .await
             .unwrap_err()
             .to_string()
@@ -282,9 +372,178 @@ async fn runtime_lease_and_port_discovery_each_block_the_marker() {
         .await
         .unwrap();
     service
-        .complete_external_cleanup(&fixture.env_id, false)
+        .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
         .await
         .unwrap();
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn ambiguous_dispatch_on_another_environment_does_not_block_cleanup() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroying").await;
+    // Sandbox A keeps running with one dispatch whose outcome is unknown and
+    // one still in flight. Neither can change the Sandbox being deleted.
+    let other = seed_running_environment(&pool, &fixture, "other").await;
+    let ambiguous = ambiguous_dispatch(&pool, &fixture.org_id, &other).await;
+    let in_flight = acquire_environment_runtime_mutation_lease(&pool, &fixture.org_id, &other)
+        .await
+        .unwrap();
+
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
+        .await
+        .expect("another Sandbox's runtime dispatches must not block this delete");
+    assert!(cleanup_marked(&pool, &fixture.env_id).await);
+
+    // This proof says nothing about Sandbox A, so its evidence is untouched.
+    assert_eq!(lease(&pool, &ambiguous).await.state, "resolution_required");
+    assert_eq!(lease(&pool, &in_flight.id).await.state, "active");
+    release_organization_mutation_lease(&pool, &in_flight.id)
+        .await
+        .unwrap();
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn own_ambiguous_dispatch_is_resolved_once_runtime_absence_is_proven() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroying").await;
+    let target = seed_running_environment(&pool, &fixture, "target").await;
+    // The Dev failure: closing a terminal recorded an ambiguous StopSession,
+    // then the same Sandbox was deleted.
+    let ambiguous = ambiguous_dispatch(&pool, &fixture.org_id, &target).await;
+    begin_destroy(&pool, &target).await;
+
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&target, false, proof(&pool).await)
+        .await
+        .expect("a proof that began after the ambiguity settled covers it");
+    assert!(cleanup_marked(&pool, &target).await);
+    let resolved = lease(&pool, &ambiguous).await;
+    assert_eq!(resolved.state, "resolved");
+    assert!(resolved.resolved_at.is_some());
+    assert_eq!(
+        resolved.recovery_code.as_deref(),
+        Some("environment_runtime_dispatch_ambiguous"),
+        "resolution keeps the original ambiguity evidence"
+    );
+    assert!(
+        unresolved_organization_mutation_leases(&pool, &fixture.org_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the destroyed Sandbox leaves no unresolved runtime lease behind"
+    );
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn ambiguity_that_settles_during_the_proof_waits_for_the_next_attempt() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroying").await;
+    let target = seed_running_environment(&pool, &fixture, "target").await;
+    // Admitted before the delete; its outcome became unknown only after this
+    // attempt had started removing the runtime, so it may have acted since.
+    let in_flight = acquire_environment_runtime_mutation_lease(&pool, &fixture.org_id, &target)
+        .await
+        .unwrap();
+    begin_destroy(&pool, &target).await;
+    let first_attempt = proof(&pool).await;
+    mark_ambiguous(&pool, &in_flight.id).await;
+
+    assert_cleanup_refused(&pool, &target, first_attempt).await;
+    assert_eq!(
+        lease(&pool, &in_flight.id).await.state,
+        "resolution_required"
+    );
+
+    // The retry proves absence again after the ambiguity settled.
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&target, false, proof(&pool).await)
+        .await
+        .expect("a later attempt covers the settled ambiguity");
+    assert!(cleanup_marked(&pool, &target).await);
+    assert_eq!(lease(&pool, &in_flight.id).await.state, "resolved");
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn in_flight_dispatch_on_the_same_environment_still_blocks_cleanup() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroying").await;
+    let target = seed_running_environment(&pool, &fixture, "target").await;
+    let in_flight = acquire_environment_runtime_mutation_lease(&pool, &fixture.org_id, &target)
+        .await
+        .unwrap();
+    begin_destroy(&pool, &target).await;
+
+    assert_cleanup_refused(&pool, &target, proof(&pool).await).await;
+    // Lease expiry alone is never proof that the dispatch stopped acting.
+    sqlx::query(
+        r#"UPDATE organization_mutation_leases
+           SET admitted_at = NOW() - INTERVAL '2 minutes',
+               deadline_at = NOW() - INTERVAL '1 minute'
+           WHERE id = $1"#,
+    )
+    .bind(&in_flight.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_cleanup_refused(&pool, &target, proof(&pool).await).await;
+    assert_eq!(
+        lease(&pool, &in_flight.id).await.state,
+        "active",
+        "cleanup never settles a dispatch that is still running"
+    );
+
+    // Only the dispatch's own known outcome releases it.
+    release_organization_mutation_lease(&pool, &in_flight.id)
+        .await
+        .unwrap();
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&target, false, proof(&pool).await)
+        .await
+        .unwrap();
+    assert_eq!(lease(&pool, &in_flight.id).await.state, "released");
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn organization_wide_ambiguity_blocks_only_until_a_later_proof() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroying").await;
+    // Environment creation, and every lease admitted before leases recorded
+    // their environment, may target any environment of the organization.
+    let organization_wide = acquire_organization_mutation_lease(
+        &pool,
+        &fixture.org_id,
+        OrganizationMutationClass::EnvironmentRuntimeDispatch,
+    )
+    .await
+    .unwrap();
+    assert_eq!(organization_wide.environment_id, None);
+    let first_attempt = proof(&pool).await;
+    mark_ambiguous(&pool, &organization_wide.id).await;
+
+    assert_cleanup_refused(&pool, &fixture.env_id, first_attempt).await;
+
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
+        .await
+        .expect("a proof that began after the ambiguity settled covers this Sandbox");
+    assert!(cleanup_marked(&pool, &fixture.env_id).await);
+    // It may concern another environment, so only organization deletion,
+    // after proving every environment, may resolve it.
+    assert_eq!(
+        lease(&pool, &organization_wide.id).await.state,
+        "resolution_required"
+    );
 
     cleanup(&pool, &fixture).await;
 }

@@ -176,7 +176,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 66
+  assert_passed_count "server-core migration matrix" "$logfile" 71
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
@@ -324,7 +324,7 @@ run_database() {
     echo "::error::organization deletion lifecycle matrix skipped"
     return 1
   fi
-  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 19
+  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 20
 
   logfile="$RUN_DIR/organization-billing-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -351,7 +351,7 @@ run_database() {
     echo "::error::environment external cleanup matrix skipped"
     return 1
   fi
-  assert_passed_count "environment external cleanup matrix" "$logfile" 3
+  assert_passed_count "environment external cleanup matrix" "$logfile" 8
 
   logfile="$RUN_DIR/environment-session-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
