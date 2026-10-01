@@ -12,7 +12,7 @@ use super::env_data::{
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
 use super::gatewayauth::issue_environment_tokens;
-use super::start_timing::{duration_ms, pod_stage_timings, start_profile};
+use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{
@@ -1365,7 +1365,7 @@ async fn run_environment_create(
                 // The gateway serves readiness only after it reaches the
                 // workspace daemon, so this wait covers the workspace cold
                 // start. Same metadata shape as the restart path, less the
-                // Pod IP, which `store_backend` records once the probe sees it.
+                // Pod IP, which the backend row records once a probe sees it.
                 let gateway_started = std::time::Instant::now();
                 emit_create_log(
                     authority,
@@ -1407,33 +1407,24 @@ async fn run_environment_create(
 
             CreateAction::StoreBackend => {
                 update_backend_pod_info(authority, &probe.pod_ip, &probe.pod_name).await?;
-                // This arm runs only when a verified Pod first differs from
-                // the stored backend, so each Pod's own start marks are
-                // recorded once. A bootstrap-recovered replacement publishes
-                // itself and is not timed here. The marks are not journal
-                // checkpoints.
-                for timing in pod_stage_timings(&probe.pod_timeline) {
-                    emit_create_log(
-                        authority,
-                        timing.stage.as_str(),
-                        "completed",
-                        "",
-                        Some(timing.metadata()),
-                    )
-                    .await?;
-                    observe_create_stage(timing.stage, profile, timing.duration);
-                }
                 emit_create_log(authority, "store_backend", "completed", "", None).await?;
             }
 
             CreateAction::MarkRunning => {
-                if let Err(e) = svc.transition(env_id, &env.state, "running").await {
-                    authority.ensure().await?;
-                    tracing::warn!(env = env_id, from = env.state, error = %e, "CAS to running failed");
-                }
+                let entered_running = match svc.transition(env_id, &env.state, "running").await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        authority.ensure().await?;
+                        tracing::warn!(env = env_id, from = env.state, error = %e, "CAS to running failed");
+                        false
+                    }
+                };
                 if let Err(e) = svc.mark_started(env_id).await {
                     authority.ensure().await?;
                     tracing::warn!(env = env_id, error = %e, "mark started failed");
+                }
+                if entered_running && records_pod_start_marks(action) {
+                    record_pod_start_marks(ctx, authority, &probe, profile).await?;
                 }
                 emit_running_log(authority, "mark_running", "completed", "", None).await?;
             }
@@ -1495,6 +1486,68 @@ fn elapsed_meta(elapsed: Duration) -> Option<serde_json::Value> {
 }
 
 const GATEWAY_READY_STARTED_MESSAGE: &str = "Waiting for gateway";
+
+/// The create action whose committed transition records the workspace Pod's
+/// own start marks: `mark_running`, the one action every create path takes.
+/// `store_backend` cannot own this: the leader's sandbox liveness loop stores
+/// `pod_name` and `pod_ip` for `creating` environments every few seconds, so
+/// during the gateway readiness wait it usually stores the Pod first and
+/// create goes straight from `create_claim` to `mark_running`.
+fn records_pod_start_marks(action: CreateAction) -> bool {
+    action == CreateAction::MarkRunning
+}
+
+/// Rows carry the Pod UID and are written once per Pod, even when an error
+/// retry reaches `mark_running` again for the same Pod. They are not journal
+/// checkpoints.
+async fn record_pod_start_marks(
+    ctx: &WorkerContext,
+    authority: &ActivityAuthority,
+    probe: &ProbeResult,
+    profile: StartProfile,
+) -> anyhow::Result<()> {
+    if probe.pod_uid.is_empty() {
+        return Ok(());
+    }
+    let recorded = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+           SELECT 1 FROM environment_logs
+            WHERE environment_id = $1
+              AND phase = ANY($2)
+              AND metadata->>'pod_uid' = $3
+         )",
+    )
+    .bind(authority.environment_id())
+    .bind(&POD_STAGE_PHASES[..])
+    .bind(&probe.pod_uid)
+    .fetch_one(&ctx.pool)
+    .await;
+    match recorded {
+        Ok(false) => {}
+        Ok(true) => return Ok(()),
+        Err(error) => {
+            // Timing is observational; a failed read must not fail create.
+            tracing::warn!(
+                environment_id = authority.environment_id(),
+                error = %error,
+                "create: skip Pod start marks after a failed recorded-marks read"
+            );
+            return Ok(());
+        }
+    }
+    for timing in pod_stage_timings(&probe.pod_timeline) {
+        emit_running_log(
+            authority,
+            timing.stage.as_str(),
+            "completed",
+            "",
+            Some(timing.metadata(&probe.pod_uid)),
+        )
+        .await?;
+        observe_create_stage(timing.stage, profile, timing.duration);
+    }
+    Ok(())
+}
 
 /// Observe a completed create stage after its durable log row committed.
 fn observe_create_stage(stage: StartStage, profile: StartProfile, elapsed: Duration) {
@@ -1974,6 +2027,85 @@ mod tests {
             next_create_action("running", Some(&b), true, &probe(true, true)),
             CreateAction::Done
         );
+    }
+
+    /// Walk the create policy the way the activity loop does, applying each
+    /// action's durable effect, and return the actions taken.
+    /// `liveness_stores_pod` reproduces Dev on 2026-09-30: the leader's
+    /// sandbox liveness loop stored the Pod's name and IP during the gateway
+    /// readiness wait, so create never took `store_backend`.
+    fn walk_create(start_state: &str, liveness_stores_pod: bool) -> Vec<CreateAction> {
+        let ready = probe(true, true);
+        let mut state = start_state.to_string();
+        let mut stored: Option<BackendRow> = None;
+        let mut claim_exists = false;
+        let mut actions = Vec::new();
+        loop {
+            let observed = if claim_exists {
+                ready.clone()
+            } else {
+                probe(false, false)
+            };
+            let action = next_create_action(&state, stored.as_ref(), false, &observed);
+            actions.push(action);
+            assert!(actions.len() <= 8, "create did not converge: {actions:?}");
+            match action {
+                CreateAction::EnsureNamespace => stored = Some(backend("ns", "", "", false)),
+                CreateAction::CreateClaim => {
+                    let row = stored.as_mut().unwrap();
+                    claim_exists = true;
+                    row.claim_name = "sandbox-env".into();
+                    state = "creating".into();
+                    if liveness_stores_pod {
+                        row.pod_name = ready.pod_name.clone();
+                        row.pod_ip = ready.pod_ip.clone();
+                    }
+                }
+                CreateAction::StoreBackend => {
+                    let row = stored.as_mut().unwrap();
+                    row.pod_name = ready.pod_name.clone();
+                    row.pod_ip = ready.pod_ip.clone();
+                }
+                CreateAction::MarkRunning => state = "running".into(),
+                CreateAction::PublishSetup => return actions,
+                other => panic!("unexpected create action {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn pod_start_marks_are_recorded_on_the_path_dev_takes() {
+        use CreateAction::*;
+        // Dev: create_claim, then straight to mark_running.
+        let dev = walk_create("pending", true);
+        assert_eq!(
+            dev,
+            [EnsureNamespace, CreateClaim, MarkRunning, PublishSetup]
+        );
+        let create_stores_pod = walk_create("pending", false);
+        assert_eq!(
+            create_stores_pod,
+            [
+                EnsureNamespace,
+                CreateClaim,
+                StoreBackend,
+                MarkRunning,
+                PublishSetup
+            ]
+        );
+        // Every path takes the recording action exactly once;
+        // `store_backend` is optional and so cannot own the Pod marks.
+        for actions in [&dev, &create_stores_pod] {
+            assert_eq!(
+                actions
+                    .iter()
+                    .filter(|action| records_pod_start_marks(**action))
+                    .count(),
+                1,
+                "{actions:?}"
+            );
+        }
+        assert!(!records_pod_start_marks(StoreBackend));
     }
 
     #[test]

@@ -40,6 +40,10 @@ async function transport(page: Page) {
     expect([...form.keys()].sort()).toEqual(["_csrf", "account_id"]);
     expect(form.get("account_id")).toBe(state.accountId);
     await state.launchGate;
+    if (state.launchFailure === "limit") {
+      await route.fulfill({ status: 409, json: { error: "session-limit" } });
+      return;
+    }
     if (state.launchFailure === "csrf") {
       await route.fulfill({ status: 403, json: { error: "request-rejected" } });
       return;
@@ -218,7 +222,7 @@ test("old output, history gap and recent output render serially before final set
   await releaseOneWrite(page);
   await expect.poll(() => state.connections[0].frames.filter((frame) => frame.type === "ack").map((frame) => frame.offset)).toEqual([String(oldEnd), "4096", String(recentEnd)]);
   await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "true");
-  await expect(page.locator("[data-terminal-connection]")).toHaveText("exited (0)");
+  await expect(page.locator("[data-terminal-connection]")).toHaveText("Exited with code 0");
   expect(state.launches).toBe(0);
   expect(state.stops).toBe(0);
 });
@@ -280,7 +284,7 @@ test("clean final socket closure drains output before publishing the exact exit 
   await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "false");
   await expect.poll(async () => (await heldWrites(page)).callbacks).toBe(1);
   await releaseOneWrite(page);
-  await expect(page.locator("[data-terminal-connection]")).toHaveText("exited (7)");
+  await expect(page.locator("[data-terminal-connection]")).toHaveText("Exited with code 7");
   await expect(page.locator("[data-terminal-root]")).toHaveAttribute("data-terminal-settled", "true");
   expect(state.connections[0].frames.some((frame) => frame.type === "ack")).toBe(false);
   expect(state.launches).toBe(0);
@@ -527,17 +531,17 @@ for (const transition of ["disconnect", "foreground", "stopping", "exited"] as c
       await expect.poll(() => state.connections.length).toBe(2);
     } else {
       state.connections[0].route.send(JSON.stringify({ type: "status", state: transition }));
-      await expect(page.locator("[data-terminal-connection]")).toHaveText(transition);
+      await expect(page.locator("[data-terminal-connection]")).toHaveText(transition === "stopping" ? "Stopping…" : "Exited");
       if (transition === "stopping") {
         state.connections[0].route.send(JSON.stringify({ type: "status", state: "running" }));
-        await expect(page.locator("[data-terminal-connection]")).toHaveText("running");
+        await expect(page.locator("[data-terminal-connection]")).toHaveText("Running");
         await page.keyboard.insertText("new-input");
       }
     }
     await page.clock.runFor(6000);
     await expect.poll(() => state.connections.flatMap((connection) => connection.frames.filter((frame) => frame.type === "input").map((frame) => frame.data)))
       .toEqual(transition === "stopping" ? ["new-input"] : []);
-    if (transition === "exited") await expect(page.locator("[data-terminal-connection]")).toHaveText("exited");
+    if (transition === "exited") await expect(page.locator("[data-terminal-connection]")).toHaveText("Exited");
     else await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
     expect(state.stops).toBe(0);
   });
@@ -730,6 +734,10 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
   }
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeInViewport();
+  // The limit is explained where it applies, not only by a disabled button.
+  const limit = page.locator("[data-terminal-limit]");
+  await expect(limit).toHaveText("Up to 8 terminals can be open at once. Close one to open another.");
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toHaveAccessibleDescription("Up to 8 terminals can be open at once. Close one to open another.");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
   const stored = await page.evaluate(() => ({ ...sessionStorage }));
   const references = JSON.parse(stored[`${prefix}account-a:${org}:${environment}`]);
@@ -743,6 +751,90 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
   expect(state.stops).toBe(0);
 });
 
+
+test("the tab limit note appears only at the limit", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  const limit = page.locator("[data-terminal-limit]");
+  const create = page.getByRole("button", { name: "New terminal", exact: true });
+  for (let count = 1; count <= 8; count += 1) {
+    await expect(limit).toBeHidden();
+    await expect(create).not.toHaveAttribute("aria-describedby");
+    await create.click();
+    await expect(page.getByRole("tab")).toHaveCount(count);
+  }
+  await expect(limit).toBeVisible();
+  await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+  await page.getByRole("dialog", { name: "Close terminal?", exact: true }).getByRole("button", { name: "Close terminal", exact: true }).click();
+  await expect(page.getByRole("tab")).toHaveCount(7);
+  await expect(limit).toBeHidden();
+  await expect(create).toBeEnabled();
+  expect(state.stops).toBe(1);
+});
+
+test("a launch refused at the session limit says so and leaves New terminal usable", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  const create = page.getByRole("button", { name: "New terminal", exact: true });
+  await expect(create).toBeEnabled();
+  state.launchFailure = "limit";
+  await create.click();
+  await expect(page.locator("[data-terminal-message]")).toHaveText("This Sandbox has reached its terminal session limit. Close a terminal you no longer need, then try again.");
+  await expect(page.getByRole("tab")).toHaveCount(0);
+  await expect(create).toBeEnabled();
+});
+
+test("the Close terminal dialog dismisses from its backdrop and Escape without stopping the shell", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  const close = page.getByRole("button", { name: "Close terminal", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Close terminal?", exact: true });
+  await close.click();
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(4, 4);
+  await expect(dialog).toBeHidden();
+  await expect(close).toBeFocused();
+  await close.click();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  expect(state.stops).toBe(0);
+});
+
+test("an ended session offers Replay, not Reconnect", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "last-output\r\n");
+  state.connections[0].route.send(JSON.stringify({ type: "status", state: "exited", exitCode: 0 }));
+  await expect(page.locator("[data-terminal-connection]")).toHaveText("Exited with code 0");
+  // The session inventory reports the exit too, as the daemon does.
+  state.sessions = [{ sessionId: sessionId(1), state: "exited" }];
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Replay recent output", exact: true })).toBeEnabled();
+  expect(state.launches).toBe(0);
+});
+
+test("a failed Sandbox operation is announced and Start retries it", async ({ page }) => {
+  const state = await transport(page);
+  state.running = false;
+  state.detail = { state: "error", desiredState: "started", tone: "danger", lastEvent: "just now",
+    resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
+    startEligible: true, stopEligible: false, deleteEligible: true, actionsAllowed: true, pending: false,
+    deletionState: "unscheduled", shutdownAt: null };
+  await openFixture(page);
+  const status = page.locator("[data-sandbox-observation-status]");
+  await expect(status).toHaveText("The Sandbox operation failed. Choose Start to try again.");
+  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
+  state.detail = { ...state.detail, startEligible: false };
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(status).toHaveText("The Sandbox operation failed. Refresh status to check its current state; no action was retried.");
+  expect(state.launches).toBe(0);
+});
 
 test("a terminal refit after copying keeps the copy announcement", async ({ page }) => {
   const state = await transport(page);
@@ -878,7 +970,7 @@ test("terminal rename cancellation and validation preserve the name and return f
   await trigger.click();
   const input = dialog.getByLabel("Terminal name", { exact: true });
   await expect(input).toHaveAttribute("maxlength", "64");
-  for (const name of [" ", "bad\u202ename", "x".repeat(65)]) {
+  for (const name of [" ", "bad\u202ename", "bad\u200fname", "x".repeat(65)]) {
     await input.evaluate((node, value) => { (node as HTMLInputElement).value = value; node.dispatchEvent(new Event("input", { bubbles: true })); }, name);
     await dialog.getByRole("button", { name: "Save name", exact: true }).click();
     await expect(dialog).toBeVisible();
@@ -1137,7 +1229,7 @@ test("Close confirmation rechecks a terminal that ended while the dialog was ope
   await expect.poll(() => state.connections.length).toBe(1);
   await page.getByRole("button", { name: "Close terminal", exact: true }).click();
   state.connections[0].route.send(JSON.stringify({ type: "status", state: "failed" }));
-  await expect(page.locator("[data-terminal-connection]")).toHaveText("failed");
+  await expect(page.locator("[data-terminal-connection]")).toHaveText("Failed");
   await page.getByRole("dialog").getByRole("button", { name: "Close terminal", exact: true }).click();
   await expect(page.locator("[data-terminal-message]")).toContainText("Use Remove tab");
   await page.getByRole("button", { name: "Remove tab", exact: true }).click();
@@ -1150,13 +1242,28 @@ test("initial terminal restoration waits for fresh status rather than rendered r
   let release!: () => void;
   state.statusGate = new Promise<void>((resolve) => { release = resolve; });
   await openFixture(page);
-  await expect(page.locator("[data-terminal-message]")).toContainText("Checking Sandbox status");
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Checking Sandbox status before restoring terminals…");
+  await expect(page.locator("[data-terminal-message]")).toBeHidden();
+  await expect(page.locator("[data-sandbox-observation-status]")).toBeHidden();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   expect(state.lists).toBe(0);
   expect(state.connections).toHaveLength(0);
   expect(state.launches).toBe(0);
   release();
   await expect.poll(() => state.connections.length).toBe(1);
+  expect(state.launches).toBe(0);
+});
+
+test("a Sandbox stopped at load says how to use its terminals instead of checking forever", async ({ page }) => {
+  const state = await transport(page);
+  state.running = false;
+  state.sessions = [{ sessionId: sessionId(1), state: "interrupted" }];
+  await openFixture(page);
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Start this Sandbox to use its terminals.");
+  // The explanation appears once, not also in the status line.
+  await expect(page.locator("[data-terminal-message]")).toBeHidden();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  expect(state.lists).toBe(0);
   expect(state.launches).toBe(0);
 });
 
@@ -1390,7 +1497,7 @@ for (const ending of ["exited", "abnormal-final", "unverifiable", "render-failur
     if (ending === "exited") {
       socket.route.send(JSON.stringify({ type: "status", state: "exited", exitCode: 0 }));
       socket.route.close({ code: 1000, reason: "finished" });
-      await expect(connection).toHaveText("exited (0)");
+      await expect(connection).toHaveText("Exited with code 0");
     } else if (ending === "abnormal-final") {
       socket.route.send(JSON.stringify({ type: "status", state: "exited", exitCode: 0 }));
       socket.route.close({ code: 1011, reason: "upstream failed" });

@@ -658,3 +658,41 @@ async fn personal_api_key_http_forms_reject_duplicates_unknown_fields_and_oversi
     dashboard.abort();
     server.abort();
 }
+
+#[tokio::test]
+async fn personal_api_key_filters_narrow_rows_and_ignore_unlisted_organizations() {
+    let (state, _source, server) = fixture().await;
+    let (headers, _) = headers();
+    let filtered = |search: &str, organization: &str| {
+        Ok(Query(PageQuery {
+            search: search.into(),
+            organization: organization.into(),
+            ..Default::default()
+        }))
+    };
+    let html = body(
+        page(
+            State(state.clone()),
+            headers.clone(),
+            filtered("no-such-key", ""),
+        )
+        .await,
+    )
+    .await;
+    assert!(!html.contains("Name-own"));
+    assert!(html.contains("No API keys match these filters."));
+    // An organization outside this page never narrows or widens the inventory.
+    let html = body(
+        page(
+            State(state.clone()),
+            headers.clone(),
+            filtered("", "not-a-listed-organization"),
+        )
+        .await,
+    )
+    .await;
+    assert!(html.contains("Name-own"));
+    assert!(!html.contains("Name-foreign"));
+    assert!(!html.contains("Clear filters"));
+    server.abort();
+}

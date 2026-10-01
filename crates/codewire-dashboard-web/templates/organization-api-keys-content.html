@@ -1,25 +1,18 @@
 <section id="organization-content" class="cw-org-content" aria-live="polite"{% if page.has_one_time_key %} hx-history="false"{% endif %}>
-  {% if !page.message.is_empty() %}
-  <div class="cw-alert cw-alert--success" role="status">{{ page.message }}</div>
-  {% endif %}
-  {% if !page.error.is_empty() %}
-  <div class="cw-alert cw-alert--error" role="alert">{{ page.error }}</div>
-  {% endif %}
-
-  <div class="cw-org-toolbar">
+  <header class="cw-page-header">
     <div>
-      <h2 class="cw-card-title">API Keys</h2>
-      <p>Manage API keys for programmatic access</p>
+      <div class="cw-page-title-row"><h1 class="cw-page-title">API keys</h1><span class="cw-badge">{{ page.keys.len() }}<span class="cw-sr-only">{% if page.keys.len() == 1 %} key{% else %} keys{% endif %}</span></span></div>
+      <p class="cw-page-description">Codewire API keys for {{ organization.name }}, for the CLI and SDK.</p>
     </div>
     <details class="cw-menu cw-org-details"{% if page.form.expanded %} open{% endif %}>
-      <summary class="cw-button cw-button--pill">
+      <summary class="cw-button">
         <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>
-        Create Key
+        Create key
       </summary>
       <section class="cw-drawer" aria-labelledby="create-key-title">
         <header class="cw-drawer-header">
-          <h3 id="create-key-title" class="cw-card-title">Create API Key</h3>
-          <p class="cw-card-description">Generate a new API key for this organization.</p>
+          <h2 id="create-key-title" class="cw-card-title">Create API key</h2>
+          <p class="cw-card-description">The key belongs to {{ organization.name }} and is shown once after creation.</p>
         </header>
         <div class="cw-drawer-body">
           {% if !page.form.form_error.is_empty() %}
@@ -53,72 +46,101 @@
               <p class="cw-field-error" role="alert">{{ page.form.expiration_error }}</p>
               {% endif %}
             </div>
-            <button class="cw-button" type="submit">Create</button>
+            <button class="cw-button" type="submit">Create key</button>
           </form>
         </div>
       </section>
     </details>
-  </div>
+  </header>
+
+  {% if !page.message.is_empty() %}
+  <div class="cw-alert cw-alert--success" role="status">{{ page.message }}</div>
+  {% endif %}
+  {% if !page.error.is_empty() %}
+  <div class="cw-alert cw-alert--error" role="alert">{{ page.error }}</div>
+  {% endif %}
 
   {% if page.keys.is_empty() %}
-  <div class="cw-state">
-    <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg>
-    <p>No API keys yet. Create one for programmatic access.</p>
-  </div>
+  <p class="cw-state">No API keys yet. Create one for programmatic access.</p>
   {% else %}
-  <div class="cw-table-shell">
+  <form class="cw-inventory-toolbar" role="search" aria-label="Filter API keys" method="get" action="{{ organization.api_keys_url }}">
+    <label class="cw-sr-only" for="api-key-search">Search API keys</label>
+    <input class="cw-input" id="api-key-search" type="search" name="search" value="{{ page.filter.search }}" maxlength="128" placeholder="Search by name or prefix" autocomplete="off">
+    <label class="cw-sr-only" for="api-key-status">Status</label>
+    <select class="cw-select" id="api-key-status" name="status">
+      <option value=""{% if page.filter.status_selected("") %} selected{% endif %}>All statuses</option>
+      <option value="active"{% if page.filter.status_selected("active") %} selected{% endif %}>Active</option>
+      <option value="disabled"{% if page.filter.status_selected("disabled") %} selected{% endif %}>Disabled</option>
+      <option value="expired"{% if page.filter.status_selected("expired") %} selected{% endif %}>Expired</option>
+    </select>
+    <button class="cw-button cw-button--outline" type="submit">Filter</button>
+    {% if page.filter.active() %}<a href="{{ organization.api_keys_url }}">Clear filters</a>{% endif %}
+  </form>
+  {% if page.visible_count() == 0 %}
+  <p class="cw-state" role="status">No API keys match these filters.</p>
+  {% else %}
+  <div class="cw-table-shell cw-table-shell--menus">
     <table class="cw-table">
+      <caption class="cw-sr-only">API keys in {{ organization.name }}</caption>
       <thead>
-        <tr><th>Name</th><th>Key</th><th>Created by</th><th>Created</th><th>Last used</th><th>Status</th><th>Actions</th></tr>
+        <tr><th scope="col">Name</th><th class="cw-table-secondary" scope="col">Created by</th><th scope="col">Status</th><th class="cw-table-secondary" scope="col">Last used</th><th class="cw-table-secondary" scope="col">Created</th><th class="cw-table-actions" scope="col"><span class="cw-sr-only">Actions</span></th></tr>
       </thead>
       <tbody>
-        {% for key in page.keys %}
+        {% for key in page.keys %}{% if page.filter.matches(key) %}
         <tr>
-          <td><strong>{{ key.name }}</strong></td>
-          <td><code class="cw-key">{{ key.prefix }}</code></td>
-          <td>{{ key.created_by }}</td>
-          <td>{{ key.created }}</td>
-          <td>{{ key.last_used }}</td>
-          <td><span class="cw-status" data-tone="{{ key.status_tone }}">{{ key.status }}</span></td>
-          <td>
-            <div class="cw-row-actions">
-              {% if !key.expired %}
-              <form method="post" action="/{{ organization.slug }}/api-keys/_actions/toggle" hx-post="/{{ organization.slug }}/api-keys/_actions/toggle">
-                <input type="hidden" name="_csrf" value="{{ page.csrf_token }}">
-                <input type="hidden" name="key_id" value="{{ key.id }}">
-                <input type="hidden" name="disabled" value="{% if key.disabled %}false{% else %}true{% endif %}">
-                <button class="cw-button cw-button--outline cw-button--small" type="submit" aria-label="{% if key.disabled %}Enable{% else %}Disable{% endif %} API key">
-                  {% if key.disabled %}Enable{% else %}Disable{% endif %}
-                </button>
-              </form>
-              {% endif %}
-              {% if organization.can_admin %}
-              <details class="cw-menu">
-                <summary class="cw-button cw-button--outline cw-button--small cw-danger-button" aria-label="Delete API key">Delete</summary>
-                <div class="cw-menu-panel cw-menu-panel--form cw-menu-panel--end">
-                  <p>Permanently revoke <strong>{{ key.name }}</strong>? Integrations using it will stop immediately.</p>
-                  <form method="post" action="/{{ organization.slug }}/api-keys/_actions/delete" hx-post="/{{ organization.slug }}/api-keys/_actions/delete">
+          <th scope="row"><span class="cw-cell-stack"><strong>{{ key.name }}</strong><code class="cw-key">{{ key.prefix }}</code></span></th>
+          <td class="cw-table-secondary">{{ key.created_by }}</td>
+          <td><span class="cw-status cw-status--pill" data-tone="{{ key.status_tone }}">{{ key.status }}</span></td>
+          <td class="cw-table-secondary">{{ key.last_used }}</td>
+          <td class="cw-table-secondary">{{ key.created }}</td>
+          <td class="cw-table-actions">
+            {% if !key.expired || organization.can_admin %}
+            <details class="cw-menu">
+              <summary class="cw-icon-button" aria-label="Actions for {{ key.name }}">•••</summary>
+              <div class="cw-menu-panel cw-menu-panel--end">
+                <ul>
+                  {% if !key.expired %}
+                  <li><form method="post" action="/{{ organization.slug }}/api-keys/_actions/toggle" hx-post="/{{ organization.slug }}/api-keys/_actions/toggle">
                     <input type="hidden" name="_csrf" value="{{ page.csrf_token }}">
                     <input type="hidden" name="key_id" value="{{ key.id }}">
-                    <button class="cw-button cw-button--small" type="submit">Delete permanently</button>
-                  </form>
-                </div>
-              </details>
-              {% endif %}
-            </div>
+                    <input type="hidden" name="disabled" value="{% if key.disabled %}false{% else %}true{% endif %}">
+                    <button class="cw-menu-item" type="submit">{% if key.disabled %}Enable{% else %}Disable{% endif %}</button>
+                  </form></li>
+                  {% endif %}
+                  {% if organization.can_admin %}
+                  <li><button class="cw-menu-item cw-menu-danger" type="button" data-dialog-open="api-key-{{ loop.index }}-delete" aria-haspopup="dialog" aria-controls="api-key-{{ loop.index }}-delete">Delete</button></li><li data-scriptless><form aria-label="Delete {{ key.name }}" method="post" action="/{{ organization.slug }}/api-keys/_actions/delete"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="key_id" value="{{ key.id }}"><button class="cw-menu-item cw-menu-danger" type="submit">Delete permanently</button></form></li>
+                  {% endif %}
+                </ul>
+              </div>
+            </details>
+            {% endif %}
           </td>
         </tr>
-        {% endfor %}
+        {% endif %}{% endfor %}
       </tbody>
     </table>
   </div>
+  {% if !organization.can_admin %}<p class="cw-field-help">Only organization owners and admins can delete keys.</p>{% endif %}
+  {% if organization.can_admin %}{% for key in page.keys %}{% if page.filter.matches(key) %}
+  <dialog class="cw-dialog" data-dialog id="api-key-{{ loop.index }}-delete" aria-labelledby="api-key-{{ loop.index }}-delete-title">
+    <header class="cw-dialog-header"><h2 id="api-key-{{ loop.index }}-delete-title">Delete {{ key.name }}?</h2></header>
+    <p class="cw-dialog-body">This permanently removes the key. Integrations using it stop working immediately. This does not stop existing Sandbox processes or connections.</p>
+    <form class="cw-dialog-actions" method="post" action="/{{ organization.slug }}/api-keys/_actions/delete" hx-post="/{{ organization.slug }}/api-keys/_actions/delete">
+      <input type="hidden" name="_csrf" value="{{ page.csrf_token }}">
+      <input type="hidden" name="key_id" value="{{ key.id }}">
+      <button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button>
+      <button class="cw-button cw-danger-button" type="submit">Delete key</button>
+    </form>
+  </dialog>
+  {% endif %}{% endfor %}{% endif %}
+  {% endif %}
   {% endif %}
 
   {% if page.has_one_time_key %}
   <div class="cw-dialog-backdrop" role="presentation">
     <section class="cw-dialog" role="dialog" aria-modal="true" aria-labelledby="key-created-title" data-api-key-reveal>
       <div class="cw-dialog-header">
-        <h2 id="key-created-title" class="cw-card-title">API Key Created</h2>
+        <h2 id="key-created-title" class="cw-card-title">API key created</h2>
         <p class="cw-card-description">Copy your key now. It will not be shown again.</p>
       </div>
       <div class="cw-dialog-body">

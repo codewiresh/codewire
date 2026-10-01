@@ -81,10 +81,10 @@
 /* Personal secrets and API keys. */
 [data-dashboard-app] :is(.cw-personal-secrets-page, .cw-personal-api-keys-page) > .cw-card { margin-top: var(--space-4); }
 [data-dashboard-app] :is(.cw-personal-secrets-page, .cw-personal-api-keys-page) .cw-card-content { display: grid; gap: var(--space-3); }
-[data-dashboard-app] .cw-personal-api-key-group { display: grid; gap: var(--space-3); min-width: 0; }
-[data-dashboard-app] .cw-personal-api-key-group > header h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
-[data-dashboard-app] .cw-personal-api-key-row > header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); }
-[data-dashboard-app] .cw-personal-api-key-row dd ul { margin: 0; padding-left: var(--space-4); }
+
+@media (scripting: enabled) {
+  [data-dashboard-app] .cw-personal-api-keys-page [data-scriptless] { display: none; }
+}
 
 /* A dialog launcher or Cancel is a GET form so it also works without
    scripting; scripting opens or closes the dialog in place instead. */

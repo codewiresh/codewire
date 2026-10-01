@@ -16,7 +16,7 @@ use crate::{
 
 pub(crate) const HTMX_REQUEST: &str = "hx-request";
 const HTMX_REDIRECT: &str = "hx-redirect";
-const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'";
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'";
 
 /// Only server-generated nonces can extend the terminal's style policy. This
 /// capability never permits inline script or style attributes.
@@ -310,6 +310,22 @@ mod tests {
         );
         assert!(!CONTENT_SECURITY_POLICY.contains("unsafe-inline"));
         assert!(!CONTENT_SECURITY_POLICY.contains("unsafe-eval"));
+    }
+
+    #[test]
+    fn design_system_icons_load_under_the_page_policy() {
+        // Icon tokens are data: URIs. Without data: in img-src every select
+        // chevron, checkbox mark and close icon is blocked and disappears.
+        let styles = concat!(
+            include_str!("../../../packages/codewire-design/styles.css"),
+            include_str!("../../../packages/codewire-design/components.css"),
+        );
+        assert!(styles.contains("url(\"data:image/svg+xml,"));
+        let img_src = CONTENT_SECURITY_POLICY
+            .split(';')
+            .map(str::trim)
+            .find(|directive| directive.starts_with("img-src "));
+        assert_eq!(img_src, Some("img-src 'self' data:"));
     }
 
     #[test]

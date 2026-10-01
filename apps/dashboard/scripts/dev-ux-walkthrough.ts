@@ -106,7 +106,7 @@ async function settings(page: Page, slug: string, width: number): Promise<void> 
       }
       await fits(page);
     });
-    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API Keys"]]) {
+    for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API keys"]]) {
       await stage(`settings-${path}-${scope}-${width}`, async () => {
         await visit(page, `/settings/${path}/${query}`);
         await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
@@ -173,8 +173,7 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
       await expect(form).toHaveAttribute("data-create-draft-id", draft!);
       await expect(form).toHaveAttribute("data-create-draft-actor", userId);
       await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-      await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-      await button(page, "Restore saved draft").click();
+      // The exact draft comes back by itself after the detour.
       await expect(form).toHaveAttribute("data-create-draft-restored", "true");
       await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
       await expect(page.locator('[name="ttl"]')).toHaveValue("8h");
@@ -401,7 +400,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await ports.getByLabel("Preview label", { exact: true }).fill("ux-preview");
     await expect(ports.getByLabel("Who can open the preview?", { exact: true })).toHaveValue("creator");
     await button(ports, "Add port").click();
-    await expect(port).toContainText("8080 · Creator");
+    await expect(port).toContainText("8080 · Sandbox creator");
   });
   await stage("ports-preview-url", async () => {
     const open = port.getByRole("link", { name: "Open preview", exact: true });
@@ -417,24 +416,42 @@ export async function runDevUxWalkthrough(page: Page, options: {
   // Isolated request context has no browser cookies. Do not follow login
   // redirects, inject auth across domains, or change the preview to public.
   const anonymous = await request.newContext();
+  let previewPage: Page | undefined;
   try {
     await stage("ports-preview-denied", async () => {
       const denied = await anonymous.get(preview, { maxRedirects: 0, timeout: 15_000 });
       expect([302, 303, 401, 403]).toContain(denied.status());
       expect(await denied.text()).not.toContain(canary);
     });
-    // #2142: normal private-preview Open has no browser-auth handoff yet.
-    // Do not inject a full account cookie or claim authenticated Open proof.
+    // #2142: a signed-in creator opens the private preview directly, with no
+    // confirmation; its scoped cookie works only while this session is live.
+    await stage("ports-preview-open", async () => {
+      const opened = page.waitForEvent("popup");
+      await port.getByRole("link", { name: "Open preview", exact: true }).click();
+      previewPage = await opened;
+      await expect(previewPage).toHaveURL(new URL(preview).href, { timeout: 30_000 });
+      await expect(previewPage.locator("body")).toHaveText(canary);
+      await previewPage.reload({ waitUntil: "domcontentloaded" });
+      await expect(previewPage).toHaveURL(new URL(preview).href);
+      await expect(previewPage.locator("body")).toHaveText(canary);
+    });
     await stage("ports-preview-removed", async () => {
       await button(port, "Remove ux-preview preview").click();
       await expect(port).toHaveCount(0);
+      // Removing the port revokes the open browser preview as well.
+      const revoked = await previewPage!.reload({ waitUntil: "domcontentloaded" });
+      expect(revoked?.status()).toBe(404);
+      await expect(previewPage!.locator("body")).not.toContainText(canary);
       const removed = await anonymous.get(preview, { maxRedirects: 0, timeout: 15_000 });
       expect(removed.status()).toBe(404);
       expect(await removed.text()).not.toContain(canary);
     });
-  } finally { await anonymous.dispose(); }
+  } finally {
+    await previewPage?.close();
+    await anonymous.dispose();
+  }
   await stage("ports-close", async () => {
-    await button(ports, "Close").click();
+    await button(ports, "Done").click();
     expect(page.url()).toBe(before);
     // The dialog must leave the live terminal intact. Check its latest
     // output: earlier lines may have scrolled out of the visible rows.

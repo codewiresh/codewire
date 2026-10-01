@@ -982,7 +982,7 @@ fn enrollment_response(
         .header("x-accel-buffering", "no")
         .header(
             header::CONTENT_SECURITY_POLICY,
-            "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'",
+            "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'",
         )
         .body(Body::from_stream(stream))
         .expect("static enrollment response headers")
