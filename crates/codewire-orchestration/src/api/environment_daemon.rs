@@ -355,6 +355,7 @@ pub async fn restart_environment_daemon_session_core(
     org_id: &str,
     environment_id: &str,
     session_id: &str,
+    expected_launch_generation: Option<u64>,
 ) -> AppResult<v1::SessionRecord> {
     let (mut client, token) = session_client_for_target(
         state,
@@ -368,6 +369,7 @@ pub async fn restart_environment_daemon_session_core(
     let request = authorize(
         v1::RestartSessionRequest {
             session_id: session_id.to_string(),
+            expected_launch_generation,
         },
         &token,
     )?;

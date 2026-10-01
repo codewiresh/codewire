@@ -135,6 +135,7 @@ impl EnvironmentSessionBackend for PlatformSessionBackend {
         org_id: &str,
         environment_id: &str,
         session_id: &str,
+        expected_launch_generation: Option<u64>,
     ) -> Result<v1::SessionRecord, connectrpc::ConnectError> {
         let user = auth_user(ctx)?.clone();
         restart_environment_daemon_session_core(
@@ -143,6 +144,7 @@ impl EnvironmentSessionBackend for PlatformSessionBackend {
             org_id,
             environment_id,
             session_id,
+            expected_launch_generation,
         )
         .await
         .map_err(|error| workspace_rpc_error(&error, ctx))

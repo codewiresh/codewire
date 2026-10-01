@@ -199,6 +199,10 @@ enum PtyRuntimeControl {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedSession {
     session_id: String,
+    // Incarnation identity is admitted durably before launch effects. Zero is
+    // an older record without a usable guarded-restart token.
+    #[serde(default)]
+    launch_generation: u64,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -466,6 +470,7 @@ impl SessionEngine {
         let session_id = self.create_session_id().await?;
         let persisted = PersistedSession {
             session_id: session_id.clone(),
+            launch_generation: 1,
             name: request.name,
             parent_session_id: request.parent_session_id,
             state: v1::SessionLifecycleState::Starting as i32,
@@ -583,17 +588,30 @@ impl SessionEngine {
     }
 
     pub async fn restart(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
+        self.restart_with_generation(session_id, None).await
+    }
+
+    /// A guarded restart consumes one terminal incarnation. A stale or missing
+    /// token cannot interrupt an admitted replacement, even after caller loss.
+    pub async fn restart_with_generation(
+        &self,
+        session_id: &str,
+        expected_launch_generation: Option<u64>,
+    ) -> Result<v1::SessionRecord, SessionError> {
         let engine = self.clone();
         let session_id = session_id.to_string();
-        self.own_launch(
-            move |cancel| async move { engine.restart_inner(&session_id, cancel).await },
-        )
+        self.own_launch(move |cancel| async move {
+            engine
+                .restart_inner(&session_id, expected_launch_generation, cancel)
+                .await
+        })
         .await
     }
 
     async fn restart_inner(
         &self,
         session_id: &str,
+        expected_launch_generation: Option<u64>,
         cancel: CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
         self.ensure_initialized().await?;
@@ -615,20 +633,50 @@ impl SessionEngine {
                 ));
             }
         }
-        handle.launch_cancellation.send_replace(true);
+        // Legacy Restart may interrupt a pending projection before acquiring
+        // the operation lock. A guarded caller must first prove it still owns
+        // the terminal incarnation; it cannot cancel another caller's launch.
+        if expected_launch_generation.is_none() {
+            handle.launch_cancellation.send_replace(true);
+        }
         let _operation = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(launch_cancelled_error()),
             operation = handle.operation.lock() => operation,
         };
-        {
+        let next_generation = {
             let metadata = handle.metadata.lock().await;
+            if let Some(expected) = expected_launch_generation {
+                if expected == 0 || metadata.launch_generation != expected {
+                    return Err(SessionError::FailedPrecondition(
+                        "session launch generation changed or is unavailable; restart was not admitted"
+                            .into(),
+                    ));
+                }
+                if !matches!(
+                    lifecycle_state(metadata.state),
+                    v1::SessionLifecycleState::Exited
+                        | v1::SessionLifecycleState::Stopped
+                        | v1::SessionLifecycleState::Failed
+                        | v1::SessionLifecycleState::Interrupted
+                ) || lock(&self.inner.active).contains_key(session_id)
+                {
+                    return Err(SessionError::FailedPrecondition(
+                        "guarded restart requires a terminal session with confirmed cleanup".into(),
+                    ));
+                }
+            }
             if metadata.cleanup_unknown {
                 return Err(SessionError::FailedPrecondition(
                     "session launch cleanup is unconfirmed; restart is unavailable".into(),
                 ));
             }
-        }
+            metadata.launch_generation.checked_add(1).ok_or_else(|| {
+                SessionError::ResourceExhausted(
+                    "session launch generation is exhausted; launch a new session".into(),
+                )
+            })?
+        };
         if lock(&self.inner.active).contains_key(session_id) {
             // Once Stop is dispatched, retain the operation lock until the
             // previous monitor settles. Caller loss cannot cancel its cleanup.
@@ -648,6 +696,7 @@ impl SessionEngine {
 
         {
             let mut metadata = handle.metadata.lock().await;
+            metadata.launch_generation = next_generation;
             metadata.state = v1::SessionLifecycleState::Starting as i32;
             metadata.started_at = None;
             metadata.finished_at = None;
@@ -2944,6 +2993,7 @@ impl PersistedSession {
     fn to_record(&self) -> v1::SessionRecord {
         v1::SessionRecord {
             session_id: self.session_id.clone(),
+            launch_generation: self.launch_generation,
             name: self.name.clone(),
             parent_session_id: self.parent_session_id.clone(),
             cleanup_unknown: self.cleanup_unknown,
@@ -3074,6 +3124,7 @@ mod tests {
         let session_id = engine.create_session_id().await.unwrap();
         let metadata = PersistedSession {
             session_id: session_id.clone(),
+            launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
             state: v1::SessionLifecycleState::Starting as i32,
@@ -3593,6 +3644,7 @@ mod tests {
         file.sync_all().await.unwrap();
         let metadata = PersistedSession {
             session_id: session_id.into(),
+            launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
             state: v1::SessionLifecycleState::Running as i32,
@@ -3978,6 +4030,7 @@ mod tests {
 
         let mut metadata = PersistedSession {
             session_id: session_id.into(),
+            launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
             state: v1::SessionLifecycleState::Exited as i32,

@@ -652,7 +652,10 @@ pub(crate) async fn native_environment(name: &str) -> anyhow::Result<Option<v1::
     Ok(native_environments()
         .await?
         .into_iter()
-        .find(|environment| environment.name == name || environment.id == name))
+        .find(|environment| match uuid::Uuid::parse_str(name) {
+            Ok(id) => environment.id == id.to_string(),
+            Err(_) => environment.name == name,
+        }))
 }
 
 pub(crate) async fn native_selected_environment() -> anyhow::Result<Option<v1::Environment>> {
@@ -767,9 +770,60 @@ async fn get_native_environment_with_required_authority(
     client: &mut NativeSupervisorClient,
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
+    let expected_id = uuid::Uuid::parse_str(name).ok().map(|id| id.to_string());
+    if let Some(expected_id) = &expected_id {
+        let listed = client.list().await.map_err(native_status)?;
+        if !listed
+            .iter()
+            .any(|environment| environment.id == *expected_id)
+        {
+            anyhow::bail!(
+                "native environment {expected_id} no longer exists; a reused name cannot replace it"
+            );
+        }
+    }
     let environment = get_native_environment_with_authority_recovery(client, name).await?;
+    if expected_id.as_ref().is_some_and(|id| environment.id != *id) {
+        anyhow::bail!("native environment identity changed before the operation");
+    }
     ensure_native_credential_authority(&environment).await?;
     Ok(environment)
+}
+
+/// Managed guests use a selected typed proxy, never the host agent's login.
+pub(crate) async fn require_native_agent_profile(
+    environment_id: &str,
+    provider: &str,
+) -> anyhow::Result<()> {
+    let environment_id = uuid::Uuid::parse_str(environment_id)?.to_string();
+    let environment = native_environments()
+        .await?
+        .into_iter()
+        .find(|environment| environment.id == environment_id)
+        .context("the managed native environment no longer exists")?;
+    let spec = sources::project_from_environment(&environment)?;
+    let selected = spec
+        .credentials
+        .context("managed VM agents require a selected local credential profile")?;
+    if selected.profile.starts_with("platform:") {
+        anyhow::bail!("managed native agents currently require a local credential profile");
+    }
+    let profile_id = codewire_access::AccessProfileId::parse(environment.access_profile_id)?;
+    let mut credentials = connect_local_credential_authority().await?;
+    let bound = credentials
+        .get_profile_revision(&profile_id, environment.access_profile_revision)
+        .await?;
+    if !bound
+        .profile
+        .entries
+        .keys()
+        .any(|slot| slot.as_str() == provider)
+    {
+        anyhow::bail!(
+            "the native environment's selected credential profile has no {provider} provider"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) async fn delete_native_environment(

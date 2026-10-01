@@ -1,4 +1,4 @@
-//! Managed agent conversations on trusted host environments.
+//! Managed agent conversations on trusted hosts and native Linux guests.
 //!
 //! `cw run --agent` launches `cw _agent-driver` as an ordinary durable session.
 //! The driver owns the installed native agent's stdio protocol. The CLI reaches
@@ -14,6 +14,68 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _};
+
+#[cfg(target_os = "linux")]
+mod guest_peer;
+#[cfg(target_os = "linux")]
+mod native;
+#[cfg(target_os = "linux")]
+mod native_host;
+#[cfg(target_os = "linux")]
+pub(crate) use guest_peer::{AgentPeerArgs, run_agent_peer};
+#[cfg(target_os = "linux")]
+pub(crate) use native::{AgentControlArgs, run_agent_control};
+
+#[cfg(target_os = "linux")]
+const GUEST_AGENT_PROTOCOL_VERSION: u32 = 1;
+
+/// The guest owns only its local journals and provider subprocesses. It never
+/// receives a host registry, supervisor connection or daemon credential.
+#[derive(Clone)]
+enum DriverEnvironment {
+    Host(HostEnvironment),
+    Guest { id: String, root: PathBuf },
+}
+
+trait AgentStore {
+    fn root(&self) -> PathBuf;
+    fn id(&self) -> &str;
+}
+
+impl AgentStore for HostEnvironment {
+    fn root(&self) -> PathBuf {
+        HostEnvironment::root(self)
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl AgentStore for DriverEnvironment {
+    fn root(&self) -> PathBuf {
+        match self {
+            Self::Host(environment) => environment.root(),
+            Self::Guest { root, .. } => root.clone(),
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Host(environment) => &environment.id,
+            Self::Guest { id, .. } => id,
+        }
+    }
+}
+
+impl DriverEnvironment {
+    fn host(&self) -> Option<&HostEnvironment> {
+        match self {
+            Self::Host(environment) => Some(environment),
+            Self::Guest { .. } => None,
+        }
+    }
+}
 
 const DRIVER_COMMAND: &str = "_agent-driver";
 const HOST_DATA_DIR_ENV: &str = "CW_HOST_DATA_DIR";
@@ -379,6 +441,7 @@ struct ControlLine {
 #[serde(rename_all = "snake_case")]
 enum ControlOp {
     Deliver,
+    Shutdown,
 }
 
 fn control_line(driver_id: &str, message_id: &str) -> anyhow::Result<Vec<u8>> {
@@ -387,6 +450,18 @@ fn control_line(driver_id: &str, message_id: &str) -> anyhow::Result<Vec<u8>> {
         op: ControlOp::Deliver,
         driver_id: driver_id.into(),
         message_id: message_id.into(),
+    })?;
+    line.push(b'\n');
+    Ok(line)
+}
+
+#[cfg(target_os = "linux")]
+fn shutdown_control_line(driver_id: &str, operation_id: &str) -> anyhow::Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(&ControlLine {
+        v: 1,
+        op: ControlOp::Shutdown,
+        driver_id: canonical_uuid(driver_id)?,
+        message_id: canonical_uuid(operation_id)?,
     })?;
     line.push(b'\n');
     Ok(line)
@@ -559,7 +634,7 @@ impl Drop for StateLock {
     }
 }
 
-fn agents_root(environment: &HostEnvironment) -> PathBuf {
+fn agents_root(environment: &impl AgentStore) -> PathBuf {
     environment.root().join("agents")
 }
 
@@ -567,7 +642,7 @@ fn dir_driver_id(dir: &Path) -> Option<&str> {
     dir.file_name().and_then(|name| name.to_str())
 }
 
-fn driver_dir(environment: &HostEnvironment, driver_id: &str) -> anyhow::Result<PathBuf> {
+fn driver_dir(environment: &impl AgentStore, driver_id: &str) -> anyhow::Result<PathBuf> {
     let driver_id = canonical_uuid(driver_id)?;
     existing_private_dir(&environment.root())?;
     let root = agents_root(environment);
@@ -725,6 +800,22 @@ fn apply_delivery_failure(record: &mut MessageRecord, definitive: bool, error: &
 /// Managed drivers own their input; raw send and interactive attach must refuse.
 pub(crate) fn is_managed_session(view: &EnvironmentSessionView) -> bool {
     view.command.iter().any(|arg| arg == DRIVER_COMMAND)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn stop_native_managed(
+    target: &EnvironmentSessionTarget,
+    session: &EnvironmentSessionView,
+) -> anyhow::Result<EnvironmentSessionView> {
+    native_host::stop(target.clone(), session).await
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn restart_native_managed(
+    target: &EnvironmentSessionTarget,
+    session: &EnvironmentSessionView,
+) -> anyhow::Result<EnvironmentSessionView> {
+    native_host::restart(target.clone(), session).await
 }
 
 fn driver_identity(command: &[String]) -> Option<(String, String)> {
@@ -896,6 +987,10 @@ pub(super) async fn handle_agent_run_command(
     target: EnvironmentSessionTarget,
     args: EnvironmentRunArgs,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
+        return native_host::run(target, args).await;
+    }
     let environment = host_placement(&target)?.clone();
     let agent = match args.agent.as_deref() {
         Some("codex") => AgentKind::Codex,
@@ -1090,6 +1185,22 @@ pub(crate) async fn handle_agent_message_command(
     if let Some(turn) = &args.turn_id {
         validate_token("turn ID", turn)?;
     }
+    #[cfg(target_os = "linux")]
+    {
+        let target = resolve_environment_session_target(globals, environment).await?;
+        if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
+            return native_host::message(
+                target,
+                session,
+                text,
+                reply_to,
+                args.turn_id.clone(),
+                steer,
+                args.output,
+            )
+            .await;
+        }
+    }
     let managed = resolve_managed(globals, environment, session).await?;
     ensure_accepting(&managed)?;
     let mut record = MessageRecord::new(
@@ -1134,6 +1245,13 @@ pub(crate) async fn handle_agent_interrupt_command(
     args: SessionTargetArgs,
 ) -> anyhow::Result<()> {
     let (environment, session) = split_session_target(&args.target)?;
+    #[cfg(target_os = "linux")]
+    {
+        let target = resolve_environment_session_target(globals, environment).await?;
+        if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
+            return native_host::interrupt(target, session, args.output).await;
+        }
+    }
     let managed = resolve_managed(globals, environment, session).await?;
     ensure_accepting(&managed)?;
     let state = read_optional::<DriverState>(&managed.dir.join("state.json"))?
@@ -1170,6 +1288,13 @@ pub(crate) async fn handle_agent_inbox_command(
     args: SessionTargetArgs,
 ) -> anyhow::Result<()> {
     let (environment, session) = split_session_target(&args.target)?;
+    #[cfg(target_os = "linux")]
+    {
+        let target = resolve_environment_session_target(globals, environment).await?;
+        if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
+            return native_host::inbox(target, session, args.output).await;
+        }
+    }
     let managed = resolve_managed(globals, environment, session).await?;
     let state = read_optional::<DriverState>(&managed.dir.join("state.json"))?;
     let mut messages = list_messages(&managed.dir)?;
@@ -1270,14 +1395,23 @@ pub(crate) async fn handle_agent_inbox_command(
 
 /// Waits for a managed message's terminal result. Timeout is never success.
 pub(crate) async fn wait_agent_message(
-    _globals: &Globals,
+    globals: &Globals,
     message_id: &str,
     timeout: Duration,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
     let message_id = canonical_uuid(message_id)?;
-    let (environment, dir) = find_message(&message_id)?
-        .with_context(|| format!("managed message {message_id} not found"))?;
+    #[cfg(target_os = "linux")]
+    if native_host::wait(globals, &message_id, timeout, output).await? {
+        return Ok(());
+    }
+    let Some((environment, dir)) = find_message(&message_id)? else {
+        #[cfg(target_os = "linux")]
+        if native_host::recover_and_wait(globals, &message_id, timeout, output).await? {
+            return Ok(());
+        }
+        anyhow::bail!("managed message {message_id} not found");
+    };
     let (record, end) = wait_for_message(&environment, &dir, &message_id, timeout).await?;
     print_message_result(&record, output)?;
     match wait_failure(&record, &end).or_else(|| message_failure(&record)) {
@@ -1450,7 +1584,7 @@ fn find_message(message_id: &str) -> anyhow::Result<Option<(HostEnvironment, Pat
 }
 
 fn receiver_state(
-    environment: &HostEnvironment,
+    environment: &impl AgentStore,
     notification: &ParentNotification,
 ) -> Option<MessageState> {
     let dir = driver_dir(environment, &notification.parent_driver_id).ok()?;
@@ -1459,7 +1593,7 @@ fn receiver_state(
         .map(|record| record.state)
 }
 
-fn message_view(environment: &HostEnvironment, record: &MessageRecord) -> Value {
+fn message_view(environment: &impl AgentStore, record: &MessageRecord) -> Value {
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     if let Some(notification) = &record.notification {
         value["notification_receiver_state"] =
@@ -1512,6 +1646,9 @@ pub(crate) struct AgentDriverArgs {
     pub(crate) driver_id: String,
     #[arg(long)]
     pub(crate) registry_root: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    #[arg(long, conflicts_with = "registry_root")]
+    pub(crate) guest_root: Option<PathBuf>,
 }
 
 pub(crate) async fn run_agent_driver(args: AgentDriverArgs) -> anyhow::Result<()> {
@@ -1519,23 +1656,49 @@ pub(crate) async fn run_agent_driver(args: AgentDriverArgs) -> anyhow::Result<()
     let started_at = now();
     let driver_id = canonical_uuid(&args.driver_id)?;
     canonical_uuid(&args.environment)?;
-    let environment = match &args.registry_root {
-        Some(registry) => host_environment_at(&registry.join(&args.environment))?,
-        None => host_environment(&args.environment)?
-            .context("the host environment for this managed conversation no longer exists")?,
+    #[cfg(target_os = "linux")]
+    let guest_root = args.guest_root.as_ref();
+    #[cfg(not(target_os = "linux"))]
+    let guest_root: Option<&PathBuf> = None;
+    let environment = match guest_root {
+        Some(root) => {
+            if !root.is_absolute() {
+                anyhow::bail!("guest managed state root must be absolute");
+            }
+            existing_private_dir(root)?;
+            DriverEnvironment::Guest {
+                id: args.environment.clone(),
+                root: root.clone(),
+            }
+        }
+        None => DriverEnvironment::Host(match &args.registry_root {
+            Some(registry) => host_environment_at(&registry.join(&args.environment))?,
+            None => host_environment(&args.environment)?
+                .context("the host environment for this managed conversation no longer exists")?,
+        }),
     };
-    if environment.id != args.environment {
-        anyhow::bail!("the agent driver requires the host environment ID");
+    if environment.id() != args.environment {
+        anyhow::bail!("the agent driver requires the canonical environment ID");
     }
     let dir = driver_dir(&environment, &driver_id)?;
     // Crash fence: one live driver per conversation; released by the kernel on exit.
     let _instance = StateLock::try_acquire(&dir.join("driver.lock"))?
         .context("another driver already owns this managed conversation")?;
     let config: AgentConfig = read_record(&dir.join("config.json"))?;
-    config.validate(&environment.id, &driver_id)?;
+    config.validate(environment.id(), &driver_id)?;
     let binding = wait_for_binding(&dir, &driver_id).await?;
     let previous = read_optional::<DriverState>(&dir.join("state.json"))?
         .filter(|state| state.driver_id == driver_id && state.agent == config.agent);
+    #[cfg(target_os = "linux")]
+    if environment.host().is_none() && previous.is_some() {
+        guest_peer::require_clean_previous(
+            &dir,
+            environment.id(),
+            &driver_id,
+            &binding.session_id,
+        )?
+        .context("previous guest peer custody is missing; restart is fenced")?;
+    }
     let state = DriverState {
         version: 1,
         driver_id: driver_id.clone(),
@@ -1555,9 +1718,10 @@ pub(crate) async fn run_agent_driver(args: AgentDriverArgs) -> anyhow::Result<()
             interrupt: false,
             note: "driver starting".into(),
         },
-        policy: match config.agent {
-            AgentKind::Codex => CODEX_POLICY.into(),
-            AgentKind::Claude => CLAUDE_POLICY.into(),
+        policy: match (environment.host(), config.agent) {
+            (Some(_), AgentKind::Codex) => CODEX_POLICY.into(),
+            (Some(_), AgentKind::Claude) => CLAUDE_POLICY.into(),
+            (None, _) => "native Linux VM execution: installed guest agent with the environment's selected typed provider projection; provider material remains outside the VM".into(),
         },
         last_error: None,
         started_at: started_at.clone(),
@@ -1798,6 +1962,14 @@ struct Peer {
     stdin: tokio::process::ChildStdin,
     events: tokio::sync::mpsc::Receiver<NativeLine>,
     next_id: u64,
+    #[cfg(target_os = "linux")]
+    guest: Option<GuestPeer>,
+}
+
+#[cfg(target_os = "linux")]
+struct GuestPeer {
+    dir: PathBuf,
+    identity: guest_peer::PeerIdentity,
 }
 
 impl Peer {
@@ -1805,17 +1977,77 @@ impl Peer {
         program: &Path,
         args: &[&str],
         working_dir: &str,
-        registry_root: &Path,
+        driver: &Driver,
         label: &'static str,
     ) -> anyhow::Result<Self> {
-        let mut child = tokio::process::Command::new(program)
-            .args(args)
-            .current_dir(working_dir)
-            .env(HOST_DATA_DIR_ENV, registry_root)
+        #[cfg(target_os = "linux")]
+        let guest = if driver.environment.host().is_none() {
+            Some(GuestPeer {
+                dir: driver.dir.clone(),
+                identity: guest_peer::prepare(
+                    &driver.dir,
+                    driver.environment.id(),
+                    &driver.config.driver_id,
+                    &driver.binding.session_id,
+                    &driver.started_at,
+                )?,
+            })
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let mut command = if let Some(guest) = &guest {
+            let identity = &guest.identity;
+            // Linux resolves this alias to the actual running ELF, including a
+            // verified sealed memfd, rather than reopening a mutable pathname.
+            let mut command = tokio::process::Command::new("/proc/self/exe");
+            command.args([
+                "_agent-peer",
+                "--environment",
+                &identity.environment_id,
+                "--driver-id",
+                &identity.driver_id,
+                "--session-id",
+                &identity.session_id,
+                "--instance-id",
+                &identity.instance_id,
+                "--driver-started-at",
+                &identity.driver_started_at,
+                "--driver-pid",
+                &identity.driver_pid.to_string(),
+                "--driver-start-ticks",
+                &identity.driver_start_ticks.to_string(),
+                "--guest-root",
+                &driver.environment.root().to_string_lossy(),
+                "--program",
+                &program.to_string_lossy(),
+                "--",
+            ]);
+            command
+        } else {
+            tokio::process::Command::new(program)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let mut command = tokio::process::Command::new(program);
+        command.args(args).current_dir(working_dir);
+        let runtime_root = driver.environment.root();
+        let registry_root = driver
+            .environment
+            .host()
+            .and_then(|_| runtime_root.parent());
+        if let Some(registry_root) = registry_root {
+            command.env(HOST_DATA_DIR_ENV, registry_root);
+        } else {
+            command
+                .env_remove(HOST_DATA_DIR_ENV)
+                .env_remove("CW_CONFIG_DIR");
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            // A guest guardian retains custody after a driver crash or timeout.
+            .kill_on_drop(driver.environment.host().is_some())
             .spawn()
             .with_context(|| format!("start the installed {label} CLI at {}", program.display()))?;
         let stdin = child.stdin.take().context("native agent stdin")?;
@@ -1829,6 +2061,8 @@ impl Peer {
             stdin,
             events,
             next_id: 1,
+            #[cfg(target_os = "linux")]
+            guest,
         })
     }
 
@@ -1899,6 +2133,35 @@ impl Peer {
     }
 
     async fn stop(&mut self) -> Option<std::process::ExitStatus> {
+        #[cfg(target_os = "linux")]
+        if let Some(guest) = &self.guest {
+            let deadline = tokio::time::Instant::now() + STOP_GRACE;
+            let mut status = None;
+            loop {
+                if let Ok(receipt) = guest_peer::read_receipt(&guest.dir, &guest.identity) {
+                    if !receipt.cleanup_unknown && receipt.finished_at.is_some() {
+                        return match status {
+                            Some(status) => Some(status),
+                            None => tokio::time::timeout(STOP_GRACE, self.child.wait())
+                                .await
+                                .ok()
+                                .and_then(Result::ok),
+                        };
+                    }
+                    // Signal only the recorded guardian process birth. A late
+                    // guardian startup is retried within this bounded wait.
+                    let _ = guest_peer::signal_guardian(&guest.dir, &guest.identity);
+                }
+                if status.is_none() {
+                    status = self.child.try_wait().ok().flatten();
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    // Never SIGKILL the guardian; it continues owning cleanup.
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
         if let Ok(Some(status)) = self.child.try_wait() {
             return Some(status);
         }
@@ -2022,10 +2285,36 @@ enum DriverEvent {
     Native(Option<NativeLine>),
     Stop(&'static str),
     Adopt,
+    ShutdownProbe,
+}
+
+enum StartupEvent {
+    Initialized(anyhow::Result<()>),
+    Stop(&'static str),
+    #[cfg(target_os = "linux")]
+    Shutdown(anyhow::Result<Box<native::ShutdownRecord>>),
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_startup_shutdown(
+    dir: PathBuf,
+    identity: Option<guest_peer::PeerIdentity>,
+) -> anyhow::Result<native::ShutdownRecord> {
+    let Some(identity) = identity else {
+        return std::future::pending().await;
+    };
+    let mut probe = tokio::time::interval(Duration::from_millis(500));
+    probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        probe.tick().await;
+        if let Some(shutdown) = native::admit_shutdown(&dir, &identity)? {
+            return Ok(shutdown);
+        }
+    }
 }
 
 struct Driver {
-    environment: HostEnvironment,
+    environment: DriverEnvironment,
     dir: PathBuf,
     config: AgentConfig,
     binding: AgentBinding,
@@ -2061,29 +2350,79 @@ impl Driver {
         let mut terminate = signal(SignalKind::terminate())?;
         let mut interrupt = signal(SignalKind::interrupt())?;
         let mut hangup = signal(SignalKind::hangup())?;
-        let started = match self.config.agent {
-            AgentKind::Codex => self.start_codex().await,
-            AgentKind::Claude => self.start_claude().await,
-        };
-        let mut peer = match started {
+        // Keep the spawned peer outside the initialization future. Cancelling
+        // a stalled protocol handshake must retain the guardian and its family
+        // until cleanup is proved, just like shutdown during a running turn.
+        let mut peer = match self.spawn_peer() {
             Ok(peer) => peer,
-            Err(error) => {
-                self.state.phase = DriverPhase::Failed;
-                let reason = truncate_utf8(&format!("{error:#}"), 128 * 1024).0;
-                self.state.last_error = Some(reason.clone());
-                while let Some(id) = self.queue.pop_front() {
-                    let record = update_message(&self.dir, &id, |r| {
-                        r.fail(
-                            MessageState::Error,
-                            format!(
-                                "native agent startup failed before issuing this task: {reason}"
-                            ),
-                        );
-                    })?;
-                    self.notify_parent(&record).await;
+            Err(error) => return self.startup_failed(error).await,
+        };
+        let startup = {
+            #[cfg(target_os = "linux")]
+            let shutdown = wait_startup_shutdown(
+                self.dir.clone(),
+                peer.guest.as_ref().map(|guest| guest.identity.clone()),
+            );
+            let initialize = self.initialize_peer(&mut peer);
+            #[cfg(target_os = "linux")]
+            {
+                tokio::select! {
+                    biased;
+                    shutdown = shutdown => StartupEvent::Shutdown(shutdown.map(Box::new)),
+                    _ = terminate.recv() => StartupEvent::Stop("SIGTERM"),
+                    _ = interrupt.recv() => StartupEvent::Stop("SIGINT"),
+                    _ = hangup.recv() => StartupEvent::Stop("SIGHUP"),
+                    result = initialize => StartupEvent::Initialized(result),
                 }
-                let _ = self.persist_state();
-                return Err(error);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                tokio::select! {
+                    biased;
+                    _ = terminate.recv() => StartupEvent::Stop("SIGTERM"),
+                    _ = interrupt.recv() => StartupEvent::Stop("SIGINT"),
+                    _ = hangup.recv() => StartupEvent::Stop("SIGHUP"),
+                    result = initialize => StartupEvent::Initialized(result),
+                }
+            }
+        };
+        match startup {
+            StartupEvent::Initialized(Ok(())) => {}
+            StartupEvent::Initialized(Err(error)) => {
+                let error = if peer.stop().await.is_some() {
+                    error
+                } else {
+                    error.context("native startup cleanup is unknown; restart is fenced")
+                };
+                return self.startup_failed(error).await;
+            }
+            StartupEvent::Stop(signal) => {
+                return self
+                    .lose_peer(&mut peer, format!("startup stopped by {signal}"), true)
+                    .await;
+            }
+            #[cfg(target_os = "linux")]
+            StartupEvent::Shutdown(Ok(shutdown)) => {
+                let result = self
+                    .lose_peer(
+                        &mut peer,
+                        format!("managed startup shutdown {}", shutdown.operation_id),
+                        true,
+                    )
+                    .await;
+                let error = result.as_ref().err().map(|error| format!("{error:#}"));
+                native::complete_shutdown(&self.dir, &shutdown, error.as_deref())?;
+                return result;
+            }
+            #[cfg(target_os = "linux")]
+            StartupEvent::Shutdown(Err(error)) => {
+                return self
+                    .lose_peer(
+                        &mut peer,
+                        format!("could not validate startup shutdown: {error:#}"),
+                        false,
+                    )
+                    .await;
             }
         };
         self.state.phase = DriverPhase::Idle;
@@ -2095,7 +2434,35 @@ impl Driver {
         ));
         let mut adopt = tokio::time::interval(ADOPT_SCAN_INTERVAL);
         adopt.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut shutdown_probe = tokio::time::interval(Duration::from_millis(500));
         loop {
+            #[cfg(target_os = "linux")]
+            if let Some(identity) = peer.guest.as_ref().map(|guest| guest.identity.clone()) {
+                match native::admit_shutdown(&self.dir, &identity) {
+                    Ok(Some(shutdown)) => {
+                        let result = self
+                            .lose_peer(
+                                &mut peer,
+                                format!("managed shutdown {}", shutdown.operation_id),
+                                true,
+                            )
+                            .await;
+                        let error = result.as_ref().err().map(|error| format!("{error:#}"));
+                        native::complete_shutdown(&self.dir, &shutdown, error.as_deref())?;
+                        return result;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return self
+                            .lose_peer(
+                                &mut peer,
+                                format!("could not validate managed shutdown: {error:#}"),
+                                false,
+                            )
+                            .await;
+                    }
+                }
+            }
             if let Err(error) = self.start_next(&mut peer).await {
                 return self
                     .lose_peer(
@@ -2112,6 +2479,7 @@ impl Driver {
                 _ = interrupt.recv() => DriverEvent::Stop("SIGINT"),
                 _ = hangup.recv() => DriverEvent::Stop("SIGHUP"),
                 _ = adopt.tick() => DriverEvent::Adopt,
+                _ = shutdown_probe.tick(), if self.environment.host().is_none() => DriverEvent::ShutdownProbe,
             };
             let result = match event {
                 DriverEvent::Control(Some(ControlInput::Line(line))) => {
@@ -2164,10 +2532,48 @@ impl Driver {
                     }
                     Ok(())
                 }
+                DriverEvent::ShutdownProbe => Ok(()),
             };
             if let Err(error) = result {
                 return self.lose_peer(&mut peer, format!("{error:#}"), false).await;
             }
+        }
+    }
+
+    async fn startup_failed(&mut self, error: anyhow::Error) -> anyhow::Result<()> {
+        self.state.phase = DriverPhase::Failed;
+        let reason = truncate_utf8(&format!("{error:#}"), 128 * 1024).0;
+        self.state.last_error = Some(reason.clone());
+        while let Some(id) = self.queue.pop_front() {
+            let record = update_message(&self.dir, &id, |record| {
+                record.fail(
+                    MessageState::Error,
+                    format!("native agent startup failed before issuing this task: {reason}"),
+                );
+            })?;
+            self.notify_parent(&record).await;
+        }
+        let _ = self.persist_state();
+        Err(error)
+    }
+
+    fn spawn_peer(&mut self) -> anyhow::Result<Peer> {
+        match self.config.agent {
+            AgentKind::Codex => Peer::spawn(
+                &self.config.program,
+                &["app-server"],
+                &self.config.working_dir,
+                self,
+                "codex",
+            ),
+            AgentKind::Claude => self.spawn_claude(),
+        }
+    }
+
+    async fn initialize_peer(&mut self, peer: &mut Peer) -> anyhow::Result<()> {
+        match self.config.agent {
+            AgentKind::Codex => self.initialize_codex(peer).await,
+            AgentKind::Claude => self.initialize_claude(peer).await,
         }
     }
 
@@ -2277,15 +2683,7 @@ impl Driver {
         Ok(())
     }
 
-    async fn start_codex(&mut self) -> anyhow::Result<Peer> {
-        let runtime_root = self.environment.root();
-        let mut peer = Peer::spawn(
-            &self.config.program,
-            &["app-server"],
-            &self.config.working_dir,
-            runtime_root.parent().context("host registry parent")?,
-            "codex",
-        )?;
+    async fn initialize_codex(&mut self, peer: &mut Peer) -> anyhow::Result<()> {
         peer.call(
             "initialize",
             json!({"clientInfo": {"name": "codewire", "title": "Codewire", "version": env!("CARGO_PKG_VERSION")}}),
@@ -2335,10 +2733,10 @@ impl Driver {
             note: "Codex app-server turn/steer with expectedTurnId and turn/interrupt".into(),
         };
         self.persist_state()?;
-        Ok(peer)
+        Ok(())
     }
 
-    async fn start_claude(&mut self) -> anyhow::Result<Peer> {
+    fn spawn_claude(&mut self) -> anyhow::Result<Peer> {
         let saved = (
             self.state.native_thread_id.clone(),
             self.state.native_thread_established,
@@ -2369,14 +2767,16 @@ impl Driver {
         if let Some(effort) = &self.config.effort {
             args.extend(["--effort", effort.as_str()]);
         }
-        let runtime_root = self.environment.root();
-        let mut peer = Peer::spawn(
+        Peer::spawn(
             &self.config.program,
             &args,
             &self.config.working_dir,
-            runtime_root.parent().context("host registry parent")?,
+            self,
             "claude",
-        )?;
+        )
+    }
+
+    async fn initialize_claude(&mut self, peer: &mut Peer) -> anyhow::Result<()> {
         // Positive feature detection: advertise interrupt only after the
         // installed CLI answers the native control initialize request.
         let request_id = format!("cw-probe-{}", uuid::Uuid::new_v4());
@@ -2384,7 +2784,7 @@ impl Driver {
             .await?;
         let detected = match tokio::time::timeout(
             CONTROL_PROBE_TIMEOUT,
-            claude_control_probe(&mut peer, &request_id),
+            claude_control_probe(peer, &request_id),
         )
         .await
         {
@@ -2401,7 +2801,7 @@ impl Driver {
             },
         };
         self.persist_state()?;
-        Ok(peer)
+        Ok(())
     }
 
     async fn start_next(&mut self, peer: &mut Peer) -> anyhow::Result<()> {
@@ -2476,6 +2876,11 @@ impl Driver {
             log("ignored a control line with an invalid message ID");
             return Ok(());
         };
+        if matches!(control.op, ControlOp::Shutdown) {
+            // Shutdown is admitted from its durable, instance-bound journal at
+            // the top of the loop, also when the sending CLI was cancelled.
+            return Ok(());
+        }
         self.accept(peer, &id).await
     }
 
@@ -3095,9 +3500,11 @@ impl Driver {
         reason: String,
         stopping: bool,
     ) -> anyhow::Result<()> {
-        let reason = match peer.stop().await {
+        let status = peer.stop().await;
+        let cleanup_confirmed = status.is_some();
+        let reason = match status {
             Some(status) => format!("{reason} (native agent {status})"),
-            None => reason,
+            None => format!("{reason}; native peer cleanup is unknown; restart is fenced"),
         };
         let mut issued: Vec<String> = self
             .pending
@@ -3137,19 +3544,19 @@ impl Driver {
             }
         }
         // Queued messages were never issued; they stay accepted for the next start.
-        self.state.phase = if stopping {
+        self.state.phase = if stopping && cleanup_confirmed {
             DriverPhase::Stopped
         } else {
             DriverPhase::Failed
         };
-        self.state.last_error = (!stopping).then(|| reason.clone());
+        self.state.last_error = (!stopping || !cleanup_confirmed).then(|| reason.clone());
         self.state.active_message_id = None;
         self.state.current_turn_id = None;
         if let Err(error) = self.persist_state() {
             log(format!("could not persist driver state: {error:#}"));
         }
         log(&reason);
-        if stopping {
+        if stopping && cleanup_confirmed {
             Ok(())
         } else {
             Err(anyhow::anyhow!(reason))
@@ -3169,7 +3576,9 @@ impl Driver {
         );
         let footer = format!(
             "Follow up with: cw msg {} {} \"...\" --reply-to {}",
-            self.environment.id, self.binding.session_id, source.id
+            self.environment.id(),
+            self.binding.session_id,
+            source.id
         );
         let body = match source.state {
             MessageState::Completed => source
@@ -3279,7 +3688,19 @@ impl Driver {
             return Ok(());
         }
         self.set_notification(&source.id, &notification, NotificationState::Pending, None)?;
-        let parent_view = host_target(&self.environment).get(&parent.session_id).await;
+        let Some(environment) = self.environment.host() else {
+            self.set_notification(
+                &source.id,
+                &notification,
+                NotificationState::Pending,
+                Some(
+                    "queued in the canonical parent inbox; the guest parent adopts it when ready"
+                        .into(),
+                ),
+            )?;
+            return Ok(());
+        };
+        let parent_view = host_target(environment).get(&parent.session_id).await;
         let parent_state = match &parent_view {
             Ok(view) if session_running(view) => None,
             Ok(view) => Some(view.state.clone()),
@@ -3300,7 +3721,7 @@ impl Driver {
             return Ok(());
         }
         let line = control_line(&parent.driver_id, &record.id)?;
-        let sent = match host_session_client(&self.environment).await {
+        let sent = match host_session_client(environment).await {
             Ok(client) => client
                 .send_input(&parent.session_id, line)
                 .await

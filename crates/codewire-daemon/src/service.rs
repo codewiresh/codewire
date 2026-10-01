@@ -229,11 +229,16 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::RestartSessionRequest>,
     ) -> Result<Response<v1::RestartSessionResponse>, Status> {
         self.authorize(&request)?;
-        let session = self
-            .session_engine
-            .restart(&request.into_inner().session_id)
-            .await
-            .map_err(status_from_session_error)?;
+        let request = request.into_inner();
+        let session = match request.expected_launch_generation {
+            Some(generation) => {
+                self.session_engine
+                    .restart_with_generation(&request.session_id, Some(generation))
+                    .await
+            }
+            None => self.session_engine.restart(&request.session_id).await,
+        }
+        .map_err(status_from_session_error)?;
         Ok(Response::new(v1::RestartSessionResponse {
             session: Some(session),
         }))

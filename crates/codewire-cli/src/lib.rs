@@ -181,6 +181,12 @@ enum Command {
     #[cfg(unix)]
     #[command(name = "_agent-driver", hide = true)]
     AgentDriver(AgentDriverArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_agent-control", hide = true)]
+    AgentControl(AgentControlArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_agent-peer", hide = true)]
+    AgentPeer(AgentPeerArgs),
     #[command(about = "Manage environments")]
     Env(EnvArgs),
     #[command(about = "Show usage and billing overview")]
@@ -394,6 +400,10 @@ where
         Command::Inbox(args) => handle_agent_inbox_command(&globals, args).await,
         #[cfg(unix)]
         Command::AgentDriver(args) => run_agent_driver(args).await,
+        #[cfg(target_os = "linux")]
+        Command::AgentControl(args) => run_agent_control(args).await,
+        #[cfg(target_os = "linux")]
+        Command::AgentPeer(args) => run_agent_peer(args).await,
         Command::Env(args) => handle_env_command(&globals, args).await,
         Command::Cost(args) => handle_cost_command(&globals, args).await,
         Command::Org { command } => handle_org_command(&globals, command).await,

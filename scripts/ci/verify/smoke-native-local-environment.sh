@@ -68,6 +68,8 @@ MESH_STARTED=0
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 MANAGED_CREDENTIAL_BROKER=0
+MANAGED_AGENT_SESSIONS=0
+MANAGED_AGENT_CW_ARTIFACT=''
 CREDENTIAL_ROOT=''
 CREDENTIAL_PROFILE_NAME='native-broker'
 CREDENTIAL_ID=''
@@ -122,6 +124,7 @@ usage: smoke-native-local-environment.sh \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
   [--managed-credential-broker] \
+  [--managed-agent-sessions --managed-agent-cw-artifact ABSOLUTE_DESCRIPTOR] \
   [--workspace-image-import-bin ABSOLUTE_PATH] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
@@ -163,6 +166,13 @@ install, startup, managed exec, and PTY sessions; replaces and clears them
 through confirmed source updates; and proves installed-root, workspace, and
 skill preservation.
 Application values are intentionally child-visible, unlike provider credentials.
+
+With --managed-agent-sessions and a source-bound static guest cw descriptor,
+the same protected-broker environment additionally runs actual pinned guest
+Codex and Claude managed conversations before the existing revocation proof.
+It requires native acknowledgement, follow-up/resume, held-turn controls,
+guest tool execution, same-VM parent continuation, history/wait and cleanup.
+This mode retains the exact workspace-image and private credential-store gates.
 USAGE
 }
 
@@ -256,6 +266,16 @@ while [[ $# -gt 0 ]]; do
       MANAGED_CREDENTIAL_BROKER=1
       shift
       ;;
+    --managed-agent-sessions)
+      [[ "$MANAGED_AGENT_SESSIONS" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_SESSIONS=1
+      shift
+      ;;
+    --managed-agent-cw-artifact)
+      [[ $# -ge 2 && -z "$MANAGED_AGENT_CW_ARTIFACT" ]] || { usage; exit 2; }
+      MANAGED_AGENT_CW_ARTIFACT="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -285,6 +305,14 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   require_absolute_canonical_file 'stock SSH workload fixture' "$STOCK_SSH_WORKLOAD_SOURCE"
 elif [[ -n "$WORKSPACE_IMAGE_IMPORT_BIN" ]]; then
   die 'workspace image importer is only available in managed synthetic mode'
+fi
+if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
+  [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && -n "$MANAGED_AGENT_CW_ARTIFACT" ]] ||
+    die 'managed agent sessions require protected-broker mode and a guest cw descriptor'
+  require_absolute_canonical_file 'managed guest cw descriptor' "$MANAGED_AGENT_CW_ARTIFACT"
+  require_absolute_canonical_file 'managed native journey' "$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py"
+elif [[ -n "$MANAGED_AGENT_CW_ARTIFACT" ]]; then
+  die 'guest cw descriptor requires --managed-agent-sessions'
 fi
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
 [[ "$(uname -m)" == x86_64 ]] || die 'the current native artifact set requires x86_64'
@@ -1260,6 +1288,43 @@ run_managed_credential_broker_smoke() {
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   [[ "$(cat "$stdout_file")" == 'codewire-local-codex-bridge-smoke: PASS (managed broker)' ]] ||
     die 'managed local credential-broker smoke receipt drifted'
+}
+
+run_native_managed_agent_smoke() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! env -i \
+    PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
+    SHELL='/bin/sh' TERM='xterm-256color' LC_ALL=C \
+    CW_CONFIG_DIR="$PLATFORM_CONFIG" \
+    CODEWIRE_NATIVE_STATE_ROOT="$STATE_ROOT" \
+    CODEWIRE_NATIVE_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+    CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
+    CODEWIRE_NATIVE_MANAGED_AGENT_ARTIFACT="$MANAGED_AGENT_CW_ARTIFACT" \
+    CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT" \
+    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
+    CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
+    CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
+    HTTP_PROXY='http://127.0.0.1:1' HTTPS_PROXY='http://127.0.0.1:1' \
+    ALL_PROXY='http://127.0.0.1:1' NO_PROXY='127.0.0.1,localhost' \
+    PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/timeout --foreground --signal=TERM --kill-after=10s 1220s \
+    python3 "$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py" \
+      --cw "$CW_BIN" --environment "$ENVIRONMENT_ID" \
+      --codex-model codewire-synthetic --claude-model claude-sonnet-4-6 \
+      >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    cat "$stdout_file" >&2
+    tail -n 30 "$stderr_file" >&2
+    die 'native managed agent session journey failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  jq -e '.status == "passed" and .mode == "protected-broker-actual-agents" and
+    (.missing_acceptance | length) == 0 and (.cleanup_errors | length) == 0' \
+    "$stdout_file" >/dev/null || die 'native managed agent journey receipt drifted'
+  log 'native managed agent session journey passed'
 }
 
 wait_for_pid_exit() {
@@ -2392,6 +2457,10 @@ run_cw run --no-tty -- /bin/sh -lc \
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_application_secret_smoke
+  if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
+    log 'checking actual pinned guest managed sessions and parent continuation'
+    run_native_managed_agent_smoke
+  fi
   log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
   run_managed_credential_broker_smoke
   run_cw credentials --local get "id:$CREDENTIAL_ID" --output json

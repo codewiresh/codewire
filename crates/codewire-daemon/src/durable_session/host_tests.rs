@@ -158,6 +158,7 @@ async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid(
         let session_id = engine.create_session_id().await.unwrap();
         let metadata = PersistedSession {
             session_id: session_id.clone(),
+            launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
             state: state as i32,
@@ -618,4 +619,381 @@ async fn restart_cannot_overwrite_cleanup_fence_published_by_its_dispatched_stop
     assert!(engine.get(&id).await.unwrap().cleanup_unknown);
     assert!(!marker.exists());
     assert!(engine.shutdown().await.is_err());
+}
+
+async fn assert_guarded_restart_has_no_effects(
+    engine: &SessionEngine,
+    id: &str,
+    expected: u64,
+) -> SessionError {
+    let handle = engine.handle(id).unwrap();
+    let before = engine.get(id).await.unwrap();
+    let metadata_path = engine.inner.root.join(id).join(METADATA_FILE);
+    let saved = tokio::fs::read(&metadata_path).await.unwrap();
+    let cancellation = *handle.launch_cancellation.borrow();
+    let active = lock(&engine.inner.active)
+        .get(id)
+        .map(|active| active.token);
+    let error = tokio::time::timeout(
+        Duration::from_secs(3),
+        engine.restart_with_generation(id, Some(expected)),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(engine.get(id).await.unwrap(), before);
+    assert_eq!(tokio::fs::read(metadata_path).await.unwrap(), saved);
+    assert_eq!(*handle.launch_cancellation.borrow(), cancellation);
+    assert_eq!(
+        lock(&engine.inner.active)
+            .get(id)
+            .map(|active| active.token),
+        active
+    );
+    error
+}
+
+#[tokio::test]
+async fn guarded_restart_duplicate_callers_cannot_stop_an_admitted_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    let pid_path = temp.path().join("peer.pid");
+    let launches = temp.path().join("launches");
+    let command = format!(
+        "printf x >> '{}'; printf '%s' \"$$\" > '{}'; exec sleep 60",
+        launches.display(),
+        pid_path.display()
+    );
+    let original = engine.launch(request(&command, false)).await.unwrap();
+    assert_eq!(original.launch_generation, 1);
+    let original_pid: u32 = wait_file(&pid_path).await.parse().unwrap();
+    assert!(matches!(
+        assert_guarded_restart_has_no_effects(&engine, &original.session_id, 1).await,
+        SessionError::FailedPrecondition(_)
+    ));
+    assert!(alive(original_pid));
+    engine.stop(&original.session_id).await.unwrap();
+    assert!(!alive(original_pid));
+    tokio::fs::remove_file(&pid_path).await.unwrap();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let mut calls = tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        let engine = engine.clone();
+        let id = original.session_id.clone();
+        let barrier = barrier.clone();
+        calls.spawn(async move {
+            barrier.wait().await;
+            engine.restart_with_generation(&id, Some(1)).await
+        });
+    }
+    barrier.wait().await;
+    let mut admitted = Vec::new();
+    let mut refused = 0;
+    while let Some(result) = tokio::time::timeout(Duration::from_secs(3), calls.join_next())
+        .await
+        .unwrap()
+    {
+        match result.unwrap() {
+            Ok(record) => admitted.push(record),
+            Err(SessionError::FailedPrecondition(_)) => refused += 1,
+            other => panic!("unexpected guarded admission: {other:?}"),
+        }
+    }
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(refused, 1);
+    assert_eq!(admitted[0].launch_generation, 2);
+    let replacement_pid: u32 = wait_file(&pid_path).await.parse().unwrap();
+    assert!(alive(replacement_pid));
+    assert!(matches!(
+        assert_guarded_restart_has_no_effects(&engine, &original.session_id, 1).await,
+        SessionError::FailedPrecondition(_)
+    ));
+    assert!(alive(replacement_pid));
+    assert_eq!(tokio::fs::read_to_string(launches).await.unwrap(), "xx");
+    engine.shutdown().await.unwrap();
+    assert!(!alive(replacement_pid));
+}
+
+#[tokio::test]
+async fn guarded_restart_cancelled_while_waiting_cannot_cancel_or_consume_an_incarnation() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    engine.ensure_initialized().await.unwrap();
+    let marker = temp.path().join("must-not-spawn");
+    let handle = tests::pending_handle(&engine, &marker).await;
+    let id = {
+        let mut metadata = handle.metadata.lock().await;
+        metadata.state = v1::SessionLifecycleState::Stopped as i32;
+        metadata.cleanup_unknown = false;
+        metadata.cleanup_confirmed = true;
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+        metadata.session_id.clone()
+    };
+    let before = engine.get(&id).await.unwrap();
+    let held_operation = handle.operation.lock().await;
+    let (entered, observed) = oneshot::channel();
+    let (settled, finished) = oneshot::channel();
+    let owner = engine.clone();
+    let worker = engine.clone();
+    let worker_id = id.clone();
+    let caller = tokio::spawn(async move {
+        owner
+            .own_launch(move |cancel| async move {
+                let _ = entered.send(());
+                let result = worker.restart_inner(&worker_id, Some(1), cancel).await;
+                let _ = settled.send(());
+                result
+            })
+            .await
+    });
+    observed.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if engine.inner.retention_admission.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::task::yield_now().await;
+    assert!(handle.operation.try_lock().is_err());
+    assert!(!caller.is_finished());
+    assert!(!*handle.launch_cancellation.borrow());
+    caller.abort();
+    let _ = caller.await;
+    tokio::time::timeout(Duration::from_secs(3), finished)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!*handle.launch_cancellation.borrow());
+    assert_eq!(engine.get(&id).await.unwrap(), before);
+    assert!(!marker.exists());
+    drop(held_operation);
+    let admitted = engine.restart_with_generation(&id, Some(1)).await.unwrap();
+    assert_eq!(admitted.launch_generation, 2);
+    assert_eq!(wait_file(&marker).await, "spawned");
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn guarded_restart_lost_response_keeps_new_process_and_consumed_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    let pid_path = temp.path().join("peer.pid");
+    let command = format!(
+        "printf '%s' \"$$\" > '{}'; exec sleep 60",
+        pid_path.display()
+    );
+    let original = engine.launch(request(&command, false)).await.unwrap();
+    wait_file(&pid_path).await;
+    engine.stop(&original.session_id).await.unwrap();
+    tokio::fs::remove_file(&pid_path).await.unwrap();
+    let (handed_off, observed) = oneshot::channel();
+    let (settled, finished) = oneshot::channel();
+    let owner = engine.clone();
+    let worker = engine.clone();
+    let id = original.session_id.clone();
+    let caller = tokio::spawn(async move {
+        owner
+            .own_launch(move |cancel| async move {
+                let record = worker.restart_inner(&id, Some(1), cancel.clone()).await?;
+                handed_off.send(record.clone()).unwrap();
+                // The restart is admitted, but its RPC caller has not received
+                // the result. Lose that caller after monitor handoff.
+                cancel.cancelled().await;
+                let _ = settled.send(());
+                Ok(record)
+            })
+            .await
+    });
+    let admitted = tokio::time::timeout(Duration::from_secs(3), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.launch_generation, 2);
+    let replacement_pid: u32 = wait_file(&pid_path).await.parse().unwrap();
+    caller.abort();
+    let _ = caller.await;
+    tokio::time::timeout(Duration::from_secs(3), finished)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        assert_guarded_restart_has_no_effects(&engine, &original.session_id, 1).await,
+        SessionError::FailedPrecondition(_)
+    ));
+    assert!(alive(replacement_pid));
+    engine.shutdown().await.unwrap();
+    assert!(!alive(replacement_pid));
+    let recovered = host_engine(temp.path());
+    assert_eq!(
+        recovered
+            .get(&original.session_id)
+            .await
+            .unwrap()
+            .launch_generation,
+        2
+    );
+    assert!(matches!(
+        assert_guarded_restart_has_no_effects(&recovered, &original.session_id, 1).await,
+        SessionError::FailedPrecondition(_)
+    ));
+    recovered.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn guarded_restart_failed_launch_consumes_generation_across_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    let original = engine
+        .launch(request("exec sleep 60", false))
+        .await
+        .unwrap();
+    engine.stop(&original.session_id).await.unwrap();
+    let handle = engine.handle(&original.session_id).unwrap();
+    {
+        let mut metadata = handle.metadata.lock().await;
+        metadata.command = vec![
+            temp.path()
+                .join("absent-executable")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+    }
+    let failed = engine
+        .restart_with_generation(&original.session_id, Some(1))
+        .await
+        .unwrap();
+    assert_eq!(failed.state, v1::SessionLifecycleState::Failed as i32);
+    assert_eq!(failed.launch_generation, 2);
+    assert!(failed.started_at.is_none());
+    assert!(!failed.cleanup_unknown);
+    engine.shutdown().await.unwrap();
+    drop(handle);
+    drop(engine);
+    let recovered = host_engine(temp.path());
+    assert_eq!(recovered.get(&original.session_id).await.unwrap(), failed);
+    assert!(matches!(
+        assert_guarded_restart_has_no_effects(&recovered, &original.session_id, 1).await,
+        SessionError::FailedPrecondition(_)
+    ));
+    let next = recovered
+        .restart_with_generation(&original.session_id, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(next.state, v1::SessionLifecycleState::Failed as i32);
+    assert_eq!(next.launch_generation, 3);
+    recovered.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn guarded_restart_rejects_unknown_cleanup_and_exhaustion_before_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    engine.ensure_initialized().await.unwrap();
+    let marker = temp.path().join("must-not-spawn");
+    let handle = tests::pending_handle(&engine, &marker).await;
+    let id = handle.metadata.lock().await.session_id.clone();
+    for state in [
+        v1::SessionLifecycleState::Unspecified,
+        v1::SessionLifecycleState::Starting,
+        v1::SessionLifecycleState::Running,
+        v1::SessionLifecycleState::Stopping,
+    ] {
+        {
+            let mut metadata = handle.metadata.lock().await;
+            metadata.state = state as i32;
+            metadata.cleanup_unknown = false;
+            persist_metadata(&engine.inner.root, &metadata)
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            assert_guarded_restart_has_no_effects(&engine, &id, 1).await,
+            SessionError::FailedPrecondition(_)
+        ));
+    }
+    {
+        let mut metadata = handle.metadata.lock().await;
+        metadata.state = v1::SessionLifecycleState::Stopped as i32;
+        metadata.cleanup_unknown = true;
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        assert_guarded_restart_has_no_effects(&engine, &id, 1).await,
+        SessionError::FailedPrecondition(_)
+    ));
+    {
+        let mut metadata = handle.metadata.lock().await;
+        metadata.launch_generation = u64::MAX;
+        metadata.cleanup_unknown = false;
+        metadata.cleanup_confirmed = true;
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+    }
+    for expected in [0, u64::MAX - 1] {
+        assert!(matches!(
+            assert_guarded_restart_has_no_effects(&engine, &id, expected).await,
+            SessionError::FailedPrecondition(_)
+        ));
+    }
+    assert!(matches!(
+        assert_guarded_restart_has_no_effects(&engine, &id, u64::MAX).await,
+        SessionError::ResourceExhausted(_)
+    ));
+    assert!(!marker.exists());
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn guarded_restart_legacy_records_remain_unfenced_until_actual_new_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    let original = engine
+        .launch(request("exec sleep 60", false))
+        .await
+        .unwrap();
+    engine.shutdown().await.unwrap();
+    drop(engine);
+    let path = temp
+        .path()
+        .join("state/sessions")
+        .join(&original.session_id)
+        .join(METADATA_FILE);
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("launch_generation");
+    tokio::fs::write(&path, serde_json::to_vec(&saved).unwrap())
+        .await
+        .unwrap();
+    let recovered = host_engine(temp.path());
+    assert_eq!(
+        recovered
+            .get(&original.session_id)
+            .await
+            .unwrap()
+            .launch_generation,
+        0
+    );
+    for expected in [0, 1] {
+        assert!(matches!(
+            assert_guarded_restart_has_no_effects(&recovered, &original.session_id, expected).await,
+            SessionError::FailedPrecondition(_)
+        ));
+    }
+    let replacement = recovered.restart(&original.session_id).await.unwrap();
+    assert_eq!(replacement.launch_generation, 1);
+    assert_eq!(replacement.state, v1::SessionLifecycleState::Running as i32);
+    recovered.shutdown().await.unwrap();
 }

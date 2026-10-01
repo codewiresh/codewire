@@ -90,6 +90,7 @@ pub trait EnvironmentSessionBackend: Clone + Send + Sync + 'static {
         org_id: &str,
         environment_id: &str,
         session_id: &str,
+        expected_launch_generation: Option<u64>,
     ) -> Result<v1::SessionRecord, connectrpc::ConnectError>;
 
     async fn send_input(
@@ -289,6 +290,7 @@ where
                 request.org_id,
                 request.environment_id,
                 request.session_id,
+                request.expected_launch_generation,
             )
             .await?;
         connectrpc::Response::ok(proto::RestartSessionResponse {
@@ -682,6 +684,7 @@ pub fn public_session(record: v1::SessionRecord) -> proto::EnvironmentSession {
         name: record.name,
         parent_session_id: record.parent_session_id,
         cleanup_unknown: record.cleanup_unknown,
+        launch_generation: record.launch_generation,
         session_id: record.session_id,
         state: public_session_state(record.state).into(),
         command: record.command,
@@ -771,6 +774,7 @@ mod tests {
                 (13, "name"),
                 (14, "parent_session_id"),
                 (15, "cleanup_unknown"),
+                (16, "launch_generation"),
             ],
         ),
         (
@@ -816,7 +820,12 @@ mod tests {
         ("codewire.v1.StopSessionResponse", &[(1, "session")]),
         (
             "codewire.v1.RestartSessionRequest",
-            &[(1, "org_id"), (2, "environment_id"), (3, "session_id")],
+            &[
+                (1, "org_id"),
+                (2, "environment_id"),
+                (3, "session_id"),
+                (4, "expected_launch_generation"),
+            ],
         ),
         ("codewire.v1.RestartSessionResponse", &[(1, "session")]),
         (
@@ -885,12 +894,15 @@ mod tests {
         .unwrap()
     }
 
+    type RestartRequestLog = Arc<Mutex<Vec<(String, Option<u64>)>>>;
+
     #[derive(Clone)]
     struct TestBackend {
         authorization_error: Option<connectrpc::ConnectError>,
         validation_calls: Arc<AtomicUsize>,
         output_reads: Arc<Mutex<Vec<v1::ReadSessionOutputRequest>>>,
         unary_inputs: Arc<Mutex<Vec<v1::SendSessionInputRequest>>>,
+        restart_requests: RestartRequestLog,
     }
 
     impl TestBackend {
@@ -900,6 +912,7 @@ mod tests {
                 validation_calls: Arc::new(AtomicUsize::new(0)),
                 output_reads: Arc::new(Mutex::new(Vec::new())),
                 unary_inputs: Arc::new(Mutex::new(Vec::new())),
+                restart_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -912,6 +925,7 @@ mod tests {
                 validation_calls: Arc::new(AtomicUsize::new(0)),
                 output_reads: Arc::new(Mutex::new(Vec::new())),
                 unary_inputs: Arc::new(Mutex::new(Vec::new())),
+                restart_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -1020,9 +1034,18 @@ mod tests {
             _ctx: &RequestContext,
             _org_id: &str,
             _environment_id: &str,
-            _session_id: &str,
+            session_id: &str,
+            expected_launch_generation: Option<u64>,
         ) -> Result<v1::SessionRecord, connectrpc::ConnectError> {
-            unreachable!("not used by bridge unit tests")
+            self.restart_requests
+                .lock()
+                .await
+                .push((session_id.into(), expected_launch_generation));
+            Ok(v1::SessionRecord {
+                session_id: session_id.into(),
+                launch_generation: 47,
+                ..Default::default()
+            })
         }
 
         async fn send_input(
@@ -1115,6 +1138,44 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Unauthenticated);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(inputs.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn guarded_restart_forwards_generation_and_maps_the_admitted_record() {
+        let backend = TestBackend::allowed();
+        let requests = backend.restart_requests.clone();
+        let bridge = EnvironmentSessionBridge::new(backend);
+        for expected in [Some(41), None] {
+            let message = proto::RestartSessionRequest {
+                org_id: "org".into(),
+                environment_id: "environment".into(),
+                session_id: "session".into(),
+                expected_launch_generation: expected,
+                ..Default::default()
+            };
+            let body = bytes::Bytes::from(message.encode_to_vec());
+            let view = proto::RestartSessionRequest::decode_view(&body).unwrap();
+            let response = proto::EnvironmentSessionService::restart_session(
+                &bridge,
+                RequestContext::default(),
+                ServiceRequest::from_parts(&view, &body),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response
+                    .body
+                    .session
+                    .into_option()
+                    .unwrap()
+                    .launch_generation,
+                47
+            );
+        }
+        assert_eq!(
+            *requests.lock().await,
+            vec![("session".into(), Some(41)), ("session".into(), None)]
+        );
     }
 
     #[tokio::test]
@@ -1506,6 +1567,7 @@ mod tests {
             name: "label".into(),
             parent_session_id: Some("session-parent".into()),
             cleanup_unknown: true,
+            launch_generation: 123,
             state: v1::SessionLifecycleState::Running as i32,
             command: vec!["sh".into()],
             working_dir: "/workspace".into(),
@@ -1519,6 +1581,7 @@ mod tests {
         assert_eq!(public.name, "label");
         assert_eq!(public.parent_session_id.as_deref(), Some("session-parent"));
         assert!(public.cleanup_unknown);
+        assert_eq!(public.launch_generation, 123);
         assert_eq!(
             public.state.as_known(),
             Some(proto::EnvironmentSessionState::Running)

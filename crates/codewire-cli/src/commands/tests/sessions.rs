@@ -92,6 +92,27 @@ fn selected_native_session_target_accepts_only_its_name_or_exact_id() {
     assert!(!native_session_request_matches(&environment, "platform"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_native_session_target_refuses_a_replacement_named_as_the_deleted_uuid() {
+    let old = "8fc6e44a-047a-4e65-8e56-26df709fee44";
+    let replacement = codewire_local_vmm::control::v1::Environment {
+        id: "d52a6f57-0f19-4b8c-b89b-b941abfc90b3".to_owned(),
+        name: old.to_owned(),
+        ..Default::default()
+    };
+    assert!(!native_session_request_matches(&replacement, old));
+    assert!(native_session_request_matches(
+        &replacement,
+        &replacement.id
+    ));
+    let named = codewire_local_vmm::control::v1::Environment {
+        name: "team-vm".to_owned(),
+        ..replacement
+    };
+    assert!(native_session_request_matches(&named, "team-vm"));
+}
+
 #[test]
 fn environment_run_tty_selection_preserves_interactive_and_machine_modes() {
     let Command::Run(interactive) = Cli::try_parse_from(["cw", "run", "builder", "--", "codex"])
@@ -175,6 +196,7 @@ fn adjacent_session_wraps_without_mutating_selected_environment() {
             parent_session_id: String::new(),
             started_at: String::new(),
             cleanup_unknown: false,
+            launch_generation: 1,
             session_id: "a".to_string(),
             state: "Running".to_string(),
             command: vec!["first".to_string()],
@@ -190,6 +212,7 @@ fn adjacent_session_wraps_without_mutating_selected_environment() {
             parent_session_id: String::new(),
             started_at: String::new(),
             cleanup_unknown: false,
+            launch_generation: 1,
             session_id: "b".to_string(),
             state: "Running".to_string(),
             command: vec!["second".to_string()],
@@ -332,6 +355,7 @@ fn foreground_run_fails_closed_on_session_exit_status() {
         parent_session_id: String::new(),
         started_at: String::new(),
         cleanup_unknown: false,
+        launch_generation: 1,
         session_id: "session-1".to_string(),
         state: "Exited".to_string(),
         command: vec!["false".to_string()],
@@ -378,6 +402,7 @@ fn an_exact_session_id_wins_over_another_sessions_name() {
         parent_session_id: String::new(),
         started_at: String::new(),
         cleanup_unknown: false,
+        launch_generation: 1,
         state: "Running".into(),
         command: vec!["sh".into()],
         working_dir: "/workspace".into(),
@@ -397,4 +422,36 @@ fn an_exact_session_id_wins_over_another_sessions_name() {
             .session_id,
         "session-real"
     );
+}
+
+#[test]
+fn a_deleted_session_id_never_selects_a_replacement_with_that_name() {
+    let old = "session-8fc6e44a-047a-4e65-8e56-26df709fee44";
+    let replacement = EnvironmentSessionView {
+        session_id: "session-d52a6f57-0f19-4b8c-b89b-b941abfc90b3".into(),
+        name: old.into(),
+        parent_session_id: String::new(),
+        started_at: String::new(),
+        cleanup_unknown: false,
+        launch_generation: 1,
+        state: "Running".into(),
+        command: vec!["sh".into()],
+        working_dir: "/workspace".into(),
+        pty: false,
+        exit_code: None,
+        output_end_offset: 0,
+        output_start_offset: 0,
+        status_message: String::new(),
+    };
+    let views = [replacement];
+    assert!(requested_environment_session(&views, old).is_none());
+    assert_eq!(
+        requested_environment_session(&views, &views[0].session_id)
+            .unwrap()
+            .session_id,
+        views[0].session_id
+    );
+    let mut named = views[0].clone();
+    named.name = "worker".into();
+    assert!(requested_environment_session(&[named], "worker").is_some());
 }

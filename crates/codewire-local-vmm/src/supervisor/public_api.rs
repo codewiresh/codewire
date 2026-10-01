@@ -1282,11 +1282,12 @@ impl EnvironmentSessionBackend for LocalSessionBackend {
         org_id: &str,
         environment_id: &str,
         session_id: &str,
+        expected_launch_generation: Option<u64>,
     ) -> Result<daemon_v1::SessionRecord, connectrpc::ConnectError> {
         self.supervisor
             .public_daemon_client(org_id, environment_id)
             .await?
-            .restart(session_id)
+            .restart_with_generation(session_id, expected_launch_generation)
             .await
             .map_err(local_session_error)
     }

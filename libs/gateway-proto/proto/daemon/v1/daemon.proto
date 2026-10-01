@@ -124,6 +124,8 @@ message SessionRecord {
   string name = 13;
   optional string parent_session_id = 14;
   bool cleanup_unknown = 15;
+  // Durable per-session launch admission generation; zero means unavailable.
+  uint64 launch_generation = 16;
 }
 
 message LaunchSessionRequest {
@@ -166,6 +168,8 @@ message StopSessionResponse {
 
 message RestartSessionRequest {
   string session_id = 1;
+  // Compare before cancellation/Stop; requires a known terminal generation.
+  optional uint64 expected_launch_generation = 2;
 }
 
 message RestartSessionResponse {

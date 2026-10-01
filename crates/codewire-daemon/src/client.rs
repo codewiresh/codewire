@@ -414,11 +414,20 @@ impl SessionClient {
     }
 
     pub async fn restart(&self, session_id: &str) -> Result<v1::SessionRecord, SessionClientError> {
+        self.restart_with_generation(session_id, None).await
+    }
+
+    pub async fn restart_with_generation(
+        &self,
+        session_id: &str,
+        expected_launch_generation: Option<u64>,
+    ) -> Result<v1::SessionRecord, SessionClientError> {
         let mut client = self.inner.clone();
         Self::required_session(
             client
                 .restart_session(self.authorized(v1::RestartSessionRequest {
                     session_id: session_id.to_string(),
+                    expected_launch_generation,
                 }))
                 .await?
                 .into_inner()

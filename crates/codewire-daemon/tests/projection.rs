@@ -615,6 +615,7 @@ async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen
     let restarted = bounded(harness.client.restart_session(authorized(
         v1::RestartSessionRequest {
             session_id: id.clone(),
+            expected_launch_generation: None,
         },
     )))
     .await
@@ -646,6 +647,7 @@ async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen
         let error = bounded(harness.client.restart_session(authorized(
             v1::RestartSessionRequest {
                 session_id: id.clone(),
+                expected_launch_generation: None,
             },
         )))
         .await

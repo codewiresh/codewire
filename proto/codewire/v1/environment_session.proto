@@ -69,6 +69,8 @@ message EnvironmentSession {
   optional string parent_session_id = 14;
   // Cleanup cannot be established after a trusted-host daemon crash.
   bool cleanup_unknown = 15;
+  // Durable per-session launch admission generation; zero means unavailable.
+  uint64 launch_generation = 16;
 }
 
 // Output offsets are absolute byte positions over the ordered output sequence.
@@ -134,6 +136,8 @@ message RestartSessionRequest {
   string org_id = 1;
   string environment_id = 2;
   string session_id = 3;
+  // Compare before cancellation/Stop; requires a known terminal generation.
+  optional uint64 expected_launch_generation = 4;
 }
 
 message RestartSessionResponse {
