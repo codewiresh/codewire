@@ -48,6 +48,7 @@ mod tests {
     mod owner_sources;
     mod preview_browser;
     mod projection;
+    mod runtime_dispatch_scope;
     mod session_mutation;
     mod ssh;
     mod two_factor_replacements;
@@ -62,9 +63,13 @@ mod tests {
     // Measured in isolated PostgreSQL after composing account access,
     // environment projection, typed SSH metadata, the GitHub singleton that
     // every personal profile includes, the per-session two-factor setup skip,
-    // preview browser authorization and pending authenticator replacement,
-    // through version32.
+    // preview browser authorization, pending authenticator replacement and
+    // the runtime-dispatch lease environment scope, through version33.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "9ea2293788144db31bb819299fc154b7df74519c9b5cacc966ff9ff4bdb90de0";
+    // Accepted table schema through version32, before runtime-dispatch leases
+    // recorded their environment.
+    const ACCEPTED_PRE_RUNTIME_DISPATCH_SCOPE_SCHEMA_FINGERPRINT: &str =
         "a0e8d8c86afccc0fbefb594374d7416b4f96704d16d480b400621f9cf616da22";
     // Accepted table schema through version31, before pending authenticator
     // replacement and the TOTP replay step.
@@ -5045,6 +5050,9 @@ mod tests {
         }
         if version > 31 {
             two_factor_replacements::assert_accepted_staged31()?;
+        }
+        if version > 32 {
+            runtime_dispatch_scope::assert_accepted_prior32()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR

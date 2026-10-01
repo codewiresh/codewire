@@ -14,16 +14,16 @@ use codewire_server_core::org_deletion::{
     OrganizationBillingMutationError, OrganizationDeletionOperation, OrganizationDeletionPhase,
     OrganizationMutationClass, OrganizationMutationLease, OrganizationRuntimeMutationError,
     OrganizationTenantSecretMutationError, RuntimeMutationOutcome,
-    acquire_organization_mutation_lease, advance_organization_deletion_phase,
-    begin_organization_deletion, finalize_organization_deletion_database,
-    mark_organization_deletion_failed, mark_organization_deletion_started,
-    mark_organization_mutation_resolution_required, pending_organization_deletion_operations,
-    record_organization_deletion_start_attempt, release_organization_mutation_lease,
-    require_organization_mutation_barrier_drained, resolve_organization_mutation_lease,
-    run_environment_runtime_mutation, run_environment_runtime_mutation_with_outcome,
-    run_organization_billing_mutation, run_organization_database_mutation,
-    run_organization_runtime_mutation, run_organization_tenant_secret_mutation,
-    unresolved_organization_mutation_leases,
+    acquire_environment_runtime_mutation_lease, acquire_organization_mutation_lease,
+    advance_organization_deletion_phase, begin_organization_deletion,
+    finalize_organization_deletion_database, mark_organization_deletion_failed,
+    mark_organization_deletion_started, mark_organization_mutation_resolution_required,
+    pending_organization_deletion_operations, record_organization_deletion_start_attempt,
+    release_organization_mutation_lease, require_organization_mutation_barrier_drained,
+    resolve_organization_mutation_lease, run_environment_runtime_mutation,
+    run_environment_runtime_mutation_with_outcome, run_organization_billing_mutation,
+    run_organization_database_mutation, run_organization_runtime_mutation,
+    run_organization_tenant_secret_mutation, unresolved_organization_mutation_leases,
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -1518,6 +1518,118 @@ async fn finalizer_refuses_active_and_resolution_required_leases_for_every_class
     .unwrap();
     assert_eq!(completed.state, "completed");
 
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn finalizer_refuses_environment_scoped_runtime_leases_until_resolved() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool).await;
+    let environment_id = seed_running_environment(&pool, &fixture).await;
+    // Recording the target environment narrows which environment cleanup
+    // waits; the organization barrier still sees every runtime admission.
+    let in_flight =
+        acquire_environment_runtime_mutation_lease(&pool, &fixture.org_id, &environment_id)
+            .await
+            .unwrap();
+    let ambiguous =
+        acquire_environment_runtime_mutation_lease(&pool, &fixture.org_id, &environment_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        in_flight.environment_id.as_deref(),
+        Some(environment_id.as_str())
+    );
+    mark_organization_mutation_resolution_required(
+        &pool,
+        &ambiguous.id,
+        "environment_runtime_dispatch_ambiguous",
+    )
+    .await
+    .unwrap();
+    let organization_wide = acquire_organization_mutation_lease(
+        &pool,
+        &fixture.org_id,
+        OrganizationMutationClass::EnvironmentRuntimeDispatch,
+    )
+    .await
+    .unwrap();
+    assert_eq!(organization_wide.environment_id, None);
+    release_organization_mutation_lease(&pool, &organization_wide.id)
+        .await
+        .unwrap();
+
+    // The environment is verified gone; only its runtime leases remain.
+    sqlx::query(
+        r#"UPDATE environments
+           SET state = 'destroyed', desired_state = 'destroyed',
+               destroyed_at = NOW(), external_cleanup_completed_at = NOW()
+           WHERE id = $1"#,
+    )
+    .bind(&environment_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let operation = begin_organization_deletion(&pool, &fixture.owner, &fixture.org_id)
+        .await
+        .unwrap();
+    advance_to_control_plane_reconciled(&pool, &operation).await;
+    let refused = |result: Result<OrganizationDeletionOperation, AppError>| {
+        matches!(
+            result,
+            Err(AppError::Coded {
+                code: "organization_mutation_barrier_not_drained",
+                ..
+            })
+        )
+    };
+    assert!(refused(
+        finalize_organization_deletion_database(
+            &pool,
+            &operation.id,
+            &fixture.org_id,
+            operation.generation,
+        )
+        .await
+    ));
+    assert!(
+        require_organization_mutation_barrier_drained(&pool, &fixture.org_id)
+            .await
+            .is_err()
+    );
+    // Lease expiry is recorded as ambiguity, never as absence.
+    mark_organization_mutation_resolution_required(
+        &pool,
+        &in_flight.id,
+        "environment_runtime_dispatch_deadline_elapsed",
+    )
+    .await
+    .unwrap();
+    assert!(refused(
+        finalize_organization_deletion_database(
+            &pool,
+            &operation.id,
+            &fixture.org_id,
+            operation.generation,
+        )
+        .await
+    ));
+    for lease in [&in_flight, &ambiguous] {
+        resolve_organization_mutation_lease(&pool, &lease.id)
+            .await
+            .unwrap();
+    }
+    let completed = finalize_organization_deletion_database(
+        &pool,
+        &operation.id,
+        &fixture.org_id,
+        operation.generation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed.state, "completed");
+
+    cleanup_environment(&pool, &fixture, &environment_id).await;
     cleanup(&pool, &fixture).await;
 }
 

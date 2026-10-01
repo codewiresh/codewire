@@ -28,7 +28,7 @@ use super::setup::{
     jittered_duration, wait_for_sidecar,
 };
 use super::{JobPayload, WorkerContext};
-use crate::lifecycle::{Action, PgLifecycleStore, Service, Snapshot};
+use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, Snapshot};
 use crate::sandbox::client::{
     ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
@@ -998,6 +998,10 @@ pub async fn handle_environment_destroy(
         return Ok(());
     }
 
+    // Every cleanup step below belongs to this attempt's runtime absence
+    // proof; the marker resolves only ambiguity that settled before it began.
+    let absence_proof = RuntimeAbsenceProof::begin(&ctx.pool).await?;
+
     port_dns::delete_port_dns_records_authoritative(
         ctx,
         env_id,
@@ -1093,7 +1097,7 @@ pub async fn handle_environment_destroy(
     }
 
     if let Err(e) = svc
-        .complete_external_cleanup(env_id, env.state == "destroyed")
+        .complete_external_cleanup(env_id, env.state == "destroyed", absence_proof)
         .await
     {
         record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
