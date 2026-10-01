@@ -20,7 +20,8 @@ use codewire_credential_broker::{
     GitHubAppUserOAuthBundle,
 };
 use codewire_platform_credentials::{
-    CredentialRecord, OAuthRefreshState, PlatformCredentialError, PlatformCredentialStore,
+    CredentialRecord, OAuthRefreshAttemptInfo, OAuthRefreshState, PlatformCredentialError,
+    PlatformCredentialStore,
 };
 use codewire_protected_store::ProtectedValue;
 use codewire_proto::codewire::v1::{
@@ -419,6 +420,11 @@ async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(
             .current_oauth_refresh_attempt(&owner, &credential_id)
             .await
             .map_err(refresh_error)?;
+        // A finished attempt against an earlier generation is history that
+        // begin replaces, not a concurrent change. Without this, the first
+        // committed renewal would block every later one.
+        let attempt =
+            attempt.filter(|attempt| attempt.expected == expected || !finished_attempt(attempt));
         if let Some(attempt) = attempt {
             if attempt.expected != expected {
                 return Err(Error::CredentialChanged);
@@ -757,6 +763,15 @@ fn same_refreshed_record(before: &CredentialRecord, after: &CredentialRecord) ->
     expected.version.material_generation = material_generation;
     expected.metadata.revocation_generation = revocation_generation;
     same_record(&expected, after)
+}
+
+/// The states `begin_oauth_refresh` may replace: no provider request is
+/// outstanding and no result waits to be promoted.
+fn finished_attempt(attempt: &OAuthRefreshAttemptInfo) -> bool {
+    matches!(
+        attempt.state,
+        OAuthRefreshState::Committed | OAuthRefreshState::Cancelled
+    ) || (attempt.state == OAuthRefreshState::Reserved && !attempt.reservation_live)
 }
 
 fn unix_now() -> Result<u64, Error> {
