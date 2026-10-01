@@ -5,6 +5,8 @@ use crate::sandbox::template::{
     credential_codex_config_name, credential_gateway_certificate_name,
     render_credential_codex_config, render_credential_gateway_certificate,
 };
+use futures::StreamExt;
+use kube::api::{WatchEvent, WatchParams};
 
 impl SandboxClient {
     pub(super) fn credential_certificates(&self) -> Api<DynamicObject> {
@@ -197,10 +199,28 @@ impl SandboxClient {
     /// A read-only convergence wait, always outside the activity's SQL mutation
     /// fence. Ready means the current Certificate revision and exact generation
     /// gateway rollout are ready, not that a provider account was contacted.
+    ///
+    /// Create and start block on this wait, so it wakes on the gateway
+    /// Deployment's next change rather than a fixed poll. Every wake re-reads
+    /// both objects, so a missed or failed watch only falls back to polling.
     pub async fn wait_for_credential_gateway_ready(
         &self,
         opts: &TemplateOpts,
         timeout: Duration,
+    ) -> anyhow::Result<()> {
+        self.wait_for_credential_gateway_ready_with_fallback(
+            opts,
+            timeout,
+            GATEWAY_READY_FALLBACK_POLL,
+        )
+        .await
+    }
+
+    async fn wait_for_credential_gateway_ready_with_fallback(
+        &self,
+        opts: &TemplateOpts,
+        timeout: Duration,
+        fallback_poll: Duration,
     ) -> anyhow::Result<()> {
         let Some(rendered) = render_credential_gateway_certificate(&self.namespace, opts) else {
             return Ok(());
@@ -223,13 +243,54 @@ impl SandboxClient {
                 if certificate_ready(&certificate) && gateway_ready(&gateway, opts) {
                     return Ok::<_, anyhow::Error>(());
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                self.wait_for_deployment_change(&gateway_name, &gateway, fallback_poll)
+                    .await;
             }
         })
         .await
         .map_err(|_| anyhow::anyhow!("credential gateway readiness timed out"))?
     }
+
+    /// Returns on the first change to `name` after the observed revision, or
+    /// once `fallback_poll` elapses. A watch that cannot open, reports an
+    /// error, or ends early waits out the fallback, so a broken watch never
+    /// turns into a tight read loop.
+    async fn wait_for_deployment_change(
+        &self,
+        name: &str,
+        observed: &DynamicObject,
+        fallback_poll: Duration,
+    ) {
+        let changed = async {
+            let Some(version) = observed.metadata.resource_version.as_deref() else {
+                return std::future::pending::<()>().await;
+            };
+            let params = WatchParams::default()
+                .fields(&format!("metadata.name={name}"))
+                .timeout(fallback_poll.as_secs().clamp(1, 290) as u32)
+                .disable_bookmarks();
+            let Ok(events) = self.deployments().watch(&params, version).await else {
+                return std::future::pending::<()>().await;
+            };
+            let mut events = std::pin::pin!(events);
+            while let Some(event) = events.next().await {
+                if matches!(
+                    event,
+                    Ok(WatchEvent::Added(_) | WatchEvent::Modified(_) | WatchEvent::Deleted(_))
+                ) {
+                    return;
+                }
+            }
+            std::future::pending::<()>().await
+        };
+        let _ = tokio::time::timeout(fallback_poll, changed).await;
+    }
 }
+
+/// The gateway readiness wait re-reads at least this often, covering a
+/// Certificate that turns ready after the Deployment's last change and a
+/// watch that cannot be opened.
+const GATEWAY_READY_FALLBACK_POLL: Duration = Duration::from_secs(2);
 
 fn validate_bootstrap_owner(
     existing: &DynamicObject,

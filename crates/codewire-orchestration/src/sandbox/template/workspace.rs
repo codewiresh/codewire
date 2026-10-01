@@ -12,11 +12,12 @@ use super::runtime_policy::{
     kata_coco_kernel_params_annotation, uses_kata_policy_init_data, workspace_storage_class,
 };
 use super::{
-    DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, DIND_SOCKET_PATH, EXTENSIONS_API_VERSION,
-    HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
-    KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR,
-    WORKSPACE_DAEMON_PORT, WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
+    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE,
+    DIND_SOCKET_PATH, EXTENSIONS_API_VERSION, HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+    KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
+    WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
+    WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI, WORKSPACE_READY_TIMEOUT,
 };
 
 /// Mirrors `sandbox.RenderSandboxTemplate`.
@@ -362,7 +363,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
-        ws["readinessProbe"] = docker_socket_readiness_probe();
+        apply_docker_socket_probes(ws, &runtime_spec);
 
         containers.push(ws.clone());
         let mut dind = dind_container(opts, &runtime_spec, false);
@@ -379,7 +380,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
-        ws["readinessProbe"] = docker_socket_readiness_probe();
+        apply_docker_socket_probes(ws, &runtime_spec);
 
         containers.push(ws.clone());
         let mut dind = dind_container(opts, &runtime_spec, true);
@@ -412,7 +413,24 @@ fn configure_confidential_workspace_device(container: &mut Value) {
     }]);
 }
 
-fn docker_socket_readiness_probe() -> Value {
+/// Workspace readiness proves the cross-container Docker socket, and create
+/// and start wait for that readiness. The kubelet runs readiness only after
+/// the startup probe succeeds, and then at once, so the 1-second startup probe
+/// bounds how late a start notices Docker while the steady-state readiness
+/// probe keeps its 2-second period. The startup budget is the tier's ready
+/// timeout: create or start has already failed before the kubelet would stop
+/// a slow Docker start.
+fn apply_docker_socket_probes(ws: &mut Value, runtime_spec: &RuntimeProfileSpec) {
+    let ready_timeout = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        CONFIDENTIAL_WORKSPACE_READY_TIMEOUT
+    } else {
+        WORKSPACE_READY_TIMEOUT
+    };
+    ws["startupProbe"] = docker_socket_probe(1, ready_timeout.as_secs());
+    ws["readinessProbe"] = docker_socket_probe(2, 3);
+}
+
+fn docker_socket_probe(period_seconds: u64, failure_threshold: u64) -> Value {
     json!({
         "exec": {
             "command": [
@@ -421,9 +439,9 @@ fn docker_socket_readiness_probe() -> Value {
                 "docker version --format '{{.Server.Version}}' >/dev/null",
             ],
         },
-        "periodSeconds": 2,
+        "periodSeconds": period_seconds,
         "timeoutSeconds": 2,
-        "failureThreshold": 3,
+        "failureThreshold": failure_threshold,
         "successThreshold": 1,
     })
 }
