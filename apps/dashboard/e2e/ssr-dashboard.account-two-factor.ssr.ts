@@ -18,17 +18,34 @@ const origin = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").repl
 test.use({ storageState: { cookies: [], origins: [] }, trace: "off", screenshot: "off" });
 
 let secret = "";
-let lastCode = "";
+let lastAcceptedStep = -1;
 let recoveryCodes: string[] = [];
 
-/** A code from a later time step than any the IdP has accepted. */
-async function freshCode(seed: string): Promise<string> {
-  const generate = () => new OTPAuth.TOTP({ secret: seed }).generate();
-  if (lastCode) {
-    await expect.poll(generate, { timeout: 35_000, intervals: [1_000] }).not.toBe(lastCode);
-  }
-  lastCode = generate();
-  return lastCode;
+// The IdP's TOTP period. It accepts a code within one step of its clock and
+// records the newest step it accepted from this factor.
+const TOTP_PERIOD_MS = 30_000;
+const totpStep = () => Math.floor(Date.now() / TOTP_PERIOD_MS);
+
+/**
+ * The authenticator's code for this time step. Enrollment and sign-in accept
+ * any code in the IdP's window, so they never wait; the step is remembered
+ * because the IdP records it for the next fresh proof.
+ */
+function currentCode(seed: string): string {
+  const step = totpStep();
+  lastAcceptedStep = Math.max(lastAcceptedStep, step);
+  return new OTPAuth.TOTP({ secret: seed }).generate({ timestamp: step * TOTP_PERIOD_MS });
+}
+
+/**
+ * A fresh proof for an account change must come from a later time step than
+ * any the IdP has accepted. Wait for the authenticator's next step only when
+ * the current one is already used: at most one TOTP period.
+ */
+async function freshProofCode(seed: string): Promise<string> {
+  await expect.poll(totpStep, { timeout: TOTP_PERIOD_MS + 5_000, intervals: [250] })
+    .toBeGreaterThan(lastAcceptedStep);
+  return currentCode(seed);
 }
 
 async function submit(page: Page, path: string, owner: ReturnType<Page["getByRole"]>, button: string): Promise<Response> {
@@ -88,14 +105,14 @@ test.describe.serial("Account › Security replaces the authenticator after a fr
     await expect(page.getByRole("heading", { name: "Secure your account" })).toBeVisible();
     secret = (await page.getByTestId("totp-secret").textContent())?.trim() || "";
     expect(secret).not.toBe("");
-    await fillField(page, "#code", await freshCode(secret));
+    await fillField(page, "#code", currentCode(secret));
     await page.getByRole("button", { name: /enable two-factor authentication/i }).click();
     await expect(page.getByTestId("recovery-code")).toHaveCount(10);
     recoveryCodes = (await page.getByTestId("recovery-code").allTextContents()).map((code) => code.trim());
   });
 
   test("a wrong proof says what still works and counts one failure", async ({ page }) => {
-    expect(await signIn(page, await freshCode(secret))).toBe(303);
+    expect(await signIn(page, currentCode(secret))).toBe(303);
     await page.goto("/settings/");
     const security = page.getByRole("region", { name: "Security", exact: true });
     await expect(security).toContainText("Sign-in asks for a code from your authenticator app. Recovery codes each work once.");
@@ -113,7 +130,7 @@ test.describe.serial("Account › Security replaces the authenticator after a fr
   });
 
   test("regenerating with a recovery code replaces every code and keeps the session", async ({ page }) => {
-    expect(await signIn(page, await freshCode(secret))).toBe(303);
+    expect(await signIn(page, currentCode(secret))).toBe(303);
     const before = await sessionCookie(page);
     await page.goto("/settings/#security");
     await page.getByRole("button", { name: "Regenerate recovery codes", exact: true }).click();
@@ -135,7 +152,10 @@ test.describe.serial("Account › Security replaces the authenticator after a fr
   });
 
   test("replacing swaps the factor, signs out other browsers and rotates this one", async ({ page }) => {
-    expect(await signIn(page, await freshCode(secret))).toBe(303);
+    // The fresh proof may wait a full TOTP period for a step later than this
+    // sign-in's; the five sign-ins keep their ordinary budget on top of it.
+    test.setTimeout(test.info().timeout * 2 + TOTP_PERIOD_MS);
+    expect(await signIn(page, currentCode(secret))).toBe(303);
     const other = await createAuthenticatedSession(email);
     const before = await sessionCookie(page);
     expect((await accountSecurityState(email)).sessions).toBeGreaterThanOrEqual(2);
@@ -144,7 +164,7 @@ test.describe.serial("Account › Security replaces the authenticator after a fr
     await page.getByRole("button", { name: "Replace authenticator", exact: true }).click();
     const proof = page.getByRole("dialog", { name: "Replace authenticator", exact: true });
     await proof.getByLabel("Password", { exact: true }).fill(TEST_PASSWORD);
-    await proof.getByLabel("Current code or recovery code", { exact: true }).fill(await freshCode(secret));
+    await proof.getByLabel("Current code or recovery code", { exact: true }).fill(await freshProofCode(secret));
     const started = await submit(page, "/settings/_actions/two-factor/replace/start", proof, "Continue");
     expect(started.status()).toBe(200);
     const confirm = page.getByRole("dialog", { name: "Add your new authenticator", exact: true });
