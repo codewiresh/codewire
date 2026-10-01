@@ -1,7 +1,7 @@
 //! Orchestration-owned node image cache (Program #2238 A2b, slice 1).
 //!
-//! A new release changes the gateway image (which the workspace Pod's
-//! daemon-init also copies the daemon from) and sometimes the workspace and
+//! A new release changes the gateway image (which the workspace Pod also
+//! mounts or copies the daemon from) and sometimes the workspace and
 //! DinD images. Without a cache, the first sandbox on a runtime node after a
 //! release waits for those pulls. Orchestration renders those exact digests,
 //! so it also keeps them warm: one `cw-image-cache` DaemonSet on every
