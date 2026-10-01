@@ -831,6 +831,21 @@ pub(crate) struct EnvironmentRow {
     pub(crate) sources: Option<EnvironmentSourcesSummaryView>,
 }
 
+impl EnvironmentRow {
+    pub(crate) fn cpu_resize_choices(&self) -> Vec<ResourceChoice> {
+        current_resource_choices(CPU_CHOICES, self.cpu_millicores, "millicores")
+    }
+
+    pub(crate) fn memory_resize_choices(&self) -> Vec<ResourceChoice> {
+        current_resource_choices(MEMORY_CHOICES, self.memory_mb, "MiB")
+    }
+
+    /// Field ids for this Sandbox's row Resize form; unique within the list.
+    pub(crate) fn row_resize_fields_id(&self) -> String {
+        format!("resize-{}", self.id)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentSourcesSummaryView {
     pub(crate) selection: codewire_proto::codewire::v1::EnvironmentSourceSelection,
@@ -1254,6 +1269,113 @@ pub(crate) enum GithubConnectionState {
     Connected,
 }
 
+/// Create's fixed resource choices, as `(value, label)`. Resize offers the
+/// same CPU and memory catalog; this is the only copy of it.
+pub(crate) const CPU_CHOICES: &[(u32, &str)] = &[
+    (1_000, "1 vCPU"),
+    (2_000, "2 vCPU"),
+    (4_000, "4 vCPU"),
+    (8_000, "8 vCPU"),
+];
+pub(crate) const MEMORY_CHOICES: &[(u32, &str)] = &[
+    (2_048, "2 GiB"),
+    (4_096, "4 GiB"),
+    (8_192, "8 GiB"),
+    (16_384, "16 GiB"),
+];
+pub(crate) const DISK_CHOICES: &[(u32, &str)] = &[
+    (10, "10 GiB"),
+    (20, "20 GiB"),
+    (40, "40 GiB"),
+    (80, "80 GiB"),
+];
+
+/// One native `<option>` of a resource select.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResourceChoice {
+    pub(crate) value: String,
+    pub(crate) label: String,
+    pub(crate) selected: bool,
+    /// The one extra option for a value outside the catalog.
+    pub(crate) off_catalog: bool,
+}
+
+fn catalog_has(catalog: &[(u32, &str)], value: &str) -> bool {
+    catalog
+        .iter()
+        .any(|(choice, _)| choice.to_string() == value)
+}
+
+/// The catalog choices with `current` selected. A value outside the catalog
+/// comes first as its own selected option, so the select never shows a
+/// different value than the one it holds.
+fn resource_choices(
+    catalog: &[(u32, &str)],
+    current: &str,
+    off_catalog_label: impl FnOnce() -> String,
+) -> Vec<ResourceChoice> {
+    let off_catalog = (!catalog_has(catalog, current)).then(|| ResourceChoice {
+        value: current.to_owned(),
+        label: off_catalog_label(),
+        selected: true,
+        off_catalog: true,
+    });
+    off_catalog
+        .into_iter()
+        .chain(catalog.iter().map(|(value, label)| {
+            let value = value.to_string();
+            ResourceChoice {
+                selected: value == current,
+                value,
+                label: (*label).to_owned(),
+                off_catalog: false,
+            }
+        }))
+        .collect()
+}
+
+/// Create labels a submitted or restored value outside the catalog by its
+/// unit; an empty value leaves the platform default.
+fn create_off_catalog_label(value: &str, unit: &str) -> String {
+    if value.is_empty() {
+        "Platform default".to_owned()
+    } else {
+        format!("{value} {unit}")
+    }
+}
+
+/// Resize choices for a Sandbox's current value. A value outside the catalog
+/// is offered, and selected, as the Sandbox's current value.
+fn current_resource_choices(
+    catalog: &[(u32, &str)],
+    current: i32,
+    unit: &str,
+) -> Vec<ResourceChoice> {
+    let value = current.to_string();
+    resource_choices(catalog, &value, || format!("{value} {unit} (current)"))
+}
+
+/// Empty asks Create for the configuration's default lifetime. `0`,
+/// `infinity` and `∞` are accepted with the same meaning for older input and
+/// saved drafts.
+pub(crate) fn ttl_uses_default(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value == "0" || value.eq_ignore_ascii_case("infinity") || value == "∞"
+}
+
+/// A lifetime in the largest exact unit the Delete after field accepts, such
+/// as `1h` for 3600 seconds or `90m` for 5400.
+pub(crate) fn lifetime_field_value(seconds: i32) -> String {
+    if seconds > 0 {
+        for (unit, size) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
+            if seconds % size == 0 {
+                return format!("{}{unit}", seconds / size);
+            }
+        }
+    }
+    format!("{seconds}s")
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentCreateFormView {
     pub(crate) csrf_token: String,
@@ -1313,16 +1435,49 @@ impl EnvironmentCreateFormView {
         }
     }
 
-    pub(crate) fn cpu_uses_catalog_option(&self) -> bool {
-        matches!(self.cpu.as_str(), "1000" | "2000" | "4000" | "8000")
+    pub(crate) fn cpu_choices(&self) -> Vec<ResourceChoice> {
+        resource_choices(CPU_CHOICES, &self.cpu, || {
+            create_off_catalog_label(&self.cpu, "millicores")
+        })
     }
 
-    pub(crate) fn memory_uses_catalog_option(&self) -> bool {
-        matches!(self.memory.as_str(), "2048" | "4096" | "8192" | "16384")
+    pub(crate) fn memory_choices(&self) -> Vec<ResourceChoice> {
+        resource_choices(MEMORY_CHOICES, &self.memory, || {
+            create_off_catalog_label(&self.memory, "MiB")
+        })
     }
 
-    pub(crate) fn disk_uses_catalog_option(&self) -> bool {
-        matches!(self.disk.as_str(), "10" | "20" | "40" | "80")
+    pub(crate) fn disk_choices(&self) -> Vec<ResourceChoice> {
+        resource_choices(DISK_CHOICES, &self.disk, || {
+            create_off_catalog_label(&self.disk, "GiB")
+        })
+    }
+
+    /// The Delete after value that an empty field resolves to: the selected
+    /// preset's default lifetime, if it has one.
+    fn preset_ttl(&self) -> Option<String> {
+        let preset_id = self.preset_id.trim();
+        self.presets
+            .iter()
+            .find(|preset| !preset_id.is_empty() && preset.id == preset_id)
+            .and_then(|preset| preset.default_ttl_seconds)
+            .map(lifetime_field_value)
+    }
+
+    /// An empty field uses the configuration's default lifetime. Without a
+    /// default, Create leaves the Sandbox off the automatic deletion schedule.
+    pub(crate) fn ttl_placeholder(&self) -> String {
+        self.preset_ttl()
+            .unwrap_or_else(|| "Not scheduled".to_owned())
+    }
+
+    /// Show the selected preset's default lifetime unless the field holds the
+    /// user's own value. Legacy `0`, `infinity` and `∞` also ask for the
+    /// default, and never come back as field text.
+    pub(crate) fn follow_preset_ttl(&mut self) {
+        if ttl_uses_default(&self.ttl) {
+            self.ttl = self.preset_ttl().unwrap_or_default();
+        }
     }
 
     pub(crate) fn isolation_selected(&self, value: &str) -> bool {
@@ -2291,5 +2446,69 @@ mod secret_debug_tests {
 
         assert_value_blind(&format!("{page:?}"));
         assert_value_blind(&format!("{submission:?}"));
+    }
+}
+
+#[cfg(test)]
+mod resource_choice_tests {
+    use super::{CPU_CHOICES, MEMORY_CHOICES, ResourceChoice, current_resource_choices};
+
+    fn choice(value: &str, label: &str, selected: bool, off_catalog: bool) -> ResourceChoice {
+        ResourceChoice {
+            value: value.into(),
+            label: label.into(),
+            selected,
+            off_catalog,
+        }
+    }
+
+    #[test]
+    fn resize_selects_the_matching_create_choice() {
+        assert_eq!(
+            current_resource_choices(CPU_CHOICES, 2_000, "millicores"),
+            vec![
+                choice("1000", "1 vCPU", false, false),
+                choice("2000", "2 vCPU", true, false),
+                choice("4000", "4 vCPU", false, false),
+                choice("8000", "8 vCPU", false, false),
+            ]
+        );
+        assert_eq!(
+            current_resource_choices(MEMORY_CHOICES, 16_384, "MiB"),
+            vec![
+                choice("2048", "2 GiB", false, false),
+                choice("4096", "4 GiB", false, false),
+                choice("8192", "8 GiB", false, false),
+                choice("16384", "16 GiB", true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn resize_keeps_an_off_catalog_current_value_as_its_selected_first_choice() {
+        let cpu = current_resource_choices(CPU_CHOICES, 750, "millicores");
+        assert_eq!(
+            cpu[0],
+            choice("750", "750 millicores (current)", true, true)
+        );
+        assert_eq!(cpu.len(), CPU_CHOICES.len() + 1);
+        assert_eq!(cpu.iter().filter(|choice| choice.selected).count(), 1);
+        let memory = current_resource_choices(MEMORY_CHOICES, 1_536, "MiB");
+        assert_eq!(memory[0], choice("1536", "1536 MiB (current)", true, true));
+        assert!(
+            memory[1..]
+                .iter()
+                .all(|choice| !choice.selected && !choice.off_catalog)
+        );
+        assert_eq!(
+            memory[1..]
+                .iter()
+                .map(|choice| (choice.value.clone(), choice.label.clone()))
+                .collect::<Vec<_>>(),
+            MEMORY_CHOICES
+                .iter()
+                .map(|(value, label)| (value.to_string(), (*label).to_owned()))
+                .collect::<Vec<_>>()
+        );
     }
 }

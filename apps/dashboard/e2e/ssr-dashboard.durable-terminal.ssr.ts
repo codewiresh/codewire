@@ -1830,7 +1830,7 @@ test("inventory Resize dismisses innermost menus with focus return and retains e
   const resize = row.locator(".cw-menu-resize");
   await actions.locator(":scope > summary").click();
   await resize.locator(":scope > summary").click();
-  await resize.getByLabel("CPU (millicores)", { exact: true }).fill("3000");
+  await resize.getByLabel("CPU", { exact: true }).selectOption("8000");
   await page.keyboard.press("Escape");
   await expect(resize).toHaveJSProperty("open", false);
   await expect(actions).toHaveJSProperty("open", true);
@@ -1840,13 +1840,13 @@ test("inventory Resize dismisses innermost menus with focus return and retains e
   await expect(actions.locator(":scope > summary")).toBeFocused();
   await actions.locator(":scope > summary").click();
   await resize.locator(":scope > summary").click();
-  await expect(resize.getByLabel("CPU (millicores)", { exact: true })).toHaveValue("3000");
+  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("8000");
   await page.getByRole("heading", { name: "Sandboxes", exact: true }).click();
   await expect(resize).toHaveJSProperty("open", false);
   await expect(actions).toHaveJSProperty("open", false);
   await actions.locator(":scope > summary").click();
   await resize.locator(":scope > summary").click();
-  await expect(resize.getByLabel("CPU (millicores)", { exact: true })).toHaveValue("3000");
+  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("8000");
   expect(mutations).toBe(0);
 });
 
@@ -2060,24 +2060,24 @@ test("live detail pauses stale actions and leaves open Resize drafts unchanged",
   await openFixture(page);
   const resize = page.locator("[data-sandbox-resize]");
   await resize.getByText("Resize", { exact: true }).click();
-  await resize.getByLabel("CPU (millicores)").fill("3000");
+  await resize.getByLabel("CPU", { exact: true }).selectOption("4000");
   state.statusAvailable = false;
   // Let the real periodic poll refresh without a deliberate outside click,
   // which correctly dismisses the native action menu.
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable", { timeout: 7500 });
   await expect(resize.getByRole("button", { name: "Review resize" })).toBeDisabled();
   await expect(resize).toHaveAttribute("open", "");
-  await expect(resize.getByLabel("CPU (millicores)")).toHaveValue("3000");
+  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("4000");
   state.statusAvailable = true;
   state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "a moment ago",
     resources: "2 vCPU · 4 GiB · 20 GiB", cpuMillicores: 2000, memoryMib: 4096, diskGib: 20,
     startEligible: false, stopEligible: true, deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false };
   await expect(page.locator("[data-sandbox-resources]")).toHaveText([state.detail.resources, state.detail.resources], { timeout: 7500 });
-  await expect(resize.getByLabel("CPU (millicores)")).toHaveValue("3000");
+  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("4000");
   await expect(resize.getByRole("button", { name: "Review resize" })).toBeEnabled();
   await resize.locator("summary").click();
   await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
-  await expect(resize.getByLabel("CPU (millicores)")).toHaveValue("2000");
+  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("2000");
   expect(state.launches).toBe(0);
 });
 

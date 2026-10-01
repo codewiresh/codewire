@@ -24,7 +24,20 @@ test("creation keeps sources visible and closed advanced fields remain native fo
   await page.getByLabel("Disk", { exact: true }).selectOption("20");
   await expect(page.getByLabel("CPU", { exact: true }).locator("option:checked")).toHaveText("2 vCPU");
   await expect(page.getByLabel("Memory", { exact: true }).locator("option:checked")).toHaveText("4 GiB");
-  await expect(page.getByLabel("Delete after")).toHaveAccessibleDescription(/automatic deletion.*not an idle timeout/);
+  const ttl = page.getByLabel("Delete after");
+  await expect(ttl).toHaveAccessibleDescription(/automatic deletion.*not an idle timeout.*without one, the Sandbox is not scheduled/);
+  // No preset is selected: empty states what it does instead of "infinity".
+  await expect(ttl).toHaveValue("");
+  await expect(ttl).toHaveAttribute("placeholder", "Not scheduled");
+  for (const legacy of ["0", "infinity", "∞"]) {
+    await ttl.fill(legacy);
+    await ttl.press("Tab");
+    await expect(ttl).toHaveValue("");
+  }
+  await ttl.fill(" 8 H ");
+  await ttl.press("Tab");
+  await expect(ttl).toHaveValue("8h");
+  await ttl.fill("");
   await runtime.locator("summary").click();
   await page.getByLabel("Install command", { exact: true }).fill("bun install");
   await page.getByLabel("Startup script", { exact: true }).fill("bun run dev");
@@ -33,7 +46,7 @@ test("creation keeps sources visible and closed advanced fields remain native fo
     const data = new FormData(form);
     return Object.fromEntries(["cpu", "memory", "disk", "ttl", "install_command", "startup_script"].map((name) => [name, data.get(name)]));
   });
-  expect(fields).toEqual({ cpu: "2000", memory: "4096", disk: "20", ttl: "infinity", install_command: "bun install", startup_script: "bun run dev" });
+  expect(fields).toEqual({ cpu: "2000", memory: "4096", disk: "20", ttl: "", install_command: "bun install", startup_script: "bun run dev" });
 });
 
 const draftPrefix = "codewire.create-selections.v1:";
@@ -769,6 +782,30 @@ test("Create recovery restores authored values only after current selections are
   await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
 });
 
+test("Create recovery keeps the restored preset lifetime when the draft left it to the default", async ({ page }) => {
+  const saved = selectionsDraft();
+  // Drafts saved before an empty field meant the default stored "infinity".
+  const draft = {
+    ...saved,
+    selections: { ...saved.selections, ttl: "infinity" },
+    authored: {
+      name: "preset-lifetime", image: "registry.example.test/workspace:stable", install_command: "", startup_script: "",
+      repositories: [], port_rows: [], ttl: "infinity",
+    },
+  };
+  await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
+  await page.goto(fixtureUrl());
+  // The server shows the restored preset's default lifetime for such a draft.
+  const restored = 'name="ttl" value="7d" placeholder="7d"';
+  const html = (await restoredCard(page, draft)).replace('name="ttl" value="infinity" placeholder="Not scheduled"', restored);
+  expect(html).toContain(restored);
+  await page.route("**/fixture/_fragments/create-draft", (route) => route.fulfill({ status: 200, contentType: "text/html", body: html }));
+  await page.getByRole("button", { name: "Restore saved draft" }).click();
+  await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "true");
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("preset-lifetime");
+  await expect(page.getByLabel("Delete after")).toHaveValue("7d");
+});
+
 test("Create draft retains in-progress preview and lifetime text", async ({ page }) => {
   await page.goto(fixtureUrl());
   await page.getByLabel("Delete after").fill("not-a-duration");
@@ -778,7 +815,7 @@ test("Create draft retains in-progress preview and lifetime text", async ({ page
   const stored = await page.evaluate((key) => JSON.parse(sessionStorage.getItem(key)!), keyForDraft(selectionsDraft()));
   expect(stored.authored.ttl).toBe("not-a-duration");
   expect(stored.authored.port_rows).toEqual([{ port: "", label: "web", access: "creator" }]);
-  expect(stored.selections.ttl).toBe("infinity");
+  expect(stored.selections.ttl).toBe("");
   expect(stored.selections.ports).toEqual([]);
 });
 

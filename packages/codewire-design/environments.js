@@ -12,6 +12,10 @@
   const organizationId = opaqueId;
   const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
   const draftNumber = (value, minimum, maximum) => typeof value === "string" && /^\d{1,7}$/.test(value) && Number(value) >= minimum && Number(value) <= maximum;
+  // Empty uses the saved configuration's default lifetime. "0", "infinity"
+  // and "∞" meant the same in older input and drafts; they are still read,
+  // but never written back.
+  const defaultTtl = (value) => ["", "0", "infinity", "∞"].includes(value.trim().toLocaleLowerCase());
   const draftTtl = (value) => {
     if (["", "0", "infinity"].includes(value)) return true;
     if (typeof value !== "string" || value.length > 10) return false;
@@ -135,7 +139,7 @@
     selections: {
       preset_id: draftFormValue(form, "preset_id"), cpu: draftFormValue(form, "cpu"),
       memory: draftFormValue(form, "memory"), disk: draftFormValue(form, "disk"),
-      ttl: draftTtl(ttl) ? ttl : "infinity", isolation_tier: draftFormValue(form, "isolation_tier"),
+      ttl: draftTtl(ttl) && !defaultTtl(ttl) ? ttl : "", isolation_tier: draftFormValue(form, "isolation_tier"),
       agents: Array.from(form.querySelectorAll('[name="agent"]:checked'), (field) => field.value),
       ports: portRows.filter((row) => draftNumber(row.port.trim(), 1, 65535))
         .map((row) => ({ port: row.port.trim(), access: row.access })),
@@ -228,6 +232,8 @@
     for (const name of fields) {
       const field = form.elements.namedItem(name);
       if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) throw new Error("invalid authored field");
+      // A lifetime left to the default keeps the restored preset's default.
+      if (name === "ttl" && defaultTtl(authored.ttl)) continue;
       field.value = authored[name];
     }
     const rows = form.querySelector("[data-repository-rows]");
@@ -814,8 +820,8 @@
   document.addEventListener("focusout", (event) => {
     if (!(event.target instanceof HTMLInputElement) || !event.target.matches("[data-ttl-input]")) return;
     const value = event.target.value.trim().toLocaleLowerCase();
-    if (value === "" || value === "0" || value === "∞" || value === "infinity") {
-      event.target.value = "infinity";
+    if (defaultTtl(value)) {
+      event.target.value = "";
       return;
     }
     const duration = value.match(/^(\d+)\s*([smhd])$/);

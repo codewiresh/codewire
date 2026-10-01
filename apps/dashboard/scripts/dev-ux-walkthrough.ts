@@ -150,7 +150,7 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
   // Read-only setup detours: do not create credentials or application secrets.
   for (const destination of ["secrets", "credentials"]) {
     await stage(`create-detour-${destination}-${width}`, async () => {
-      await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+      await page.locator("#environment-create-card").getByLabel("CPU", { exact: true }).selectOption("2000");
       await page.getByLabel("Delete after", { exact: true }).fill("8h");
       await page.getByLabel("Name", { exact: true }).fill(`dev-ux-draft-${destination}`);
       await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
@@ -213,9 +213,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await owned.admit(deadline);
     previewPattern = (await page.locator(".cw-preview-pattern").innerText()).trim();
     await page.getByLabel("Name", { exact: true }).fill(owned.name);
-    await page.getByLabel("CPU", { exact: true }).selectOption("1000");
-    await page.getByLabel("Memory", { exact: true }).selectOption("2048");
-    await page.getByLabel("Disk", { exact: true }).selectOption("10");
+    await page.locator("#environment-create-card").getByLabel("CPU", { exact: true }).selectOption("1000");
+    await page.locator("#environment-create-card").getByLabel("Memory", { exact: true }).selectOption("2048");
+    await page.locator("#environment-create-card").getByLabel("Disk", { exact: true }).selectOption("10");
     await page.getByLabel("Delete after", { exact: true }).fill("1h");
     // Use the product's configured default image. Never inherit a saved source
     // selection or attach the dedicated account's existing secrets/providers.
