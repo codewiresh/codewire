@@ -599,7 +599,11 @@
     if (browserForm(browser)?.dataset.createOptionsLoading === "true") message.textContent = "Loading GitHub account…";
     else message.textContent = `${githubStateMessage(browser, account ? `Connected as @${account}.` : "GitHub connected.")}${profileHint}`;
     const setup = browser.querySelector("[data-github-setup-link]");
-    if (setup) setup.textContent = { connected: "Manage GitHub connection", inactive: "Reconnect GitHub" }[connectionState(browser)] || "Connect GitHub";
+    if (setup) {
+      // Until choices load the connection is unknown; never offer Connect early.
+      setup.hidden = browserForm(browser)?.dataset.createOptionsLoading === "true";
+      setup.textContent = { connected: "Manage GitHub connection", inactive: "Reconnect GitHub" }[connectionState(browser)] || "Connect GitHub";
+    }
   };
   const browserCurrent = (browser, state, sequence) => browser.isConnected
     && state.sequence === sequence
@@ -702,7 +706,8 @@
       browser.querySelector("[data-github-next]").hidden = state.complete || !!state.query;
       setStatus(browser, state.query
         ? state.complete ? `${state.matches} matching repositories found across ${state.pages} pages.${state.matches > 200 ? " Showing the first 200; refine your search." : ""}` : `Searching all accessible repositories… ${state.pages} pages checked, ${state.matches} matches.`
-        : state.complete ? `${state.pages} pages loaded. Choose a repository to add.${state.pruned ? " Earlier rows can be found with search." : ""}` : `${state.pages} pages loaded. Scroll or load more.${state.pruned ? " Earlier rows can be found with search." : ""}`);
+        : state.complete && state.matches === 0 ? "No repositories are available through this GitHub connection. Change the repositories the Codewire GitHub App can access, or use Add custom Git URL."
+        : state.complete ? `${state.matches} repositories loaded. Choose one to add.${state.pruned ? " Earlier rows can be found with search." : ""}` : `${state.matches} repositories loaded. Scroll or load more.${state.pruned ? " Earlier rows can be found with search." : ""}`);
     } catch (error) {
       if (browserCurrent(browser, state, sequence)) {
         setStatus(browser, error?.message && !["invalid endpoint", "invalid content type", "invalid repository response", "draft response limit"].includes(error.message) ? error.message : "Repository access unavailable. Retry loading repositories.");
