@@ -173,8 +173,7 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
       await expect(form).toHaveAttribute("data-create-draft-id", draft!);
       await expect(form).toHaveAttribute("data-create-draft-actor", userId);
       await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-      await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-      await button(page, "Restore saved draft").click();
+      // The exact draft comes back by itself after the detour.
       await expect(form).toHaveAttribute("data-create-draft-restored", "true");
       await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
       await expect(page.locator('[name="ttl"]')).toHaveValue("8h");

@@ -258,7 +258,7 @@
       access.value = port.access;
     });
   };
-  const restoreDraft = async (form, state) => {
+  const restoreDraft = async (form, state, automatic = false) => {
     if (!state || !state.saved || state.edited || state.storageFailed || form.dataset.createDraftFresh !== "true" || !draftIsOpen(form) || !pristineDraftForm(form)) return;
     suspendCreateOptions(form);
     cancelDraftRestore(state, form);
@@ -268,7 +268,10 @@
     const button = form.querySelector("[data-restore-create-draft]");
     if (button) button.disabled = true;
     draftStatus(form, "Checking current options before restoring selections…");
-    const timer = window.setTimeout(() => controller.abort(), 40_000);
+    // An automatic restore holds the form briefly so an early keystroke cannot
+    // replace the saved draft with an empty one; a slow restore gives it back.
+    if (automatic) { form.inert = true; form.setAttribute("aria-busy", "true"); }
+    const timer = window.setTimeout(() => controller.abort(), automatic ? 8_000 : 40_000);
     try {
       if (!validDraft(state.saved)) throw new Error("invalid draft");
       const endpoint = new URL(form.dataset.createDraftUrl, window.location.origin);
@@ -303,6 +306,7 @@
     } finally {
       window.clearTimeout(timer);
       if (state.controller === controller) state.controller = null;
+      if (automatic && form.isConnected) { form.inert = false; form.removeAttribute("aria-busy"); }
       if (button && form.isConnected) button.disabled = state.edited || state.storageFailed || !pristineDraftForm(form);
       resumeCreateOptions(form);
     }
@@ -409,7 +413,7 @@
   const wireDraftForms = () => {
     document.querySelectorAll("[data-environment-form][data-create-draft-id]").forEach((form) => {
       if (!(form instanceof HTMLFormElement) || draftStates.has(form)) return;
-      const state = { saved: null, edited: false, storageFailed: false, sequence: 0, controller: null };
+      const state = { saved: null, edited: false, storageFailed: false, sequence: 0, controller: null, autoRestore: false };
       draftStates.set(form, state);
       if (!actorId(form.dataset.createDraftActor) || !organizationId(form.dataset.createDraftOrganization) || !canonicalId(form.dataset.createDraftId)) return;
       reconcileDraftActor(form.dataset.createDraftActor);
@@ -419,6 +423,9 @@
         state.saved = saved.find((draft) => draft.draft === form.dataset.createDraftId) || (!exactReturn && saved[0]) || null;
         const button = form.querySelector("[data-restore-create-draft]");
         if (button) button.hidden = !state.saved || form.dataset.createDraftFresh !== "true";
+        // Authored values come back on their own when this fresh form opens;
+        // the button remains to retry if that restore fails or is interrupted.
+        state.autoRestore = !!state.saved && form.dataset.createDraftFresh === "true";
         if (exactReturn && !state.saved) draftStatus(form, "The requested draft is unavailable in this tab. No Sandbox was created.", true);
       } catch {
         state.storageFailed = true;
@@ -429,9 +436,11 @@
         const observer = new MutationObserver(() => {
           if (!form.isConnected) { cancelDraftRestore(state, form); observer.disconnect(); }
           else if (!draftIsOpen(form)) cancelDraftRestore(state, form);
+          else if (state.autoRestore) { state.autoRestore = false; void restoreDraft(form, state, true); }
         });
         observer.observe(owner, { childList: true, attributes: true, attributeFilter: ["hidden", "data-open"] });
       }
+      if (state.autoRestore && draftIsOpen(form)) { state.autoRestore = false; void restoreDraft(form, state, true); }
     });
   };
   const editDraft = (form) => {
