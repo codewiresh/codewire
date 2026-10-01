@@ -66,7 +66,9 @@
     const environmentId = root.dataset.terminalEnvironmentId;
     const slug = root.dataset.terminalOrgSlug;
     if (!P.uuid.test(environmentId || "") || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug || "") || slug.length < 3 || slug.length > 48) return;
-    const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness`;
+    // Ask for setupRunning explicitly: the server omits it for pages that
+    // predate it, whose closed-shape check would otherwise reject the response.
+    const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=setup`;
     const button = root.querySelector("[data-terminal-readiness-refresh]");
     const heading = document.querySelector("[data-sandbox-observation]");
     const observesDetail = heading?.dataset.sandboxEnvironmentId === environmentId;
@@ -121,7 +123,7 @@
         const action = control.dataset.sandboxAction;
         const eligible = available && !submissionPending && !(resizeLocked && ["start", "stop", "delete", "resize"].includes(action))
           && ({ start: detail.startEligible, stop: detail.stopEligible,
-          delete: detail.deleteEligible, resize: detail.actionsAllowed && !detail.pending,
+          delete: detail.deleteEligible, resize: detail.actionsAllowed && !detail.pending && value.setupRunning !== true,
           ports: detail.actionsAllowed, connect: value.running && value.setupComplete })[action] === true;
         if (control instanceof HTMLButtonElement) control.disabled = !eligible;
         if (control instanceof HTMLAnchorElement) {
@@ -135,6 +137,18 @@
           control.hidden = !eligible && available && !submissionPending;
         }
       }
+      // Resize waits while setup owns the running Sandbox, as New terminal
+      // does, and says why. The rendered reason stands until status settles.
+      const setupNote = document.querySelector("[data-resize-setup-note]");
+      if (setupNote && settled) {
+        const waiting = available && !submissionPending && !resizeLocked && value.setupRunning === true
+          && detail.actionsAllowed && !detail.pending;
+        setupNote.hidden = !waiting;
+        for (const control of document.querySelectorAll('[data-resize-open], [data-sandbox-action="resize"]')) {
+          if (waiting) control.setAttribute("aria-describedby", setupNote.id);
+          else control.removeAttribute("aria-describedby");
+        }
+      }
     }
     let epoch = 0;
     let pending = null;
@@ -146,7 +160,8 @@
       observe(available, value);
       document.dispatchEvent(new CustomEvent("codewire:sandbox-status", {
         detail: { environmentId, available, running: value?.running === true,
-          setupComplete: value?.setupComplete === true, actionsAllowed: value?.detail?.actionsAllowed === true,
+          setupComplete: value?.setupComplete === true, setupRunning: value?.setupRunning === true,
+          actionsAllowed: value?.detail?.actionsAllowed === true,
           pending: value?.detail?.pending !== false, checking: !settled },
       }));
     };
@@ -197,9 +212,13 @@
         }
         text += decoder.decode();
         const value = JSON.parse(text);
-        if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"])
+        // A server from before setupRunning omits it; that reads as false, so
+        // Resize behaves as before and the server's refusal covers setup.
+        if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"], ["setupRunning"])
           || value.environmentId !== environmentId || typeof value.running !== "boolean"
-          || typeof value.setupComplete !== "boolean" || !validDetail(value.detail)) throw new Error("Invalid readiness");
+          || typeof value.setupComplete !== "boolean"
+          || (Object.hasOwn(value, "setupRunning") && typeof value.setupRunning !== "boolean")
+          || !validDetail(value.detail)) throw new Error("Invalid readiness");
         if (version === epoch && !paused && !document.hidden && root.isConnected) { settled = true; report(true, value); }
       } catch {
         if (version === epoch && !paused && root.isConnected) { settled = true; report(false); }

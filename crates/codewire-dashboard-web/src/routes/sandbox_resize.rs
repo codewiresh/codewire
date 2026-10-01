@@ -14,7 +14,7 @@ use codewire_proto::codewire::v1::{
     EnvironmentResizeOperationState, EnvironmentResizePlan, EnvironmentResources,
     ResizeEnvironmentRequest,
 };
-use connectrpc::ErrorCode;
+use connectrpc::{ConnectError, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -346,17 +346,27 @@ pub(super) async fn plan(
             Some(value) => json(StatusCode::OK, value),
             None => failure(StatusCode::BAD_GATEWAY, "resize-plan-unavailable"),
         },
-        Err(error) => failure(
-            match error.code {
-                ErrorCode::Unauthenticated => StatusCode::UNAUTHORIZED,
-                ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
-                ErrorCode::NotFound => StatusCode::NOT_FOUND,
-                ErrorCode::InvalidArgument => StatusCode::BAD_REQUEST,
-                _ => StatusCode::SERVICE_UNAVAILABLE,
-            },
-            "resize-plan-unavailable",
-        ),
+        Err(error) => plan_failure(&error),
     }
+}
+
+/// Review is read-only, so a refusal never leaves an outcome to reconcile.
+/// Setup still owning the Sandbox gets its own code so the dialog can say so;
+/// every other refusal stays generic.
+fn plan_failure(error: &ConnectError) -> Response {
+    if environment_connect::resize_refused_during_setup(error) {
+        return failure(StatusCode::CONFLICT, "setup-in-progress");
+    }
+    failure(
+        match error.code {
+            ErrorCode::Unauthenticated => StatusCode::UNAUTHORIZED,
+            ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
+            ErrorCode::NotFound => StatusCode::NOT_FOUND,
+            ErrorCode::InvalidArgument => StatusCode::BAD_REQUEST,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        },
+        "resize-plan-unavailable",
+    )
 }
 
 pub(super) async fn apply(
@@ -683,6 +693,65 @@ mod tests {
                 value,
                 serde_json::json!({"error": "resize-outcome-unknown"})
             );
+        }
+    }
+
+    fn setup_refusal(message: &str) -> ConnectError {
+        let reason = codewire_proto::google::rpc::ErrorInfo {
+            reason: "INVALID_STATE".to_owned(),
+            domain: "codewire.sh".to_owned(),
+            ..Default::default()
+        };
+        ConnectError::failed_precondition(message).with_detail(
+            connectrpc::ErrorDetail::from_message("google.rpc.ErrorInfo", &reason),
+        )
+    }
+
+    async fn failure_body(response: Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 2048)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// #2333: Review during setup said only that it could not be reviewed.
+    #[tokio::test]
+    async fn review_refused_during_setup_has_its_own_code_and_others_stay_generic() {
+        let setup = "environment setup is still in progress; try again when it finishes";
+        let (status, value) = failure_body(plan_failure(&setup_refusal(setup))).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(value, serde_json::json!({"error": "setup-in-progress"}));
+        let generic = serde_json::json!({"error": "resize-plan-unavailable"});
+        for (error, expected) in [
+            // Another lifecycle conflict keeps the generic refusal.
+            (
+                setup_refusal("environment cannot be resized while stopping"),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            // The text alone, without the known code and reason, is not trusted.
+            (
+                ConnectError::failed_precondition(setup),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                ConnectError::unavailable(setup),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (ConnectError::not_found("gone"), StatusCode::NOT_FOUND),
+            (ConnectError::permission_denied("no"), StatusCode::FORBIDDEN),
+            (
+                ConnectError::unauthenticated("no"),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                ConnectError::invalid_argument("bad"),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, value) = failure_body(plan_failure(&error)).await;
+            assert_eq!(status, expected, "{error:?}");
+            assert_eq!(value, generic, "{error:?}");
         }
     }
 

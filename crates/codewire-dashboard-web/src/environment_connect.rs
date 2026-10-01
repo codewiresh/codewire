@@ -486,6 +486,21 @@ pub(crate) async fn plan_environment_resize(
     Ok((plan, environment))
 }
 
+/// Orchestration refuses Resize while setup still owns a running Sandbox with
+/// its known `invalid_state` conflict (failed_precondition). Only its detail
+/// separates it from other state conflicts; orchestration pins that text in
+/// `assert_setup_in_progress`. Callers map it to a fixed message and never
+/// forward the detail itself.
+pub(crate) fn resize_refused_during_setup(error: &ConnectError) -> bool {
+    error.code == connectrpc::ErrorCode::FailedPrecondition
+        && crate::view::connect_error_reason(error)
+            .is_some_and(|reason| reason.eq_ignore_ascii_case("invalid_state"))
+        && error
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("setup is still in progress"))
+}
+
 pub(crate) async fn resize_environment(
     state: &AppState,
     cookie: HeaderValue,
@@ -741,6 +756,10 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
     let sources = source_summary(&environment);
     let (deletion_state, shutdown_at, shutdown_at_label) = deletion_deadline(&environment);
     let state = state_name(environment.state.to_i32());
+    // Mirrors orchestration's setup window for a running Sandbox (#2328).
+    let setup_running = state == "running"
+        && !environment.setup_complete
+        && environment.setup_error.trim().is_empty();
     let display_name = if environment.name.trim().is_empty() {
         environment.id.chars().take(8).collect()
     } else {
@@ -790,6 +809,7 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         can_start: matches!(state, "stopped" | "error"),
         can_stop: state == "running",
         can_destroy: !matches!(state, "destroying" | "destroyed"),
+        setup_running,
         confidential_actions_allowed: true,
         vscode_url: format!(
             "vscode://vscode-remote/ssh-remote+cw-{}/workspace",
