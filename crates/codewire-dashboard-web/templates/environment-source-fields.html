@@ -1,4 +1,4 @@
-<section class="cw-create-panel cw-secret-panel" aria-labelledby="{{ source_fields_id }}-secrets-title">
+<section class="cw-create-panel" aria-labelledby="{{ source_fields_id }}-secrets-title">
   <header class="cw-create-panel-heading cw-create-panel-heading--help"><h3 id="{{ source_fields_id }}-secrets-title">Application secrets</h3><button class="cw-field-help-trigger" type="button" popovertarget="{{ source_fields_id }}-secrets-help" popovertargetaction="show" aria-label="About application secrets" data-field-help-trigger>i</button><p id="{{ source_fields_id }}-secrets-help" class="cw-field-help-popover" popover="auto" role="tooltip" data-field-help-popover>Selected secrets become environment variables with their original names; Sandbox processes and root can read them. If names overlap, environment configuration wins, followed by personal, project, and organization secrets.</p></header>
   {% if !sources.application_selection_enabled %}<p class="cw-field-help">Application-secret selection is not available in this dashboard yet.</p>{% endif %}
   {% if !sources.application_selection_enabled %}
@@ -11,8 +11,8 @@
   <fieldset class="cw-source-fields" aria-describedby="{{ source_fields_id }}-secrets-help"{% if !sources.application_selection_enabled %} disabled{% endif %}>
     <legend class="cw-sr-only">Application secret sources</legend>
     <ul class="cw-source-choices">
-      <li><label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_org_secrets" value="platform"{% if sources.organization_selected %} checked{% endif %}><span>Organization secrets</span></label></li>
-      <li><label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_user_secrets" value="platform"{% if sources.personal_selected %} checked{% endif %}><span>Personal secrets</span></label></li>
+      <li><label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_org_secrets" value="platform"{% if sources.organization_selected %} checked{% endif %}><span>Organization secrets</span></label><a class="cw-source-manage" href="/{{ organization.slug }}/secrets/organization/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage organization secrets</a></li>
+      <li><label class="cw-source-choice cw-choice"><input class="cw-checkbox" type="checkbox" name="include_user_secrets" value="platform"{% if sources.personal_selected %} checked{% endif %}><span>Personal secrets</span></label><a class="cw-source-manage" href="/settings/secrets/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage personal secrets</a></li>
     </ul>
     <div class="cw-field">
       <label class="cw-label" for="{{ source_fields_id }}-secret-project">Secret project</label>
@@ -23,15 +23,9 @@
       {% if !sources.project_selection_error.is_empty() %}<p id="{{ source_fields_id }}-project-help" class="cw-field-error" role="alert">{{ sources.project_selection_error }}</p>{% endif %}
       {% if !sources.project_error.is_empty() %}<p class="cw-field-error" role="alert">{{ sources.project_error }}</p>{% endif %}
       {% if sources.application_selection_enabled && sources.project_error.is_empty() && sources.projects.is_empty() %}<p class="cw-field-help">No secret projects are available in this organization. An organization administrator can create one.</p>{% endif %}
+      <a class="cw-source-manage" href="{{ organization.secrets_url }}{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage secret projects</a>
     </div>
   </fieldset>
-  <nav aria-label="Manage application secrets">
-    <ul class="cw-source-choices">
-      <li><a href="/settings/secrets/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage personal secrets</a></li>
-      <li><a href="/{{ organization.slug }}/secrets/organization/{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage organization secrets</a></li>
-      <li><a href="{{ organization.secrets_url }}{% if !source_creation_draft_parameter.is_empty() %}?{{ source_creation_draft_parameter }}{% endif %}"{% if !source_creation_draft_parameter.is_empty() %} data-create-draft-setup{% endif %}>Manage secret projects</a></li>
-    </ul>
-  </nav>
 </section>
 
 <section class="cw-create-panel cw-credential-panel" aria-labelledby="{{ source_fields_id }}-credentials-title">

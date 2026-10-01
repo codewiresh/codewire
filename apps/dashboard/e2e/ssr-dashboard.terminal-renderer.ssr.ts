@@ -14,11 +14,11 @@ test("ports load in place and late dismissed responses cannot redirect or replac
   const ports = page.getByRole("button", { name: "Ports", exact: true });
   const dialog = page.getByRole("dialog", { name: "Ports · Example Sandbox", exact: true });
   await ports.click();
-  await expect(dialog.getByText("Internal 3000 · Creator", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Internal port 3000 · Sandbox creator", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("link", { name: "Open preview" })).toHaveAttribute("href", "https://web-5d1db-example.preview.example.test");
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: test.info().outputPath("ports-dialog.png") });
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
   let releaseStale: (() => void) | undefined;
   let requests = 0;
   await page.route("**/reference/fixtures/terminal-ports.html", async (route) => {
@@ -31,7 +31,7 @@ test("ports load in place and late dismissed responses cannot redirect or replac
   await ports.click();
   await expect.poll(() => Boolean(releaseStale)).toBe(true);
   await expect(page.locator("#sandbox-ports-content")).toHaveJSProperty("inert", true);
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
   await ports.click();
   const staleResponse = page.waitForResponse((response) => response.headers()["x-stale-fixture"] === "true");
   releaseStale!();
@@ -40,15 +40,15 @@ test("ports load in place and late dismissed responses cannot redirect or replac
   // request runs after the obsolete response has been suppressed.
   await expect.poll(() => requests).toBe(2);
   await expect(page.locator("#sandbox-ports-content")).toHaveJSProperty("inert", false);
-  await expect(dialog.getByText("Internal 3000 · Creator", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Internal port 3000 · Sandbox creator", { exact: true })).toBeVisible();
   await expect(page.getByText("Stale response", { exact: true })).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
   await page.unroute("**/reference/fixtures/terminal-ports.html");
   await page.route("**/reference/fixtures/terminal-ports.html", (route) => route.fulfill({ status: 503, body: "Synthetic unavailable" }));
   await ports.click();
   await expect(dialog.getByRole("alert")).toContainText("The ports could not be refreshed");
   await expect(page.locator("#sandbox-ports-content")).toHaveJSProperty("inert", true);
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
   await expect(ports).toBeFocused();
   expect(page.url()).toBe(originalUrl);
   expect(await terminal!.evaluate((element) => element === document.querySelector("[data-terminal-root]"))).toBe(true);

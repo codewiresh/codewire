@@ -9,7 +9,7 @@
     {% if editor.expected.personal %}<input type="hidden" name="expected_include_user_secrets" value="platform">{% endif %}
     <input type="hidden" name="expected_credential_profile" value="{% if !editor.expected.profile.is_empty() %}{{ editor.expected.profile_id() }}@{{ editor.expected.profile_revision }}{% endif %}">
     <div class="cw-drawer-body">
-      <dl class="cw-source-summary"><dt>Environment operation</dt><dd>{{ editor.expected.operation_generation }}</dd><dt>Current credential profile</dt><dd>{% if editor.expected.profile.is_empty() %}None{% else %}{{ editor.expected.profile }} · revision {{ editor.expected.profile_revision }}{% endif %}</dd></dl>
+      <dl class="cw-source-summary"><dt>Sandbox operation</dt><dd>{{ editor.expected.operation_generation }}</dd><dt>Current credential profile</dt><dd>{% if editor.expected.profile.is_empty() %}None{% else %}{{ editor.expected.profile }} · revision {{ editor.expected.profile_revision }}{% endif %}</dd></dl>
       <p class="cw-field-help">{{ editor.environment_name }}. Changing selections restarts a running Sandbox and retains its workspace data. A stopped Sandbox remains stopped.</p>
       {% let source_fields_id = "environment-edit" %}
       {% let sources = editor.fields %}

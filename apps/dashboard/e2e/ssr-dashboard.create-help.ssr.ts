@@ -76,7 +76,7 @@ for (const fixture of ["create-sandbox.html", "edit-sandbox-sources.html"]) {
     await expect(page.getByRole("link", { name: "Manage organization secrets" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Manage secret projects" })).toBeVisible();
     await page.keyboard.press("Escape");
-    await page.locator(".cw-secret-panel").screenshot({ path: test.info().outputPath(`${fixture}-secret-panel.png`) });
+    await page.locator(".cw-create-panel").filter({ has: page.getByRole("heading", { name: "Application secrets", exact: true }) }).screenshot({ path: test.info().outputPath(`${fixture}-secret-panel.png`) });
   });
 }
 
@@ -95,4 +95,61 @@ test("source help without a trigger id stays open while its container scrolls", 
   await page.locator(".cw-drawer-body").evaluate((body) => body.dispatchEvent(new Event("scroll")));
   await expect(help).toBeVisible();
   await expect(help).not.toHaveAttribute("data-field-help-trigger");
+});
+
+test("workspace image choices open as a listbox, filter, and pick by keyboard or pointer", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
+  await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
+  const image = page.getByRole("combobox", { name: "Workspace image", exact: true });
+  const choices = page.getByRole("listbox", { name: "Suggested images", exact: true });
+  // The native datalist popup is replaced; the datalist stays the source of choices.
+  await expect(image).not.toHaveAttribute("list");
+  await expect(image).toHaveAttribute("aria-expanded", "false");
+  await image.click();
+  await expect(choices).toBeVisible();
+  await expect(choices.getByRole("option")).toHaveCount(3);
+  await expect(choices.getByRole("option").first()).toContainText("Codewire workspace");
+  await expect(choices.getByRole("option").first()).toContainText("Official");
+  await page.screenshot({ path: test.info().outputPath("image-combobox.png") });
+
+  // Clearing or typing an exact choice leaves nothing to suggest.
+  await image.fill("");
+  await expect(choices).toBeHidden();
+  await image.fill("ghcr.io/example/node-22:1.4.0");
+  await expect(choices).toBeHidden();
+  await image.fill("python");
+  await expect(choices.getByRole("option")).toHaveText([/Python 3\.13/]);
+  await image.press("ArrowDown");
+  await expect(image).toHaveAttribute("aria-activedescendant", "fixture-image-choices-0");
+  await expect(choices.getByRole("option").first()).toHaveAttribute("aria-selected", "true");
+  await image.press("Enter");
+  await expect(image).toHaveValue("docker.io/library/python:3.13-slim");
+  await expect(choices).toBeHidden();
+  await expect(image).toBeFocused();
+
+  // Escape closes only the list; the Create sheet stays open.
+  await image.press("ArrowDown");
+  await expect(choices).toBeVisible();
+  await image.press("Escape");
+  await expect(choices).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Create Sandbox", exact: true })).toBeVisible();
+
+  await image.click();
+  await choices.getByRole("option").filter({ hasText: "Node 22" }).click();
+  await expect(image).toHaveValue("ghcr.io/example/node-22:1.4.0");
+  await expect(image).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test.describe("without JavaScript", () => {
+  test.use({ javaScriptEnabled: false });
+
+  test("workspace image keeps the native datalist", async ({ page }) => {
+    const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+    test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
+    await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
+    await expect(page.locator("#fixture-image")).toHaveAttribute("list", "workspace-image-options");
+    await expect(page.locator("#workspace-image-options option")).toHaveCount(3);
+  });
 });
