@@ -658,7 +658,15 @@ proving SQLx rolls
 back their DDL and ledger before a successful retry. These are database proof,
 not evidence of deployed browser authorization or audience enforcement.
 
-There is no in-place downgrade. Stop preview authorization writers, then replay
+Because 0031 only adds two tables, it has an in-place rollback that keeps
+every other row: stop the version-31 binaries, then in one transaction drop
+`preview_browser_grants` and `preview_auth_challenges` and delete ledger
+version 31 from `_sqlx_migrations`, then start the version-30 binaries. Open
+preview grants are lost and are re-earned by opening the preview again. The
+fixture `preview_down_restores30_in_place_and_keeps_every_other_row` runs that
+exact statement and proves the accepted version-30 fingerprint, unchanged
+rows, helpers and ledger, and a clean roll-forward. A full recovery remains
+available: stop preview authorization writers, then replay
 the selected version30 source into only an empty, disposable application
 `public` schema. The rollback fixture proves removal of preview capabilities,
 restoration of prior ledger/schema/helpers, discarded credential/session rows,

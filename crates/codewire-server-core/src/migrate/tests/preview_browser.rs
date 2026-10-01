@@ -286,6 +286,52 @@ async fn preview_failed_forward_rolls_back_both_tables_and_ledger_then_retries()
     result.and(db.drop().await)
 }
 
+/// The documented in-place rollback: the migration only adds two tables, so
+/// removing them and their ledger row restores version 30 without touching
+/// sessions, credentials or other rows. Preview grants are simply re-earned.
+const PREVIEW_DOWN: &str = "BEGIN; \
+    DROP TABLE public.preview_browser_grants; \
+    DROP TABLE public.preview_auth_challenges; \
+    DELETE FROM public._sqlx_migrations WHERE version = 31; \
+    COMMIT;";
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn preview_down_restores30_in_place_and_keeps_every_other_row() -> anyhow::Result<()> {
+    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
+    let result = async {
+        ensure_schema(&db.url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db.url)
+            .await?;
+        seed(&pool).await?;
+        seed_capabilities(&pool).await?;
+        let original = rows(&pool, false).await?;
+        let old_helpers = helpers(&pool).await?;
+        let ledger = applied_migrations(&pool).await?;
+        sqlx::raw_sql(PREVIEW_DOWN).execute(&pool).await?;
+        anyhow::ensure!(applied_migrations(&pool).await? == ledger[..30]);
+        anyhow::ensure!(absent(&pool).await? && helpers(&pool).await? == old_helpers);
+        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_PRE_PREVIEW_SCHEMA_FINGERPRINT);
+        anyhow::ensure!(rows(&pool, false).await? == original);
+        pool.close().await;
+        // Rolling forward again applies 31 cleanly.
+        ensure_schema(&db.url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db.url)
+            .await?;
+        anyhow::ensure!(applied_migrations(&pool).await?.len() == 31);
+        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+        anyhow::ensure!(rows(&pool, false).await? == original);
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    result.and(db.drop().await)
+}
+
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
 async fn preview_rollback_replays30_only_in_disposable_application_schema() -> anyhow::Result<()> {
