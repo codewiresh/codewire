@@ -1843,6 +1843,18 @@ jobs:
           read -r -a suites <<<"$KIND_SHARD_SUITES"
           scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"
 
+      - name: Upload dashboard browser test results on failure
+        # The dashboard leg's Playwright error contexts (error-context.md,
+        # screenshots, traces) are the only rendered-DOM evidence when a
+        # browser spec fails on a shard cluster. Upload them before teardown.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && matrix.shard.slug == 'dashboard' }}
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: kind-dashboard-test-results-${{ github.run_id }}-${{ matrix.shard.slug }}
+          path: apps/dashboard/test-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
       - name: Delete the shard Kind cluster
         # Teardown is best-effort, like the old in-process cleanup: a green
         # leg must not fail on a transient DinD hiccup while deleting.

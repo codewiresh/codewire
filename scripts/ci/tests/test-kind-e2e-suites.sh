@@ -1536,8 +1536,8 @@ done
 # dependencies belong only to the dashboard leg.
 grep -Fq "contains(needs.verification-selection.outputs.selection, '|edge_kind|') && matrix.shard.slug == 'edge' }}" \
   <<<"$edge_kind_block" || fail 'Edge static verification is not pinned to the edge shard'
-[ "$(grep -Fc "matrix.shard.slug == 'dashboard'" <<<"$edge_kind_block")" -eq 2 ] ||
-  fail 'browser host dependencies are not pinned to the dashboard shard'
+[ "$(grep -Fc "matrix.shard.slug == 'dashboard'" <<<"$edge_kind_block")" -eq 3 ] ||
+  fail 'browser host dependencies and the failure upload are not pinned to the dashboard shard'
 # Sandbox supply-chain provenance requires a live product workspace: every
 # workspace-service fixture self-cleans, so no shard may invoke it standalone.
 # It runs only nested inside the TTL acceptance (pinned above against

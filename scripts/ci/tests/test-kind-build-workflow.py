@@ -289,6 +289,26 @@ class WorkflowContractTests(unittest.TestCase):
         cancel = named_step(edge, "Cancel the run after this failure")
         self.assertIs(edge["steps"][-1], cancel)
 
+        # A failed dashboard leg uploads its Playwright test results before
+        # teardown; no other leg has browser output to preserve.
+        upload = named_step(edge, "Upload dashboard browser test results on failure")
+        self.assertEqual(upload["uses"], UPLOAD)
+        self.assertEqual(
+            upload["if"],
+            "${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted'"
+            " && matrix.shard.slug == 'dashboard' }}",
+        )
+        self.assertEqual(upload["with"], {
+            "name": "kind-dashboard-test-results-${{ github.run_id }}-${{ matrix.shard.slug }}",
+            "path": "apps/dashboard/test-results/",
+            "if-no-files-found": "ignore",
+            "retention-days": 5,
+        })
+        self.assertLess(
+            edge["steps"].index(upload),
+            edge["steps"].index(named_step(edge, "Delete the shard Kind cluster")),
+        )
+
         # Edge static verification runs once, in the edge leg; the locked
         # browser host dependencies belong only to the dashboard leg.
         self.assertIn(
