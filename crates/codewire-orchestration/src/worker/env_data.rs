@@ -10,7 +10,7 @@ use sqlx::Row;
 mod projection;
 
 /// Mirrors `worker.environmentRow`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnvironmentRow {
     pub id: String,
     pub org_id: String,

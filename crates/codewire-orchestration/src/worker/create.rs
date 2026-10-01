@@ -851,6 +851,7 @@ async fn run_environment_create(
     let cfg = &ctx.sandbox_cfg;
     let mut bootstrap_recovered = false;
     let mut workspace_resumed = false;
+    let mut reconciled_runtime: Option<ReconciledRuntime> = None;
 
     loop {
         authority.ensure().await?;
@@ -902,22 +903,29 @@ async fn run_environment_create(
 
         if create_action_requires_runtime_identity(action) {
             let backend = backend.as_ref().expect("ready runtime requires backend");
-            if reconcile_or_refresh_runtime_identity(
-                ctx,
-                &env,
-                backend,
-                authority,
-                &[env.state.as_str()],
-                &probe,
-                !bootstrap_recovered,
-            )
-            .await?
-            {
-                bootstrap_recovered = true;
-                // The old probe must not overwrite the replacement's backend
-                // association or let setup act on the retired incarnation.
-                continue;
+            let observed = ReconciledRuntime::observe(&env, backend, &probe);
+            if reconciled_runtime.as_ref() != Some(&observed) {
+                reconciled_runtime = None;
+                if reconcile_or_refresh_runtime_identity(
+                    ctx,
+                    &env,
+                    backend,
+                    authority,
+                    &[env.state.as_str()],
+                    &probe,
+                    !bootstrap_recovered,
+                )
+                .await?
+                {
+                    bootstrap_recovered = true;
+                    // The old probe must not overwrite the replacement's backend
+                    // association or let setup act on the retired incarnation.
+                    continue;
+                }
+                reconciled_runtime = Some(observed);
             }
+        } else {
+            reconciled_runtime = None;
         }
 
         match action {
@@ -1458,8 +1466,13 @@ async fn run_environment_create(
                     authority.ensure().await?;
                     tracing::warn!(env = env_id, error = %e, "mark started failed");
                 }
-                if entered_running && records_pod_start_marks(action) {
-                    record_pod_start_marks(ctx, authority, &probe, profile).await?;
+                if entered_running {
+                    if let Some(reconciled) = reconciled_runtime.as_mut() {
+                        reconciled.entered_running();
+                    }
+                    if records_pod_start_marks(action) {
+                        record_pod_start_marks(ctx, authority, &probe, profile).await?;
+                    }
                 }
                 emit_running_log(authority, "mark_running", "completed", "", None).await?;
             }
@@ -1521,6 +1534,49 @@ fn elapsed_meta(elapsed: Duration) -> Option<serde_json::Value> {
 }
 
 const GATEWAY_READY_STARTED_MESSAGE: &str = "Waiting for gateway";
+
+/// What one runtime identity reconciliation in this create attempt checked:
+/// the environment row it rendered from, the recorded Claim association, and
+/// the exact Pod incarnation and address the probe observed.
+///
+/// Every ready action (`store_backend`, `mark_running`, `publish_setup`,
+/// `done`) needs a reconciled runtime. A cold create reaches two or three of
+/// them back to back on one Pod, and each repeat re-read the Claim, Sandbox,
+/// Pod and bootstrap objects, re-applied the gateway stack and waited for
+/// its readiness again: about 0.25 s on Dev, or 1.25 s when that readiness
+/// poll missed once. A repeat now runs whenever any of these inputs changed.
+/// The only change it allows is the `running` state this attempt's own
+/// `mark_running` committed; every later write still checks authority for
+/// its own states.
+#[derive(Debug, Clone, PartialEq)]
+struct ReconciledRuntime {
+    environment: EnvironmentRow,
+    namespace: String,
+    claim_name: String,
+    claim_uid: String,
+    pod_name: String,
+    pod_uid: String,
+    pod_ip: String,
+}
+
+impl ReconciledRuntime {
+    fn observe(environment: &EnvironmentRow, backend: &BackendRow, probe: &ProbeResult) -> Self {
+        Self {
+            environment: environment.clone(),
+            namespace: backend.namespace.clone(),
+            claim_name: backend.claim_name.clone(),
+            claim_uid: backend.claim_uid.clone(),
+            pod_name: probe.pod_name.clone(),
+            pod_uid: probe.pod_uid.clone(),
+            pod_ip: probe.pod_ip.clone(),
+        }
+    }
+
+    /// Record the state transition this attempt itself just committed.
+    fn entered_running(&mut self) {
+        self.environment.state = "running".to_string();
+    }
+}
 
 /// The create action whose committed transition records the workspace Pod's
 /// own start marks: `mark_running`, the one action every create path takes.
@@ -2131,17 +2187,41 @@ mod tests {
         );
     }
 
+    fn environment(state: &str) -> EnvironmentRow {
+        EnvironmentRow {
+            id: "env-1".into(),
+            org_id: "org-1".into(),
+            preset_id: None,
+            env_type: "sandbox".into(),
+            state: state.into(),
+            desired_state: "started".into(),
+            isolation_tier: "standard".into(),
+            external_cleanup_completed_at: None,
+            cpu_millicores: 1000,
+            memory_mb: 2048,
+            disk_gb: 10,
+            ttl_seconds: None,
+            project_spec: codewire_project::ProjectSpec::default(),
+            operation_generation: 7,
+            projection_selection: Ok(None),
+            managed_credential_clients: Ok(Default::default()),
+        }
+    }
+
     /// Walk the create policy the way the activity loop does, applying each
-    /// action's durable effect, and return the actions taken.
+    /// action's durable effect. Returns the actions taken and how many
+    /// runtime identity reconciliations they needed.
     /// `liveness_stores_pod` reproduces Dev on 2026-09-30: the leader's
     /// sandbox liveness loop stored the Pod's name and IP during the gateway
     /// readiness wait, so create never took `store_backend`.
-    fn walk_create(start_state: &str, liveness_stores_pod: bool) -> Vec<CreateAction> {
+    fn walk_create(start_state: &str, liveness_stores_pod: bool) -> (Vec<CreateAction>, usize) {
         let ready = probe(true, true);
         let mut state = start_state.to_string();
         let mut stored: Option<BackendRow> = None;
         let mut claim_exists = false;
         let mut actions = Vec::new();
+        let mut reconciled: Option<ReconciledRuntime> = None;
+        let mut reconciliations = 0;
         loop {
             let observed = if claim_exists {
                 ready.clone()
@@ -2151,6 +2231,19 @@ mod tests {
             let action = next_create_action(&state, stored.as_ref(), false, &observed);
             actions.push(action);
             assert!(actions.len() <= 8, "create did not converge: {actions:?}");
+            if create_action_requires_runtime_identity(action) {
+                let runtime = ReconciledRuntime::observe(
+                    &environment(&state),
+                    stored.as_ref().unwrap(),
+                    &observed,
+                );
+                if reconciled.as_ref() != Some(&runtime) {
+                    reconciliations += 1;
+                    reconciled = Some(runtime);
+                }
+            } else {
+                reconciled = None;
+            }
             match action {
                 CreateAction::EnsureNamespace => stored = Some(backend("ns", "", "", false)),
                 CreateAction::CreateClaim => {
@@ -2168,8 +2261,11 @@ mod tests {
                     row.pod_name = ready.pod_name.clone();
                     row.pod_ip = ready.pod_ip.clone();
                 }
-                CreateAction::MarkRunning => state = "running".into(),
-                CreateAction::PublishSetup => return actions,
+                CreateAction::MarkRunning => {
+                    state = "running".into();
+                    reconciled.as_mut().unwrap().entered_running();
+                }
+                CreateAction::PublishSetup => return (actions, reconciliations),
                 other => panic!("unexpected create action {other}"),
             }
         }
@@ -2179,12 +2275,12 @@ mod tests {
     fn pod_start_marks_are_recorded_on_the_path_dev_takes() {
         use CreateAction::*;
         // Dev: create_claim, then straight to mark_running.
-        let dev = walk_create("pending", true);
+        let (dev, dev_reconciliations) = walk_create("pending", true);
         assert_eq!(
             dev,
             [EnsureNamespace, CreateClaim, MarkRunning, PublishSetup]
         );
-        let create_stores_pod = walk_create("pending", false);
+        let (create_stores_pod, store_reconciliations) = walk_create("pending", false);
         assert_eq!(
             create_stores_pod,
             [
@@ -2208,6 +2304,91 @@ mod tests {
             );
         }
         assert!(!records_pod_start_marks(StoreBackend));
+        // One Pod, one reconciliation: the ready actions that follow it in
+        // the same attempt reuse it.
+        assert_eq!((dev_reconciliations, store_reconciliations), (1, 1));
+    }
+
+    #[test]
+    fn a_ready_action_reconciles_again_after_any_observed_change() {
+        let stored = backend("ns", "sandbox-env", "10.0.0.5", false);
+        let ready = probe(true, true);
+        let running = environment("running");
+        let mut reconciled = ReconciledRuntime::observe(&environment("creating"), &stored, &ready);
+        // Only this attempt's own committed `mark_running` may advance state.
+        assert_ne!(
+            reconciled,
+            ReconciledRuntime::observe(&running, &stored, &ready)
+        );
+        reconciled.entered_running();
+        assert_eq!(
+            reconciled,
+            ReconciledRuntime::observe(&running, &stored, &ready)
+        );
+
+        let probed = |change: fn(&mut ProbeResult)| {
+            let mut probe = ready.clone();
+            change(&mut probe);
+            ReconciledRuntime::observe(&running, &stored, &probe)
+        };
+        let recorded = |change: fn(&mut BackendRow)| {
+            let mut backend = stored.clone();
+            change(&mut backend);
+            ReconciledRuntime::observe(&running, &backend, &ready)
+        };
+        let loaded = |change: fn(&mut EnvironmentRow)| {
+            let mut environment = running.clone();
+            change(&mut environment);
+            ReconciledRuntime::observe(&environment, &stored, &ready)
+        };
+        let changes = [
+            (
+                "replaced Pod",
+                probed(|p| p.pod_uid = "replacement-uid".into()),
+            ),
+            ("renamed Pod", probed(|p| p.pod_name = "replacement".into())),
+            ("new Pod address", probed(|p| p.pod_ip = "10.0.0.6".into())),
+            (
+                "new Claim",
+                recorded(|b| b.claim_uid = "claim-uid-2".into()),
+            ),
+            ("new namespace", recorded(|b| b.namespace = "ns-2".into())),
+            (
+                "state moved elsewhere",
+                loaded(|e| e.state = "error".into()),
+            ),
+            (
+                "desired stop",
+                loaded(|e| e.desired_state = "stopped".into()),
+            ),
+            ("new generation", loaded(|e| e.operation_generation = 8)),
+            (
+                "new managed clients",
+                loaded(|e| {
+                    e.managed_credential_clients =
+                        codewire_access::ManagedCredentialClients::from_profile_slots(["github"])
+                            .map_err(|_| codewire_project::PlatformProjectionSelectionError)
+                }),
+            ),
+            (
+                "invalid selection",
+                loaded(|e| {
+                    e.projection_selection = Err(codewire_project::PlatformProjectionSelectionError)
+                }),
+            ),
+            ("resized", loaded(|e| e.memory_mb = 4096)),
+        ];
+        for (change, observed) in changes {
+            assert_ne!(reconciled, observed, "{change}");
+        }
+        // Backend Pod fields are what `store_backend` writes, not an input.
+        assert_eq!(
+            reconciled,
+            recorded(|b| {
+                b.pod_ip.clear();
+                b.pod_name.clear();
+            })
+        );
     }
 
     #[test]
