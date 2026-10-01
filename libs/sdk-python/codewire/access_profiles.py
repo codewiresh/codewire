@@ -143,6 +143,23 @@ class AccessProfiles:
             raise RuntimeError("access profile response omitted access_profile")
         return _profile(response.access_profile)
 
+    def rename(self, profile_id: str, expected_revision: int, expected_name: str,
+               name: str) -> AccessProfile:
+        """Relabel at the exact current revision and name; a stale view is
+        rejected. No revision is published, entries are unchanged and
+        environment bindings stay pinned."""
+        response = self._context.unary(
+            self._client.rename_access_profile,
+            pb.RenameAccessProfileRequest(
+                access_profile_id=profile_id,
+                expected_revision=_revision(expected_revision),
+                expected_name=expected_name, name=name,
+            ),
+        )
+        if not response.HasField("access_profile"):
+            raise RuntimeError("access profile response omitted access_profile")
+        return _profile(response.access_profile)
+
     def delete(self, profile_id: str, expected_revision: int) -> None:
         self._context.unary(self._client.delete_access_profile,
                             pb.DeleteAccessProfileRequest(

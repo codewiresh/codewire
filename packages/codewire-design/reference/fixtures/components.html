@@ -237,6 +237,9 @@
     <header class="cw-card-header"><h2 id="key-secret-title" class="cw-card-title">Keys and one-time secrets</h2><p class="cw-card-description">A key prefix identifies a key inline, such as <code class="cw-key">cw_7f3a</code>. A value shown once, such as a new API key, is selected with one click.</p></header>
     <div class="cw-card-content">
       <code class="cw-key-secret">cw_gallery_example_value_not_a_real_credential</code>
+      <p class="cw-card-description">A one-time authenticator setup QR code, and the recovery codes shown once after two-factor setup or regeneration.</p>
+      <div class="cw-qr" role="img" aria-label="Example authenticator setup QR code"><svg viewBox="0 0 256 256" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><rect width="256" height="256" fill="#fff"/><path fill="#111" d="M16 16h56v56H16zm8 8v40h40V24zm8 8h24v24H32zM184 16h56v56h-56zm8 8v40h40V24zm8 8h24v24h-24zM16 184h56v56H16zm8 8v40h40v-40zm8 8h24v24H32zM88 16h16v16H88zm32 0h16v16h-16zM88 88h24v16H88zm40 0h16v16h-16zm24 40h16v16h-16zm-48 40h24v16h-24zm72 16h16v16h-16z"/></svg></div>
+      <ul class="cw-backup-codes" aria-label="Example recovery codes"><li><code>0a1b2c3d4e</code></li><li><code>5f6a7b8c9d</code></li><li><code>e0f1a2b3c4</code></li><li><code>d5e6f7a8b9</code></li></ul>
     </div>
   </section>
 
@@ -262,16 +265,37 @@
     </div>
   </section>
 
-  <section class="cw-card" aria-labelledby="table-title">
-    <header class="cw-card-header"><h2 id="table-title" class="cw-card-title">Table</h2><p class="cw-card-description">Headers use the small role in normal case.</p></header>
+  <section class="cw-card" aria-labelledby="combobox-title">
+    <header class="cw-card-header"><h2 id="combobox-title" class="cw-card-title">Combobox</h2><p class="cw-card-description">A text field whose choices open below it on the menu surface. The option under the keyboard is highlighted; typing filters.</p></header>
     <div class="cw-card-content">
-      <div class="cw-table-shell">
+      <div class="gallery-stage">
+        <div class="cw-field"><label class="cw-label" for="g-combobox">Workspace image</label>
+          <div class="cw-combobox"><div class="cw-input-group cw-mono"><input id="g-combobox" role="combobox" aria-autocomplete="list" aria-controls="g-combobox-choices" aria-expanded="true" aria-activedescendant="g-combobox-choices-1" value="node"></div>
+            <ul class="cw-combobox-list" id="g-combobox-choices" role="listbox" aria-label="Suggested images">
+              <li class="cw-combobox-option" id="g-combobox-choices-0" role="option" aria-selected="false"><strong>Codewire workspace <span class="cw-badge" data-tone="info">Official</span></strong><code>registry.example.invalid/codewire/workspace@sha256:0000…</code><span>Ubuntu with Node, Python, Go and Rust toolchains.</span></li>
+              <li class="cw-combobox-option" id="g-combobox-choices-1" role="option" aria-selected="true"><strong>Node 22</strong><code>ghcr.io/example/node-22:1.4.0</code></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="table-title">
+    <header class="cw-card-header"><h2 id="table-title" class="cw-card-title">Table</h2><p class="cw-card-description">Headers use the small role in normal case. An inventory toolbar searches and filters above it; a row header can stack a name over its identifier.</p></header>
+    <div class="cw-card-content">
+      <form class="cw-inventory-toolbar" role="search" aria-label="Filter gallery keys" action="#">
+        <label class="cw-sr-only" for="g-inventory-search">Search keys</label><input class="cw-input" id="g-inventory-search" type="search" placeholder="Search by name or prefix">
+        <label class="cw-sr-only" for="g-inventory-status">Status</label><select class="cw-select" id="g-inventory-status"><option>All statuses</option><option>Active</option></select>
+        <button class="cw-button cw-button--outline" type="submit">Filter</button><a href="#table-title">Clear filters</a>
+      </form>
+      <div class="cw-table-shell cw-table-shell--menus">
         <table class="cw-table">
           <caption class="cw-sr-only">Sandboxes</caption>
-          <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Resources</th></tr></thead>
+          <thead><tr><th scope="col">Name</th><th scope="col">State</th><th class="cw-table-secondary" scope="col">Resources</th><th class="cw-table-actions" scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead>
           <tbody>
-            <tr><td>default-image</td><td><span class="cw-status" data-tone="success">Running</span></td><td class="cw-mono">1 vCPU · 2 GiB</td></tr>
-            <tr><td>diag-sandbox</td><td><span class="cw-status" data-tone="warning">Pending</span></td><td class="cw-mono">1 vCPU · 2 GiB</td></tr>
+            <tr><th scope="row"><span class="cw-cell-stack"><strong>default-image</strong><code class="cw-key">cw_2f9a…</code></span></th><td><span class="cw-status" data-tone="success">Running</span></td><td class="cw-mono cw-table-secondary">1 vCPU · 2 GiB</td><td class="cw-table-actions"><details class="cw-menu"><summary class="cw-icon-button" aria-label="Actions for default-image">•••</summary><div class="cw-menu-panel cw-menu-panel--end"><ul><li><button class="cw-menu-item" type="button">Disable</button></li><li><button class="cw-menu-item cw-menu-danger" type="button">Delete</button></li></ul></div></details></td></tr>
+            <tr><td>diag-sandbox</td><td><span class="cw-status" data-tone="warning">Pending</span></td><td class="cw-mono cw-table-secondary">1 vCPU · 2 GiB</td><td class="cw-table-actions"></td></tr>
           </tbody>
         </table>
       </div>
@@ -318,7 +342,7 @@
           <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" aria-label="Toggle example navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-menu"/></svg></button><a class="cw-brand" href="#shell-title"><img src="../../assets/brand-icon.svg" alt=""><span>Codewire</span></a></header>
           <button class="cw-mobile-overlay" type="button" aria-label="Close example navigation"></button>
           <aside class="cw-mobile-drawer"><nav class="cw-sidebar" aria-label="Example mobile navigation"><a class="cw-nav-link" href="#shell-title">Sandboxes</a></nav></aside>
-          <div class="cw-main"><div class="cw-main-inner"><div class="cw-page"><header class="cw-page-header"><div><h3 class="cw-page-title">Sandboxes</h3><p class="cw-page-description">A page title, one short description and the page's primary action.</p></div><button class="cw-button cw-button--pill" type="button">Create Sandbox</button></header></div></div></div>
+          <div class="cw-main"><div class="cw-main-inner"><div class="cw-page"><header class="cw-page-header"><div><div class="cw-page-title-row"><h3 class="cw-page-title">Sandboxes</h3><span class="cw-badge">2<span class="cw-sr-only"> Sandboxes</span></span></div><p class="cw-page-description">A page title with its count, one short description and the page's primary action.</p></div><button class="cw-button cw-button--pill" type="button">Create Sandbox</button></header></div></div></div>
         </div>
       </div>
     </div>

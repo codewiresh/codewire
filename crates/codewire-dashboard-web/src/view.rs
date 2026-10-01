@@ -318,11 +318,35 @@ pub(crate) struct SettingsPageView {
     pub(crate) current_session_id: String,
     pub(crate) current_session_expiry: String,
     pub(crate) sessions: Vec<AccountSessionRowView>,
+    // The current session is one of the listed rows, so its row owns sign-out.
+    pub(crate) current_session_listed: bool,
+    // A later page of sessions links back to the first.
+    pub(crate) later_sessions_page: bool,
     pub(crate) next_sessions_url: String,
     pub(crate) first_sessions_url: String,
     pub(crate) csrf_token: String,
     pub(crate) message: String,
     pub(crate) error: String,
+    /// An alert in the Security card that belongs to no dialog.
+    pub(crate) security_error: String,
+    /// A confirmed replacement revoked every listed session, including the one
+    /// the page was read with, so the list is withheld until the next load.
+    pub(crate) sessions_replaced: bool,
+    pub(crate) two_factor: TwoFactorDialogView,
+}
+
+/// The open two-factor dialog and the one-time values it shows. The setup key,
+/// QR code and recovery codes exist only in the POST response that created
+/// them; nothing here implements `Debug`.
+#[derive(Default)]
+pub(crate) struct TwoFactorDialogView {
+    pub(crate) active: &'static str,
+    pub(crate) error: String,
+    pub(crate) replacement_id: String,
+    pub(crate) qr_svg: String,
+    pub(crate) setup_key: String,
+    pub(crate) expires: String,
+    pub(crate) backup_codes: Vec<String>,
 }
 
 #[derive(Default)]
@@ -414,6 +438,15 @@ pub(crate) struct CredentialSettingsView {
 }
 
 impl CredentialSettingsView {
+    /// The exact Create draft this page returns to, carried by the GET forms
+    /// that open a dialog without scripting.
+    pub(crate) fn creation_draft(&self) -> String {
+        url::form_urlencoded::parse(self.navigation_query.trim_start_matches('?').as_bytes())
+            .find(|(name, _)| name == "creation_draft")
+            .map(|(_, value)| value.into_owned())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn has_github_connections(&self) -> bool {
         self.credentials
             .iter()
@@ -463,6 +496,16 @@ pub(crate) struct CredentialProfileUpdateSubmission {
     pub(crate) anthropic: String,
     #[serde(default)]
     pub(crate) ssh: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CredentialProfileRenameSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) profile_id: String,
+    pub(crate) expected_revision: u64,
+    pub(crate) expected_name: String,
+    pub(crate) name: String,
 }
 
 #[derive(Deserialize)]
@@ -681,6 +724,39 @@ pub(crate) struct OrganizationRow {
     pub(crate) can_admin: bool,
     pub(crate) billing_plan: String,
     pub(crate) url: String,
+}
+
+impl OrganizationRow {
+    /// A readable organization name; an empty name falls back to its slug so
+    /// a missing value never renders blank.
+    pub(crate) fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.slug
+        } else {
+            &self.name
+        }
+    }
+}
+
+#[cfg(test)]
+mod organization_row_tests {
+    use super::OrganizationRow;
+
+    #[test]
+    fn display_name_falls_back_to_the_slug_only_when_the_name_is_empty() {
+        let row = |name: &str| OrganizationRow {
+            id: "org".into(),
+            name: name.into(),
+            slug: "alpha-team".into(),
+            role: "owner",
+            can_admin: true,
+            billing_plan: String::new(),
+            url: String::new(),
+        };
+        assert_eq!(row("Alpha team").display_name(), "Alpha team");
+        assert_eq!(row("  ").display_name(), "alpha-team");
+        assert_eq!(row("").display_name(), "alpha-team");
+    }
 }
 
 #[derive(Debug)]
@@ -1566,6 +1642,81 @@ pub(crate) struct ApiKeyRow {
     pub(crate) expired: bool,
 }
 
+/// Search and status filters for an API-key inventory. Filtering only narrows
+/// rows the owning read already authorized; it never widens an inventory.
+#[derive(Debug, Default)]
+pub(crate) struct ApiKeyFilterView {
+    pub(crate) search: String,
+    pub(crate) status: String,
+    /// An organization ID the caller has validated, or empty for all.
+    pub(crate) organization: String,
+}
+
+impl ApiKeyFilterView {
+    pub(crate) fn new(search: &str, status: &str) -> Self {
+        Self {
+            search: search.trim().chars().take(128).collect(),
+            status: match status {
+                "active" | "disabled" | "expired" => status.to_owned(),
+                _ => String::new(),
+            },
+            organization: String::new(),
+        }
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        !self.search.is_empty() || !self.status.is_empty() || !self.organization.is_empty()
+    }
+
+    pub(crate) fn status_selected(&self, value: &str) -> bool {
+        self.status == value
+    }
+
+    pub(crate) fn matches(&self, key: &ApiKeyRow) -> bool {
+        let search = self.search.to_lowercase();
+        (search.is_empty()
+            || key.name.to_lowercase().contains(&search)
+            || key.prefix.to_lowercase().contains(&search))
+            && (self.status.is_empty() || key.status.eq_ignore_ascii_case(&self.status))
+    }
+}
+
+#[cfg(test)]
+mod api_key_filter_tests {
+    use super::{ApiKeyFilterView, ApiKeyRow};
+
+    fn key(name: &str, prefix: &str, status: &'static str) -> ApiKeyRow {
+        ApiKeyRow {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            prefix: prefix.to_owned(),
+            created_by: "You".to_owned(),
+            created: String::new(),
+            last_used: String::new(),
+            status,
+            status_tone: "success",
+            disabled: status == "Disabled",
+            expired: status == "Expired",
+        }
+    }
+
+    #[test]
+    fn search_matches_name_or_prefix_and_status_is_allowlisted() {
+        let ci = key("CI pipeline", "cw_y-ci…", "Active");
+        let old = key("Old deploy", "cw_-old…", "Expired");
+        let filter = ApiKeyFilterView::new("  PIPE ", "");
+        assert!(filter.active() && filter.matches(&ci) && !filter.matches(&old));
+        assert!(ApiKeyFilterView::new("-old", "").matches(&old));
+        let expired = ApiKeyFilterView::new("", "expired");
+        assert!(expired.matches(&old) && !expired.matches(&ci));
+        // Unknown statuses and oversized searches never widen or break a filter.
+        let unknown = ApiKeyFilterView::new(&"x".repeat(400), "revoked");
+        assert!(unknown.status.is_empty() && unknown.search.chars().count() == 128);
+        let none = ApiKeyFilterView::new("", "");
+        assert!(!none.active() && none.matches(&ci) && none.matches(&old));
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ApiKeyFormView {
     pub(crate) name: String,
@@ -1611,6 +1762,7 @@ pub(crate) struct ApiKeyIdSubmission {
 // one-time API-key material, and derived diagnostics must never expose it.
 pub(crate) struct ApiKeysPageView {
     pub(crate) keys: Vec<ApiKeyRow>,
+    pub(crate) filter: ApiKeyFilterView,
     pub(crate) form: ApiKeyFormView,
     pub(crate) csrf_token: String,
     pub(crate) one_time_key: String,
@@ -1619,11 +1771,19 @@ pub(crate) struct ApiKeysPageView {
     pub(crate) error: String,
 }
 
+impl ApiKeysPageView {
+    pub(crate) fn visible_count(&self) -> usize {
+        self.keys
+            .iter()
+            .filter(|key| self.filter.matches(key))
+            .count()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PersonalApiKeyRow {
     pub(crate) key: ApiKeyRow,
     pub(crate) expires: String,
-    pub(crate) scopes: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -1648,6 +1808,9 @@ pub(crate) struct PersonalApiKeyFormView {
 #[derive(Default)]
 pub(crate) struct PersonalApiKeysPageView {
     pub(crate) groups: Vec<PersonalApiKeyGroupView>,
+    pub(crate) filter: ApiKeyFilterView,
+    /// The validated organization-page cursor the filter form carries.
+    pub(crate) cursor: String,
     pub(crate) organizations: Vec<OrganizationRow>,
     pub(crate) organizations_available: bool,
     pub(crate) account_id: String,
@@ -1662,6 +1825,44 @@ pub(crate) struct PersonalApiKeysPageView {
     pub(crate) reload_url: String,
     pub(crate) first_page_url: String,
     pub(crate) next_page_url: String,
+}
+
+impl PersonalApiKeysPageView {
+    pub(crate) fn key_count(&self) -> usize {
+        self.groups.iter().map(|group| group.keys.len()).sum()
+    }
+
+    pub(crate) fn group_visible(&self, group: &PersonalApiKeyGroupView) -> bool {
+        self.filter.organization.is_empty() || self.filter.organization == group.organization.id
+    }
+
+    pub(crate) fn row_visible(
+        &self,
+        group: &PersonalApiKeyGroupView,
+        entry: &PersonalApiKeyRow,
+    ) -> bool {
+        self.group_visible(group) && self.filter.matches(&entry.key)
+    }
+
+    pub(crate) fn visible_count(&self) -> usize {
+        self.groups
+            .iter()
+            .map(|group| {
+                group
+                    .keys
+                    .iter()
+                    .filter(|entry| self.row_visible(group, entry))
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Delete is limited to organization owners and admins.
+    pub(crate) fn delete_limited(&self) -> bool {
+        self.groups
+            .iter()
+            .any(|group| !group.organization.can_admin && !group.keys.is_empty())
+    }
 }
 
 #[derive(Debug)]

@@ -392,6 +392,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(credentials::update_profile_action),
         )
         .route(
+            "/settings/credentials/_actions/profiles/rename",
+            post(credentials::rename_profile_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
             "/settings/credentials/_actions/profiles/delete",
             post(credentials::delete_profile_action),
         )
@@ -406,6 +410,18 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/settings/_actions/sessions/revoke",
             post(settings::revoke_session_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/two-factor/replace/start",
+            post(settings::replace_authenticator_start_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/two-factor/replace/confirm",
+            post(settings::replace_authenticator_confirm_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/two-factor/recovery-codes/regenerate",
+            post(settings::regenerate_recovery_codes_action).layer(DefaultBodyLimit::max(2048)),
         )
         .route(
             "/settings/_actions/sign-out",

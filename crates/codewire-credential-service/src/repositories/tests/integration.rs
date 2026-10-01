@@ -30,6 +30,8 @@ const GITHUB_APP_REFRESH_TOKEN: &str = "ghr_synthetic_app_refresh_token_12345678
 const GITHUB_APP_REFRESHED_TOKEN: &str = "ghu_synthetic_app_refreshed_token_1234567890";
 const GITHUB_APP_REFRESHED_REFRESH_TOKEN: &str =
     "ghr_synthetic_app_refreshed_refresh_token_1234567890";
+const GITHUB_APP_SECOND_REFRESHED_TOKEN: &str = "ghu_synthetic_app_second_refreshed_token_12345";
+const GITHUB_APP_SECOND_REFRESH_TOKEN: &str = "ghr_synthetic_app_second_refresh_token_1234567";
 
 struct Provider {
     calls: AtomicUsize,
@@ -37,6 +39,9 @@ struct Provider {
     reject_first_app_repository: AtomicBool,
     reject_first_refreshed_app_repository: AtomicBool,
     initial_app_access_lifetime: AtomicUsize,
+    refreshed_app_access_lifetime: AtomicUsize,
+    initial_refresh_used: AtomicBool,
+    refreshed_refresh_used: AtomicBool,
     hold: AtomicBool,
     entered: Notify,
     released: Notify,
@@ -50,6 +55,9 @@ impl Default for Provider {
             reject_first_app_repository: AtomicBool::new(false),
             reject_first_refreshed_app_repository: AtomicBool::new(false),
             initial_app_access_lifetime: AtomicUsize::new(28_800),
+            refreshed_app_access_lifetime: AtomicUsize::new(28_800),
+            initial_refresh_used: AtomicBool::new(false),
+            refreshed_refresh_used: AtomicBool::new(false),
             hold: AtomicBool::new(false),
             entered: Notify::new(),
             released: Notify::new(),
@@ -98,6 +106,7 @@ impl BrokerUpstreamTransport for Provider {
             format!("Bearer {GITHUB_TOKEN}"),
             format!("Bearer {GITHUB_APP_INITIAL_TOKEN}"),
             format!("Bearer {GITHUB_APP_REFRESHED_TOKEN}"),
+            format!("Bearer {GITHUB_APP_SECOND_REFRESHED_TOKEN}"),
         ]
         .contains(&authorization.to_owned())
         {
@@ -171,17 +180,39 @@ impl Provider {
                 )
             }
             Some("refresh_token")
-                if form.get("refresh_token").map(|value| value.as_ref())
-                    == Some(GITHUB_APP_REFRESH_TOKEN) =>
+                if matches!(
+                    form.get("refresh_token").map(|value| value.as_ref()),
+                    Some(GITHUB_APP_REFRESH_TOKEN | GITHUB_APP_REFRESHED_REFRESH_TOKEN)
+                ) =>
             {
+                // Each rotation consumes its refresh token and issues the next;
+                // GitHub rejects a refresh token that was already used.
+                let second = form.get("refresh_token").map(|value| value.as_ref())
+                    == Some(GITHUB_APP_REFRESHED_REFRESH_TOKEN);
+                let used = if second {
+                    &self.refreshed_refresh_used
+                } else {
+                    &self.initial_refresh_used
+                };
+                if used.swap(true, Ordering::SeqCst) {
+                    return json_response(StatusCode::OK, json!({"error": "bad_refresh_token"}));
+                }
                 self.app_refreshes.fetch_add(1, Ordering::SeqCst);
                 json_response(
                     StatusCode::OK,
                     json!({
-                        "access_token": GITHUB_APP_REFRESHED_TOKEN,
+                        "access_token": if second {
+                            GITHUB_APP_SECOND_REFRESHED_TOKEN
+                        } else {
+                            GITHUB_APP_REFRESHED_TOKEN
+                        },
                         "token_type": "bearer",
-                        "expires_in": 28_800,
-                        "refresh_token": GITHUB_APP_REFRESHED_REFRESH_TOKEN,
+                        "expires_in": self.refreshed_app_access_lifetime.load(Ordering::SeqCst),
+                        "refresh_token": if second {
+                            GITHUB_APP_SECOND_REFRESH_TOKEN
+                        } else {
+                            GITHUB_APP_REFRESHED_REFRESH_TOKEN
+                        },
                         "refresh_token_expires_in": 15_897_600,
                     }),
                 )
@@ -231,6 +262,7 @@ fn github_app_headers(headers: &HeaderMap) -> bool {
         authorization,
         value if value == format!("Bearer {GITHUB_APP_INITIAL_TOKEN}")
             || value == format!("Bearer {GITHUB_APP_REFRESHED_TOKEN}")
+            || value == format!("Bearer {GITHUB_APP_SECOND_REFRESHED_TOKEN}")
     ) && headers.get(http::header::ACCEPT)
         == Some(&HeaderValue::from_static("application/vnd.github+json"))
         && headers.get(http::header::USER_AGENT)
@@ -784,6 +816,54 @@ async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() 
                 .record(&original.metadata.owner, &original.metadata.id)
                 .await?;
         ensure!(same_refreshed_record(&original, &current).is_ok());
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_app_repository_picker_refreshes_again_after_an_earlier_committed_refresh()
+-> Result<()> {
+    let f = Fixture::app().await?;
+    let result = async {
+        // Every issued App token is inside the renewal skew, so each listing
+        // renews before its first repository request.
+        f.provider
+            .initial_app_access_lifetime
+            .store(60, Ordering::SeqCst);
+        f.provider
+            .refreshed_app_access_lifetime
+            .store(60, Ordering::SeqCst);
+        let original = f.app_credential().await?;
+        let owner = original.metadata.owner.clone();
+        let id = original.metadata.id.clone();
+        let (status, page) = response(f.post(&original).bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK
+                && page["repositories"]
+                    .as_array()
+                    .is_some_and(|repositories| repositories.len() == 1),
+            "first renewal did not list repositories: {status} {page}"
+        );
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
+        let first = f.h.store.record(&owner, &id).await?;
+        ensure!(same_refreshed_record(&original, &first).is_ok());
+
+        // The first attempt stays committed against the original generation.
+        // That finished history must not read as a concurrent change.
+        let (status, page) = response(f.post(&first).bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK
+                && page["repositories"]
+                    .as_array()
+                    .is_some_and(|repositories| repositories.len() == 1),
+            "an earlier committed renewal blocked the next one: {status} {page}"
+        );
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 2);
+        let second = f.h.store.record(&owner, &id).await?;
+        ensure!(same_refreshed_record(&first, &second).is_ok());
         Ok(())
     }
     .await;

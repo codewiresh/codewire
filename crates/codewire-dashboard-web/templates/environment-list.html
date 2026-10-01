@@ -19,7 +19,7 @@
           <span class="cw-row-menu-meta">{{ sandbox.cost }} usage</span>
           <details class="cw-disclosure cw-menu-resize"><summary>Secrets and credentials</summary>
             {% if let Some(sources) = sandbox.sources %}
-            <dl class="cw-source-summary"><dt>Environment operation</dt><dd>{{ sources.operation_generation }}</dd><dt>Application sources</dt><dd>{% if sources.organization %}Organization{% endif %}{% if sources.personal %} Personal{% endif %}{% if !sources.project.is_empty() %} {{ sources.project }}{% endif %}{% if !sources.organization && !sources.personal && sources.project.is_empty() %}None{% endif %}</dd><dt>Credential profile</dt><dd>{% if sources.profile.is_empty() %}None{% else %}{{ sources.profile }} · revision {{ sources.profile_revision }}{% endif %}</dd></dl>
+            <dl class="cw-source-summary"><dt>Sandbox operation</dt><dd>{{ sources.operation_generation }}</dd><dt>Application sources</dt><dd>{% if sources.organization %}Organization{% endif %}{% if sources.personal %} Personal{% endif %}{% if !sources.project.is_empty() %} {{ sources.project }}{% endif %}{% if !sources.organization && !sources.personal && sources.project.is_empty() %}None{% endif %}</dd><dt>Credential profile</dt><dd>{% if sources.profile.is_empty() %}None{% else %}{{ sources.profile }} · revision {{ sources.profile_revision }}{% endif %}</dd></dl>
             {% else %}<p>Current source selection is unavailable.</p>{% endif %}
             {% if sandbox.sources.is_some() && sandbox.can_destroy && sandbox.confidential_actions_allowed %}<a href="{{ organization.environments_url }}?sources={{ sandbox.id }}">Edit secrets and credentials</a>{% endif %}
           </details>

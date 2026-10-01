@@ -46,9 +46,11 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 mod tests {
     mod github_singleton;
     mod owner_sources;
+    mod preview_browser;
     mod projection;
     mod session_mutation;
     mod ssh;
+    mod two_factor_replacements;
     mod two_factor_setup_skip;
     use std::{borrow::Cow, time::Duration};
 
@@ -59,9 +61,18 @@ mod tests {
 
     // Measured in isolated PostgreSQL after composing account access,
     // environment projection, typed SSH metadata, the GitHub singleton that
-    // every personal profile includes, and the per-session two-factor setup
-    // skip, through version30.
+    // every personal profile includes, the per-session two-factor setup skip,
+    // preview browser authorization and pending authenticator replacement,
+    // through version32.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "a0e8d8c86afccc0fbefb594374d7416b4f96704d16d480b400621f9cf616da22";
+    // Accepted table schema through version31, before pending authenticator
+    // replacement and the TOTP replay step.
+    const ACCEPTED_PRE_TWO_FACTOR_REPLACEMENT_SCHEMA_FINGERPRINT: &str =
+        "33355acfec29dc0e65e302bc135c45db05a351b46ff3fa067ab1cc5f110caa38";
+    // Accepted table schema through version30, before preview browser
+    // authorization.
+    const ACCEPTED_PRE_PREVIEW_SCHEMA_FINGERPRINT: &str =
         "334e2acdf542843ab58f93c3961eca0c18e070e7c6dfc007f7e1d5d272eb3d86";
     // Accepted table schema through version29, before the two-factor setup skip.
     const ACCEPTED_PRE_TWO_FACTOR_SKIP_SCHEMA_FINGERPRINT: &str =
@@ -5029,6 +5040,12 @@ mod tests {
         if version > 26 {
             owner_sources::assert_accepted_staged26()?;
         }
+        if version > 30 {
+            preview_browser::assert_accepted_prior30()?;
+        }
+        if version > 31 {
+            two_factor_replacements::assert_accepted_staged31()?;
+        }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR
                 .iter()
@@ -5043,8 +5060,11 @@ mod tests {
         if version > OAUTH_PUBLICATION_AUTHORITY_VERSION {
             assert_frozen_oauth_publication_authority_checksum()?;
         }
+        // One past the newest embedded version applies the whole history, so a
+        // fixture can name the ledger through its own version and keep meaning
+        // that once a later migration exists.
         anyhow::ensure!(
-            MIGRATOR.version_exists(version),
+            MIGRATOR.version_exists(version) || version == embedded_max_version()? + 1,
             "embedded migration {version} is missing"
         );
         // Construct the exact SQLx ledger state immediately before the

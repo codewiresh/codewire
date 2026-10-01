@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
     <title>Snapshots · {{ organization.name }} · Codewire</title>
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
@@ -21,15 +21,8 @@
         <header class="cw-console-header"><div class="cw-console-breadcrumb"><span>{{ organization.slug }}</span><span>/</span><strong>snapshots</strong></div>{% include "console-account.html" %}</header>
         <div class="cw-main-inner"><div class="cw-page cw-page--wide">
           <header class="cw-page-header">
-            <div><h1 class="cw-page-title">Snapshots</h1><p class="cw-page-description">Reusable Sandbox filesystem snapshots will appear here.</p></div>
-            <button class="cw-button" type="button" disabled aria-disabled="true" title="Snapshot creation is not available yet">Create Snapshot</button>
+            <div><h1 class="cw-page-title">Snapshots</h1><p class="cw-page-description">Snapshots are not available yet. Saved Sandbox filesystems you can reuse or restore will appear here.</p></div>
           </header>
-          <div class="cw-table-shell">
-            <table class="cw-table">
-              <thead><tr><th>Name</th><th>Source Sandbox</th><th>Image</th><th>Resources</th><th>State</th><th>Created</th><th>Last used</th></tr></thead>
-              <tbody><tr><td colspan="7"><div class="cw-state"><strong>No snapshots yet</strong><p>Create and restore actions will be enabled when the snapshot backend ships.</p></div></td></tr></tbody>
-            </table>
-          </div>
         </div></div>
       </main>
     </div>

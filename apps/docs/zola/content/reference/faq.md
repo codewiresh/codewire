@@ -209,7 +209,7 @@ Persistent data is retained according to the active plan and environment policy.
 <details>
 <summary>What 2FA methods are supported?</summary>
 
-Codewire supports TOTP (Time-based One-Time Password) via authenticator apps like Google Authenticator, Authy, or 1Password. 10 backup codes are provided as a fallback. 2FA is mandatory — it's set up during onboarding.
+Codewire supports TOTP (Time-based One-Time Password) via authenticator apps like Google Authenticator, Authy, or 1Password. 10 backup codes are provided as a fallback. We strongly recommend it: Codewire offers to set up 2FA after you sign in. Choose **Set up later** to continue without it, and set it up any time from **Settings → Account → Security**.
 
 </details>
 

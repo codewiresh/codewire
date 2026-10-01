@@ -108,7 +108,7 @@ retired React suite.
 
 The suite under `apps/dashboard/e2e/` covers:
 
-- real signup, mandatory 2FA setup, sign-out, fresh login, and 2FA challenge;
+- real signup, 2FA setup, sign-out, fresh login, and 2FA challenge;
 - password reset with the token moved from the URL to a scoped HttpOnly
   cookie;
 - OIDC discovery and published Ed25519 keys, browser PKCE, CLI device

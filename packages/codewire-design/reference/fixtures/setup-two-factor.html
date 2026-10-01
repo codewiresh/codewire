@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Set up two-factor authentication · Codewire</title>
+  <link rel="icon" href="../../assets/brand-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/auth.css">
+  <link rel="stylesheet" href="../../cosmos.css">
+  <script src="../../cosmos.js" defer></script>
+</head>
+  <body class="cw-body cw-auth-body" data-route="setup-two-factor">
+    <div class="cw-cosmos" aria-hidden="true">
+      <canvas id="cosmos-canvas"></canvas>
+    </div>
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="home.html" aria-label="Codewire home"><img src="../../assets/brand-icon.svg" width="48" height="48" alt="Codewire"></a>
+      <section class="cw-auth-panel" aria-labelledby="setup-title">
+        <header class="cw-auth-header">
+          <h1 id="setup-title" class="cw-page-title">Secure your account</h1>
+          <p class="cw-auth-copy">Scan this one-time QR code with your authenticator, then enter the current six-digit code.</p>
+        </header>
+        <div class="cw-setup-grid">
+          <section aria-labelledby="qr-title">
+            <h2 id="qr-title" class="cw-card-title">1. Scan the QR code</h2>
+            <div class="cw-qr" aria-label="Authenticator setup QR code"><svg viewBox="0 0 256 256" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><rect width="256" height="256" fill="#fff"/><path fill="#111" d="M16 16h56v56H16zm8 8v40h40V24zm8 8h24v24H32zM184 16h56v56h-56zm8 8v40h40V24zm8 8h24v24h-24zM16 184h56v56H16zm8 8v40h40v-40zm8 8h24v24H32zM88 16h16v16H88zm32 0h16v16h-16zm16 16h16v16h-16zM88 48h24v8H88zm40 0h16v16h-16zm24 16h16v16h-16zM80 88h24v16H80zm32 8h16v24h-16zm24-16h16v24h-16zm24 8h16v16h-16zm24-8h16v16h-16zm24 16h32v16h-32zM16 96h24v16H16zm32-16h16v24H48zM16 128h24v16H16zm32 0h16v24H48zm24 16h16v16H72zm24 0h24v16H96zm32-16h24v16h-24zm32 16h16v24h-16zm24-16h16v16h-16zm24 16h32v16h-32zM88 176h24v16H88zm32 0h16v24h-16zm24 16h24v16h-24zm32-16h16v16h-16zm24 8h32v16h-32zM88 216h32v16H88zm40 0h16v24h-16zm24 16h24v8h-24zm32-24h16v32h-16zm24 16h32v16h-32z"/></svg></div>
+            <p class="cw-help">Can't scan it? Enter this setup key manually:</p>
+            <p><code class="cw-key" data-testid="totp-secret">JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP</code></p>
+          </section>
+          <form class="cw-form" method="post" action="#">
+            <div class="cw-field">
+              <label class="cw-label" for="code">2. Enter the current code</label>
+              <input class="cw-input cw-input--mono cw-input--large cw-auth-code" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
+            </div>
+            <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">Enable two-factor authentication</button>
+          </form>
+          <form class="cw-form" method="post" action="#">
+            <button class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" type="submit">Set up later</button>
+            <p class="cw-help">You can set it up anytime from Account › Security. Codewire asks again at your next sign-in.</p>
+          </form>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

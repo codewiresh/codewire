@@ -134,7 +134,8 @@ async function assertExplicitCreateRecovery(page: Page) {
     await page.goto(`/${slug}/new/?creation_draft=${requestedDraft}`);
     await expect(page.locator("[data-drawer]")).toBeVisible();
     await page.reload();
-    await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
+    // The exact draft comes back by itself on every return and reload.
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
     // Exercise the actual native Settings detour, not a direct fabricated
     // return URL: validation, mutation, and explicit Return retain this exact
     // older draft while the new source remains available but unattached.
@@ -164,11 +165,12 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
     await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
     await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-    await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
+    // The draft returns by itself; the new project is offered but not attached.
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
     await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
-    await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("draft-name-restored");
     // The new personal Settings consumer must retain the same exact draft
     // through cancellation, server validation and a real native secret write.
     // Owning tests disable trace/video/failure screenshots around these inputs.
@@ -207,14 +209,12 @@ async function assertExplicitCreateRecovery(page: Page) {
     expect((await secretWrite).headers().origin).toBe(ssrUrl);
     await expect(page).toHaveURL(`${ssrUrl}${personalPath}&message=secret-saved`);
     await expect(page.locator(".cw-personal-secret-row", { hasText: personalKey })).toHaveCount(1);
+    const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
     await personalReturn.click();
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
-    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
-    await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     const csrf = await form.locator('[name="_csrf"]').inputValue();
-    const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
-    await page.getByRole("button", { name: "Restore saved draft" }).click();
     const response = await responsePromise;
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
     expect(response.status()).toBe(200);
     expect(response.headers()["cache-control"]).toBe("private, no-store");
     expect(response.headers()["vary"]).toBe("Cookie");
@@ -1069,7 +1069,7 @@ test.describe.serial("server-rendered environments", () => {
       has: page.getByText("web", { exact: true }),
     });
     await expect(configuredPort).toHaveCount(1);
-    await expect(configuredPort).toContainText("3000 · Creator");
+    await expect(configuredPort).toContainText("3000 · Sandbox creator");
     await portPanel.getByRole("spinbutton", { name: "Internal port", exact: true }).fill("8080");
     await portPanel.getByLabel("Preview label", { exact: true }).fill("manual-http");
     await portPanel.getByRole("button", { name: "Add port", exact: true }).click();
@@ -1090,9 +1090,9 @@ test.describe.serial("server-rendered environments", () => {
     await expect(portPanel.getByRole("status").filter({ hasText: "Port deleted" })).toBeVisible();
     await expect(port).toHaveCount(0);
     await expect(configuredPort).toHaveCount(1);
-    await expect(configuredPort).toContainText("3000 · Creator");
+    await expect(configuredPort).toContainText("3000 · Sandbox creator");
 
-    await portPanel.getByRole("button", { name: "Close", exact: true }).click();
+    await portPanel.getByRole("button", { name: "Done", exact: true }).click();
     await expect(portPanel).not.toBeVisible();
     expect(page.url()).toBe(detailUrlBeforePorts);
     expect(await terminalBeforePorts!.evaluate((element) => element === document.querySelector("[data-terminal-tab-panel]:not([hidden]) [data-terminal-root]"))).toBe(true);
@@ -1179,6 +1179,13 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
+    // One live terminal stays open across Stop and Start (#2136).
+    const launchesBeforeStop = launchRequests;
+    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(1);
+    await expect(page.locator("[data-terminal-connection]")).toHaveText("Connected", { timeout: 60_000 });
+    const lifecycleSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
+    expect(lifecycleSessionId).toBeTruthy();
     const sandboxStopsBeforeCancel = sandboxStopRequests;
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     const stopDialog = page.getByRole("dialog", { name: `Stop ${environmentName}?`, exact: true });
@@ -1198,6 +1205,18 @@ test.describe.serial("server-rendered environments", () => {
     expect(await sourceDeletionDeadline()).toBe(stopDeadline);
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", stopDeadline);
     await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
+    // Stop reloads the page; a stopped Sandbox restores no tabs and says why.
+    await expect(page.locator("[data-terminal-empty]")).toHaveText("Start this Sandbox to use its terminals.", { timeout: 30_000 });
+    await expect(page.getByRole("tab")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+    // A lifecycle action submitted for the wrong state is rejected by the
+    // service and shown on the detail page; the state does not change (#2138).
+    await page.locator('form[action$="/_actions/sandboxes/stop"]').evaluate((form: HTMLFormElement) => form.submit());
+    await expect(page).toHaveURL(/[?&]error=invalid(?:&|$)/);
+    await expect(page.getByRole("alert")).toContainText("The Sandbox request was invalid for its current state.");
+    const [stillStopped] = await sql`SELECT state FROM environments WHERE id = ${environmentId}`;
+    expect(stillStopped.state).toBe("stopped");
+    await page.goto(filteredDetailPath);
     // Stopped compute changes are saved for Start, not a disguised restart.
     await page.getByRole("button", { name: "Resize", exact: true }).click();
     await resizeDialog.getByLabel("CPU (millicores)", { exact: true }).fill("750");
@@ -1258,6 +1277,12 @@ test.describe.serial("server-rendered environments", () => {
     const restartedDeadline = await sourceDeletionDeadline();
     expect(restartedDeadline).not.toBe(beforeStartDeadline);
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", restartedDeadline, { timeout: 30_000 });
+    // The same terminal is shown as ended after Start; nothing was launched in its place.
+    await expect(page.getByRole("tab")).toHaveCount(1);
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", lifecycleSessionId!);
+    await expect(page.locator("[data-terminal-connection]")).toHaveText(/interrupted|stopped|exited|failed|no longer available/i, { timeout: 60_000 });
+    expect(launchRequests).toBe(launchesBeforeStop + 1);
+    await page.getByRole("button", { name: "Remove tab", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
     await page.getByRole("button", { name: "Delete", exact: true }).click();

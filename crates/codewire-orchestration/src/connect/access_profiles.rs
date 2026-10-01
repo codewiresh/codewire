@@ -9,8 +9,9 @@ use codewire_proto::codewire::v1::{
     CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse,
     EnvironmentAccessProfileBinding, GetAccessProfileRequest, GetAccessProfileResponse,
     GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse,
-    ListAccessProfilesRequest, ListAccessProfilesResponse, UpdateAccessProfileRequest,
-    UpdateAccessProfileResponse, get_access_profile_request,
+    ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest,
+    RenameAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse,
+    get_access_profile_request,
 };
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::connect::{auth_user, rpc_app_error};
@@ -126,6 +127,30 @@ impl AccessProfileService for ProfileConnectService {
         )
         .await?;
         connectrpc::Response::ok(UpdateAccessProfileResponse {
+            access_profile: Some(proto_profile(profile)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn rename_access_profile(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, RenameAccessProfileRequest>,
+    ) -> ServiceResult<RenameAccessProfileResponse> {
+        let user = account_user(&ctx)?;
+        let request = request.view();
+        let profile = bounded(
+            &ctx,
+            self.profiles.rename(
+                &user,
+                request.access_profile_id,
+                request.expected_revision,
+                request.expected_name,
+                request.name,
+            ),
+        )
+        .await?;
+        connectrpc::Response::ok(RenameAccessProfileResponse {
             access_profile: Some(proto_profile(profile)).into(),
             ..Default::default()
         })

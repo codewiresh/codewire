@@ -40,7 +40,7 @@ After signing up, you'll receive a verification email. Click the link to activat
 
 ## Set up two-factor authentication
 
-After verifying your email and signing in, you'll be redirected to `/setup-2fa` to configure two-factor authentication. We strongly recommend it. You can choose **Skip for now** to continue without it for this sign-in; you'll be asked again the next time you sign in, and you can set it up any time from **Settings → Security**.
+After verifying your email and signing in, you'll be redirected to `/setup-2fa` to configure two-factor authentication. We strongly recommend it. You can choose **Set up later** to continue without it for this sign-in; you'll be asked again the next time you sign in, and you can set it up any time from **Settings → Account → Security**.
 
 1. Open your authenticator app (Google Authenticator, Authy, 1Password, etc.)
 2. Scan the QR code or enter the manual key

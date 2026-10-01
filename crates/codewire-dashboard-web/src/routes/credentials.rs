@@ -33,9 +33,10 @@ use crate::{
     templates::CredentialSettingsTemplate,
     view::{
         CredentialApiKeySubmission, CredentialOAuthSubmission, CredentialProfileCreateSubmission,
-        CredentialProfileDeleteSubmission, CredentialProfileUpdateSubmission,
-        CredentialRenameSubmission, CredentialRevisionSubmission, CredentialRotateSubmission,
-        CredentialSettingsView, CredentialSshGenerateSubmission, CredentialSshImportSubmission,
+        CredentialProfileDeleteSubmission, CredentialProfileRenameSubmission,
+        CredentialProfileUpdateSubmission, CredentialRenameSubmission,
+        CredentialRevisionSubmission, CredentialRotateSubmission, CredentialSettingsView,
+        CredentialSshGenerateSubmission, CredentialSshImportSubmission,
         GitHubAppAuthorizationSubmission, GitIdentitySubmission,
     },
 };
@@ -257,6 +258,45 @@ pub(super) async fn update_profile_action(
     {
         Ok(()) => page_redirect("profile-updated", false, &query, &headers),
         Err(error) => mutation_error(error.code, false, &dialog, &query, &headers),
+    }
+}
+
+/// Relabel a profile. The dialog's observed revision and name fence a stale
+/// view; both names use Create profile's rules and every binding is kept.
+pub(super) async fn rename_profile_action(
+    State(state): State<AppState>,
+    CredentialQuery(query): CredentialQuery,
+    headers: HeaderMap,
+    Form(form): Form<CredentialProfileRenameSubmission>,
+) -> Response {
+    let dialog = row_action_dialog("profile", &form.profile_id, "rename");
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
+        Ok(cookie) => cookie,
+        Err(response) => return response,
+    };
+    let name = form.name.trim();
+    if exact_id(&form.profile_id).is_err()
+        || !valid_revision(form.expected_revision)
+        || !valid_name(&form.expected_name)
+        || !valid_name(name)
+    {
+        return page_error_redirect("profile-invalid", &dialog, &query, &headers);
+    }
+    match credentials_connect::rename_profile(
+        &state,
+        cookie,
+        form.profile_id,
+        form.expected_revision,
+        form.expected_name,
+        name.into(),
+    )
+    .await
+    {
+        Ok(()) => page_redirect("profile-renamed", false, &query, &headers),
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&page_path(&query), &headers)
+        }
+        Err(error) => page_error_redirect(rename_error_code(error.code), &dialog, &query, &headers),
     }
 }
 
@@ -654,7 +694,12 @@ pub(super) async fn github_app_callback(
         .filter(|dialog| !dialog.is_empty())
         .unwrap_or_else(|| "connect-github".to_owned());
     let response = if !query.error.is_empty() {
-        page_error_redirect("github-app-cancelled", &dialog, &context, &headers)
+        page_error_redirect(
+            github_callback_error(&query.error),
+            &dialog,
+            &context,
+            &headers,
+        )
     } else if !valid_github_app_callback_code(&query.code) {
         page_error_redirect("github-app-failed", &dialog, &context, &headers)
     } else {
@@ -685,6 +730,16 @@ pub(super) async fn github_app_callback(
     let response =
         super::remember_organization_choice(response, &state.public_origin, &context.org);
     github_app_callback_response(response, clear)
+}
+
+/// GitHub reports a person's choice to cancel as `access_denied`; every other
+/// callback error is a setup problem. Its text is never shown.
+fn github_callback_error(error: &str) -> &'static str {
+    if error == "access_denied" {
+        "github-app-cancelled"
+    } else {
+        "github-app-rejected"
+    }
 }
 
 fn github_app_installation_url(app_slug: &str) -> String {
@@ -927,7 +982,7 @@ fn enrollment_response(
         .header("x-accel-buffering", "no")
         .header(
             header::CONTENT_SECURITY_POLICY,
-            "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'",
+            "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'",
         )
         .body(Body::from_stream(stream))
         .expect("static enrollment response headers")
@@ -1162,6 +1217,16 @@ fn credential_mutation_error(
     page_error_redirect(error, dialog, context, headers)
 }
 
+// The service reports a taken name and a stale revision with one conflict
+// code, so the rename dialog names both possible causes.
+fn rename_error_code(code: ErrorCode) -> &'static str {
+    if code == ErrorCode::Aborted || code == ErrorCode::AlreadyExists {
+        "profile-rename-conflict"
+    } else {
+        mutation_error_code(code, false)
+    }
+}
+
 fn mutation_error_code(code: ErrorCode, delete: bool) -> &'static str {
     if code == ErrorCode::InvalidArgument {
         "profile-invalid"
@@ -1242,7 +1307,7 @@ fn valid_row_action(kind: &str, action: &str) -> bool {
             action,
             "rename" | "reconnect" | "rotate" | "revoke" | "delete"
         ),
-        "profile" => matches!(action, "edit" | "delete"),
+        "profile" => matches!(action, "rename" | "edit" | "delete"),
         _ => false,
     }
 }
@@ -1271,9 +1336,8 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
     ) || requested_row_id(requested, "credential").is_some_and(|id| {
         data.credentials.iter().any(|credential| {
             credential.id == id
-                && (requested == row_dialog("credential", id)
-                    || requested == row_action_dialog("credential", id, "rename")
-                        && credential.oauth_provider != "github"
+                && (requested == row_action_dialog("credential", id, "rename")
+                    && credential.oauth_provider != "github"
                     || requested == row_action_dialog("credential", id, "reconnect")
                         && credential.oauth
                     || requested == row_action_dialog("credential", id, "rotate")
@@ -1284,8 +1348,11 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
                     || requested == row_action_dialog("credential", id, "delete")
                         && (credential.revoked || credential.oauth_provider == "github"))
         })
-    }) || requested_row_id(requested, "profile")
-        .is_some_and(|id| data.profiles.iter().any(|profile| profile.id == id));
+    }) || requested_row_id(requested, "profile").is_some_and(|id| {
+        // Rows open their actions directly; there is no per-row manage dialog.
+        requested != row_dialog("profile", id)
+            && data.profiles.iter().any(|profile| profile.id == id)
+    });
     if allowed {
         requested.to_owned()
     } else {
@@ -1319,6 +1386,7 @@ fn approved_message(code: &str) -> &'static str {
         "github-app-connected" => "GitHub connected through the GitHub App.",
         "profile-created" => "Credential profile created.",
         "profile-updated" => "Credential profile updated.",
+        "profile-renamed" => "Credential profile renamed.",
         "profile-deleted" => "Credential profile deleted.",
         _ => "",
     }
@@ -1345,6 +1413,9 @@ fn approved_error(code: &str) -> &'static str {
         "github-app-cancelled" => {
             "GitHub App authorization was cancelled. No credential was changed."
         }
+        "github-app-rejected" => {
+            "GitHub could not authorize Codewire, so no credential was changed. Ask an administrator to check the Codewire GitHub App settings."
+        }
         "github-app-failed" => {
             "This GitHub connection attempt expired or could not be verified. Continue to GitHub to start a new attempt."
         }
@@ -1361,6 +1432,9 @@ fn approved_error(code: &str) -> &'static str {
             "Check the profile name and selected credentials. Use 1–128 lowercase letters, numbers, hyphens, underscores or dots; start and end with a letter or number."
         }
         "profile-conflict" => "The credential profile changed. Reload and try again.",
+        "profile-rename-conflict" => {
+            "Another profile already uses that name, or this profile changed. Choose a different name, or reload and try again."
+        }
         "profile-in-use" => "The credential profile is still in use and cannot be deleted.",
         "request-failed" => "The credential profile change could not be completed. Try again.",
         _ => "",
@@ -1503,6 +1577,7 @@ mod tests {
             "credentials/ssh/generate",
             "credentials/ssh/import",
             "profiles/create",
+            "profiles/rename",
             "profiles/update",
             "profiles/delete",
             "git-identity",
@@ -1522,6 +1597,40 @@ mod tests {
             }
         }
         assert!(!html.contains("/settings/?org=sample-org&amp;creation_draft="));
+    }
+
+    #[test]
+    fn dialogs_open_and_cancel_through_get_forms_that_keep_the_draft() {
+        let draft = "00000000-0000-4000-8000-000000000003";
+        let html = rendered_dialogs_with_navigation("", "", &format!("?creation_draft={draft}"));
+        let draft_input =
+            format!("<input type=\"hidden\" name=\"creation_draft\" value=\"{draft}\">");
+        let launchers = html
+            .split("<form class=\"cw-dialog-launcher\"")
+            .skip(1)
+            .collect::<Vec<_>>();
+        assert!(launchers.len() > 20);
+        for form in &launchers {
+            let form = form.split("</form>").next().unwrap();
+            // A launcher returns to its dialog; Cancel returns to the page.
+            let action = form.split('"').nth(3).unwrap();
+            if form.contains("data-dialog-open=") {
+                assert!(action.starts_with(&format!("{PATH}#")), "{action}");
+            } else {
+                assert_eq!(action, PATH);
+            }
+            assert!(form.contains(&draft_input), "a dialog form lost its draft");
+            assert!(form.contains("type=\"submit\""));
+            assert!(form.contains("data-dialog-open=") == form.contains("name=\"dialog\""));
+        }
+        for dialog in ["add-credential", "create-profile", "connect-github"] {
+            assert!(
+                html.contains(&format!("name=\"dialog\" value=\"{dialog}\"")),
+                "{dialog}"
+            );
+        }
+        assert!(!html.contains("type=\"button\" data-dialog-open"));
+        assert!(!html.contains("type=\"button\" data-dialog-close"));
     }
 
     #[test]
@@ -1593,10 +1702,9 @@ mod tests {
             "generate-ssh",
             "import-ssh",
             "create-profile",
-            "credential-00000000-0000-4000-8000-000000000001",
-            "profile-00000000-0000-4000-8000-000000000002",
             "credential-00000000-0000-4000-8000-000000000001-reconnect",
             "credential-00000000-0000-4000-8000-000000000001-delete",
+            "profile-00000000-0000-4000-8000-000000000002-rename",
             "profile-00000000-0000-4000-8000-000000000002-edit",
             "profile-00000000-0000-4000-8000-000000000002-delete",
         ] {
@@ -1610,6 +1718,9 @@ mod tests {
             "connect-github\" autofocus",
             "credential-00000000-0000-4000-8000-000000000099",
             "profile-00000000-0000-4000-8000-000000000001",
+            // Rows open their actions from a menu; the old manage dialogs are gone.
+            "credential-00000000-0000-4000-8000-000000000001",
+            "profile-00000000-0000-4000-8000-000000000002",
             "credential-00000000-0000-4000-8000-000000000099-reconnect",
             "credential-00000000-0000-4000-8000-000000000001-edit",
             "credential-00000000-0000-4000-8000-000000000001-rename",
@@ -1618,6 +1729,8 @@ mod tests {
             "credential-00000000-0000-4000-8000-000000000001-revoke",
             "profile-00000000-0000-4000-8000-000000000002-reconnect",
             "profile-00000000-0000-4000-8000-000000000002-edit-delete",
+            "profile-00000000-0000-4000-8000-000000000002-rename-edit",
+            "profile-00000000-0000-4000-8000-000000000099-rename",
             "add-api-key",
         ] {
             assert!(approved_dialog(id, &data).is_empty(), "{id}");
@@ -1638,7 +1751,9 @@ mod tests {
             html.find("id=\"profiles-title\"").unwrap()
                 < html.find("id=\"create-profile\"").unwrap()
         );
-        assert_eq!(html.matches("data-dialog id=").count(), 15);
+        // Rows open their actions from a menu with no per-row manage dialog;
+        // the profile row has Rename, Edit identities and Delete dialogs.
+        assert_eq!(html.matches("data-dialog id=").count(), 14);
         assert!(!html.contains("data-dialog-auto-open"));
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));
@@ -1648,6 +1763,8 @@ mod tests {
         assert!(!credential_primary.contains("Generation"));
         assert!(!credential_primary.contains("Expires"));
         assert!(credential_primary.contains("Active"));
+        assert!(credential_primary.contains("aria-label=\"Actions for "));
+        assert!(!credential_primary.contains("Manage "));
         // The GitHub connection dialog carries no Details or Generation copy.
         assert!(
             !credential_dialog
@@ -1657,15 +1774,18 @@ mod tests {
                 .contains("Generation")
         );
         let profile_row = html.split("class=\"cw-profile-row\"").nth(1).unwrap();
-        let (profile_primary, profile_dialog) = profile_row.split_once("<dialog").unwrap();
+        let (profile_primary, profile_dialogs) = profile_row.split_once("<dialog").unwrap();
         assert!(!profile_primary.contains("Revision"));
-        assert!(
-            profile_dialog
-                .split("</dialog>")
-                .next()
-                .unwrap()
-                .contains("Revision 9")
-        );
+        assert!(profile_primary.contains(">Rename</button>"));
+        assert!(profile_primary.contains(">Edit identities</button>"));
+        let profile_edit = profile_dialogs
+            .split("id=\"profile-00000000-0000-4000-8000-000000000002-edit\"")
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(profile_edit.contains("Revision 9"));
         assert!(!html.contains("name=\"name\" value=\"legacy-github\""));
         assert!(html.contains("name=\"confirm_reconnect\" value=\"yes\" required"));
         assert!(
@@ -1713,6 +1833,83 @@ mod tests {
         assert!(html.contains("/settings/credentials/_actions/github/authorize?org=sample-org"));
         assert!(html.contains("https://github.com/apps/codewire-synthetic/installations/new"));
         assert!(html.contains("icons-v2.svg#icon-github"));
+    }
+
+    #[test]
+    fn profile_rename_is_one_name_field_fenced_by_the_observed_revision() {
+        let id = "00000000-0000-4000-8000-000000000002";
+        let html = rendered_dialogs(
+            &format!("profile-{id}-rename"),
+            approved_error("profile-rename-conflict"),
+        );
+        let profile_row = html.split("class=\"cw-profile-row\"").nth(1).unwrap();
+        let menu = profile_row.split("</details>").next().unwrap();
+        let items: Vec<_> = menu
+            .split("class=\"cw-menu-item")
+            .skip(1)
+            .map(|item| item.split('>').nth(1).unwrap().split('<').next().unwrap())
+            .collect();
+        assert_eq!(items, ["Rename", "Edit identities", "Delete"]);
+        assert!(menu.contains(&format!(
+            "action=\"{PATH}#profile-{id}-rename\"><input type=\"hidden\" name=\"dialog\" value=\"profile-{id}-rename\">"
+        )));
+        assert_eq!(html.matches("data-dialog-auto-open").count(), 1);
+        let dialog = html
+            .split(&format!(
+                "id=\"profile-{id}-rename\" aria-labelledby=\"profile-{id}-rename-title\" data-dialog-auto-open>"
+            ))
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(dialog.contains(&format!(
+            "<h2 id=\"profile-{id}-rename-title\">Rename work</h2>"
+        )));
+        assert!(dialog.contains("role=\"alert\">Another profile already uses that name"));
+        assert!(dialog.contains(&format!(
+            "action=\"{PATH}_actions/profiles/rename?org=sample-org\""
+        )));
+        for hidden in [
+            "name=\"_csrf\" value=\"synthetic-csrf\"".to_owned(),
+            format!("name=\"profile_id\" value=\"{id}\""),
+            "name=\"expected_revision\" value=\"9\"".to_owned(),
+            "name=\"expected_name\" value=\"work\"".to_owned(),
+        ] {
+            assert!(dialog.contains(&hidden), "{hidden}");
+        }
+        // One Name field with Create profile's rules, prefilled and labelled.
+        assert_eq!(dialog.matches("<input class=\"cw-input\"").count(), 1);
+        assert_eq!(dialog.matches("<select").count(), 0);
+        assert!(dialog.contains(&format!(
+            "<label class=\"cw-label\" for=\"profile-{id}-name\">New name</label><input class=\"cw-input\" id=\"profile-{id}-name\" name=\"name\" autofocus pattern=\"[a-z0-9]([a-z0-9_.\\-]*[a-z0-9])?\" maxlength=\"128\" value=\"work\""
+        )));
+        assert!(dialog.contains(&format!(
+            "<button class=\"cw-button\" type=\"submit\" form=\"profile-{id}-rename-form\">Save name</button>"
+        )));
+        assert!(dialog.contains(&format!(
+            "<form class=\"cw-dialog-launcher\" method=\"get\" action=\"{PATH}\"><button class=\"cw-button cw-button--outline\" type=\"submit\" data-dialog-close>Cancel</button></form>"
+        )));
+        assert_eq!(
+            rename_error_code(ErrorCode::AlreadyExists),
+            "profile-rename-conflict"
+        );
+        assert_eq!(
+            rename_error_code(ErrorCode::Aborted),
+            "profile-rename-conflict"
+        );
+        assert_eq!(
+            rename_error_code(ErrorCode::InvalidArgument),
+            "profile-invalid"
+        );
+        assert_eq!(
+            rename_error_code(ErrorCode::PermissionDenied),
+            "request-failed"
+        );
+        assert_eq!(
+            approved_message("profile-renamed"),
+            "Credential profile renamed."
+        );
     }
 
     #[test]
@@ -1872,6 +2069,19 @@ mod tests {
             response.headers()[header::CACHE_CONTROL],
             HeaderValue::from_static("no-store, max-age=0")
         );
+    }
+
+    #[test]
+    fn github_callback_errors_separate_a_cancellation_from_a_setup_problem() {
+        assert_eq!(
+            github_callback_error("access_denied"),
+            "github-app-cancelled"
+        );
+        for error in ["redirect_uri_mismatch", "application_suspended", "<script>"] {
+            assert_eq!(github_callback_error(error), "github-app-rejected");
+        }
+        let message = approved_error("github-app-rejected");
+        assert!(message.contains("no credential was changed") && !message.contains("redirect"));
     }
 
     #[test]

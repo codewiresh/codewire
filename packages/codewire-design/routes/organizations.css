@@ -48,3 +48,12 @@
   .cw-row-actions .cw-menu-panel--end { right: auto; left: 0; }
   .cw-table th:nth-child(3), .cw-table td:nth-child(3), .cw-table th:nth-child(4), .cw-table td:nth-child(4), .cw-table th:nth-child(5), .cw-table td:nth-child(5) { display: none; }
 }
+
+/* API keys: without scripting, Delete submits directly instead of opening a dialog. */
+@media (scripting: enabled) {
+  [data-dashboard-app] .cw-org-content [data-scriptless] { display: none; }
+}
+
+@media (scripting: none) {
+  [data-dashboard-app] .cw-org-content [data-dialog-open] { display: none; }
+}
