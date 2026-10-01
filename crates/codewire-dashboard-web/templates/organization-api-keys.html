@@ -21,7 +21,7 @@
       </header>
       <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
-      <main class="cw-main">{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
+      <main class="cw-main">{% let crumb_scope = organization.slug.as_str() %}{% let crumb_page = "api keys" %}{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
         <div class="cw-org-management-layout"><aside class="cw-context-nav">{% include "organization-settings-nav.html" %}</aside><div class="cw-context-main">
         {% include "organization-api-keys-content.html" %}
         </div></div>
