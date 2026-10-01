@@ -300,6 +300,7 @@
       form.closest("#environment-create-card")?.replaceWith(replacement);
       wireDraftForms();
       wireGithubBrowsers();
+      enhanceComboboxes();
       restored.querySelector('[name="name"]')?.focus();
     } catch {
       if (!state.edited && state.sequence === sequence && draftIsOpen(form)) draftStatus(form, "The draft could not be restored. Reload and review current options; no Sandbox was created.", true);

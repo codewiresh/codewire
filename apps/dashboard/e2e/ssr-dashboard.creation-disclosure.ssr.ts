@@ -498,7 +498,16 @@ test("secret settings fixture provides an explicit metadata-only Return link", a
 async function restoredCard(page: Page, draft: Draft): Promise<string> {
   return page.locator("#environment-create-card").evaluate((card, draft) => {
     const copy = card.cloneNode(true) as HTMLElement;
+    // The server returns native markup; undo the browser's combobox enhancement.
+    copy.querySelectorAll(".cw-combobox-list").forEach((list) => list.remove());
+    copy.querySelectorAll<HTMLInputElement>("input[data-combobox-options]").forEach((input) => {
+      input.setAttribute("list", input.dataset.comboboxOptions!);
+      for (const name of ["data-combobox-options", "role", "aria-autocomplete", "aria-controls", "aria-expanded", "aria-activedescendant", "autocomplete"]) input.removeAttribute(name);
+    });
     const form = copy.querySelector("form")!;
+    // Server markup is never held by an automatic restore in progress.
+    form.inert = false;
+    form.removeAttribute("aria-busy");
     form.dataset.createDraftId = draft.draft;
     form.dataset.createDraftFresh = "false";
     form.dataset.createDraftRestored = "true";
@@ -643,6 +652,9 @@ test("Create drafts save bounded authored fields and restore them after reload",
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("saved-name-canary");
   await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("https://canary.invalid/private-repository");
   await expect(page.getByLabel("Preview label", { exact: true })).toHaveValue("saved-label");
+  // The restored form keeps the styled image suggestions.
+  await page.getByRole("combobox", { name: "Workspace image", exact: true }).click();
+  await expect(page.getByRole("listbox", { name: "Suggested images", exact: true })).toBeVisible();
 });
 
 test("Create drafts do not store credential-bearing repository URLs", async ({ page }) => {
