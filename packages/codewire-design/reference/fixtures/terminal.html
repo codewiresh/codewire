@@ -6,7 +6,7 @@
   <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
   <!-- Public, static nonce ONLY for this non-authenticated design fixture.
        Production generates a fresh random nonce for each terminal response. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'nonce-codewire-terminal-design-preview'; style-src-attr 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'nonce-codewire-terminal-design-preview'; style-src-attr 'none'">
   <title>Codewire terminal fixture</title>
   <link rel="stylesheet" href="../../styles.css">
   <link rel="stylesheet" href="../../components.css">
@@ -49,9 +49,9 @@
     </dialog>
     <dialog class="cw-dialog cw-port-dialog" data-dialog id="sandbox-ports" aria-labelledby="sandbox-ports-title" hx-get="terminal-ports.html" hx-trigger="codewire:dialog-open" hx-request='{"timeout":30000}' hx-target="#sandbox-ports-content">
       <header class="cw-dialog-header"><h2 id="sandbox-ports-title">Ports · Example Sandbox</h2></header>
-      <p class="cw-dialog-body cw-alert cw-alert--error" data-dialog-load-error role="alert" hidden>The ports could not be refreshed. Close and reopen this dialog to check the current state before trying again.</p>
+      <p class="cw-dialog-body cw-alert cw-alert--error" data-dialog-load-error role="alert" hidden>The ports could not be refreshed. Reopen this dialog to check the current state before trying again.</p>
       <div class="cw-dialog-body" id="sandbox-ports-content"><p>Loading preview ports…</p></div>
-      <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Close</button></footer>
+      <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Done</button></footer>
     </dialog>
     <section class="cw-sandbox-terminal" aria-label="Sandbox terminal">
       <header class="cw-terminal-toolbar"><p class="cw-terminal-copy-status" data-terminal-copy-status role="status"></p><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-copy disabled>Copy selection</button></header>

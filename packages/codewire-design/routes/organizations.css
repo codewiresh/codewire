@@ -1,124 +1,59 @@
-[data-route="organization"] .cw-page { max-width: var(--content-default); }
-.cw-org-header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: 0 0 var(--space-6); }
-.cw-org-header .cw-page-title { font-size: 1.5rem; }
-.cw-org-tabs { display: flex; gap: var(--space-1); margin: 0 0 var(--space-6); overflow-x: auto; border-bottom: 1px solid var(--border-subtle); }
-.cw-org-tab { position: relative; flex: none; padding: .6rem 1rem; color: var(--fg-secondary); font-size: .875rem; font-weight: 510; }
-.cw-org-tab:hover, .cw-org-tab:focus-visible, .cw-org-tab[aria-current="page"] { color: var(--fg-primary); outline: none; }
-.cw-org-tab[aria-current="page"]::after { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: var(--accent); content: ""; }
-.cw-org-content { display: grid; gap: var(--space-6); }
-.cw-org-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.cw-org-toolbar p { margin: 0; color: var(--fg-secondary); font-size: .875rem; }
-.cw-org-details > summary { list-style: none; }
-.cw-org-details > summary::-webkit-details-marker { display: none; }
-.cw-org-details[open] > summary { margin-bottom: var(--space-4); }
-.cw-org-form { display: grid; gap: var(--space-4); }
-.cw-org-form-row { display: grid; grid-template-columns: minmax(0, 1fr) 9rem auto; align-items: start; gap: var(--space-3); }
-.cw-org-assignments { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+/* Organization pages: the shared context navigation beside one content column,
+   as in Settings. Primitives own the visuals; this sheet lays the pages out.
+   Every value is a design token. */
+[data-dashboard-app] .cw-org-management-page { max-width: none; padding: 0; }
+[data-dashboard-app] .cw-org-management-layout { display: grid; grid-template-columns: var(--context-nav-width) minmax(0, 1fr); min-height: calc(100vh - var(--console-header)); }
+[data-dashboard-app] .cw-context-main { min-width: 0; padding: var(--space-6) var(--space-6) var(--space-12); }
+[data-dashboard-app] .cw-context-page-header { margin-bottom: var(--space-5); }
 
-.cw-assignment { display: inline-flex; padding: .08rem .4rem; border: 1px solid var(--border-hover); border-radius: var(--radius-pill); font-size: .6875rem; line-height: 1.45; }
-.cw-assignment[data-tone="info"] { color: #60a5fa; border-color: rgba(96,165,250,.35); }
-.cw-assignment[data-tone="success"] { color: #4ade80; border-color: rgba(74,222,128,.35); }
-.cw-assignment[data-tone="purple"] { color: #c084fc; border-color: rgba(192,132,252,.35); }
-.cw-assignment[data-tone="warning"] { color: #facc15; border-color: rgba(250,204,21,.35); }
-.cw-assignment[data-tone="orange"] { color: #fb923c; border-color: rgba(251,146,60,.35); }
-.cw-assignment[data-tone="danger"] { color: #f87171; border-color: rgba(248,113,113,.35); }
+.cw-org-content { display: grid; gap: var(--space-6); }
+[data-dashboard-app] .cw-org-management-layout .cw-org-content { gap: var(--space-3); }
+.cw-org-toolbar { display: flex; min-height: var(--control-height); flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.cw-org-toolbar p { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+
+/* Create forms open in a drawer from the toolbar button. */
+.cw-org-details[open]::before { position: fixed; inset: 0; z-index: 80; background: var(--backdrop); content: ""; }
+.cw-org-details > .cw-drawer { width: min(var(--drawer-width-sm), 94vw); }
+.cw-org-form { display: grid; gap: var(--space-3); }
+.cw-org-form-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--control-width-sm) auto; align-items: start; gap: var(--space-3); }
+.cw-org-assignments { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.cw-assignment-editor .cw-org-assignments { display: grid; }
+:is(.cw-org-assignments, .cw-person-assignments) .cw-badge { margin-left: 0; }
+
+/* Member and secret rows inside a card. */
 .cw-list { display: grid; }
-.cw-list-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-6); }
+.cw-list-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-4); }
 .cw-list-row + .cw-list-row { border-top: 1px solid var(--border-subtle); }
 .cw-person { display: flex; min-width: 0; align-items: center; gap: var(--space-3); }
-.cw-avatar { display: grid; width: 2rem; height: 2rem; flex: none; place-items: center; border-radius: 50%; background: var(--bg-surface-hover); color: var(--fg-secondary); font-size: .75rem; font-weight: 600; }
+.cw-avatar { display: grid; width: var(--control-height-sm); height: var(--control-height-sm); flex: none; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-surface); color: var(--fg-secondary); font-size: var(--text-small); font-weight: var(--weight-semibold); }
 .cw-person-copy { min-width: 0; }
 .cw-person-copy strong, .cw-person-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cw-person-copy strong { font-size: .875rem; font-weight: 510; }
-.cw-person-copy > span { color: var(--fg-secondary); font-size: .75rem; }
+.cw-person-copy strong { font-size: var(--text-secondary); font-weight: var(--weight-medium); }
+.cw-person-copy > span { color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-person-assignments { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-1); }
 .cw-row-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .cw-row-actions form { margin: 0; }
 .cw-inline-form { display: flex; align-items: center; gap: var(--space-2); }
-.cw-assignment-editor { position: relative; }
-.cw-assignment-editor > summary { list-style: none; }
-.cw-assignment-editor > summary::-webkit-details-marker { display: none; }
-.cw-assignment-popover { position: absolute; z-index: 20; top: calc(100% + .4rem); right: 0; width: 15rem; padding: var(--space-3); border: 1px solid var(--border-hover); border-radius: var(--radius-md); background: var(--bg-secondary); box-shadow: var(--shadow-overlay); }
-.cw-assignment-popover .cw-org-assignments { display: grid; }
-.cw-assignment-popover .cw-button { width: 100%; margin-top: var(--space-3); }
-.cw-key { padding: .15rem .4rem; border-radius: var(--radius-sm); background: var(--bg-surface-hover); font: .75rem var(--font-mono); }
-.cw-secret-warning { margin: 0 0 var(--space-4); color: var(--warning); font-size: .875rem; }
-.cw-delete-confirmation { position: relative; }
-.cw-delete-confirmation > summary { list-style: none; }
-.cw-delete-confirmation > summary::-webkit-details-marker { display: none; }
-.cw-delete-panel { position: absolute; z-index: 20; top: calc(100% + .4rem); right: 0; width: 17rem; padding: var(--space-3); border: 1px solid rgba(239,68,68,.25); border-radius: var(--radius-md); background: var(--bg-secondary); box-shadow: var(--shadow-overlay); text-align: left; }
-.cw-delete-panel p { margin: 0 0 var(--space-3); color: var(--fg-secondary); font-size: .75rem; }
+.cw-secret-warning { margin: 0; color: var(--warning); font-size: var(--text-body); }
 
 @media (max-width: 48rem) {
-  .cw-org-form-row { grid-template-columns: 1fr; }
-  .cw-list-row { align-items: flex-start; flex-direction: column; padding: var(--space-3) var(--space-4); }
+  [data-dashboard-app] .cw-org-management-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  [data-dashboard-app] .cw-context-main { padding: var(--space-4) var(--space-4) var(--space-8); }
+  .cw-org-toolbar { align-items: stretch; }
+  .cw-org-details, .cw-org-details > summary { width: 100%; }
+  .cw-org-details > summary { justify-content: center; }
+  .cw-org-form-row { grid-template-columns: minmax(0, 1fr); }
+  .cw-list-row { align-items: flex-start; flex-direction: column; }
   .cw-row-actions { width: 100%; justify-content: flex-start; }
+  .cw-row-actions .cw-menu-panel--end { right: auto; left: 0; }
   .cw-table th:nth-child(3), .cw-table td:nth-child(3), .cw-table th:nth-child(4), .cw-table td:nth-child(4), .cw-table th:nth-child(5), .cw-table td:nth-child(5) { display: none; }
-  .cw-assignment-popover, .cw-delete-panel { right: auto; left: 0; }
 }
 
-/* Rounded organization-management shell used by presets, secrets, keys,
-   members, and billing. Sandbox inventory keeps its purpose-built table shell. */
-[data-dashboard-app] .cw-org-management-page { max-width: none; padding: 0; }
-[data-dashboard-app] .cw-org-management-layout { display: grid; grid-template-columns: 14rem minmax(0, 1fr); min-height: calc(100vh - 3.25rem); margin-inline: -1.25rem; }
-[data-dashboard-app] .cw-context-main { min-width: 0; padding: 1.5rem 1.25rem 3rem; }
-[data-dashboard-app] .cw-context-page-header { margin-bottom: 1.25rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-content { gap: .8rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-toolbar { min-height: 2.4rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-toolbar > p,
-[data-dashboard-app] .cw-org-management-layout .cw-org-toolbar > div > p { color: #6e6e6e; font-size: .72rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-details > summary { border-radius: 999px; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-details[open] > summary { margin-bottom: .75rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-details > .cw-card { max-width: 48rem; border-color: #242424; background: #0d0d0d; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-form { gap: .75rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-org-form-row { gap: .75rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-list-row { padding: .75rem .9rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-person-copy strong { font: 500 .72rem var(--font-mono); }
-[data-dashboard-app] .cw-org-management-layout .cw-person-copy > span { color: #666; font-size: .67rem; }
-[data-dashboard-app] .cw-org-management-layout .cw-avatar { border: 1px solid #292929; background: #171717; }
-[data-dashboard-app] .cw-org-management-layout .cw-key { border-radius: var(--radius-md); background: var(--bg-base); }
-[data-dashboard-app] .cw-org-management-layout .cw-org-details[open]::before {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  background: rgba(0,0,0,.55);
-  content: "";
-}
-[data-dashboard-app] .cw-org-management-layout .cw-org-details[open] > .cw-card {
-  position: fixed;
-  z-index: 81;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 540px;
-  max-width: 94vw;
-  overflow-y: auto;
-  border: 0;
-  border-left: 1px solid #262626;
-  border-radius: 0;
-  background: #0d0d0d;
-  box-shadow: -18px 0 48px rgba(0,0,0,.32);
-  animation: cw-drawer-in 160ms ease;
-}
-[data-dashboard-app] .cw-org-management-layout .cw-org-details[open] > .cw-card > .cw-card-header {
-  position: sticky;
-  z-index: 2;
-  top: 0;
-  padding: 20px 22px 15px;
-  background: #0d0d0d;
-}
-[data-dashboard-app] .cw-org-management-layout .cw-org-details[open] > .cw-card > .cw-card-content { padding: 18px 22px 24px; }
-
-@media (max-width: 63.9375rem) {
-  [data-dashboard-app] .cw-org-management-layout { min-height: calc(100vh - 3.5rem); }
+/* API keys: without scripting, Delete submits directly instead of opening a dialog. */
+@media (scripting: enabled) {
+  [data-dashboard-app] .cw-org-content [data-scriptless] { display: none; }
 }
 
-@media (max-width: 48rem) {
-  [data-dashboard-app] .cw-org-management-layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; margin-inline: -.8rem; }
-  [data-dashboard-app] .cw-context-main { padding: 1rem .8rem 2rem; }
-  [data-dashboard-app] .cw-org-management-layout .cw-org-toolbar { align-items: stretch; }
-  [data-dashboard-app] .cw-org-management-layout .cw-org-details,
-  [data-dashboard-app] .cw-org-management-layout .cw-org-details > summary { width: 100%; }
-  [data-dashboard-app] .cw-org-management-layout .cw-org-details > summary { justify-content: center; }
-  [data-dashboard-app] .cw-org-management-layout .cw-org-form-row { grid-template-columns: 1fr; }
+@media (scripting: none) {
+  [data-dashboard-app] .cw-org-content [data-dialog-open] { display: none; }
 }

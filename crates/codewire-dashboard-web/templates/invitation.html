@@ -6,34 +6,36 @@
     <title>Join {{ view.invitation.organization_name }} · Codewire</title>
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/auth-v2.css">
+    <link rel="stylesheet" href="/assets/codewire/cosmos-v1.css">
+    <script src="/assets/codewire/cosmos-v1.js" defer></script>
   </head>
   <body class="cw-body cw-auth-body" data-route="accept-invite">
+    <div class="cw-cosmos" aria-hidden="true">
+      <canvas id="cosmos-canvas"></canvas>
+    </div>
     <main class="cw-auth-shell">
-      <a class="cw-auth-brand" href="/"><img src="/assets/codewire/logo-v1.svg" alt=""><span>Codewire</span></a>
-      <section class="cw-card cw-auth-card">
-        <header class="cw-card-header cw-auth-header">
-          <div class="cw-auth-mark" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-users"/></svg></div>
-          <h1 class="cw-page-title">Join {{ view.invitation.organization_name }}</h1>
-          <p class="cw-card-description">{{ view.invitation.inviter_name }} invited you to join as {{ view.invitation.role }}.</p>
+      <a class="cw-auth-brand" href="/" aria-label="Codewire home"><img src="/assets/codewire/brand-icon-v1.svg" width="48" height="48" alt="Codewire"></a>
+      <section class="cw-auth-panel" aria-labelledby="invite-title">
+        <header class="cw-auth-header">
+          <h1 id="invite-title" class="cw-page-title">Join {{ view.invitation.organization_name }}</h1>
+          <p class="cw-auth-copy">{{ view.invitation.inviter_name }} invited you to join as {{ view.invitation.role }}.</p>
         </header>
-        <div class="cw-card-content">
-          <dl class="cw-invite-details"><div><dt>Team</dt><dd>{{ view.invitation.organization_name }}</dd></div><div><dt>Invited email</dt><dd>{{ view.invitation.email }}</dd></div><div><dt>Role</dt><dd>{{ view.invitation.role }}</dd></div></dl>
-          {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
-          {% if !view.authenticated %}
-          <p class="cw-auth-copy">Sign in or create an account with the invited email address. The invitation will remain attached to the continuation.</p>
-          <div class="cw-auth-actions"><a class="cw-button" href="{{ view.login_url }}">Sign in</a><a class="cw-button cw-button--outline" href="{{ view.signup_url }}">Create account</a></div>
-          {% else if !view.email_matches %}
-          <div class="cw-alert cw-alert--warning" role="alert"><strong>Email mismatch.</strong> Sign in as {{ view.invitation.email }} to accept this invitation.</div>
-          <a class="cw-button cw-button--outline cw-auth-submit" href="/login">Use another account</a>
-          {% else %}
-          <form class="cw-form" method="post" action="/accept-invite/_actions/accept">
-            <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
-            <input type="hidden" name="token" value="{{ view.token }}">
-            <button class="cw-button cw-auth-submit" type="submit">Accept invitation</button>
-          </form>
-          <p class="cw-auth-secondary"><a href="/dashboard/">Cancel and return to dashboard</a></p>
-          {% endif %}
-        </div>
+        <dl class="cw-invite-details"><div><dt>Team</dt><dd>{{ view.invitation.organization_name }}</dd></div><div><dt>Invited email</dt><dd>{{ view.invitation.email }}</dd></div><div><dt>Role</dt><dd>{{ view.invitation.role }}</dd></div></dl>
+        {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
+        {% if !view.authenticated %}
+        <p class="cw-auth-copy">Sign in or create an account with the invited email address. The invitation will remain attached to the continuation.</p>
+        <div class="cw-auth-actions"><a class="cw-button cw-button--pill cw-button--large" href="{{ view.login_url }}">Sign in</a><a class="cw-button cw-button--outline cw-button--pill cw-button--large" href="{{ view.signup_url }}">Create account</a></div>
+        {% else if !view.email_matches %}
+        <div class="cw-alert cw-alert--warning" role="alert"><strong>Email mismatch.</strong> Sign in as {{ view.invitation.email }} to accept this invitation.</div>
+        <a class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" href="/login">Use another account</a>
+        {% else %}
+        <form class="cw-form" method="post" action="/accept-invite/_actions/accept">
+          <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
+          <input type="hidden" name="token" value="{{ view.token }}">
+          <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">Accept invitation</button>
+        </form>
+        <p class="cw-auth-secondary"><a href="/dashboard/">Cancel and return to dashboard</a></p>
+        {% endif %}
       </section>
     </main>
   </body>

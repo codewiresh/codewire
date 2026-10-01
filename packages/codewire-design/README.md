@@ -54,14 +54,8 @@ tokens); route sheets and fixtures reference `var(--token)` without fallbacks.
 The guard also rejects `!important`, removed focus outlines, route-level
 overrides of core primitives, undefined tokens and `cw-` classes, native
 controls without their primitive class, inline styles, and core primitives
-missing from `reference/fixtures/components.html`. Existing violations are
-fingerprinted in `scripts/checks/contracts/design-token-baseline.json`. The
-comparison is two-sided: a new violation fails as unapproved and a fixed one
-fails as stale, so the baseline can only shrink. After fixing violations, run
-`design-tokens --prune` to delete the stale entries; `--write-baseline` refuses
-to add entries to an existing baseline. Files listed in `strict_files` in
-`scripts/checks/contracts/design-token-policy.json` may have no baseline
-entries, and that list only grows. `--self-test` proves each rule on in-memory
+missing from `reference/fixtures/components.html`. There is no baseline of
+exceptions: every violation fails. `--self-test` proves each rule on in-memory
 fixtures.
 
 Route modules keep public page URLs clean. Mutations live under `_actions`,

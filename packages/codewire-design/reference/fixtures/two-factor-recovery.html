@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Two-factor authentication enabled · Codewire</title>
+  <link rel="icon" href="../../assets/brand-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/auth.css">
+  <link rel="stylesheet" href="../../cosmos.css">
+  <script src="../../cosmos.js" defer></script>
+</head>
+  <body class="cw-body cw-auth-body" data-route="two-factor-recovery">
+    <div class="cw-cosmos" aria-hidden="true">
+      <canvas id="cosmos-canvas"></canvas>
+    </div>
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="home.html" aria-label="Codewire home"><img src="../../assets/brand-icon.svg" width="48" height="48" alt="Codewire"></a>
+      <section class="cw-auth-panel" aria-labelledby="recovery-title">
+        <header class="cw-auth-header">
+          <h1 id="recovery-title" class="cw-page-title">Two-factor authentication enabled</h1>
+          <p class="cw-auth-copy">Save these recovery codes now. Each code works once, and Codewire will not show this set again.</p>
+        </header>
+        <div class="cw-setup-grid">
+          <section aria-labelledby="backup-title">
+            <h2 id="backup-title" class="cw-card-title">Save recovery codes</h2>
+            <ul class="cw-backup-codes">
+              <li><code data-testid="recovery-code">a1b2-c3d4</code></li><li><code data-testid="recovery-code">e5f6-a7b8</code></li><li><code data-testid="recovery-code">c9d0-e1f2</code></li><li><code data-testid="recovery-code">a3b4-c5d6</code></li><li><code data-testid="recovery-code">e7f8-a9b0</code></li><li><code data-testid="recovery-code">c1d2-e3f4</code></li><li><code data-testid="recovery-code">a5b6-c7d8</code></li><li><code data-testid="recovery-code">e9f0-a1b2</code></li><li><code data-testid="recovery-code">c3d4-e5f6</code></li><li><code data-testid="recovery-code">a7b8-c9d0</code></li>
+            </ul>
+          </section>
+          <a class="cw-button cw-button--pill cw-button--large cw-auth-submit" href="settings-account.html">Continue to Codewire</a>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

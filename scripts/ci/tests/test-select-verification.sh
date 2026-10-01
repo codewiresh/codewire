@@ -766,9 +766,6 @@ run_paths_case permanent_raw_policy_guard pull_request refs/pull/117/head false 
   'policy' scripts/checks/contracts/permanent-raw-surface-policy.json
 run_present_paths_case design_token_policy pull_request refs/pull/2203/head false \
   'policy' scripts/checks/contracts/design-token-policy.json
-run_present_paths_case design_token_baseline pull_request refs/pull/22031/head false \
-  'policy' scripts/checks/contracts/design-token-baseline.json \
-  scripts/checks/contracts/design-token-policy.json
 run_present_paths_case design_token_guard_module pull_request refs/pull/22032/head false \
   'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_policy/design_tokens.py
@@ -1430,7 +1427,7 @@ grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 10
 grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
 grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
-grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 7' "$integration_runner"
+grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 8' "$integration_runner"
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
 grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 26' "$integration_runner"
 grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
@@ -1441,10 +1438,11 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 54' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 66' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
+grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 21' "$integration_runner"
-grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 13' "$integration_runner"
+grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 14' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"
 grep -qF 'assert_passed_count "platform owner-source authority matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner"

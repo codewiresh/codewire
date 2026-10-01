@@ -43,7 +43,7 @@ try {
   ensure(await desktop.title() === "What is Codewire? · Codewire", "desktop title mismatch");
   ensure(await desktop.locator(".docs-nav-link").count() === 29, "desktop navigation is not the 29-route manifest");
   ensure(await desktop.locator(".docs-nav-link[aria-current='page']").count() === 1, "desktop navigation has no unique active route");
-  ensure(await desktop.locator("body").evaluate((body) => getComputedStyle(body).backgroundColor) === "rgb(8, 9, 10)", "Kernel Dark background token is not active");
+  ensure(await desktop.locator("body").evaluate((body) => getComputedStyle(body).backgroundColor) === "rgb(10, 10, 10)", "The design-system background token is not active");
 
   await desktop.keyboard.press("/");
   const search = desktop.locator("[data-docs-search-input]");

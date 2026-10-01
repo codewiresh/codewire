@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .access_profile_pb2 import CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse, GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse
+from .access_profile_pb2 import CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse, GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest, RenameAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -45,6 +45,9 @@ class AccessProfileService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def update_access_profile(self, request: UpdateAccessProfileRequest, ctx: RequestContext[UpdateAccessProfileRequest, UpdateAccessProfileResponse]) -> UpdateAccessProfileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def rename_access_profile(self, request: RenameAccessProfileRequest, ctx: RequestContext[RenameAccessProfileRequest, RenameAccessProfileResponse]) -> RenameAccessProfileResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def delete_access_profile(self, request: DeleteAccessProfileRequest, ctx: RequestContext[DeleteAccessProfileRequest, DeleteAccessProfileResponse]) -> DeleteAccessProfileResponse:
@@ -106,6 +109,16 @@ class AccessProfileServiceASGIApplication(ConnectASGIApplication[AccessProfileSe
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.update_access_profile,
+                ),
+                "/codewire.v1.AccessProfileService/RenameAccessProfile": Endpoint.unary(
+                    method=MethodInfo(
+                        name="RenameAccessProfile",
+                        service_name="codewire.v1.AccessProfileService",
+                        input=RenameAccessProfileRequest,
+                        output=RenameAccessProfileResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.rename_access_profile,
                 ),
                 "/codewire.v1.AccessProfileService/DeleteAccessProfile": Endpoint.unary(
                     method=MethodInfo(
@@ -249,6 +262,26 @@ class AccessProfileServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def rename_access_profile(
+        self,
+        request: RenameAccessProfileRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RenameAccessProfileResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RenameAccessProfile",
+                service_name="codewire.v1.AccessProfileService",
+                input=RenameAccessProfileRequest,
+                output=RenameAccessProfileResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def delete_access_profile(
         self,
         request: DeleteAccessProfileRequest,
@@ -302,6 +335,9 @@ class AccessProfileServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def update_access_profile(self, request: UpdateAccessProfileRequest, ctx: RequestContext[UpdateAccessProfileRequest, UpdateAccessProfileResponse]) -> UpdateAccessProfileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def rename_access_profile(self, request: RenameAccessProfileRequest, ctx: RequestContext[RenameAccessProfileRequest, RenameAccessProfileResponse]) -> RenameAccessProfileResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def delete_access_profile(self, request: DeleteAccessProfileRequest, ctx: RequestContext[DeleteAccessProfileRequest, DeleteAccessProfileResponse]) -> DeleteAccessProfileResponse:
@@ -361,6 +397,16 @@ class AccessProfileServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.update_access_profile,
+                ),
+                "/codewire.v1.AccessProfileService/RenameAccessProfile": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="RenameAccessProfile",
+                        service_name="codewire.v1.AccessProfileService",
+                        input=RenameAccessProfileRequest,
+                        output=RenameAccessProfileResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.rename_access_profile,
                 ),
                 "/codewire.v1.AccessProfileService/DeleteAccessProfile": EndpointSync.unary(
                     method=MethodInfo(
@@ -495,6 +541,25 @@ class AccessProfileServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.AccessProfileService",
                 input=UpdateAccessProfileRequest,
                 output=UpdateAccessProfileResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def rename_access_profile(
+        self,
+        request: RenameAccessProfileRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RenameAccessProfileResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RenameAccessProfile",
+                service_name="codewire.v1.AccessProfileService",
+                input=RenameAccessProfileRequest,
+                output=RenameAccessProfileResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

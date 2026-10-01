@@ -5,6 +5,7 @@
 //! services. Only the canonical browser session cookie crosses those bounds.
 
 mod account_sessions;
+mod account_two_factor;
 mod admin_connect;
 mod assets;
 mod auth;

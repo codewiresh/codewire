@@ -240,14 +240,14 @@ test.describe("server-rendered public, auth, and account routes", () => {
         .getByRole("button", { name: provider, exact: true }).click();
       const connection = page.getByRole("dialog", { name: provider === "GitHub" ? "Connect GitHub" : "Connect Codex", exact: true });
       if (provider === "GitHub") {
-        const github = connection.locator("form");
+        const github = connection.locator("form:not(.cw-dialog-launcher)");
         await expect(github).toHaveAttribute("action", "/settings/credentials/_actions/github/authorize");
         await expect(github.locator('[name="name"]')).toHaveCount(0);
         const submit = connection.getByRole("button", { name: "Continue to GitHub", exact: true });
         await expect(submit).toBeVisible();
         expect(await submit.evaluate((button: HTMLButtonElement) => button.form?.id)).toBe("connect-github-form");
       } else {
-        await expect(connection.locator("form"))
+        await expect(connection.locator("form:not(.cw-dialog-launcher)"))
           .toHaveAttribute("action", "/settings/credentials/_actions/credentials/oauth/enroll");
         await expect(connection).toContainText(/enable device code authorization for Codex/i);
         await expect(connection.getByRole("link", { name: "ChatGPT Security settings", exact: true }))
@@ -309,8 +309,9 @@ test.describe("server-rendered public, auth, and account routes", () => {
     const snapshots = await page.goto(snapshotsHref!);
     expect(snapshots?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Snapshots", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Create Snapshot" })).toBeDisabled();
-    await expect(page.getByText("No snapshots yet", { exact: true })).toBeVisible();
+    // An unavailable feature says so once; it offers no inactive controls.
+    await expect(page.getByText("Snapshots are not available yet.", { exact: false })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create Snapshot" })).toHaveCount(0);
   });
 
   test("Account and Credentials preserve authenticated navigation with consolidated sections", async ({ page, isMobile }) => {

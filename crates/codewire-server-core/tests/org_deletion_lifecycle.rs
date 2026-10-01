@@ -1421,6 +1421,8 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "org_subscriptions:cascade",
             "platform_access_profiles:cascade",
             "platform_credentials:cascade",
+            "preview_auth_challenges:cascade",
+            "preview_browser_grants:cascade",
             "repo_configs:no_action",
             "sandbox_running_sessions:cascade",
             "secret_projects:no_action",
@@ -1443,6 +1445,8 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_resize_operations:cascade",
             "environment_sessions:cascade",
             "platform_environment_access_bindings:cascade",
+            "preview_auth_challenges:cascade",
+            "preview_browser_grants:cascade",
             "sandbox_environment_backend:cascade",
             "sandbox_running_sessions:cascade",
         ]

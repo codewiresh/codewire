@@ -214,7 +214,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page.locator("dialog[open]")).toHaveCount(0);
       await openGithubConnection(page);
       const connection = page.getByRole("dialog", { name: "Connect GitHub", exact: true });
-      const form = connection.locator("form");
+      const form = connection.locator("form:not(.cw-dialog-launcher)");
       await expect(form.locator('[name="name"]')).toHaveCount(0);
       await expect(connection.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
         .toHaveAttribute("href", "/assets/codewire/icons-v2.svg#icon-github");
@@ -288,6 +288,8 @@ test.describe("managed provider credential browser journey", () => {
 
       // Every personal profile includes the account's GitHub connection; a
       // profile never selects or pins a GitHub credential.
+      // Created under a draft name, then renamed from its row menu.
+      const createdName = "github-repository-draft";
       const profileName = "github-repository-browser";
       await page.getByRole("button", { name: "Create profile", exact: true }).click();
       const createProfile = page.locator('form[action^="/settings/credentials/_actions/profiles/create"]');
@@ -309,27 +311,38 @@ test.describe("managed provider credential browser journey", () => {
       await page.goto(new URL(validation.headers().location, ssrUrl).toString());
       await expect(page.getByRole("dialog", { name: "Create profile", exact: true })).toBeVisible();
       await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
-      await createProfile.getByRole("textbox", { name: "Profile name", exact: true }).fill(profileName);
+      await createProfile.getByRole("textbox", { name: "Profile name", exact: true }).fill(createdName);
       await page.getByRole("dialog", { name: "Create profile", exact: true })
         .getByRole("button", { name: "Create profile", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=profile-created`);
-      let profileRow = page.locator(".cw-profile-row", { hasText: profileName });
+      let profileRow = page.locator(".cw-profile-row", { hasText: createdName });
       await expect(profileRow).toHaveCount(1);
       await expect(profileRow).toContainText(`GitHub: @${name}`);
       const profileId = await profileRow.locator('[name="profile_id"]').first().inputValue();
       expect(await profileCurrentRevision(profileId)).toBe(1);
+      // A rename relabels the profile in place: same identity, no new revision.
+      await profileRow.locator("details.cw-menu > summary").click();
+      await profileRow.getByRole("button", { name: "Rename", exact: true }).click();
+      const renameProfile = page.getByRole("dialog", { name: `Rename ${createdName}`, exact: true });
+      await renameProfile.getByRole("textbox", { name: "New name", exact: true }).fill(profileName);
+      await renameProfile.getByRole("button", { name: "Save name", exact: true }).click();
+      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=profile-renamed`);
+      await expect(page.getByRole("status")).toHaveText("Credential profile renamed.");
+      await expect(page.locator(".cw-profile-row", { hasText: createdName })).toHaveCount(0);
+      profileRow = page.locator(".cw-profile-row", { hasText: profileName });
+      await expect(profileRow).toHaveCount(1);
+      await expect(profileRow.locator('[name="profile_id"]').first()).toHaveValue(profileId);
+      expect(await profileCurrentRevision(profileId)).toBe(1);
 
+      const restored = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
       await returnLink.click();
       await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${draft}`);
       await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
       await expect(draftForm).toHaveAttribute("data-create-draft-actor", owner);
       await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
       await expect(page.getByRole("combobox", { name: "Credential profile", exact: true }).locator(`option[value="${profileId}@1"]`)).toContainText(profileName);
-      await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
-      await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("");
       const currentCsrf = await draftForm.locator('[name="_csrf"]').inputValue();
-      const restored = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
-      await page.getByRole("button", { name: "Restore saved draft", exact: true }).click();
+      // The draft comes back by itself; the new profile is offered, not chosen.
       const restoreResponse = await restored;
       expect(restoreResponse.status()).toBe(200);
       expect(restoreResponse.headers()["cache-control"]).toBe("private, no-store");
@@ -394,9 +407,8 @@ test.describe("managed provider credential browser journey", () => {
       // was: profiles show GitHub as missing, Create cannot browse.
       await page.goto("/settings/credentials/");
       row = credentialRows.filter({ hasText: name });
-      await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
-      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
-        .getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
+      await row.locator("details.cw-menu > summary").click();
+      await row.getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
       await page.getByRole("dialog", { name: "Disconnect GitHub?", exact: true })
         .getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
       await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=credential-deleted/);

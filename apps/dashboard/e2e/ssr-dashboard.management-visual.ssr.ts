@@ -67,7 +67,7 @@ test.describe.serial("rounded management interface", () => {
       ["presets", "Presets", "management-presets"],
       ["secrets", "Secrets", "management-secrets"],
       ["secrets/organization", "Organization Secrets", "management-secret-bucket"],
-      ["api-keys", "API Keys", "management-api-keys"],
+      ["api-keys", "API keys", "management-api-keys"],
       ["members", "Members", "management-members"],
       ["billing", "Billing", "management-billing"],
     ] as const) {

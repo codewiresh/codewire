@@ -176,7 +176,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 54
+  assert_passed_count "server-core migration matrix" "$logfile" 66
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
@@ -192,7 +192,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 13
+  assert_passed_count "platform access profile matrix" "$logfile" 14
 
   logfile="$RUN_DIR/platform-owner-source-authority.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -204,11 +204,18 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib --test access_profiles \
       --test credentials --test environment_external_cleanup --test environment_sources --no-run
 
+  logfile="$RUN_DIR/preview-browser-authorization.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      api::preview::authorization::database_tests:: -- --ignored --nocapture \
+      | tee "$logfile"
+  assert_passed_count "preview browser authorization matrix" "$logfile" 7
+
   logfile="$RUN_DIR/public-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --test access_profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "public access profile restricted API matrix" "$logfile" 7
+  assert_passed_count "public access profile restricted API matrix" "$logfile" 8
 
   logfile="$RUN_DIR/public-credential-metadata.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -232,7 +239,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib repositories::tests::integration:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "GitHub repository discovery matrix" "$logfile" 7
+  assert_passed_count "GitHub repository discovery matrix" "$logfile" 8
 
   logfile="$RUN_DIR/kind-credential-effective-acl.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -569,6 +576,16 @@ run_idp() {
     return 1
   fi
   assert_passed_count "idp session inventory" "$logfile" 7
+
+  logfile="$RUN_DIR/idp-two-factor-replacement.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo_ci test --profile ci -p codewire-idp --test two_factor_replacement -- --nocapture \
+    | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::idp two-factor replacement DB tests skipped"
+    return 1
+  fi
+  assert_passed_count "idp two-factor replacement" "$logfile" 11
 
   logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

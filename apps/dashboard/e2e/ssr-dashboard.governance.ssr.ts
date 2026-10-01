@@ -124,15 +124,19 @@ test.describe.serial("server-rendered organization governance", () => {
     await page.goto(`/${slug}/api-keys/`);
     await expect(page.locator('[data-secret-kind="api-key"]')).toHaveCount(0);
 
+    await expect(page.locator(".cw-page-title-row .cw-badge")).toHaveText("1 key");
     let keyRow = page.getByRole("row").filter({ hasText: keyName });
     await expect(keyRow).toBeVisible();
-    await keyRow.getByRole("button", { name: "Disable API key" }).click();
+    await keyRow.locator("details.cw-menu > summary").click();
+    await keyRow.getByRole("button", { name: "Disable", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("API key status updated");
     keyRow = page.getByRole("row").filter({ hasText: keyName });
     await expect(keyRow.getByText("Disabled")).toBeVisible();
 
-    await keyRow.getByText("Delete", { exact: true }).click();
-    await keyRow.getByRole("button", { name: "Delete permanently" }).click();
+    await keyRow.locator("details.cw-menu > summary").click();
+    await keyRow.getByRole("button", { name: "Delete", exact: true }).click();
+    const deletion = page.getByRole("dialog", { name: `Delete ${keyName}?`, exact: true });
+    await deletion.getByRole("button", { name: "Delete key", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("API key deleted");
     await expect(page.getByRole("row").filter({ hasText: keyName })).toHaveCount(0);
   });
@@ -220,6 +224,6 @@ test.describe.serial("server-rendered organization governance", () => {
       "SSR Governance",
     );
     await expect(page.getByRole("navigation", { name: "Organization navigation" })).toBeVisible();
-    await expect(page.getByText("Create Key", { exact: true })).toBeInViewport();
+    await expect(page.getByText("Create key", { exact: true })).toBeInViewport();
   });
 });

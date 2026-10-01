@@ -15,14 +15,14 @@
       <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
       <header class="cw-mobile-bar">
         <button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button>
-        <a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span>Codewire</span></a>
+        <a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a>
       </header>
       <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
       <main class="cw-main">{% include "console-header.html" %}<div class="cw-page cw-settings-page">
         <div class="cw-settings-layout">
           {% let settings_section = "account" %}{% include "settings-nav.html" %}
-          <div class="cw-settings-content">
+          <div class="cw-settings-content cw-account-page">
         <header class="cw-page-header"><div><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, security and browser sessions.</p></div></header>
         <section id="account-details" class="cw-card cw-settings-card" aria-labelledby="account-title">
           <header class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account details</h2><p class="cw-card-description">Your Codewire account identity. GitHub connections do not change it.</p></header>
@@ -35,38 +35,86 @@
         <section id="security" class="cw-card cw-settings-card" aria-labelledby="security-title">
           <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>
           <div class="cw-card-content">
-            <p class="cw-settings-muted">Two-factor authentication: <strong>{% if settings.two_factor_enabled %}Enabled{% else %}Not enabled{% endif %}</strong>.</p>
-            <p class="cw-settings-muted">Two-factor authentication protects your account.</p>
-            {% if !settings.two_factor_enabled %}<p><a href="/setup-2fa?return_to=%2Fsettings%2F">Set up two-factor authentication</a></p>{% endif %}
-            <p><a href="/forgot-password">Request a password reset</a></p>
-            <p class="cw-settings-muted">If email delivery is available for your account, the reset flow will send instructions. This page cannot confirm delivery.</p>
-          </div>
+            {% if !settings.security_error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ settings.security_error }}</p>{% endif %}
+            <ul class="cw-row-list">
+            <li class="cw-security-row"><div><h3>Two-factor authentication</h3><p>{% if settings.two_factor_enabled %}Sign-in asks for a code from your authenticator app. Recovery codes each work once.{% else %}Add a code from an authenticator app to every sign-in.{% endif %}</p></div>{% if settings.two_factor_enabled %}<div class="cw-security-actions"><span class="cw-status cw-status--pill" data-tone="success">Enabled</span><form class="cw-dialog-launcher" method="get" action="/settings/#replace-authenticator"><input type="hidden" name="dialog" value="replace-authenticator"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-dialog-open="replace-authenticator" aria-haspopup="dialog" aria-controls="replace-authenticator">Replace authenticator</button></form><form class="cw-dialog-launcher" method="get" action="/settings/#regenerate-recovery-codes"><input type="hidden" name="dialog" value="regenerate-recovery-codes"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-dialog-open="regenerate-recovery-codes" aria-haspopup="dialog" aria-controls="regenerate-recovery-codes">Regenerate recovery codes</button></form></div>{% else %}<a class="cw-button cw-button--outline cw-button--small" href="/setup-2fa?return_to=%2Fsettings%2F">Set up</a>{% endif %}</li>
+            <li class="cw-security-row"><div><h3>Password</h3><p>Get a reset link by email.</p></div><a class="cw-button cw-button--outline cw-button--small" href="/forgot-password">Reset password</a></li>
+          </ul></div>
         </section>
+        {% if settings.two_factor_enabled %}
+        <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator" aria-labelledby="replace-authenticator-title"{% if settings.two_factor.active == "replace-authenticator" %} data-dialog-auto-open{% endif %}>
+          <header class="cw-dialog-header"><h2 id="replace-authenticator-title">Replace authenticator</h2></header>
+          <div class="cw-dialog-body">{% if settings.two_factor.active == "replace-authenticator" && !settings.two_factor.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ settings.two_factor.error }}</p>{% endif %}<p>Confirm it's you before adding a new authenticator app. Your current authenticator and recovery codes keep working until the new one is verified.</p>
+            <form id="replace-authenticator-form" class="cw-form" method="post" action="/settings/_actions/two-factor/replace/start"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="account_id" value="{{ settings.account_id }}">
+              <div class="cw-field"><label class="cw-label" for="replace-authenticator-password">Password</label><input class="cw-input" id="replace-authenticator-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus data-dialog-private></div>
+              <div class="cw-field"><label class="cw-label" for="replace-authenticator-proof">Current code or recovery code</label><input class="cw-input cw-input--mono" id="replace-authenticator-proof" name="proof" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" required aria-describedby="replace-authenticator-proof-help" data-dialog-private><p class="cw-field-help" id="replace-authenticator-proof-help">The six-digit code your current authenticator shows now, or one unused recovery code.</p></div>
+            </form></div>
+          <footer class="cw-dialog-actions"><form class="cw-dialog-launcher" method="get" action="/settings/#security"><button class="cw-button cw-button--outline" type="submit" data-dialog-close>Cancel</button></form><button class="cw-button" type="submit" form="replace-authenticator-form">Continue</button></footer>
+        </dialog>
+        {% if settings.two_factor.active == "replace-authenticator-confirm" %}
+        <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator-confirm" aria-labelledby="replace-authenticator-confirm-title" data-dialog-auto-open>
+          <header class="cw-dialog-header"><h2 id="replace-authenticator-confirm-title">Add your new authenticator</h2></header>
+          <div class="cw-dialog-body">{% if !settings.two_factor.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ settings.two_factor.error }}</p>{% endif %}{% if !settings.two_factor.setup_key.is_empty() %}<p>Scan this QR code with your new authenticator app, then enter the six-digit code it shows. This setup key is shown only once and expires {{ settings.two_factor.expires }}.</p>
+            {% if !settings.two_factor.qr_svg.is_empty() %}<div class="cw-qr" role="img" aria-label="QR code for your new authenticator">{{ settings.two_factor.qr_svg|safe }}</div>{% endif %}
+            <p class="cw-field-help">Can't scan it? Enter this setup key in the app instead:</p>
+            <code class="cw-key-secret" data-testid="replacement-totp-secret">{{ settings.two_factor.setup_key }}</code>{% else %}<p>Enter the six-digit code from the new authenticator you added. If you didn't add it, cancel and start again.</p>{% endif %}
+            <p>Your current authenticator keeps working until you confirm. Confirming signs out your other browsers.</p>
+            <form id="replace-authenticator-confirm-form" class="cw-form" method="post" action="/settings/_actions/two-factor/replace/confirm"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="account_id" value="{{ settings.account_id }}"><input type="hidden" name="replacement_id" value="{{ settings.two_factor.replacement_id }}">
+              <div class="cw-field"><label class="cw-label" for="replace-authenticator-code">Code from your new authenticator</label><input class="cw-input cw-input--mono" id="replace-authenticator-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus data-dialog-private></div>
+            </form></div>
+          <footer class="cw-dialog-actions"><form class="cw-dialog-launcher" method="get" action="/settings/#security"><button class="cw-button cw-button--outline" type="submit" data-dialog-close>Cancel</button></form><button class="cw-button" type="submit" form="replace-authenticator-confirm-form">Replace authenticator</button></footer>
+        </dialog>
+        {% endif %}
+        {% if settings.two_factor.active == "replace-authenticator-done" %}
+        <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator-done" aria-labelledby="replace-authenticator-done-title" data-dialog-auto-open>
+          <header class="cw-dialog-header"><h2 id="replace-authenticator-done-title">Authenticator replaced</h2></header>
+          <div class="cw-dialog-body"><p role="status">Your old authenticator and recovery codes no longer work, and your other browsers were signed out. Save these new recovery codes now. Each works once, and Codewire won't show them again.</p>
+            <ul class="cw-backup-codes" aria-label="New recovery codes">{% for code in settings.two_factor.backup_codes %}<li><code data-testid="recovery-code">{{ code }}</code></li>{% endfor %}</ul></div>
+          <footer class="cw-dialog-actions"><a class="cw-button" href="/settings/#security">Done</a></footer>
+        </dialog>
+        {% endif %}
+        <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="regenerate-recovery-codes" aria-labelledby="regenerate-recovery-codes-title"{% if settings.two_factor.active == "regenerate-recovery-codes" %} data-dialog-auto-open{% endif %}>
+          <header class="cw-dialog-header"><h2 id="regenerate-recovery-codes-title">Regenerate recovery codes</h2></header>
+          <div class="cw-dialog-body">{% if settings.two_factor.active == "regenerate-recovery-codes" && !settings.two_factor.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ settings.two_factor.error }}</p>{% endif %}<p>Confirm it's you to make ten new recovery codes. Your current recovery codes stop working as soon as the new ones are made. Your authenticator keeps working.</p>
+            <form id="regenerate-recovery-codes-form" class="cw-form" method="post" action="/settings/_actions/two-factor/recovery-codes/regenerate"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="account_id" value="{{ settings.account_id }}">
+              <div class="cw-field"><label class="cw-label" for="regenerate-recovery-codes-password">Password</label><input class="cw-input" id="regenerate-recovery-codes-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus data-dialog-private></div>
+              <div class="cw-field"><label class="cw-label" for="regenerate-recovery-codes-proof">Current code or recovery code</label><input class="cw-input cw-input--mono" id="regenerate-recovery-codes-proof" name="proof" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" required aria-describedby="regenerate-recovery-codes-proof-help" data-dialog-private><p class="cw-field-help" id="regenerate-recovery-codes-proof-help">The six-digit code your authenticator shows now, or one unused recovery code.</p></div>
+            </form></div>
+          <footer class="cw-dialog-actions"><form class="cw-dialog-launcher" method="get" action="/settings/#security"><button class="cw-button cw-button--outline" type="submit" data-dialog-close>Cancel</button></form><button class="cw-button" type="submit" form="regenerate-recovery-codes-form">Regenerate codes</button></footer>
+        </dialog>
+        {% if settings.two_factor.active == "recovery-codes-done" %}
+        <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="recovery-codes-done" aria-labelledby="recovery-codes-done-title" data-dialog-auto-open>
+          <header class="cw-dialog-header"><h2 id="recovery-codes-done-title">New recovery codes</h2></header>
+          <div class="cw-dialog-body"><p role="status">Recovery codes regenerated. Your previous recovery codes no longer work, and your authenticator still works. Save these codes now. Each works once, and Codewire won't show them again.</p>
+            <ul class="cw-backup-codes" aria-label="New recovery codes">{% for code in settings.two_factor.backup_codes %}<li><code data-testid="recovery-code">{{ code }}</code></li>{% endfor %}</ul></div>
+          <footer class="cw-dialog-actions"><a class="cw-button" href="/settings/#security">Done</a></footer>
+        </dialog>
+        {% endif %}
+        {% endif %}
         <section id="sessions" class="cw-card cw-settings-card" aria-labelledby="sessions-title">
-          <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2><p class="cw-card-description">Browser sign-ins for this account. Signing out a session blocks subsequent requests; it does not stop Sandbox terminals, existing connections, provider credentials or API keys.</p></header>
+          <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2></header>
           <div class="cw-card-content">
             {% if !settings.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ settings.message }}</p>{% endif %}
             {% if !settings.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ settings.error }}</p>{% endif %}
-            {% if settings.sessions_available %}
-            <p class="cw-settings-muted">This browser: <code>{{ settings.current_session_id }}</code>. Expires {{ settings.current_session_expiry }}. Expiry may extend with activity.</p>
+            {% if settings.sessions_replaced %}<p class="cw-alert cw-alert--success" role="status">Your other browsers were signed out, and this browser has a new session. <a href="/settings/#sessions">Reload sessions</a></p>
+            {% else if settings.sessions_available %}
             <ul class="cw-row-list cw-account-sessions">
               {% for session in settings.sessions %}<li class="cw-account-session">
-                <header><h3>{% if session.current %}This browser{% else %}Browser session{% endif %}</h3><code>{{ session.id }}</code></header>
-                <dl class="cw-settings-details"><div><dt>Created</dt><dd>{{ session.created }}</dd></div><div><dt>Expires</dt><dd>{{ session.expires }}</dd></div></dl>
-                <button class="cw-button cw-button--outline" type="button" data-dialog-open="revoke-session-{{ session.id }}" aria-haspopup="dialog" aria-controls="revoke-session-{{ session.id }}">Sign out {% if session.current %}this browser{% else %}session{% endif %}</button>
+                <header><h3>{% if session.current %}This browser{% else %}Browser session{% endif %}</h3><code>{{ session.id }}</code><p>Signed in {{ session.created }} · Expires {{ session.expires }}</p></header>
+                {% if session.current %}<form id="sign-out" method="post" action="/settings/_actions/sign-out" data-sign-out><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Sign out of this browser</button></form>{% else %}<button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="revoke-session-{{ session.id }}" aria-haspopup="dialog" aria-controls="revoke-session-{{ session.id }}">Sign out session</button>
                 <dialog class="cw-dialog" data-dialog id="revoke-session-{{ session.id }}" aria-labelledby="revoke-title-{{ session.id }}">
-                  <header class="cw-dialog-header"><h2 id="revoke-title-{{ session.id }}">Sign out {% if session.current %}this browser{% else %}session{% endif %}?</h2></header>
-                  <div class="cw-dialog-body"><p>Sign out <code>{{ session.id }}</code>{% if session.current %}, the browser you are using now{% endif %}? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div>
-                  <form method="post" action="/settings/_actions/sessions/revoke"{% if session.current %} data-sign-out-current{% endif %}>
+                  <header class="cw-dialog-header"><h2 id="revoke-title-{{ session.id }}">Sign out session?</h2></header>
+                  <div class="cw-dialog-body"><p>Sign out <code>{{ session.id }}</code>? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div>
+                  <form method="post" action="/settings/_actions/sessions/revoke">
                     <input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="account_id" value="{{ settings.account_id }}"><input type="hidden" name="session_id" value="{{ session.id }}">
-                    <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out {% if session.current %}this browser{% else %}session{% endif %}</button></footer>
+                    <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out session</button></footer>
                   </form>
-                </dialog>
+                </dialog>{% endif %}
               </li>{% endfor %}
             </ul>
-            <nav class="cw-session-pagination" aria-label="Session pages"><a href="{{ settings.first_sessions_url }}">First page</a>{% if !settings.next_sessions_url.is_empty() %}<a href="{{ settings.next_sessions_url }}">Next page</a>{% endif %}</nav>
+            {% if settings.later_sessions_page || !settings.next_sessions_url.is_empty() %}<nav class="cw-session-pagination" aria-label="Session pages">{% if settings.later_sessions_page %}<a href="{{ settings.first_sessions_url }}">First page</a>{% endif %}{% if !settings.next_sessions_url.is_empty() %}<a href="{{ settings.next_sessions_url }}">Next page</a>{% endif %}</nav>{% endif %}
             {% else %}<p class="cw-alert cw-alert--warning" role="status">Session controls are unavailable. Reload to try again. No unknown sessions can be signed out here.</p>{% endif %}
-            <form id="sign-out" method="post" action="/settings/_actions/sign-out"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out of this browser</button></form>
+            {% if !settings.current_session_listed %}<form id="sign-out" method="post" action="/settings/_actions/sign-out"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out of this browser</button></form>{% endif %}
           </div>
         </section>
           </div>
