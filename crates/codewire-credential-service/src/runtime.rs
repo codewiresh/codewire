@@ -25,6 +25,7 @@ use codewire_credential_broker::github_enrollment::{
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
+use codewire_credential_broker::platform::keepalive::OAuthKeepAlive;
 use codewire_credential_broker::{BrokerUpstreamTransport, ProviderHttpsTransport};
 use codewire_platform_credentials::PlatformAccessProfileStore;
 use codewire_protected_store::openbao_workload_identity::{
@@ -186,6 +187,16 @@ async fn run_connected(
     let enrollment = enrollment_config(config.codex_executable, config.runtime_directory.clone())?;
     let github = github_enrollment_config(config.github_executable, &config.runtime_directory)?;
     let store = authorities.credential_store(pool.clone());
+    // Idle rotating OAuth credentials are refreshed by this same process,
+    // through the same journal, transport and App owner as on-demand refresh.
+    let keepalive = config.oauth_keepalive.map(|keepalive| {
+        Arc::new(OAuthKeepAlive::new(
+            store.clone(),
+            Arc::new(upstream.clone()),
+            github_app_authorization.clone(),
+            keepalive,
+        ))
+    });
     let repositories = Arc::new(GithubRepositoryOwner::new(
         pool.clone(),
         store.clone(),
@@ -224,6 +235,7 @@ async fn run_connected(
         mutation,
         repositories,
         bridge,
+        keepalive,
         shutdown,
     )
     .await
@@ -286,6 +298,8 @@ struct Listeners {
 
 // Generic dependency composition stays private. Synthetic tests can exercise
 // these exact listeners/owners without adding production fixture switches.
+// Every owner is an explicit argument so one place shows its start and drain.
+#[allow(clippy::too_many_arguments)]
 async fn serve_owned<A, U>(
     listeners: Listeners,
     pool: PgPool,
@@ -293,6 +307,7 @@ async fn serve_owned<A, U>(
     mutation: Arc<CredentialMutationOwner>,
     repositories: Arc<GithubRepositoryOwner>,
     bridge: PlatformCredentialBridgeService<A, U>,
+    keepalive: Option<Arc<OAuthKeepAlive>>,
     shutdown: impl Future<Output = Result<(), RuntimeError>> + Send,
 ) -> Result<(), RuntimeError>
 where
@@ -365,6 +380,9 @@ where
         });
         ready.store(true, Ordering::Release);
         tracing::info!("isolated credential listeners ready");
+        if let Some(keepalive) = &keepalive {
+            keepalive.start();
+        }
         tokio::select! {
             biased;
             result = shutdown => result,
@@ -381,11 +399,20 @@ where
     mutation.start_shutdown();
     repositories.start_shutdown();
     bridge.start_shutdown();
+    if let Some(keepalive) = &keepalive {
+        keepalive.start_shutdown();
+    }
     stop.cancel();
-    let (mutation_result, (), bridge_result, ()) = tokio::join!(
+    let (mutation_result, (), bridge_result, (), ()) = tokio::join!(
         mutation.shutdown(),
         repositories.shutdown(),
         bridge.shutdown(),
+        async {
+            // A keep-alive refresh past `begin` reaches its terminal outcome.
+            if let Some(keepalive) = &keepalive {
+                keepalive.shutdown().await;
+            }
+        },
         async {
             if tokio::time::timeout(TRANSPORT_GRACE, async {
                 while servers.join_next().await.is_some() {}

@@ -33,8 +33,8 @@ mod store;
 pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
 pub use profiles::{PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError};
 pub use refresh::{
-    OAuthRefreshAttemptInfo, OAuthRefreshState, PreparedOAuthRefresh, PreparedOAuthRefreshResult,
-    StartedOAuthRefresh,
+    OAuthKeepAliveCandidate, OAuthRefreshAttemptInfo, OAuthRefreshState, PreparedOAuthRefresh,
+    PreparedOAuthRefreshResult, StartedOAuthRefresh,
 };
 pub use store::{
     CredentialMetadataReader, PlatformCredentialStore, PreparedCredentialCreation,

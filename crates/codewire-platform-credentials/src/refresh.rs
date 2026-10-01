@@ -9,7 +9,8 @@
 use std::fmt;
 
 use codewire_access::{
-    CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CredentialId, CredentialStatus, Owner,
+    CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CredentialId, CredentialStatus, Owner, OwnerId,
+    ProviderId,
 };
 use codewire_protected_store::ProtectedValue;
 use codewire_protected_store::secret_envelope::{
@@ -52,6 +53,21 @@ pub struct OAuthRefreshAttemptInfo {
     pub reservation_live: bool,
     pub execution_live: bool,
 }
+
+/// One material-free keep-alive candidate. Selection is only a hint: the
+/// trusted refresh owner must still read this exact version and decide from
+/// the material's own refresh time. It is not a send permit or a grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OAuthKeepAliveCandidate {
+    pub owner: Owner,
+    pub id: CredentialId,
+    pub provider: ProviderId,
+    pub version: CredentialVersion,
+}
+
+/// Bounds for one keep-alive page. Providers are closed by the caller.
+const MAX_KEEPALIVE_PAGE: u32 = 1000;
+const MAX_KEEPALIVE_PROVIDERS: usize = 8;
 
 impl OAuthRefreshState {
     fn parse(value: &str) -> Result<Self, Error> {
@@ -163,6 +179,77 @@ impl StartedOAuthRefresh {
 }
 
 impl PlatformCredentialStore {
+    /// Select active, unexpired OAuth credentials of a live owner whose current
+    /// material may be at least `min_age_seconds` old for its provider. The
+    /// pairs name each provider once with its keep-alive age. Results are
+    /// ordered by ID after `after`, at most `limit` rows, and never include a
+    /// credential with a live reservation or a started, staged or unknown
+    /// attempt: those belong to their current owner or to recovery.
+    ///
+    /// Only a commit receipt for exactly the current generation dates the
+    /// material (its reservation began just after the material's own refresh
+    /// time was taken). Otherwise the record's creation time is used: a
+    /// reconnect, cancelled reservation or rename leaves no exact timestamp,
+    /// so the bound may select a recently replaced credential, never miss an
+    /// old one. No material, DEK or KEK provider is touched here.
+    pub async fn oauth_keepalive_candidates(
+        &self,
+        providers: &[(ProviderId, u64)],
+        after: Option<&CredentialId>,
+        limit: u32,
+    ) -> Result<Vec<OAuthKeepAliveCandidate>, Error> {
+        if providers.is_empty()
+            || providers.len() > MAX_KEEPALIVE_PROVIDERS
+            || limit == 0
+            || limit > MAX_KEEPALIVE_PAGE
+        {
+            return Err(Error::InvalidInput);
+        }
+        let mut names = Vec::with_capacity(providers.len());
+        let mut ages = Vec::with_capacity(providers.len());
+        for (provider, age) in providers {
+            if names.contains(&provider.as_str()) {
+                return Err(Error::InvalidInput);
+            }
+            names.push(provider.as_str());
+            ages.push(i64::try_from(*age).map_err(|_| Error::InvalidInput)?);
+        }
+        let rows: Vec<KeepAliveRow> = sqlx::query_as(
+            "SELECT c.id, c.user_id, c.organization_id, c.provider, \
+             c.revocation_generation, c.material_generation \
+             FROM platform_credentials c \
+             JOIN unnest($1::text[], $2::bigint[]) AS k(provider, min_age_seconds) \
+               ON k.provider = c.provider \
+             LEFT JOIN platform_credential_refresh_attempts a ON a.credential_id = c.id \
+             WHERE c.status = 'active' AND c.authentication_kind = 'oauth' \
+               AND (c.expires_at_unix IS NULL \
+                    OR c.expires_at_unix > extract(epoch FROM clock_timestamp())) \
+               AND ((c.user_id IS NOT NULL \
+                     AND EXISTS (SELECT 1 FROM users u WHERE u.id = c.user_id)) \
+                 OR (c.organization_id IS NOT NULL \
+                     AND EXISTS (SELECT 1 FROM organizations o \
+                                 WHERE o.id = c.organization_id AND o.deletion_state = 'active'))) \
+               AND (a.credential_id IS NULL OR a.state IN ('committed', 'cancelled') \
+                    OR (a.state = 'reserved' AND a.reserved_until <= clock_timestamp())) \
+               AND COALESCE(CASE WHEN a.state = 'committed' \
+                                  AND a.expected_revocation_generation + 1 = c.revocation_generation \
+                                  AND a.expected_material_generation + 1 = c.material_generation \
+                                 THEN a.created_at END, \
+                            c.created_at) \
+                   <= clock_timestamp() - k.min_age_seconds * interval '1 second' \
+               AND ($3::text IS NULL OR c.id > $3) \
+             ORDER BY c.id LIMIT $4",
+        )
+        .bind(&names)
+        .bind(&ages)
+        .bind(after.map(CredentialId::as_str))
+        .bind(i64::from(limit))
+        .fetch_all(self.pool())
+        .await
+        .map_err(database_error)?;
+        rows.into_iter().map(KeepAliveRow::candidate).collect()
+    }
+
     /// Reserve one exact credential version for at most 60 database-clock
     /// seconds before start. Duplicate attempt IDs do not yield another permit.
     /// All OpenBao work completes before reservation locks or provider start.
@@ -528,6 +615,41 @@ impl PlatformCredentialStore {
         }
         tx.commit().await.map_err(database_error)?;
         Ok(())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct KeepAliveRow {
+    id: String,
+    user_id: Option<String>,
+    organization_id: Option<String>,
+    provider: String,
+    revocation_generation: i64,
+    material_generation: i64,
+}
+
+impl KeepAliveRow {
+    fn candidate(self) -> Result<OAuthKeepAliveCandidate, Error> {
+        let owner = match (self.user_id, self.organization_id) {
+            (Some(id), None) => Owner::User(OwnerId::parse(id).map_err(|_| Error::CorruptRecord)?),
+            (None, Some(id)) => {
+                Owner::Organization(OwnerId::parse(id).map_err(|_| Error::CorruptRecord)?)
+            }
+            _ => return Err(Error::CorruptRecord),
+        };
+        let version = CredentialVersion {
+            revocation_generation: u64::try_from(self.revocation_generation)
+                .map_err(|_| Error::CorruptRecord)?,
+            material_generation: u64::try_from(self.material_generation)
+                .map_err(|_| Error::CorruptRecord)?,
+        };
+        version.replaced().map_err(|_| Error::CorruptRecord)?;
+        Ok(OAuthKeepAliveCandidate {
+            owner,
+            id: CredentialId::parse(self.id).map_err(|_| Error::CorruptRecord)?,
+            provider: ProviderId::parse(self.provider).map_err(|_| Error::CorruptRecord)?,
+            version,
+        })
     }
 }
 

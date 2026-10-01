@@ -3,8 +3,12 @@
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use codewire_credential_broker::GitHubAppAuthorizationConfig;
+use codewire_credential_broker::platform::keepalive::{
+    OAuthKeepAliveConfig, OAuthKeepAliveConfigError,
+};
 use codewire_protected_store::secret_envelope::OpenBaoTransitConfig;
 use codewire_tls::ServerTlsFiles;
 use url::Url;
@@ -57,6 +61,8 @@ pub struct CredentialServiceConfig {
     pub(super) github_app_authorization: Option<GitHubAppAuthorizationConfig>,
     pub(super) runtime_directory: PathBuf,
     pub(super) keks: KekAuthorityConfig,
+    /// `None` when explicitly disabled.
+    pub(super) oauth_keepalive: Option<OAuthKeepAliveConfig>,
 }
 
 /// Where the credential-service's key-encryption keys come from.
@@ -183,8 +189,56 @@ impl CredentialServiceConfig {
             github_app_authorization,
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
             keks,
+            oauth_keepalive: oauth_keepalive_config(&lookup)?,
         })
     }
+}
+
+const KEEPALIVE_ENABLED: &str = "CREDENTIAL_OAUTH_KEEPALIVE_ENABLED";
+const KEEPALIVE_INTERVAL: &str = "CREDENTIAL_OAUTH_KEEPALIVE_INTERVAL_SECONDS";
+const KEEPALIVE_CODEX_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_CODEX_AGE_SECONDS";
+const KEEPALIVE_GITHUB_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_GITHUB_AGE_SECONDS";
+
+/// Optional OAuth keep-alive inputs. It is enabled with the broker defaults
+/// unless `CREDENTIAL_OAUTH_KEEPALIVE_ENABLED=false`. A present value must be
+/// exact and in range, even when disabled: a typo stops startup instead of
+/// silently running with defaults.
+pub(super) fn oauth_keepalive_config(
+    lookup: &impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<OAuthKeepAliveConfig>, RuntimeError> {
+    let enabled = match lookup(KEEPALIVE_ENABLED).map(OsString::into_string) {
+        None => true,
+        Some(Ok(value)) if value == "true" => true,
+        Some(Ok(value)) if value == "false" => false,
+        Some(_) => return Err(RuntimeError::Configuration(KEEPALIVE_ENABLED)),
+    };
+    let seconds = |name: &'static str, default: Duration| match lookup(name) {
+        None => Ok(default),
+        Some(value) => value
+            .into_string()
+            .ok()
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 10 && value.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .ok_or(RuntimeError::Configuration(name)),
+    };
+    let defaults = OAuthKeepAliveConfig::default();
+    let config = OAuthKeepAliveConfig {
+        interval: seconds(KEEPALIVE_INTERVAL, defaults.interval)?,
+        codex_age: seconds(KEEPALIVE_CODEX_AGE, defaults.codex_age)?,
+        github_age: seconds(KEEPALIVE_GITHUB_AGE, defaults.github_age)?,
+    }
+    .validate()
+    .map_err(|error| {
+        RuntimeError::Configuration(match error {
+            OAuthKeepAliveConfigError::Interval => KEEPALIVE_INTERVAL,
+            OAuthKeepAliveConfigError::CodexAge => KEEPALIVE_CODEX_AGE,
+            OAuthKeepAliveConfigError::GitHubAge => KEEPALIVE_GITHUB_AGE,
+        })
+    })?;
+    Ok(enabled.then_some(config))
 }
 
 fn github_app_authorization_config(
@@ -451,6 +505,73 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    #[test]
+    fn oauth_keepalive_is_on_by_default_and_overrides_are_exact() {
+        let config =
+            CredentialServiceConfig::from_lookup(|name| inputs().get(name).cloned()).unwrap();
+        assert_eq!(
+            config.oauth_keepalive,
+            Some(OAuthKeepAliveConfig::default())
+        );
+
+        let lookup = |pairs: &[(&'static str, &str)]| {
+            let mut values = inputs();
+            for (name, value) in pairs {
+                values.insert(name, (*value).into());
+            }
+            move |name: &str| values.get(name).cloned()
+        };
+        assert_eq!(
+            oauth_keepalive_config(&lookup(&[(KEEPALIVE_ENABLED, "false")])).unwrap(),
+            None
+        );
+        assert_eq!(
+            oauth_keepalive_config(&lookup(&[
+                (KEEPALIVE_ENABLED, "true"),
+                (KEEPALIVE_INTERVAL, "15"),
+                (KEEPALIVE_CODEX_AGE, "60"),
+                (KEEPALIVE_GITHUB_AGE, "120"),
+            ]))
+            .unwrap(),
+            Some(OAuthKeepAliveConfig {
+                interval: Duration::from_secs(15),
+                codex_age: Duration::from_secs(60),
+                github_age: Duration::from_secs(120),
+            })
+        );
+        for (name, value) in [
+            (KEEPALIVE_ENABLED, "yes"),
+            (KEEPALIVE_ENABLED, ""),
+            (KEEPALIVE_INTERVAL, ""),
+            (KEEPALIVE_INTERVAL, "-1"),
+            (KEEPALIVE_INTERVAL, "1e3"),
+            (KEEPALIVE_INTERVAL, " 60"),
+            (KEEPALIVE_INTERVAL, "5"),
+            (KEEPALIVE_INTERVAL, "86401"),
+            (KEEPALIVE_CODEX_AGE, "59"),
+            // Never later than Codex CLI's own 8-day refresh habit.
+            (KEEPALIVE_CODEX_AGE, "691201"),
+            (KEEPALIVE_GITHUB_AGE, "7776001"),
+            (KEEPALIVE_GITHUB_AGE, "99999999999"),
+        ] {
+            assert_eq!(
+                CredentialServiceConfig::from_lookup(lookup(&[(name, value)]))
+                    .err()
+                    .unwrap(),
+                RuntimeError::Configuration(name),
+                "{name}={value:?}"
+            );
+        }
+        // A bad value is rejected even when the keep-alive is disabled.
+        assert!(
+            oauth_keepalive_config(&lookup(&[
+                (KEEPALIVE_ENABLED, "false"),
+                (KEEPALIVE_CODEX_AGE, "0"),
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
