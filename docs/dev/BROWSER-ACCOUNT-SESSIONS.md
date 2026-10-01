@@ -123,7 +123,14 @@ API keys and OAuth grants survive a replacement. The factor encryption key is
 still derived from the shared session secret. Both are known limits outside
 this change.
 
-Focused proof is `cargo test -p codewire-idp --lib two_factor` and the nine
+Each audit event is written in the same transaction as its change, and the
+commit and the notice run in their own task, so a client that disconnects
+cannot cancel either one part-way. Sign-in issues its session in the same
+transaction that consumes its challenge, while it holds the account lock. A
+sign-in that completes during a replacement is therefore either revoked with
+every other session, or finds its challenge already gone.
+
+Focused proof is `cargo test -p codewire-idp --lib two_factor` and the eleven
 synthetic PostgreSQL tests in `tests/two_factor_replacement.rs`. They cover:
 
 - bearer, Origin and account rejection without side effects;
@@ -132,9 +139,11 @@ synthetic PostgreSQL tests in `tests/two_factor_replacement.rs`. They cover:
 - the old factor working while a replacement is pending;
 - attempts, expiry and newer starts;
 - the swap, with session revocation and cookie rotation;
-- concurrent winners, and audit hygiene.
+- a sign-in completing during a replacement, which keeps no session;
+- concurrent confirmations, and concurrent proofs with one code;
+- audit hygiene.
 
-The checked-in service verification requires all nine tests and rejects
+The checked-in service verification requires all eleven tests and rejects
 missing-database skips.
 
 ## Dashboard Account screen

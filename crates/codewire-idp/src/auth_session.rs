@@ -683,6 +683,37 @@ pub(crate) async fn log_audit(
     .await;
 }
 
+/// [`log_audit`] inside the caller's transaction. Unlike the best-effort pool
+/// variant this returns its error: a failed insert aborts the transaction, so
+/// the change and its audit row commit together or not at all.
+pub(crate) async fn log_audit_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    action: &str,
+    user_id: &str,
+    ip: &str,
+    ua: &str,
+    metadata: serde_json::Value,
+    severity: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs
+            (id, timestamp, action, user_id, ip_address, user_agent, metadata, severity)
+        VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(hex_id())
+    .bind(action)
+    .bind(user_id)
+    .bind(ip)
+    .bind(ua)
+    .bind(metadata)
+    .bind(severity)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Insert a web session row (mirrors `auth.CreateSession`): a 64-hex
 /// token, a 32-hex id, `expires_at = NOW() + 8h`. Returns the
 /// browser-safe session metadata plus the raw token for `Set-Cookie`.

@@ -1428,7 +1428,7 @@ grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' 
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
 grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 66' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
-grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 9' "$integration_runner"
+grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 21' "$integration_runner"
 grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 13' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"

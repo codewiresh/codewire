@@ -27,7 +27,8 @@ use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::auth_session::{
     AuthResponse, LOCKOUT_DURATION_SECS, MAX_FAILED_ATTEMPTS, UserAuthRow, account_disabled,
-    create_session, hex_id, request_info, session_cookie_string, too_many_requests, user_response,
+    create_session_in, hex_id, request_info, session_cookie_string, too_many_requests,
+    user_response,
 };
 
 mod replacement;
@@ -453,9 +454,15 @@ async fn disable(_auth: AuthUser) -> Result<StatusCode, AppError> {
     ))
 }
 
+/// Finish a sign-in inside the transaction that consumed its challenge. The
+/// account lock is still held, so an account-wide revocation (an authenticator
+/// replacement or a disablement) either sees this session and deletes it, or
+/// runs first and leaves no challenge to complete. Issuing the session after
+/// commit would let it slip in behind such a revocation.
 async fn complete_login(
     state: &TwoFactorState,
     headers: &HeaderMap,
+    mut tx: Transaction<'_, Postgres>,
     user_id: &str,
 ) -> Result<Response, AppError> {
     let user: UserAuthRow = sqlx::query_as(
@@ -466,11 +473,12 @@ async fn complete_login(
         "#,
     )
     .bind(user_id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(account_disabled)?;
     let (ip, ua) = request_info(headers);
-    let created_session = create_session(&state.pool, user_id, &ip, &ua).await?;
+    let created_session = create_session_in(&mut *tx, user_id, &ip, &ua).await?;
+    tx.commit().await?;
 
     let body = AuthResponse {
         user: user_response(user),
@@ -652,8 +660,7 @@ async fn validate(
         // for an account change must use a later step than this one.
         record_totp_step(&mut tx, &user_id, step).await?;
         reset_failed_attempts(&mut tx, &user_id).await?;
-        tx.commit().await?;
-        return complete_login(&state, &headers, &user_id).await;
+        return complete_login(&state, &headers, tx, &user_id).await;
     }
 
     if let Some(enc_backup) = enc_backup
@@ -676,8 +683,7 @@ async fn validate(
                 AppError::InternalMsg("Failed to update backup codes".into())
             })?;
         reset_failed_attempts(&mut tx, &user_id).await?;
-        tx.commit().await?;
-        return complete_login(&state, &headers, &user_id).await;
+        return complete_login(&state, &headers, tx, &user_id).await;
     }
 
     let locked = record_failed_attempt(&mut tx, &user_id).await?;

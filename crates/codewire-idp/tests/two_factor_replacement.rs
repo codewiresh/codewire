@@ -1052,3 +1052,185 @@ async fn audit_records_every_change_without_secret_material() {
     }
     cleanup(&pool, &user.email).await;
 }
+
+async fn named_pool(application_name: &str) -> PgPool {
+    let mut url = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+    url.query_pairs_mut()
+        .append_pair("application_name", application_name);
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect(url.as_str())
+        .await
+        .unwrap()
+}
+
+/// Wait until the named application's backend is blocked by a lock.
+async fn wait_until_blocked(pool: &PgPool, application_name: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
+                 WHERE application_name = $1 \
+                   AND cardinality(pg_catalog.pg_blocking_pids(pid)) > 0)",
+            )
+            .bind(application_name)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if blocked {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("request did not reach its account-lock barrier");
+}
+
+/// A sign-in that is completing while the authenticator is replaced must not
+/// keep a session. The sign-in queues first on the account lock, so it wins:
+/// it consumes its challenge and issues its session in one transaction, and
+/// the replacement that takes the lock next deletes that session with every
+/// other. Issuing the session after the sign-in commits would let it slip in
+/// behind the revocation and survive.
+#[tokio::test]
+async fn a_sign_in_completing_during_a_replacement_cannot_keep_its_session() {
+    let Some(pool) = pool().await else { return };
+    let apps = apps(&pool);
+    let user = enrolled(&pool, &apps, "replacement-signin-race").await;
+    let started = proof(&apps, START, &user, &user.session, PASSWORD, &user.codes[0]).await;
+    assert_eq!(started.status, 200, "{}", started.body);
+    let id = started.body["replacement_id"].as_str().unwrap().to_owned();
+    let new_secret = started.body["secret"].as_str().unwrap().to_owned();
+    let challenge = call(
+        &apps.signup,
+        "POST",
+        "/api/auth/sign-in",
+        Call::default(),
+        json!({"email": user.email, "password": PASSWORD}),
+    )
+    .await;
+    let challenge = challenge.body["twoFactorToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let validate_name = format!("tfr-validate-{}", std::process::id());
+    let confirm_name = format!("tfr-confirm-{}", std::process::id());
+    let validate_app = codewire_idp::two_factor::router(
+        named_pool(&validate_name).await,
+        SESSION_SECRET.into(),
+        true,
+        AuthState { pool: pool.clone() },
+    );
+    let confirm_app = codewire_idp::two_factor::replacement_router(
+        named_pool(&confirm_name).await,
+        SESSION_SECRET.into(),
+        true,
+        ORIGIN.into(),
+        codewire_email::EmailClient::disabled(),
+    );
+
+    // Hold the account lock so both requests queue on it in a known order.
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+        .bind(&user.user_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let old_code = code_at(&user.secret, &user.email, 0);
+    let signing_in = tokio::spawn(async move {
+        call(
+            &validate_app,
+            "POST",
+            "/api/auth/two-factor/validate",
+            Call::default(),
+            json!({"code": old_code, "token": challenge}),
+        )
+        .await
+    });
+    wait_until_blocked(&pool, &validate_name).await;
+    let confirm_body = json!({
+        "account_id": user.user_id,
+        "replacement_id": id,
+        "code": code_at(&new_secret, &user.email, 0),
+    });
+    let session = user.session.clone();
+    let replacing = tokio::spawn(async move {
+        call(
+            &confirm_app,
+            "POST",
+            CONFIRM,
+            Call {
+                cookie: Some(&session),
+                origin: Some(ORIGIN),
+                ..Default::default()
+            },
+            confirm_body,
+        )
+        .await
+    });
+    wait_until_blocked(&pool, &confirm_name).await;
+    holder.rollback().await.unwrap();
+
+    let signed_in = signing_in.await.unwrap();
+    let replaced = replacing.await.unwrap();
+    assert_eq!(signed_in.status, 200, "{}", signed_in.body);
+    assert_eq!(replaced.status, 200, "{}", replaced.body);
+    let signed_in_token = cookie_token(signed_in.set_cookie.as_deref().unwrap());
+    let rotated = cookie_token(replaced.set_cookie.as_deref().unwrap());
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT token_hash FROM sessions WHERE user_id=$1")
+            .bind(&user.user_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        remaining,
+        vec![hash_session_token(&rotated)],
+        "a sign-in session survived the replacement"
+    );
+    assert!(!remaining.contains(&hash_session_token(&signed_in_token)));
+    cleanup(&pool, &user.email).await;
+}
+
+/// Two fresh proofs that race with the same authenticator code serialize on
+/// the account: exactly one is accepted, and the other is a counted failure.
+#[tokio::test]
+async fn concurrent_proofs_with_one_code_have_exactly_one_winner() {
+    let Some(pool) = pool().await else { return };
+    let apps = apps(&pool);
+    let user = enrolled(&pool, &apps, "replacement-proof-race").await;
+    let code = code_at(&user.secret, &user.email, 0);
+    let (started, regenerated) = tokio::join!(
+        proof(&apps, START, &user, &user.session, PASSWORD, &code),
+        proof(&apps, REGENERATE, &user, &user.session, PASSWORD, &code),
+    );
+    let mut statuses = [started.status, regenerated.status];
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        [200, 422],
+        "{}: {} / {}: {}",
+        started.status,
+        started.body,
+        regenerated.status,
+        regenerated.body
+    );
+    assert_eq!(failures(&pool, &user.user_id).await, (1, false));
+    assert_eq!(
+        pending(&pool, &user.user_id).await.is_some(),
+        started.status == 200,
+        "only an accepted start leaves a pending replacement"
+    );
+    let rejected: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE user_id=$1 AND action='user.2fa.proof_failed' \
+         AND metadata->>'reason'='rejected'",
+    )
+    .bind(&user.user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rejected, 1);
+    cleanup(&pool, &user.email).await;
+}

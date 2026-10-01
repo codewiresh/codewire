@@ -16,6 +16,9 @@
 //! then the factor; refuses a locked account; and counts every failure against
 //! the lockout that sign-in uses, answering with one generic 422.
 //!
+//! Each change and its audit row commit together; a best-effort notice is
+//! sent only after the commit.
+//!
 //! Replacement never deactivates the enrolled factor early. `start` stores an
 //! encrypted pending secret tied to this browser session and returns it once.
 //! `confirm` verifies a code from the new authenticator, then in one
@@ -44,7 +47,7 @@ use super::{
 };
 use crate::auth_session::{
     bounded_transaction, cookie_digest, create_session_in, exact_origin, hex_id,
-    lock_account_actor, log_audit, private, request_info, session_cookie_string, unavailable,
+    lock_account_actor, log_audit_in, private, request_info, session_cookie_string, unavailable,
     valid_id, verify_password,
 };
 
@@ -559,17 +562,26 @@ async fn prepare_confirm(
     if factor.is_none() {
         return Err(not_enrolled());
     }
-    let pending: Option<(String, String, String, i32, bool)> = sqlx::query_as(
-        "SELECT id, session_id, secret, attempts, expires_at > clock_timestamp() \
+    let pending: Option<(String, String, String, i32)> = sqlx::query_as(
+        "SELECT id, session_id, secret, attempts \
          FROM two_factor_replacements WHERE user_id = $1 FOR UPDATE",
     )
     .bind(&user_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|_| unavailable())?;
-    let Some((pending_id, owner_session, pending_secret, attempts, live)) = pending else {
+    let Some((pending_id, owner_session, pending_secret, attempts)) = pending else {
         return Err(replacement_not_found());
     };
+    // Judge expiry with wall-clock time after the row lock is held, not with a
+    // value computed before a lock wait.
+    let live: bool = sqlx::query_scalar(
+        "SELECT expires_at > clock_timestamp() FROM two_factor_replacements WHERE user_id = $1",
+    )
+    .bind(&user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| unavailable())?;
     // Only the exact replacement, from the browser session that proved the
     // account, can be confirmed. Anything else is indistinguishable from none.
     if !constant_time_eq(pending_id.as_bytes(), request.replacement_id.as_bytes())
@@ -713,86 +725,123 @@ async fn regenerate(
     finish(&state, &headers, prepared.await).await
 }
 
-/// Commit outside the request budget: once every check has passed, a late
-/// timeout must not leave a committed swap that the caller believes failed.
-/// Audit and email happen only after the commit and never carry a secret.
-async fn finish(
-    state: &ReplacementState,
-    headers: &HeaderMap,
-    prepared: Result<Result<Prepared, AppError>, tokio::time::error::Elapsed>,
-) -> Response {
-    let (tx, outcome) = match prepared {
-        Ok(Ok(prepared)) => prepared,
-        Ok(Err(error)) => return private(error),
-        Err(_) => return private(unavailable()),
-    };
-    if tx.commit().await.is_err() {
-        return private(unavailable());
-    }
-    let (ip, ua) = request_info(headers);
+/// The audit event a prepared outcome records. It carries no secret, code,
+/// URI or password, and is written in the same transaction as the change.
+fn audit_event(outcome: &Outcome) -> Option<(&str, &'static str, serde_json::Value, &'static str)> {
     match outcome {
         Outcome::ProofFailed {
             user_id,
             operation,
             reason,
             locked,
-        } => {
-            log_audit(
-                &state.pool,
-                "user.2fa.proof_failed",
-                &user_id,
-                &ip,
-                &ua,
-                json!({ "operation": operation, "reason": reason, "locked": locked }),
-                "warn",
-            )
-            .await;
-            private(if locked {
-                account_locked()
-            } else {
-                proof_rejected()
-            })
-        }
+        } => Some((
+            user_id,
+            "user.2fa.proof_failed",
+            json!({ "operation": operation, "reason": reason, "locked": locked }),
+            "warn",
+        )),
         Outcome::Started {
             user_id,
-            response,
             replaced_pending,
             used_recovery_code,
-        } => {
-            log_audit(
-                &state.pool,
-                "user.2fa.replace_started",
-                &user_id,
-                &ip,
-                &ua,
-                json!({
-                    "replaced_pending": replaced_pending,
-                    "proof": proof_label(used_recovery_code),
-                }),
-                "info",
-            )
-            .await;
-            private(Json(response))
-        }
-        Outcome::ConfirmRefused(error) => private(error),
+            ..
+        } => Some((
+            user_id,
+            "user.2fa.replace_started",
+            json!({
+                "replaced_pending": replaced_pending,
+                "proof": proof_label(*used_recovery_code),
+            }),
+            "info",
+        )),
+        Outcome::ConfirmRefused(_) => None,
         Outcome::Replaced {
             user_id,
-            email,
+            signed_out_sessions,
+            ..
+        } => Some((
+            user_id,
+            "user.2fa.replaced",
+            json!({ "signed_out_sessions": signed_out_sessions }),
+            "info",
+        )),
+        Outcome::Regenerated {
+            user_id,
+            used_recovery_code,
+            ..
+        } => Some((
+            user_id,
+            "user.2fa.recovery_codes_regenerated",
+            json!({ "proof": proof_label(*used_recovery_code) }),
+            "info",
+        )),
+    }
+}
+
+fn notice(outcome: &Outcome) -> Option<(String, String, Notice)> {
+    match outcome {
+        Outcome::Replaced { user_id, email, .. } => {
+            Some((user_id.clone(), email.clone(), Notice::Replaced))
+        }
+        Outcome::Regenerated { user_id, email, .. } => {
+            Some((user_id.clone(), email.clone(), Notice::Regenerated))
+        }
+        _ => None,
+    }
+}
+
+/// Write the audit row into the prepared transaction, then commit outside the
+/// request budget: once every check has passed, a late timeout must not leave
+/// a committed swap that the caller believes failed. The commit and the
+/// post-commit notice run in their own task, so a client that disconnects
+/// cannot cancel either one part-way.
+async fn finish(
+    state: &ReplacementState,
+    headers: &HeaderMap,
+    prepared: Result<Result<Prepared, AppError>, tokio::time::error::Elapsed>,
+) -> Response {
+    let (mut tx, outcome) = match prepared {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => return private(error),
+        Err(_) => return private(unavailable()),
+    };
+    if let Some((user_id, action, metadata, severity)) = audit_event(&outcome) {
+        let (ip, ua) = request_info(headers);
+        if log_audit_in(&mut tx, action, user_id, &ip, &ua, metadata, severity)
+            .await
+            .is_err()
+        {
+            return private(unavailable());
+        }
+    }
+    let notice = notice(&outcome);
+    let task_state = state.clone();
+    let committed = tokio::spawn(async move {
+        let committed = tx.commit().await.is_ok();
+        if committed && let Some((user_id, to, notice)) = notice {
+            notify(&task_state, &user_id, to, notice);
+        }
+        committed
+    })
+    .await
+    .unwrap_or(false);
+    if !committed {
+        return private(unavailable());
+    }
+    match outcome {
+        Outcome::ProofFailed { locked, .. } => private(if locked {
+            account_locked()
+        } else {
+            proof_rejected()
+        }),
+        Outcome::Started { response, .. } => private(Json(response)),
+        Outcome::ConfirmRefused(error) => private(error),
+        Outcome::Replaced {
             backup_codes,
             signed_out_sessions,
             session_token,
+            ..
         } => {
-            log_audit(
-                &state.pool,
-                "user.2fa.replaced",
-                &user_id,
-                &ip,
-                &ua,
-                json!({ "signed_out_sessions": signed_out_sessions }),
-                "info",
-            )
-            .await;
-            notify(state, &user_id, email, Notice::Replaced);
             let mut response = private(Json(ConfirmResponse {
                 backup_codes,
                 signed_out_sessions,
@@ -805,23 +854,7 @@ async fn finish(
             }
             response
         }
-        Outcome::Regenerated {
-            user_id,
-            email,
-            backup_codes,
-            used_recovery_code,
-        } => {
-            log_audit(
-                &state.pool,
-                "user.2fa.recovery_codes_regenerated",
-                &user_id,
-                &ip,
-                &ua,
-                json!({ "proof": proof_label(used_recovery_code) }),
-                "info",
-            )
-            .await;
-            notify(state, &user_id, email, Notice::Regenerated);
+        Outcome::Regenerated { backup_codes, .. } => {
             private(Json(RegenerateResponse { backup_codes }))
         }
     }

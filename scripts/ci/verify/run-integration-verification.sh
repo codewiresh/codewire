@@ -585,7 +585,7 @@ run_idp() {
     echo "::error::idp two-factor replacement DB tests skipped"
     return 1
   fi
-  assert_passed_count "idp two-factor replacement" "$logfile" 9
+  assert_passed_count "idp two-factor replacement" "$logfile" 11
 
   logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
