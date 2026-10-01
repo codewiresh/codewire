@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 const ORIGIN: &str = "https://dashboard.synthetic.invalid";
 const ACCOUNT: &str = "synthetic-account";
 const PASSWORD: &str = "synthetic-password-canary";
+const BROWSER_USER_AGENT: &str = "synthetic-browser/1.0";
 const PROOF: &str = "9f8e7d6c5b";
 const SECRET: &str = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
 const REPLACEMENT: &str = "0123456789abcdef0123456789abcdef";
@@ -28,7 +29,10 @@ const CODES: [&str; 10] = [
     "f4e3d2c1b0",
 ];
 
-type Calls = Arc<Mutex<Vec<(String, Option<String>, Vec<u8>)>>>;
+type Calls = Arc<Mutex<Vec<(String, Option<String>, Vec<u8>, BrowserHeaders)>>>;
+
+/// The User-Agent and X-Forwarded-For the identity service received.
+type BrowserHeaders = (Option<String>, Option<String>);
 
 struct TestServer {
     origin: String,
@@ -89,8 +93,21 @@ async fn upstream(mode: &'static str) -> (TestServer, Calls) {
                 .headers()
                 .get(header::ORIGIN)
                 .map(|value| value.to_str().unwrap().to_owned());
+            let browser = (
+                request
+                    .headers()
+                    .get(header::USER_AGENT)
+                    .map(|value| value.to_str().unwrap().to_owned()),
+                request
+                    .headers()
+                    .get("x-forwarded-for")
+                    .map(|value| value.to_str().unwrap().to_owned()),
+            );
             let body = to_bytes(request.into_body(), 32 * 1024).await.unwrap();
-            calls.lock().unwrap().push((path.clone(), origin, body.to_vec()));
+            calls
+                .lock()
+                .unwrap()
+                .push((path.clone(), origin, body.to_vec(), browser));
             if path == "/api/auth/get-session" {
                 return Json(serde_json::json!({"user": {
                     "id": ACCOUNT, "email": "synthetic@example.test",
@@ -151,6 +168,8 @@ async fn upstream(mode: &'static str) -> (TestServer, Calls) {
 fn authority(csrf: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::ORIGIN, ORIGIN.parse().unwrap());
+    headers.insert(header::USER_AGENT, BROWSER_USER_AGENT.parse().unwrap());
+    headers.insert("x-forwarded-for", "198.51.100.7".parse().unwrap());
     headers.insert(
         header::COOKIE,
         format!("codewire.session_token=synthetic-session; codewire_ssr_csrf={csrf}")
@@ -238,13 +257,17 @@ fn assert_private(page: &Page) {
 /// The page data was read before the factor change and nothing after it.
 fn assert_read_before_mutation(calls: &Calls, mutation: &str) {
     let calls = calls.lock().unwrap();
-    let paths: Vec<&str> = calls.iter().map(|(path, _, _)| path.as_str()).collect();
+    let paths: Vec<&str> = calls.iter().map(|(path, _, _, _)| path.as_str()).collect();
     let mutation_index = paths.iter().position(|path| *path == mutation).unwrap();
     assert_eq!(mutation_index, paths.len() - 1, "{paths:?}");
     assert!(paths[..mutation_index].contains(&"/api/auth/sessions"));
     assert!(paths[..mutation_index].contains(&"/api/auth/get-session"));
-    let (_, origin, body) = &calls[mutation_index];
+    let (_, origin, body, browser) = &calls[mutation_index];
     assert_eq!(origin.as_deref(), Some(ORIGIN));
+    // The browser's User-Agent reaches the IdP's audit row and session; its
+    // X-Forwarded-For does not, since the IdP has no trusted-proxy list.
+    assert_eq!(browser.0.as_deref(), Some(BROWSER_USER_AGENT));
+    assert_eq!(browser.1, None);
     let body: serde_json::Value = serde_json::from_slice(body).unwrap();
     assert_eq!(body["account_id"], ACCOUNT);
     assert_eq!(body.as_object().unwrap().len(), 3);
@@ -270,7 +293,7 @@ async fn starting_a_replacement_shows_the_setup_key_once_in_the_post_response() 
             .contains(&format!("name=\"replacement_id\" value=\"{REPLACEMENT}\""))
     );
     assert_read_before_mutation(&calls, "/api/auth/two-factor/replace/start");
-    let (_, _, body) = calls.lock().unwrap().last().cloned().unwrap();
+    let (_, _, body, _) = calls.lock().unwrap().last().cloned().unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["password"], PASSWORD);
     assert_eq!(body["proof"], PROOF);
@@ -309,7 +332,7 @@ async fn confirming_forwards_the_rotated_cookie_and_shows_new_codes_once() {
     assert!(page.body.contains("id=\"sign-out\""));
     assert!(!page.body.contains(SECRET));
     assert_read_before_mutation(&calls, "/api/auth/two-factor/replace/confirm");
-    let (_, _, body) = calls.lock().unwrap().last().cloned().unwrap();
+    let (_, _, body, _) = calls.lock().unwrap().last().cloned().unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         body,
@@ -488,7 +511,7 @@ async fn boundary_failures_never_reach_the_identity_service() {
             .lock()
             .unwrap()
             .iter()
-            .any(|(path, _, _)| factor_path(path)),
+            .any(|(path, _, _, _)| factor_path(path)),
         "a refused request reached a factor route"
     );
 }
@@ -507,6 +530,6 @@ async fn an_account_without_a_factor_is_sent_to_security_without_a_change() {
             .lock()
             .unwrap()
             .iter()
-            .any(|(path, _, _)| factor_path(path))
+            .any(|(path, _, _, _)| factor_path(path))
     );
 }

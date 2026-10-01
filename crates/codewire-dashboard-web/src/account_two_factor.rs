@@ -7,7 +7,9 @@
 //! The one-time setup key and recovery codes it returns belong only in the
 //! POST response page; no type here implements `Debug`.
 
-use axum::http::{HeaderValue, StatusCode, header};
+use std::time::Duration;
+
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use codewire_server_core::auth::SESSION_COOKIE_NAME;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -15,6 +17,11 @@ use crate::account_sessions::{valid_id, valid_time};
 use crate::state::AppState;
 
 const RESPONSE_LIMIT: usize = 16 * 1024;
+/// Above the IdP's five-second budget, which covers every check but not its
+/// commit, so a slow commit is still reported rather than called unknown.
+/// This overrides the account client's shorter default for these calls only.
+const FACTOR_CHANGE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_USER_AGENT_BYTES: usize = 512;
 const RECOVERY_CODE_COUNT: usize = 10;
 const RECOVERY_CODE_LENGTH: usize = 10;
 
@@ -128,25 +135,54 @@ async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> R
     serde_json::from_slice(&body).map_err(|_| ())
 }
 
-async fn post<I: Serialize>(
+/// The browser's User-Agent, which the IdP records on the audit row and on a
+/// rotated session. It only describes the client and grants nothing. The
+/// browser's X-Forwarded-For is deliberately not forwarded: the IdP takes the
+/// first hop of that header without a trusted-proxy list, and no other
+/// dashboard call to the IdP forwards it, so relaying it here would let a
+/// browser choose the address the IdP records.
+pub(crate) fn browser_user_agent(headers: &HeaderMap) -> Option<HeaderValue> {
+    let mut values = headers.get_all(header::USER_AGENT).iter();
+    let value = values.next()?;
+    if values.next().is_some() || value.len() > MAX_USER_AGENT_BYTES || value.to_str().is_err() {
+        return None;
+    }
+    Some(value.clone())
+}
+
+fn request<I: Serialize>(
     state: &AppState,
     path: &str,
     cookie: HeaderValue,
+    user_agent: Option<HeaderValue>,
     body: &I,
-) -> Result<reqwest::Response, ()> {
+) -> Result<reqwest::Request, ()> {
     let origin = reqwest::Url::parse(&state.public_origin)
         .map_err(|_| ())?
         .origin()
         .ascii_serialization();
-    state
+    let mut request = state
         .account_http
         .post(format!("{}{path}", state.identity_origin_string))
+        .timeout(FACTOR_CHANGE_TIMEOUT)
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, origin)
-        .json(body)
-        .send()
-        .await
-        .map_err(|_| ())
+        .json(body);
+    if let Some(user_agent) = user_agent {
+        request = request.header(header::USER_AGENT, user_agent);
+    }
+    request.build().map_err(|_| ())
+}
+
+async fn post<I: Serialize>(
+    state: &AppState,
+    path: &str,
+    cookie: HeaderValue,
+    user_agent: Option<HeaderValue>,
+    body: &I,
+) -> Result<reqwest::Response, ()> {
+    let request = request(state, path, cookie, user_agent, body)?;
+    state.account_http.execute(request).await.map_err(|_| ())
 }
 
 /// A failed proof never changes anything except the shared failure counter.
@@ -181,6 +217,7 @@ fn valid_proof_input(account_id: &str, password: &str, proof: &str) -> bool {
 pub(crate) async fn start(
     state: &AppState,
     cookie: HeaderValue,
+    user_agent: Option<HeaderValue>,
     account_id: &str,
     password: &str,
     proof: &str,
@@ -192,6 +229,7 @@ pub(crate) async fn start(
         state,
         START_PATH,
         cookie,
+        user_agent,
         &ProofRequest {
             account_id,
             password,
@@ -217,6 +255,7 @@ pub(crate) async fn start(
 pub(crate) async fn confirm(
     state: &AppState,
     cookie: HeaderValue,
+    user_agent: Option<HeaderValue>,
     account_id: &str,
     replacement_id: &str,
     code: &str,
@@ -238,6 +277,7 @@ pub(crate) async fn confirm(
         state,
         CONFIRM_PATH,
         cookie,
+        user_agent,
         &Request {
             account_id,
             replacement_id,
@@ -273,6 +313,7 @@ pub(crate) async fn confirm(
 pub(crate) async fn regenerate(
     state: &AppState,
     cookie: HeaderValue,
+    user_agent: Option<HeaderValue>,
     account_id: &str,
     password: &str,
     proof: &str,
@@ -284,6 +325,7 @@ pub(crate) async fn regenerate(
         state,
         REGENERATE_PATH,
         cookie,
+        user_agent,
         &ProofRequest {
             account_id,
             password,
@@ -369,10 +411,12 @@ mod tests {
                     request.headers()[header::COOKIE],
                     "codewire.session_token=synthetic"
                 );
+                assert!(!request.headers().contains_key("x-forwarded-for"));
                 let path = request.uri().path().to_owned();
                 let origin = request.headers().get(header::ORIGIN).cloned();
+                let user_agent = request.headers().get(header::USER_AGENT).cloned();
                 let body = axum::body::to_bytes(request.into_body(), 4096).await.unwrap();
-                requests.lock().unwrap().push((path, origin, body));
+                requests.lock().unwrap().push((path, origin, body, user_agent));
                 let ok = |body: String| {
                     Response::builder()
                         .header(header::CONTENT_TYPE, "application/json")
@@ -451,6 +495,7 @@ mod tests {
             start(
                 &state,
                 cookie.clone(),
+                None,
                 "account-1",
                 "synthetic-password",
                 "123456",
@@ -470,6 +515,7 @@ mod tests {
             confirm(
                 &state,
                 cookie.clone(),
+                Some(HeaderValue::from_static("synthetic-browser/1.0")),
                 "account-1",
                 "0123456789abcdef0123456789abcdef",
                 "123 456",
@@ -496,6 +542,7 @@ mod tests {
             regenerate(
                 &state,
                 cookie.clone(),
+                None,
                 "account-1",
                 "synthetic-password",
                 "abcdef0123",
@@ -517,9 +564,14 @@ mod tests {
         server.await.unwrap();
         let requests = observed.lock().unwrap();
         assert_eq!(requests.len(), 19, "a redirect must not add a request");
-        for (path, origin, body) in requests.iter() {
+        for (path, origin, body, user_agent) in requests.iter() {
             assert!([START_PATH, CONFIRM_PATH, REGENERATE_PATH].contains(&path.as_str()));
             assert_eq!(origin.as_ref().unwrap(), "https://app.example.test");
+            // Only the browser's own User-Agent is relayed, and only when given.
+            assert_eq!(
+                user_agent.as_ref().map(|value| value.to_str().unwrap()),
+                (path == CONFIRM_PATH).then_some("synthetic-browser/1.0")
+            );
             let body: serde_json::Value = serde_json::from_slice(body).unwrap();
             if path == CONFIRM_PATH {
                 assert_eq!(
@@ -558,22 +610,30 @@ mod tests {
             ("password", &"1".repeat(65)),
         ] {
             assert_eq!(
-                start(&state, cookie.clone(), "account-1", password, proof)
+                start(&state, cookie.clone(), None, "account-1", password, proof)
                     .await
                     .err(),
                 Some(Failure::ProofRejected)
             );
         }
         assert_eq!(
-            confirm(&state, cookie.clone(), "account-1", "../other", "123456")
-                .await
-                .err(),
+            confirm(
+                &state,
+                cookie.clone(),
+                None,
+                "account-1",
+                "../other",
+                "123456"
+            )
+            .await
+            .err(),
             Some(Failure::NoLongerAvailable)
         );
         assert_eq!(
             confirm(
                 &state,
                 cookie,
+                None,
                 "account-1",
                 "0123456789abcdef0123456789abcdef",
                 "12345"
@@ -582,6 +642,60 @@ mod tests {
             .err(),
             Some(Failure::CodeRejected)
         );
+    }
+
+    #[test]
+    fn factor_calls_outlast_the_idp_budget_and_relay_only_a_bounded_user_agent() {
+        let state = AppState::new(crate::Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            runtime_mode: crate::RuntimeMode::CurrentThread,
+            public_origin: "https://app.example.test".into(),
+            api_origin: "http://127.0.0.1:9".parse().unwrap(),
+            credential_origin: "http://127.0.0.1:9".parse().unwrap(),
+            identity_origin_string: "http://127.0.0.1:9".into(),
+            browser_api_origin: "http://127.0.0.1:9".into(),
+            billing_origin: "http://127.0.0.1:9".parse().unwrap(),
+            docs_root: Default::default(),
+            confidential_storage_enabled: false,
+            confidential_admin_only: true,
+            turnstile_site_key: String::new(),
+            github_app_slug: String::new(),
+            github_app_client_id: String::new(),
+        });
+        let built = request(
+            &state,
+            CONFIRM_PATH,
+            HeaderValue::from_static("codewire.session_token=synthetic"),
+            Some(HeaderValue::from_static("synthetic-browser/1.0")),
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        // The IdP answers within five seconds plus its commit; the account
+        // client's six-second default would report a slow commit as unknown.
+        assert_eq!(built.timeout(), Some(&FACTOR_CHANGE_TIMEOUT));
+        assert!(FACTOR_CHANGE_TIMEOUT > Duration::from_secs(6));
+        assert_eq!(built.headers()[header::USER_AGENT], "synthetic-browser/1.0");
+        assert_eq!(built.headers()[header::ORIGIN], "https://app.example.test");
+        assert!(!built.headers().contains_key("x-forwarded-for"));
+
+        let mut browser = HeaderMap::new();
+        assert!(browser_user_agent(&browser).is_none());
+        browser.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("synthetic-browser/1.0"),
+        );
+        browser.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.7"));
+        assert_eq!(
+            browser_user_agent(&browser).unwrap(),
+            "synthetic-browser/1.0"
+        );
+        browser.append(header::USER_AGENT, HeaderValue::from_static("second"));
+        assert!(browser_user_agent(&browser).is_none());
+        browser.insert(
+            header::USER_AGENT,
+            HeaderValue::from_str(&"a".repeat(MAX_USER_AGENT_BYTES + 1)).unwrap(),
+        );
+        assert!(browser_user_agent(&browser).is_none());
     }
 
     #[test]

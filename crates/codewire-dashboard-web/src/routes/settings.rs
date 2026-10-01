@@ -350,6 +350,7 @@ pub(super) async fn replace_authenticator_start_action(
     match account_two_factor::start(
         &state,
         cookie,
+        account_two_factor::browser_user_agent(&headers),
         &form.account_id,
         &form.password,
         &form.proof,
@@ -394,6 +395,7 @@ pub(super) async fn replace_authenticator_confirm_action(
     match account_two_factor::confirm(
         &state,
         cookie,
+        account_two_factor::browser_user_agent(&headers),
         &form.account_id,
         &form.replacement_id,
         &form.code,
@@ -461,6 +463,7 @@ pub(super) async fn regenerate_recovery_codes_action(
     match account_two_factor::regenerate(
         &state,
         cookie,
+        account_two_factor::browser_user_agent(&headers),
         &form.account_id,
         &form.password,
         &form.proof,

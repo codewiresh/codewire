@@ -203,8 +203,17 @@ Each takes a closed form with a 2 KiB limit. Each action:
    to match that identity;
 3. reads every piece of page data before the IdP mutation, because a
    confirmed replacement revokes the session the request arrived with;
-4. forwards only the canonical cookie and the validated public Origin through
-   the bounded, redirect-free account client.
+4. forwards the canonical cookie, the validated public Origin and the
+   browser's own User-Agent (one value of at most 512 bytes) through the
+   bounded, redirect-free account client, with a 10-second per-request
+   timeout. That timeout is above the IdP's 5-second budget, so a slow commit
+   is still reported; only a genuine timeout reads as an unknown outcome.
+
+The browser's X-Forwarded-For is not forwarded. The IdP takes the first hop
+of that header without a trusted-proxy list, and no other dashboard call to
+the IdP forwards it, so relaying it would let a browser choose the address
+the IdP records. Like dashboard sign-in, these audit rows and the rotated
+session record no client address until a trusted-proxy rule exists.
 
 The response is rendered directly as a private `no-store` page; no secret ever
 appears in a redirect or URL:
