@@ -134,7 +134,8 @@ async function assertExplicitCreateRecovery(page: Page) {
     await page.goto(`/${slug}/new/?creation_draft=${requestedDraft}`);
     await expect(page.locator("[data-drawer]")).toBeVisible();
     await page.reload();
-    await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
+    // The exact draft comes back by itself on every return and reload.
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
     // Exercise the actual native Settings detour, not a direct fabricated
     // return URL: validation, mutation, and explicit Return retain this exact
     // older draft while the new source remains available but unattached.
@@ -164,11 +165,12 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
     await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
     await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-    await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
+    // The draft returns by itself; the new project is offered but not attached.
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
     await expect(page.getByLabel("Secret project", { exact: true }).locator(`option[value="${createdProject.id}"]`)).toHaveText(detourProjectName);
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
-    await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("draft-name-restored");
     // The new personal Settings consumer must retain the same exact draft
     // through cancellation, server validation and a real native secret write.
     // Owning tests disable trace/video/failure screenshots around these inputs.
@@ -207,14 +209,12 @@ async function assertExplicitCreateRecovery(page: Page) {
     expect((await secretWrite).headers().origin).toBe(ssrUrl);
     await expect(page).toHaveURL(`${ssrUrl}${personalPath}&message=secret-saved`);
     await expect(page.locator(".cw-personal-secret-row", { hasText: personalKey })).toHaveCount(1);
+    const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
     await personalReturn.click();
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
-    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
-    await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     const csrf = await form.locator('[name="_csrf"]').inputValue();
-    const responsePromise = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
-    await page.getByRole("button", { name: "Restore saved draft" }).click();
     const response = await responsePromise;
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
     expect(response.status()).toBe(200);
     expect(response.headers()["cache-control"]).toBe("private, no-store");
     expect(response.headers()["vary"]).toBe("Cookie");
