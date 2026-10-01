@@ -247,7 +247,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
         await expect(submit).toBeVisible();
         expect(await submit.evaluate((button: HTMLButtonElement) => button.form?.id)).toBe("connect-github-form");
       } else {
-        await expect(connection.locator("form"))
+        await expect(connection.locator("form:not(.cw-dialog-launcher)"))
           .toHaveAttribute("action", "/settings/credentials/_actions/credentials/oauth/enroll");
         await expect(connection).toContainText(/enable device code authorization for Codex/i);
         await expect(connection.getByRole("link", { name: "ChatGPT Security settings", exact: true }))
