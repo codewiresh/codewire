@@ -239,6 +239,54 @@ mod tests {
     }
 
     #[test]
+    fn restored_lifetime_follows_the_preset_unless_the_draft_chose_one() {
+        let preset = |default_ttl_seconds| crate::view::EnvironmentPresetOption {
+            id: PROJECT.into(),
+            name: "Preset".into(),
+            description: String::new(),
+            image: "example.test/workspace@sha256:abc".into(),
+            default_cpu_millicores: None,
+            default_memory_mib: None,
+            default_disk_gib: None,
+            default_ttl_seconds,
+            default_install_command: String::new(),
+            default_startup_script: String::new(),
+            default_agents: Vec::new(),
+            default_app_ports: Vec::new(),
+            uses_protected_secret_bindings: false,
+            official: false,
+        };
+        for (preset_id, default_ttl, saved, expected) in [
+            (PROJECT, Some(604_800), "", "7d"),
+            (PROJECT, Some(604_800), "infinity", "7d"),
+            (PROJECT, Some(604_800), "0", "7d"),
+            (PROJECT, Some(5_400), "", "90m"),
+            (PROJECT, Some(604_800), "8h", "8h"),
+            (PROJECT, None, "infinity", ""),
+            ("", Some(604_800), "infinity", ""),
+            ("", None, "", ""),
+        ] {
+            let mut value = metadata();
+            value["selections"]["agents"] = serde_json::json!([]);
+            value["selections"]["preset_id"] = serde_json::json!(preset_id);
+            value["selections"]["ttl"] = serde_json::json!(saved);
+            let mut form =
+                super::super::environments::default_create_form("current-csrf".into(), true);
+            form.presets = vec![preset(default_ttl)];
+            SelectionDraft::parse(value.to_string().as_bytes(), NOW)
+                .ok()
+                .unwrap()
+                .hydrate(&mut form)
+                .unwrap();
+            assert_eq!(
+                form.ttl, expected,
+                "{preset_id:?} {default_ttl:?} {saved:?}"
+            );
+            assert!(form.form_error.is_empty());
+        }
+    }
+
+    #[test]
     fn current_capability_and_agent_catalog_reject_unavailable_choices() {
         let mut value = metadata();
         let mut form = super::super::environments::default_create_form("current-csrf".into(), true);

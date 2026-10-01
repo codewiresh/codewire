@@ -47,14 +47,14 @@ use crate::{
     view::{
         EnvironmentAppPortFormRow, EnvironmentCreateFormView, EnvironmentPortPanelView,
         EnvironmentRepositoryFormRow, EnvironmentsPageView, OrganizationContext,
-        SandboxListContext, bad_request_fields, connect_error_reason,
+        SandboxListContext, bad_request_fields, connect_error_reason, lifetime_field_value,
+        ttl_uses_default,
     },
 };
 
 const MAX_REPOSITORIES: usize = 108;
 const MAX_APP_PORTS: usize = 16;
 const MAX_FIELD: usize = 16_384;
-const DEFAULT_TTL: &str = "infinity";
 const PROTECTED_SECRET_ACCESS_UNAVAILABLE: &str =
     crate::environment_source_forms::INVALID_SELECTION;
 const PROJECT_SPEC_INVALID: &str = "The Sandbox service returned an invalid project configuration.";
@@ -281,7 +281,12 @@ impl EnvironmentSubmission {
             cpu: self.cpu.trim().to_owned(),
             memory: self.memory.trim().to_owned(),
             disk: self.disk.trim().to_owned(),
-            ttl: self.ttl.trim().to_owned(),
+            // Legacy `0`, `infinity` and `∞` mean the default; never echo them.
+            ttl: if ttl_uses_default(&self.ttl) {
+                String::new()
+            } else {
+                self.ttl.trim().to_owned()
+            },
             isolation_tier: self.isolation_tier.trim().to_owned(),
             confidential_available: false,
             show_confidential_controls: false,
@@ -332,7 +337,7 @@ impl EnvironmentSubmission {
         if ttl_uses_default(&self.ttl)
             && let Some(ttl) = preset.default_ttl_seconds
         {
-            self.ttl = format!("{ttl}s");
+            self.ttl = lifetime_field_value(ttl);
         }
         if self.install_command.is_empty() {
             self.install_command = preset.default_install_command.clone();
@@ -2109,7 +2114,7 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         cpu: "1000".to_owned(),
         memory: "2048".to_owned(),
         disk: "10".to_owned(),
-        ttl: DEFAULT_TTL.to_owned(),
+        ttl: String::new(),
         isolation_tier: "standard".to_owned(),
         confidential_available: false,
         show_confidential_controls: false,
@@ -2294,15 +2299,11 @@ fn parse_ttl(value: &str, error: &mut String) -> Option<i32> {
     {
         Some(seconds) if (60..=31_536_000).contains(&seconds) => Some(seconds as i32),
         _ => {
-            *error = "TTL must be infinity or 60 seconds to 365 days, such as 8h or 7d.".to_owned();
+            *error = "Enter a duration from 60 seconds to 365 days, such as 8h or 7d, or leave it empty."
+                .to_owned();
             None
         }
     }
-}
-
-fn ttl_uses_default(value: &str) -> bool {
-    let value = value.trim();
-    value.is_empty() || value == "0" || value.eq_ignore_ascii_case(DEFAULT_TTL) || value == "∞"
 }
 
 fn allowlisted_agents(values: &[String]) -> Vec<String> {
@@ -3850,7 +3851,7 @@ mod tests {
         assert_eq!(submission.cpu, "750");
         assert_eq!(submission.memory, "1024");
         assert_eq!(submission.disk, "5");
-        assert_eq!(submission.ttl, "3600s");
+        assert_eq!(submission.ttl, "1h");
         assert_eq!(submission.image, "example.test/workspace@sha256:abc");
         assert_eq!(submission.install_command, "install-dependencies");
         assert_eq!(submission.startup_script, "start-services");
@@ -3919,6 +3920,76 @@ mod tests {
         assert_eq!(parse_ttl("∞", &mut error), None);
         assert_eq!(parse_ttl("0", &mut error), None);
         assert!(error.is_empty());
+    }
+
+    #[test]
+    fn preset_lifetimes_use_the_largest_exact_unit_and_parse_back() {
+        for (seconds, expected) in [
+            (60, "1m"),
+            (90, "90s"),
+            (3_600, "1h"),
+            (5_400, "90m"),
+            (86_400, "1d"),
+            (90_000, "25h"),
+            (604_800, "7d"),
+            (31_536_000, "365d"),
+        ] {
+            assert_eq!(lifetime_field_value(seconds), expected);
+            let mut error = String::new();
+            assert_eq!(parse_ttl(expected, &mut error), Some(seconds));
+            assert!(error.is_empty());
+        }
+    }
+
+    #[test]
+    fn delete_after_shows_the_preset_default_and_never_infinity() {
+        let organization = test_organization();
+        let render = |form: &EnvironmentCreateFormView| {
+            EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form,
+            }
+            .render()
+            .expect("environment create form")
+        };
+        let field = |value: &str, placeholder: &str| {
+            format!("name=\"ttl\" value=\"{value}\" placeholder=\"{placeholder}\"")
+        };
+
+        let mut form = default_create_form("csrf".into(), true);
+        let html = render(&form);
+        assert!(html.contains(&field("", "Not scheduled")), "{html}");
+        assert!(!html.to_lowercase().contains("infinity"));
+        assert!(html.contains("without one, the Sandbox is not scheduled for automatic deletion"));
+
+        // A preset without a default lifetime leaves the Sandbox unscheduled.
+        form.preset_id = "preset-id".into();
+        form.presets = vec![test_preset("preset-id", false)];
+        form.follow_preset_ttl();
+        assert!(render(&form).contains(&field("", "Not scheduled")));
+
+        let mut preset = test_preset("preset-id", false);
+        preset.default_ttl_seconds = Some(604_800);
+        form.presets = vec![preset];
+        for legacy in ["", "0", "infinity", "Infinity", "∞"] {
+            form.ttl = legacy.into();
+            form.follow_preset_ttl();
+            assert!(render(&form).contains(&field("7d", "7d")), "{legacy}");
+        }
+        // The user's own value is kept; clearing it shows what empty resolves to.
+        form.ttl = "8h".into();
+        form.follow_preset_ttl();
+        assert!(render(&form).contains(&field("8h", "7d")));
+        form.ttl = String::new();
+        assert!(render(&form).contains(&field("", "7d")));
+
+        // Legacy input without a preset default comes back empty, not "infinity".
+        let submission = EnvironmentSubmission::parse(b"ttl=infinity").unwrap();
+        assert_eq!(submission.form_view("csrf".into()).ttl, "");
+        let submission = EnvironmentSubmission::parse(b"ttl=%E2%88%9E").unwrap();
+        assert_eq!(submission.form_view("csrf".into()).ttl, "");
+        let submission = EnvironmentSubmission::parse(b"ttl=8h").unwrap();
+        assert_eq!(submission.form_view("csrf".into()).ttl, "8h");
     }
 
     #[test]

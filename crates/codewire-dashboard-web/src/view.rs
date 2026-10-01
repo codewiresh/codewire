@@ -1355,6 +1355,27 @@ fn current_resource_choices(
     resource_choices(catalog, &value, || format!("{value} {unit} (current)"))
 }
 
+/// Empty asks Create for the configuration's default lifetime. `0`,
+/// `infinity` and `∞` are accepted with the same meaning for older input and
+/// saved drafts.
+pub(crate) fn ttl_uses_default(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value == "0" || value.eq_ignore_ascii_case("infinity") || value == "∞"
+}
+
+/// A lifetime in the largest exact unit the Delete after field accepts, such
+/// as `1h` for 3600 seconds or `90m` for 5400.
+pub(crate) fn lifetime_field_value(seconds: i32) -> String {
+    if seconds > 0 {
+        for (unit, size) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
+            if seconds % size == 0 {
+                return format!("{}{unit}", seconds / size);
+            }
+        }
+    }
+    format!("{seconds}s")
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentCreateFormView {
     pub(crate) csrf_token: String,
@@ -1430,6 +1451,33 @@ impl EnvironmentCreateFormView {
         resource_choices(DISK_CHOICES, &self.disk, || {
             create_off_catalog_label(&self.disk, "GiB")
         })
+    }
+
+    /// The Delete after value that an empty field resolves to: the selected
+    /// preset's default lifetime, if it has one.
+    fn preset_ttl(&self) -> Option<String> {
+        let preset_id = self.preset_id.trim();
+        self.presets
+            .iter()
+            .find(|preset| !preset_id.is_empty() && preset.id == preset_id)
+            .and_then(|preset| preset.default_ttl_seconds)
+            .map(lifetime_field_value)
+    }
+
+    /// An empty field uses the configuration's default lifetime. Without a
+    /// default, Create leaves the Sandbox off the automatic deletion schedule.
+    pub(crate) fn ttl_placeholder(&self) -> String {
+        self.preset_ttl()
+            .unwrap_or_else(|| "Not scheduled".to_owned())
+    }
+
+    /// Show the selected preset's default lifetime unless the field holds the
+    /// user's own value. Legacy `0`, `infinity` and `∞` also ask for the
+    /// default, and never come back as field text.
+    pub(crate) fn follow_preset_ttl(&mut self) {
+        if ttl_uses_default(&self.ttl) {
+            self.ttl = self.preset_ttl().unwrap_or_default();
+        }
     }
 
     pub(crate) fn isolation_selected(&self, value: &str) -> bool {

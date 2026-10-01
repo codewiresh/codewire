@@ -457,10 +457,12 @@ test.describe.serial("server-rendered environments", () => {
     await expect(drawer).toHaveCSS("transform", "none");
     await expect(page.locator("#environment-name")).toBeFocused();
     const ttl = page.getByLabel("Delete after");
-    await expect(ttl).toHaveValue("infinity");
+    // No preset is selected, so the field states what empty does.
+    await expect(ttl).toHaveValue("");
+    await expect(ttl).toHaveAttribute("placeholder", "Not scheduled");
     await ttl.fill("0");
     await ttl.press("Tab");
-    await expect(ttl).toHaveValue("infinity");
+    await expect(ttl).toHaveValue("");
     await page.locator("#environment-name").focus();
     await expect(page.locator("#environment-snapshot, .cw-snapshot-meter")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
@@ -569,7 +571,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("1000");
     await expect(page.locator("#environment-create-card").getByLabel("Memory", { exact: true })).toHaveValue("2048");
     await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("10");
-    await expect(page.getByLabel("Delete after")).toHaveValue("infinity");
+    await expect(page.getByLabel("Delete after")).toHaveValue("");
     await expect(page.getByLabel("Workspace image")).toHaveValue(
       "registry.example.test/team/workspace:v1",
     );
@@ -620,7 +622,7 @@ test.describe.serial("server-rendered environments", () => {
     test.skip(!isMobile, "mobile responsive and visual contract");
     await page.goto(`/${slug}/new/`);
     await expect(page.getByRole("heading", { name: "Create Sandbox" })).toBeVisible();
-    await expect(page.getByLabel("Delete after")).toHaveValue("infinity");
+    await expect(page.getByLabel("Delete after")).toHaveValue("");
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await page.locator(".cw-drawer-body").evaluate((element) => { element.scrollTop = 0; });
     expect(await page.locator("#environment-create-card").evaluate((element) => element.getBoundingClientRect().top)).toBe(0);
@@ -662,7 +664,7 @@ test.describe.serial("server-rendered environments", () => {
     expect((await response).status()).toBe(422);
     const ttl = page.getByLabel("Delete after");
     await expect(ttl).toHaveAttribute("aria-invalid", "true");
-    await expect(ttl).toHaveAccessibleDescription(/TTL must be infinity or 60 seconds to 365 days/);
+    await expect(ttl).toHaveAccessibleDescription(/Enter a duration from 60 seconds to 365 days/);
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     await expect(page.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
