@@ -4,6 +4,8 @@
 //! rejects the skip sentinel or an unexpected executed-test count.
 
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use codewire_server_core::AppError;
@@ -11,13 +13,14 @@ use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
     OrganizationBillingMutationError, OrganizationDeletionOperation, OrganizationDeletionPhase,
     OrganizationMutationClass, OrganizationMutationLease, OrganizationRuntimeMutationError,
-    OrganizationTenantSecretMutationError, acquire_organization_mutation_lease,
-    advance_organization_deletion_phase, begin_organization_deletion,
-    finalize_organization_deletion_database, mark_organization_deletion_failed,
-    mark_organization_deletion_started, mark_organization_mutation_resolution_required,
-    pending_organization_deletion_operations, record_organization_deletion_start_attempt,
-    release_organization_mutation_lease, require_organization_mutation_barrier_drained,
-    resolve_organization_mutation_lease, run_environment_runtime_mutation,
+    OrganizationTenantSecretMutationError, RuntimeMutationOutcome,
+    acquire_organization_mutation_lease, advance_organization_deletion_phase,
+    begin_organization_deletion, finalize_organization_deletion_database,
+    mark_organization_deletion_failed, mark_organization_deletion_started,
+    mark_organization_mutation_resolution_required, pending_organization_deletion_operations,
+    record_organization_deletion_start_attempt, release_organization_mutation_lease,
+    require_organization_mutation_barrier_drained, resolve_organization_mutation_lease,
+    run_environment_runtime_mutation, run_environment_runtime_mutation_with_outcome,
     run_organization_billing_mutation, run_organization_database_mutation,
     run_organization_runtime_mutation, run_organization_tenant_secret_mutation,
     unresolved_organization_mutation_leases,
@@ -802,6 +805,164 @@ async fn runtime_mutation_settles_its_lease_after_the_caller_is_dropped() {
 
     cleanup_environment(&pool, &fixture, &environment_id).await;
     cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn operation_chosen_runtime_outcome_settles_after_the_caller_is_dropped() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool).await;
+    let environment_id = seed_running_environment(&pool, &fixture).await;
+
+    // A waiting caller receives the value and the lease is released. This is
+    // the SSH proxy handing its opened stream back to the upgrade.
+    let value = run_environment_runtime_mutation_with_outcome(
+        &pool,
+        &fixture.org_id,
+        &environment_id,
+        async { RuntimeMutationOutcome::release("ssh stream") },
+    )
+    .await
+    .unwrap();
+    assert_eq!(value, "ssh stream");
+    assert!(
+        unresolved_organization_mutation_leases(&pool, &fixture.org_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // A value produced after the caller left still releases the lease, and
+    // the owner then drops it so no resource outlives the vanished caller.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let resource = DropProbe(Arc::clone(&dropped));
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    drop_caller_after_operation_starts(
+        run_environment_runtime_mutation_with_outcome(
+            &pool,
+            &fixture.org_id,
+            &environment_id,
+            async move {
+                let _ = entered_tx.send(());
+                let _ = finish_rx.await;
+                RuntimeMutationOutcome::release(resource)
+            },
+        ),
+        entered_rx,
+    )
+    .await;
+    let lease_id = only_unresolved_lease(&pool, &fixture.org_id, "active").await;
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "the admitted operation must not be cancelled with its caller"
+    );
+    let _ = finish_tx.send(());
+    let settled = settled_runtime_lease(&pool, &lease_id).await;
+    assert_eq!(settled.state, "released");
+    assert_eq!(settled.recovery_code, None);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the owner drops a value nobody is waiting for");
+
+    // The operation's own recovery code survives the caller, as daemon
+    // repair needs for its readiness and backend boundaries.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    drop_caller_after_operation_starts(
+        run_environment_runtime_mutation_with_outcome(
+            &pool,
+            &fixture.org_id,
+            &environment_id,
+            async move {
+                let _ = entered_tx.send(());
+                let _ = finish_rx.await;
+                RuntimeMutationOutcome::resolution_required(
+                    "environment_daemon_repair_readiness_ambiguous",
+                    (),
+                )
+            },
+        ),
+        entered_rx,
+    )
+    .await;
+    let lease_id = only_unresolved_lease(&pool, &fixture.org_id, "active").await;
+    let _ = finish_tx.send(());
+    let settled = settled_runtime_lease(&pool, &lease_id).await;
+    assert_eq!(settled.state, "resolution_required");
+    assert_eq!(
+        settled.recovery_code.as_deref(),
+        Some("environment_daemon_repair_readiness_ambiguous")
+    );
+    resolve_organization_mutation_lease(&pool, &lease_id)
+        .await
+        .unwrap();
+
+    // A panicking operation is ambiguous evidence, never an active lease.
+    let panicked = run_environment_runtime_mutation_with_outcome(
+        &pool,
+        &fixture.org_id,
+        &environment_id,
+        async { panicking_runtime_outcome() },
+    )
+    .await;
+    assert!(matches!(panicked, Err(AppError::InternalMsg(_))));
+    let lease_id = only_unresolved_lease(&pool, &fixture.org_id, "resolution_required").await;
+    let settled = settled_runtime_lease(&pool, &lease_id).await;
+    assert_eq!(
+        settled.recovery_code.as_deref(),
+        Some("environment_runtime_dispatch_panicked")
+    );
+    resolve_organization_mutation_lease(&pool, &lease_id)
+        .await
+        .unwrap();
+
+    // Admission still rejects an environment that is being destroyed before
+    // the operation runs, and leaves no lease behind.
+    sqlx::query("UPDATE environments SET state = 'destroying' WHERE id = $1")
+        .bind(&environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ran = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&ran);
+    let rejected = run_environment_runtime_mutation_with_outcome(
+        &pool,
+        &fixture.org_id,
+        &environment_id,
+        async move {
+            observed.store(true, Ordering::SeqCst);
+            RuntimeMutationOutcome::release(())
+        },
+    )
+    .await;
+    assert!(matches!(rejected, Err(AppError::Conflict(_))));
+    assert!(!ran.load(Ordering::SeqCst));
+    assert!(
+        unresolved_organization_mutation_leases(&pool, &fixture.org_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    cleanup_environment(&pool, &fixture, &environment_id).await;
+    cleanup(&pool, &fixture).await;
+}
+
+/// Stands in for a resource such as a port-forwarded stream.
+struct DropProbe(Arc<AtomicBool>);
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+fn panicking_runtime_outcome() -> RuntimeMutationOutcome<()> {
+    panic!("synthetic runtime dispatch panic")
 }
 
 async fn seed_running_environment(pool: &PgPool, fixture: &Fixture) -> String {

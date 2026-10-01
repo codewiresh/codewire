@@ -1439,6 +1439,10 @@ grep -qF -- "'api::admin::startup_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'api::environment_resize::tests::db_'" "$integration_runner"
 grep -qF 'assert_passed_count "environment resize admission matrix" "$logfile" 2' "$integration_runner"
+grep -qF -- "'api::ssh_proxy::database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "SSH proxy runtime lease matrix" "$logfile" 2' "$integration_runner"
+grep -qF -- "'api::environment_daemon::repair_database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "environment daemon repair lease matrix" "$logfile" 2' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \

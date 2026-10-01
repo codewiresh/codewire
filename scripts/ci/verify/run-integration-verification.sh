@@ -324,7 +324,7 @@ run_database() {
     echo "::error::organization deletion lifecycle matrix skipped"
     return 1
   fi
-  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 18
+  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 19
 
   logfile="$RUN_DIR/organization-billing-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -417,6 +417,20 @@ run_database() {
       'api::environment_resize::tests::db_' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "environment resize admission matrix" "$logfile" 2
+
+  logfile="$RUN_DIR/ssh-proxy-runtime-lease.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::ssh_proxy::database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "SSH proxy runtime lease matrix" "$logfile" 2
+
+  logfile="$RUN_DIR/environment-daemon-repair-lease.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_daemon::repair_database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment daemon repair lease matrix" "$logfile" 2
 
 }
 

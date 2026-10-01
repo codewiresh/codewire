@@ -610,6 +610,66 @@ where
     .await
 }
 
+/// How an admitted environment runtime mutation settles its lease once its
+/// own outcome is known. The operation, never its caller, chooses this.
+#[must_use = "a runtime mutation outcome settles its lease only when returned"]
+pub struct RuntimeMutationOutcome<T> {
+    value: T,
+    resolution_code: Option<&'static str>,
+}
+
+impl<T> RuntimeMutationOutcome<T> {
+    /// The runtime effect is known: release the lease, then return `value`.
+    pub fn release(value: T) -> Self {
+        Self {
+            value,
+            resolution_code: None,
+        }
+    }
+
+    /// The runtime effect is unknown: retain `resolution_required` evidence
+    /// under `code`, then return `value`.
+    pub fn resolution_required(code: &'static str, value: T) -> Self {
+        Self {
+            value,
+            resolution_code: Some(code),
+        }
+    }
+}
+
+/// Admit an environment-scoped runtime mutation whose operation decides its
+/// own settlement and bounds its own external calls.
+///
+/// Admission, the operation and its lease settlement run in the same owner
+/// task as [`run_environment_runtime_mutation`], spawned before admission, so
+/// a dropped caller cannot strand an `active` lease. This variant adds no
+/// deadline and no known/ambiguous mapping: each operation path returns the
+/// release or recovery code it already established. A panic still records
+/// `environment_runtime_dispatch_panicked`. When the caller is gone, the value
+/// is dropped with the owner task's output after settlement, which closes any
+/// resource it holds.
+pub async fn run_environment_runtime_mutation_with_outcome<T, F>(
+    pool: &PgPool,
+    organization_id: &str,
+    environment_id: &str,
+    operation: F,
+) -> Result<T, AppError>
+where
+    F: Future<Output = RuntimeMutationOutcome<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    let pool = pool.clone();
+    let organization_id = organization_id.to_owned();
+    let environment_id = environment_id.to_owned();
+    run_owned_runtime_mutation(async move {
+        let lease =
+            acquire_environment_runtime_mutation_lease(&pool, &organization_id, &environment_id)
+                .await?;
+        settle_runtime_mutation(&pool, lease, operation).await
+    })
+    .await
+}
+
 /// Spawn before admission so there is no cancellation gap between committing
 /// the lease and handing it to its owner. Dropping the returned future drops
 /// only the `JoinHandle`, which detaches the owner task without cancelling it.
@@ -674,28 +734,56 @@ async fn finish_organization_runtime_mutation<T, F>(
 where
     F: Future<Output = Result<T, OrganizationRuntimeMutationError>>,
 {
+    settle_runtime_mutation(pool, lease, async move {
+        match tokio::time::timeout(Duration::from_secs(60), operation).await {
+            Ok(Ok(value)) => RuntimeMutationOutcome::release(Ok(value)),
+            Ok(Err(OrganizationRuntimeMutationError::Known(error))) => {
+                RuntimeMutationOutcome::release(Err(error))
+            }
+            Ok(Err(OrganizationRuntimeMutationError::Ambiguous(error))) => {
+                RuntimeMutationOutcome::resolution_required(
+                    "environment_runtime_dispatch_ambiguous",
+                    Err(error),
+                )
+            }
+            Err(_) => RuntimeMutationOutcome::resolution_required(
+                "environment_runtime_dispatch_timeout",
+                Err(AppError::InternalMsg(
+                    "environment runtime dispatch timed out".into(),
+                )),
+            ),
+        }
+    })
+    .await?
+}
+
+/// Settle an admitted runtime lease from its operation's own outcome.
+async fn settle_runtime_mutation<T, F>(
+    pool: &PgPool,
+    lease: OrganizationMutationLease,
+    operation: F,
+) -> Result<T, AppError>
+where
+    F: Future<Output = RuntimeMutationOutcome<T>>,
+{
     // A panic inside the operation must still leave durable evidence: whether
     // it dispatched before panicking is unknown, so it is ambiguous.
-    let operation = AssertUnwindSafe(operation).catch_unwind();
-    match tokio::time::timeout(Duration::from_secs(60), operation).await {
-        Ok(Ok(Ok(value))) => {
+    match AssertUnwindSafe(operation).catch_unwind().await {
+        Ok(RuntimeMutationOutcome {
+            value,
+            resolution_code: None,
+        }) => {
             release_organization_mutation_lease(pool, &lease.id).await?;
             Ok(value)
         }
-        Ok(Ok(Err(OrganizationRuntimeMutationError::Known(error)))) => {
-            release_organization_mutation_lease(pool, &lease.id).await?;
-            Err(error)
+        Ok(RuntimeMutationOutcome {
+            value,
+            resolution_code: Some(code),
+        }) => {
+            mark_organization_mutation_resolution_required(pool, &lease.id, code).await?;
+            Ok(value)
         }
-        Ok(Ok(Err(OrganizationRuntimeMutationError::Ambiguous(error)))) => {
-            mark_organization_mutation_resolution_required(
-                pool,
-                &lease.id,
-                "environment_runtime_dispatch_ambiguous",
-            )
-            .await?;
-            Err(error)
-        }
-        Ok(Err(_panic)) => {
+        Err(_panic) => {
             tracing::error!(
                 lease_id = %lease.id,
                 "environment runtime dispatch panicked; lease requires resolution"
@@ -708,17 +796,6 @@ where
             .await?;
             Err(AppError::InternalMsg(
                 "environment runtime dispatch failed".into(),
-            ))
-        }
-        Err(_) => {
-            mark_organization_mutation_resolution_required(
-                pool,
-                &lease.id,
-                "environment_runtime_dispatch_timeout",
-            )
-            .await?;
-            Err(AppError::InternalMsg(
-                "environment runtime dispatch timed out".into(),
             ))
         }
     }
