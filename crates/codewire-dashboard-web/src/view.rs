@@ -327,6 +327,26 @@ pub(crate) struct SettingsPageView {
     pub(crate) csrf_token: String,
     pub(crate) message: String,
     pub(crate) error: String,
+    /// An alert in the Security card that belongs to no dialog.
+    pub(crate) security_error: String,
+    /// A confirmed replacement revoked every listed session, including the one
+    /// the page was read with, so the list is withheld until the next load.
+    pub(crate) sessions_replaced: bool,
+    pub(crate) two_factor: TwoFactorDialogView,
+}
+
+/// The open two-factor dialog and the one-time values it shows. The setup key,
+/// QR code and recovery codes exist only in the POST response that created
+/// them; nothing here implements `Debug`.
+#[derive(Default)]
+pub(crate) struct TwoFactorDialogView {
+    pub(crate) active: &'static str,
+    pub(crate) error: String,
+    pub(crate) replacement_id: String,
+    pub(crate) qr_svg: String,
+    pub(crate) setup_key: String,
+    pub(crate) expires: String,
+    pub(crate) backup_codes: Vec<String>,
 }
 
 #[derive(Default)]

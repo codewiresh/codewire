@@ -42,8 +42,9 @@
 [data-dashboard-app] .cw-account-session code,
 [data-dashboard-app] .cw-public-key code { overflow-wrap: anywhere; font-size: var(--text-code); }
 [data-dashboard-app] :is(.cw-credential-row, .cw-profile-row) > .cw-button { justify-self: start; }
-/* Session and security rows: what it is on the left, its one action on the right. */
+/* Session and security rows: what it is on the left, its actions on the right. */
 [data-dashboard-app] :is(.cw-account-session, .cw-security-row) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; }
+[data-dashboard-app] .cw-security-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: var(--space-2); }
 [data-dashboard-app] :is(.cw-account-session > header, .cw-security-row > div) p { margin: var(--space-1) 0 0; color: var(--fg-tertiary); font-size: var(--text-small); }
 [data-dashboard-app] .cw-account-session > header code { color: var(--fg-tertiary); font-size: var(--text-small); }
 [data-dashboard-app] .cw-session-pagination { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-block: var(--space-4); }
@@ -70,6 +71,11 @@
 [data-dashboard-app] .cw-credential-dialog { width: min(var(--dialog-width), calc(100vw - var(--space-8))); }
 [data-dashboard-app] .cw-credential-dialog .cw-dialog-actions { flex-wrap: wrap; }
 [data-dashboard-app] .cw-credential-dialog .cw-dialog-actions .cw-button { white-space: normal; }
+/* Two-factor dialogs: proof fields, the one-time QR code and setup key, and
+   new recovery codes. */
+[data-dashboard-app] .cw-two-factor-dialog .cw-dialog-body { display: grid; gap: var(--space-3); }
+[data-dashboard-app] .cw-two-factor-dialog .cw-dialog-body > p { margin: 0; }
+[data-dashboard-app] .cw-two-factor-dialog .cw-qr { margin-bottom: 0; }
 [data-dashboard-app] .cw-credential-types { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 [data-dashboard-app] .cw-credential-types li { display: grid; }
 [data-dashboard-app] .cw-credential-choice { display: grid; grid-template-columns: var(--icon-size) minmax(0, 1fr) var(--icon-size); align-items: center; gap: var(--space-3); width: 100%; padding: var(--space-3) var(--space-4); border: var(--border-width) solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-primary); font: inherit; text-align: left; cursor: pointer; }
@@ -92,7 +98,7 @@
 
 @media (scripting: none) {
   /* The dialog named in the URL shows in place of a modal. */
-  [data-dashboard-app] .cw-credentials-page dialog[data-dialog-auto-open] { position: static; display: block; margin: var(--space-4) 0; }
+  [data-dashboard-app] :is(.cw-credentials-page, .cw-account-page) dialog[data-dialog-auto-open] { position: static; display: block; margin: var(--space-4) 0; }
   [data-dashboard-app] .cw-personal-api-keys-page [data-dialog-open],
   [data-dashboard-app] .cw-personal-api-keys-page [data-copy-api-key] { display: none; }
   [data-dashboard-app] .cw-personal-secrets-page [data-dialog-open] { display: none; }
@@ -103,6 +109,8 @@
 }
 
 @media (max-width: 48rem) {
+  [data-dashboard-app] .cw-security-row { grid-template-columns: minmax(0, 1fr); }
+  [data-dashboard-app] .cw-security-actions { justify-content: start; }
   [data-dashboard-app] .cw-settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   [data-dashboard-app] .cw-settings-content { padding: var(--space-4) var(--space-4) var(--space-8); }
   [data-dashboard-app] .cw-settings-details div { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }

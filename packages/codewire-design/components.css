@@ -595,6 +595,41 @@ dialog.cw-discard-dialog {
   user-select: all;
 }
 
+/* A one-time authenticator setup QR code on its light quiet zone, shown when
+   two-factor authentication is set up or its authenticator is replaced. */
+.cw-qr {
+  display: grid;
+  width: fit-content;
+  margin: 0 auto var(--space-3);
+  place-items: center;
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--qr-light);
+}
+
+.cw-qr svg { display: block; width: min(12rem, 60vw); height: auto; aspect-ratio: 1; }
+
+/* One-time recovery codes: a two-column list, one column on narrow screens. */
+.cw-backup-codes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cw-backup-codes li {
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-hover);
+  text-align: center;
+}
+
+@media (max-width: 34rem) {
+  .cw-backup-codes { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* Row list: repeated records inside a card. Rows are separated by hairlines
    and align to the card's inset instead of nesting boxes of their own. */
 .cw-row-list {

@@ -101,6 +101,19 @@ export async function bindSyntheticPasswordResetToken(
   return row ? token : null;
 }
 
+// Active browser sessions and recorded sign-in failures for one synthetic
+// account. Read-only: journeys assert state the product created.
+export async function accountSecurityState(email: string): Promise<{ sessions: number; failures: number }> {
+  const [row] = await sql`
+    SELECT
+      (SELECT count(*)::int FROM sessions WHERE user_id = u.id AND expires_at > NOW()) AS sessions,
+      COALESCE(u.failed_login_attempts, 0)::int AS failures
+    FROM users AS u WHERE u.email = ${email}
+  `;
+  if (!row) throw new Error(`Missing synthetic account ${email}`);
+  return { sessions: row.sessions, failures: row.failures };
+}
+
 // Get user ID by email
 export async function getUserId(email: string): Promise<string | null> {
   const [result] = await sql`

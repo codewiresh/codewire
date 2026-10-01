@@ -171,6 +171,80 @@ scope rejection, and proves other/current-session revocation separately.
 Fixture request interception proves only presentation/submit shape; it does
 not substitute for the real IdP/database journey.
 
+### Security: replacing the authenticator
+
+For an enrolled account, the Security card offers **Replace authenticator** and
+**Regenerate recovery codes**. Each opens a focused dialog through a native GET
+launcher (`/settings/?dialog=…`), which also works without scripting; scripting
+opens the same dialog in place. Only these two proof dialogs open from a URL.
+The proof fields are labelled and required, are never prefilled, and are
+cleared when a dialog closes.
+
+The three POST actions are:
+
+- `/settings/_actions/two-factor/replace/start`
+- `/settings/_actions/two-factor/replace/confirm`
+- `/settings/_actions/two-factor/recovery-codes/regenerate`
+
+Each takes a closed form with a 2 KiB limit. Each action:
+
+1. requires one session cookie, no `Authorization` header, exactly one Origin
+   and the page CSRF token;
+2. requires fresh identity, an enrolled factor, and the form's `account_id`
+   to match that identity;
+3. reads every piece of page data before the IdP mutation, because a
+   confirmed replacement revokes the session the request arrived with;
+4. forwards only the canonical cookie and the validated public Origin through
+   the bounded, redirect-free account client.
+
+The response is rendered directly as a private `no-store` page; no secret ever
+appears in a redirect or URL:
+
+- The setup key and QR code appear only in the `start` response.
+- The new recovery codes appear only in the `confirm` or `regenerate`
+  response.
+- A rejected code reopens confirmation without the key.
+- `confirm` forwards exactly one well-formed rotated session cookie. The
+  page then withholds the session list it read before the change, since every
+  one of those sessions is gone.
+
+Error messages say what still works:
+
+| Outcome | Dialog | Message |
+|---|---|---|
+| Wrong password or code | proof | "The password or code didn't match. Nothing changed: …" |
+| Account locked | proof | "Too many incorrect attempts. Wait 15 minutes, then try again. Your current authenticator and recovery codes still work." |
+| New code rejected | confirm | "That code doesn't match the new authenticator. … Your current authenticator still works." |
+| Five wrong codes or ten minutes | replace | "This replacement ended after five incorrect codes or ten minutes. Start again. …" |
+| Superseded or foreign replacement | replace | "This replacement is no longer available … Start again. …" |
+| IdP without these routes or unreachable before a change | proof | "… unavailable right now. Nothing changed: …" |
+| Lost confirmation or regeneration response | Security card or regenerate | Says the outcome is unknown and how to recover |
+
+An account mismatch redirects to `/settings/?security=account-changed#security`
+with no change.
+
+Focused proof includes:
+
+- adapter tests for closed results, rotated-cookie admission, redirect refusal
+  and the failure mapping;
+- registered-route tests against a synthetic identity service, proving
+  read-before-mutation, exact Origin, CSRF, account, bearer and unknown-field
+  rejection, and that no password or proof is echoed;
+- template tests;
+- the editable fixtures `settings-account.html`,
+  `settings-account-replace-authenticator.html` and
+  `settings-account-authenticator-replaced.html`, with their desktop, mobile
+  and no-JavaScript specs in `ssr-dashboard.account-dialogs.ssr.ts`.
+
+The managed journey `ssr-dashboard.account-two-factor.ssr.ts` enrolls a
+synthetic owner, then on the real IdP, dashboard and database:
+
+1. proves a wrong proof says what still works and counts one failure;
+2. regenerates codes with a recovery code;
+3. replaces the authenticator, rejecting a wrong new code first;
+4. proves both old cookies are refused, the rotated cookie opens Account with
+   one session, and sign-in accepts only the new authenticator and its codes.
+
 Account management goldens use an isolated synthetic owner with exactly two
 sessions, fixed creation/expiry dates, and the byte-lowest session as the current
 browser. The owner joins the selected organization only after its Members
