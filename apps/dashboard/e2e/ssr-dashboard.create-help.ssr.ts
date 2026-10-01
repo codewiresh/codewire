@@ -76,7 +76,7 @@ for (const fixture of ["create-sandbox.html", "edit-sandbox-sources.html"]) {
     await expect(page.getByRole("link", { name: "Manage organization secrets" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Manage secret projects" })).toBeVisible();
     await page.keyboard.press("Escape");
-    await page.locator(".cw-secret-panel").screenshot({ path: test.info().outputPath(`${fixture}-secret-panel.png`) });
+    await page.locator(".cw-create-panel").filter({ has: page.getByRole("heading", { name: "Application secrets", exact: true }) }).screenshot({ path: test.info().outputPath(`${fixture}-secret-panel.png`) });
   });
 }
 
