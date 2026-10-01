@@ -7,10 +7,7 @@
     <form data-resize-plan-form>
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <fieldset data-resize-inputs><legend>Requested resources</legend>
-        <label for="resize-cpu">CPU (millicores)</label><input class="cw-input" id="resize-cpu" name="cpu_millicores" type="number" min="100" max="128000" value="{{ page.environment.cpu_millicores }}" required>
-        <p class="cw-field-help">1,000 millicores is one vCPU.</p>
-        <label for="resize-memory">Memory (MiB)</label><input class="cw-input" id="resize-memory" name="memory_mb" type="number" min="128" max="1048576" value="{{ page.environment.memory_mb }}" required>
-        <label for="resize-disk">Disk (GiB)</label><input class="cw-input" id="resize-disk" name="disk_gb" type="number" min="1" max="16384" value="{{ page.environment.disk_gb }}" required>
+        {% let resize_fields_id = "resize" %}{% let resize_sandbox = page.environment %}{% include "environment-resize-fields.html" %}
         <button class="cw-button" type="submit" data-resize-review>Review resize</button>
       </fieldset>
     </form>

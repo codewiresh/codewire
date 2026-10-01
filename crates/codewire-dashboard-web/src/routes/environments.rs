@@ -47,14 +47,14 @@ use crate::{
     view::{
         EnvironmentAppPortFormRow, EnvironmentCreateFormView, EnvironmentPortPanelView,
         EnvironmentRepositoryFormRow, EnvironmentsPageView, OrganizationContext,
-        SandboxListContext, bad_request_fields, connect_error_reason,
+        SandboxListContext, bad_request_fields, connect_error_reason, lifetime_field_value,
+        ttl_uses_default,
     },
 };
 
 const MAX_REPOSITORIES: usize = 108;
 const MAX_APP_PORTS: usize = 16;
 const MAX_FIELD: usize = 16_384;
-const DEFAULT_TTL: &str = "infinity";
 const PROTECTED_SECRET_ACCESS_UNAVAILABLE: &str =
     crate::environment_source_forms::INVALID_SELECTION;
 const PROJECT_SPEC_INVALID: &str = "The Sandbox service returned an invalid project configuration.";
@@ -281,7 +281,12 @@ impl EnvironmentSubmission {
             cpu: self.cpu.trim().to_owned(),
             memory: self.memory.trim().to_owned(),
             disk: self.disk.trim().to_owned(),
-            ttl: self.ttl.trim().to_owned(),
+            // Legacy `0`, `infinity` and `∞` mean the default; never echo them.
+            ttl: if ttl_uses_default(&self.ttl) {
+                String::new()
+            } else {
+                self.ttl.trim().to_owned()
+            },
             isolation_tier: self.isolation_tier.trim().to_owned(),
             confidential_available: false,
             show_confidential_controls: false,
@@ -332,7 +337,7 @@ impl EnvironmentSubmission {
         if ttl_uses_default(&self.ttl)
             && let Some(ttl) = preset.default_ttl_seconds
         {
-            self.ttl = format!("{ttl}s");
+            self.ttl = lifetime_field_value(ttl);
         }
         if self.install_command.is_empty() {
             self.install_command = preset.default_install_command.clone();
@@ -2109,7 +2114,7 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         cpu: "1000".to_owned(),
         memory: "2048".to_owned(),
         disk: "10".to_owned(),
-        ttl: DEFAULT_TTL.to_owned(),
+        ttl: String::new(),
         isolation_tier: "standard".to_owned(),
         confidential_available: false,
         show_confidential_controls: false,
@@ -2294,15 +2299,11 @@ fn parse_ttl(value: &str, error: &mut String) -> Option<i32> {
     {
         Some(seconds) if (60..=31_536_000).contains(&seconds) => Some(seconds as i32),
         _ => {
-            *error = "TTL must be infinity or 60 seconds to 365 days, such as 8h or 7d.".to_owned();
+            *error = "Enter a duration from 60 seconds to 365 days, such as 8h or 7d, or leave it empty."
+                .to_owned();
             None
         }
     }
-}
-
-fn ttl_uses_default(value: &str) -> bool {
-    let value = value.trim();
-    value.is_empty() || value == "0" || value.eq_ignore_ascii_case(DEFAULT_TTL) || value == "∞"
 }
 
 fn allowlisted_agents(values: &[String]) -> Vec<String> {
@@ -3136,9 +3137,27 @@ mod tests {
         .render()
         .expect("environment create form");
 
-        assert!(html.contains("<option value=\"750\" selected>750 millicores</option>"));
-        assert!(html.contains("<option value=\"1024\" selected>1024 MiB</option>"));
-        assert!(html.contains("<option value=\"5\" selected>5 GiB</option>"));
+        assert!(html.contains("<option value=\"750\" selected>750 millicores</option><option value=\"1000\">1 vCPU</option><option value=\"2000\">2 vCPU</option><option value=\"4000\">4 vCPU</option><option value=\"8000\">8 vCPU</option></select>"));
+        assert!(html.contains(
+            "<option value=\"1024\" selected>1024 MiB</option><option value=\"2048\">2 GiB</option>"
+        ));
+        assert!(html.contains(
+            "<option value=\"5\" selected>5 GiB</option><option value=\"10\">10 GiB</option>"
+        ));
+
+        let defaults = default_create_form("csrf".into(), true);
+        let html = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &defaults,
+        }
+        .render()
+        .expect("environment create form");
+        assert!(html.contains("name=\"cpu\" aria-describedby=\"environment-cpu-help\"><option value=\"1000\" selected>1 vCPU</option><option value=\"2000\">2 vCPU</option>"));
+        assert!(html.contains("<option value=\"2048\" selected>2 GiB</option><option value=\"4096\">4 GiB</option><option value=\"8192\">8 GiB</option><option value=\"16384\">16 GiB</option></select>"));
+        assert!(html.contains(
+            "<option value=\"10\" selected>10 GiB</option><option value=\"20\">20 GiB</option>"
+        ));
+        assert!(!html.contains("Platform default"));
     }
 
     #[test]
@@ -3217,6 +3236,167 @@ mod tests {
         assert_eq!(rendered.matches("scope=\"col\"").count(), 6);
         assert!(rendered.contains("colspan=\"6\""));
         assert!(!rendered.contains("Region unavailable"));
+    }
+
+    fn resize_test_row(
+        id: &str,
+        cpu_millicores: i32,
+        memory_mb: i32,
+    ) -> crate::view::EnvironmentRow {
+        crate::view::EnvironmentRow {
+            id: id.into(),
+            name: "Resize test".into(),
+            state: "running",
+            state_tone: "success",
+            state_symbol: "●",
+            preset_name: String::new(),
+            isolation_tier: "standard",
+            last_event: String::new(),
+            created: String::new(),
+            deletion_state: "unscheduled",
+            shutdown_at: None,
+            shutdown_at_label: "Not currently scheduled".into(),
+            cost: String::new(),
+            running_time: String::new(),
+            resources: String::new(),
+            cpu_millicores,
+            memory_mb,
+            disk_gb: 10,
+            hourly_rate: String::new(),
+            can_start: false,
+            can_stop: true,
+            can_destroy: true,
+            confidential_actions_allowed: true,
+            vscode_url: "https://vscode.invalid".into(),
+            ports: Vec::new(),
+            sources: None,
+        }
+    }
+
+    fn resize_ids(html: &str) -> Vec<&str> {
+        html.split(" id=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|id| id.starts_with("resize"))
+            .collect()
+    }
+
+    #[test]
+    fn every_resize_form_offers_create_choices_and_keeps_an_off_catalog_current_value() {
+        const OFF: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        const ON: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let organization = test_organization();
+        let off_catalog = resize_test_row(OFF, 750, 1_536);
+        let page = EnvironmentsPageView {
+            environments: vec![off_catalog.clone(), resize_test_row(ON, 2_000, 4_096)],
+            environments_loading: false,
+            create_form: default_create_form("csrf".into(), false),
+            source_editor: None,
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: String::new(),
+            state: "all".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let list = EnvironmentListTemplate {
+            organization: &organization,
+            page: &page,
+        }
+        .render()
+        .unwrap();
+        assert!(list.contains(&format!(
+            "<label class=\"cw-label\" for=\"resize-{OFF}-cpu\">CPU</label><select class=\"cw-select\" id=\"resize-{OFF}-cpu\" name=\"cpu_millicores\" required><option value=\"750\" selected data-resize-current>750 millicores (current)</option><option value=\"1000\">1 vCPU</option><option value=\"2000\">2 vCPU</option><option value=\"4000\">4 vCPU</option><option value=\"8000\">8 vCPU</option></select>"
+        )));
+        assert!(list.contains(&format!(
+            "<label class=\"cw-label\" for=\"resize-{OFF}-memory\">Memory</label><select class=\"cw-select\" id=\"resize-{OFF}-memory\" name=\"memory_mb\" required><option value=\"1536\" selected data-resize-current>1536 MiB (current)</option><option value=\"2048\">2 GiB</option>"
+        )));
+        assert!(list.contains(&format!(
+            "id=\"resize-{ON}-cpu\" name=\"cpu_millicores\" required><option value=\"1000\">1 vCPU</option><option value=\"2000\" selected>2 vCPU</option><option value=\"4000\">4 vCPU</option>"
+        )));
+        assert!(list.contains(&format!(
+            "id=\"resize-{ON}-memory\" name=\"memory_mb\" required><option value=\"2048\">2 GiB</option><option value=\"4096\" selected>4 GiB</option>"
+        )));
+        assert!(list.contains(&format!(
+            "<label class=\"cw-label\" for=\"resize-{ON}-disk\">Disk (GiB)</label><input class=\"cw-input\" id=\"resize-{ON}-disk\" name=\"disk_gb\" type=\"number\" min=\"1\" max=\"16384\" value=\"10\" required>"
+        )));
+        assert_eq!(list.matches("data-resize-current").count(), 2);
+        assert!(!list.contains("millicores)"));
+
+        let view = crate::view::DashboardView {
+            user_name: "Resize".into(),
+            csrf_token: Default::default(),
+            is_admin: false,
+            organizations: Vec::new(),
+            has_organizations: false,
+            organization_navigation_unavailable: false,
+            new_organization_url: "/organizations/new/".into(),
+            settings_url: "/settings/".into(),
+            has_selected_organization: false,
+            selected_organization_name: String::new(),
+            selected_organization_slug: String::new(),
+            selected_organization_url: String::new(),
+            sandboxes: Vec::new(),
+            recent_sandboxes: Vec::new(),
+            sandbox_rail_available: false,
+            sandbox_rail_loading: false,
+            sandbox_total: 0,
+            sandbox_running: 0,
+            sandbox_stopped: 0,
+            sandbox_attention: 0,
+            provisioned_cpu_millicores: 0,
+            provisioned_memory_mb: 0,
+            provisioned_disk_gb: 0,
+        };
+        let terminal_page = crate::view::TerminalPageView {
+            account_id: "account".into(),
+            organization_id: organization.id.clone(),
+            environment: off_catalog,
+            websocket_origin: "wss://dashboard.invalid".into(),
+            list_context: SandboxListContext::default(),
+            list_url: "/test/".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let terminal = crate::templates::TerminalTemplate {
+            view: &view,
+            organization: &organization,
+            page: &terminal_page,
+            csrf_token: "csrf",
+            style_nonce: "nonce",
+        }
+        .render()
+        .unwrap();
+        // The Resize dialog and its no-script fallback render the same fields.
+        for form in ["resize", "resize-fallback"] {
+            assert!(terminal.contains(&format!(
+                "<label class=\"cw-label\" for=\"{form}-cpu\">CPU</label><select class=\"cw-select\" id=\"{form}-cpu\" name=\"cpu_millicores\" required><option value=\"750\" selected data-resize-current>750 millicores (current)</option><option value=\"1000\">1 vCPU</option>"
+            )));
+            assert!(terminal.contains(&format!(
+                "id=\"{form}-memory\" name=\"memory_mb\" required><option value=\"1536\" selected data-resize-current>1536 MiB (current)</option>"
+            )));
+        }
+        assert!(!terminal.contains("millicores)"));
+
+        for html in [&list, &terminal] {
+            let ids = resize_ids(html);
+            let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+            assert_eq!(
+                unique.len(),
+                ids.len(),
+                "duplicate Resize field id in {ids:?}"
+            );
+            for id in ids.iter().filter(|id| {
+                id.ends_with("-cpu") || id.ends_with("-memory") || id.ends_with("-disk")
+            }) {
+                assert!(
+                    html.contains(&format!("for=\"{id}\"")),
+                    "unlabelled Resize field {id}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3671,7 +3851,7 @@ mod tests {
         assert_eq!(submission.cpu, "750");
         assert_eq!(submission.memory, "1024");
         assert_eq!(submission.disk, "5");
-        assert_eq!(submission.ttl, "3600s");
+        assert_eq!(submission.ttl, "1h");
         assert_eq!(submission.image, "example.test/workspace@sha256:abc");
         assert_eq!(submission.install_command, "install-dependencies");
         assert_eq!(submission.startup_script, "start-services");
@@ -3740,6 +3920,76 @@ mod tests {
         assert_eq!(parse_ttl("∞", &mut error), None);
         assert_eq!(parse_ttl("0", &mut error), None);
         assert!(error.is_empty());
+    }
+
+    #[test]
+    fn preset_lifetimes_use_the_largest_exact_unit_and_parse_back() {
+        for (seconds, expected) in [
+            (60, "1m"),
+            (90, "90s"),
+            (3_600, "1h"),
+            (5_400, "90m"),
+            (86_400, "1d"),
+            (90_000, "25h"),
+            (604_800, "7d"),
+            (31_536_000, "365d"),
+        ] {
+            assert_eq!(lifetime_field_value(seconds), expected);
+            let mut error = String::new();
+            assert_eq!(parse_ttl(expected, &mut error), Some(seconds));
+            assert!(error.is_empty());
+        }
+    }
+
+    #[test]
+    fn delete_after_shows_the_preset_default_and_never_infinity() {
+        let organization = test_organization();
+        let render = |form: &EnvironmentCreateFormView| {
+            EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form,
+            }
+            .render()
+            .expect("environment create form")
+        };
+        let field = |value: &str, placeholder: &str| {
+            format!("name=\"ttl\" value=\"{value}\" placeholder=\"{placeholder}\"")
+        };
+
+        let mut form = default_create_form("csrf".into(), true);
+        let html = render(&form);
+        assert!(html.contains(&field("", "Not scheduled")), "{html}");
+        assert!(!html.to_lowercase().contains("infinity"));
+        assert!(html.contains("without one, the Sandbox is not scheduled for automatic deletion"));
+
+        // A preset without a default lifetime leaves the Sandbox unscheduled.
+        form.preset_id = "preset-id".into();
+        form.presets = vec![test_preset("preset-id", false)];
+        form.follow_preset_ttl();
+        assert!(render(&form).contains(&field("", "Not scheduled")));
+
+        let mut preset = test_preset("preset-id", false);
+        preset.default_ttl_seconds = Some(604_800);
+        form.presets = vec![preset];
+        for legacy in ["", "0", "infinity", "Infinity", "∞"] {
+            form.ttl = legacy.into();
+            form.follow_preset_ttl();
+            assert!(render(&form).contains(&field("7d", "7d")), "{legacy}");
+        }
+        // The user's own value is kept; clearing it shows what empty resolves to.
+        form.ttl = "8h".into();
+        form.follow_preset_ttl();
+        assert!(render(&form).contains(&field("8h", "7d")));
+        form.ttl = String::new();
+        assert!(render(&form).contains(&field("", "7d")));
+
+        // Legacy input without a preset default comes back empty, not "infinity".
+        let submission = EnvironmentSubmission::parse(b"ttl=infinity").unwrap();
+        assert_eq!(submission.form_view("csrf".into()).ttl, "");
+        let submission = EnvironmentSubmission::parse(b"ttl=%E2%88%9E").unwrap();
+        assert_eq!(submission.form_view("csrf".into()).ttl, "");
+        let submission = EnvironmentSubmission::parse(b"ttl=8h").unwrap();
+        assert_eq!(submission.form_view("csrf".into()).ttl, "8h");
     }
 
     #[test]

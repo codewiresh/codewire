@@ -27,7 +27,9 @@
     && value.requestId === attempt.requestId && equalResources(value.desiredResources, attempt.desiredResources)
     && value.policy === (attempt.allowRestart ? "allow-restart" : "live-only")
     && ["pending", "applying", "restarting", "completed", "failed"].includes(value.state);
-  const describe = (value) => `${value.cpuMillicores / 1000} vCPU · ${value.memoryMib} MiB memory · ${value.diskGib} GiB disk`;
+  // Same units as the choices and the Sandbox's resources line.
+  const memory = (mib) => mib % 1024 === 0 ? `${mib / 1024} GiB` : `${mib} MiB`;
+  const describe = (value) => `${value.cpuMillicores / 1000} vCPU · ${memory(value.memoryMib)} memory · ${value.diskGib} GiB disk`;
 
   async function boundedJson(response) {
     if (!response.ok || response.headers.get("content-type")?.split(";", 1)[0].trim() !== "application/json") {

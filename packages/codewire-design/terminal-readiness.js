@@ -30,6 +30,28 @@
     node.replaceChildren(time);
   }
 
+  // Resize offers Create's fixed CPU and memory choices. A current value
+  // outside them keeps one "(current)" option, added before the value is set:
+  // a select given a value without an option would show nothing selected.
+  const currentUnits = { cpu_millicores: "millicores", memory_mb: "MiB" };
+  function showResource(field, value) {
+    const text = String(value);
+    if (field instanceof HTMLSelectElement) {
+      let current = field.querySelector("option[data-resize-current]");
+      if (Array.from(field.options).some((option) => option !== current && option.value === text)) current?.remove();
+      else {
+        if (!current) {
+          current = document.createElement("option");
+          current.dataset.resizeCurrent = "";
+          field.prepend(current);
+        }
+        current.value = text;
+        current.textContent = `${text} ${currentUnits[field.name]} (current)`;
+      }
+    }
+    field.value = text;
+  }
+
   function validDetail(value) {
     return P.closed(value, detailFields) && states.includes(value.state) && validDeadline(value)
       && ["started", "stopped", "destroyed", "archived", "resized", "unknown"].includes(value.desiredState)
@@ -72,7 +94,7 @@
         const resize = document.querySelector('dialog[data-resize-enhanced="true"]') || document.querySelector("details[data-sandbox-resize]");
         if (resize && !resize.open && !resize.contains(document.activeElement)) {
           for (const [name, key] of [["cpu_millicores", "cpuMillicores"], ["memory_mb", "memoryMib"], ["disk_gb", "diskGib"]]) {
-            resize.querySelector(`[name="${name}"]`).value = String(detail[key]);
+            showResource(resize.querySelector(`[name="${name}"]`), detail[key]);
           }
         }
         if (resize instanceof HTMLDetailsElement && !resize.open) resize.hidden = !detail.actionsAllowed;
