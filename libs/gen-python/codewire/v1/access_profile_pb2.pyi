@@ -88,6 +88,24 @@ class UpdateAccessProfileResponse(_message.Message):
     access_profile: AccessProfile
     def __init__(self, access_profile: _Optional[_Union[AccessProfile, _Mapping]] = ...) -> None: ...
 
+class RenameAccessProfileRequest(_message.Message):
+    __slots__ = ("access_profile_id", "expected_revision", "expected_name", "name")
+    ACCESS_PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_REVISION_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_NAME_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    access_profile_id: str
+    expected_revision: int
+    expected_name: str
+    name: str
+    def __init__(self, access_profile_id: _Optional[str] = ..., expected_revision: _Optional[int] = ..., expected_name: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
+
+class RenameAccessProfileResponse(_message.Message):
+    __slots__ = ("access_profile",)
+    ACCESS_PROFILE_FIELD_NUMBER: _ClassVar[int]
+    access_profile: AccessProfile
+    def __init__(self, access_profile: _Optional[_Union[AccessProfile, _Mapping]] = ...) -> None: ...
+
 class DeleteAccessProfileRequest(_message.Message):
     __slots__ = ("access_profile_id", "expected_revision")
     ACCESS_PROFILE_ID_FIELD_NUMBER: _ClassVar[int]

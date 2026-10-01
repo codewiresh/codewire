@@ -171,6 +171,20 @@ func (s *AccessProfileService) Update(ctx context.Context, id string, expectedRe
 	return fromProtoAccessProfile(response.Msg.GetAccessProfile())
 }
 
+// Rename relabels a profile at the exact expected current revision and name; a
+// stale view is rejected. No revision is published, the entries are unchanged
+// and environment bindings stay pinned.
+func (s *AccessProfileService) Rename(ctx context.Context, id string, expectedRevision uint64, expectedName, name string) (*AccessProfile, error) {
+	if err := accessProfileRevision(expectedRevision); err != nil {
+		return nil, err
+	}
+	response, err := s.client.accessProfiles.RenameAccessProfile(ctx, connect.NewRequest(&codewirev1.RenameAccessProfileRequest{AccessProfileId: id, ExpectedRevision: expectedRevision, ExpectedName: expectedName, Name: name}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	return fromProtoAccessProfile(response.Msg.GetAccessProfile())
+}
+
 // Delete removes a profile only at the exact expected current revision.
 func (s *AccessProfileService) Delete(ctx context.Context, id string, expectedRevision uint64) error {
 	if err := accessProfileRevision(expectedRevision); err != nil {
