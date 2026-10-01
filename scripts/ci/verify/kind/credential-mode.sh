@@ -66,7 +66,8 @@ patch_kind_credential_container() {
           | .env |= (map(select(.name as $n | [
               "CODEWIRE_KIND_CREDENTIAL_FIXTURE",
               "CODEWIRE_KIND_CREDENTIAL_TEST_KEK",
-              "CREDENTIAL_PUBLIC_ORIGIN"
+              "CREDENTIAL_PUBLIC_ORIGIN",
+              "CREDENTIAL_OAUTH_KEEPALIVE_ENABLED"
             ] | index($n) | not)) + $add)
         else . end)' |
     kubectl replace -f - >/dev/null

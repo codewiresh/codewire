@@ -140,6 +140,20 @@ impl Config {
         Ok(config)
     }
 
+    /// Create the hosted native launch directory before serving. Its parent is
+    /// the Pod's `/codewire/run`; no init container prepares it. Every launch
+    /// still checks that it is an owner-private (0700) directory.
+    pub fn prepare_native_launch_directory(&self) -> std::io::Result<()> {
+        match self
+            .launch_projection
+            .as_ref()
+            .and_then(|projection| projection.native.as_ref())
+        {
+            Some(native) => crate::execution::ensure_process_directory(&native.process_directory),
+            None => Ok(()),
+        }
+    }
+
     fn configure_hosted_projection(
         &mut self,
         lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -338,6 +352,34 @@ mod tests {
             config.validate_host(),
             Err(ConfigError::HostUnsupportedPlatform)
         );
+    }
+
+    #[test]
+    fn hosted_daemon_creates_only_its_configured_native_process_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let parent = tempfile::tempdir().unwrap();
+        let process_directory = parent.path().join("processes");
+        let mut config = fixture();
+        config.prepare_native_launch_directory().unwrap();
+        config.launch_projection = Some(LaunchProjectionConfig {
+            selection_sha256: [0xab; 32],
+            native: None,
+        });
+        config.prepare_native_launch_directory().unwrap();
+        assert!(!process_directory.exists());
+        config.launch_projection = Some(LaunchProjectionConfig {
+            selection_sha256: [0xab; 32],
+            native: Some(NativeLaunchProjectionConfig {
+                helper_path: "/codewire/bin/cw".into(),
+                process_directory: process_directory.clone(),
+            }),
+        });
+        for _restart in 0..2 {
+            config.prepare_native_launch_directory().unwrap();
+            let metadata = std::fs::symlink_metadata(&process_directory).unwrap();
+            assert!(metadata.is_dir());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        }
     }
 
     #[test]

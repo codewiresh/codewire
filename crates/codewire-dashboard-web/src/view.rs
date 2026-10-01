@@ -96,6 +96,8 @@ pub(crate) struct AuthFormView {
     pub(crate) turnstile_site_key: String,
     pub(crate) show_totp_code: bool,
     pub(crate) forgot_password_link: bool,
+    /// Sign-in that finishes at the private-preview handoff; switches fixed copy only.
+    pub(crate) preview_sign_in: bool,
     pub(crate) secondary_label: &'static str,
     pub(crate) secondary_url: String,
 }
@@ -388,6 +390,8 @@ pub(crate) struct CredentialRowView {
     pub(crate) public_key_id: String,
     pub(crate) api_key: bool,
     pub(crate) oauth: bool,
+    /// A rotating OAuth refresh failed; only the owner's Reconnect restores it.
+    pub(crate) reconnect_needed: bool,
     pub(crate) revoked: bool,
     pub(crate) oauth_provider: &'static str,
 }
@@ -825,6 +829,10 @@ pub(crate) struct EnvironmentRow {
     pub(crate) can_start: bool,
     pub(crate) can_stop: bool,
     pub(crate) can_destroy: bool,
+    /// Setup still owns this running Sandbox: it has neither completed nor
+    /// recorded a failure. Orchestration refuses Resize in this window, so
+    /// Resize waits and says why. Presentation only, never authorization.
+    pub(crate) setup_running: bool,
     pub(crate) confidential_actions_allowed: bool,
     pub(crate) vscode_url: String,
     pub(crate) ports: Vec<EnvironmentPortRow>,
@@ -832,6 +840,22 @@ pub(crate) struct EnvironmentRow {
 }
 
 impl EnvironmentRow {
+    /// The lifecycle state as people read it. Deletion uses the product's
+    /// Delete language; every other state reads as its name.
+    pub(crate) fn state_label(&self) -> &'static str {
+        match self.state {
+            "destroying" => "deleting…",
+            "destroyed" => "deleted",
+            state => state,
+        }
+    }
+
+    /// Delete was accepted: the Sandbox is going or gone, so no lifecycle,
+    /// resource or connection action applies to it any more.
+    pub(crate) fn deletion_started(&self) -> bool {
+        matches!(self.state, "destroying" | "destroyed")
+    }
+
     pub(crate) fn cpu_resize_choices(&self) -> Vec<ResourceChoice> {
         current_resource_choices(CPU_CHOICES, self.cpu_millicores, "millicores")
     }
@@ -1562,6 +1586,9 @@ pub(crate) struct EnvironmentsPageView {
     pub(crate) resize_operation: Option<EnvironmentResizeOperationView>,
     pub(crate) search: String,
     pub(crate) state: String,
+    /// The inventory's one polite status: an action's outcome, including what
+    /// became of a Sandbox just deleted. Script replaces it as later list
+    /// refreshes observe transitions.
     pub(crate) message: String,
     pub(crate) error: String,
 }

@@ -468,6 +468,9 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
     let config = codewire_daemon::Config::from_env()?;
+    config
+        .prepare_native_launch_directory()
+        .context("prepare hosted launch process directory")?;
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
         .with_context(|| format!("listen hosted daemon {}", config.listen_addr))?;

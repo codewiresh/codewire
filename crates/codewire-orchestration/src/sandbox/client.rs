@@ -48,6 +48,9 @@ pub struct ProbeResult {
     pub claim_ready: bool,
     pub claim_reason: String,
     pub replicas: i64,
+    /// The Claim's bound Sandbox exists and its spec requests `Suspended`.
+    /// Unlike `replicas == 0`, this is never inferred from an unbound Claim.
+    pub sandbox_suspended: bool,
     pub pod_exists: bool,
     pub pod_phase: String,
     pub node_name: String,
@@ -568,31 +571,40 @@ fn workspace_client_changes(
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("workspace containers are unavailable"))?;
     let (workspace_index, _) = workspace_container(containers)?;
-    let init_containers = spec
-        .get("initContainers")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap init is unavailable"))?;
-    let mut init = init_containers
-        .iter()
-        .enumerate()
-        .filter(|(_, container)| container["name"] == "codewire-daemon-init");
-    let (init_index, current_init) = init
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap init is unavailable"))?;
-    anyhow::ensure!(
-        init.next().is_none(),
-        "workspace bootstrap init is duplicated"
-    );
+    let init_containers = match spec.get("initContainers") {
+        None => &[][..],
+        Some(Value::Array(values)) => values.as_slice(),
+        _ => anyhow::bail!("workspace bootstrap init is malformed"),
+    };
+    let named_init = |name: &str| -> anyhow::Result<Option<(usize, &Value)>> {
+        let mut found = init_containers
+            .iter()
+            .enumerate()
+            .filter(|(_, container)| container["name"] == name);
+        let first = found.next();
+        anyhow::ensure!(
+            found.next().is_none(),
+            "workspace bootstrap init is duplicated"
+        );
+        Ok(first)
+    };
+    let daemon_init = named_init(super::template::DAEMON_INIT_CONTAINER)?;
+    let client_init = named_init(super::template::CLIENT_BOOTSTRAP_CONTAINER)?;
+    // The daemon reaches `/codewire/bin` by exactly one route, fixed when the
+    // object was created: copied by its init container into an emptyDir, or
+    // mounted from the support image. Older objects keep the copy.
+    let daemon_image = match (daemon_init, workspace_daemon_image(spec)?) {
+        (Some(_), None) if client_init.is_none() => None,
+        (None, Some(image)) => Some(image),
+        (None, None) => anyhow::bail!("workspace bootstrap init is unavailable"),
+        _ => anyhow::bail!("workspace daemon delivery is ambiguous"),
+    };
     let mut changes = Vec::new();
     for (path, expected) in [
         (format!("{spec_path}/volumes"), &clients["volumes"]),
         (
             format!("{spec_path}/containers/{workspace_index}/volumeMounts"),
             &clients["volumeMounts"],
-        ),
-        (
-            format!("{spec_path}/initContainers/{init_index}/volumeMounts"),
-            &clients["init"]["volumeMounts"],
         ),
     ] {
         workspace_client_named_changes(
@@ -602,10 +614,70 @@ fn workspace_client_changes(
             &mut changes,
         )?;
     }
-    if current_init.get("command") != Some(&clients["init"]["command"]) {
-        changes.push(serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/{init_index}/command"),"value":clients["init"]["command"]}));
+    let (current, expected) = match daemon_image {
+        None => (daemon_init, &clients["init"]),
+        Some(image) => {
+            let expected = &clients["clientInit"];
+            match (client_init, expected.is_null()) {
+                (None, true) => return Ok(changes),
+                (Some((index, _)), true) => {
+                    changes.push(serde_json::json!({"op":"remove","path":format!("{spec_path}/initContainers/{index}")}));
+                    return Ok(changes);
+                }
+                (None, false) => {
+                    let mut init = expected.clone();
+                    init["image"] = image.into();
+                    changes.push(if spec.get("initContainers").is_none() {
+                        serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers"),"value":[init]})
+                    } else {
+                        serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/-"),"value":init})
+                    });
+                    return Ok(changes);
+                }
+                (Some(_), false) => (client_init, expected),
+            }
+        }
+    };
+    let (init_index, current_init) = current.expect("selected bootstrap init");
+    workspace_client_named_changes(
+        data,
+        &format!("{spec_path}/initContainers/{init_index}/volumeMounts"),
+        expected["volumeMounts"]
+            .as_array()
+            .expect("rendered client array"),
+        &mut changes,
+    )?;
+    if current_init.get("command") != Some(&expected["command"]) {
+        changes.push(serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/{init_index}/command"),"value":expected["command"]}));
     }
     Ok(changes)
+}
+
+/// The support image a Pod mounts its daemon from, or `None` when its
+/// `codewire-bin` is an emptyDir filled by the daemon init container.
+fn workspace_daemon_image(spec: &Value) -> anyhow::Result<Option<&str>> {
+    let volumes = spec
+        .get("volumes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut daemon = volumes
+        .iter()
+        .filter(|volume| volume["name"] == super::template::DAEMON_VOLUME);
+    let volume = daemon.next();
+    anyhow::ensure!(
+        daemon.next().is_none(),
+        "workspace daemon volume is duplicated"
+    );
+    let Some(image) = volume.and_then(|volume| volume.get("image")) else {
+        return Ok(None);
+    };
+    image
+        .get("reference")
+        .and_then(Value::as_str)
+        .filter(|reference| !reference.is_empty())
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("workspace daemon image is malformed"))
 }
 
 fn require_bootstrap_object(
@@ -3715,16 +3787,12 @@ impl SandboxClient {
         {
             // Like getSandboxReplicas: Suspended reads 0; any other existing
             // Sandbox is treated as one running slot.
-            result.replicas = if sb
+            result.sandbox_suspended = sb
                 .data
                 .pointer("/spec/operatingMode")
                 .and_then(Value::as_str)
-                == Some("Suspended")
-            {
-                0
-            } else {
-                1
-            };
+                == Some("Suspended");
+            result.replicas = if result.sandbox_suspended { 0 } else { 1 };
         }
 
         let pod_lookup = if sandbox_name.is_empty() {
@@ -4295,6 +4363,80 @@ mod tests {
             SandboxClient::new(Client::new(service, "default"), "dev-sandboxes"),
             state,
         )
+    }
+
+    fn probe_client(claim: Value, sandbox: Option<Value>) -> SandboxClient {
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let (claim, sandbox) = (claim.clone(), sandbox.clone());
+            async move {
+                assert_eq!(request.method(), Method::GET, "a probe never mutates");
+                let path = request.uri().path().to_string();
+                let (status, body) = match (path.as_str(), sandbox) {
+                    (MODE_CLAIM_PATH, _) => (StatusCode::OK, claim),
+                    (MODE_SANDBOX_PATH, Some(sandbox)) => (StatusCode::OK, sandbox),
+                    _ => (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+                };
+                Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        SandboxClient::new(Client::new(service, "default"), "dev-sandboxes")
+    }
+
+    /// #2328: create recovery resumes only an observed suspended Sandbox. An
+    /// unbound Claim also reads zero replicas and must not look suspended.
+    #[tokio::test]
+    async fn probe_reports_suspension_only_for_the_bound_sandbox() {
+        let claim = |bound: bool| {
+            let mut claim = json!({
+                "apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+                "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                "status": {"conditions": [{"type": "Ready", "status": "False", "reason": "SandboxSuspended"}]}
+            });
+            if bound {
+                claim["status"]["sandbox"] = json!({"name": "workspace-env-test"});
+            }
+            claim
+        };
+        let sandbox = |mode: &str| {
+            let mut sandbox = mode_sandbox();
+            sandbox["spec"]["operatingMode"] = json!(mode);
+            sandbox
+        };
+        for (label, client, suspended, replicas) in [
+            (
+                "suspended",
+                probe_client(claim(true), Some(sandbox("Suspended"))),
+                true,
+                0,
+            ),
+            (
+                "running",
+                probe_client(claim(true), Some(sandbox("Running"))),
+                false,
+                1,
+            ),
+            ("unbound", probe_client(claim(false), None), false, 0),
+            (
+                "bound but absent",
+                probe_client(claim(true), None),
+                false,
+                0,
+            ),
+        ] {
+            let probe =
+                tokio::time::timeout(Duration::from_secs(2), client.probe_environment("env-test"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(probe.claim_exists && !probe.claim_ready, "{label}");
+            assert_eq!(probe.sandbox_suspended, suspended, "{label}");
+            assert_eq!(probe.replicas, replicas, "{label}");
+            assert!(!probe.pod_exists, "{label}");
+        }
     }
 
     #[tokio::test]

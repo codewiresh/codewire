@@ -185,6 +185,48 @@ fn coded(status: StatusCode, code: &'static str, detail: impl Into<Cow<'static, 
     }
 }
 
+/// Setup progress as recorded on the backend row. The schema keeps the owner
+/// tuple all-or-nothing, so its status alone says whether a lease is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
+struct SetupProgress {
+    setup_complete: bool,
+    setup_failed: bool,
+    owner_present: bool,
+}
+
+macro_rules! setup_progress_sql {
+    () => {
+        "SELECT setup_complete,
+                COALESCE(btrim(setup_error), '') <> '' AS setup_failed,
+                setup_owner_status IS NOT NULL AS owner_present
+           FROM sandbox_environment_backend
+          WHERE environment_id = $1"
+    };
+}
+const SETUP_PROGRESS_SQL: &str = setup_progress_sql!();
+const SETUP_PROGRESS_FOR_UPDATE_SQL: &str = concat!(setup_progress_sql!(), " FOR UPDATE");
+
+/// Setup owns a running runtime from create until it completes or records its
+/// failure, and for as long as any setup lease tuple (including `reaping`)
+/// remains. Admitting a resize there replaces the `started` intent that the
+/// lease is fenced on: setup then treats the change as authority loss, scales
+/// the Sandbox to zero to fence its attached process, and cannot resume it
+/// (#2328). Source restart and session launch refuse the same window.
+fn setup_owns_running_runtime(state: &str, setup: Option<SetupProgress>) -> bool {
+    state == "running"
+        && setup.is_some_and(|setup| {
+            setup.owner_present || (!setup.setup_complete && !setup.setup_failed)
+        })
+}
+
+fn setup_in_progress() -> AppError {
+    coded(
+        StatusCode::CONFLICT,
+        "invalid_state",
+        "environment setup is still in progress; try again when it finishes",
+    )
+}
+
 fn validate_request(params: &ResizeEnvironmentParams) -> AppResult<()> {
     if params.org_id.trim().is_empty() {
         return Err(coded(
@@ -353,6 +395,17 @@ async fn build_resize_plan(
             "invalid_state",
             format!("environment cannot be resized while {environment_state}"),
         ));
+    }
+    // Review refuses early so the plan never offers an Apply that admission
+    // must reject; admission rechecks under the environment row lock.
+    if environment_state == "running" {
+        let setup = sqlx::query_as::<_, SetupProgress>(SETUP_PROGRESS_SQL)
+            .bind(&params.environment_id)
+            .fetch_optional(&state.pool)
+            .await?;
+        if setup_owns_running_runtime(&environment_state, setup) {
+            return Err(setup_in_progress());
+        }
     }
     let previous = EnvironmentResources {
         cpu_millicores,
@@ -845,6 +898,18 @@ async fn begin_resize_operation(
             "invalid_state",
             "environment state changed before resize admission",
         ));
+    }
+    if env.state == "running" {
+        // Setup lease transitions lock the environment row, then the backend
+        // row. Holding both until the intent update commits excludes a new
+        // setup owner between this check and `state = 'resizing'`.
+        let setup = sqlx::query_as::<_, SetupProgress>(SETUP_PROGRESS_FOR_UPDATE_SQL)
+            .bind(&params.environment_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if setup_owns_running_runtime(&env.state, setup) {
+            return Err(setup_in_progress());
+        }
     }
 
     let desired = params.desired_resources;
@@ -1438,6 +1503,339 @@ mod tests {
                 .unwrap();
         assert!(newly_admitted);
         assert_eq!(after_failure.reserved_cpu_millicores, 400);
+
+        sqlx::query("DELETE FROM environments WHERE org_id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM environment_presets WHERE id = $1")
+            .bind(&preset_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn setup_owns_a_running_runtime_until_it_completes_or_records_failure() {
+        let progress = |setup_complete, setup_failed, owner_present| SetupProgress {
+            setup_complete,
+            setup_failed,
+            owner_present,
+        };
+        // Published but not yet claimed, between phases, and every lease
+        // status, including a `reaping` tuple left after authority loss.
+        for setup in [
+            progress(false, false, false),
+            progress(false, false, true),
+            progress(false, true, true),
+            progress(true, false, true),
+        ] {
+            assert!(
+                setup_owns_running_runtime("running", Some(setup)),
+                "{setup:?}"
+            );
+        }
+        // Completed or recorded failure with no lease leaves nothing to fence.
+        for setup in [progress(true, false, false), progress(false, true, false)] {
+            assert!(
+                !setup_owns_running_runtime("running", Some(setup)),
+                "{setup:?}"
+            );
+        }
+        assert!(!setup_owns_running_runtime("running", None));
+        // A stopped Sandbox applies the change on its next start.
+        assert!(!setup_owns_running_runtime(
+            "stopped",
+            Some(progress(false, false, true))
+        ));
+        assert_setup_in_progress(&setup_in_progress(), "constructor");
+    }
+
+    fn assert_setup_in_progress(error: &AppError, label: &str) {
+        let AppError::Coded {
+            status,
+            code,
+            detail,
+        } = error
+        else {
+            panic!("{label}: expected a coded rejection, got {error}");
+        };
+        // A known, non-ambiguous lifecycle rejection: Connect renders
+        // `invalid_state` as failed_precondition with its state hint.
+        assert_eq!(*status, StatusCode::CONFLICT, "{label}");
+        assert_eq!(*code, "invalid_state", "{label}");
+        assert!(
+            detail.contains("setup is still in progress"),
+            "{label}: {detail}"
+        );
+    }
+
+    /// #2328: a resize admitted 128 ms after setup started replaced the
+    /// `started` intent its lease is fenced on, so setup suspended the Sandbox
+    /// and never resumed it. Admission must wait for setup to release it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn db_resize_admission_waits_for_setup_to_release_the_running_runtime() {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL is required for resize DB flow");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("connect environment resize test database");
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = format!("usr_resize_setup_{suffix}");
+        let org_id = format!("org_resize_setup_{suffix}");
+        let preset_id = format!("preset_resize_setup_{suffix}");
+        let env_id = format!("env_resize_setup_{suffix}");
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("resize-setup-{suffix}@example.test"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by)
+             VALUES ($1, 'Resize setup test', $2, $3)",
+        )
+        .bind(&org_id)
+        .bind(format!("resize-setup-{suffix}"))
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+               VALUES ($1, $2, 'Resize setup test', $3,
+                       '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+        )
+        .bind(&preset_id)
+        .bind(&org_id)
+        .bind(format!("resize-setup-preset-{suffix}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO environments
+                (id, org_id, created_by, preset_id, type, state, desired_state,
+                 cpu_millicores, memory_mb, disk_gb, project_spec)
+             VALUES ($1, $2, $3, $4, 'sandbox', 'running', 'started', 1000, 1024, 10,
+                     '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+        )
+        .bind(&env_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&preset_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sandbox_environment_backend (environment_id, namespace)
+             VALUES ($1, 'resize-setup-test')",
+        )
+        .bind(&env_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let set_setup =
+            |complete: bool,
+             error: Option<&'static str>,
+             owner: Option<(&'static str, Option<&'static str>)>| {
+                let pool = pool.clone();
+                let env_id = env_id.clone();
+                async move {
+                    let (status, pod_uid) = owner.unzip();
+                    sqlx::query(
+                    "UPDATE sandbox_environment_backend
+                        SET setup_complete = $2, setup_error = $3,
+                            setup_owner_generation = CASE WHEN $4::text IS NULL THEN NULL ELSE 1 END,
+                            setup_owner_activity_id = CASE WHEN $4::text IS NULL THEN NULL ELSE '3' END,
+                            setup_owner_attempt = CASE WHEN $4::text IS NULL THEN NULL ELSE 1 END,
+                            setup_owner_phase = CASE WHEN $4::text IS NULL THEN NULL ELSE 1 END,
+                            setup_owner_status = $4, setup_owner_pod_uid = $5
+                      WHERE environment_id = $1",
+                )
+                .bind(&env_id)
+                .bind(complete)
+                .bind(error)
+                .bind(status)
+                .bind(pod_uid.flatten())
+                .execute(&pool)
+                .await
+                .unwrap();
+                }
+            };
+        let params = |request_id: &str| ResizeEnvironmentParams {
+            org_id: org_id.clone(),
+            environment_id: env_id.clone(),
+            desired_resources: EnvironmentResources {
+                cpu_millicores: 1_500,
+                memory_mb: 1_024,
+                disk_gb: 10,
+            },
+            request_id: request_id.into(),
+            force: false,
+            disruption_policy: EnvironmentResizeDisruptionPolicy::LiveOnly,
+        };
+        let plan = |execution_mode| EnvironmentResizePlan {
+            previous_resources: EnvironmentResources {
+                cpu_millicores: 1_000,
+                memory_mb: 1_024,
+                disk_gb: 10,
+            },
+            desired_resources: params("plan").desired_resources,
+            execution_mode,
+            active_session_count: 0,
+            active_sessions_will_be_terminated: false,
+            reason: "test".into(),
+            warnings: Vec::new(),
+        };
+        let lifecycle = || async {
+            sqlx::query_as::<_, (String, String, i64)>(
+                "SELECT e.state, e.desired_state,
+                        (SELECT COUNT(*) FROM environment_resize_operations o
+                          WHERE o.environment_id = e.id)
+                   FROM environments e WHERE e.id = $1",
+            )
+            .bind(&env_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        let mut operations = 0;
+        for (label, complete, error, owner) in [
+            ("published, not yet claimed", false, None, None),
+            ("claimed", false, None, Some(("claimed", None))),
+            (
+                "process attached",
+                false,
+                None,
+                Some(("running", Some("pod-a"))),
+            ),
+            (
+                "reaping after authority loss",
+                false,
+                None,
+                Some(("reaping", Some("pod-a"))),
+            ),
+            (
+                "post-start mutation",
+                true,
+                None,
+                Some(("running", Some("pod-a"))),
+            ),
+            (
+                "retry after a recorded failure",
+                false,
+                Some("install failed"),
+                Some(("claimed", None)),
+            ),
+        ] {
+            set_setup(complete, error, owner).await;
+            let refused = begin_resize_operation(
+                &pool,
+                &params(label),
+                &plan(EnvironmentResizeExecutionMode::InPlace),
+                -1,
+                -1,
+            )
+            .await
+            .expect_err(label);
+            assert_setup_in_progress(&refused, label);
+            assert_eq!(
+                lifecycle().await,
+                ("running".into(), "started".into(), operations),
+                "{label} must leave setup's intent untouched"
+            );
+        }
+        // Review reads the same facts without taking the admission locks.
+        let progress = sqlx::query_as::<_, SetupProgress>(SETUP_PROGRESS_SQL)
+            .bind(&env_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            progress,
+            SetupProgress {
+                setup_complete: false,
+                setup_failed: true,
+                owner_present: true,
+            }
+        );
+
+        for (label, complete, error) in [
+            ("setup complete", true, None),
+            ("setup failure recorded", false, Some("install failed")),
+        ] {
+            set_setup(complete, error, None).await;
+            let (operation, newly_admitted) = begin_resize_operation(
+                &pool,
+                &params(label),
+                &plan(EnvironmentResizeExecutionMode::InPlace),
+                -1,
+                -1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert!(newly_admitted, "{label}");
+            operations += 1;
+            assert_eq!(
+                lifecycle().await,
+                ("resizing".into(), "resized".into(), operations),
+                "{label}"
+            );
+            sqlx::query(
+                "UPDATE environment_resize_operations
+                    SET state = 'failed', failure_code = 'test_failure',
+                        failure_message = 'test failure', completed_at = NOW()
+                  WHERE id = $1",
+            )
+            .bind(&operation.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE environments SET state = 'running', desired_state = 'started'
+                  WHERE id = $1",
+            )
+            .bind(&env_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // A stopped Sandbox has no setup runtime to fence; it applies on start.
+        set_setup(false, None, Some(("reaping", Some("pod-a")))).await;
+        sqlx::query(
+            "UPDATE environments SET state = 'stopped', desired_state = 'stopped' WHERE id = $1",
+        )
+        .bind(&env_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (_, newly_admitted) = begin_resize_operation(
+            &pool,
+            &params("stopped"),
+            &plan(EnvironmentResizeExecutionMode::ApplyOnStart),
+            -1,
+            -1,
+        )
+        .await
+        .unwrap();
+        assert!(newly_admitted);
 
         sqlx::query("DELETE FROM environments WHERE org_id = $1")
             .bind(&org_id)

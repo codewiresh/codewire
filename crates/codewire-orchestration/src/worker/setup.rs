@@ -19,7 +19,7 @@ use super::agents::agent_definition;
 use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environment};
 #[cfg(feature = "kind-e2e")]
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
-use super::scripts::build_workspace_env_script;
+use super::scripts::{build_git_identity_command, build_workspace_env_script};
 use super::setup_lease::{
     PhaseAcquire, PhasePreparation, SetupActivityIdentity, SetupLeaseRecord, SetupPhaseAuthority,
 };
@@ -1307,37 +1307,17 @@ impl WorkerSetupOps<'_> {
             Some(email) if !email.is_empty() => email.to_string(),
             _ => email,
         };
-        let git_config_result: anyhow::Result<()> = async {
-            self.workspace_exec(
+        // One workspace exec sets both fields: each exec costs about 0.2 s of
+        // attachment on the create and restart critical paths.
+        let git_config_result = self
+            .workspace_exec(
                 namespace,
                 env_id,
-                &[
-                    "git".to_string(),
-                    "config".to_string(),
-                    "--global".to_string(),
-                    "user.email".to_string(),
-                    resolved_email.clone(),
-                ],
+                &build_git_identity_command(&resolved_email, &resolved_name),
                 "",
                 &BTreeMap::new(),
             )
-            .await?;
-            self.workspace_exec(
-                namespace,
-                env_id,
-                &[
-                    "git".to_string(),
-                    "config".to_string(),
-                    "--global".to_string(),
-                    "user.name".to_string(),
-                    resolved_name.clone(),
-                ],
-                "",
-                &BTreeMap::new(),
-            )
-            .await
-        }
-        .await;
+            .await;
         match git_config_result {
             Err(error) if is_setup_control_flow(&error) => {
                 return Err(error);

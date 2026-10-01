@@ -38,6 +38,136 @@ async function fits(page: Page, owner?: Locator): Promise<void> {
   if (owner) await expect.poll(() => owner.evaluate((node) => node.scrollWidth <= node.clientWidth + 1), { timeout: 5_000 }).toBe(true);
 }
 
+// Read-only page checks below never open a create or destructive action. Rows
+// and names are the Dev account's own data: each check holds for whatever rows
+// exist and never assumes a count or a name.
+
+// No unset value renders in place of a name, and every status is in words.
+async function noUnsetValues(page: Page): Promise<void> {
+  const main = page.locator("main");
+  await expect(main).not.toContainText("null · null");
+  await expect(main.getByText(/^(?:null|undefined)$/)).toHaveCount(0);
+  await expect(main.locator(".cw-status").filter({ hasNotText: /\S/ })).toHaveCount(0);
+}
+
+// One Settings shell headed exactly "Settings", whose only current link is
+// this page within its own group.
+async function settingsShell(page: Page, group: "personal" | "organization", current: string): Promise<void> {
+  const shell = page.locator(".cw-context-nav");
+  await expect(shell.locator(".cw-context-nav-heading")).toHaveText("Settings");
+  await expect(shell.getByRole("heading", { name: "Settings", exact: true, level: 2 })).toBeVisible();
+  await expect(shell.locator('a[aria-current="page"]')).toHaveCount(1);
+  await expect(shell.locator(`ul[aria-labelledby="settings-${group}-title"] a[aria-current="page"]`)).toHaveAttribute("href", current);
+}
+
+// A page title as written, never uppercased.
+async function pageTitle(header: Locator, title: string): Promise<void> {
+  const heading = header.getByRole("heading", { level: 1 });
+  await expect(heading).toHaveText(title);
+  await expect(heading).toHaveCSS("text-transform", "none");
+}
+
+// GitHub reconnects or disconnects; other credentials rename, optionally
+// reconnect or rotate, then revoke while active or delete once revoked.
+const CREDENTIAL_MENU = /^(?:Reconnect,Disconnect GitHub|Rename(?:,Reconnect)?(?:,Rotate API key)?,(?:Revoke|Delete))$/;
+const menuItems = (rows: Locator) => rows.evaluateAll((nodes) => nodes.map((row) => Array.from(
+  row.querySelectorAll(":scope > details.cw-menu .cw-menu-item"), (item) => item.textContent?.trim()).join(",")));
+
+// Credential rows show an icon, a name, a status in words and one actions menu
+// holding only that row's actions: no Manage step, generation or revision.
+// Profile rows show the account's GitHub connection, or that it is missing.
+async function credentialRows(page: Page): Promise<void> {
+  const credentials = page.locator(".cw-credential-row");
+  const profiles = page.locator(".cw-profile-row");
+  const count = await credentials.count();
+  if (!count) await expect(page.getByText("No credentials yet. Add a provider account, API key or SSH identity to get started.", { exact: true })).toBeVisible();
+  await expect(page.locator(".cw-credential-row > .cw-credential-identity > svg.cw-icon")).toHaveCount(count);
+  await expect(page.locator(".cw-credential-row > .cw-credential-identity strong").filter({ hasText: /\S/ })).toHaveCount(count);
+  await expect(page.locator(".cw-credential-row > .cw-credential-status").filter({ hasText: /\S/ })).toHaveCount(count);
+  await expect(page.locator('.cw-credential-row > details.cw-menu > summary[aria-label^="Actions for "]')).toHaveCount(count);
+  await expect(credentials.filter({ hasText: /Generation|Revision/ })).toHaveCount(0);
+  const credentialMenus = await menuItems(credentials);
+  for (const menu of credentialMenus) expect(menu).toMatch(CREDENTIAL_MENU);
+  if (!await profiles.count()) await expect(page.getByText("No profiles yet. Create a profile from your credentials, then select it for a Sandbox.", { exact: true })).toBeVisible();
+  await expect(page.locator(".cw-profile-row > header").filter({ hasText: /Generation|Revision/ })).toHaveCount(0);
+  for (const menu of await menuItems(profiles)) expect(menu).toBe("Rename,Edit identities,Delete");
+  const github = credentialMenus.some((menu) => menu.endsWith("Disconnect GitHub")) ? /GitHub: @\S/ : /GitHub: missing/;
+  for (const summary of await profiles.locator(":scope > header").allTextContents()) expect(summary).toMatch(github);
+  await expect(page.locator(":is(.cw-credential-row, .cw-profile-row)").getByRole("button", { name: /^Manage\b/ })).toHaveCount(0);
+  // The keyboard opens the first row menu; Escape closes it and returns focus.
+  // Nothing in the menu is chosen.
+  const menu = page.locator(":is(.cw-credential-row, .cw-profile-row) > details.cw-menu").first();
+  if (await menu.count()) {
+    const trigger = menu.locator(":scope > summary");
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    await expect(menu).toHaveAttribute("open", "");
+    await expect(menu.locator(".cw-menu-item").first()).toBeVisible();
+    await fits(page);
+    await page.keyboard.press("Escape");
+    await expect(menu).not.toHaveAttribute("open", "");
+    await expect(trigger).toBeFocused();
+  }
+}
+
+// Settings lists the account's own keys across its organizations, each linked
+// to that organization's inventory, and Create asks which organization a key
+// belongs to. Create is never opened here.
+async function personalApiKeys(page: Page): Promise<void> {
+  const header = page.locator(".cw-settings-content > .cw-page-header");
+  await pageTitle(header, "API keys");
+  await expect(header.locator(".cw-page-title-row .cw-badge")).toHaveText(/^\d+ keys?$/);
+  await expect(header.locator(".cw-page-description")).toHaveText("Codewire API keys you created, for the CLI and SDK. Each key belongs to one organization.");
+  await expect(button(header, "Create key")).toBeEnabled();
+  const organization = page.locator("#create-personal-api-key-org");
+  await expect(organization).toHaveAttribute("required", "");
+  await expect(organization.locator("option").first()).toHaveAttribute("value", "");
+  await expect(organization.locator("option").filter({ hasText: /^(?:null|undefined)$|null · null/ })).toHaveCount(0);
+  await expect(page.getByRole("search", { name: "Filter API keys", exact: true })).toBeVisible();
+  await apiKeyTable(page, ["Name", "Organization", "Status", "Last used", "Expires"], "You have no API keys yet. Create one to use the Codewire CLI or SDK.");
+  const owners = await page.locator(".cw-table tbody tr").evaluateAll((rows) => rows.map((row) => row.querySelector(":scope > td:nth-child(2) > a")?.getAttribute("href") ?? ""));
+  for (const owner of owners) expect(owner).toMatch(/^\/[a-z0-9]+(?:-[a-z0-9]+)*\/api-keys\/$/);
+}
+
+// The organization's own inventory stays separate and scoped to it.
+async function organizationApiKeys(page: Page, slug: string): Promise<void> {
+  await visit(page, `/${slug}/api-keys/`);
+  const header = page.locator("#organization-content > .cw-page-header");
+  await pageTitle(header, "API keys");
+  await expect(header.locator(".cw-page-title-row .cw-badge")).toHaveText(/^\d+ keys?$/);
+  await expect(header.locator(".cw-page-description")).toHaveText(/^Codewire API keys for \S.*, for the CLI and SDK\.$/);
+  await settingsShell(page, "organization", `/${slug}/api-keys/`);
+  await expect(page.locator("#settings-organization-title")).toHaveText(/^Organization · \S/);
+  await apiKeyTable(page, ["Name", "Created by", "Status", "Last used", "Created"], "No API keys yet. Create one for programmatic access.");
+  await noUnsetValues(page);
+  await fits(page);
+}
+
+// A table with declared column headers when keys exist, else the empty state.
+async function apiKeyTable(page: Page, columns: string[], empty: string): Promise<void> {
+  if (await page.locator(".cw-table").count()) {
+    await expect(page.locator('.cw-table thead th[scope="col"]')).toHaveText([...columns, "Actions"]);
+  } else {
+    await expect(page.getByText(empty, { exact: true })).toBeVisible();
+  }
+}
+
+// View only: never fill or submit this form.
+async function createOrganization(page: Page): Promise<void> {
+  await visit(page, "/organizations/new/");
+  const title = page.getByRole("heading", { name: "Create Organization", exact: true, level: 1 });
+  await expect(title).toBeVisible();
+  await expect(title).toHaveCSS("text-transform", "none");
+  expect(parseFloat(await title.evaluate((node) => getComputedStyle(node).fontSize))).toBeGreaterThanOrEqual(24);
+  await expect(page.locator(".cw-form-icon")).toHaveCount(0);
+  await expect(page.getByText("Organizations group your Sandboxes and team members together")).toHaveCount(0);
+  const panel = (await page.locator(".cw-form-page").boundingBox())!;
+  const name = (await page.getByLabel("Organization name", { exact: true }).boundingBox())!;
+  expect(panel.width).toBeLessThanOrEqual(512);
+  expect(name.width).toBeLessThan(panel.width);
+  await fits(page);
+}
+
 async function credentials(page: Page, slug: string, width: number): Promise<void> {
   const add = button(page, "Add credential");
   const chooser = dialog(page, "Add credential");
@@ -45,6 +175,18 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
     await visit(page, `/settings/credentials/?org=${slug}`);
     await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Profiles", exact: true, level: 2 })).toBeVisible();
+    await expect(page.locator(".cw-settings-content > .cw-page-header .cw-page-description"))
+      .toHaveText("Add and manage provider credentials for things like GitHub, SSH keys, Claude, and Codex.");
+    await settingsShell(page, "personal", "/settings/credentials/");
+    await credentialRows(page);
+    // Git commit identity is attribution, apart from authentication and profiles.
+    const identity = page.locator("#git-identity");
+    await expect(identity.getByRole("heading", { name: "Git commit identity", exact: true, level: 2 })).toBeVisible();
+    await expect(identity.locator(".cw-card-description"))
+      .toHaveText("Author name and email for Sandbox commits. This is commit attribution, not a GitHub login, provider credential or profile member.");
+    await expect(identity.getByText("Clear either field to use its independent account fallback. Connecting GitHub does not overwrite your Codewire email.")).toBeVisible();
+    for (const field of ["Commit author name", "Commit author email"]) await expect(identity.getByLabel(field, { exact: true })).toBeVisible();
+    await noUnsetValues(page);
   });
   await stage(`credentials-chooser-${width}`, async () => {
     await add.click();
@@ -104,13 +246,45 @@ async function settings(page: Page, slug: string, width: number): Promise<void> 
       for (const title of ["Account details", "Security", "Active sessions"]) {
         await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
       }
+      // A plain "Account" title and one short description, with no eyebrow.
+      const header = page.locator(".cw-settings-content > .cw-page-header");
+      await pageTitle(header, "Account");
+      await expect(header.locator("p")).toHaveText(["Your account details, security and browser sessions."]);
+      await expect(header.getByText(/personal/i)).toHaveCount(0);
+      await settingsShell(page, "personal", "/settings/");
+      // Session controls are available, and this browser leads its page.
+      const sessions = page.locator("#sessions");
+      await expect(sessions.getByText("Session controls are unavailable")).toHaveCount(0);
+      await expect(sessions.locator(".cw-account-sessions")).toHaveCount(1);
+      const rows = sessions.locator(".cw-account-session");
+      if (await rows.getByRole("heading", { name: "This browser", exact: true }).count()) {
+        await expect(rows.first().locator(":scope > header > h3")).toHaveText("This browser");
+        await expect(rows.first().locator(":scope > header > p")).toHaveText(/^Signed in .+ · Expires .+$/);
+      }
+      await noUnsetValues(page);
       await fits(page);
+      if (scope === "personal") {
+        // Old Security and Sessions links land on their Account sections.
+        if (width === 1440) {
+          for (const section of ["security", "sessions"]) {
+            await page.goto(`${ORIGIN}/settings/${section}/`, { waitUntil: "domcontentloaded" });
+            await expect(page).toHaveURL(`${ORIGIN}/settings/#${section}`);
+            await expect(page.getByRole("heading", { name: "Account", exact: true, level: 1 })).toBeVisible();
+          }
+        }
+        // No stage owns Create Organization; it is an account page.
+        await createOrganization(page);
+      }
     });
     for (const [path, title] of [["secrets", "Secrets"], ["api-keys", "API keys"]]) {
       await stage(`settings-${path}-${scope}-${width}`, async () => {
         await visit(page, `/settings/${path}/${query}`);
         await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
+        await settingsShell(page, "personal", `/settings/${path}/`);
+        if (path === "api-keys") await personalApiKeys(page);
+        await noUnsetValues(page);
         await fits(page);
+        if (path === "api-keys" && scope === "organization") await organizationApiKeys(page, slug);
       });
     }
   }
@@ -146,6 +320,39 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
   await stage(`create-fit-${width}`, async () => {
     await fits(page, github);
     await fits(page, page.locator("#environment-create-card"));
+    // CPU, Memory, Disk and Delete after share one row on desktop and two on a
+    // phone, each with its own help beside its label.
+    const resources = page.locator(".cw-create-resources");
+    const tops = await resources.locator(":scope > .cw-field").evaluateAll((fields) =>
+      fields.map((field) => Math.round(field.getBoundingClientRect().top)));
+    expect(tops).toHaveLength(4);
+    if (width === 1440) expect(new Set(tops).size).toBe(1);
+    else expect([tops[0] === tops[1], tops[2] === tops[3], tops[2] > tops[0]]).toEqual([true, true, true]);
+    for (const [name, help, text] of [
+      ["About CPU", "cpu", "1000 millicores equals 1 vCPU."], ["About memory", "memory", "1024 MiB equals 1 GiB."],
+      ["About disk", "disk", "Workspace disk size is measured in GiB."],
+      ["About automatic deletion", "ttl", "Stop and activity do not cancel the deadline; setup and Start reschedule it."],
+    ]) {
+      await expect(button(resources, name)).toBeVisible();
+      await expect(page.locator(`#environment-${help}-help`)).toContainText(text);
+    }
+    await expect(page.locator("#environment-ttl-help")).toContainText("Schedules automatic deletion of the Sandbox and workspace files; this is not an idle timeout.");
+    // The keyboard reaches the CPU help from Name; Escape closes only the help.
+    const cpuHelp = page.locator("#environment-cpu-help");
+    await page.getByLabel("Name", { exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await expect(button(resources, "About CPU")).toBeFocused();
+    await expect(cpuHelp).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(cpuHelp).toBeHidden();
+    await expect(form).toBeVisible();
+    // Section headings read exactly like the field labels around them.
+    const textStyle = (owner: Locator) => owner.evaluate((node) => {
+      const style = getComputedStyle(node);
+      return `${style.color} ${style.fontSize} ${style.fontWeight}`;
+    });
+    const label = await textStyle(page.locator('label[for="environment-name"]'));
+    for (const heading of ["#create-resources-title", "#create-repositories-title"]) expect(await textStyle(page.locator(heading))).toBe(label);
   });
   // Read-only setup detours: do not create credentials or application secrets.
   for (const destination of ["secrets", "credentials"]) {
@@ -216,6 +423,10 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await page.locator("#environment-create-card").getByLabel("CPU", { exact: true }).selectOption("1000");
     await page.locator("#environment-create-card").getByLabel("Memory", { exact: true }).selectOption("2048");
     await page.locator("#environment-create-card").getByLabel("Disk", { exact: true }).selectOption("10");
+    // Create names the exact units the detail page and Resize show.
+    for (const [field, unit] of [["CPU", "1 vCPU"], ["Memory", "2 GiB"], ["Disk", "10 GiB"]]) {
+      await expect(page.locator("#environment-create-card").getByLabel(field, { exact: true }).locator("option:checked")).toHaveText(unit);
+    }
     await page.getByLabel("Delete after", { exact: true }).fill("1h");
     // Use the product's configured default image. Never inherit a saved source
     // selection or attach the dedicated account's existing secrets/providers.
@@ -468,9 +679,20 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
   });
   await stage("resize-dismissal", async () => {
+    // The detail page shows the exact resources and the scheduled deletion
+    // that Delete after = 1h requested.
+    await expect(page.locator("[data-sandbox-resources]")).toHaveText(["1 vCPU · 2 GiB · 10 GiB", "1 vCPU · 2 GiB · 10 GiB"]);
+    const deadline = Date.parse((await page.locator("[data-sandbox-lifetime] time").getAttribute("datetime")) ?? "");
+    expect(deadline).toBeGreaterThan(Date.now());
+    expect(deadline).toBeLessThanOrEqual(Date.now() + 65 * 60_000);
     await button(page, "Resize").click();
     const resize = dialog(page, `Resize ${owned.name}`);
     await expect(resize).toBeVisible();
+    // Resize offers Create's choices with the current resources selected.
+    await expect(resize).toContainText("Some changes require a restart.");
+    await expect(resize.getByLabel("CPU", { exact: true }).locator("option:checked")).toHaveText("1 vCPU");
+    await expect(resize.getByLabel("Memory", { exact: true }).locator("option:checked")).toHaveText("2 GiB");
+    await expect(resize.getByLabel("Disk (GiB)", { exact: true })).toHaveValue("10");
     await page.mouse.click(2, 2);
     await expect(resize).not.toBeVisible();
     await expect(button(page, "Resize")).toBeFocused();
@@ -479,6 +701,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await button(page, "Stop").click();
     const stop = dialog(page, `Stop ${owned.name}?`);
     await expect(button(stop, "Cancel")).toBeFocused();
+    // Each confirmation says what happens to processes, files and the deadline.
+    for (const effect of ["Running processes and terminal sessions will end.", "Workspace files are kept",
+      "Stopping does not cancel automatic deletion."]) await expect(stop).toContainText(effect);
     await button(stop, "Cancel").click();
     await expect(page.locator("[data-sandbox-state]")).toHaveText("running");
     await button(page, "Stop").click();
@@ -492,10 +717,11 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await button(page, "Delete").click();
     const deletion = dialog(page, `Delete ${owned.name}?`);
     await expect(button(deletion, "Cancel")).toBeFocused();
+    await expect(deletion).toContainText("This permanently deletes the Sandbox and its workspace files.");
     await button(deletion, "Cancel").click();
     await button(page, "Delete").click();
     await button(deletion, "Delete Sandbox").click();
-    await expect(page).toHaveURL(`${ORIGIN}/${slug}/?message=environment-destroying`);
+    await expect(page).toHaveURL(`${ORIGIN}/${slug}/?message=environment-destroying&environment=${id}`);
     // Independent CLI finally cleanup proves terminal destruction, even when
     // the browser loses an acknowledgment. Do not equate this redirect to it.
   });

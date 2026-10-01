@@ -17,13 +17,12 @@ use codewire_gateway_proto::{
 };
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
-    acquire_environment_runtime_mutation_lease, mark_organization_mutation_resolution_required,
-    release_organization_mutation_lease,
+    RuntimeMutationOutcome, run_environment_runtime_mutation_with_outcome,
 };
 use codewire_server_core::{AppError, AppResult};
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
@@ -34,13 +33,15 @@ use super::ApiState;
 use super::proxy::{
     huma_error, resolve_running_sandbox_target, resolve_running_sandbox_target_for_repair,
 };
-use crate::sandbox::client::SandboxClient;
+use crate::sandbox::client::{SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::template::{WORKSPACE_DAEMON_PORT, workspace_daemon_service_name};
 use crate::worker::activity_authority::{
     ActivityAuthority, await_external_mutation, is_authority_lost,
 };
 use crate::worker::gatewayauth::{SCOPE_DAEMON, issue_token};
 
+#[cfg(test)]
+mod repair_database_tests;
 mod session_mutation;
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -659,191 +660,226 @@ pub async fn repair_environment_daemon_core(
         .await
         .map_err(|_| AppError::ServiceUnavailable("workspace Pod is unavailable".into()))?
         .ok_or_else(|| AppError::ServiceUnavailable("workspace Pod is unavailable".into()))?;
-    let lease =
-        acquire_environment_runtime_mutation_lease(&state.pool, org_id, &target.environment_id)
-            .await?;
-
-    if let Err(error) = delete_workspace_pod_while_setup_idle(
-        &authority,
-        &sandbox,
-        &target.environment_id,
-        &current.name,
-        &current.uid,
+    run_daemon_repair(
+        &state.pool,
+        org_id,
+        DaemonRepair {
+            session_secret: state.session_secret.clone(),
+            daemon_endpoints: state.environment_daemon_endpoints.clone(),
+            namespace: target.namespace,
+            environment_id: target.environment_id,
+            sandbox,
+            authority,
+            current,
+        },
     )
     .await
-    {
-        if error.downcast_ref::<DaemonRepairSetupBusy>().is_some() {
-            release_organization_mutation_lease(&state.pool, &lease.id).await?;
-            return Err(AppError::Conflict(
-                "environment setup or recovery is in progress".into(),
-            ));
-        }
-        if is_authority_lost(&error) {
-            release_organization_mutation_lease(&state.pool, &lease.id).await?;
-            return Err(AppError::Conflict(
-                "environment state changed during daemon repair".into(),
-            ));
-        }
-        mark_organization_mutation_resolution_required(
-            &state.pool,
-            &lease.id,
-            "environment_daemon_repair_ambiguous",
-        )
-        .await?;
-        tracing::warn!(environment_id, %error, "environment daemon repair failed");
-        return Err(AppError::Upstream(
-            "environment daemon repair did not converge".into(),
-        ));
-    }
-    let replacement = match authority
-        .run_while_authoritative_for_states(
-            &["running"],
-            sandbox.wait_for_replacement_workspace_pod(
-                &current.name,
-                &current.uid,
-                DAEMON_REPAIR_TIMEOUT,
-            ),
-        )
-        .await
-    {
-        Ok(replacement) => replacement,
-        Err(error) => {
-            mark_organization_mutation_resolution_required(
-                &state.pool,
-                &lease.id,
-                "environment_daemon_repair_ambiguous",
-            )
-            .await?;
-            tracing::warn!(
-                environment_id,
-                %error,
-                "environment daemon repair failed"
-            );
-            return Err(AppError::Upstream(
-                "environment daemon repair did not converge".into(),
-            ));
-        }
-    };
-    let deadline = tokio::time::Instant::now() + DAEMON_REPAIR_TIMEOUT;
-    let status = loop {
-        if let Err(error) = authority.ensure_for_states(&["running"]).await {
-            mark_organization_mutation_resolution_required(
-                &state.pool,
-                &lease.id,
-                "environment_daemon_repair_readiness_ambiguous",
-            )
-            .await?;
-            return Err(if is_authority_lost(&error) {
-                AppError::Conflict("environment state changed during daemon repair".into())
-            } else {
-                AppError::Upstream("environment daemon repair did not converge".into())
-            });
-        }
-        match daemon_status_for_target(
-            state,
-            &target.namespace,
-            &target.environment_id,
-            &replacement.name,
+}
+
+/// Everything a daemon repair uses after admission, owned so the repair can
+/// outlive the request that started it.
+struct DaemonRepair {
+    session_secret: String,
+    daemon_endpoints: EnvironmentDaemonEndpointOverrides,
+    namespace: String,
+    environment_id: String,
+    sandbox: SandboxClient,
+    authority: ActivityAuthority,
+    current: WorkspacePodIdentity,
+}
+
+/// Replace the workspace Pod behind the environment runtime fence.
+///
+/// Admission and the replacement run in the shared runtime-mutation owner
+/// task, so a caller that leaves mid-repair cannot strand the lease: each path
+/// still releases it or records its own recovery code. The replacement keeps
+/// its own Pod and readiness deadlines; the owner adds none.
+async fn run_daemon_repair(
+    pool: &PgPool,
+    org_id: &str,
+    repair: DaemonRepair,
+) -> AppResult<EnvironmentDaemonRepair> {
+    let environment_id = repair.environment_id.clone();
+    run_environment_runtime_mutation_with_outcome(
+        pool,
+        org_id,
+        &environment_id,
+        repair.replace_workspace_pod(),
+    )
+    .await?
+}
+
+impl DaemonRepair {
+    async fn replace_workspace_pod(
+        self,
+    ) -> RuntimeMutationOutcome<AppResult<EnvironmentDaemonRepair>> {
+        let environment_id = self.environment_id.as_str();
+        if let Err(error) = delete_workspace_pod_while_setup_idle(
+            &self.authority,
+            &self.sandbox,
+            environment_id,
+            &self.current.name,
+            &self.current.uid,
         )
         .await
         {
-            Ok(status)
-                if matches!(
-                    status.state,
-                    v1::DaemonState::Ready
-                        | v1::DaemonState::Unsupported
-                        | v1::DaemonState::UpgradeRequired
-                        | v1::DaemonState::Unhealthy
-                ) =>
+            if error.downcast_ref::<DaemonRepairSetupBusy>().is_some() {
+                return RuntimeMutationOutcome::release(Err(AppError::Conflict(
+                    "environment setup or recovery is in progress".into(),
+                )));
+            }
+            if is_authority_lost(&error) {
+                return RuntimeMutationOutcome::release(Err(AppError::Conflict(
+                    "environment state changed during daemon repair".into(),
+                )));
+            }
+            tracing::warn!(environment_id, %error, "environment daemon repair failed");
+            return RuntimeMutationOutcome::resolution_required(
+                "environment_daemon_repair_ambiguous",
+                Err(AppError::Upstream(
+                    "environment daemon repair did not converge".into(),
+                )),
+            );
+        }
+        let replacement = match self
+            .authority
+            .run_while_authoritative_for_states(
+                &["running"],
+                self.sandbox.wait_for_replacement_workspace_pod(
+                    &self.current.name,
+                    &self.current.uid,
+                    DAEMON_REPAIR_TIMEOUT,
+                ),
+            )
+            .await
+        {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                tracing::warn!(
+                    environment_id,
+                    %error,
+                    "environment daemon repair failed"
+                );
+                return RuntimeMutationOutcome::resolution_required(
+                    "environment_daemon_repair_ambiguous",
+                    Err(AppError::Upstream(
+                        "environment daemon repair did not converge".into(),
+                    )),
+                );
+            }
+        };
+        let deadline = tokio::time::Instant::now() + DAEMON_REPAIR_TIMEOUT;
+        let status = loop {
+            if let Err(error) = self.authority.ensure_for_states(&["running"]).await {
+                return RuntimeMutationOutcome::resolution_required(
+                    "environment_daemon_repair_readiness_ambiguous",
+                    Err(if is_authority_lost(&error) {
+                        AppError::Conflict("environment state changed during daemon repair".into())
+                    } else {
+                        AppError::Upstream("environment daemon repair did not converge".into())
+                    }),
+                );
+            }
+            match self.daemon_status(&replacement.name).await {
+                Ok(status)
+                    if matches!(
+                        status.state,
+                        v1::DaemonState::Ready
+                            | v1::DaemonState::Unsupported
+                            | v1::DaemonState::UpgradeRequired
+                            | v1::DaemonState::Unhealthy
+                    ) =>
+                {
+                    break status;
+                }
+                Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(DAEMON_STATUS_RETRY_INTERVAL).await;
+                }
+                Ok(status) => {
+                    break status;
+                }
+                Err(error) => {
+                    return RuntimeMutationOutcome::resolution_required(
+                        "environment_daemon_repair_readiness_ambiguous",
+                        Err(error),
+                    );
+                }
+            }
+        };
+        let probe = match self
+            .authority
+            .run_while_authoritative_for_states(
+                &["running"],
+                self.sandbox.probe_environment(environment_id),
+            )
+            .await
+        {
+            Ok(probe)
+                if probe.pod_exists
+                    && probe.pod_name == replacement.name
+                    && probe.pod_uid == replacement.uid
+                    && !probe.pod_ip.is_empty() =>
             {
-                break status;
+                probe
             }
-            Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(DAEMON_STATUS_RETRY_INTERVAL).await;
-            }
-            Ok(status) => {
-                break status;
+            Ok(_) => {
+                return RuntimeMutationOutcome::resolution_required(
+                    "environment_daemon_repair_backend_ambiguous",
+                    Err(AppError::Upstream(
+                        "environment daemon repair did not converge".into(),
+                    )),
+                );
             }
             Err(error) => {
-                mark_organization_mutation_resolution_required(
-                    &state.pool,
-                    &lease.id,
-                    "environment_daemon_repair_readiness_ambiguous",
-                )
-                .await?;
-                return Err(error);
+                tracing::warn!(environment_id, %error, "environment daemon repair backend did not converge");
+                return RuntimeMutationOutcome::resolution_required(
+                    "environment_daemon_repair_backend_ambiguous",
+                    Err(if is_authority_lost(&error) {
+                        AppError::Conflict("environment state changed during daemon repair".into())
+                    } else {
+                        AppError::Upstream("environment daemon repair did not converge".into())
+                    }),
+                );
             }
-        }
-    };
-    let probe = match authority
-        .run_while_authoritative_for_states(
-            &["running"],
-            sandbox.probe_environment(&target.environment_id),
-        )
-        .await
-    {
-        Ok(probe)
-            if probe.pod_exists
-                && probe.pod_name == replacement.name
-                && probe.pod_uid == replacement.uid
-                && !probe.pod_ip.is_empty() =>
-        {
-            probe
-        }
-        Ok(_) => {
-            mark_organization_mutation_resolution_required(
-                &state.pool,
-                &lease.id,
+        };
+        let backend_update = self
+            .authority
+            .execute_for_states(
+                &["running"],
+                sqlx::query(
+                    "UPDATE sandbox_environment_backend SET pod_name = $1, pod_ip = $2 \
+                     WHERE environment_id = $3",
+                )
+                .bind(&probe.pod_name)
+                .bind(&probe.pod_ip)
+                .bind(environment_id),
+            )
+            .await;
+        if !matches!(backend_update, Ok(ref result) if result.rows_affected() == 1) {
+            return RuntimeMutationOutcome::resolution_required(
                 "environment_daemon_repair_backend_ambiguous",
-            )
-            .await?;
-            return Err(AppError::Upstream(
-                "environment daemon repair did not converge".into(),
-            ));
+                Err(AppError::Upstream(
+                    "environment daemon repair did not converge".into(),
+                )),
+            );
         }
-        Err(error) => {
-            mark_organization_mutation_resolution_required(
-                &state.pool,
-                &lease.id,
-                "environment_daemon_repair_backend_ambiguous",
-            )
-            .await?;
-            tracing::warn!(environment_id, %error, "environment daemon repair backend did not converge");
-            return Err(if is_authority_lost(&error) {
-                AppError::Conflict("environment state changed during daemon repair".into())
-            } else {
-                AppError::Upstream("environment daemon repair did not converge".into())
-            });
-        }
-    };
-    let backend_update = authority
-        .execute_for_states(
-            &["running"],
-            sqlx::query(
-                "UPDATE sandbox_environment_backend SET pod_name = $1, pod_ip = $2 \
-                 WHERE environment_id = $3",
-            )
-            .bind(&probe.pod_name)
-            .bind(&probe.pod_ip)
-            .bind(&target.environment_id),
-        )
-        .await;
-    if !matches!(backend_update, Ok(ref result) if result.rows_affected() == 1) {
-        mark_organization_mutation_resolution_required(
-            &state.pool,
-            &lease.id,
-            "environment_daemon_repair_backend_ambiguous",
+        RuntimeMutationOutcome::release(Ok(EnvironmentDaemonRepair {
+            status,
+            replaced_pod_name: replacement.name,
+        }))
+    }
+
+    async fn daemon_status(&self, known_pod_name: &str) -> AppResult<EnvironmentDaemonStatus> {
+        let (channel, token) = daemon_channel_for_endpoint(
+            &self.session_secret,
+            &self.environment_id,
+            self.daemon_endpoints
+                .endpoint(&self.namespace, &self.environment_id),
+            DaemonRequestBudget::Control,
         )
         .await?;
-        return Err(AppError::Upstream(
-            "environment daemon repair did not converge".into(),
-        ));
+        query_daemon(channel, token, known_pod_name).await
     }
-    release_organization_mutation_lease(&state.pool, &lease.id).await?;
-    Ok(EnvironmentDaemonRepair {
-        status,
-        replaced_pod_name: replacement.name,
-    })
 }
 
 fn daemon_repair_setup_is_idle(setup_complete: bool, setup_owner_status: Option<&str>) -> bool {

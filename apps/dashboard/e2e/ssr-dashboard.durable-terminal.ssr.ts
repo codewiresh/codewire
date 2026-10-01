@@ -18,10 +18,12 @@ async function transport(page: Page) {
   const state = { accountId: "account-a", sessions: [] as Session[], connections: [] as Connection[],
     launches: 0, stops: 0, lists: 0, launchFailure: "", stopFailure: "", listStatus: 200, listGate: Promise.resolve(), launchGate: Promise.resolve(),
     statusGate: Promise.resolve(), statusAvailable: true, running: true, setupComplete: true, detail: null as Detail | null };
-  await page.route("**/_fragments/terminal-readiness", async (route) => {
+  // Only the opted-in readiness request is answered with setupRunning.
+  await page.route("**/_fragments/terminal-readiness?fields=setup", async (route) => {
     await state.statusGate;
     await route.fulfill({ status: state.statusAvailable ? 200 : 503, json: {
       environmentId: environment, running: state.running, setupComplete: state.setupComplete,
+      setupRunning: state.running && !state.setupComplete,
       detail: state.detail ?? { state: state.running ? "running" : "stopped", desiredState: state.running ? "started" : "stopped",
         tone: state.running ? "success" : "neutral", lastEvent: "just now", resources: "1 vCPU · 2 GiB · 10 GiB",
         cpuMillicores: 1000, memoryMib: 2048, diskGib: 10, startEligible: !state.running, stopEligible: state.running,
@@ -534,7 +536,7 @@ for (const transition of ["disconnect", "foreground", "stopping", "exited"] as c
       await expect(page.locator("[data-terminal-connection]")).toHaveText(transition === "stopping" ? "Stopping…" : "Exited");
       if (transition === "stopping") {
         state.connections[0].route.send(JSON.stringify({ type: "status", state: "running" }));
-        await expect(page.locator("[data-terminal-connection]")).toHaveText("Running");
+        await expect(page.locator("[data-terminal-connection]")).toHaveText("Connected");
         await page.keyboard.insertText("new-input");
       }
     }
@@ -834,6 +836,67 @@ test("a failed Sandbox operation is announced and Start retries it", async ({ pa
   await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
   await expect(status).toHaveText("The Sandbox operation failed. Refresh status to check its current state; no action was retried.");
   expect(state.launches).toBe(0);
+});
+
+const deletingDetail: Detail = { state: "destroying", desiredState: "destroyed", tone: "warning", lastEvent: "just now",
+  resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
+  startEligible: false, stopEligible: false, deleteEligible: false, actionsAllowed: true, pending: true,
+  deletionState: "unscheduled", shutdownAt: null };
+
+// A Sandbox being deleted hides its terminal, so do not wait for terminal controls.
+async function openDeletingFixture(page: Page) {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/terminal-tabs.html`);
+}
+
+test("a Sandbox deleted while its page is open ends with a way back and no dead controls", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.running = false;
+  state.detail = deletingDetail;
+  const polls: string[] = [];
+  page.on("request", (request) => { if (request.url().includes("/_fragments/terminal-readiness")) polls.push(request.url()); });
+  await openDeletingFixture(page);
+  const status = page.locator("[data-sandbox-observation-status]");
+  const back = page.locator("[data-sandbox-deleted]");
+  await expect(status).toHaveText("This Sandbox is being deleted.");
+  await expect(page.locator("[data-sandbox-state]")).toHaveText("deleting…");
+  await expect(page.locator("[data-sandbox-actions]")).toBeHidden();
+  await expect(page.getByRole("region", { name: "Sandbox terminal", exact: true })).toBeHidden();
+  await expect(back).toBeHidden();
+  state.detail = { ...deletingDetail, state: "destroyed", tone: "neutral", pending: false };
+  await page.clock.fastForward(5_000);
+  await expect(status).toHaveText("This Sandbox was deleted.");
+  await expect(page.locator("[data-sandbox-state]")).toHaveText("deleted");
+  await expect(back).toBeVisible();
+  await expect(back.getByRole("link", { name: "Back to Sandboxes", exact: true }))
+    .toHaveAttribute("href", "sandboxes.html?search=quiet-mesa&state=running");
+  await expect(page.locator("[data-sandbox-actions]")).toBeHidden();
+  await expect(page.getByRole("region", { name: "Sandbox terminal", exact: true })).toBeHidden();
+  // Deletion is final: the page stops asking for status.
+  const settled = polls.length;
+  await page.clock.fastForward(30_000);
+  expect(polls).toHaveLength(settled);
+  expect(state.launches).toBe(0);
+});
+
+test("a failed deletion restores the actions that recover the Sandbox", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.running = false;
+  state.detail = deletingDetail;
+  await openDeletingFixture(page);
+  const status = page.locator("[data-sandbox-observation-status]");
+  await expect(status).toHaveText("This Sandbox is being deleted.");
+  state.detail = { ...deletingDetail, state: "error", tone: "danger", pending: false, startEligible: true, deleteEligible: true };
+  await page.clock.fastForward(5_000);
+  await expect(status).toHaveText("This Sandbox could not be deleted. Choose Delete to try again.");
+  await expect(page.locator("[data-sandbox-state]")).toHaveText("error");
+  await expect(page.locator("[data-sandbox-actions]")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Delete", exact: true })).toBeEnabled();
+  await expect(page.getByRole("region", { name: "Sandbox terminal", exact: true })).toBeVisible();
+  await expect(page.locator("[data-sandbox-deleted]")).toBeHidden();
 });
 
 test("a terminal refit after copying keeps the copy announcement", async ({ page }) => {

@@ -229,10 +229,11 @@ rg -F 'SANDBOX_DOCKER_MODE: profile-default' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_CONFIDENTIAL_STORAGE_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_CONFIDENTIAL_ADMIN_ONLY: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
-# Dev commodity workspaces use local-path while Dev's Longhorn is retired for
-# LINSTOR (Program #2238). The inactive confidential activation still pins
-# ordinary Longhorn for commodity workspaces.
-rg -Fx '  SANDBOX_WORKSPACE_STORAGE_CLASS: local-path' "$COMMODITY_PROFILE" >/dev/null
+# Dev commodity workspaces use LINSTOR linstor-local (Program #2238, A1-6).
+# The inactive confidential activation still pins ordinary Longhorn for
+# commodity workspaces and must not be activated until confidential storage is
+# re-homed onto LINSTOR.
+rg -Fx '  SANDBOX_WORKSPACE_STORAGE_CLASS: linstor-local' "$COMMODITY_PROFILE" >/dev/null
 rg -Fx '  SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_KBS_URL: https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
   "$CONFIDENTIAL_PROFILE" >/dev/null

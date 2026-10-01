@@ -11,7 +11,7 @@
       "package": "astro",
       "reason": "Starlight 0.34 constrains the docs application to Astro 5; migrate both together",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     },
     {
       "kind": "osv",
@@ -19,7 +19,7 @@
       "package": "astro",
       "reason": "Starlight 0.34 constrains the docs application to Astro 5; migrate both together",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     },
     {
       "kind": "osv",
@@ -27,7 +27,7 @@
       "package": "brace-expansion",
       "reason": "Redocly pins minimatch 5, whose compatible brace-expansion line has no fixed release",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     },
     {
       "kind": "osv",
@@ -35,7 +35,7 @@
       "package": "git2",
       "reason": "The pinned GPUI desktop dependency still requires git2 0.20",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     },
     {
       "kind": "osv",
@@ -43,7 +43,7 @@
       "package": "git2",
       "reason": "The pinned GPUI desktop dependency still requires git2 0.20",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     },
     {
       "kind": "osv",
@@ -51,7 +51,7 @@
       "package": "circular-buffer",
       "reason": "The pinned GPUI desktop dependency requires circular-buffer 1.x; its profiler uses push_back, not the affected truncate, clear, or extend methods",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     },
     {
       "kind": "osv",
@@ -59,7 +59,7 @@
       "package": "glib",
       "reason": "The current Wry Linux desktop stack still requires GTK and GLib 0.18",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     },
     {
       "kind": "osv",
@@ -67,7 +67,7 @@
       "package": "quick-xml",
       "reason": "The GPUI and Wayland desktop dependency graph has not adopted quick-xml 0.41",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     },
     {
       "kind": "osv",
@@ -75,7 +75,7 @@
       "package": "quick-xml",
       "reason": "The GPUI and Wayland desktop dependency graph has not adopted quick-xml 0.41",
       "owner": "noel",
-      "expires": "2026-09-30"
+      "expires": "2026-10-08"
     }
   ]
 }

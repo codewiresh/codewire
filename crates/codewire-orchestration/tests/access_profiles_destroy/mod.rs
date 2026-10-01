@@ -1,7 +1,7 @@
 //! Terminal lifecycle cleanup releases metadata references, not credentials.
 
 use anyhow::{Result, ensure};
-use codewire_orchestration::lifecycle::{PgLifecycleStore, Service, Snapshot};
+use codewire_orchestration::lifecycle::{PgLifecycleStore, RuntimeAbsenceProof, Service, Snapshot};
 use serde_json::{Value, json};
 
 use super::support::*;
@@ -80,7 +80,7 @@ async fn failed_cleanup_preserves(h: &Harness) -> Result<()> {
     let before = snapshot(h, ENV).await?;
     ensure!(
         Service::<PgLifecycleStore>::for_pool(h.db.clone())
-            .complete_external_cleanup(ENV, false)
+            .complete_external_cleanup(ENV, false, RuntimeAbsenceProof::begin(&h.db).await?)
             .await
             .is_err(),
         "cleanup unexpectedly passed its guard"
@@ -155,7 +155,11 @@ async fn terminal_cleanup_unbinds_only_target_and_releases_public_profile_deleti
 
             let lifecycle = Service::<PgLifecycleStore>::for_pool(h.db.clone());
             lifecycle
-                .complete_external_cleanup(ENV, already_destroyed)
+                .complete_external_cleanup(
+                    ENV,
+                    already_destroyed,
+                    RuntimeAbsenceProof::begin(&h.db).await?,
+                )
                 .await?;
             let after = snapshot(&h, ENV).await?;
             ensure!(after["binding"].is_null() && after["backend"].is_null());
@@ -296,7 +300,7 @@ async fn failed_cleanup_guards_and_journal_rollback_preserve_binding_atomically(
         let before = snapshot(&h, ENV).await?;
         let lifecycle = Service::<PgLifecycleStore>::for_pool(h.db.clone());
         let error = lifecycle
-            .complete_external_cleanup(ENV, false)
+            .complete_external_cleanup(ENV, false, RuntimeAbsenceProof::begin(&h.db).await?)
             .await
             .err()
             .ok_or_else(|| anyhow::anyhow!("cleanup ignored the failing journal"))?;
@@ -326,7 +330,9 @@ async fn failed_cleanup_guards_and_journal_rollback_preserve_binding_atomically(
         sqlx::query("DROP FUNCTION public.synthetic_fail_cleanup_journal()")
             .execute(&h.db)
             .await?;
-        lifecycle.complete_external_cleanup(ENV, false).await?;
+        lifecycle
+            .complete_external_cleanup(ENV, false, RuntimeAbsenceProof::begin(&h.db).await?)
+            .await?;
         let after = snapshot(&h, ENV).await?;
         ensure!(after["binding"].is_null() && after["backend"].is_null());
         ensure!(!after["environment"]["external_cleanup_completed_at"].is_null());

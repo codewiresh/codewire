@@ -2,13 +2,13 @@
 //! to launch. The session service independently checks setup before dispatch.
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State, rejection::QueryRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use codewire_proto::codewire::v1::DesiredState;
 use connectrpc::ErrorCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{environment_connect, state::AppState, view::EnvironmentRow};
 
@@ -18,7 +18,27 @@ struct Readiness {
     environment_id: String,
     running: bool,
     setup_complete: bool,
+    /// Setup still owns the running Sandbox, so Resize waits and says why.
+    /// Sent only on request: pages loaded before it existed reject unknown
+    /// fields, and must keep their terminals across a deploy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_running: Option<bool>,
     detail: Detail,
+}
+
+/// The fixed, enumerated fields a page can opt into. Anything else, including
+/// a repeated or unknown parameter, is refused like other private queries.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReadinessQuery {
+    fields: Option<ReadinessFields>,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ReadinessFields {
+    /// `fields=setup` adds `setupRunning` (#2333).
+    Setup,
 }
 
 /// Lifecycle eligibility is presentation, never mutation authorization. Each
@@ -65,8 +85,21 @@ fn lifecycle_pending(state: &str, desired: &str) -> bool {
     }
 }
 
+/// A create or start that has not converged stays deletable. Destroy already
+/// supersedes the `started` intent in any state but destroying/destroyed, and
+/// a retry that cannot converge must not leave the Sandbox with no action
+/// (#2328). Pending stop, resize, and destroy intents keep their own guard.
+fn start_intent_unconverged(state: &str, desired: &str) -> bool {
+    desired == "started" && matches!(state, "pending" | "creating" | "starting")
+}
+
 impl Readiness {
-    fn new(row: EnvironmentRow, setup_complete: bool, desired_state: i32) -> Self {
+    fn new(
+        row: EnvironmentRow,
+        setup_complete: bool,
+        desired_state: i32,
+        fields: Option<ReadinessFields>,
+    ) -> Self {
         let desired_state = desired_state_name(desired_state);
         let pending = lifecycle_pending(row.state, desired_state);
         let allowed = row.confidential_actions_allowed;
@@ -74,6 +107,7 @@ impl Readiness {
             environment_id: row.id,
             running: row.state == "running" && row.confidential_actions_allowed,
             setup_complete,
+            setup_running: (fields == Some(ReadinessFields::Setup)).then_some(row.setup_running),
             detail: Detail {
                 state: row.state,
                 desired_state,
@@ -87,7 +121,8 @@ impl Readiness {
                 disk_gib: row.disk_gb,
                 start_eligible: allowed && !pending && row.can_start,
                 stop_eligible: allowed && !pending && row.can_stop,
-                delete_eligible: !pending && row.can_destroy,
+                delete_eligible: row.can_destroy
+                    && (!pending || start_intent_unconverged(row.state, desired_state)),
                 actions_allowed: allowed,
                 pending,
             },
@@ -122,6 +157,7 @@ fn unavailable(status: StatusCode) -> Response {
 pub(super) async fn get(
     State(state): State<AppState>,
     Path((slug, environment_id)): Path<(String, String)>,
+    query: Result<Query<ReadinessQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
     if !codewire_server_core::organization_slug::valid_organization_slug(&slug)
@@ -129,6 +165,9 @@ pub(super) async fn get(
     {
         return unavailable(StatusCode::NOT_FOUND);
     }
+    let Ok(Query(query)) = query else {
+        return unavailable(StatusCode::BAD_REQUEST);
+    };
     let continuation = super::terminal::terminal_path(&slug, &environment_id);
     let (dashboard, organization, cookie) =
         match super::organization_governance::get_context(&state, &headers, &slug, &continuation)
@@ -170,7 +209,7 @@ pub(super) async fn get(
     super::environments::apply_confidential_visibility(&state, dashboard.is_admin, &mut row);
     json(
         StatusCode::OK,
-        Readiness::new(row, setup_complete, desired_state),
+        Readiness::new(row, setup_complete, desired_state, query.fields),
     )
 }
 
@@ -190,8 +229,13 @@ mod tests {
         };
         let mut row = environment_connect::environment_row(source);
         row.confidential_actions_allowed = false;
-        let value =
-            serde_json::to_value(Readiness::new(row, false, DesiredState::Started as i32)).unwrap();
+        let value = serde_json::to_value(Readiness::new(
+            row,
+            false,
+            DesiredState::Started as i32,
+            None,
+        ))
+        .unwrap();
         assert_eq!(value["running"], false);
         assert_eq!(value["setupComplete"], false);
         assert_eq!(value.as_object().unwrap().len(), 4);
@@ -222,6 +266,7 @@ mod tests {
                 environment_connect::environment_row(source),
                 true,
                 DesiredState::Started as i32,
+                None,
             ))
             .unwrap();
             assert_eq!(value["running"], true);
@@ -263,6 +308,139 @@ mod tests {
         ] {
             assert!(lifecycle_pending(state, "started"));
         }
+    }
+
+    #[test]
+    fn unconverged_create_or_start_stays_deletable_but_other_pending_intents_do_not() {
+        use codewire_proto::codewire::v1::{Environment, EnvironmentState};
+        let readiness = |state: EnvironmentState, desired: DesiredState| {
+            let row = environment_connect::environment_row(Environment {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                state: state.into(),
+                ..Default::default()
+            });
+            serde_json::to_value(Readiness::new(row, false, desired as i32, None)).unwrap()
+        };
+        // #2328: a pending-create retry waiting on a suspended Sandbox hid
+        // Delete together with every other action.
+        for state in [
+            EnvironmentState::Pending,
+            EnvironmentState::Creating,
+            EnvironmentState::Starting,
+        ] {
+            let value = readiness(state, DesiredState::Started);
+            assert_eq!(value["detail"]["pending"], true, "{state:?}");
+            assert_eq!(value["detail"]["deleteEligible"], true, "{state:?}");
+            assert_eq!(value["detail"]["startEligible"], false, "{state:?}");
+            assert_eq!(value["detail"]["stopEligible"], false, "{state:?}");
+        }
+        for (state, desired) in [
+            (EnvironmentState::Running, DesiredState::Stopped),
+            (EnvironmentState::Stopping, DesiredState::Stopped),
+            (EnvironmentState::Resizing, DesiredState::Resized),
+            (EnvironmentState::Running, DesiredState::Destroyed),
+            (EnvironmentState::Destroying, DesiredState::Destroyed),
+        ] {
+            let value = readiness(state, desired);
+            assert_eq!(value["detail"]["pending"], true, "{state:?}");
+            assert_eq!(value["detail"]["deleteEligible"], false, "{state:?}");
+        }
+        assert_eq!(
+            readiness(EnvironmentState::Running, DesiredState::Started)["detail"]["deleteEligible"],
+            true
+        );
+    }
+
+    /// #2333: Resize waits while setup owns a running Sandbox, as orchestration
+    /// does, and is offered again once setup completes or records a failure.
+    #[test]
+    fn setup_running_only_while_setup_owns_a_running_sandbox() {
+        use codewire_proto::codewire::v1::{Environment, EnvironmentState};
+        let setup_running = |state: EnvironmentState, complete: bool, error: &str| {
+            let row = environment_connect::environment_row(Environment {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                state: state.into(),
+                setup_complete: complete,
+                setup_error: error.into(),
+                ..Default::default()
+            });
+            let value = serde_json::to_value(Readiness::new(
+                row,
+                complete,
+                DesiredState::Started as i32,
+                Some(ReadinessFields::Setup),
+            ))
+            .unwrap();
+            assert!(!value.to_string().contains("private setup failure"));
+            value["setupRunning"].as_bool().unwrap()
+        };
+        assert!(setup_running(EnvironmentState::Running, false, ""));
+        assert!(setup_running(EnvironmentState::Running, false, " "));
+        assert!(!setup_running(EnvironmentState::Running, true, ""));
+        assert!(!setup_running(
+            EnvironmentState::Running,
+            false,
+            "private setup failure"
+        ));
+        // Resize of a stopped Sandbox applies on its next start.
+        assert!(!setup_running(EnvironmentState::Stopped, false, ""));
+        assert!(!setup_running(EnvironmentState::Starting, false, ""));
+    }
+
+    /// Pages loaded before `setupRunning` existed reject unknown fields. Only a
+    /// page that asks for it receives it, so open terminals survive a deploy.
+    #[test]
+    fn setup_running_is_sent_only_to_a_page_that_asks_for_it() {
+        use axum::http::Uri;
+        let fields = |uri: &str| {
+            Query::<ReadinessQuery>::try_from_uri(&uri.parse::<Uri>().unwrap())
+                .map(|Query(query)| query.fields)
+        };
+        let base = "https://dashboard.invalid/org/id/_fragments/terminal-readiness";
+        assert!(fields(base).unwrap().is_none());
+        assert!(fields(&format!("{base}?fields=setup")).unwrap() == Some(ReadinessFields::Setup));
+        for query in [
+            "fields=",
+            "fields=other",
+            "fields=SETUP",
+            "fields=setup&fields=setup",
+            "fields=setup&extra=1",
+            "extra=1",
+        ] {
+            assert!(fields(&format!("{base}?{query}")).is_err(), "{query}");
+        }
+
+        let render = |fields: Option<ReadinessFields>| {
+            let row = environment_connect::environment_row(Environment {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                state: EnvironmentState::Running.into(),
+                ..Default::default()
+            });
+            serde_json::to_string(&Readiness::new(
+                row,
+                false,
+                DesiredState::Started as i32,
+                fields,
+            ))
+            .unwrap()
+        };
+        let id = "\"environmentId\":\"00000000-0000-4000-8000-000000000001\"";
+        // Without the opt-in: the earlier shape, field for field and in order.
+        let earlier = render(None);
+        let earlier_detail = earlier
+            .strip_prefix(&format!(
+                "{{{id},\"running\":true,\"setupComplete\":false,\"detail\":"
+            ))
+            .expect("earlier readiness shape");
+        assert!(!earlier.contains("setupRunning"));
+        // With it: the same bytes plus setupRunning before detail.
+        let opted_in = render(Some(ReadinessFields::Setup));
+        let opted_in_detail = opted_in
+            .strip_prefix(&format!(
+                "{{{id},\"running\":true,\"setupComplete\":false,\"setupRunning\":true,\"detail\":"
+            ))
+            .expect("opted-in readiness shape");
+        assert_eq!(earlier_detail, opted_in_detail);
     }
 
     #[test]

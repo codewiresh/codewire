@@ -1177,3 +1177,179 @@ async fn staged_integrity_and_kek_recovery_preserve_old_material_and_recheck_fin
     }.await;
     db.finish(result).await
 }
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn keepalive_candidates_are_idle_active_oauth_without_an_owned_attempt() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        // The restricted broker login proves the existing grants suffice.
+        let (pool, _) = db.broker_pool().await?;
+        let store = Arc::new(PlatformCredentialStore::new(
+            pool.clone(),
+            Arc::new(SyntheticKek::default()),
+            builtin_provider_catalog(),
+        ));
+        let user = db.user("keepalive-user").await?;
+        let org = db.organization("keepalive-org").await?;
+        let deleting = db.organization("keepalive-deleting").await?;
+        let oauth = |name: &str| {
+            let mut input = registration(name, Kind::OAuth);
+            input.expires_at_unix = None;
+            input
+        };
+        let new = |owner: Owner, input: codewire_platform_credentials::CredentialRegistration| {
+            let store = store.clone();
+            async move { store.create(&owner, input, &value(OLD_VALUE)).await }
+        };
+        let age = |id: CredentialId| {
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query(
+                    "UPDATE platform_credentials SET created_at=now()-interval '10 days' WHERE id=$1",
+                )
+                .bind(id.as_str())
+                .execute(&pool)
+                .await
+            }
+        };
+        let mut expected = Vec::new();
+        let mut aged = |record: CredentialRecord, selected: bool| {
+            if selected {
+                expected.push(record.metadata.id.clone());
+            }
+            record
+        };
+
+        let idle = aged(new(user.clone(), oauth("Idle")).await?, true);
+        age(idle.metadata.id.clone()).await?;
+        // Fresh material is never a candidate.
+        let fresh = aged(new(user.clone(), oauth("Fresh")).await?, false);
+        let key = aged(new(user.clone(), registration("Key", Kind::ApiKey)).await?, false);
+        age(key.metadata.id.clone()).await?;
+        let failed = aged(new(user.clone(), oauth("Failed")).await?, false);
+        age(failed.metadata.id.clone()).await?;
+        sqlx::query("UPDATE platform_credentials SET status='refresh_failed' WHERE id=$1")
+            .bind(failed.metadata.id.as_str())
+            .execute(&db.pool)
+            .await?;
+        let revoked = aged(new(user.clone(), oauth("Revoked")).await?, false);
+        age(revoked.metadata.id.clone()).await?;
+        store
+            .revoke(&user, &revoked.metadata.id, revoked.version)
+            .await?;
+        let expired = aged(new(user.clone(), oauth("Expired")).await?, false);
+        age(expired.metadata.id.clone()).await?;
+        sqlx::query("UPDATE platform_credentials SET expires_at_unix=1 WHERE id=$1")
+            .bind(expired.metadata.id.as_str())
+            .execute(&db.pool)
+            .await?;
+        // A live reservation, a started and a staged attempt belong to their
+        // owner or to recovery. An expired, never-started reservation does not.
+        let reserved = aged(new(user.clone(), oauth("Reserved")).await?, false);
+        age(reserved.metadata.id.clone()).await?;
+        store
+            .begin_oauth_refresh(&user, &reserved.metadata.id, reserved.version, Uuid::new_v4())
+            .await?;
+        let abandoned = aged(new(user.clone(), oauth("Abandoned")).await?, true);
+        age(abandoned.metadata.id.clone()).await?;
+        store
+            .begin_oauth_refresh(&user, &abandoned.metadata.id, abandoned.version, Uuid::new_v4())
+            .await?;
+        sqlx::query(
+            "UPDATE platform_credential_refresh_attempts \
+             SET reserved_until=clock_timestamp()-interval '1 second' WHERE credential_id=$1",
+        )
+        .bind(abandoned.metadata.id.as_str())
+        .execute(&db.pool)
+        .await?;
+        let running = aged(new(user.clone(), oauth("Running")).await?, false);
+        age(running.metadata.id.clone()).await?;
+        let (_, _running_permit) = started(&store, &user, &running).await?;
+        let staged = aged(new(user.clone(), oauth("Staged")).await?, false);
+        age(staged.metadata.id.clone()).await?;
+        let (_, staged_permit) = started(&store, &user, &staged).await?;
+        store
+            .stage_oauth_refresh(&staged_permit.prepare_result(&value(NEW_VALUE))?)
+            .await?;
+        // A commit receipt for the current generation dates the material even
+        // though the record itself was created long ago.
+        let rotated = aged(new(user.clone(), oauth("Rotated")).await?, false);
+        age(rotated.metadata.id.clone()).await?;
+        let (rotated_attempt, rotated_permit) = started(&store, &user, &rotated).await?;
+        store
+            .stage_oauth_refresh(&rotated_permit.prepare_result(&value(NEW_VALUE))?)
+            .await?;
+        store
+            .promote_oauth_refresh(&user, &rotated.metadata.id, rotated.version, rotated_attempt)
+            .await?;
+        // Organization credentials count only while their organization is live.
+        let shared = aged(new(org.clone(), oauth("Shared")).await?, true);
+        age(shared.metadata.id.clone()).await?;
+        let orphaned = aged(new(deleting.clone(), oauth("Orphaned")).await?, false);
+        age(orphaned.metadata.id.clone()).await?;
+        begin_organization_deletion(&db.pool, &admin_user(), deleting.id().as_str()).await?;
+        let _ = fresh;
+
+        let providers = [(codewire_access::ProviderId::parse("openai")?, 7 * 86_400)];
+        let page = |after: Option<CredentialId>, limit: u32| {
+            let store = store.clone();
+            let providers = providers.clone();
+            async move {
+                store
+                    .oauth_keepalive_candidates(&providers, after.as_ref(), limit)
+                    .await
+            }
+        };
+        expected.sort();
+        let all = page(None, 100).await?;
+        let ids: Vec<_> = all.iter().map(|candidate| candidate.id.clone()).collect();
+        ensure!(ids == expected, "selected {ids:?}, expected {expected:?}");
+        let first = all.first().context("candidate")?;
+        ensure!(first.provider.as_str() == "openai" && first.version.material_generation == 1);
+        // ID-ordered pages resume after the cursor without repeating a row.
+        let mut paged = Vec::new();
+        let mut after = None;
+        loop {
+            let next = page(after.clone(), 1).await?;
+            let Some(candidate) = next.first() else { break };
+            paged.push(candidate.id.clone());
+            after = Some(candidate.id.clone());
+        }
+        ensure!(paged == expected);
+        // The age is per provider: nothing here is 11 days old.
+        let older = [(codewire_access::ProviderId::parse("openai")?, 11 * 86_400)];
+        ensure!(store.oauth_keepalive_candidates(&older, None, 100).await?.is_empty());
+        // Once the receipt itself is old, the rotated credential is due.
+        sqlx::query(
+            "UPDATE platform_credential_refresh_attempts \
+             SET created_at=now()-interval '8 days' WHERE credential_id=$1",
+        )
+        .bind(rotated.metadata.id.as_str())
+        .execute(&db.pool)
+        .await?;
+        let all = page(None, 100).await?;
+        let rotated_candidate = all
+            .iter()
+            .find(|candidate| candidate.id == rotated.metadata.id)
+            .context("aged commit receipt was not selected")?;
+        ensure!(rotated_candidate.version == promoted(rotated.version));
+        // A provider outside the list is never selected.
+        let other = [(codewire_access::ProviderId::parse("github")?, 0)];
+        ensure!(store.oauth_keepalive_candidates(&other, None, 100).await?.is_empty());
+        for (providers, limit) in [
+            (Vec::new(), 10),
+            (providers.to_vec(), 0),
+            (providers.to_vec(), 1001),
+            ([providers[0].clone(), providers[0].clone()].to_vec(), 10),
+        ] {
+            ensure!(matches!(
+                store.oauth_keepalive_candidates(&providers, None, limit).await,
+                Err(Error::InvalidInput)
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

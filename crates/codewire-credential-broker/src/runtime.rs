@@ -29,6 +29,7 @@ use crate::github_app::{
     GitHubAppUserOAuthBundle, GitHubOAuthCredential,
 };
 use crate::openai::OpenAiChatGptOAuthAdapter;
+use crate::refresh_failure::{ProviderRejection, RefreshFailure};
 use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiApiKeyAdapter, OpenAiStreamingResponse,
     ValidatedOpenAiRequest,
@@ -41,6 +42,8 @@ const OPENAI_OAUTH_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const MAX_OAUTH_REFRESH_RESPONSE_BYTES: usize = 1024 * 1024;
 const OAUTH_REFRESH_WAIT_ATTEMPTS: usize = 64;
 const OAUTH_REFRESH_WAIT_INTERVAL: Duration = Duration::from_millis(500);
+const CODEX_REFRESH_PROVIDER: &str = "openai";
+const GITHUB_REFRESH_PROVIDER: &str = "github";
 #[cfg(feature = "local-broker-synthetic-smoke")]
 const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
 
@@ -1456,68 +1459,54 @@ where
         reservation: P::RefreshReservation,
         refreshed_at_unix: u64,
     ) -> Result<(), BrokerRequestError> {
-        let permit = leases
-            .start_credential_refresh(reservation)
-            .await
+        let permit = match leases.start_credential_refresh(reservation).await {
+            Ok(permit) => permit,
             // Start consumed the reservation. Even definite denial must end
             // this epoch so a still-Reserved attempt cannot retain an owner
             // that no caller can release. An uncertain ACK takes the same
             // drain path, but recovery never retries a Started attempt.
-            .map_err(|_| BrokerRequestError::AuthorityUnavailable)?;
-        let exchange = tokio::time::timeout(
-            Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
-            Self::request_oauth_refresh(&upstream, credential.refresh_token()),
-        )
-        .await;
-        let tokens = match exchange {
-            Ok(Ok(tokens)) => tokens,
-            Ok(Err(OAuthRefreshError::Uncertain(error))) => {
-                return match leases.fail_credential_refresh(permit).await {
-                    Ok(()) => Err(error),
-                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
-                };
-            }
-            Ok(Err(OAuthRefreshError::Permanent)) => {
-                return match leases.fail_credential_refresh(permit).await {
-                    Ok(()) => Err(BrokerRequestError::Denied),
-                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
-                };
-            }
-            Err(_) => {
-                return match leases.fail_credential_refresh(permit).await {
-                    Ok(()) => Err(BrokerRequestError::UpstreamFailed),
-                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
-                };
+            Err(error) => {
+                RefreshFailure::Start(error).warn(CODEX_REFRESH_PROVIDER);
+                return Err(BrokerRequestError::AuthorityUnavailable);
             }
         };
-        let refreshed = match credential.refreshed(
-            tokens.id_token,
-            tokens.access_token,
-            tokens.refresh_token,
-            refreshed_at_unix,
-        ) {
-            Ok(refreshed) => refreshed,
+        let (failure, error) =
+            match exchange_codex_oauth_refresh(&*upstream, credential, refreshed_at_unix).await {
+                Ok(bundle) => {
+                    return leases
+                        .commit_credential_refresh(permit, bundle)
+                        .await
+                        .map_err(|error| {
+                            RefreshFailure::Publication(error).warn(CODEX_REFRESH_PROVIDER);
+                            map_refresh_error(error)
+                        });
+                }
+                Err(failed) => failed,
+            };
+        Self::fail_started_refresh(&*leases, permit, CODEX_REFRESH_PROVIDER, failure, error).await
+    }
+
+    /// Record one terminal failure for an exact started attempt after logging
+    /// its closed class. The caller never retries the previous refresh token.
+    async fn fail_started_refresh(
+        leases: &P,
+        permit: P::StartedRefresh,
+        provider: &'static str,
+        failure: RefreshFailure,
+        error: BrokerRequestError,
+    ) -> Result<(), BrokerRequestError> {
+        failure.warn(provider);
+        match leases.fail_credential_refresh(permit).await {
+            Ok(()) => Err(error),
             Err(_) => {
-                return match leases.fail_credential_refresh(permit).await {
-                    Ok(()) => Err(BrokerRequestError::Denied),
-                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
-                };
+                tracing::warn!(
+                    provider,
+                    failure = failure.class(),
+                    "provider credential refresh failure could not be recorded"
+                );
+                Err(BrokerRequestError::AuthorityUnavailable)
             }
-        };
-        let bundle = match refreshed.to_bundle() {
-            Ok(bundle) => bundle,
-            Err(_) => {
-                return match leases.fail_credential_refresh(permit).await {
-                    Ok(()) => Err(BrokerRequestError::Denied),
-                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
-                };
-            }
-        };
-        leases
-            .commit_credential_refresh(permit, bundle)
-            .await
-            .map_err(map_refresh_error)?;
-        Ok(())
+        }
     }
 
     async fn prepare_github_after_refresh(
@@ -1663,123 +1652,189 @@ where
         bundle: GitHubAppUserOAuthBundle,
         reservation: P::RefreshReservation,
     ) -> Result<(), BrokerRequestError> {
-        let permit = leases
-            .start_credential_refresh(reservation)
-            .await
-            .map_err(|_| BrokerRequestError::AuthorityUnavailable)?;
-        let exchange = tokio::time::timeout(
-            Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
-            owner.refresh(bundle),
-        )
-        .await;
-        let bundle = match exchange {
-            Ok(Ok(bundle)) => bundle,
-            Ok(Err(GitHubAppRefreshError::Permanent)) => {
-                return match leases.fail_credential_refresh(permit).await {
-                    Ok(()) => Err(BrokerRequestError::Denied),
-                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
-                };
-            }
-            Ok(Err(GitHubAppRefreshError::Uncertain)) | Err(_) => {
-                return match leases.fail_credential_refresh(permit).await {
-                    Ok(()) => Err(BrokerRequestError::UpstreamFailed),
-                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
-                };
+        let permit = match leases.start_credential_refresh(reservation).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                RefreshFailure::Start(error).warn(GITHUB_REFRESH_PROVIDER);
+                return Err(BrokerRequestError::AuthorityUnavailable);
             }
         };
-        leases
-            .commit_github_app_refresh(permit, bundle)
-            .await
-            .map_err(map_refresh_error)?;
-        Ok(())
-    }
-
-    async fn request_oauth_refresh(
-        upstream: &U,
-        refresh_token: &str,
-    ) -> Result<OAuthRefreshResponse, OAuthRefreshError> {
-        let mut body = Zeroizing::new(
-            serde_json::to_vec(&OAuthRefreshRequest {
-                client_id: OPENAI_OAUTH_CLIENT_ID,
-                grant_type: "refresh_token",
-                refresh_token,
-            })
-            .map_err(|_| OAuthRefreshError::Permanent)?,
-        );
-        let target =
-            Url::parse(OPENAI_OAUTH_REFRESH_URL).map_err(|_| OAuthRefreshError::Permanent)?;
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::ACCEPT,
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        let upstream = upstream
-            .execute(BrokerUpstreamRequest {
-                method: Method::POST,
-                target,
-                headers,
-                body: std::mem::take(&mut *body),
-            })
-            .await
-            .map_err(|error| OAuthRefreshError::Uncertain(map_upstream_error(error)))?;
-        let (status, headers, mut response_body) = upstream.into_parts();
-        // Refresh bypasses the guest response redactor, but every transport
-        // must still deliver identity bytes before internal token parsing.
-        crate::openai::validate_response_encoding(&headers)
-            .map_err(|_| OAuthRefreshError::Uncertain(BrokerRequestError::UpstreamFailed))?;
-        let mut response = Zeroizing::new(Vec::new());
-        while let Some(chunk) = response_body.next().await {
-            let chunk = chunk.map_err(|error| {
-                if status.is_success() {
-                    OAuthRefreshError::Permanent
-                } else {
-                    OAuthRefreshError::Uncertain(map_upstream_error(error))
-                }
-            })?;
-            let next_len = response
-                .len()
-                .checked_add(chunk.len())
-                .filter(|length| *length <= MAX_OAUTH_REFRESH_RESPONSE_BYTES)
-                .ok_or(if status.is_success() {
-                    OAuthRefreshError::Permanent
-                } else {
-                    OAuthRefreshError::Uncertain(BrokerRequestError::ResponseTooLarge)
-                })?;
-            let additional = next_len.saturating_sub(response.len());
-            response.try_reserve(additional).map_err(|_| {
-                if status.is_success() {
-                    OAuthRefreshError::Permanent
-                } else {
-                    OAuthRefreshError::Uncertain(BrokerRequestError::ResponseTooLarge)
-                }
-            })?;
-            response.extend_from_slice(&chunk);
-        }
-        if !status.is_success() {
-            return Err(if oauth_refresh_rejection_is_permanent(status, &response) {
-                OAuthRefreshError::Permanent
-            } else {
-                OAuthRefreshError::Uncertain(BrokerRequestError::UpstreamFailed)
-            });
-        }
-        let parsed = serde_json::from_slice::<OAuthRefreshResponse>(&response)
-            .map_err(|_| OAuthRefreshError::Permanent)?;
-        response.zeroize();
-        if parsed.access_token.is_none() {
-            return Err(OAuthRefreshError::Permanent);
-        }
-        Ok(parsed)
+        let (failure, error) = match exchange_github_app_refresh(&owner, bundle).await {
+            Ok(bundle) => {
+                return leases
+                    .commit_github_app_refresh(permit, bundle)
+                    .await
+                    .map_err(|error| {
+                        RefreshFailure::Publication(error).warn(GITHUB_REFRESH_PROVIDER);
+                        map_refresh_error(error)
+                    });
+            }
+            Err(failed) => failed,
+        };
+        Self::fail_started_refresh(&*leases, permit, GITHUB_REFRESH_PROVIDER, failure, error).await
     }
 }
 
+/// One bounded Codex refresh-token exchange plus rotated-material validation.
+///
+/// The caller owns a durable Started attempt. Every `Err` is terminal for that
+/// attempt: the previous refresh token is never replayed. The closed failure
+/// class is for operator diagnostics only. Shared by on-demand broker refresh
+/// and the platform keep-alive so both send and validate exactly the same way.
+pub(crate) async fn exchange_codex_oauth_refresh<U>(
+    upstream: &U,
+    credential: CodexOAuthCredential,
+    refreshed_at_unix: u64,
+) -> Result<CanonicalCodexOAuthBundle, (RefreshFailure, BrokerRequestError)>
+where
+    U: BrokerUpstreamTransport + ?Sized,
+{
+    let exchange = tokio::time::timeout(
+        Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
+        request_oauth_refresh(upstream, credential.refresh_token()),
+    )
+    .await;
+    match exchange {
+        Ok(Ok(tokens)) => credential
+            .refreshed(
+                tokens.id_token,
+                tokens.access_token,
+                tokens.refresh_token,
+                refreshed_at_unix,
+            )
+            .and_then(|refreshed| refreshed.to_bundle())
+            .map_err(|_| (RefreshFailure::Material, BrokerRequestError::Denied)),
+        Ok(Err(OAuthRefreshError::Uncertain(error, failure))) => Err((failure, error)),
+        Ok(Err(OAuthRefreshError::Permanent(failure))) => {
+            Err((failure, BrokerRequestError::Denied))
+        }
+        Err(_) => Err((RefreshFailure::Timeout, BrokerRequestError::UpstreamFailed)),
+    }
+}
+
+/// One bounded GitHub App user-token rotation through the private App owner.
+/// Like the Codex exchange, every `Err` is terminal for the started attempt.
+pub(crate) async fn exchange_github_app_refresh(
+    owner: &GitHubAppAuthorizationOwner,
+    bundle: GitHubAppUserOAuthBundle,
+) -> Result<GitHubAppUserOAuthBundle, (RefreshFailure, BrokerRequestError)> {
+    let exchange = tokio::time::timeout(
+        Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
+        owner.refresh(bundle),
+    )
+    .await;
+    match exchange {
+        Ok(Ok(bundle)) => Ok(bundle),
+        Ok(Err(GitHubAppRefreshError::Permanent)) => {
+            Err((RefreshFailure::ProviderRejected, BrokerRequestError::Denied))
+        }
+        Ok(Err(GitHubAppRefreshError::Uncertain)) => Err((
+            RefreshFailure::ProviderUncertain,
+            BrokerRequestError::UpstreamFailed,
+        )),
+        Err(_) => Err((RefreshFailure::Timeout, BrokerRequestError::UpstreamFailed)),
+    }
+}
+
+async fn request_oauth_refresh<U>(
+    upstream: &U,
+    refresh_token: &str,
+) -> Result<OAuthRefreshResponse, OAuthRefreshError>
+where
+    U: BrokerUpstreamTransport + ?Sized,
+{
+    // Request construction is local and fixed; failing it sends nothing.
+    let local = OAuthRefreshError::Permanent(RefreshFailure::RequestBuild);
+    let mut body = Zeroizing::new(
+        serde_json::to_vec(&OAuthRefreshRequest {
+            client_id: OPENAI_OAUTH_CLIENT_ID,
+            grant_type: "refresh_token",
+            refresh_token,
+        })
+        .map_err(|_| local)?,
+    );
+    let target = Url::parse(OPENAI_OAUTH_REFRESH_URL).map_err(|_| local)?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::ACCEPT,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let upstream = upstream
+        .execute(BrokerUpstreamRequest {
+            method: Method::POST,
+            target,
+            headers,
+            body: std::mem::take(&mut *body),
+        })
+        .await
+        .map_err(|error| {
+            OAuthRefreshError::Uncertain(
+                map_upstream_error(error),
+                RefreshFailure::Transport(error),
+            )
+        })?;
+    let (status, headers, mut response_body) = upstream.into_parts();
+    // Refresh bypasses the guest response redactor, but every transport
+    // must still deliver identity bytes before internal token parsing.
+    crate::openai::validate_response_encoding(&headers).map_err(|_| {
+        OAuthRefreshError::Uncertain(
+            BrokerRequestError::UpstreamFailed,
+            RefreshFailure::ResponseEncoding,
+        )
+    })?;
+    let body_failure = |error: BrokerRequestError| {
+        if status.is_success() {
+            OAuthRefreshError::Permanent(RefreshFailure::ResponseBody)
+        } else {
+            OAuthRefreshError::Uncertain(error, RefreshFailure::ResponseBody)
+        }
+    };
+    let mut response = Zeroizing::new(Vec::new());
+    while let Some(chunk) = response_body.next().await {
+        let chunk = chunk.map_err(|error| body_failure(map_upstream_error(error)))?;
+        let next_len = response
+            .len()
+            .checked_add(chunk.len())
+            .filter(|length| *length <= MAX_OAUTH_REFRESH_RESPONSE_BYTES)
+            .ok_or_else(|| body_failure(BrokerRequestError::ResponseTooLarge))?;
+        let additional = next_len.saturating_sub(response.len());
+        response
+            .try_reserve(additional)
+            .map_err(|_| body_failure(BrokerRequestError::ResponseTooLarge))?;
+        response.extend_from_slice(&chunk);
+    }
+    if !status.is_success() {
+        // Only allowlisted identifiers survive classification; the body,
+        // including any provider description, is zeroized on drop.
+        let rejection = ProviderRejection::classify(status, &response);
+        return Err(if rejection.permanent {
+            OAuthRefreshError::Permanent(RefreshFailure::Rejected(rejection))
+        } else {
+            OAuthRefreshError::Uncertain(
+                BrokerRequestError::UpstreamFailed,
+                RefreshFailure::Rejected(rejection),
+            )
+        });
+    }
+    let parsed = serde_json::from_slice::<OAuthRefreshResponse>(&response)
+        .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))?;
+    response.zeroize();
+    if parsed.access_token.is_none() {
+        return Err(OAuthRefreshError::Permanent(RefreshFailure::ResponseParse));
+    }
+    Ok(parsed)
+}
+
+/// Terminal refresh exchange outcomes. Both are recorded as an unknown
+/// attempt; the closed failure class exists only for operator diagnostics.
 #[derive(Clone, Copy)]
 enum OAuthRefreshError {
-    Permanent,
-    Uncertain(BrokerRequestError),
+    Permanent(RefreshFailure),
+    Uncertain(BrokerRequestError, RefreshFailure),
 }
 
 #[derive(Serialize)]
@@ -1794,46 +1849,6 @@ struct OAuthRefreshResponse {
     id_token: Option<Zeroizing<String>>,
     access_token: Option<Zeroizing<String>>,
     refresh_token: Option<Zeroizing<String>>,
-}
-
-#[derive(Deserialize)]
-struct OAuthRefreshErrorBody {
-    error: Option<OAuthRefreshErrorValue>,
-    code: Option<Zeroizing<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum OAuthRefreshErrorValue {
-    Code(Zeroizing<String>),
-    Detail { code: Option<Zeroizing<String>> },
-}
-
-fn oauth_refresh_rejection_is_permanent(status: StatusCode, body: &[u8]) -> bool {
-    if status == StatusCode::UNAUTHORIZED {
-        return true;
-    }
-    if status != StatusCode::BAD_REQUEST {
-        return false;
-    }
-    let Ok(parsed) = serde_json::from_slice::<OAuthRefreshErrorBody>(body) else {
-        return false;
-    };
-    let code = match parsed.error {
-        Some(OAuthRefreshErrorValue::Code(code)) => Some(code),
-        Some(OAuthRefreshErrorValue::Detail { code }) => code,
-        None => parsed.code,
-    };
-    code.as_deref().is_some_and(|code| {
-        [
-            "invalid_grant",
-            "refresh_token_expired",
-            "refresh_token_reused",
-            "refresh_token_invalidated",
-        ]
-        .iter()
-        .any(|expected| code.eq_ignore_ascii_case(expected))
-    })
 }
 
 struct ValidatedGuestRequest {
@@ -3912,6 +3927,167 @@ mod tests {
             Err(BrokerRequestError::Denied)
         ));
         assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// Thread-local WARN capture. `#[tokio::test]` runs the tracked refresh
+    /// task on this same current-thread runtime, so its events arrive here.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLog {
+        fn install() -> (Self, tracing::subscriber::DefaultGuard) {
+            let log = Self::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || writer.clone())
+                .finish();
+            let guard = tracing::subscriber::set_default(subscriber);
+            (log, guard)
+        }
+
+        /// Return and clear this scenario's output. A parallel test may have
+        /// registered a shared callsite before this scoped subscriber existed,
+        /// so refresh every cached callsite interest before the next scenario.
+        fn take(&self) -> String {
+            let text = String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap();
+            tracing::callsite::rebuild_interest_cache();
+            text
+        }
+    }
+
+    fn assert_refresh_warning(text: &str, fields: &[&str], absent: &[&str]) {
+        let warning = text
+            .lines()
+            .find(|line| line.contains("provider credential refresh failed"))
+            .unwrap_or_else(|| panic!("no refresh failure warning in {text:?}"));
+        assert!(warning.contains("WARN"), "{warning}");
+        assert!(warning.contains(r#"provider="openai""#), "{warning}");
+        for field in fields {
+            assert!(warning.contains(field), "missing {field} in {warning}");
+        }
+        for value in [
+            "synthetic-old-refresh-token",
+            "synthetic-new-refresh-token",
+            "synthetic provider detail",
+        ]
+        .iter()
+        .chain(absent)
+        {
+            assert!(!text.contains(value), "log exposed {value}");
+        }
+    }
+
+    /// One capture subscriber for every scenario keeps scoped dispatcher
+    /// registration out of the parallel test schedule.
+    #[tokio::test]
+    async fn terminal_refresh_failures_warn_with_closed_classes_only() {
+        let (log, _guard) = CapturedLog::install();
+        log.take();
+
+        // A definite provider rejection: status plus allowlisted identifiers.
+        let (broker, state) = oauth_broker(
+            StatusCode::UNAUTHORIZED,
+            br#"{"error":{"message":"synthetic provider detail","type":"invalid_request_error","code":"refresh_token_expired"}}"#.to_vec(),
+            "unused-access-token".into(),
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::Denied)
+        ));
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        assert_refresh_warning(
+            &log.take(),
+            &[
+                r#"failure="http_status""#,
+                "http_status=401",
+                r#"provider_error_code="refresh_token_expired""#,
+                r#"provider_error_type="invalid_request_error""#,
+                "permanent=true",
+            ],
+            &[],
+        );
+
+        // An ambiguous status never exposes unlisted provider values.
+        let (broker, state) = oauth_broker(
+            StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"error":{"code":"synthetic-unlisted-code","type":"synthetic-unlisted-type"}}"#
+                .to_vec(),
+            "unused-access-token".into(),
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::UpstreamFailed)
+        ));
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        assert_refresh_warning(
+            &log.take(),
+            &[
+                "http_status=503",
+                r#"provider_error_code="other""#,
+                r#"provider_error_type="other""#,
+                "permanent=false",
+            ],
+            &["synthetic-unlisted-code", "synthetic-unlisted-type"],
+        );
+
+        // A transport failure names only its closed class.
+        let (mut broker, state) =
+            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
+        Arc::get_mut(&mut broker.upstream).unwrap().refresh_error =
+            Some(BrokerUpstreamError::Connect);
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::UpstreamFailed)
+        ));
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        assert_refresh_warning(&log.take(), &[r#"failure="transport_connect""#], &[]);
+
+        // Rejected rotated material is classified without logging new tokens.
+        let access_token = jwt(json!({
+            "exp": current_unix_time().expect("current time") + 3_600
+        }));
+        let refresh_response = serde_json::to_vec(&json!({
+            "id_token": jwt(json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "different-account",
+                    "chatgpt_account_is_fedramp": false
+                }
+            })),
+            "access_token": access_token.clone(),
+            "refresh_token": "synthetic-new-refresh-token"
+        }))
+        .unwrap();
+        let (broker, state) = oauth_broker(
+            StatusCode::OK,
+            refresh_response,
+            access_token.clone(),
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::Denied)
+        ));
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        assert_refresh_warning(
+            &log.take(),
+            &[r#"failure="material""#],
+            &[access_token.as_str(), "different-account"],
+        );
     }
 
     async fn assert_refresh_timeout(header_delay: Duration, body_delay: Duration) {

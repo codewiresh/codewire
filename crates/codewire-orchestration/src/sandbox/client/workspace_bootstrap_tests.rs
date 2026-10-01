@@ -1057,3 +1057,165 @@ async fn newly_selected_codex_public_bootstrap_precedes_suspended_recipe_publica
         .is_empty()
     );
 }
+
+const DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:48549d19114407c712d043af3ba2136d97052a2c30c82935190f75a3a61f13ab";
+
+/// A commodity recipe whose daemon is an image volume: no init container
+/// until a selected client needs its bootstrap.
+fn image_volume_fixture() -> Fixture {
+    let mut fixture = fixture();
+    for spec in [
+        &mut fixture.template["spec"]["podTemplate"]["spec"],
+        &mut fixture.sandbox["spec"]["podTemplate"]["spec"],
+        &mut fixture.pod["spec"],
+    ] {
+        spec.as_object_mut().unwrap().remove("initContainers");
+        spec["volumes"].as_array_mut().unwrap().push(json!({
+            "name":"codewire-bin","image":{"reference":DAEMON_IMAGE,"pullPolicy":"IfNotPresent"}
+        }));
+    }
+    fixture
+}
+
+fn with_clients(slots: &[&str]) -> TemplateOpts {
+    let mut opts = opts();
+    opts.managed_credential_clients =
+        codewire_access::ManagedCredentialClients::from_profile_slots(slots.iter().copied())
+            .unwrap();
+    opts
+}
+
+#[tokio::test]
+async fn image_volume_recipe_adds_and_removes_only_the_client_bootstrap() {
+    let (client, state) = client(image_volume_fixture());
+    let codex = with_clients(&["codex"]);
+    client
+        .reconcile_workspace_bootstrap(&codex, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    let rendered = super::super::template::render_workspace_client_bootstrap(&codex);
+    {
+        let state = state.lock().unwrap();
+        for object in [&state.template, &state.sandbox] {
+            let spec = &object["spec"]["podTemplate"]["spec"];
+            let mut expected = rendered["clientInit"].clone();
+            expected["image"] = json!(DAEMON_IMAGE);
+            assert_eq!(spec["initContainers"], json!([expected]));
+            assert!(!spec.to_string().contains("codewire-daemon-init"));
+            assert!(
+                spec["volumes"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!({"name":"codewire-bin","image":{"reference":DAEMON_IMAGE,"pullPolicy":"IfNotPresent"}}))
+            );
+        }
+    }
+    assert!(
+        !client
+            .workspace_bootstrap_matches(&codex, &claim_name(ENV), CLAIM_UID, &expected_pod())
+            .await
+            .unwrap(),
+        "a Pod without the selected client bootstrap must not certify it"
+    );
+    let replacement = WorkspacePodIdentity {
+        name: POD.into(),
+        uid: "replacement-pod".into(),
+    };
+    {
+        let mut state = state.lock().unwrap();
+        state.pod["spec"] = state.sandbox["spec"]["podTemplate"]["spec"].clone();
+        state.pod["metadata"]["uid"] = json!("replacement-pod");
+    }
+    assert!(
+        client
+            .workspace_bootstrap_matches(&codex, &claim_name(ENV), CLAIM_UID, &replacement)
+            .await
+            .unwrap()
+    );
+    // Reconciling the same selection again writes nothing.
+    let writes = state.lock().unwrap().requests.len();
+    client
+        .reconcile_workspace_bootstrap(&codex, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    assert!(
+        state.lock().unwrap().requests[writes..]
+            .iter()
+            .all(|(method, _, _)| *method != Method::PATCH)
+    );
+
+    let cleared = with_clients(&[]);
+    client
+        .reconcile_workspace_bootstrap(&cleared, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    assert!(
+        !client
+            .workspace_bootstrap_matches(&cleared, &claim_name(ENV), CLAIM_UID, &replacement)
+            .await
+            .unwrap(),
+        "a stale client bootstrap must not certify its removal"
+    );
+    let state = state.lock().unwrap();
+    for object in [&state.template, &state.sandbox] {
+        let spec = &object["spec"]["podTemplate"]["spec"];
+        assert_eq!(spec["initContainers"], json!([]));
+        assert!(!spec.to_string().contains("credential-codex"));
+        assert_eq!(
+            spec["volumes"][0]["persistentVolumeClaim"]["claimName"],
+            "saved-pvc"
+        );
+    }
+}
+
+#[test]
+fn daemon_delivery_must_be_exactly_one_route() {
+    let clients = super::super::template::render_workspace_client_bootstrap(&with_clients(&[]));
+    let legacy = blueprint();
+    assert!(
+        workspace_client_changes(&legacy, &clients, "/spec")
+            .unwrap()
+            .is_empty()
+    );
+    let image = image_volume_fixture().pod;
+    assert!(
+        workspace_client_changes(&image, &clients, "/spec")
+            .unwrap()
+            .is_empty()
+    );
+
+    let daemon_init = legacy["spec"]["initContainers"][0].clone();
+    let mut client_init = clients["init"].clone();
+    client_init["name"] = json!("codewire-client-bootstrap");
+    let mut both_routes = image.clone();
+    both_routes["spec"]["initContainers"] = json!([daemon_init]);
+    let mut neither_route = legacy.clone();
+    neither_route["spec"]["initContainers"] = json!([]);
+    let mut copy_with_client_init = legacy.clone();
+    copy_with_client_init["spec"]["initContainers"]
+        .as_array_mut()
+        .unwrap()
+        .push(client_init.clone());
+    let mut duplicate_client_init = image.clone();
+    duplicate_client_init["spec"]["initContainers"] = json!([client_init, client_init]);
+    let mut duplicate_daemon_volume = image.clone();
+    duplicate_daemon_volume["spec"]["volumes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"codewire-bin","emptyDir":{}}));
+    let mut unnamed_image = image.clone();
+    unnamed_image["spec"]["volumes"][1]["image"] = json!({"pullPolicy":"IfNotPresent"});
+    for (case, spec) in [
+        ("both routes", both_routes),
+        ("neither route", neither_route),
+        ("copy with client init", copy_with_client_init),
+        ("duplicate client init", duplicate_client_init),
+        ("duplicate daemon volume", duplicate_daemon_volume),
+        ("image without reference", unnamed_image),
+    ] {
+        assert!(
+            workspace_client_changes(&spec, &clients, "/spec").is_err(),
+            "{case}"
+        );
+    }
+}

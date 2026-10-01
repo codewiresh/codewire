@@ -394,6 +394,9 @@ grep -Fq "VALUES ('\$preset_id', 'codewire-gateway:e2e', 'resize-template');" <<
   fail 'resize fixture image/template base does not match its runtime'
 grep -Fq 'INSERT INTO environment_presets (id, org_id, name, official, project_spec)' <<<"$resize_fixture" ||
   fail 'resize fixture does not own its preset'
+# Resize refuses a running Sandbox whose setup still owns the runtime (#2328).
+grep -Fq "'\$pod_name', '\$pod_ip', true" <<<"$resize_fixture" ||
+  fail 'resize fixture does not model completed setup'
 # Names and immutable daemon bootstrap come from the same Rust renderer used
 # by runtime reconciliation. This also covers shadow names exceeding 63 bytes.
 for binding in \

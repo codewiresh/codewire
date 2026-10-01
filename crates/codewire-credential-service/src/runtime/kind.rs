@@ -27,11 +27,13 @@ const TARGET: &str = "codewire_kind_credential_fixture";
 async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
     let config = config::Config::from_env()?;
     // No inherited RUST_LOG can expose SQL, requests, provider material or
-    // projected tokens. These two targets emit only closed runtime events.
+    // projected tokens. These targets emit only closed runtime events.
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(tracing_subscriber::EnvFilter::new(
-            "off,codewire_kind_credential_fixture=info,codewire_credential_service::runtime=info",
+            "off,codewire_kind_credential_fixture=info,codewire_credential_service::runtime=info,\
+             codewire_credential_broker::platform::keepalive=info,\
+             codewire_credential_broker::refresh_failure=warn",
         ))
         .with_current_span(false)
         .try_init()
@@ -112,6 +114,17 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             GitHubEnrollmentOwner::new(github),
             Some(github_app_authorization.clone()),
         ));
+        // The production keep-alive against the synthetic provider. Its
+        // defaults never touch the gate's freshly enrolled credentials; the
+        // same environment inputs shorten it for local observation.
+        let keepalive = config.oauth_keepalive.map(|keepalive| {
+            Arc::new(OAuthKeepAlive::new(
+                store.clone(),
+                Arc::new(provider.clone()),
+                Some(github_app_authorization.clone()),
+                keepalive,
+            ))
+        });
         let repositories = Arc::new(GithubRepositoryOwner::new(
             pool.clone(),
             store,
@@ -126,6 +139,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             mutation,
             repositories,
             bridge,
+            keepalive,
             async {
                 let signal = tokio::select! {
                     value = terminate.recv() => value,

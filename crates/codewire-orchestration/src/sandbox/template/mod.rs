@@ -49,7 +49,10 @@ pub use runtime_policy::{
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
-pub(crate) use workspace::render_workspace_client_bootstrap;
+pub(crate) use workspace::{
+    CLIENT_BOOTSTRAP_CONTAINER, DAEMON_INIT_CONTAINER, DAEMON_VOLUME,
+    render_workspace_client_bootstrap,
+};
 pub use workspace::{render_sandbox_template, render_workspace_daemon_service};
 
 /// Return the exact raw TOML bytes that the hypervisor annotation compresses
@@ -72,9 +75,9 @@ pub(crate) fn confidential_init_data(opts: &TemplateOpts) -> anyhow::Result<Stri
 }
 
 /// How long one create or start waits for a workspace to become ready. The
-/// gateway's startup probe and rollout deadline use the same budget, so
-/// Kubernetes never restarts or fails a gateway during a start that can still
-/// succeed.
+/// gateway's startup probe and rollout deadline, and the workspace's Docker
+/// startup probe, use the same budget, so Kubernetes never restarts or fails
+/// either during a start that can still succeed.
 pub const WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(600);
 /// Confidential guests initialize encrypted storage before the daemon listens.
 pub const CONFIDENTIAL_WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(1_800);

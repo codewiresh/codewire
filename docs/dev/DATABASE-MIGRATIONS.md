@@ -744,6 +744,69 @@ schema survives. Other databases, schemas, cluster roles and external key
 material remain outside this boundary. These tests and instructions
 authorize no live reset.
 
+### Runtime-dispatch lease environment scope
+
+Migration `0033_runtime_dispatch_environment_scope.sql` adds one nullable,
+opaque `organization_mutation_leases.environment_id`. It changes no existing
+row, helper, index or earlier migration. A check allows a value only on an
+`environment_runtime_dispatch` lease and rejects an empty one. There is no
+foreign key: leases stay as evidence after their environment and
+organization rows are removed.
+
+Environment-scoped runtime admissions (terminal, SSH proxy, daemon session
+mutations and repair, ports, sources, resize, start, stop and delete) record
+their target environment. Environment creation and every lease admitted before version 33
+stay NULL, which keeps the original organization-wide meaning. External
+cleanup of one environment (issue #2347):
+
+- waits for an active lease scoped to it or NULL;
+- waits for an ambiguous (`resolution_required`) lease scoped to it or NULL
+  that settled after the current destroy attempt began proving runtime
+  absence, so the next attempt proves absence again;
+- resolves, in the same statement as its marker, its own ambiguous leases that
+  settled before that proof began;
+- ignores leases scoped to other environments, and leaves NULL-scoped
+  ambiguity unresolved for organization deletion.
+
+Organization deletion still refuses every active or unresolved lease,
+whatever its scope. Lease expiry is never treated as absence.
+
+**Compatibility.** Running version-32 pods insert NULL and ignore the column,
+so their leases block like before and their cleanup keeps the stricter
+organization-wide check. As with every migration, a version-32 binary cannot
+restart against a version-33 ledger.
+
+**Fixtures.** The 32→33 fixture pins migration 32 and the history through it
+from accepted canonical `219a16e228ddb03697c2794ab43f58f44a9b1e9f`. The
+version-32 fingerprint stays pinned as
+`ACCEPTED_PRE_RUNTIME_DISPATCH_SCOPE_SCHEMA_FINGERPRINT`. The fixtures prove:
+
+- fresh apply, the column type and nullability, and the check;
+- upgrade from version 32 with every lease unchanged and unscoped, and a
+  second startup that is a no-op;
+- a forced failure after the column and check exist, which rolls back both and
+  the ledger, followed by a clean retry.
+
+**Rollback.** Because 0033 only adds one nullable column and its check, it has
+an in-place rollback that keeps every lease:
+
+1. Stop the version-33 binaries.
+2. In one transaction, drop `organization_mutation_leases_environment_scope_check`,
+   drop `organization_mutation_leases.environment_id`, and delete ledger
+   version 33 from `_sqlx_migrations`.
+3. Start the version-32 binaries.
+
+Scoped leases become organization-wide again, which only makes version-32
+cleanup wait for more of them; resolved leases stay resolved. The fixture
+`runtime_dispatch_scope_down_restores32_in_place_and_keeps_every_lease` runs
+that exact statement and proves the version-32 fingerprint, unchanged leases,
+helpers and ledger, and a clean roll-forward that does not invent scope. The
+full recovery also remains available: replay the selected version-32 source
+into only an empty, disposable application `public` schema. Its fixture
+proves the ledger and migration 32 checksum are restored, records are
+discarded, and a separate schema survives. These tests and instructions
+authorize no live reset.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

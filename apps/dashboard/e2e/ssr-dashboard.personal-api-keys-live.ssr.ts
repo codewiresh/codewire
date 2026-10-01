@@ -57,8 +57,10 @@ test.describe.serial("personal Codewire API keys through the managed app", () =>
     await page.getByRole("link", { name: "Done", exact: true }).click();
     await expect(page.locator("[data-one-time-api-key]")).toHaveCount(0);
     const row = page.getByRole("row").filter({ has: page.locator("th strong").getByText(name, { exact: true }) });
+    const menu = row.locator("details.cw-menu");
     const act = async (action: string) => {
-      await row.locator("details.cw-menu > summary").click();
+      await menu.locator(":scope > summary").click();
+      await expect(menu).toHaveAttribute("open", "");
       await row.getByRole("button", { name: action, exact: true }).click();
     };
     await expect(row).toBeVisible();
@@ -72,7 +74,11 @@ test.describe.serial("personal Codewire API keys through the managed app", () =>
     await expect(deletion.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await deletion.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(row).toBeVisible();
-    await act("Delete");
+    // Cancel keeps the row menu open and returns focus to its Delete opener.
+    const deleteOpener = row.getByRole("button", { name: "Delete", exact: true });
+    await expect(menu).toHaveAttribute("open", "");
+    await expect(deleteOpener).toBeFocused();
+    await deleteOpener.click();
     await deletion.getByRole("button", { name: "Delete key", exact: true }).click();
     await expect(row).toHaveCount(0);
   });
