@@ -1906,6 +1906,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "preview_browser_grants:cascade",
             "sandbox_environment_backend:cascade",
             "sandbox_running_sessions:cascade",
+            "sandbox_workspace_bindings:cascade",
         ]
     );
 }
