@@ -81,7 +81,7 @@ test("reviews consequences and resolves only a matching operation observation", 
   const state = await transport(page);
   await open(page);
   const dialog = await review(page);
-  await expect(dialog.locator("[data-resize-summary]")).toContainText("1 vCPU · 2048 MiB memory · 10 GiB disk → 2 vCPU");
+  await expect(dialog.locator("[data-resize-summary]")).toContainText("1 vCPU · 2 GiB memory · 10 GiB disk → 2 vCPU · 4 GiB memory");
   await expect(dialog.locator("[data-resize-disk-warning]")).toBeVisible();
   await expect(dialog.locator("[data-resize-restart-consent]")).not.toBeVisible();
   await expect(dialog.locator("[data-resize-session-consent]")).not.toBeVisible();
