@@ -678,11 +678,13 @@ where
     async fn channel_open_session(
         &mut self,
         channel: Channel<server::Msg>,
+        reply: server::ChannelOpenHandle,
         _session: &mut server::Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         self.channels
             .insert(channel.id(), SshChannelState::new(channel));
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn channel_open_direct_tcpip(
@@ -692,9 +694,17 @@ where
         port_to_connect: u32,
         _originator_address: &str,
         _originator_port: u32,
+        reply: server::ChannelOpenHandle,
         _session: &mut server::Session,
-    ) -> Result<bool, Self::Error> {
-        Ok(allow_local_port_forward(host_to_connect, port_to_connect))
+    ) -> Result<(), Self::Error> {
+        if allow_local_port_forward(host_to_connect, port_to_connect) {
+            reply.accept().await;
+        } else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+        }
+        Ok(())
     }
 
     async fn pty_request(
@@ -1100,7 +1110,7 @@ mod tests {
 
         async fn check_server_key(
             &mut self,
-            _server_public_key: &russh::keys::ssh_key::PublicKey,
+            _server_public_key: &russh::keys::PublicKeyOrCertificate,
         ) -> Result<bool, Self::Error> {
             Ok(true)
         }
@@ -1823,6 +1833,26 @@ mod tests {
             .unwrap();
         let _ = relay_shutdown.send(());
         relay_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn russh_handler_rejects_nonlocal_direct_tcpip_channels() {
+        let (runner, addr, server_task) = spawn_test_gateway().await;
+        let client = authenticated_client(addr).await;
+        let result = timeout(
+            Duration::from_secs(5),
+            client.channel_open_direct_tcpip("198.51.100.1", 443, "127.0.0.1", 12345),
+        )
+        .await
+        .expect("direct-tcpip rejection did not hang");
+        assert!(matches!(
+            result,
+            Err(russh::Error::ChannelOpenFailure(
+                russh::ChannelOpenFailure::AdministrativelyProhibited
+            ))
+        ));
+        assert!(runner_events(&runner).await.is_empty());
+        stop_client_and_server(client, server_task).await;
     }
 
     #[tokio::test]
