@@ -23,7 +23,7 @@
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
       <main class="cw-main">{% let crumb_scope = organization.slug.as_str() %}{% let crumb_page = "members" %}{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
         <div class="cw-org-management-layout"><aside class="cw-context-nav">{% include "organization-settings-nav.html" %}</aside><div class="cw-context-main">
-        <header class="cw-context-page-header"><h2>Members</h2><p>Membership, roles, assignments, and invitations.</p></header>
+        <header class="cw-context-page-header"><h1>Members</h1><p>Membership, roles, assignments, and invitations.</p></header>
         {% include "organization-members-content.html" %}
         </div></div>
       </div></main>
