@@ -961,6 +961,8 @@ fn build_settings_data(
             status_tone,
             api_key: matches!(slot, "openai" | "anthropic"),
             oauth: matches!(slot, "codex" | "github"),
+            reconnect_needed: matches!(slot, "codex" | "github")
+                && credential.status == CredentialStatus::RefreshFailed,
             revoked: credential.status == CredentialStatus::Revoked,
             expires,
             generation: credential.revocation_generation,
@@ -1239,7 +1241,9 @@ fn credential_status(
     } else if credential.status == CredentialStatus::Expired {
         Ok(("Expired", "warning"))
     } else if credential.status == CredentialStatus::RefreshFailed {
-        Ok(("Refresh failed", "warning"))
+        // The provider refused or lost the stored refresh token; only the
+        // owner can restore it. Say what to do, not what failed.
+        Ok(("Reconnect needed", "warning"))
     } else {
         Err(invalid_metadata())
     }
@@ -1397,6 +1401,62 @@ mod tests {
         assert_eq!(
             data.profiles[0].entries[0].status_tone,
             data.credentials[0].status_tone
+        );
+    }
+
+    #[test]
+    fn failed_refresh_reads_reconnect_needed_on_the_row_and_its_profiles() {
+        let failed_id = "00000000-0000-4000-8000-000000000001";
+        let active_id = "00000000-0000-4000-8000-000000000002";
+        let mut failed = credential(
+            failed_id,
+            "Work Codex",
+            "openai",
+            CredentialAuthenticationKind::Oauth,
+        );
+        failed.status = CredentialStatus::RefreshFailed.into();
+        let data = build_settings_data(
+            vec![
+                failed,
+                credential(
+                    active_id,
+                    "Other Codex",
+                    "openai",
+                    CredentialAuthenticationKind::Oauth,
+                ),
+            ],
+            vec![AccessProfile {
+                id: "00000000-0000-4000-8000-000000000003".into(),
+                name: "work".into(),
+                revision: 1,
+                entries: vec![AccessProfileEntry {
+                    capability_slot: "codex".into(),
+                    credential_id: failed_id.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let row = |id: &str| {
+            data.credentials
+                .iter()
+                .find(|row| row.id == id)
+                .expect("credential row")
+        };
+        assert_eq!(row(failed_id).status, "Reconnect needed");
+        assert_eq!(row(failed_id).status_tone, "warning");
+        assert!(row(failed_id).reconnect_needed);
+        assert_eq!(row(active_id).status, "Active");
+        assert!(!row(active_id).reconnect_needed);
+        let entry = data.profiles[0]
+            .entries
+            .iter()
+            .find(|entry| entry.slot == "Codex")
+            .unwrap();
+        assert_eq!(
+            (entry.status, entry.status_tone),
+            ("Reconnect needed", "warning")
         );
     }
 

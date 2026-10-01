@@ -15,6 +15,7 @@
 //! abandonment fence. This adapter creates no detached placement work.
 
 pub mod bridge;
+pub mod keepalive;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
 
@@ -24,9 +25,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS,
-    CapabilitySlot, CredentialAuthKind, CredentialMetadata, DerivedGrant, EnvironmentAccessBinding,
-    GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
-    Placement,
+    CapabilitySlot, CredentialAuthKind, CredentialId, CredentialMetadata, DerivedGrant,
+    EnvironmentAccessBinding, GrantContext, GrantPermission, GrantPlacement, Owner,
+    PROVIDER_REFRESH_TIMEOUT_SECONDS, Placement,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, OAuthRefreshState, PlatformAccessProfileStore,
@@ -571,39 +572,61 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         if permit.instance_id != self.instance_id {
             return Err(BrokerRefreshError::Denied);
         }
-        let result = permit
-            .started
-            .prepare_result(&value)
-            .map_err(refresh_store_error)?;
-        drop(value);
-        if let Err(error) = self.credentials.stage_oauth_refresh(&result).await {
-            // A stage ACK can be lost. Discover only this exact immutable result's
-            // attempt; absence of staged output never permits another exchange.
-            let current = self
-                .credentials
-                .current_oauth_refresh_attempt(
-                    &self.session.credential_owner,
-                    &permit.request.grant.credential_id,
-                )
-                .await
-                .map_err(refresh_store_error)?;
-            if !current.is_some_and(|attempt| {
-                attempt.attempt_id == permit.request.refresh_id
-                    && attempt.expected == expected(&permit.request)
-                    && matches!(
-                        attempt.state,
-                        OAuthRefreshState::Staged | OAuthRefreshState::Committed
-                    )
-            }) {
-                return Err(refresh_store_error(error));
-            }
-        }
         // Do not discard rotated output merely because a guest disconnected or
         // its grant expired. Publication preserves storage's hard deadline; the
         // shared runtime separately obtains fresh authority before consuming it.
-        self.promote(&permit.request, permit.request.refresh_id)
-            .await
+        publish_started_refresh(
+            &self.credentials,
+            &self.session.credential_owner,
+            &permit.request.grant.credential_id,
+            expected(&permit.request),
+            permit.request.refresh_id,
+            permit.started,
+            value,
+        )
+        .await
     }
+}
+
+/// Durably stage one exact started attempt's rotated material, then promote
+/// it. A stage ACK can be lost: discover only this exact immutable attempt as
+/// staged or committed; absence of staged output never permits another
+/// provider exchange. Shared by on-demand refresh and the keep-alive owner.
+pub(crate) async fn publish_started_refresh(
+    store: &PlatformCredentialStore,
+    owner: &Owner,
+    credential_id: &CredentialId,
+    expected: CredentialVersion,
+    attempt_id: Uuid,
+    started: StartedOAuthRefresh,
+    value: ProtectedValue,
+) -> Result<(), BrokerRefreshError> {
+    let result = started
+        .prepare_result(&value)
+        .map_err(refresh_store_error)?;
+    drop(value);
+    drop(started);
+    if let Err(error) = store.stage_oauth_refresh(&result).await {
+        let current = store
+            .current_oauth_refresh_attempt(owner, credential_id)
+            .await
+            .map_err(refresh_store_error)?;
+        if !current.is_some_and(|attempt| {
+            attempt.attempt_id == attempt_id
+                && attempt.expected == expected
+                && matches!(
+                    attempt.state,
+                    OAuthRefreshState::Staged | OAuthRefreshState::Committed
+                )
+        }) {
+            return Err(refresh_store_error(error));
+        }
+    }
+    store
+        .promote_oauth_refresh(owner, credential_id, expected, attempt_id)
+        .await
+        .map(|_| ())
+        .map_err(refresh_store_error)
 }
 
 #[async_trait]

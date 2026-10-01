@@ -390,6 +390,8 @@ pub(crate) struct CredentialRowView {
     pub(crate) public_key_id: String,
     pub(crate) api_key: bool,
     pub(crate) oauth: bool,
+    /// A rotating OAuth refresh failed; only the owner's Reconnect restores it.
+    pub(crate) reconnect_needed: bool,
     pub(crate) revoked: bool,
     pub(crate) oauth_provider: &'static str,
 }

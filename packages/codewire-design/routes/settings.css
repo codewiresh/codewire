@@ -55,6 +55,8 @@
 [data-dashboard-app] .cw-public-key > span,
 [data-dashboard-app] .cw-public-key > small { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
 [data-dashboard-app] .cw-credential-status { justify-self: start; }
+/* A credential that needs reconnecting shows its Reconnect action on the row. */
+[data-dashboard-app] .cw-credential-reconnect { grid-column: 1 / -1; justify-self: start; }
 [data-dashboard-app] .cw-public-key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2) var(--space-3); align-items: center; }
 [data-dashboard-app] .cw-public-key > span,
 [data-dashboard-app] .cw-public-key > small { grid-column: 1 / -1; }
