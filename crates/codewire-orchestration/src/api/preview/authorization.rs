@@ -312,7 +312,6 @@ pub(super) async fn check_access(
 
 pub(super) async fn start(
     state: &PreviewContext<'_>,
-    headers: &HeaderMap,
     matched: &PreviewHostMatch,
     target: &PreviewTarget,
     host: &str,
@@ -323,10 +322,11 @@ pub(super) async fn start(
     if !safe_return_path(path) || host != super::normalize_dns_name(host) || host.contains(':') {
         return Err(invalid());
     }
-    let nonce = match unique_cookie(headers, NONCE_COOKIE).map_err(|_| invalid())? {
-        Some(value) if opaque_token(value) => value.to_owned(),
-        _ => random_token().map_err(|_| unavailable())?,
-    };
+    // Always a fresh nonce in a cookie of its own. A preview page can write
+    // cookies for its host, so adopting one the browser offers would let it
+    // know the nonce that redeems an intercepted code; one cookie per sign-in
+    // keeps concurrent tabs from replacing each other's.
+    let nonce = random_token().map_err(|_| unavailable())?;
     let start = Start {
         challenge: Challenge {
             id: uuid::Uuid::new_v4().to_string(),
@@ -347,7 +347,12 @@ pub(super) async fn start(
     ));
     response.headers_mut().append(
         header::SET_COOKIE,
-        cookie(NONCE_COOKIE, &nonce, Some(CHALLENGE_SECONDS), "None"),
+        cookie(
+            &nonce_cookie(&start.challenge.id),
+            &nonce,
+            Some(CHALLENGE_SECONDS),
+            "None",
+        ),
     );
     Ok(response)
 }
@@ -475,7 +480,8 @@ async fn authorize_inner(
     tx.commit().await.map_err(|_| unavailable())?;
     let callback = format!("https://{}{CALLBACK_PATH}", challenge.host);
     let body = format!(
-        "<p>Continue to your preview.</p><input type=\"hidden\" name=\"code\" value=\"{code}\"><button type=\"submit\" class=\"cw-button\">Continue to preview</button>"
+        "<p>Continue to your preview.</p><input type=\"hidden\" name=\"code\" value=\"{code}\"><input type=\"hidden\" name=\"challenge\" value=\"{}\"><button type=\"submit\" class=\"cw-button\">Continue to preview</button>",
+        html_escape(&challenge.id),
     );
     let nonce = random_token().map_err(|_| unavailable())?;
     Ok(page(
@@ -532,25 +538,37 @@ pub(super) async fn callback(
     {
         return Err(invalid());
     }
-    let nonce = unique_cookie(request.headers(), NONCE_COOKIE)
+    let (parts, body) = request.into_parts();
+    let bytes = to_bytes(body, 4096).await.map_err(|_| invalid())?;
+    let values: Vec<_> = url::form_urlencoded::parse(&bytes).collect();
+    let value = |name: &str| {
+        let mut found = values.iter().filter(|(key, _)| key == name);
+        match (found.next(), found.next()) {
+            (Some((_, value)), None) => Some(value.to_string()),
+            _ => None,
+        }
+    };
+    let (Some(code), Some(challenge_id)) = (value("code"), value("challenge")) else {
+        return Err(invalid());
+    };
+    if values.len() != 2
+        || !opaque_token(&code)
+        || uuid::Uuid::parse_str(&challenge_id)
+            .map_or(true, |id| id.hyphenated().to_string() != challenge_id)
+    {
+        return Err(invalid());
+    }
+    let nonce_name = nonce_cookie(&challenge_id);
+    let nonce = unique_cookie(&parts.headers, &nonce_name)
         .map_err(|_| invalid())?
         .filter(|value| opaque_token(value))
         .ok_or_else(invalid)?
         .to_owned();
-    let bytes = to_bytes(request.into_body(), 4096)
-        .await
-        .map_err(|_| invalid())?;
-    let values: Vec<_> = url::form_urlencoded::parse(&bytes).collect();
-    if values.len() != 1 || values[0].0 != "code" || !opaque_token(&values[0].1) {
-        return Err(invalid());
-    }
-    let code = Callback {
-        code: values[0].1.to_string(),
-    };
+    let code = Callback { code };
     // Complete policy reads before reserving a pool connection. A callback
     // must never wait on itself even when the pool has only one connection.
-    let row = sqlx::query("SELECT id,organization_id,environment_id,port_id,host,return_path,session_id FROM preview_auth_challenges WHERE code_hash=$1 AND nonce_hash=$2 AND host=$3 AND expires_at > clock_timestamp() AND code_expires_at > clock_timestamp() AND consumed_at IS NULL")
-        .bind(token_hash(&code.code)).bind(token_hash(&nonce)).bind(host).fetch_optional(state.pool).await.map_err(|_| unavailable())?.ok_or_else(invalid)?;
+    let row = sqlx::query("SELECT id,organization_id,environment_id,port_id,host,return_path,session_id FROM preview_auth_challenges WHERE code_hash=$1 AND nonce_hash=$2 AND host=$3 AND id=$4 AND expires_at > clock_timestamp() AND code_expires_at > clock_timestamp() AND consumed_at IS NULL")
+        .bind(token_hash(&code.code)).bind(token_hash(&nonce)).bind(host).bind(&challenge_id).fetch_optional(state.pool).await.map_err(|_| unavailable())?.ok_or_else(invalid)?;
     let challenge = Challenge {
         id: row.get("id"),
         organization_id: row.get("organization_id"),
@@ -639,8 +657,9 @@ pub(super) async fn callback(
         header::SET_COOKIE,
         cookie(GRANT_COOKIE, &token, None, "Lax"),
     );
-    // Keep the nonce briefly for already-open concurrent authorization tabs.
-    // It cannot authorize a request without an unused, session-bound code.
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, cookie(&nonce_name, "", Some(0), "None"));
     Ok(response)
 }
 

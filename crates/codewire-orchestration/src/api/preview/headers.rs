@@ -111,7 +111,10 @@ fn permitted_application_cookie(value: &HeaderValue, preview_host: &str) -> bool
 pub(super) fn browser_response_headers(headers: &HeaderMap, preview_host: &str) -> HeaderMap {
     let mut result = HeaderMap::new();
     for (name, value) in headers {
+        // Clear-Site-Data clears cookies for the whole shared preview site,
+        // which would sign this browser out of every other preview.
         if hop_header(name, headers)
+            || name.as_str() == "clear-site-data"
             || name.as_str().starts_with("x-codewire-")
             || (name == header::SET_COOKIE && !permitted_application_cookie(value, preview_host))
         {
@@ -247,6 +250,20 @@ mod tests {
             ),
         )]);
         assert!(!workload_request_headers(&input, false).contains_key(header::COOKIE));
+    }
+
+    #[test]
+    fn a_workload_cannot_clear_the_preview_site() {
+        let input = HeaderMap::from_iter([
+            (
+                HeaderName::from_static("clear-site-data"),
+                HeaderValue::from_static("\"cookies\""),
+            ),
+            (header::CONTENT_TYPE, HeaderValue::from_static("text/html")),
+        ]);
+        let output = browser_response_headers(&input, HOST);
+        assert!(!output.contains_key("clear-site-data"));
+        assert_eq!(output[header::CONTENT_TYPE], "text/html");
     }
 
     #[test]

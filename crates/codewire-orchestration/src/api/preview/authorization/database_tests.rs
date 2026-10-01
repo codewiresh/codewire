@@ -93,16 +93,12 @@ impl Fixture {
         Ok(sqlx::query_as("SELECT (SELECT count(*) FROM preview_auth_challenges),(SELECT count(*) FROM preview_browser_grants)").fetch_one(&self.pool).await?)
     }
 
-    async fn begin(&self, nonce: Option<&str>) -> Result<(String, String)> {
+    /// Returns the continuation and this sign-in's nonce cookie pair.
+    async fn begin(&self) -> Result<(String, String)> {
         let (matched, target) = self.target().await?;
-        let mut headers = HeaderMap::new();
-        if let Some(nonce) = nonce {
-            headers.insert(header::COOKIE, format!("{NONCE_COOKIE}={nonce}").parse()?);
-        }
         let response = accepted(
             start(
                 &self.context(),
-                &headers,
                 &matched,
                 &target,
                 HOST,
@@ -112,7 +108,7 @@ impl Fixture {
         )?;
         anyhow::ensure!(response.status() == StatusCode::SEE_OTHER);
         assert_private(&response);
-        let nonce = response_cookie(&response, NONCE_COOKIE)?;
+        let nonce = nonce_pair(&response)?;
         let destination = url::Url::parse(response.headers()[header::LOCATION].to_str()?)?;
         anyhow::ensure!(
             destination.origin().ascii_serialization() == FRONTEND
@@ -227,6 +223,23 @@ fn field(html: &str, name: &str) -> Result<String> {
         .into())
 }
 
+/// The fresh nonce cookie a start response sets, as a `name=value` pair.
+fn nonce_pair(response: &Response) -> Result<String> {
+    let header = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with(&format!("{NONCE_COOKIE}-")))
+        .context("missing nonce cookie")?;
+    anyhow::ensure!(
+        header.contains("Path=/")
+            && header.contains("Secure; HttpOnly")
+            && !header.contains("Domain=")
+    );
+    Ok(header.split(';').next().unwrap().into())
+}
+
 fn response_cookie(response: &Response, name: &str) -> Result<String> {
     let header = response
         .headers()
@@ -263,15 +276,25 @@ fn account_headers() -> HeaderMap {
     headers
 }
 
+/// The challenge a nonce cookie pair belongs to, and its value.
+fn nonce_parts(nonce: &str) -> (&str, &str) {
+    let (name, value) = nonce.split_once('=').unwrap();
+    (
+        name.strip_prefix(&format!("{NONCE_COOKIE}-")).unwrap(),
+        value,
+    )
+}
+
 fn callback_request(code: &str, nonce: &str) -> Request<Body> {
+    let (challenge, _) = nonce_parts(nonce);
     Request::builder()
         .method(Method::POST)
         .uri(CALLBACK_PATH)
         .header(header::HOST, HOST)
         .header(header::ORIGIN, FRONTEND)
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .header(header::COOKIE, format!("{NONCE_COOKIE}={nonce}"))
-        .body(Body::from(format!("code={code}")))
+        .header(header::COOKIE, nonce)
+        .body(Body::from(format!("code={code}&challenge={challenge}")))
         .unwrap()
 }
 
@@ -281,8 +304,8 @@ async fn single_connection_roundtrip_is_stateless_until_confirmation_and_replay_
 -> Result<()> {
     let f = Fixture::create(1).await?;
     let result = tokio::time::timeout(Duration::from_secs(12), async {
-        for _ in 0..12 { f.begin(None).await?; }
-        let (continuation, nonce) = f.begin(None).await?;
+        for _ in 0..12 { f.begin().await?; }
+        let (continuation, nonce) = f.begin().await?;
         anyhow::ensure!(f.counts().await? == (0, 0));
         let mut anonymous = account_headers(); anonymous.remove(header::COOKIE);
         let login = accepted(authorize_page_inner(&f.context(), &anonymous, &continuation).await)?;
@@ -294,10 +317,10 @@ async fn single_connection_roundtrip_is_stateless_until_confirmation_and_replay_
         let token = f.finish(&code, &nonce).await?;
         anyhow::ensure!(f.granted(&token).await? && f.counts().await? == (1, 1));
         let stored: (String, String, bool) = sqlx::query_as("SELECT c.nonce_hash,c.code_hash,c.consumed_at IS NOT NULL FROM preview_auth_challenges c").fetch_one(&f.pool).await?;
-        anyhow::ensure!(stored == (token_hash(&nonce), token_hash(&code), true));
+        anyhow::ensure!(stored == (token_hash(nonce_parts(&nonce).1), token_hash(&code), true));
         anyhow::ensure!(sqlx::query_scalar::<_, String>("SELECT token_hash FROM preview_browser_grants").fetch_one(&f.pool).await? == token_hash(&token));
         let serialized: String = sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(c) FROM preview_auth_challenges c),(SELECT jsonb_agg(g) FROM preview_browser_grants g))::text").fetch_one(&f.pool).await?;
-        for raw in [nonce.as_str(), code.as_str(), token.as_str(), ACCOUNT_TOKEN] { anyhow::ensure!(!serialized.contains(raw)); }
+        for raw in [nonce_parts(&nonce).1, code.as_str(), token.as_str(), ACCOUNT_TOKEN] { anyhow::ensure!(!serialized.contains(raw)); }
         anyhow::ensure!(sqlx::query_scalar::<_, chrono::NaiveDateTime>("SELECT expires_at FROM sessions WHERE id='preview-session'").fetch_one(&f.pool).await? == expiry);
         rejected(callback(&f.context(), callback_request(&code, &nonce), HOST).await, StatusCode::BAD_REQUEST)?;
         let decoded = decode_start(&f.context(), &continuation).map_err(|_| anyhow::anyhow!("continuation decode"))?;
@@ -314,7 +337,7 @@ async fn confirmation_rejects_tamper_expiry_wrong_host_origin_csrf_and_session_c
 -> Result<()> {
     let f = Fixture::create(2).await?;
     let result = async {
-        let (continuation, _) = f.begin(None).await?;
+        let (continuation, _) = f.begin().await?;
         let decoded =
             decode_start(&f.context(), &continuation).map_err(|_| anyhow::anyhow!("decode"))?;
         let csrf = confirmation_token(SECRET, "preview-session", &decoded.challenge.id);
@@ -418,19 +441,22 @@ async fn callback_rejects_wrong_transport_nonce_host_and_expiry_without_consumpt
 {
     let f = Fixture::create(2).await?;
     let result = async {
-        let (continuation, nonce) = f.begin(None).await?;
+        let (continuation, nonce) = f.begin().await?;
         let code = f.approve(&continuation).await?;
-        for case in 0..8 {
+        for case in 0..10 {
             let mut request = callback_request(&code, &nonce);
             match case {
                 0 => *request.method_mut() = Method::GET,
                 1 => { request.headers_mut().insert(header::ORIGIN, "https://attacker.example.test".parse()?); },
                 2 => *request.uri_mut() = format!("{CALLBACK_PATH}?code=forbidden").parse()?,
                 3 => { request.headers_mut().insert(header::CONTENT_TYPE, "text/plain".parse()?); },
-                4 => { request.headers_mut().insert(header::COOKIE, format!("{NONCE_COOKIE}={}", random_token().unwrap()).parse()?); },
-                5 => { request.headers_mut().append(header::COOKIE, format!("{NONCE_COOKIE}={nonce}").parse()?); },
+                4 => { request.headers_mut().insert(header::COOKIE, format!("{NONCE_COOKIE}-{}={}", nonce_parts(&nonce).0, random_token().unwrap()).parse()?); },
+                5 => { request.headers_mut().append(header::COOKIE, nonce.parse()?); },
                 6 => *request.body_mut() = Body::from(format!("code={code}&code={code}")),
-                _ => *request.body_mut() = Body::from(format!("code={code}&extra=field")),
+                7 => *request.body_mut() = Body::from(format!("code={code}&challenge={}&extra=field", nonce_parts(&nonce).0)),
+                // Another sign-in's challenge cannot redeem this code.
+                8 => *request.body_mut() = Body::from(format!("code={code}&challenge={}", uuid::Uuid::new_v4())),
+                _ => { request.headers_mut().insert(header::COOKIE, format!("{NONCE_COOKIE}={}", nonce_parts(&nonce).1).parse()?); },
             }
             rejected(callback(&f.context(), request, HOST).await, StatusCode::BAD_REQUEST)?;
         }
@@ -453,7 +479,7 @@ async fn callback_rejects_wrong_transport_nonce_host_and_expiry_without_consumpt
 async fn concurrent_callbacks_consume_once_and_reissue_the_same_scoped_grant() -> Result<()> {
     let f = Fixture::create(4).await?;
     let result = tokio::time::timeout(Duration::from_secs(12), async {
-        let (continuation, nonce) = f.begin(None).await?;
+        let (continuation, nonce) = f.begin().await?;
         let code = f.approve(&continuation).await?;
         let context = f.context();
         let (a, b) = tokio::join!(
@@ -463,14 +489,20 @@ async fn concurrent_callbacks_consume_once_and_reissue_the_same_scoped_grant() -
         anyhow::ensure!(a.is_ok() != b.is_ok());
         rejected(if a.is_err() { a } else { b }, StatusCode::BAD_REQUEST)?;
         anyhow::ensure!(f.counts().await? == (1, 1));
-        let (one, same_nonce) = f.begin(Some(&nonce)).await?;
-        let (two, same_nonce2) = f.begin(Some(&nonce)).await?;
-        anyhow::ensure!(same_nonce == nonce && same_nonce2 == nonce);
+        // Concurrent tabs each get a fresh nonce of their own; neither replaces
+        // the other's, and both reach the same scoped grant.
+        let (one, nonce_one) = f.begin().await?;
+        let (two, nonce_two) = f.begin().await?;
+        anyhow::ensure!(nonce_one != nonce && nonce_two != nonce && nonce_one != nonce_two);
         let first = f.approve(&one).await?;
         let second = f.approve(&two).await?;
+        rejected(
+            callback(&context, callback_request(&first, &nonce_two), HOST).await,
+            StatusCode::BAD_REQUEST,
+        )?;
         let (a, b) = tokio::join!(
-            callback(&context, callback_request(&first, &nonce), HOST),
-            callback(&context, callback_request(&second, &nonce), HOST)
+            callback(&context, callback_request(&first, &nonce_one), HOST),
+            callback(&context, callback_request(&second, &nonce_two), HOST)
         );
         let a = response_cookie(&accepted(a)?, GRANT_COOKIE)?;
         let b = response_cookie(&accepted(b)?, GRANT_COOKIE)?;
@@ -493,7 +525,7 @@ async fn repeated_browser_reopening_reuses_one_grant_without_exhausting_scope_qu
     let result = async {
         let mut first = None;
         for _ in 0..12 {
-            let (continuation, nonce) = f.begin(None).await?;
+            let (continuation, nonce) = f.begin().await?;
             let code = f.approve(&continuation).await?;
             let token = f.finish(&code, &nonce).await?;
             anyhow::ensure!(f.granted(&token).await?);
@@ -527,7 +559,7 @@ async fn logout_disable_expiry_and_cross_user_cleanup_do_not_leave_preview_autho
         for before_callback in [true, false] {
             let f = Fixture::create(2).await?;
             let result = async {
-                let (continuation, nonce) = f.begin(None).await?;
+                let (continuation, nonce) = f.begin().await?;
                 let code = f.approve(&continuation).await?;
                 let token = if before_callback {
                     None
@@ -561,7 +593,7 @@ async fn logout_disable_expiry_and_cross_user_cleanup_do_not_leave_preview_autho
             INSERT INTO preview_auth_challenges(id,nonce_hash,client_hash,organization_id,environment_id,port_id,host,return_path,created_at,expires_at,session_id,code_hash,code_expires_at) VALUES('expired-other',repeat('a',64),repeat('b',64),'preview-org','abcde-preview-env','preview-port','app-abcde-preview-org.preview.test','/',clock_timestamp()-interval '6 minutes',clock_timestamp()-interval '2 minutes','other-session',repeat('c',64),clock_timestamp()-interval '3 minutes'); \
             INSERT INTO preview_browser_grants(token_hash,session_id,organization_id,environment_id,port_id,host,created_at) VALUES(repeat('d',64),'other-session','preview-org','abcde-preview-env','preview-port','app-abcde-preview-org.preview.test',clock_timestamp()-interval '2 hours');")
             .execute(&f.pool).await?;
-        let (continuation, _) = f.begin(None).await?; f.approve(&continuation).await?;
+        let (continuation, _) = f.begin().await?; f.approve(&continuation).await?;
         anyhow::ensure!(f.counts().await? == (1, 0));
         Ok(())
     }.await;
@@ -573,7 +605,7 @@ async fn logout_disable_expiry_and_cross_user_cleanup_do_not_leave_preview_autho
 async fn exact_port_host_and_current_audience_membership_are_revalidated() -> Result<()> {
     let f = Fixture::create(2).await?;
     let result = async {
-        let (continuation, nonce) = f.begin(None).await?;
+        let (continuation, nonce) = f.begin().await?;
         let code = f.approve(&continuation).await?;
         let token = f.finish(&code, &nonce).await?;
         let (matched, mut target) = f.target().await?;
@@ -599,7 +631,7 @@ async fn exact_port_host_and_current_audience_membership_are_revalidated() -> Re
         anyhow::ensure!(!f.granted(&token).await?);
         sqlx::query("UPDATE environment_ports SET access='creator' WHERE id='preview-port'").execute(&f.pool).await?;
         sqlx::query("UPDATE environments SET created_by='preview-user' WHERE id='abcde-preview-env'").execute(&f.pool).await?;
-        let (continuation, nonce) = f.begin(None).await?;
+        let (continuation, nonce) = f.begin().await?;
         let code = f.approve(&continuation).await?;
         sqlx::query("UPDATE environments SET created_by='other-user' WHERE id='abcde-preview-env'").execute(&f.pool).await?;
         rejected(callback(&f.context(), callback_request(&code, &nonce), HOST).await, StatusCode::FORBIDDEN)?;

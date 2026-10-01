@@ -75,6 +75,11 @@ pub(super) const CALLBACK_PATH: &str = "/.codewire/preview-auth/callback";
 pub(super) const NONCE_COOKIE: &str = "__Host-codewire-preview-challenge";
 pub(super) const GRANT_COOKIE: &str = "__Host-codewire-preview";
 
+/// Each sign-in carries its nonce in a cookie named for its challenge.
+pub(super) fn nonce_cookie(challenge: &str) -> String {
+    format!("{NONCE_COOKIE}-{challenge}")
+}
+
 pub(super) fn random_token() -> Result<String, ()> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| ())?;
@@ -112,18 +117,19 @@ pub(super) fn opaque_token(token: &str) -> bool {
 }
 
 /// Cookies are authority: duplicates cannot select first/last by accident.
+/// Another preview on the shared site can add cookies to this request, so an
+/// unrelated pair that does not parse, or a large header, is skipped rather
+/// than failing every lookup.
 pub(super) fn unique_cookie<'a>(
     headers: &'a HeaderMap,
     expected: &str,
 ) -> Result<Option<&'a str>, ()> {
     let mut result = None;
-    let mut total = 0usize;
     for header in headers.get_all(header::COOKIE) {
-        total = total.checked_add(header.as_bytes().len()).ok_or(())?;
-        if total > 16 * 1024 {
-            return Err(());
-        }
-        for pair in header.to_str().map_err(|_| ())?.split(';') {
+        for pair in header.as_bytes().split(|byte| *byte == b';') {
+            let Ok(pair) = std::str::from_utf8(pair) else {
+                continue;
+            };
             let Some((name, value)) = pair.trim().split_once('=') else {
                 continue;
             };
@@ -228,8 +234,23 @@ pub(super) fn verify_confirmation(
     mac.verify_slice(&bytes).is_ok()
 }
 
+/// A preview grant authenticates only the preview's own requests and top-level
+/// navigations to it. Every preview host shares one site, so SameSite cannot
+/// stop another preview from sending this browser's grant with a script,
+/// image, frame or credentialed fetch of its own; Fetch Metadata can. Unsafe
+/// methods also need this preview's exact Origin.
 pub(super) fn safe_cookie_request(method: &Method, headers: &HeaderMap, origin: &str) -> bool {
-    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || exact_origin(headers, origin)
+    let fetch = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let navigation =
+        fetch("sec-fetch-mode") == Some("navigate") && fetch("sec-fetch-dest") == Some("document");
+    let site = match fetch("sec-fetch-site") {
+        Some("same-origin" | "none") => true,
+        Some(_) => navigation,
+        // A browser without Fetch Metadata: any Origin it sends must match.
+        None => !headers.contains_key(header::ORIGIN) || exact_origin(headers, origin),
+    };
+    site && (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        || exact_origin(headers, origin))
 }
 
 #[cfg(test)]
@@ -371,6 +392,15 @@ mod tests {
     }
 
     #[test]
+    fn cookies_another_preview_planted_do_not_hide_the_grant() {
+        let mut value = b"junk=\xff\xfe; __Host-codewire-preview=one; ".to_vec();
+        value.extend(format!("big={}", "x".repeat(20 * 1024)).bytes());
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, HeaderValue::from_bytes(&value).unwrap());
+        assert_eq!(unique_cookie(&headers, GRANT_COOKIE), Ok(Some("one")));
+    }
+
+    #[test]
     fn confirmation_is_bound_to_purpose_session_and_challenge() {
         let token = confirmation_token("synthetic-key", "session", "challenge");
         assert!(verify_confirmation(
@@ -403,6 +433,42 @@ mod tests {
             "challenge",
             ""
         ));
+    }
+
+    #[test]
+    fn a_grant_serves_only_its_own_requests_and_top_level_navigations() {
+        let origin = "https://web-abcde-org.preview.test";
+        let request = |site: &str, mode: &str, dest: &str| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in [
+                ("sec-fetch-site", site),
+                ("sec-fetch-mode", mode),
+                ("sec-fetch-dest", dest),
+            ] {
+                headers.insert(name, HeaderValue::from_str(value).unwrap());
+            }
+            safe_cookie_request(&Method::GET, &headers, origin)
+        };
+        assert!(request("same-origin", "cors", "empty"));
+        assert!(request("same-origin", "no-cors", "script"));
+        assert!(request("none", "navigate", "document"));
+        assert!(request("cross-site", "navigate", "document"));
+        assert!(request("same-site", "navigate", "document"));
+        // Another preview's subresources and frames never carry the grant.
+        assert!(!request("same-site", "cors", "empty"));
+        assert!(!request("same-site", "no-cors", "script"));
+        assert!(!request("same-site", "no-cors", "image"));
+        assert!(!request("same-site", "navigate", "iframe"));
+        assert!(!request("cross-site", "no-cors", "script"));
+        // Without Fetch Metadata, a foreign Origin is refused.
+        let mut legacy = HeaderMap::new();
+        legacy.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://other-abcde-org.preview.test"),
+        );
+        assert!(!safe_cookie_request(&Method::GET, &legacy, origin));
+        legacy.insert(header::ORIGIN, HeaderValue::from_static(origin));
+        assert!(safe_cookie_request(&Method::GET, &legacy, origin));
     }
 
     #[test]

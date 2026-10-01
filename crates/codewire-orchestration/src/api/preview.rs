@@ -172,7 +172,6 @@ pub async fn preview_proxy_middleware(
                 }
                 return match authorization::start(
                     &authorization::PreviewContext::from(&state),
-                    &headers,
                     &host_match,
                     &target,
                     &host,
