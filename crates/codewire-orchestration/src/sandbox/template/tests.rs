@@ -1195,6 +1195,18 @@ mod tests {
             }),
             "workspace readiness must prove the cross-container Docker socket"
         );
+        assert_eq!(
+            workspace["startupProbe"],
+            json!({
+                "exec": workspace["readinessProbe"]["exec"],
+                "periodSeconds": 1,
+                "timeoutSeconds": 2,
+                "failureThreshold": WORKSPACE_READY_TIMEOUT.as_secs(),
+                "successThreshold": 1,
+            }),
+            "a start notices Docker within a second and is never stopped before \
+             the commodity ready wait gives up"
+        );
         assert!(
             volumes
                 .iter()
@@ -1238,6 +1250,21 @@ mod tests {
             startup_probe_budget_seconds(gateway_container),
             WORKSPACE_READY_TIMEOUT.as_secs(),
             "the kubelet must not restart a commodity gateway during a slow start"
+        );
+        assert_eq!(
+            gateway_container["startupProbe"]["periodSeconds"],
+            json!(1),
+            "create notices the gateway reaching its daemon within one second"
+        );
+        assert_eq!(
+            gateway_container["readinessProbe"],
+            json!({
+                "httpGet": { "path": "/readyz", "port": DEFAULT_GATEWAY_READYZ_PORT },
+                "periodSeconds": 2,
+                "timeoutSeconds": 2,
+                "failureThreshold": 3,
+            }),
+            "steady-state gateway readiness keeps its period and failure budget"
         );
         assert!(
             spec["volumes"]
@@ -1337,6 +1364,16 @@ mod tests {
         assert_eq!(
             workspace["readinessProbe"]["exec"]["command"][2].as_str(),
             Some("docker version --format '{{.Server.Version}}' >/dev/null")
+        );
+        assert_eq!(
+            workspace["startupProbe"]["exec"],
+            workspace["readinessProbe"]["exec"]
+        );
+        assert_eq!(
+            workspace["startupProbe"]["failureThreshold"].as_u64().unwrap()
+                * workspace["startupProbe"]["periodSeconds"].as_u64().unwrap(),
+            CONFIDENTIAL_WORKSPACE_READY_TIMEOUT.as_secs(),
+            "confidential Docker startup keeps the tier's cold-start budget"
         );
         let dind = containers
             .iter()
