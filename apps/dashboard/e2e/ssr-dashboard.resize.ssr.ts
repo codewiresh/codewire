@@ -60,7 +60,9 @@ async function open(page: Page) {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN");
   await page.goto(`${origin}/reference/fixtures/sandbox-resize.html`);
-  await expect(page.getByRole("button", { name: "Resize", exact: true })).toBeEnabled();
+  // Resize enables after the first readiness poll settles; under a loaded
+  // machine page start-up alone can exceed the default expect timeout.
+  await expect(page.getByRole("button", { name: "Resize", exact: true })).toBeEnabled({ timeout: 15_000 });
   await page.getByRole("button", { name: "Resize", exact: true }).click();
   return page.getByRole("dialog", { name: "Resize Fixture Sandbox" });
 }
