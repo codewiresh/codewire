@@ -20,6 +20,7 @@ const DAY: u64 = 24 * 60 * 60;
 const REJECTED_REFRESH_TOKEN: &str = "synthetic-refresh-rejected";
 const GITHUB_REFRESH_TOKEN: &str = "ghr_synthetic_keepalive_refresh_1234567890";
 const GITHUB_ROTATED_ACCESS_TOKEN: &str = "ghu_synthetic_keepalive_rotated_1234567890";
+const GITHUB_ROTATED_REFRESH_TOKEN: &str = "ghr_synthetic_keepalive_rotated_1234567890";
 
 /// Holds the first provider exchange at an exact barrier when armed.
 #[derive(Default)]
@@ -483,7 +484,7 @@ impl BrokerUpstreamTransport for GitHubProvider {
                     "access_token": GITHUB_ROTATED_ACCESS_TOKEN,
                     "token_type": "bearer",
                     "expires_in": 28_800,
-                    "refresh_token": "ghr_synthetic_keepalive_rotated_1234567890",
+                    "refresh_token": GITHUB_ROTATED_REFRESH_TOKEN,
                     "refresh_token_expires_in": 15_897_600
                 })
             }
