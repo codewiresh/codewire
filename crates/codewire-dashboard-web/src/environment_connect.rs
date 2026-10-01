@@ -165,23 +165,19 @@ pub(crate) async fn create_options(
     cookie: HeaderValue,
     org_id: &str,
 ) -> Result<EnvironmentCreateOptions, ConnectError> {
-    let setup = EnvironmentSetupServiceClient::new(
+    let setup_client = EnvironmentSetupServiceClient::new(
         transport(state, cookie.clone()),
         client_config(state, UNARY_TIMEOUT),
-    )
-    .get_environment_create_options(GetEnvironmentCreateOptionsRequest {
-        org_id: org_id.to_owned(),
-        ..Default::default()
-    })
-    .await?
-    .into_owned();
-
-    // The catalog is public to organization members.  Failure to read it does
-    // not block the create form; the server still performs authoritative,
-    // atomic admission when a confidential environment is submitted.
+    );
     let overview_client = billing_client(state, cookie.clone());
     let plans_client = billing_client(state, cookie.clone());
-    let (overview, plans) = tokio::join!(
+    // Presets, billing and sources are independent reads; waiting on each in
+    // turn only adds round trips before the choices appear.
+    let (setup, overview, plans, sources) = tokio::join!(
+        setup_client.get_environment_create_options(GetEnvironmentCreateOptionsRequest {
+            org_id: org_id.to_owned(),
+            ..Default::default()
+        }),
         overview_client.get_billing_overview(GetBillingOverviewRequest {
             org_id: org_id.to_owned(),
             ..Default::default()
@@ -190,7 +186,13 @@ pub(crate) async fn create_options(
             resource_type: "confidential_sandbox".to_owned(),
             ..Default::default()
         }),
+        crate::environment_sources::options(state, cookie, org_id),
     );
+    let setup = setup?.into_owned();
+
+    // The catalog is public to organization members.  Failure to read it does
+    // not block the create form; the server still performs authoritative,
+    // atomic admission when a confidential environment is submitted.
     let (confidential_available, confidential_price) = match (overview, plans) {
         (Ok(overview), Ok(plans)) => {
             let plan_key = overview.into_owned().plan;
@@ -266,7 +268,7 @@ pub(crate) async fn create_options(
         agents: agent_catalog(),
         confidential_available,
         confidential_price,
-        sources: crate::environment_sources::options(state, cookie, org_id).await,
+        sources,
     })
 }
 
