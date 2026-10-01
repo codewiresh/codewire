@@ -51,6 +51,7 @@ pub const CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME: &str = "workspace";
 pub enum CreateAction {
     Done,
     WaitForReady,
+    ResumeWorkspace,
     EnsureNamespace,
     CreateClaim,
     StoreBackend,
@@ -63,6 +64,7 @@ impl std::fmt::Display for CreateAction {
         let s = match self {
             CreateAction::Done => "done",
             CreateAction::WaitForReady => "wait_for_ready",
+            CreateAction::ResumeWorkspace => "resume_workspace",
             CreateAction::EnsureNamespace => "ensure_namespace",
             CreateAction::CreateClaim => "create_claim",
             CreateAction::StoreBackend => "store_backend",
@@ -93,6 +95,9 @@ pub fn next_create_action(
         return CreateAction::CreateClaim;
     }
     if !probe.claim_ready {
+        if create_retry_recovery_required(state) && suspended_workspace_blocks_readiness(probe) {
+            return CreateAction::ResumeWorkspace;
+        }
         return CreateAction::WaitForReady;
     }
     if !probe.pod_exists
@@ -121,6 +126,13 @@ fn create_command_cancelled(state: &str, desired_state: &str) -> bool {
 
 fn create_retry_recovery_required(state: &str) -> bool {
     state == "pending"
+}
+
+/// A Claim never reports Ready while its bound Sandbox stays suspended, for
+/// example after setup's no-Pod fence lost its `started` intent (#2328).
+/// Waiting for readiness alone would never converge.
+fn suspended_workspace_blocks_readiness(probe: &ProbeResult) -> bool {
+    probe.claim_exists && !probe.claim_ready && probe.sandbox_suspended
 }
 
 fn create_action_requires_runtime_identity(action: CreateAction) -> bool {
@@ -838,6 +850,7 @@ async fn run_environment_create(
     let svc = Service::<PgLifecycleStore>::for_activity(ctx.pool.clone(), authority.clone());
     let cfg = &ctx.sandbox_cfg;
     let mut bootstrap_recovered = false;
+    let mut workspace_resumed = false;
 
     loop {
         authority.ensure().await?;
@@ -879,7 +892,12 @@ async fn run_environment_create(
         }
 
         let setup_complete = backend.as_ref().is_some_and(|b| b.setup_complete);
-        let action = next_create_action(&env.state, backend.as_ref(), setup_complete, &probe);
+        let mut action = next_create_action(&env.state, backend.as_ref(), setup_complete, &probe);
+        if action == CreateAction::ResumeWorkspace && workspace_resumed {
+            // One resume per attempt. A Sandbox suspended again meanwhile must
+            // not loop here; the bounded readiness wait records the failure.
+            action = CreateAction::WaitForReady;
+        }
         tracing::info!(env = env_id, state = env.state, action = %action, "create loop");
 
         if create_action_requires_runtime_identity(action) {
@@ -904,6 +922,23 @@ async fn run_environment_create(
 
         match action {
             CreateAction::Done => return Ok(()),
+
+            CreateAction::ResumeWorkspace => {
+                let backend = backend.as_ref().expect("resume_workspace requires backend");
+                if let Err(e) = resume_suspended_workspace(ctx, &env, backend, authority).await {
+                    record_error(
+                        &svc,
+                        authority,
+                        env_id,
+                        &format!("resume suspended workspace: {e:#}"),
+                    )
+                    .await?;
+                    return Err(e);
+                }
+                workspace_resumed = true;
+                // The next probe observes the resumed Sandbox and waits for
+                // its Claim through the ordinary readiness path.
+            }
 
             CreateAction::WaitForReady => {
                 let started = std::time::Instant::now();
@@ -1648,6 +1683,73 @@ async fn replace_terminal_workspace_pod(
     }
 }
 
+/// Resume the exact Claim-owned Sandbox through the cold-bootstrap path Start
+/// uses: request suspension again, observe the controller complete it with
+/// every prior workspace Pod absent, refresh the bootstrap for this operation
+/// generation, then resume only that observed incarnation. A resumed Pod runs
+/// no setup command; a setup owner still re-fences its own Pod on takeover.
+async fn resume_suspended_workspace(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    backend: &BackendRow,
+    authority: &ActivityAuthority,
+) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    emit_create_log(authority, "resume_workspace", "started", "", None).await?;
+    tracing::info!(
+        env = env.id,
+        "resuming suspended workspace Sandbox before waiting for claim readiness"
+    );
+    let result = async {
+        let mut opts =
+            load_environment_template_opts(ctx, env, authority.operation_generation()).await?;
+        if env.isolation_tier == "confidential" {
+            let storage = ctx.confidential_storage.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("confidential storage providers are not configured")
+            })?;
+            opts.confidential_storage_manifest_uri = authority
+                .run_external_mutation(
+                    CREATE_MUTATION_STATES,
+                    storage.ensure_ready(&env.id, env.disk_gb),
+                )
+                .await?;
+        }
+        super::lifecycle::restart_workspace_bootstrap(
+            ctx,
+            env,
+            backend,
+            &opts,
+            authority,
+            CREATE_MUTATION_STATES,
+        )
+        .await
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            emit_create_log(
+                authority,
+                "resume_workspace",
+                "completed",
+                "",
+                duration_meta(started),
+            )
+            .await
+        }
+        Err(error) => {
+            emit_create_log(
+                authority,
+                "resume_workspace",
+                "failed",
+                &format!("{error:#}"),
+                duration_meta(started),
+            )
+            .await?;
+            Err(error)
+        }
+    }
+}
+
 async fn ensure_gateway_stack_for_environment(
     ctx: &WorkerContext,
     cfg: &SandboxWorkerCfg,
@@ -2120,11 +2222,62 @@ mod tests {
         }
         for action in [
             CreateAction::WaitForReady,
+            CreateAction::ResumeWorkspace,
             CreateAction::EnsureNamespace,
             CreateAction::CreateClaim,
         ] {
             assert!(!create_action_requires_runtime_identity(action));
         }
+    }
+
+    /// #2328: setup's no-Pod fence left the Sandbox suspended while desired
+    /// state stayed `started`. Every pending-create retry then waited for a
+    /// Claim that cannot become Ready while its Sandbox is suspended.
+    #[test]
+    fn pending_retry_resumes_a_suspended_sandbox_instead_of_waiting_for_readiness() {
+        let b = backend("ns", "sandbox-env", "10.0.0.5", false);
+        let suspended = ProbeResult {
+            claim_exists: true,
+            claim_reason: "SandboxSuspended".into(),
+            sandbox_suspended: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            next_create_action("pending", Some(&b), false, &suspended),
+            CreateAction::ResumeWorkspace
+        );
+        assert_eq!(
+            CreateAction::ResumeWorkspace.to_string(),
+            "resume_workspace"
+        );
+        // Only an explicit retry resumes. A first create waits for its own new
+        // Claim, and start/running paths own their Sandbox operating mode.
+        for state in ["creating", "starting", "running"] {
+            assert_eq!(
+                next_create_action(state, Some(&b), false, &suspended),
+                CreateAction::WaitForReady,
+                "{state}"
+            );
+        }
+        // An unbound Claim reads zero replicas without being suspended.
+        let unbound = ProbeResult {
+            sandbox_suspended: false,
+            claim_reason: String::new(),
+            ..suspended.clone()
+        };
+        assert_eq!(
+            next_create_action("pending", Some(&b), false, &unbound),
+            CreateAction::WaitForReady
+        );
+        // A Ready Claim proceeds through runtime identity, never a resume.
+        let ready = ProbeResult {
+            sandbox_suspended: true,
+            ..probe(true, true)
+        };
+        assert_eq!(
+            next_create_action("pending", Some(&b), false, &ready),
+            CreateAction::MarkRunning
+        );
     }
 
     #[test]

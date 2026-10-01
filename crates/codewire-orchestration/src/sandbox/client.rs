@@ -48,6 +48,9 @@ pub struct ProbeResult {
     pub claim_ready: bool,
     pub claim_reason: String,
     pub replicas: i64,
+    /// The Claim's bound Sandbox exists and its spec requests `Suspended`.
+    /// Unlike `replicas == 0`, this is never inferred from an unbound Claim.
+    pub sandbox_suspended: bool,
     pub pod_exists: bool,
     pub pod_phase: String,
     pub node_name: String,
@@ -3715,16 +3718,12 @@ impl SandboxClient {
         {
             // Like getSandboxReplicas: Suspended reads 0; any other existing
             // Sandbox is treated as one running slot.
-            result.replicas = if sb
+            result.sandbox_suspended = sb
                 .data
                 .pointer("/spec/operatingMode")
                 .and_then(Value::as_str)
-                == Some("Suspended")
-            {
-                0
-            } else {
-                1
-            };
+                == Some("Suspended");
+            result.replicas = if result.sandbox_suspended { 0 } else { 1 };
         }
 
         let pod_lookup = if sandbox_name.is_empty() {
@@ -4295,6 +4294,80 @@ mod tests {
             SandboxClient::new(Client::new(service, "default"), "dev-sandboxes"),
             state,
         )
+    }
+
+    fn probe_client(claim: Value, sandbox: Option<Value>) -> SandboxClient {
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let (claim, sandbox) = (claim.clone(), sandbox.clone());
+            async move {
+                assert_eq!(request.method(), Method::GET, "a probe never mutates");
+                let path = request.uri().path().to_string();
+                let (status, body) = match (path.as_str(), sandbox) {
+                    (MODE_CLAIM_PATH, _) => (StatusCode::OK, claim),
+                    (MODE_SANDBOX_PATH, Some(sandbox)) => (StatusCode::OK, sandbox),
+                    _ => (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+                };
+                Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        SandboxClient::new(Client::new(service, "default"), "dev-sandboxes")
+    }
+
+    /// #2328: create recovery resumes only an observed suspended Sandbox. An
+    /// unbound Claim also reads zero replicas and must not look suspended.
+    #[tokio::test]
+    async fn probe_reports_suspension_only_for_the_bound_sandbox() {
+        let claim = |bound: bool| {
+            let mut claim = json!({
+                "apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+                "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                "status": {"conditions": [{"type": "Ready", "status": "False", "reason": "SandboxSuspended"}]}
+            });
+            if bound {
+                claim["status"]["sandbox"] = json!({"name": "workspace-env-test"});
+            }
+            claim
+        };
+        let sandbox = |mode: &str| {
+            let mut sandbox = mode_sandbox();
+            sandbox["spec"]["operatingMode"] = json!(mode);
+            sandbox
+        };
+        for (label, client, suspended, replicas) in [
+            (
+                "suspended",
+                probe_client(claim(true), Some(sandbox("Suspended"))),
+                true,
+                0,
+            ),
+            (
+                "running",
+                probe_client(claim(true), Some(sandbox("Running"))),
+                false,
+                1,
+            ),
+            ("unbound", probe_client(claim(false), None), false, 0),
+            (
+                "bound but absent",
+                probe_client(claim(true), None),
+                false,
+                0,
+            ),
+        ] {
+            let probe =
+                tokio::time::timeout(Duration::from_secs(2), client.probe_environment("env-test"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(probe.claim_exists && !probe.claim_ready, "{label}");
+            assert_eq!(probe.sandbox_suspended, suspended, "{label}");
+            assert_eq!(probe.replicas, replicas, "{label}");
+            assert!(!probe.pod_exists, "{label}");
+        }
     }
 
     #[tokio::test]
