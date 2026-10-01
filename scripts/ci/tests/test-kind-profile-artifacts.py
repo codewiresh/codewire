@@ -54,36 +54,52 @@ class ArtifactTests(unittest.TestCase):
 
     def test_archive_resolves_exact_recorded_id(self):
         path, expected = self.archive()
-        ARTIFACTS.verify_archive(path, expected)
+        ARTIFACTS.verify_archive(path, expected, image_identity="config")
 
     def test_mutable_tag_with_different_content_fails(self):
         path, expected = self.archive()
         expected["codewire-services:e2e"] = "sha256:" + "0" * 64
         with self.assertRaises(ARTIFACTS.SealError):
-            ARTIFACTS.verify_archive(path, expected)
+            ARTIFACTS.verify_archive(path, expected, image_identity="config")
 
     def test_foreign_archive_tag_fails(self):
         path, expected = self.archive(tag="other:e2e")
         with self.assertRaises(ARTIFACTS.SealError):
-            ARTIFACTS.verify_archive(path, expected)
+            ARTIFACTS.verify_archive(path, expected, image_identity="config")
 
     def test_archive_link_cannot_supply_image_identity(self):
         path, expected = self.archive(link=True)
         with self.assertRaises(ARTIFACTS.SealError):
-            ARTIFACTS.verify_archive(path, expected)
+            ARTIFACTS.verify_archive(path, expected, image_identity="config")
 
-    def oci_archive(self, change=None, *, rebind_manifest=False):
-        """Docker29's compatibility manifest plus its single-platform OCI index."""
+    def oci_archive(self, change=None, *, rebind_manifest=False, classic=False, config_change=None):
+        """Single-platform OCI exports with either observed Docker identity."""
         tag = "codewire-services:e2e"
         config = b'{"architecture":"amd64","os":"linux"}'
         layers = [b"first synthetic compressed layer", b"second synthetic compressed layer"]
+        if classic:
+            layers = []
+            for filename in ("first", "second"):
+                stream = io.BytesIO()
+                with tarfile.open(fileobj=stream, mode="w") as layer:
+                    member = tarfile.TarInfo(filename)
+                    payload = filename.encode()
+                    member.size = len(payload)
+                    layer.addfile(member, io.BytesIO(payload))
+                layers.append(stream.getvalue())
+            value = {"architecture": "amd64", "os": "linux", "rootfs": {
+                "type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(data).hexdigest() for data in layers]}}
+            if config_change:
+                config_change(value)
+            config = ARTIFACTS.encode(value)
         blob = lambda data: "blobs/sha256/" + hashlib.sha256(data).hexdigest()
         descriptor = lambda data, media: {"digest": "sha256:" + hashlib.sha256(data).hexdigest(),
                                            "mediaType": media, "size": len(data)}
         config_path, layer_paths = blob(config), [blob(data) for data in layers]
         manifest = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
                     "config": descriptor(config, "application/vnd.oci.image.config.v1+json"),
-                    "layers": [descriptor(data, "application/vnd.oci.image.layer.v1.tar+gzip")
+                    "layers": [descriptor(data, "application/vnd.oci.image.layer.v1.tar"
+                                          if classic else "application/vnd.oci.image.layer.v1.tar+gzip")
                                for data in layers]}
         raw = ARTIFACTS.encode(manifest)
         manifest_path = blob(raw)
@@ -96,7 +112,7 @@ class ArtifactTests(unittest.TestCase):
                            **dict(zip(layer_paths, layers))}, "index": index, "oci": manifest,
                  "docker": [{"Config": config_path, "RepoTags": [tag], "Layers": layer_paths.copy()}],
                  "config_path": config_path, "layer_paths": layer_paths, "oci_path": manifest_path,
-                 "expected": {tag: "sha256:" + hashlib.sha256(raw).hexdigest()}}
+                 "expected": {tag: "sha256:" + hashlib.sha256(config if classic else raw).hexdigest()}}
         if change is not None:
             change(state)
         if rebind_manifest:
@@ -105,7 +121,9 @@ class ArtifactTests(unittest.TestCase):
             state["oci_path"] = blob(raw)
             state["files"][state["oci_path"]] = raw
             selected = state["index"]["manifests"][0]
-            selected["digest"] = state["expected"][tag] = "sha256:" + hashlib.sha256(raw).hexdigest()
+            selected["digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+            if not classic:
+                state["expected"][tag] = selected["digest"]
             selected["size"] = len(raw)
         state["files"]["manifest.json"] = ARTIFACTS.encode(state["docker"])
         state["files"]["index.json"] = state.get("index_bytes", ARTIFACTS.encode(state["index"]))
@@ -205,7 +223,6 @@ class ArtifactTests(unittest.TestCase):
         def change(state):
             state["expected"]["codewire-services:e2e"] = "sha256:" + hashlib.sha256(
                 state["files"][state["config_path"]]).hexdigest()
-            state["index"]["manifests"][0]["annotations"]["io.containerd.image.name"] = "other:e2e"
         path, expected = self.oci_archive(change)
         with self.assertRaises(ARTIFACTS.SealError):
             ARTIFACTS.verify_archive(path, expected)
@@ -229,6 +246,88 @@ class ArtifactTests(unittest.TestCase):
         with patch.object(ARTIFACTS.time, "monotonic", side_effect=[0, 121]):
             with self.assertRaisesRegex(ARTIFACTS.SealError, "deadline"):
                 ARTIFACTS.verify_archive(path, expected)
+
+    def test_classic_oci_archive_binds_admitted_config_and_uncompressed_layers(self):
+        path, expected = self.oci_archive(classic=True)
+        ARTIFACTS.verify_archive(path, expected, image_identity="config")
+        with self.assertRaises(ARTIFACTS.SealError):
+            ARTIFACTS.verify_archive(path, expected, image_identity="manifest")
+
+    def test_manifest_mode_cannot_accept_a_legacy_config_archive(self):
+        path, expected = self.archive()
+        with self.assertRaisesRegex(ARTIFACTS.SealError, "requires an OCI index"):
+            ARTIFACTS.verify_archive(path, expected, image_identity="manifest")
+
+    def test_classic_oci_config_must_bind_the_exact_ordered_diff_ids(self):
+        for name, change in (
+            ("missing rootfs", lambda value: value.pop("rootfs")),
+            ("wrong type", lambda value: value["rootfs"].update(type="other")),
+            ("wrong digest", lambda value: value["rootfs"]["diff_ids"].__setitem__(0, "sha256:" + "0" * 64)),
+            ("missing layer", lambda value: value["rootfs"]["diff_ids"].pop()),
+            ("layer order", lambda value: value["rootfs"]["diff_ids"].reverse()),
+        ):
+            with self.subTest(name=name):
+                path, expected = self.oci_archive(classic=True, config_change=change)
+                with self.assertRaisesRegex(ARTIFACTS.SealError, "rootfs.diff_ids"):
+                    ARTIFACTS.verify_archive(path, expected, image_identity="config")
+
+    def test_classic_oci_manifest_cannot_change_the_config_bound_layers(self):
+        def reorder(state):
+            state["oci"]["layers"].reverse()
+            state["docker"][0]["Layers"].reverse()
+
+        for name, change, reason in (
+            ("compressed layer", lambda state: state["oci"]["layers"][0].update(
+                mediaType="application/vnd.oci.image.layer.v1.tar+gzip"), "uncompressed"),
+            ("both inventories reordered", reorder, "rootfs.diff_ids"),
+        ):
+            with self.subTest(name=name):
+                path, expected = self.oci_archive(change, classic=True, rebind_manifest=True)
+                with self.assertRaisesRegex(ARTIFACTS.SealError, reason):
+                    ARTIFACTS.verify_archive(path, expected, image_identity="config")
+
+    def test_classic_oci_hashes_and_inventory_remain_fail_closed(self):
+        changes = {
+            "foreign tag": lambda state: state["index"]["manifests"][0]["annotations"].update(
+                {"io.containerd.image.name": "docker.io/library/other:e2e"}),
+            "wrong config ID": lambda state: state["expected"].update(
+                {"codewire-services:e2e": "sha256:" + "0" * 64}),
+            "missing digest": lambda state: state["index"]["manifests"][0].pop("digest"),
+            "invalid digest": lambda state: state["index"]["manifests"][0].update(digest=[]),
+            "manifest bytes": lambda state: state["files"].update({state["oci_path"]: b"{}"}),
+            "config bytes": lambda state: state["files"].update({state["config_path"]: b"{}"}),
+            "layer bytes": lambda state: state["files"].update({state["layer_paths"][0]: b"changed"}),
+            "remote descriptor": lambda state: state["index"]["manifests"][0].update(urls=["https://outside.invalid"]),
+            "duplicate descriptor": lambda state: state["index"]["manifests"].append(state["index"]["manifests"][0]),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                path, expected = self.oci_archive(change, classic=True)
+                with self.assertRaises(ARTIFACTS.SealError):
+                    ARTIFACTS.verify_archive(path, expected, image_identity="config")
+
+    def test_image_identity_is_selected_from_explicit_daemon_store_metadata(self):
+        for value, expected in (
+            ({"driver": "overlayfs", "status": [["driver-type", "io.containerd.snapshotter.v1"]]}, "manifest"),
+            ({"driver": "overlay2", "status": [["Backing Filesystem", "extfs"]]}, "config"),
+            ({"driver": "vfs", "status": None}, "config"),
+        ):
+            with self.subTest(value=value), patch.object(ARTIFACTS, "run", return_value=json.dumps(value)):
+                self.assertEqual(ARTIFACTS.image_identity_mode(), expected)
+
+    def test_unknown_or_malformed_image_store_is_rejected(self):
+        for value in (
+            {"driver": "unknown", "status": []},
+            {"driver": "overlayfs", "status": []},
+            {"driver": "overlay2", "status": [["driver-type", "unknown"]]},
+            {"driver": "vfs", "status": [["driver-type", "a"], ["driver-type", "b"]]},
+            {"driver": "vfs", "status": {"driver-type": "unknown"}},
+            {"driver": "vfs", "status": [["driver-type", False]]},
+            {"driver": "vfs"},
+        ):
+            with self.subTest(value=value), patch.object(ARTIFACTS, "run", return_value=json.dumps(value)):
+                with self.assertRaises(ARTIFACTS.SealError):
+                    ARTIFACTS.image_identity_mode()
 
     def test_copy_owns_inode_and_survives_build_overwrite(self):
         source, destination = self.root / "mutable", self.root / "sealed"
@@ -487,6 +586,8 @@ class TransactionTests(unittest.TestCase):
             return f"{self.head}\n{self.tree}" if "rev-parse" in argv else (" M synthetic" if self.dirty else "")
         if argv[0] in self.versions:
             return self.versions[argv[0]]
+        if argv[:2] == ("docker", "info"):
+            return json.dumps({"driver": "vfs", "status": None})
         if argv[:3] == ("docker", "image", "inspect"):
             self.inspect_count += 1
             name = argv[-1].removeprefix("codewire-").removesuffix(":e2e")
@@ -616,6 +717,12 @@ class TransactionTests(unittest.TestCase):
         self.after_save = lambda: self.versions.update(rustc="synthetic-rustc-2")
         with self.assertRaises(ARTIFACTS.SealError):
             self.seal()
+        self.assert_unpublished()
+
+    def test_image_store_change_during_save_never_publishes_or_admits(self):
+        with patch.object(ARTIFACTS, "image_identity_mode", side_effect=["config", "manifest"]):
+            with self.assertRaisesRegex(ARTIFACTS.SealError, "image store changed"):
+                self.seal()
         self.assert_unpublished()
 
     def test_source_change_after_publication_preserves_the_unadmitted_directory(self):
