@@ -13,6 +13,7 @@ use super::environments::require_environment_access;
 use super::prepare::plain_error;
 use super::terminal::authenticate_socket_request;
 use crate::confidential_storage::require_interactive_access;
+use codewire_server_core::auth::SESSION_COOKIE_NAME;
 
 const PREVIEW_SERVICE_HEADER: &str = "x-codewire-service";
 const PREVIEW_SERVICE_NAME: &str = "codewire-orchestration";
@@ -96,7 +97,8 @@ pub async fn preview_proxy_middleware(
         );
     }
 
-    if target.access != "public" || target.isolation_tier == "confidential" {
+    let authenticated = target.access != "public" || target.isolation_tier == "confidential";
+    if authenticated {
         let user = match authenticate_socket_request(&state, &headers, "").await {
             Ok(user) => user,
             Err(response) if response.status() == StatusCode::UNAUTHORIZED => {
@@ -158,7 +160,17 @@ pub async fn preview_proxy_middleware(
         }
     }
 
-    proxy_to_preview_target(&state, method, uri, headers, body, &host, &target).await
+    proxy_to_preview_target(
+        &state,
+        method,
+        uri,
+        &headers,
+        authenticated,
+        body,
+        &host,
+        &target,
+    )
+    .await
 }
 
 fn request_host<'a>(headers: &'a HeaderMap, uri: &'a axum::http::Uri) -> Option<&'a str> {
@@ -309,11 +321,13 @@ async fn resolve_preview_target(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn proxy_to_preview_target(
     state: &ApiState,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: HeaderMap,
+    headers: &HeaderMap,
+    authenticated: bool,
     body: Body,
     original_host: &str,
     target: &PreviewTarget,
@@ -325,10 +339,7 @@ async fn proxy_to_preview_target(
         return preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable");
     };
     let mut req = state.http_client.request(method, target_url);
-    for (name, value) in headers.iter() {
-        if is_hop_by_hop(name.as_str()) || name == header::HOST {
-            continue;
-        }
+    for (name, value) in forwarded_request_headers(headers, authenticated) {
         req = req.header(name.as_str(), value.as_bytes());
     }
     req = req
@@ -412,6 +423,62 @@ fn redirect_to_login(frontend_url: &str, redirect_uri: &str) -> Response {
 "#
         )))
         .expect("static redirect")
+}
+
+/// Codewire credentials authorize the proxy, never the workload. The account
+/// session cookie is always removed. A Bearer credential is removed whenever
+/// the proxy authenticated the request, and a Codewire API key is removed even
+/// from a public preview. Other Authorization schemes belong to the app.
+fn forwarded_request_headers(
+    headers: &HeaderMap,
+    authenticated: bool,
+) -> Vec<(HeaderName, HeaderValue)> {
+    let mut forwarded = Vec::new();
+    for (name, value) in headers {
+        if is_hop_by_hop(name.as_str())
+            || name == header::HOST
+            || (name == header::AUTHORIZATION && codewire_authorization(value, authenticated))
+        {
+            continue;
+        }
+        if name == header::COOKIE {
+            // A Cookie header that cannot be parsed cannot be filtered safely.
+            let Ok(cookies) = value.to_str() else {
+                continue;
+            };
+            let kept = cookies
+                .split(';')
+                .map(str::trim)
+                .filter(|pair| {
+                    !pair.is_empty()
+                        && pair.split_once('=').map_or(*pair, |(name, _)| name).trim()
+                            != SESSION_COOKIE_NAME
+                })
+                .collect::<Vec<_>>();
+            if let (false, Ok(value)) = (kept.is_empty(), HeaderValue::from_str(&kept.join("; "))) {
+                forwarded.push((name.clone(), value));
+            }
+            continue;
+        }
+        forwarded.push((name.clone(), value.clone()));
+    }
+    forwarded
+}
+
+fn codewire_authorization(value: &HeaderValue, authenticated: bool) -> bool {
+    let Ok(value) = value.to_str() else {
+        return authenticated;
+    };
+    let token = value
+        .get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("bearer "))
+        .map(|_| value[7..].trim());
+    token.is_some_and(|token| {
+        authenticated
+            || token
+                .strip_prefix("cw_")
+                .is_some_and(|rest| rest.len() == 64)
+    })
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
@@ -524,6 +591,86 @@ mod tests {
             next_chunk(&mut forwarded_response).await,
             Bytes::from_static(b"response-two")
         );
+    }
+
+    fn forwarded(headers: &HeaderMap, authenticated: bool) -> Vec<String> {
+        forwarded_request_headers(headers, authenticated)
+            .iter()
+            .map(|(name, value)| format!("{name}: {}", value.to_str().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn preview_requests_never_forward_codewire_credentials_to_the_workload() {
+        let api_key = format!("Bearer cw_{}", "a".repeat(64));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("app.org.preview.example"),
+        );
+        headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer synthetic-token"),
+        );
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic YXBwOnNlY3JldA=="),
+        );
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&api_key).unwrap(),
+        );
+        headers.insert("x-app-header", HeaderValue::from_static("kept"));
+        // Every form the auth layer accepts is removed: spacing, repeats and a
+        // second header. A name inside another cookie's value is not a credential.
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static(
+                "theme=dark; codewire.session_token =a;\tcodewire.session_token=b; app=codewire.session_token=x",
+            ),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("codewire.session_token=second"),
+        );
+
+        // A restricted preview authenticated with a Bearer credential or the
+        // account cookie: neither reaches the app; its own Basic auth does.
+        assert_eq!(
+            forwarded(&headers, true),
+            [
+                "authorization: Basic YXBwOnNlY3JldA==",
+                "x-app-header: kept",
+                "cookie: theme=dark; app=codewire.session_token=x",
+            ]
+        );
+
+        // A public preview keeps the app's own Bearer and Basic credentials,
+        // but never a Codewire API key or the account session.
+        assert_eq!(
+            forwarded(&headers, false),
+            [
+                "authorization: Bearer synthetic-token",
+                "authorization: Basic YXBwOnNlY3JldA==",
+                "x-app-header: kept",
+                "cookie: theme=dark; app=codewire.session_token=x",
+            ]
+        );
+        let mut lowercase = HeaderMap::new();
+        lowercase.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("bEaReR cw_{}", "b".repeat(64))).unwrap(),
+        );
+        assert!(forwarded(&lowercase, false).is_empty());
+
+        // Unparseable cookies are dropped rather than forwarded unfiltered.
+        let mut opaque = HeaderMap::new();
+        opaque.insert(
+            header::COOKIE,
+            HeaderValue::from_bytes(b"codewire.session_token=\xff").unwrap(),
+        );
+        assert!(forwarded(&opaque, false).is_empty());
     }
 
     #[test]
