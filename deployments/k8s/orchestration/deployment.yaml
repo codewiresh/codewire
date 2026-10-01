@@ -42,6 +42,10 @@ spec:
               name: http
             - containerPort: 8085
               name: internal-api
+            # Serves only WorkspaceBindingService to identity-free workspace
+            # Pods, under its own connection and request limits.
+            - containerPort: 8087
+              name: workspace-bind
           envFrom:
             - configMapRef:
                 name: codewire-config
@@ -62,6 +66,8 @@ spec:
               value: "8084"
             - name: ORCHESTRATION_INTERNAL_CONNECT_PORT
               value: "8085"
+            - name: ORCHESTRATION_WORKSPACE_BINDING_PORT
+              value: "8087"
             # Public trust only. The separate infrastructure owner provisions
             # both bundles and the namespace-local gateway Issuer before rollout.
             - name: SANDBOX_CREDENTIAL_BROKER_NAMESPACE

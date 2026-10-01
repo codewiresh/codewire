@@ -30,6 +30,7 @@
 //! re-exports the most common entry points.
 
 pub mod auth;
+pub mod bounded_http1;
 pub mod config;
 pub mod connect;
 pub mod connect_error;
