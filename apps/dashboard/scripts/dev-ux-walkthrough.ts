@@ -416,15 +416,32 @@ export async function runDevUxWalkthrough(page: Page, options: {
   // Isolated request context has no browser cookies. Do not follow login
   // redirects, inject auth across domains, or change the preview to public.
   const anonymous = await request.newContext();
+  let previewPage: Page | undefined;
   try {
     await stage("ports-preview-denied", async () => {
       const denied = await anonymous.get(preview, { maxRedirects: 0, timeout: 15_000 });
       expect([302, 303, 401, 403]).toContain(denied.status());
       expect(await denied.text()).not.toContain(canary);
     });
-    // #2142: opening a private preview in the signed-in browser is not yet
-    // observed on Dev. Its stage failed there with no diagnostic the deploy
-    // classifier can name, so it is held out until it can be diagnosed.
+    // #2142: a signed-in creator opens the private preview directly, with no
+    // confirmation; its scoped cookie works only while this session is live.
+    // Each step is its own stage so a Dev failure names where it stopped.
+    await stage("ports-preview-open", async () => {
+      const opened = page.waitForEvent("popup");
+      await port.getByRole("link", { name: "Open preview", exact: true }).click();
+      previewPage = await opened;
+    });
+    await stage("ports-preview-handoff", async () => {
+      await expect(previewPage!).toHaveURL(new URL(preview).href, { timeout: 30_000 });
+    });
+    await stage("ports-preview-content", async () => {
+      await expect(previewPage!.locator("body")).toHaveText(canary);
+    });
+    await stage("ports-preview-reload", async () => {
+      await previewPage!.reload({ waitUntil: "domcontentloaded" });
+      await expect(previewPage!).toHaveURL(new URL(preview).href);
+      await expect(previewPage!.locator("body")).toHaveText(canary);
+    });
     await stage("ports-preview-removed", async () => {
       await button(port, "Remove ux-preview preview").click();
       await expect(port).toHaveCount(0);
@@ -432,7 +449,16 @@ export async function runDevUxWalkthrough(page: Page, options: {
       expect(removed.status()).toBe(404);
       expect(await removed.text()).not.toContain(canary);
     });
-  } finally { await anonymous.dispose(); }
+    // Removing the port revokes the open browser preview as well.
+    await stage("ports-preview-revoked", async () => {
+      const revoked = await previewPage!.reload({ waitUntil: "domcontentloaded" });
+      expect(revoked?.status()).toBe(404);
+      await expect(previewPage!.locator("body")).not.toContainText(canary);
+    });
+  } finally {
+    await previewPage?.close();
+    await anonymous.dispose();
+  }
   await stage("ports-close", async () => {
     await button(ports, "Done").click();
     expect(page.url()).toBe(before);
