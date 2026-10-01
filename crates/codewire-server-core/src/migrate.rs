@@ -46,6 +46,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 mod tests {
     mod github_singleton;
     mod owner_sources;
+    mod preview_browser;
     mod projection;
     mod session_mutation;
     mod ssh;
@@ -59,9 +60,13 @@ mod tests {
 
     // Measured in isolated PostgreSQL after composing account access,
     // environment projection, typed SSH metadata, the GitHub singleton that
-    // every personal profile includes, and the per-session two-factor setup
-    // skip, through version30.
+    // every personal profile includes, the per-session two-factor setup skip
+    // and preview browser authorization, through version31.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "33355acfec29dc0e65e302bc135c45db05a351b46ff3fa067ab1cc5f110caa38";
+    // Accepted table schema through version30, before preview browser
+    // authorization.
+    const ACCEPTED_PRE_PREVIEW_SCHEMA_FINGERPRINT: &str =
         "334e2acdf542843ab58f93c3961eca0c18e070e7c6dfc007f7e1d5d272eb3d86";
     // Accepted table schema through version29, before the two-factor setup skip.
     const ACCEPTED_PRE_TWO_FACTOR_SKIP_SCHEMA_FINGERPRINT: &str =
@@ -5028,6 +5033,9 @@ mod tests {
         }
         if version > 26 {
             owner_sources::assert_accepted_staged26()?;
+        }
+        if version > 30 {
+            preview_browser::assert_accepted_prior30()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR
