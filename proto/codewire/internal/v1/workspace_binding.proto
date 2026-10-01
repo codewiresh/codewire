@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package codewire.internal.v1;
+
+// WorkspaceBindingService binds one identity-free workspace Pod to the
+// environment orchestration recorded for it. The caller is identified only
+// by TokenReview of a Pod-bound projected token with the exact audience
+// codewire.internal.workspace-binding.v1, on the dedicated listener only.
+service WorkspaceBindingService {
+  // Returns this Pod's binding. An unbound Pod waits up to wait_seconds, then
+  // gets not_found and retries. A bound Pod gets the same binding again.
+  rpc BindWorkspace(BindWorkspaceRequest) returns (BindWorkspaceResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+message BindWorkspaceRequest {
+  // 0-20. The server clamps. Pod identity never travels in the message.
+  uint32 wait_seconds = 1;
+}
+
+message BindWorkspaceResponse {
+  string environment_id = 1;
+  // The reviewed Pod UID. The daemon compares it with its downward-API UID.
+  string pod_uid = 2;
+  // The operation generation captured when the binding was recorded.
+  int64 operation_generation = 3;
+  // Bearer for the private daemon RPC boundary of this Pod only.
+  string daemon_credential = 4 [debug_redact = true];
+  // Lowercase hex SHA-256 of the admitted projection selection, or empty.
+  string projection_selection_sha256 = 5;
+  // Canonical ManagedCredentialClients encoding captured at bind.
+  string managed_credential_clients = 6;
+}
