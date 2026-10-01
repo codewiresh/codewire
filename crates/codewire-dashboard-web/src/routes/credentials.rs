@@ -261,8 +261,8 @@ pub(super) async fn update_profile_action(
     }
 }
 
-/// Relabel a profile. The dialog's observed revision fences a stale view; the
-/// name uses the same rules as Create profile and keeps every binding.
+/// Relabel a profile. The dialog's observed revision and name fence a stale
+/// view; both names use Create profile's rules and every binding is kept.
 pub(super) async fn rename_profile_action(
     State(state): State<AppState>,
     CredentialQuery(query): CredentialQuery,
@@ -277,6 +277,7 @@ pub(super) async fn rename_profile_action(
     let name = form.name.trim();
     if exact_id(&form.profile_id).is_err()
         || !valid_revision(form.expected_revision)
+        || !valid_name(&form.expected_name)
         || !valid_name(name)
     {
         return page_error_redirect("profile-invalid", &dialog, &query, &headers);
@@ -286,6 +287,7 @@ pub(super) async fn rename_profile_action(
         cookie,
         form.profile_id,
         form.expected_revision,
+        form.expected_name,
         name.into(),
     )
     .await
@@ -1872,6 +1874,7 @@ mod tests {
             "name=\"_csrf\" value=\"synthetic-csrf\"".to_owned(),
             format!("name=\"profile_id\" value=\"{id}\""),
             "name=\"expected_revision\" value=\"9\"".to_owned(),
+            "name=\"expected_name\" value=\"work\"".to_owned(),
         ] {
             assert!(dialog.contains(&hidden), "{hidden}");
         }

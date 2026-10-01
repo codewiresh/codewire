@@ -59,7 +59,7 @@ async fn public_profiles_auth_owner_pagination_and_immutable_revision_cas() -> R
         h.rpc.error("DeleteAccessProfile", Auth::Bob,
             json!({"accessProfileId":id(&profile)?,"expectedRevision":"1"}), "not_found").await?;
         h.rpc.error("RenameAccessProfile", Auth::Bob,
-            json!({"accessProfileId":id(&profile)?,"expectedRevision":"1","name":"taken"}), "not_found").await?;
+            json!({"accessProfileId":id(&profile)?,"expectedRevision":"1","expectedName":"work","name":"taken"}), "not_found").await?;
 
         let mut seen = Vec::new();
         let mut token = String::new();
@@ -129,8 +129,9 @@ async fn public_profile_rename_keeps_the_revision_and_uses_create_name_rules() -
                 json!({"name":"personal","entries":entries(OTHER_CREDENTIAL)}),
             )
             .await?;
-        let rename = |revision: &str, name: &str| -> Result<Value> {
-            Ok(json!({"accessProfileId":id(&profile)?,"expectedRevision":revision,"name":name}))
+        let rename = |revision: &str, expected: &str, name: &str| -> Result<Value> {
+            Ok(json!({"accessProfileId":id(&profile)?,"expectedRevision":revision,
+                "expectedName":expected,"name":name}))
         };
         // The same name rules as CreateAccessProfile, checked before any write.
         for name in [
@@ -145,7 +146,7 @@ async fn public_profile_rename_keeps_the_revision_and_uses_create_name_rules() -
                 .error(
                     "RenameAccessProfile",
                     Auth::Alice,
-                    rename("1", name)?,
+                    rename("1", "work", name)?,
                     "invalid_argument",
                 )
                 .await?;
@@ -155,7 +156,7 @@ async fn public_profile_rename_keeps_the_revision_and_uses_create_name_rules() -
                 .error(
                     "RenameAccessProfile",
                     Auth::Alice,
-                    rename(revision, "personal")?,
+                    rename(revision, "work", "personal")?,
                     "invalid_argument",
                 )
                 .await?;
@@ -164,27 +165,30 @@ async fn public_profile_rename_keeps_the_revision_and_uses_create_name_rules() -
             .error(
                 "RenameAccessProfile",
                 Auth::Alice,
-                json!({"accessProfileId":"not an id","expectedRevision":"1","name":"personal"}),
+                json!({"accessProfileId":"not an id","expectedRevision":"1","expectedName":"work","name":"personal"}),
                 "invalid_argument",
             )
             .await?;
-        // A taken name conflicts as it does on create; so does a stale view.
+        // The observed name is checked with the same rules.
         h.rpc
             .error(
                 "RenameAccessProfile",
                 Auth::Alice,
-                rename("1", "other")?,
-                "already_exists",
+                rename("1", "WORK", "personal")?,
+                "invalid_argument",
             )
             .await?;
-        h.rpc
-            .error(
-                "RenameAccessProfile",
-                Auth::Alice,
-                rename("2", "personal")?,
-                "already_exists",
-            )
-            .await?;
+        // A taken name conflicts as it does on create; so does a stale view,
+        // whether its revision or its name is out of date.
+        for request in [
+            rename("1", "work", "other")?,
+            rename("2", "work", "personal")?,
+            rename("1", "other", "personal")?,
+        ] {
+            h.rpc
+                .error("RenameAccessProfile", Auth::Alice, request, "already_exists")
+                .await?;
+        }
         let unchanged = h
             .rpc
             .ok(
@@ -197,13 +201,23 @@ async fn public_profile_rename_keeps_the_revision_and_uses_create_name_rules() -
             unchanged["accessProfile"] == profile,
             "a rejected rename changed the profile"
         );
+        // Renaming to the current name is a no-op.
+        let same = h
+            .rpc
+            .ok(
+                "RenameAccessProfile",
+                Auth::Alice,
+                rename("1", "work", "work")?,
+            )
+            .await?;
+        ensure!(same["accessProfile"] == profile);
 
         let renamed = h
             .rpc
             .ok(
                 "RenameAccessProfile",
                 Auth::Cookie,
-                rename("1", "personal")?,
+                rename("1", "work", "personal")?,
             )
             .await?;
         let mut expected = profile.clone();
@@ -216,6 +230,15 @@ async fn public_profile_rename_keeps_the_revision_and_uses_create_name_rules() -
             renamed["accessProfile"]["revision"] == "1",
             "rename published a revision"
         );
+        // A second rename from the same view cannot silently overwrite it.
+        h.rpc
+            .error(
+                "RenameAccessProfile",
+                Auth::Alice,
+                rename("1", "work", "team")?,
+                "already_exists",
+            )
+            .await?;
         let current = h
             .rpc
             .ok("GetAccessProfile", Auth::Alice, json!({"name":"personal"}))
@@ -271,14 +294,18 @@ async fn public_profile_rename_keeps_the_revision_and_uses_create_name_rules() -
             .error(
                 "RenameAccessProfile",
                 Auth::Alice,
-                rename("1", "later")?,
+                rename("1", "personal", "later")?,
                 "already_exists",
             )
             .await?;
         h.rpc.create("work", CREDENTIAL).await?;
         let later = h
             .rpc
-            .ok("RenameAccessProfile", Auth::Alice, rename("2", "later")?)
+            .ok(
+                "RenameAccessProfile",
+                Auth::Alice,
+                rename("2", "personal", "later")?,
+            )
             .await?;
         ensure!(
             later["accessProfile"]["revision"] == "2" && later["accessProfile"]["name"] == "later"

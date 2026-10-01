@@ -145,6 +145,7 @@ impl AccessProfileService for ProfileConnectService {
                 &user,
                 request.access_profile_id,
                 request.expected_revision,
+                request.expected_name,
                 request.name,
             ),
         )

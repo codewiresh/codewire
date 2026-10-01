@@ -59,8 +59,10 @@ export async function runAccessProfileTests(): Promise<void> {
   await cw.accessProfiles.update("profile-one", exact, []);
   assert.equal(calls.at(-1)!.body.expectedRevision, exact.toString());
   assert.deepEqual(calls.at(-1)!.body.entries ?? [], []);
-  const renamed = await cw.accessProfiles.rename("profile-one", exact, "renamed");
-  assert.deepEqual(calls.at(-1)!.body, { accessProfileId: "profile-one", expectedRevision: exact.toString(), name: "renamed" });
+  const renamed = await cw.accessProfiles.rename("profile-one", exact, "personal", "renamed");
+  assert.deepEqual(calls.at(-1)!.body, {
+    accessProfileId: "profile-one", expectedRevision: exact.toString(), expectedName: "personal", name: "renamed",
+  });
   assert.equal(renamed.name, "renamed");
   assert.equal(renamed.revision, exact);
   await cw.accessProfiles.delete("profile-one", exact);
@@ -78,7 +80,7 @@ export async function runAccessProfileTests(): Promise<void> {
     /never an entry/,
   );
   await assert.rejects(cw.accessProfiles.get("profile-one", 0n), /positive uint64 bigint/);
-  await assert.rejects(cw.accessProfiles.rename("profile-one", 0n, "renamed"), /positive uint64 bigint/);
+  await assert.rejects(cw.accessProfiles.rename("profile-one", 0n, "personal", "renamed"), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", 42 as unknown as bigint), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", maximum + 1n), /positive uint64 bigint/);
   assert.equal(calls.length, callsBeforeValidation);

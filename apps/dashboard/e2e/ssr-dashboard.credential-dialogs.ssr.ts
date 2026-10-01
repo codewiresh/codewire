@@ -274,6 +274,7 @@ test("profile Rename edits one name at the observed revision and posts only the 
   await expect(rename.getByRole("combobox")).toHaveCount(0);
   await expect(rename.locator('[name="profile_id"]')).toHaveValue("fixture-profile");
   await expect(rename.locator('[name="expected_revision"]')).toHaveValue("7");
+  await expect(rename.locator('[name="expected_name"]')).toHaveValue("work");
   // Create profile's native name rules apply before anything is sent.
   await field.fill("Not a valid name");
   await action(rename, "Save name").click();
@@ -292,7 +293,7 @@ test("profile Rename edits one name at the observed revision and posts only the 
   await action(rename, "Save name").click();
   await expect.poll(() => posts.length).toBe(1);
   expect(posts[0]).toEqual({ path: "/settings/credentials/_actions/profiles/rename", fields: {
-    _csrf: "design-fixture-only", profile_id: "fixture-profile", expected_revision: "7", name: "personal",
+    _csrf: "design-fixture-only", profile_id: "fixture-profile", expected_revision: "7", expected_name: "work", name: "personal",
   } });
 });
 

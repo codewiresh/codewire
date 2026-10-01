@@ -827,13 +827,14 @@ pub(crate) async fn update_profile(
     Ok(())
 }
 
-/// A rename is a label change: the acknowledged profile must keep its
-/// identity and the exact revision the dialog observed.
+/// A rename is a label change fenced on the revision and name the dialog
+/// observed: the acknowledged profile must keep its identity and revision.
 pub(crate) async fn rename_profile(
     state: &AppState,
     cookie: HeaderValue,
     profile_id: String,
     expected_revision: u64,
+    expected_name: String,
     name: String,
 ) -> Result<(), ConnectError> {
     if expected_revision == 0 || expected_revision > i64::MAX as u64 {
@@ -843,6 +844,7 @@ pub(crate) async fn rename_profile(
         .rename_access_profile(RenameAccessProfileRequest {
             access_profile_id: profile_id.clone(),
             expected_revision,
+            expected_name,
             name: name.clone(),
             ..Default::default()
         })

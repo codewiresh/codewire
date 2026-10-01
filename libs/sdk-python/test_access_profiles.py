@@ -121,11 +121,12 @@ class AccessProfilesTestCase(unittest.TestCase):
         self.cw.access_profiles.update("profile-one", EXACT, [])
         self.assertEqual(self.fixture.calls[-1][1].expected_revision, EXACT)
         self.assertEqual(len(self.fixture.calls[-1][1].entries), 0)
-        renamed = self.cw.access_profiles.rename("profile-one", EXACT, "renamed")
+        renamed = self.cw.access_profiles.rename("profile-one", EXACT, "personal", "renamed")
         self.assertEqual((renamed["name"], renamed["revision"]), ("renamed", EXACT))
         request = self.fixture.calls[-1][1]
-        self.assertEqual((request.access_profile_id, request.expected_revision, request.name),
-                         ("profile-one", EXACT, "renamed"))
+        self.assertEqual((request.access_profile_id, request.expected_revision,
+                          request.expected_name, request.name),
+                         ("profile-one", EXACT, "personal", "renamed"))
         self.cw.access_profiles.delete("profile-one", MAXIMUM)
         self.assertEqual(self.fixture.calls[-1][1].expected_revision, MAXIMUM)
         self.assertEqual(self.paths, [f"/codewire.v1.AccessProfileService/{method}" for method in
@@ -144,7 +145,7 @@ class AccessProfilesTestCase(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "positive uint64"):
                 self.cw.access_profiles.get("profile-one", revision=revision)
             with self.assertRaisesRegex(ValueError, "positive uint64"):
-                self.cw.access_profiles.rename("profile-one", revision, "renamed")
+                self.cw.access_profiles.rename("profile-one", revision, "personal", "renamed")
         self.assertEqual(self.fixture.calls, [])
 
     def test_binding_read_preserves_presence_and_stored_consent(self):

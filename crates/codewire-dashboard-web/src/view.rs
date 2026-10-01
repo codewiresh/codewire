@@ -484,6 +484,7 @@ pub(crate) struct CredentialProfileRenameSubmission {
     pub(crate) csrf: String,
     pub(crate) profile_id: String,
     pub(crate) expected_revision: u64,
+    pub(crate) expected_name: String,
     pub(crate) name: String,
 }
 

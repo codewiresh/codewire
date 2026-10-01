@@ -47,8 +47,8 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
-    /// Relabel the exact current revision; no revision is published and
-    /// environment bindings are unchanged.
+    /// Relabel the exact observed revision and name; no revision is published
+    /// and environment bindings are unchanged.
     pub async fn rename_access_profile(
         &self,
         request: RenameAccessProfileRequest,
@@ -184,6 +184,7 @@ mod tests {
         let request = RenameAccessProfileRequest {
             access_profile_id: "profile".into(),
             expected_revision: 9_007_199_254_740_993,
+            expected_name: "work".into(),
             name: "renamed".into(),
             ..Default::default()
         };

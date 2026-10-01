@@ -117,12 +117,14 @@ impl AccessProfiles {
     }
 
     /// Relabel only: the current revision, entries and bindings are unchanged.
-    /// The name uses create's rules; a stale revision or taken name conflicts.
+    /// Both names use create's rules; a stale revision or name, or a taken
+    /// name, conflicts.
     pub async fn rename(
         &self,
         user: &AuthUser,
         id: &str,
         expected_revision: u64,
+        expected_name: &str,
         name: &str,
     ) -> AppResult<AccessProfile> {
         let owner = personal_owner(user)?;
@@ -132,6 +134,7 @@ impl AccessProfiles {
                 &owner,
                 &profile_id(id)?,
                 expected_revision,
+                &profile_name(expected_name)?,
                 profile_name(name)?,
             )
             .await

@@ -88,15 +88,17 @@ message UpdateAccessProfileResponse {
 
 // Metadata-only rename: preserve the identity, current revision, every
 // historical revision, entries and environment bindings. No revision is
-// created. expected_revision must still be current at publication, so a
-// rename prepared from a stale view is rejected. The name follows
-// CreateAccessProfile's rules and must not match another of the owner's
-// profiles. Selections that name a profile resolve at admission; existing
-// bindings pin an ID and revision and are unaffected.
+// created. Both the observed revision and name must still be current at
+// publication, so a rename prepared from a stale view, including one that
+// raced another rename, is rejected. The name follows CreateAccessProfile's
+// rules and must not match another of the owner's profiles; renaming to the
+// current name is a no-op. Selections that name a profile resolve at
+// admission; existing bindings pin an ID and revision and are unaffected.
 message RenameAccessProfileRequest {
   string access_profile_id = 1;
   uint64 expected_revision = 2;
-  string name = 3;
+  string expected_name = 3;
+  string name = 4;
 }
 
 message RenameAccessProfileResponse {

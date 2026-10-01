@@ -185,12 +185,12 @@ func TestAccessProfilesMutationAndBindingMetadata(t *testing.T) {
 	if update.ExpectedRevision != accessExact || len(update.Entries) != 0 {
 		t.Fatal("exact CAS/empty replacement changed")
 	}
-	renamed, err := client.AccessProfiles.Rename(ctx, "profile-one", accessExact, "renamed")
+	renamed, err := client.AccessProfiles.Rename(ctx, "profile-one", accessExact, "personal", "renamed")
 	if err != nil || renamed.Name != "renamed" || renamed.Revision != accessExact {
 		t.Fatalf("rename result: %v %v", renamed, err)
 	}
 	rename := fixture.last().(*codewirev1.RenameAccessProfileRequest)
-	if rename.AccessProfileId != "profile-one" || rename.ExpectedRevision != accessExact || rename.Name != "renamed" {
+	if rename.AccessProfileId != "profile-one" || rename.ExpectedRevision != accessExact || rename.ExpectedName != "personal" || rename.Name != "renamed" {
 		t.Fatal("rename request changed")
 	}
 	if err := client.AccessProfiles.Delete(ctx, "profile-one", ^uint64(0)); err != nil {
@@ -230,7 +230,7 @@ func TestAccessProfilesRejectDuplicateSlotsAndZeroRevisionWithoutTransport(t *te
 	if err := client.AccessProfiles.Delete(ctx, "profile-one", 0); err == nil {
 		t.Fatal("zero CAS accepted")
 	}
-	if _, err := client.AccessProfiles.Rename(ctx, "profile-one", 0, "renamed"); err == nil {
+	if _, err := client.AccessProfiles.Rename(ctx, "profile-one", 0, "personal", "renamed"); err == nil {
 		t.Fatal("zero rename CAS accepted")
 	}
 	if fixture.count() != 0 {

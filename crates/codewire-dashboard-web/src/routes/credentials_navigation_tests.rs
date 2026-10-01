@@ -528,27 +528,50 @@ async fn navigation_does_not_change_credentials_authentication_or_mutation_fence
 }
 
 #[tokio::test]
-async fn profile_rename_sends_only_the_observed_revision_and_new_label() {
+async fn profile_rename_sends_only_the_observed_view_and_new_label() {
     let dialog = format!("dialog=profile-{PROJECT}-rename");
-    for (mode, name, outcome, writes) in [
-        ("success", "  personal  ", "message=profile-renamed", 1),
-        ("success", "Not a profile name", "error=profile-invalid", 0),
-        ("success", "", "error=profile-invalid", 0),
+    for (mode, expected, name, outcome, writes) in [
+        (
+            "success",
+            "work",
+            "  personal  ",
+            "message=profile-renamed",
+            1,
+        ),
+        (
+            "success",
+            "work",
+            "Not a profile name",
+            "error=profile-invalid",
+            0,
+        ),
+        ("success", "work", "", "error=profile-invalid", 0),
+        // The observed name is validated like the new one.
+        ("success", "Work", "personal", "error=profile-invalid", 0),
+        ("success", "", "personal", "error=profile-invalid", 0),
         (
             "mutation conflict",
+            "work",
             "personal",
             "error=profile-rename-conflict",
             1,
         ),
-        ("mutation denied", "personal", "error=request-failed", 1),
-        // An acknowledgement that published a revision is not a rename.
         (
-            "rename advances revision",
+            "mutation denied",
+            "work",
             "personal",
             "error=request-failed",
             1,
         ),
-        ("mutation unauthenticated", "personal", "/login", 1),
+        // An acknowledgement that published a revision is not a rename.
+        (
+            "rename advances revision",
+            "work",
+            "personal",
+            "error=request-failed",
+            1,
+        ),
+        ("mutation unauthenticated", "work", "personal", "/login", 1),
     ] {
         let (upstream, calls) = fixture(mode).await;
         let dashboard = serve(crate::app(config(&upstream.origin))).await;
@@ -563,14 +586,22 @@ async fn profile_rename_sends_only_the_observed_revision_and_new_label() {
                 ("_csrf", csrf.as_str()),
                 ("profile_id", PROJECT),
                 ("expected_revision", "9"),
+                ("expected_name", expected),
                 ("name", name),
             ])
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{mode} {name}");
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "{mode} {expected} {name}"
+        );
         let target = response.headers()[header::LOCATION].to_str().unwrap();
-        assert!(target.contains(outcome), "{mode} {name}: {target}");
+        assert!(
+            target.contains(outcome),
+            "{mode} {expected} {name}: {target}"
+        );
         if outcome.starts_with("error=") {
             assert!(target.starts_with(&format!("{PATH}?creation_draft={DRAFT}&")));
             assert!(target.ends_with(&format!("&{dialog}")), "{target}");
@@ -591,7 +622,7 @@ async fn profile_rename_sends_only_the_observed_revision_and_new_label() {
         }
         let calls = calls.lock().unwrap();
         let sent: Vec<_> = calls.iter().filter(|(path, _)| mutation(path)).collect();
-        assert_eq!(sent.len(), writes, "{mode} {name}");
+        assert_eq!(sent.len(), writes, "{mode} {expected} {name}");
         if let Some((path, bytes)) = sent.first() {
             assert!(path.ends_with("/codewire.v1.AccessProfileService/RenameAccessProfile"));
             let mut input = bytes.as_slice();
@@ -600,6 +631,7 @@ async fn profile_rename_sends_only_the_observed_revision_and_new_label() {
                     .unwrap();
             assert_eq!(request.access_profile_id, PROJECT);
             assert_eq!(request.expected_revision, 9);
+            assert_eq!(request.expected_name, "work");
             assert_eq!(request.name, "personal");
             assert!(!String::from_utf8_lossy(bytes).contains(DRAFT));
         }
@@ -636,6 +668,7 @@ async fn profile_rename_sends_only_the_observed_revision_and_new_label() {
                 ),
                 ("profile_id", PROJECT),
                 ("expected_revision", "9"),
+                ("expected_name", "work"),
                 ("name", "personal"),
             ])
             .send()
