@@ -14,7 +14,7 @@ test("creation keeps sources visible and closed advanced fields remain native fo
   await expect(resources.locator("summary")).toHaveCount(0);
   await expect(runtime).not.toHaveAttribute("open", "");
   await expect(page.getByLabel("CPU", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Install Command", { exact: true })).toBeHidden();
+  await expect(page.getByLabel("Install command", { exact: true })).toBeHidden();
   await expect(page.getByRole("heading", { name: "Repositories", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Application secrets", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Provider credentials", exact: true })).toBeVisible();
@@ -26,8 +26,8 @@ test("creation keeps sources visible and closed advanced fields remain native fo
   await expect(page.getByLabel("Memory", { exact: true }).locator("option:checked")).toHaveText("4 GiB");
   await expect(page.getByLabel("Delete after")).toHaveAccessibleDescription(/automatic deletion.*not an idle timeout/);
   await runtime.locator("summary").click();
-  await page.getByLabel("Install Command", { exact: true }).fill("bun install");
-  await page.getByLabel("Startup Script", { exact: true }).fill("bun run dev");
+  await page.getByLabel("Install command", { exact: true }).fill("bun install");
+  await page.getByLabel("Startup script", { exact: true }).fill("bun run dev");
   await runtime.locator("summary").click();
   const fields = await page.locator("[data-environment-form]").evaluate((form: HTMLFormElement) => {
     const data = new FormData(form);
