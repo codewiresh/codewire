@@ -321,7 +321,7 @@ async fn confirming_forwards_the_rotated_cookie_and_shows_new_codes_once() {
         1,
         "{cookies:?}"
     );
-    assert!(page.body.contains("Authenticator replaced. Your old authenticator and recovery codes no longer work, and your other browsers were signed out."));
+    assert!(page.body.contains("Your old authenticator and recovery codes no longer work, and your other browsers were signed out."));
     assert_eq!(
         page.body.matches("data-testid=\"recovery-code\"").count(),
         10

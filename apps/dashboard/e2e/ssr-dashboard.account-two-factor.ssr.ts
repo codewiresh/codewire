@@ -173,7 +173,7 @@ test.describe.serial("Account › Security replaces the authenticator after a fr
     assertPrivate(replaced, [replacement]);
     const done = page.getByRole("dialog", { name: "Authenticator replaced", exact: true });
     await expect(done.getByRole("status")).toContainText(
-      "Authenticator replaced. Your old authenticator and recovery codes no longer work, and your other browsers were signed out.",
+      "Your old authenticator and recovery codes no longer work, and your other browsers were signed out.",
     );
     await expect(done.getByTestId("recovery-code")).toHaveCount(10);
     const replacedCodes = (await done.getByTestId("recovery-code").allTextContents()).map((code) => code.trim());

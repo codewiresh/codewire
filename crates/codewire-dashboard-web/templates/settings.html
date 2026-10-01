@@ -68,7 +68,7 @@
         {% if settings.two_factor.active == "replace-authenticator-done" %}
         <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator-done" aria-labelledby="replace-authenticator-done-title" data-dialog-auto-open>
           <header class="cw-dialog-header"><h2 id="replace-authenticator-done-title">Authenticator replaced</h2></header>
-          <div class="cw-dialog-body"><p role="status">Authenticator replaced. Your old authenticator and recovery codes no longer work, and your other browsers were signed out. Save these new recovery codes now. Each works once, and Codewire won't show them again.</p>
+          <div class="cw-dialog-body"><p role="status">Your old authenticator and recovery codes no longer work, and your other browsers were signed out. Save these new recovery codes now. Each works once, and Codewire won't show them again.</p>
             <ul class="cw-backup-codes" aria-label="New recovery codes">{% for code in settings.two_factor.backup_codes %}<li><code data-testid="recovery-code">{{ code }}</code></li>{% endfor %}</ul></div>
           <footer class="cw-dialog-actions"><a class="cw-button" href="/settings/#security">Done</a></footer>
         </dialog>
