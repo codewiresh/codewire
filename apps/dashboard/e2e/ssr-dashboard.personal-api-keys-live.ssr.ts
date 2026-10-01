@@ -56,19 +56,23 @@ test.describe.serial("personal Codewire API keys through the managed app", () =>
     await checkReveal(page);
     await page.getByRole("link", { name: "Done", exact: true }).click();
     await expect(page.locator("[data-one-time-api-key]")).toHaveCount(0);
-    const row = page.locator(".cw-personal-api-key-row").filter({ has: page.getByRole("heading", { name, exact: true }) });
+    const row = page.getByRole("row").filter({ has: page.locator("th strong").getByText(name, { exact: true }) });
+    const act = async (action: string) => {
+      await row.locator("details.cw-menu > summary").click();
+      await row.getByRole("button", { name: action, exact: true }).click();
+    };
     await expect(row).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await row.getByRole("button", { name: "Disable", exact: true }).click();
+    await act("Disable");
     await expect(row.getByText("Disabled", { exact: true })).toBeVisible();
-    await row.getByRole("button", { name: "Enable", exact: true }).click();
+    await act("Enable");
     await expect(row.getByText("Active", { exact: true })).toBeVisible();
-    await row.getByRole("button", { name: "Delete", exact: true }).click();
+    await act("Delete");
     const deletion = page.getByRole("dialog", { name: `Delete ${name}?`, exact: true });
     await expect(deletion.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await deletion.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(row).toBeVisible();
-    await row.getByRole("button", { name: "Delete", exact: true }).click();
+    await act("Delete");
     await deletion.getByRole("button", { name: "Delete key", exact: true }).click();
     await expect(row).toHaveCount(0);
   });
@@ -89,11 +93,9 @@ test.describe.serial("personal Codewire API keys through the managed app", () =>
       await checkReveal(page);
       await page.getByRole("link", { name: "Done", exact: true }).click();
       await expect(page.locator("[data-one-time-api-key]")).toHaveCount(0);
-      const row = page.locator(".cw-personal-api-key-row").filter({ has: page.getByRole("heading", { name, exact: true }) });
-      const confirmation = row.locator('details[id^="fallback-api-key-"]');
-      await confirmation.locator("summary").click();
-      await expect(confirmation).toContainText("permanently removes the key");
-      await confirmation.getByRole("button", { name: "Delete key", exact: true }).click();
+      const row = page.getByRole("row").filter({ has: page.locator("th strong").getByText(name, { exact: true }) });
+      await row.locator("details.cw-menu > summary").click();
+      await row.getByRole("button", { name: "Delete permanently", exact: true }).click();
       await expect(row).toHaveCount(0);
     } finally {
       await context.close();

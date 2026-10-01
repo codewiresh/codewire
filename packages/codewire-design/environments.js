@@ -258,7 +258,7 @@
       access.value = port.access;
     });
   };
-  const restoreDraft = async (form, state) => {
+  const restoreDraft = async (form, state, automatic = false) => {
     if (!state || !state.saved || state.edited || state.storageFailed || form.dataset.createDraftFresh !== "true" || !draftIsOpen(form) || !pristineDraftForm(form)) return;
     suspendCreateOptions(form);
     cancelDraftRestore(state, form);
@@ -268,7 +268,10 @@
     const button = form.querySelector("[data-restore-create-draft]");
     if (button) button.disabled = true;
     draftStatus(form, "Checking current options before restoring selections…");
-    const timer = window.setTimeout(() => controller.abort(), 40_000);
+    // An automatic restore holds the form briefly so an early keystroke cannot
+    // replace the saved draft with an empty one; a slow restore gives it back.
+    if (automatic) { form.inert = true; form.setAttribute("aria-busy", "true"); }
+    const timer = window.setTimeout(() => controller.abort(), automatic ? 8_000 : 40_000);
     try {
       if (!validDraft(state.saved)) throw new Error("invalid draft");
       const endpoint = new URL(form.dataset.createDraftUrl, window.location.origin);
@@ -297,12 +300,14 @@
       form.closest("#environment-create-card")?.replaceWith(replacement);
       wireDraftForms();
       wireGithubBrowsers();
+      enhanceComboboxes();
       restored.querySelector('[name="name"]')?.focus();
     } catch {
       if (!state.edited && state.sequence === sequence && draftIsOpen(form)) draftStatus(form, "The draft could not be restored. Reload and review current options; no Sandbox was created.", true);
     } finally {
       window.clearTimeout(timer);
       if (state.controller === controller) state.controller = null;
+      if (automatic && form.isConnected) { form.inert = false; form.removeAttribute("aria-busy"); }
       if (button && form.isConnected) button.disabled = state.edited || state.storageFailed || !pristineDraftForm(form);
       resumeCreateOptions(form);
     }
@@ -409,7 +414,7 @@
   const wireDraftForms = () => {
     document.querySelectorAll("[data-environment-form][data-create-draft-id]").forEach((form) => {
       if (!(form instanceof HTMLFormElement) || draftStates.has(form)) return;
-      const state = { saved: null, edited: false, storageFailed: false, sequence: 0, controller: null };
+      const state = { saved: null, edited: false, storageFailed: false, sequence: 0, controller: null, autoRestore: false };
       draftStates.set(form, state);
       if (!actorId(form.dataset.createDraftActor) || !organizationId(form.dataset.createDraftOrganization) || !canonicalId(form.dataset.createDraftId)) return;
       reconcileDraftActor(form.dataset.createDraftActor);
@@ -419,6 +424,9 @@
         state.saved = saved.find((draft) => draft.draft === form.dataset.createDraftId) || (!exactReturn && saved[0]) || null;
         const button = form.querySelector("[data-restore-create-draft]");
         if (button) button.hidden = !state.saved || form.dataset.createDraftFresh !== "true";
+        // Authored values come back on their own when this fresh form opens;
+        // the button remains to retry if that restore fails or is interrupted.
+        state.autoRestore = !!state.saved && form.dataset.createDraftFresh === "true";
         if (exactReturn && !state.saved) draftStatus(form, "The requested draft is unavailable in this tab. No Sandbox was created.", true);
       } catch {
         state.storageFailed = true;
@@ -429,9 +437,11 @@
         const observer = new MutationObserver(() => {
           if (!form.isConnected) { cancelDraftRestore(state, form); observer.disconnect(); }
           else if (!draftIsOpen(form)) cancelDraftRestore(state, form);
+          else if (state.autoRestore) { state.autoRestore = false; void restoreDraft(form, state, true); }
         });
         observer.observe(owner, { childList: true, attributes: true, attributeFilter: ["hidden", "data-open"] });
       }
+      if (state.autoRestore && draftIsOpen(form)) { state.autoRestore = false; void restoreDraft(form, state, true); }
     });
   };
   const editDraft = (form) => {
@@ -599,7 +609,11 @@
     if (browserForm(browser)?.dataset.createOptionsLoading === "true") message.textContent = "Loading GitHub account…";
     else message.textContent = `${githubStateMessage(browser, account ? `Connected as @${account}.` : "GitHub connected.")}${profileHint}`;
     const setup = browser.querySelector("[data-github-setup-link]");
-    if (setup) setup.textContent = { connected: "Manage GitHub connection", inactive: "Reconnect GitHub" }[connectionState(browser)] || "Connect GitHub";
+    if (setup) {
+      // Until choices load the connection is unknown; never offer Connect early.
+      setup.hidden = browserForm(browser)?.dataset.createOptionsLoading === "true";
+      setup.textContent = { connected: "Manage GitHub connection", inactive: "Reconnect GitHub" }[connectionState(browser)] || "Connect GitHub";
+    }
   };
   const browserCurrent = (browser, state, sequence) => browser.isConnected
     && state.sequence === sequence
@@ -702,7 +716,8 @@
       browser.querySelector("[data-github-next]").hidden = state.complete || !!state.query;
       setStatus(browser, state.query
         ? state.complete ? `${state.matches} matching repositories found across ${state.pages} pages.${state.matches > 200 ? " Showing the first 200; refine your search." : ""}` : `Searching all accessible repositories… ${state.pages} pages checked, ${state.matches} matches.`
-        : state.complete ? `${state.pages} pages loaded. Choose a repository to add.${state.pruned ? " Earlier rows can be found with search." : ""}` : `${state.pages} pages loaded. Scroll or load more.${state.pruned ? " Earlier rows can be found with search." : ""}`);
+        : state.complete && state.matches === 0 ? "No repositories are available through this GitHub connection. Change the repositories the Codewire GitHub App can access, or use Add custom Git URL."
+        : state.complete ? `${state.matches} repositories loaded. Choose one to add.${state.pruned ? " Earlier rows can be found with search." : ""}` : `${state.matches} repositories loaded. Scroll or load more.${state.pruned ? " Earlier rows can be found with search." : ""}`);
     } catch (error) {
       if (browserCurrent(browser, state, sequence)) {
         setStatus(browser, error?.message && !["invalid endpoint", "invalid content type", "invalid repository response", "draft response limit"].includes(error.message) ? error.message : "Repository access unavailable. Retry loading repositories.");
@@ -850,4 +865,143 @@
   window.addEventListener("pageshow", () => {
     document.querySelectorAll("[data-environment-form]").forEach(resetCreateSubmission);
   });
+
+  // Workspace image choices open as a listbox on the menu surface instead of
+  // the browser's datalist popup. Without scripting the datalist still works.
+  // Options are read when the list opens, because Create choices load late.
+  const comboboxStates = new WeakMap();
+  const comboboxInput = (node) => node instanceof HTMLInputElement && node.matches("[data-combobox] input[data-combobox-options]") ? node : null;
+  const enhanceComboboxes = () => {
+    document.querySelectorAll("[data-combobox] input[list]").forEach((input) => {
+      if (!(input instanceof HTMLInputElement) || !input.id) return;
+      const listbox = document.createElement("ul");
+      listbox.id = `${input.id}-choices`;
+      listbox.className = "cw-combobox-list";
+      listbox.setAttribute("role", "listbox");
+      listbox.setAttribute("aria-label", input.closest("[data-combobox]").dataset.comboboxLabel || "Suggestions");
+      listbox.hidden = true;
+      input.dataset.comboboxOptions = input.getAttribute("list");
+      input.removeAttribute("list");
+      input.setAttribute("role", "combobox");
+      input.setAttribute("aria-autocomplete", "list");
+      input.setAttribute("aria-controls", listbox.id);
+      input.setAttribute("aria-expanded", "false");
+      input.autocomplete = "off";
+      input.closest("[data-combobox]").append(listbox);
+      comboboxStates.set(input, { listbox, options: [], active: -1 });
+    });
+  };
+  const closeCombobox = (input) => {
+    const state = comboboxStates.get(input);
+    if (!state || state.listbox.hidden) return false;
+    state.listbox.hidden = true;
+    state.active = -1;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    return true;
+  };
+  const activateOption = (input, index) => {
+    const state = comboboxStates.get(input);
+    if (!state || !state.options.length) return;
+    state.active = (index + state.options.length) % state.options.length;
+    state.options.forEach((option, position) => option.setAttribute("aria-selected", String(position === state.active)));
+    const active = state.options[state.active];
+    input.setAttribute("aria-activedescendant", active.id);
+    active.scrollIntoView({ block: "nearest" });
+  };
+  const openCombobox = (input, filter) => {
+    const state = comboboxStates.get(input);
+    const source = document.getElementById(input.dataset.comboboxOptions || "");
+    if (!state || !(source instanceof HTMLDataListElement)) return;
+    const query = filter ? input.value.trim().toLowerCase() : "";
+    const found = [...source.options].filter((option) => option.value
+      && (!query || option.value.toLowerCase().includes(query) || option.label.toLowerCase().includes(query)));
+    // While typing, a value that already equals every match needs no suggestion.
+    const matches = filter && found.every((option) => option.value === input.value) ? [] : found;
+    state.options = matches.map((option, index) => {
+      const item = document.createElement("li");
+      item.id = `${state.listbox.id}-${index}`;
+      item.className = "cw-combobox-option";
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", "false");
+      item.dataset.value = option.value;
+      const name = document.createElement("strong");
+      name.textContent = option.label || option.value;
+      if (option.dataset.official === "true") {
+        const badge = document.createElement("span");
+        badge.className = "cw-badge";
+        badge.dataset.tone = "info";
+        badge.textContent = "Official";
+        name.append(" ", badge);
+      }
+      const reference = document.createElement("code");
+      reference.textContent = option.value;
+      item.append(name, reference);
+      if (option.dataset.description) {
+        const description = document.createElement("span");
+        description.textContent = option.dataset.description;
+        item.append(description);
+      }
+      return item;
+    });
+    state.listbox.replaceChildren(...state.options);
+    state.active = -1;
+    input.removeAttribute("aria-activedescendant");
+    const open = state.options.length > 0;
+    state.listbox.hidden = !open;
+    input.setAttribute("aria-expanded", String(open));
+  };
+  const chooseOption = (input, option) => {
+    closeCombobox(input);
+    input.value = option.dataset.value || "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  document.addEventListener("keydown", (event) => {
+    const input = comboboxInput(event.target);
+    const state = input && comboboxStates.get(input);
+    if (!state) return;
+    const open = !state.listbox.hidden;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) openCombobox(input, false);
+      activateOption(input, event.key === "ArrowDown" ? state.active + 1 : state.active < 0 ? -1 : state.active - 1);
+    } else if (event.key === "Enter" && open && state.active >= 0) {
+      event.preventDefault();
+      chooseOption(input, state.options[state.active]);
+    } else if (event.key === "Escape" && closeCombobox(input)) {
+      // Close only the list, not the Create drawer around it.
+      event.preventDefault();
+      event.stopPropagation();
+    } else if (event.key === "Tab") {
+      closeCombobox(input);
+    }
+  }, true);
+  document.addEventListener("input", (event) => {
+    const input = comboboxInput(event.target);
+    if (!input || !event.isTrusted) return;
+    if (input.value.trim()) openCombobox(input, true); else closeCombobox(input);
+  });
+  document.addEventListener("click", (event) => {
+    const input = comboboxInput(event.target);
+    if (input) {
+      const state = comboboxStates.get(input);
+      if (state?.listbox.hidden) openCombobox(input, false); else closeCombobox(input);
+      return;
+    }
+    const option = event.target instanceof Element ? event.target.closest(".cw-combobox-option") : null;
+    const owner = option && document.querySelector(`[aria-controls="${option.parentElement?.id}"]`);
+    if (option && comboboxInput(owner)) chooseOption(owner, option);
+  });
+  // Keep focus in the field while a pointer picks an option.
+  document.addEventListener("mousedown", (event) => {
+    if (event.target instanceof Element && event.target.closest(".cw-combobox-list")) event.preventDefault();
+  });
+  document.addEventListener("focusout", (event) => {
+    const input = comboboxInput(event.target);
+    if (input) closeCombobox(input);
+  });
+  enhanceComboboxes();
+  document.addEventListener("htmx:afterSwap", enhanceComboboxes);
+  window.addEventListener("pageshow", enhanceComboboxes);
 })();

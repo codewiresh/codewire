@@ -72,3 +72,22 @@ test("repository search checks later pages before reporting no matches", async (
   await expect(page.locator("[data-repository-row]").last().getByRole("textbox", { name: "Repository URL" }))
     .toHaveValue("https://github.com/synthetic-user/later-repository.git");
 });
+
+test("an empty GitHub connection explains what to change and offers the custom URL path", async ({ page }) => {
+  await page.route("**/_fragments/github-repositories", (route) => route.fulfill({
+    contentType: "text/html; charset=utf-8",
+    body: '<section data-github-results-page><ul></ul><p role="status">No repositories are available on this page for your GitHub account.</p></section>',
+  }));
+  // Remove the fixture's example rows so the picker loads through its endpoint.
+  await page.route("**/reference/fixtures/create-sandbox.html", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.text()).replace(/<section aria-label="GitHub repository results" data-github-results-page>[\s\S]*?<\/section>/, "");
+    await route.fulfill({ response, body });
+  });
+  await page.reload();
+  const browser = page.locator("[data-github-browser]");
+  await expect(browser.locator("[data-github-status]")).toHaveText(
+    "No repositories are available through this GitHub connection. Change the repositories the Codewire GitHub App can access, or use Add custom Git URL.",
+  );
+  await expect(page.getByText("Use an HTTPS Git URL without a username or token in it.", { exact: true })).toBeVisible();
+});

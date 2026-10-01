@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
-    <title>API Keys · {{ organization.name }} · Codewire</title>
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <title>API keys · {{ organization.name }} · Codewire</title>
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/organizations-v1.css">
@@ -23,7 +23,6 @@
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
       <main class="cw-main">{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
         <div class="cw-org-management-layout"><aside class="cw-context-nav">{% include "organization-settings-nav.html" %}</aside><div class="cw-context-main">
-        <header class="cw-context-page-header"><h2>API Keys</h2><p>Credentials for Codewire SDK and CLI access.</p></header>
         {% include "organization-api-keys-content.html" %}
         </div></div>
       </div></main>
