@@ -25,7 +25,10 @@
       </a>
       <section class="cw-auth-panel" aria-labelledby="auth-title">
         <header class="cw-auth-header">
-          <h1 id="auth-title" class="cw-page-title">{% if is_login %}Log in to Codewire{% else %}{{ view.title }}{% endif %}</h1>
+          <h1 id="auth-title" class="cw-page-title">{% if view.preview_sign_in %}Sign in to view preview{% else if is_login %}Log in to Codewire{% else %}{{ view.title }}{% endif %}</h1>
+          {% if view.preview_sign_in %}
+          <p class="cw-auth-copy">You'll return to the preview after signing in.</p>
+          {% endif %}
           {% if is_login %}
           <p class="cw-auth-switch">Don't have an account? <a href="{{ view.secondary_url }}">Sign up.</a></p>
           {% else if is_signup %}

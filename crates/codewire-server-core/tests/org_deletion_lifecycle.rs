@@ -3,22 +3,24 @@
 //! The database capability gate runs this suite with `DATABASE_URL` and
 //! rejects the skip sentinel or an unexpected executed-test count.
 
+use std::future::Future;
 use std::time::Duration;
 
 use codewire_server_core::AppError;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
     OrganizationBillingMutationError, OrganizationDeletionOperation, OrganizationDeletionPhase,
-    OrganizationMutationClass, OrganizationRuntimeMutationError,
+    OrganizationMutationClass, OrganizationMutationLease, OrganizationRuntimeMutationError,
     OrganizationTenantSecretMutationError, acquire_organization_mutation_lease,
     advance_organization_deletion_phase, begin_organization_deletion,
     finalize_organization_deletion_database, mark_organization_deletion_failed,
     mark_organization_deletion_started, mark_organization_mutation_resolution_required,
     pending_organization_deletion_operations, record_organization_deletion_start_attempt,
     release_organization_mutation_lease, require_organization_mutation_barrier_drained,
-    resolve_organization_mutation_lease, run_organization_billing_mutation,
-    run_organization_database_mutation, run_organization_runtime_mutation,
-    run_organization_tenant_secret_mutation, unresolved_organization_mutation_leases,
+    resolve_organization_mutation_lease, run_environment_runtime_mutation,
+    run_organization_billing_mutation, run_organization_database_mutation,
+    run_organization_runtime_mutation, run_organization_tenant_secret_mutation,
+    unresolved_organization_mutation_leases,
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -679,15 +681,20 @@ async fn runtime_mutation_lease_distinguishes_known_ambiguous_and_cancelled_outc
         .await
         .unwrap();
 
+    // A disconnected request drops its handler future after admission. The
+    // admitted operation keeps the barrier until its own outcome is known,
+    // then settles the lease even though no caller is waiting any more.
     let task_pool = pool.clone();
     let task_org_id = fixture.org_id.clone();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         run_organization_runtime_mutation(&task_pool, &task_org_id, async move {
             entered_tx
                 .send(())
                 .expect("runtime mutation entry receiver remains available");
-            std::future::pending::<Result<(), OrganizationRuntimeMutationError>>().await
+            let _ = finish_rx.await;
+            Ok::<_, OrganizationRuntimeMutationError>(())
         })
         .await
     });
@@ -699,18 +706,195 @@ async fn runtime_mutation_lease_distinguishes_known_ambiguous_and_cancelled_outc
         task.await
             .expect_err("runtime mutation task must be cancelled")
             .is_cancelled(),
-        "test mutation should be cancelled after lease acquisition"
+        "test caller should be cancelled after lease acquisition"
     );
     let unresolved = unresolved_organization_mutation_leases(&pool, &fixture.org_id)
         .await
         .unwrap();
     assert_eq!(unresolved.len(), 1);
-    assert_eq!(unresolved[0].state, "active");
-    release_organization_mutation_lease(&pool, &unresolved[0].id)
+    assert_eq!(
+        unresolved[0].state, "active",
+        "an in-flight operation keeps the barrier after its caller is dropped"
+    );
+    let _ = finish_tx.send(());
+    let settled = settled_runtime_lease(&pool, &unresolved[0].id).await;
+    assert_eq!(settled.state, "released");
+    assert_eq!(settled.recovery_code, None);
+    require_organization_mutation_barrier_drained(&pool, &fixture.org_id)
+        .await
+        .expect("a completed operation must not strand the cleanup barrier");
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn runtime_mutation_settles_its_lease_after_the_caller_is_dropped() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool).await;
+    let environment_id = seed_running_environment(&pool, &fixture).await;
+
+    // Environment-scoped admission is the Sandbox delete/stop/start path.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    drop_caller_after_operation_starts(
+        run_environment_runtime_mutation(&pool, &fixture.org_id, &environment_id, async move {
+            let _ = entered_tx.send(());
+            let _ = finish_rx.await;
+            Ok::<_, OrganizationRuntimeMutationError>("destroy requested")
+        }),
+        entered_rx,
+    )
+    .await;
+    let lease_id = only_unresolved_lease(&pool, &fixture.org_id, "active").await;
+    let _ = finish_tx.send(());
+    let settled = settled_runtime_lease(&pool, &lease_id).await;
+    assert_eq!(settled.state, "released");
+    assert!(
+        unresolved_organization_mutation_leases(&pool, &fixture.org_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no active runtime lease may block external cleanup"
+    );
+
+    // An ambiguous dispatch outcome is still durable evidence when the
+    // caller is gone; only the operation, not the request, decides it.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    drop_caller_after_operation_starts(
+        run_environment_runtime_mutation(&pool, &fixture.org_id, &environment_id, async move {
+            let _ = entered_tx.send(());
+            let _ = finish_rx.await;
+            Err::<(), _>(OrganizationRuntimeMutationError::ambiguous(
+                AppError::ServiceUnavailable("runtime dispatch response was lost".into()),
+            ))
+        }),
+        entered_rx,
+    )
+    .await;
+    let lease_id = only_unresolved_lease(&pool, &fixture.org_id, "active").await;
+    let _ = finish_tx.send(());
+    let settled = settled_runtime_lease(&pool, &lease_id).await;
+    assert_eq!(settled.state, "resolution_required");
+    assert_eq!(
+        settled.recovery_code.as_deref(),
+        Some("environment_runtime_dispatch_ambiguous")
+    );
+    resolve_organization_mutation_lease(&pool, &lease_id)
         .await
         .unwrap();
 
+    // A panicking operation cannot leave the lease active either.
+    let panicked = run_organization_runtime_mutation(&pool, &fixture.org_id, async {
+        panicking_runtime_dispatch()
+    })
+    .await;
+    assert!(matches!(panicked, Err(AppError::InternalMsg(_))));
+    let lease_id = only_unresolved_lease(&pool, &fixture.org_id, "resolution_required").await;
+    let settled = settled_runtime_lease(&pool, &lease_id).await;
+    assert_eq!(
+        settled.recovery_code.as_deref(),
+        Some("environment_runtime_dispatch_panicked")
+    );
+    resolve_organization_mutation_lease(&pool, &lease_id)
+        .await
+        .unwrap();
+
+    cleanup_environment(&pool, &fixture, &environment_id).await;
     cleanup(&pool, &fixture).await;
+}
+
+async fn seed_running_environment(pool: &PgPool, fixture: &Fixture) -> String {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let preset_id = format!("preset_orgdel_{suffix}");
+    let environment_id = format!("env_orgdel_{suffix}");
+    sqlx::query(
+        r#"INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+           VALUES ($1, $2, 'Org deletion runtime preset', $3,
+                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+    )
+    .bind(&preset_id)
+    .bind(&fixture.org_id)
+    .bind(format!("orgdel-preset-{suffix}"))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO environments
+               (id, org_id, created_by, type, state, desired_state, preset_id, project_spec)
+           VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4,
+                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+    )
+    .bind(&environment_id)
+    .bind(&fixture.org_id)
+    .bind(&fixture.owner.user_id)
+    .bind(&preset_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    environment_id
+}
+
+async fn cleanup_environment(pool: &PgPool, fixture: &Fixture, environment_id: &str) {
+    let _ = sqlx::query("DELETE FROM environments WHERE id = $1")
+        .bind(environment_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM environment_presets WHERE org_id = $1")
+        .bind(&fixture.org_id)
+        .execute(pool)
+        .await;
+}
+
+fn panicking_runtime_dispatch() -> Result<(), OrganizationRuntimeMutationError> {
+    panic!("synthetic runtime dispatch panic")
+}
+
+/// Poll a guarded runtime mutation until its operation has started, then drop
+/// the caller future the way a disconnected request drops its handler.
+async fn drop_caller_after_operation_starts<T>(
+    caller: impl Future<Output = Result<T, AppError>>,
+    started: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut caller = Box::pin(caller);
+    tokio::select! {
+        _ = &mut caller => panic!("runtime mutation finished before its caller was dropped"),
+        started = started => started.expect("runtime operation starts after lease admission"),
+    }
+    drop(caller);
+}
+
+async fn only_unresolved_lease(pool: &PgPool, organization_id: &str, state: &str) -> String {
+    let unresolved = unresolved_organization_mutation_leases(pool, organization_id)
+        .await
+        .unwrap();
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].state, state);
+    assert_eq!(unresolved[0].mutation_class, "environment_runtime_dispatch");
+    unresolved[0].id.clone()
+}
+
+/// Wait for the admitted operation, not its dropped caller, to settle the
+/// lease. A lease that stays active here is the stranded-barrier defect.
+async fn settled_runtime_lease(pool: &PgPool, lease_id: &str) -> OrganizationMutationLease {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let lease = sqlx::query_as::<_, OrganizationMutationLease>(
+            "SELECT * FROM organization_mutation_leases WHERE id = $1",
+        )
+        .bind(lease_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if lease.state != "active" {
+            return lease;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "runtime lease {lease_id} stayed active after its operation finished"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]

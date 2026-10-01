@@ -1,30 +1,28 @@
 <dialog class="cw-dialog" data-dialog data-sandbox-resize id="sandbox-resize"
   data-resize-account-id="{{ page.account_id }}" data-resize-environment-id="{{ page.environment.id }}"
   data-resize-org-slug="{{ organization.slug }}" aria-labelledby="sandbox-resize-title">
-  <header class="cw-dialog-header"><h2 id="sandbox-resize-title">Resize {{ page.environment.name }}</h2></header>
+  <header class="cw-dialog-header"><button class="cw-button cw-button--ghost cw-dialog-back" type="button" data-resize-back hidden><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-left"/></svg>Back</button><h2 id="sandbox-resize-title">Resize {{ page.environment.name }}</h2></header>
   <section class="cw-dialog-body" aria-label="Resize resources" data-resize-content>
     <p>Review the proposed change before applying it. Some changes require a restart.</p>
-    <form data-resize-plan-form>
+    <form id="sandbox-resize-plan-form" data-resize-plan-form>
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <fieldset data-resize-inputs><legend>Requested resources</legend>
         {% let resize_fields_id = "resize" %}{% let resize_sandbox = page.environment %}{% include "environment-resize-fields.html" %}
-        <button class="cw-button" type="submit" data-resize-review>Review resize</button>
       </fieldset>
     </form>
     <section aria-labelledby="resize-review-title" data-resize-plan hidden>
       <h3 id="resize-review-title">Proposed change</h3>
       <p data-resize-summary></p><p data-resize-mode></p>
       <p class="cw-alert" data-resize-disk-warning hidden>Growing the workspace disk cannot be undone. You cannot shrink it back to its previous size.</p>
-      <form data-resize-apply-form>
-        <fieldset data-resize-consents><legend>Confirm this change</legend>
+      <form id="sandbox-resize-apply-form" data-resize-apply-form>
+        <fieldset data-resize-consents hidden><legend>Confirm this change</legend>
           <label class="cw-choice" data-resize-restart-consent hidden><input class="cw-checkbox" type="checkbox" name="allow_restart">Allow a restart of this Sandbox.</label>
           <label class="cw-choice" data-resize-session-consent hidden><input class="cw-checkbox" type="checkbox" name="force">Allow the active terminal sessions shown in this review to end.</label>
-          <button class="cw-button" type="submit" data-resize-apply>Apply resize</button>
         </fieldset>
       </form>
     </section>
     <p role="status" data-resize-status></p>
     <button class="cw-button cw-button--outline" type="button" data-resize-observe hidden>Check resize status</button>
   </section>
-  <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Close</button></footer>
+  <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close data-resize-cancel>Cancel</button><button class="cw-button cw-button--outline" type="button" data-dialog-close data-resize-done hidden>Done</button><button class="cw-button" type="submit" form="sandbox-resize-plan-form" data-resize-review>Review resize</button><button class="cw-button" type="submit" form="sandbox-resize-apply-form" data-resize-apply hidden>Apply resize</button></footer>
 </dialog>

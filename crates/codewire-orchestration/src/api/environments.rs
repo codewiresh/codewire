@@ -941,7 +941,10 @@ pub(crate) async fn delete_environment_core(
     let env = fetch_env_summary(&state.pool, org_id, env_id).await?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
-    run_environment_runtime_mutation(&state.pool, org_id, env_id, async {
+    // The admitted operation outlives a dropped request, so it owns its inputs.
+    let owned_state = state.clone();
+    run_environment_runtime_mutation(&state.pool, org_id, env_id, async move {
+        let state = &owned_state;
         let result: AppResult<()> = async {
             if env.state == "destroyed" || env.state == "destroying" {
                 return Err(coded(
@@ -1036,7 +1039,10 @@ pub(crate) async fn stop_environment_core(
     let env = fetch_env_summary(&state.pool, org_id, env_id).await?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
-    run_environment_runtime_mutation(&state.pool, org_id, env_id, async {
+    // The admitted operation outlives a dropped request, so it owns its inputs.
+    let owned_state = state.clone();
+    run_environment_runtime_mutation(&state.pool, org_id, env_id, async move {
+        let state = &owned_state;
         let result: AppResult<StatusResponse> = async {
             if env.state != "running" {
                 return Err(coded(
@@ -1102,7 +1108,12 @@ pub(crate) async fn start_environment_core(
     require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
-    run_environment_runtime_mutation(&state.pool, org_id, env_id, async {
+    // The admitted operation outlives a dropped request, so it owns its inputs.
+    let owned_state = state.clone();
+    let owned_user = user.clone();
+    let owned_org_id = org_id.to_owned();
+    run_environment_runtime_mutation(&state.pool, org_id, env_id, async move {
+        let (state, user, org_id) = (&owned_state, &owned_user, owned_org_id.as_str());
         let result: AppResult<StartEnvironmentResult> = async {
             let lifecycle = crate::lifecycle::Service::for_pool(state.pool.clone());
             match env.state.as_str() {

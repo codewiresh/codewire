@@ -9,7 +9,6 @@ dialog[data-sandbox-resize] > .cw-dialog-body { min-height: 0; overflow-y: auto;
 dialog[data-sandbox-resize] fieldset { display: grid; gap: var(--space-2); min-width: 0; margin: 0; padding: 0; border: 0; }
 dialog[data-sandbox-resize] legend { margin-bottom: var(--space-3); font-weight: var(--weight-semibold); }
 dialog[data-sandbox-resize] .cw-field-help { margin: 0; }
-dialog[data-sandbox-resize] fieldset > button { justify-self: start; }
 dialog[data-sandbox-resize] [data-resize-consents] > label:not([hidden]) { display: flex; align-items: baseline; gap: var(--space-2); }
 dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
 .cw-terminal-heading, .cw-terminal-actions { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }

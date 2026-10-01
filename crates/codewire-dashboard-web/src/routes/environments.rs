@@ -3379,6 +3379,25 @@ mod tests {
             )));
         }
         assert!(!terminal.contains("millicores)"));
+        // One footer submits each step's form; no text Close duplicates
+        // Cancel or Done. Only the v2 controller reveals Apply in that footer,
+        // so a cached v1 script must not pair with this markup.
+        assert!(terminal.contains(crate::assets::SANDBOX_RESIZE_SCRIPT_PATH));
+        assert_eq!(
+            crate::assets::SANDBOX_RESIZE_SCRIPT_PATH,
+            "/assets/codewire/sandbox-resize-v2.js"
+        );
+        let resize_dialog = terminal
+            .split_once("id=\"sandbox-resize\"")
+            .and_then(|(_, rest)| rest.split_once("</dialog>"))
+            .map(|(dialog, _)| dialog)
+            .expect("Resize dialog");
+        assert_eq!(resize_dialog.matches("<footer").count(), 1);
+        assert!(!resize_dialog.contains("Close"));
+        for form in ["sandbox-resize-plan-form", "sandbox-resize-apply-form"] {
+            assert!(resize_dialog.contains(&format!("<form id=\"{form}\"")));
+            assert!(resize_dialog.contains(&format!("type=\"submit\" form=\"{form}\"")));
+        }
 
         for html in [&list, &terminal] {
             let ids = resize_ids(html);

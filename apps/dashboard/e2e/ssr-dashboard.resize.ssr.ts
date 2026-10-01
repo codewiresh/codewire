@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 // Synthetic private-controller proof, not managed auth/daemon qualification.
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });
@@ -67,6 +67,17 @@ async function open(page: Page) {
   return page.getByRole("dialog", { name: "Resize Fixture Sandbox" });
 }
 
+// The visible footer actions, in order. Hidden buttons are not in the
+// accessibility tree, so this is exactly the set a user can reach.
+const footer = (dialog: Locator) => dialog.locator("footer").getByRole("button");
+
+// A submitted or unrecoverable change is read-only: its fields are disabled
+// and Done is the only action, so no new review can start.
+async function expectReadOnly(dialog: Locator) {
+  await expect(footer(dialog)).toHaveText(["Done"]);
+  await expect(dialog.getByLabel("CPU", { exact: true })).toBeDisabled();
+}
+
 async function review(page: Page) {
   const dialog = page.getByRole("dialog", { name: "Resize Fixture Sandbox" });
   await dialog.getByLabel("CPU", { exact: true }).selectOption("2000");
@@ -79,20 +90,28 @@ async function review(page: Page) {
 
 test("reviews consequences and resolves only a matching operation observation", async ({ page }) => {
   const state = await transport(page);
-  await open(page);
+  const opened = await open(page);
+  // Choosing is an editor: Cancel plus its one primary action, no Back.
+  await expect(footer(opened)).toHaveText(["Cancel", "Review resize"]);
+  await expect(opened.getByRole("button", { name: "Back", exact: true })).toBeHidden();
+  const choosing = (await opened.boundingBox())!;
+  const memory = (await opened.getByLabel("Memory", { exact: true }).boundingBox())!;
+  expect(memory.x + memory.width).toBeLessThanOrEqual(choosing.x + choosing.width);
   const dialog = await review(page);
   await expect(dialog.locator("[data-resize-summary]")).toContainText("1 vCPU · 2 GiB memory · 10 GiB disk → 2 vCPU · 4 GiB memory");
   await expect(dialog.locator("[data-resize-disk-warning]")).toBeVisible();
   await expect(dialog.locator("[data-resize-restart-consent]")).not.toBeVisible();
   await expect(dialog.locator("[data-resize-session-consent]")).not.toBeVisible();
+  // Reviewing is a nested step: Back, then Cancel plus Apply in one footer.
+  await expect(dialog.getByRole("button", { name: "Back", exact: true })).toBeFocused();
+  await expect(footer(dialog)).toHaveText(["Cancel", "Apply resize"]);
+  await expect(dialog.getByLabel("CPU", { exact: true })).toBeHidden();
   const bounds = (await dialog.boundingBox())!;
   expect(bounds.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   await expect(dialog.getByRole("button", { name: "Check resize status" })).not.toBeVisible();
-  const close = (await dialog.getByRole("button", { name: "Close", exact: true }).boundingBox())!;
-  expect(close.y).toBeGreaterThanOrEqual(0);
-  expect(close.y + close.height).toBeLessThanOrEqual(page.viewportSize()!.height);
-  const memory = (await dialog.getByLabel("Memory", { exact: true }).boundingBox())!;
-  expect(memory.x + memory.width).toBeLessThanOrEqual(bounds.x + bounds.width);
+  const apply = (await dialog.getByRole("button", { name: "Apply resize", exact: true }).boundingBox())!;
+  expect(apply.y).toBeGreaterThanOrEqual(0);
+  expect(apply.y + apply.height).toBeLessThanOrEqual(page.viewportSize()!.height);
   const reviewImage = test.info().outputPath("resize-resource-review.png");
   await dialog.screenshot({ path: reviewImage });
   await test.info().attach("Resize resource review", { path: reviewImage, contentType: "image/png" });
@@ -100,10 +119,13 @@ test("reviews consequences and resolves only a matching operation observation", 
   await dialog.getByRole("button", { name: "Apply resize", exact: true }).click();
   await expect(dialog.locator("[data-resize-status]")).toContainText("Resize applying");
   await expect(page.locator('[data-sandbox-action="stop"]')).toBeDisabled();
+  // A submitted change cannot be edited or cancelled here: Done dismisses it.
+  await expectReadOnly(dialog);
+  await expect(dialog.getByRole("button", { name: "Done", exact: true })).toBeFocused();
   state.observationUnavailable = true;
   await dialog.getByRole("button", { name: "Check resize status" }).click();
   await expect(dialog.locator("[data-resize-status]")).toContainText("stays locked");
-  await expect(dialog.getByRole("button", { name: "Review resize", exact: true })).toBeDisabled();
+  await expectReadOnly(dialog);
   state.observationUnavailable = false;
   state.foreign = true;
   state.operationState = "completed";
@@ -115,7 +137,31 @@ test("reviews consequences and resolves only a matching operation observation", 
   await expect(dialog.locator("[data-resize-status]")).toContainText("Resize completed");
   expect(await page.evaluate((key) => sessionStorage.getItem(key), storageKey)).toBeNull();
   await expect(page.locator('[data-sandbox-action="stop"]')).toBeEnabled();
+  // The outcome is read-only: a single Done closes it, and reopening starts over.
+  await expect(footer(dialog)).toHaveText(["Done"]);
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "Resize", exact: true }).click();
+  await expect(footer(dialog)).toHaveText(["Cancel", "Review resize"]);
+  await expect(dialog.locator("[data-resize-status]")).toBeEmpty();
   expect(state.applies).toBe(1);
+});
+
+test("Back keeps the chosen values and Cancel closes without a request", async ({ page }) => {
+  const state = await transport(page);
+  await open(page);
+  const dialog = await review(page);
+  await dialog.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(dialog.locator("[data-resize-plan]")).toBeHidden();
+  await expect(footer(dialog)).toHaveText(["Cancel", "Review resize"]);
+  await expect(dialog.getByLabel("CPU", { exact: true })).toBeFocused();
+  await expect(dialog.getByLabel("CPU", { exact: true })).toHaveValue("2000");
+  await expect(dialog.getByLabel("Memory", { exact: true })).toHaveValue("4096");
+  await expect(dialog.getByLabel("Disk (GiB)", { exact: true })).toHaveValue("20");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.plans).toBe(1);
+  expect(state.applies).toBe(0);
 });
 
 test("lost Apply acknowledgement remains locked across dismissal, readiness and reload", async ({ page }) => {
@@ -131,15 +177,15 @@ test("lost Apply acknowledgement remains locked across dismissal, readiness and 
     window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
     window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
   });
-  await expect(dialog.getByRole("button", { name: "Review resize", exact: true })).toBeDisabled();
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expectReadOnly(dialog);
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
   await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
   await page.getByRole("button", { name: "Resize", exact: true }).click();
-  await expect(dialog.getByRole("button", { name: "Review resize", exact: true })).toBeDisabled();
+  await expectReadOnly(dialog);
   await page.reload();
   await page.getByRole("button", { name: "Resize", exact: true }).click();
   await expect(dialog.locator("[data-resize-status]")).toContainText(requestId);
-  await expect(dialog.getByRole("button", { name: "Review resize", exact: true })).toBeDisabled();
+  await expectReadOnly(dialog);
   await expect(page.locator('[data-sandbox-action="stop"]')).toBeDisabled();
   await expect(page.locator("details[data-sandbox-resize]")).toBeHidden();
   expect(state.plans).toBe(1);
@@ -174,8 +220,8 @@ test("late or foreign review cannot install a stale plan", async ({ page }) => {
   await dialog.getByLabel("Disk (GiB)", { exact: true }).fill("20");
   await dialog.getByRole("button", { name: "Review resize", exact: true }).click();
   await expect.poll(() => state.plans).toBe(1);
-  await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeEnabled();
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeEnabled();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   release();
   await page.getByRole("button", { name: "Resize", exact: true }).click();
   await expect(dialog.locator("[data-resize-plan]")).toBeHidden();
@@ -191,7 +237,7 @@ test("malformed pending storage fails closed without dispatch", async ({ page })
   await page.addInitScript((key) => { sessionStorage.setItem(key, "malformed"); }, storageKey);
   const dialog = await open(page);
   await expect(dialog.locator("[data-resize-status]")).toContainText("cannot be safely recovered");
-  await expect(dialog.getByRole("button", { name: "Review resize", exact: true })).toBeDisabled();
+  await expectReadOnly(dialog);
   expect(state.applies).toBe(0);
   expect(state.plans).toBe(0);
 });
@@ -218,12 +264,12 @@ test("dismissal during Apply keeps uncertainty and rejects its late acknowledgem
   const dialog = await review(page);
   await dialog.getByRole("button", { name: "Apply resize", exact: true }).click();
   await expect.poll(() => state.applies).toBe(1);
-  await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeEnabled();
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Done", exact: true })).toBeEnabled();
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
   release();
   await page.getByRole("button", { name: "Resize", exact: true }).click();
   await expect(dialog.locator("[data-resize-status]")).toContainText("outcome is unknown");
-  await expect(dialog.getByRole("button", { name: "Review resize", exact: true })).toBeDisabled();
+  await expectReadOnly(dialog);
   expect(state.observations).toBe(0);
   expect(state.applies).toBe(1);
 });
@@ -236,7 +282,7 @@ test("storage write failure prevents dispatch even after a valid review", async 
   await dialog.getByRole("button", { name: "Apply resize", exact: true }).click();
   await expect(dialog.locator("[data-resize-status]")).toContainText("cannot be safely recovered");
   expect(state.applies).toBe(0);
-  await expect(dialog.getByRole("button", { name: "Review resize", exact: true })).toBeDisabled();
+  await expectReadOnly(dialog);
 });
 
 test("oversized review is rejected without forwarding backend text", async ({ page }) => {
@@ -256,7 +302,7 @@ test("readiness updates while closed invalidate an older reviewed tuple on reope
   const state = await transport(page);
   await open(page);
   const dialog = await review(page);
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
   await expect(page.locator('#sandbox-resize [name="cpu_millicores"]')).toHaveValue("1000");
   await page.getByRole("button", { name: "Resize", exact: true }).click();
@@ -303,7 +349,7 @@ test("a current value outside the fixed choices stays selected as its own choice
   await page.getByRole("button", { name: "Resize", exact: true }).click();
   await expect(cpu).toBeVisible();
   await expect(cpu.locator("option:checked")).toHaveText("1500 millicores (current)");
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   // A catalog value selects that choice and drops the extra option.
   Object.assign(live, { cpuMillicores: 2000, memoryMib: 4096 });
   await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();

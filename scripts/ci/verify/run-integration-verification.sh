@@ -324,7 +324,7 @@ run_database() {
     echo "::error::organization deletion lifecycle matrix skipped"
     return 1
   fi
-  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 17
+  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 18
 
   logfile="$RUN_DIR/organization-billing-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -410,6 +410,13 @@ run_database() {
       'api::admin::startup_database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "admin startup summary matrix" "$logfile" 2
+
+  logfile="$RUN_DIR/environment-resize-admission.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_resize::tests::db_' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment resize admission matrix" "$logfile" 2
 
 }
 
