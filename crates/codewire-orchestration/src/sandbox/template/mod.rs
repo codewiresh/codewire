@@ -49,7 +49,10 @@ pub use runtime_policy::{
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
-pub(crate) use workspace::render_workspace_client_bootstrap;
+pub(crate) use workspace::{
+    CLIENT_BOOTSTRAP_CONTAINER, DAEMON_INIT_CONTAINER, DAEMON_VOLUME,
+    render_workspace_client_bootstrap,
+};
 pub use workspace::{render_sandbox_template, render_workspace_daemon_service};
 
 /// Return the exact raw TOML bytes that the hypervisor annotation compresses

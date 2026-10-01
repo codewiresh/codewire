@@ -371,20 +371,34 @@ mod tests {
             }
             assert_eq!(workspace["securityContext"]["runAsUser"], 1000);
             assert_eq!(workspace["securityContext"]["runAsGroup"], 1000);
+            assert!(
+                workspace["containers"][0]["volumeMounts"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!({"name":"codewire-run","mountPath":"/codewire/run"}))
+            );
             let init = &workspace["initContainers"][0];
             assert!(init.get("securityContext").is_none());
             let command = init["command"][2].as_str().unwrap();
-            assert!(command.contains(
-                "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes"
-            ));
-            assert!(
-                init["volumeMounts"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|mount| mount
-                        == &json!({"name":"codewire-run","mountPath":"/codewire/run"}))
-            );
+            if profile == RUNTIME_PROFILE_CONFIDENTIAL {
+                assert_eq!(init["name"], "codewire-daemon-init");
+                assert!(command.contains(
+                    "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes"
+                ));
+                assert!(
+                    init["volumeMounts"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!({"name":"codewire-run","mountPath":"/codewire/run"}))
+                );
+            } else {
+                // The same-UID hosted daemon creates its owner-private process
+                // directory at startup; the client bootstrap never touches it.
+                assert_eq!(init["name"], "codewire-client-bootstrap");
+                assert!(!command.contains("/codewire/run"));
+                assert!(!init.to_string().contains("codewire-run"));
+                assert_eq!(workspace["initContainers"].as_array().unwrap().len(), 1);
+            }
         }
     }
 
@@ -468,30 +482,58 @@ mod tests {
                 volume["projected"]["sources"],
                 json!([{"serviceAccountToken":{"audience":audience,"expirationSeconds":600,"path":"token"}}])
             );
+            let projected: Vec<_> = spec["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|volume| volume.get("projected").is_some())
+                .map(|volume| &volume["name"])
+                .collect();
             for collection in ["containers", "initContainers"] {
                 for container in spec[collection].as_array().unwrap() {
                     for mount in container["volumeMounts"].as_array().unwrap() {
                         assert!(
-                            mount.get("subPath").is_none(),
+                            !projected.contains(&&mount["name"]) || mount.get("subPath").is_none(),
                             "projected rotations need directory mounts"
                         );
                     }
                 }
             }
         }
+        // Commodity mounts the daemon from the support image, so only the
+        // stock-client bootstrap remains; confidential keeps the daemon copy.
         let init = &workspace["initContainers"][0];
+        assert_eq!(workspace["initContainers"].as_array().unwrap().len(), 1);
+        assert_eq!(init["name"], "codewire-client-bootstrap");
+        assert_eq!(init["image"], opts.support_image);
         let init_mounts = init["volumeMounts"].as_array().unwrap();
-        assert_eq!(init_mounts.len(), 4);
+        assert_eq!(init_mounts.len(), 2);
+        for name in ["credential-codex-config", "credential-codex-home"] {
+            assert!(init_mounts.iter().any(|mount| mount["name"] == name));
+        }
+        assert_eq!(
+            init["command"],
+            json!(["sh", "-c", format!(
+                "umask 077 && mkdir -p -m 0700 {CODEX_PLATFORM_HOME} && cp /codewire/codex-bootstrap/config.toml {CODEX_PLATFORM_HOME}/config.toml"
+            )])
+        );
+        let mut confidential = opts.clone();
+        confidential.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
+        let confidential = render_sandbox_template("dev-sandboxes", &confidential);
+        let confidential_init = &confidential["spec"]["podTemplate"]["spec"]["initContainers"][0];
+        assert_eq!(confidential_init["name"], "codewire-daemon-init");
+        let confidential_mounts = confidential_init["volumeMounts"].as_array().unwrap();
+        assert_eq!(confidential_mounts.len(), 4);
         for name in [
             "codewire-bin",
             "codewire-run",
             "credential-codex-config",
             "credential-codex-home",
         ] {
-            assert!(init_mounts.iter().any(|mount| mount["name"] == name));
+            assert!(confidential_mounts.iter().any(|mount| mount["name"] == name));
         }
         assert!(
-            init["command"][2]
+            confidential_init["command"][2]
                 .as_str()
                 .unwrap()
                 .contains(&format!("mkdir -p -m 0700 {CODEX_PLATFORM_HOME}"))
@@ -919,8 +961,8 @@ mod tests {
             assert!(
                 workspace_spec[collection]
                     .as_array()
-                    .unwrap()
-                    .iter()
+                    .into_iter()
+                    .flatten()
                     .all(|container| {
                         container["volumeMounts"].as_array().is_none_or(|mounts| {
                             mounts.iter().all(|mount| {
@@ -1051,6 +1093,65 @@ mod tests {
     }
 
     #[test]
+    fn only_commodity_mounts_the_exact_support_image_daemon_without_init() {
+        let support = "registry.example.invalid/codewire/gateway@sha256:48549d19114407c712d043af3ba2136d97052a2c30c82935190f75a3a61f13ab";
+        for profile in [
+            RUNTIME_PROFILE_COMMODITY,
+            RUNTIME_PROFILE_CONFIDENTIAL,
+            RUNTIME_PROFILE_RUNC,
+            RUNTIME_PROFILE_NONE,
+        ] {
+            let opts = TemplateOpts {
+                runtime_profile: profile.into(),
+                support_image: support.into(),
+                ..commodity_opts()
+            };
+            let template = render_sandbox_template("dev-sandboxes", &opts);
+            let spec = &template["spec"]["podTemplate"]["spec"];
+            let volume = spec["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|volume| volume["name"] == "codewire-bin")
+                .unwrap();
+            let mount = spec["containers"][0]["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|mount| mount["name"] == "codewire-bin")
+                .unwrap();
+            if profile == RUNTIME_PROFILE_COMMODITY {
+                assert_eq!(
+                    volume,
+                    &json!({"name":"codewire-bin","image":{"reference":support,"pullPolicy":"IfNotPresent"}})
+                );
+                assert_eq!(
+                    mount,
+                    &json!({"name":"codewire-bin","mountPath":"/codewire/bin","subPath":"usr/local/bin","readOnly":true})
+                );
+                assert!(spec.get("initContainers").is_none(), "{profile}");
+            } else {
+                assert_eq!(volume, &json!({"name":"codewire-bin","emptyDir":{}}));
+                assert_eq!(
+                    mount,
+                    &json!({"name":"codewire-bin","mountPath":"/codewire/bin"})
+                );
+                let init = spec["initContainers"].as_array().unwrap();
+                assert_eq!(init.len(), 1, "{profile}");
+                assert_eq!(init[0]["name"], "codewire-daemon-init");
+                assert_eq!(init[0]["image"], support);
+            }
+            // The supervisor still starts the same executable path.
+            assert!(
+                spec["containers"][0]["command"][2]
+                    .as_str()
+                    .unwrap()
+                    .contains("/codewire/bin/cw __hosted-daemon")
+            );
+        }
+    }
+
+    #[test]
     fn commodity_template_uses_neutral_annotations_and_guest_dockerd() {
         let rendered = render_sandbox_template(
             "codewire-runtime",
@@ -1112,14 +1213,37 @@ mod tests {
                 .all(|container| container["name"].as_str() != Some("codewire-gateway")),
             "gateway must not share the workspace runtime pod"
         );
-        let init_containers = pod_template["spec"]["initContainers"].as_array().unwrap();
-        assert_eq!(
-            init_containers[0]["name"].as_str(),
-            Some("codewire-daemon-init")
+        // The daemon comes read-only from the exact support image, so the
+        // commodity Pod starts without an init container.
+        assert!(pod_template["spec"].get("initContainers").is_none());
+        assert!(
+            pod_template["spec"]["volumes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({
+                    "name": "codewire-bin",
+                    "image": { "reference": DEFAULT_GATEWAY_IMAGE, "pullPolicy": "IfNotPresent" },
+                }))
         );
-        assert_eq!(
-            init_containers[0]["image"].as_str(),
-            Some(DEFAULT_GATEWAY_IMAGE)
+        let workspace_container = &containers[0];
+        assert!(
+            workspace_container["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({
+                    "name": "codewire-bin",
+                    "mountPath": "/codewire/bin",
+                    "subPath": "usr/local/bin",
+                    "readOnly": true,
+                }))
+        );
+        assert!(
+            containers[1]["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|mount| mount["name"] != "codewire-bin"),
+            "Docker never sees the daemon image"
         );
         let dind = containers
             .iter()

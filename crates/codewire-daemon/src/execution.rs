@@ -336,6 +336,24 @@ fn validate_runc_config(config: &RuncExecution) -> io::Result<()> {
     Ok(())
 }
 
+/// Create the owner-private process directory when it is missing, then apply
+/// the same check every launch applies. Idempotent across daemon restarts; an
+/// existing directory is never replaced or loosened.
+pub(crate) fn ensure_process_directory(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    validate_process_directory(path)
+}
+
 fn validate_process_directory(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_dir() {
@@ -492,6 +510,43 @@ mod tests {
                 .await
         );
         assert!(child.0.is_some(), "the exact child remains guarded");
+    }
+
+    #[test]
+    fn process_directory_is_created_private_once_and_never_loosened_or_followed() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("processes");
+        ensure_process_directory(&directory).unwrap();
+        let mode = fs::symlink_metadata(&directory)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let marker = directory.join("pending.json");
+        fs::write(&marker, b"{}").unwrap();
+        ensure_process_directory(&directory).unwrap();
+        assert!(
+            marker.exists(),
+            "an existing directory is reused, not replaced"
+        );
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            ensure_process_directory(&directory).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let link = parent.path().join("linked");
+        std::os::unix::fs::symlink(&directory, &link).unwrap();
+        assert_eq!(
+            ensure_process_directory(&link).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            ensure_process_directory(&parent.path().join("missing/processes"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

@@ -17,9 +17,9 @@ use kube::api::ListParams;
 use sqlx::Row;
 
 use crate::sandbox::template::{
-    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC,
-    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE,
-    RUNTIME_PROFILE_RUNC, gateway_workload_name, runtime_profile_spec,
+    DAEMON_INIT_CONTAINER, DAEMON_VOLUME, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
+    RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
+    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, gateway_workload_name, runtime_profile_spec,
 };
 
 use super::ApiState;
@@ -321,7 +321,8 @@ fn observe_workspace_pod(pod: &Pod, observation: &mut LiveObservation) {
         observation.images.workspace_image = spec_container_image(pod, "workspace");
         observation.images.dind_image = spec_container_image(pod, "dind");
         observation.images.daemon_init_image =
-            spec_init_container_image(pod, "codewire-daemon-init");
+            spec_init_container_image(pod, DAEMON_INIT_CONTAINER)
+                .or_else(|| spec_daemon_volume_image(pod));
     }
 
     if let Some(status) = pod.status.as_ref() {
@@ -329,8 +330,10 @@ fn observe_workspace_pod(pod: &Pod, observation: &mut LiveObservation) {
     }
     observation.images.workspace_image_id = status_container_image_id(pod, "workspace");
     observation.images.dind_image_id = status_container_image_id(pod, "dind");
+    // An image-volume daemon has no init status; its digest-pinned reference
+    // is the daemon image above.
     observation.images.daemon_init_image_id =
-        status_init_container_image_id(pod, "codewire-daemon-init");
+        status_init_container_image_id(pod, DAEMON_INIT_CONTAINER);
 }
 
 async fn observe_node(client: kube::Client, node_name: &str, observation: &mut LiveObservation) {
@@ -410,6 +413,21 @@ fn spec_init_container_image(pod: &Pod, name: &str) -> Option<String> {
         .iter()
         .find(|container| container.name == name)
         .and_then(|container| container.image.clone())
+        .and_then(trimmed_optional)
+}
+
+/// The support image a commodity workspace mounts its daemon from.
+fn spec_daemon_volume_image(pod: &Pod) -> Option<String> {
+    pod.spec
+        .as_ref()?
+        .volumes
+        .as_ref()?
+        .iter()
+        .find(|volume| volume.name == DAEMON_VOLUME)?
+        .image
+        .as_ref()?
+        .reference
+        .clone()
         .and_then(trimmed_optional)
 }
 
@@ -603,6 +621,66 @@ mod tests {
         let runc = runtime_from_class("runc");
         assert_eq!(runc.profile, "runc");
         assert_eq!(runc.handler, "runc");
+    }
+
+    #[test]
+    fn daemon_image_is_reported_from_either_delivery_route() {
+        let observe = |spec: serde_json::Value, status: serde_json::Value| {
+            let pod: Pod = serde_json::from_value(serde_json::json!({
+                "metadata": {"name": "workspace"},
+                "spec": spec,
+                "status": status,
+            }))
+            .unwrap();
+            let mut observation = LiveObservation {
+                runtime_class: None,
+                node: None,
+                pod_ip: None,
+                zone: None,
+                region: None,
+                images: TrustReportImages {
+                    workspace_image: None,
+                    workspace_image_id: None,
+                    gateway_image: None,
+                    gateway_image_id: None,
+                    dind_image: None,
+                    dind_image_id: None,
+                    daemon_init_image: None,
+                    daemon_init_image_id: None,
+                },
+            };
+            observe_workspace_pod(&pod, &mut observation);
+            (
+                observation.images.daemon_init_image,
+                observation.images.daemon_init_image_id,
+            )
+        };
+        let image = "registry.example/codewire/gateway@sha256:1111";
+        let workspace = serde_json::json!({"name": "workspace", "image": "workspace"});
+        assert_eq!(
+            observe(
+                serde_json::json!({
+                    "containers": [workspace],
+                    "volumes": [{"name": "codewire-bin", "image": {"reference": image}}],
+                }),
+                serde_json::json!({}),
+            ),
+            (Some(image.to_owned()), None)
+        );
+        assert_eq!(
+            observe(
+                serde_json::json!({
+                    "containers": [workspace],
+                    "initContainers": [{"name": "codewire-daemon-init", "image": image}],
+                    "volumes": [{"name": "codewire-bin", "emptyDir": {}}],
+                }),
+                serde_json::json!({"initContainerStatuses": [{
+                    "name": "codewire-daemon-init", "image": image, "imageID": "sha256:2222",
+                    "ready": false, "restartCount": 0,
+                }]}),
+            ),
+            (Some(image.to_owned()), Some("sha256:2222".to_owned()))
+        );
     }
 
     #[test]
