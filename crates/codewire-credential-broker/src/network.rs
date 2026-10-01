@@ -9,6 +9,7 @@ use futures::StreamExt as _;
 use http::{HeaderMap, Method};
 use reqwest::redirect::Policy;
 
+use crate::refresh_failure::TransportFailure;
 use crate::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
 };
@@ -103,6 +104,7 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         validate_target(&target, &method, &self.selected)?;
         let is_refresh =
             target.host_str() == Some(OPENAI_AUTH_HOST) && target.path() == OPENAI_REFRESH_PATH;
+        let provider_host = provider_host(&target);
         let mut request = self
             .client
             .request(method.clone(), target.as_str())
@@ -111,7 +113,26 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         if is_refresh {
             request = request.timeout(REFRESH_REQUEST_TIMEOUT);
         }
-        let response = request.send().await.map_err(map_reqwest_error)?;
+        let response = request.send().await.map_err(|error| {
+            // Only fixed classes and an io::ErrorKind name are logged; reqwest
+            // and OS error text can carry URLs or peer details.
+            let (failure, io_error_kind) = TransportFailure::classify(
+                error.is_timeout(),
+                error.is_connect(),
+                error.is_request(),
+                &error,
+            );
+            let io_error_kind =
+                io_error_kind.map_or_else(|| "none".to_owned(), |kind| format!("{kind:?}"));
+            tracing::warn!(
+                provider_host,
+                refresh = is_refresh,
+                failure = failure.as_str(),
+                io_error_kind = %io_error_kind,
+                "provider transport request failed"
+            );
+            map_reqwest_error(error)
+        })?;
         validate_target(response.url(), &method, &self.selected)?;
         let status = response.status();
         let headers = response.headers().clone();
@@ -120,6 +141,19 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
             .bytes_stream()
             .map(|chunk| chunk.map_err(map_reqwest_error));
         Ok(BrokerUpstreamResponse::new(status, headers, Box::pin(body)))
+    }
+}
+
+/// The already-validated destination as a fixed name, never request text.
+fn provider_host(target: &url::Url) -> &'static str {
+    match target.host_str() {
+        Some(OPENAI_HOST) => OPENAI_HOST,
+        Some(CHATGPT_HOST) => CHATGPT_HOST,
+        Some(OPENAI_AUTH_HOST) => OPENAI_AUTH_HOST,
+        Some(ANTHROPIC_HOST) => ANTHROPIC_HOST,
+        Some(GITHUB_API_HOST) => GITHUB_API_HOST,
+        Some(GITHUB_GIT_HOST) => GITHUB_GIT_HOST,
+        _ => "other",
     }
 }
 

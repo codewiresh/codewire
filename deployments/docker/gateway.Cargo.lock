@@ -990,6 +990,8 @@ dependencies = [
  "tokio-util",
  "toml",
  "tonic 0.14.6",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "zeroize",

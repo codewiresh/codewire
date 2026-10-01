@@ -473,6 +473,11 @@ async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(
                     continue;
                 }
                 OAuthRefreshState::Started => {
+                    tracing::warn!(
+                        provider = "github",
+                        failure = "abandoned",
+                        "started credential refresh passed its execution deadline without an outcome"
+                    );
                     store
                         .fail_abandoned_oauth_refresh(
                             &owner,
@@ -574,20 +579,42 @@ async fn complete_github_app_refresh(
     let bundle = match exchange {
         Ok(Ok(bundle)) => bundle,
         Ok(Err(GitHubAppRefreshError::Permanent)) => {
-            return fail_started_refresh(store.as_ref(), started, Error::ProviderDenied).await;
+            return fail_started_refresh(
+                store.as_ref(),
+                started,
+                "provider_rejected",
+                Error::ProviderDenied,
+            )
+            .await;
         }
-        Ok(Err(GitHubAppRefreshError::Uncertain)) | Err(_) => {
-            return fail_started_refresh(store.as_ref(), started, Error::Unavailable).await;
+        Ok(Err(GitHubAppRefreshError::Uncertain)) => {
+            return fail_started_refresh(
+                store.as_ref(),
+                started,
+                "provider_uncertain",
+                Error::Unavailable,
+            )
+            .await;
+        }
+        Err(_) => {
+            return fail_started_refresh(store.as_ref(), started, "timeout", Error::Unavailable)
+                .await;
         }
     };
     let mut bytes = bundle.into_bytes();
     let value = match ProtectedValue::new(std::mem::take(&mut *bytes)) {
         Ok(value) => value,
-        Err(_) => return fail_started_refresh(store.as_ref(), started, Error::Unavailable).await,
+        Err(_) => {
+            return fail_started_refresh(store.as_ref(), started, "material", Error::Unavailable)
+                .await;
+        }
     };
     let result = match started.prepare_result(&value) {
         Ok(result) => result,
-        Err(_) => return fail_started_refresh(store.as_ref(), started, Error::Unavailable).await,
+        Err(_) => {
+            return fail_started_refresh(store.as_ref(), started, "material", Error::Unavailable)
+                .await;
+        }
     };
     drop(value);
     if let Err(error) = store.stage_oauth_refresh(&result).await {
@@ -623,11 +650,18 @@ async fn complete_github_app_refresh(
     .await
 }
 
+/// `failure` is a fixed class name; no provider or storage detail is logged.
 async fn fail_started_refresh(
     store: &PlatformCredentialStore,
     started: codewire_platform_credentials::StartedOAuthRefresh,
+    failure: &'static str,
     error: Error,
 ) -> Result<(), Error> {
+    tracing::warn!(
+        provider = "github",
+        failure,
+        "provider credential refresh failed"
+    );
     match store.fail_oauth_refresh(started).await {
         Ok(()) => Err(error),
         Err(_) => Err(Error::Unavailable),

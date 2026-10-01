@@ -749,6 +749,16 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
                     return Ok(BrokerRefreshAdmission::Recovered);
                 }
                 OAuthRefreshState::Started if attempt.expected == version => {
+                    // The send owner neither staged nor failed it before the
+                    // durable deadline, for example after process loss.
+                    tracing::warn!(
+                        provider = match request.kind {
+                            BrokerCredentialRefreshKind::CodexOAuth => "openai",
+                            BrokerCredentialRefreshKind::GitHubAppUserOAuth => "github",
+                        },
+                        failure = "abandoned",
+                        "started credential refresh passed its execution deadline without an outcome"
+                    );
                     self.credentials
                         .fail_abandoned_oauth_refresh(
                             &self.session.credential_owner,
