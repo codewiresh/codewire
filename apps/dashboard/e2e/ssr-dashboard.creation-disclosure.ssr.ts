@@ -290,6 +290,22 @@ test("Create submission has bounded pending feedback and recovers from BFCache",
   await expect(form.locator(".cw-submit-idle")).toBeVisible();
 });
 
+test("viewing Create without changing anything never asks to discard", async ({ page }) => {
+  await page.goto(fixtureUrl());
+  // Look around: focus and leave fields, open help, browse image suggestions.
+  await page.getByLabel("Name", { exact: true }).focus();
+  await page.getByLabel("CPU", { exact: true }).focus();
+  await page.getByRole("button", { name: "About automatic deletion", exact: true }).click();
+  await page.keyboard.press("Escape");
+  const image = page.getByRole("combobox", { name: "Workspace image", exact: true });
+  await image.click();
+  await expect(page.getByRole("listbox", { name: "Suggested images", exact: true })).toBeVisible();
+  await image.press("Escape");
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Discard changes?", exact: true })).toHaveCount(0);
+  await expect(page.locator("[data-drawer]")).toBeHidden();
+});
+
 test("dirty Create Close keeps inputs and saved draft until explicit Discard", async ({ page }) => {
   await page.goto(fixtureUrl());
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
