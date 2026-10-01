@@ -1,8 +1,9 @@
 import postgres from "postgres";
+import type { FullConfig } from "@playwright/test";
 import { cleanupKubernetesSandboxes } from "./helpers/environment";
 import { USERS, TEST_PASSWORD } from "./helpers/seed";
 import { assertIdentityTopology } from "./helpers/topology";
-import { seedSyntheticIdentity } from "./helpers/synthetic-users";
+import { seedSyntheticIdentity, seedWorkerIdentities, WORKER_IDENTITY_CEILING } from "./helpers/synthetic-users";
 import { randomBytes } from "node:crypto";
 
 const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8080";
@@ -13,7 +14,7 @@ function directDatabaseEndpoint(databaseUrl: string): string {
   return `${url.protocol}//${url.hostname}${url.port ? `:${url.port}` : ""}${url.pathname}`;
 }
 
-async function globalSetup() {
+async function globalSetup(config: FullConfig) {
   const databaseUrl = process.env.DATABASE_URL!;
   const sql = postgres(databaseUrl);
 
@@ -57,6 +58,13 @@ async function globalSetup() {
       await seedSyntheticIdentity(sql, user.email, user.name, user.isAdmin);
       console.log(`  [seed] ${role}: ${user.email} prepared`);
     }
+    // One master-class identity per worker process. A percentage string has
+    // no fixed count, so seed the ceiling; higher counts self-seed lazily.
+    const workerCount = typeof config.workers === "number"
+      ? Math.max(config.workers, WORKER_IDENTITY_CEILING)
+      : WORKER_IDENTITY_CEILING;
+    await seedWorkerIdentities(sql, workerCount);
+    console.log(`  [seed] ${workerCount} per-worker identities prepared`);
 
     // Clean environment data from previous runs
     await cleanupKubernetesSandboxes("e2e-");

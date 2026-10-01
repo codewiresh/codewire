@@ -1,23 +1,23 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./helpers/test";
 import {
   bypassTwoFactor,
   createAuthenticatedSession,
   deleteSession,
   disableTwoFactor,
-  getUserId,
 } from "./helpers/db";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { USERS } from "./helpers/seed";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
-const dashboardOrgSlug = "e2e-dashboard-read";
+// Per-project-run slug: parallel workers may run this file at the same time,
+// and each must own the organization it creates and deletes.
+const dashboardOrgSlug = `e2e-dashboard-read-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
 test.describe("server-rendered dashboard", () => {
   test.beforeAll(async ({}, testInfo) => {
     if (testInfo.project.use.isMobile) return;
-    const ownerId = await getUserId(USERS.master.email);
-    if (!ownerId) throw new Error(`Missing dashboard fixture owner ${USERS.master.email}`);
-    await ensureTestOrg("Dashboard Read Organization", dashboardOrgSlug, ownerId);
+    await ensureTestOrg("Dashboard Read Organization", dashboardOrgSlug, await ensureWorkerIdentity(testInfo.workerIndex));
   });
 
   test.afterAll(async ({}, testInfo) => {

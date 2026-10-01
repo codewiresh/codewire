@@ -104,6 +104,39 @@ The desktop and mobile projects depend on `setup`. There are no `chromium`,
 `lifecycle`, `signup`, `billing`, or `oidc` projects; those were names from the
 retired React suite.
 
+## Parallel workers and identity isolation
+
+The config keeps `workers: 1`; `--workers=N` opts in per run (start at 2, with
+4 as the ceiling — sandbox pods contend on a small Kind cluster). Switching CI
+to pass the flag is a deliberate follow-up, not part of the default local run.
+
+Each Playwright worker process acts as its own master-class seeded identity,
+`e2e-worker-<workerIndex>@codewire.sh`. Global setup seeds identities up to the
+ceiling (4); a higher `--workers` count self-seeds lazily. Specs that drive the
+browser as the seeded account import `test` from `e2e/helpers/test.ts` instead
+of `@playwright/test`: the worker-scoped `workerStorageState` fixture issues a
+real session for the worker identity (two-factor bypassed like the other
+synthetic specs, no UI round-trip) and supplies it as the test's storage state,
+including to no-JavaScript contexts that accept the `workerStorageState`
+fixture explicitly. The `setup` project still performs the single real form
+login as the shared `e2e-master` smoke proof.
+
+Isolation rules for new and edited specs:
+
+- Never mutate the shared seeded identities (`USERS.master`, `USERS.admin`,
+  `USERS.outsider`, …). Resolve the owning identity with
+  `ensureWorkerIdentity(testInfo.workerIndex)` in hooks, or seed a disposable
+  `e2e-<purpose>-<run id>` user like the admission and picker specs do.
+- Organization slugs must be unique per project run
+  (`<purpose>-${Date.now()}-<random>`). A fixed slug lets one worker delete an
+  organization another worker is still testing; global setup only wipes
+  `e2e-%` slugs at run start.
+- Personal secret stores, API key inventories, and Git identity belong to the
+  worker identity, so spec-created rows must use run-unique keys/names and be
+  removed by the spec that created them.
+- Design-fixture specs keep their empty `storageState` override and never
+  touch the seeded stack.
+
 ## Required behavior coverage
 
 The suite under `apps/dashboard/e2e/` covers:

@@ -1,16 +1,13 @@
-import { expect, test } from "@playwright/test";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { getUserId } from "./helpers/db";
+import { expect, test } from "./helpers/test";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
-import { USERS } from "./helpers/seed";
 
-const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
-const cleanRoutesOrgSlug = "e2e-clean-routes";
+// Per-project-run slugs: parallel workers may run this file at the same time,
+// and each must own the organizations it creates and deletes.
+const cleanRoutesOrgSlug = `e2e-clean-routes-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 // A second organization, so switching never depends on data from other specs.
-const switchRoutesOrgSlug = "e2e-clean-routes-switch";
+const switchRoutesOrgSlug = `e2e-clean-routes-switch-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
 test.describe("homepage", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
@@ -94,8 +91,7 @@ test.describe("homepage", () => {
 test.describe("server-rendered public, auth, and account routes", () => {
   test.beforeAll(async ({}, testInfo) => {
     if (testInfo.project.use.isMobile) return;
-    const ownerId = await getUserId(USERS.master.email);
-    if (!ownerId) throw new Error(`Missing clean-routes fixture owner ${USERS.master.email}`);
+    const ownerId = await ensureWorkerIdentity(testInfo.workerIndex);
     await ensureTestOrg("Clean Routes Organization", cleanRoutesOrgSlug, ownerId);
     await ensureTestOrg("Switch Routes Organization", switchRoutesOrgSlug, ownerId);
   });
@@ -415,8 +411,6 @@ test.describe("server-rendered public, auth, and account routes", () => {
 });
 
 test.describe("server-rendered no-JavaScript auth", () => {
-  test.use({ storageState: authState });
-
   test("wrong credentials return a safe complete HTML page without reflecting secrets", async ({ browser, isMobile }) => {
     test.skip(!!isMobile, "desktop no-JavaScript contract");
     const context = await browser.newContext({

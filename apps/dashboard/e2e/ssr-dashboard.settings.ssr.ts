@@ -1,7 +1,7 @@
-import { expect, test, type Page } from "@playwright/test";
-import { getUserId } from "./helpers/db";
+import { expect, test } from "./helpers/test";
+import type { Page } from "@playwright/test";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
-import { USERS } from "./helpers/seed";
 
 const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -19,12 +19,11 @@ function watchBrowserServiceCalls(page: Page) {
 }
 
 test.describe.serial("server-rendered settings mutations", () => {
-  test("updates and restores Git identity through the Rust form", async ({ page, isMobile }) => {
+  test("updates and restores Git identity through the Rust form", async ({ page, isMobile }, testInfo) => {
     test.skip(!!isMobile, "desktop settings mutation contract");
     const browserServiceCalls = watchBrowserServiceCalls(page);
 
-    const ownerId = await getUserId(USERS.master.email);
-    if (!ownerId) throw new Error("Synthetic settings owner is missing");
+    const ownerId = await ensureWorkerIdentity(testInfo.workerIndex);
     const org = { slug: `e2e-settings-identity-${runId}` };
     try {
       await ensureTestOrg("SSR Settings Identity", org.slug, ownerId);
