@@ -79,7 +79,14 @@ pub(crate) async fn update_environment_sources_core(
         state.pool.clone(),
         codewire_access::builtin_provider_catalog(),
     );
-    run_environment_runtime_mutation(&state.pool, organization, environment, async {
+    // The admitted operation outlives a dropped request, so it owns its inputs.
+    let owned_state = state.clone();
+    let owned_user = user.clone();
+    let owned_organization = organization.to_owned();
+    let owned_environment = environment.to_owned();
+    run_environment_runtime_mutation(&state.pool, organization, environment, async move {
+        let (state, user) = (&owned_state, &owned_user);
+        let (organization, environment) = (owned_organization.as_str(), owned_environment.as_str());
         let mut tx = profiles.begin_transaction().await.map_err(profile_error)?;
         let result = replace_environment_sources_in(
             &mut tx,

@@ -151,7 +151,13 @@ pub(crate) async fn create_port_core(
     }
 
     let dispatch_ambiguous = AtomicBool::new(false);
-    run_environment_runtime_mutation(pool, org_id, env_id, async {
+    // The admitted operation outlives a dropped request, so it owns its inputs.
+    let owned_access = access.to_owned();
+    let owned_state = state.clone();
+    let owned_org_id = org_id.to_owned();
+    run_environment_runtime_mutation(pool, org_id, env_id, async move {
+        let (state, org_id, access) = (&owned_state, owned_org_id.as_str(), owned_access.as_str());
+        let pool = &state.pool;
         let result: AppResult<EnvironmentPort> = async {
             let row = match sqlx::query(
                 r#"INSERT INTO environment_ports (environment_id, port, label, access)
@@ -305,7 +311,12 @@ pub(crate) async fn delete_port_core(
     require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
-    run_environment_runtime_mutation(pool, org_id, env_id, async {
+    // The admitted operation outlives a dropped request, so it owns its inputs.
+    let owned_pool = pool.clone();
+    let owned_env_id = env_id.to_owned();
+    let owned_port_id = port_id.to_owned();
+    run_environment_runtime_mutation(pool, org_id, env_id, async move {
+        let (pool, env_id, port_id) = (&owned_pool, owned_env_id.as_str(), owned_port_id.as_str());
         let result: AppResult<()> = async {
             let result = sqlx::query(
                 r#"UPDATE environment_ports

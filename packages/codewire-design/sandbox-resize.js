@@ -68,15 +68,27 @@
     const inputs = dialog.querySelector("[data-resize-inputs]");
     const consents = dialog.querySelector("[data-resize-consents]");
     const opener = document.querySelector("[data-resize-open]");
-    if (!planForm || !applyForm || !content || !review || !status || !observeButton || !inputs || !consents || !opener) return;
+    const back = dialog.querySelector("[data-resize-back]");
+    const cancel = dialog.querySelector("[data-resize-cancel]");
+    const done = dialog.querySelector("[data-resize-done]");
+    const reviewButton = dialog.querySelector("[data-resize-review]");
+    const applyButton = dialog.querySelector("[data-resize-apply]");
+    if (!planForm || !applyForm || !content || !review || !status || !observeButton || !inputs || !consents || !opener
+      || !back || !cancel || !done || !reviewButton || !applyButton) return;
     let plan = null;
     let attempt = null;
+    let result = false;
     let storageBlocked = false;
     let eligible = false;
     let busy = null;
     let epoch = 0;
     let timer = null;
     const locked = () => storageBlocked || attempt !== null;
+    // Choosing and reviewing are editor steps (Cancel plus one primary action,
+    // and Back while reviewing). A submitted change and its outcome are
+    // read-only, so they offer Done.
+    const step = () => locked() ? "pending" : result ? "result" : plan ? "review" : "choose";
+    const firstControl = () => ({ review: back, choose: inputs.disabled ? cancel : inputs.elements[0] })[step()] || done;
     const notify = () => document.dispatchEvent(new CustomEvent("codewire:resize-mutation-status", {
       detail: { environmentId: environment, locked: locked() },
     }));
@@ -91,6 +103,15 @@
       content.setAttribute("aria-busy", String(!!busy));
       observeButton.hidden = attempt?.operationId == null;
       observeButton.disabled = !!busy;
+      const current = step();
+      planForm.hidden = current === "review" || current === "result";
+      back.hidden = current !== "review";
+      cancel.hidden = current !== "choose" && current !== "review";
+      done.hidden = current !== "pending" && current !== "result";
+      reviewButton.hidden = current !== "choose";
+      reviewButton.disabled = inputs.disabled;
+      applyButton.hidden = current !== "review";
+      applyButton.disabled = consents.disabled;
     }
     function unresolved() {
       review.hidden = true;
@@ -164,11 +185,14 @@
           if (sessionStorage.getItem(storageKey) !== null) throw new Error("Resize storage unavailable");
           attempt = null;
           plan = null;
+          result = true;
           review.hidden = true;
           notify();
           status.textContent = value.state === "completed"
             ? "Resize completed. Current resources are shown when Sandbox status refreshes."
             : "The resize operation failed. Current resources are shown when Sandbox status refreshes; nothing was retried.";
+          controls();
+          if (!dialog.contains(document.activeElement) || document.activeElement === observeButton) done.focus();
         } catch { storageBlocked = true; unresolved(); }
       } else {
         status.textContent = `Resize ${value.state}. Requested: ${describe(value.desiredResources)}. Current resources remain source-owned Sandbox status.`;
@@ -204,10 +228,22 @@
         dialog.querySelector("[data-resize-disk-warning]").hidden = value.desiredResources.diskGib <= value.previousResources.diskGib;
         dialog.querySelector("[data-resize-restart-consent]").hidden = !value.restartRequired;
         dialog.querySelector("[data-resize-session-consent]").hidden = !value.sessionsWillTerminate;
+        consents.hidden = !value.restartRequired && !value.sessionsWillTerminate;
         review.hidden = false;
         status.textContent = "Review complete. Nothing has been applied. The server will recheck this change and its required consent.";
+        controls();
+        back.focus();
       }, () => { plan = null; status.textContent = "The resize could not be reviewed. Nothing was applied. Check current status before reviewing again."; });
     });
+    // Back returns to the chosen values without a request.
+    function chooseAgain(message) {
+      plan = null;
+      review.hidden = true;
+      status.textContent = message;
+      controls();
+      firstControl().focus();
+    }
+    back.addEventListener("click", () => { if (plan && !busy && !locked()) chooseAgain(""); });
     applyForm.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!eligible || busy || locked() || !plan || !equalResources(plan.desiredResources, selectedResources())) return;
@@ -219,11 +255,12 @@
       }
       const candidate = { version: 1, requestId: plan.requestId, desiredResources: { ...plan.desiredResources },
         allowRestart, force, operationId: null };
-      try { save(candidate); } catch { storageBlocked = true; notify(); unresolved(); return; }
+      try { save(candidate); } catch { storageBlocked = true; notify(); unresolved(); done.focus(); return; }
       attempt = candidate;
       plan = null;
       notify();
       unresolved();
+      done.focus();
       const payload = body(candidate.desiredResources);
       payload.set("request_id", candidate.requestId);
       payload.set("allow_restart", String(candidate.allowRestart));
@@ -234,15 +271,17 @@
     observeButton.addEventListener("click", () => { void poll(); });
     dialog.addEventListener("codewire:dialog-open", () => {
       if (plan && !equalResources(plan.desiredResources, selectedResources())) {
-        plan = null;
-        review.hidden = true;
-        status.textContent = "The current resources changed while Resize was closed. Review the requested resources again before applying.";
+        chooseAgain("The current resources changed while Resize was closed. Review the requested resources again before applying.");
       }
       if (locked()) unresolved();
       controls();
       if (attempt?.operationId) void poll();
     });
-    dialog.addEventListener("close", invalidate);
+    // A finished outcome is read once; reopening starts a new choice.
+    dialog.addEventListener("close", () => {
+      if (result) { result = false; status.textContent = ""; }
+      invalidate();
+    });
     window.addEventListener("pagehide", invalidate);
     window.addEventListener("pageshow", (event) => { if (event.persisted && attempt?.operationId) void poll(); });
     document.addEventListener("visibilitychange", () => { if (document.hidden) invalidate(); else if (attempt?.operationId) void poll(); });

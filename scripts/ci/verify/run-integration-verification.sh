@@ -324,7 +324,7 @@ run_database() {
     echo "::error::organization deletion lifecycle matrix skipped"
     return 1
   fi
-  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 17
+  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 18
 
   logfile="$RUN_DIR/organization-billing-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
