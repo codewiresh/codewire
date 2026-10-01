@@ -108,7 +108,7 @@ def assert_credential_bootstrap(resources: list[str], target: dict[str, str], la
 IMAGE_CACHE_ROLE = "codewire-orchestration-image-cache"
 IMAGE_CACHE_NAME = "cw-image-cache"
 RELEASE_REVISION_ROLE = "codewire-orchestration-release-revision"
-IMAGE_CACHE_TOOL_IMAGE = (
+IMAGE_CACHE_IDLE_IMAGE = (
     "docker.io/library/docker:29.7.1-dind@sha256:"
     "e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
 )
@@ -195,9 +195,10 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
             "!has(variables.pod.runtimeClassName)",
             "!variables.pod.hostNetwork", "!variables.pod.hostPID", "!variables.pod.hostIPC",
             "variables.pod.hostUsers == false",
-            "size(variables.pod.volumes) == 1",
-            "has(variables.pod.volumes[0].emptyDir)",
-            f"c.image.matches('{IMAGE_CACHE_IMAGE_PATTERN}')",
+            "size(variables.volumes) <= 6",
+            "has(v.image) && has(v.image.reference)",
+            f"v.image.reference.matches('{IMAGE_CACHE_IMAGE_PATTERN}')",
+            "v.image.pullPolicy == 'IfNotPresent'",
             "(!has(c.securityContext.privileged) || !c.securityContext.privileged)",
             "!c.securityContext.allowPrivilegeEscalation",
             "c.securityContext.readOnlyRootFilesystem",
@@ -205,12 +206,14 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
             "!has(c.securityContext.capabilities.add)",
             "variables.pod.securityContext.runAsNonRoot",
             "variables.pod.securityContext.seccompProfile.type == 'RuntimeDefault'",
-            f"c.image == '{IMAGE_CACHE_TOOL_IMAGE}'",
-            "size(variables.initContainers) == 1",
-            "size(object.spec.template.spec.containers) <= 6",
-            "c.command == ['/cw-image-cache/ld-musl-x86_64.so.1', '--library-path=', '--preload=', '/cw-image-cache/busybox', 'sleep', '2147483647']",
-            "c.command == ['/bin/busybox', 'cp', '/bin/busybox', '/lib/ld-musl-x86_64.so.1', '/cw-image-cache/']",
-            "m.name == 'cw-image-cache-tool' && has(m.readOnly) && m.readOnly",
+            f"c.image == '{IMAGE_CACHE_IDLE_IMAGE}'",
+            "size(object.spec.template.spec.initContainers) == 0",
+            "size(variables.containers) == 1",
+            "c.command == ['/bin/busybox', 'sleep', '2147483647']",
+            "has(m.readOnly) && m.readOnly",
+            "m.mountPath == '/cw-image-cache/' + m.name",
+            "!has(m.subPath) && !has(m.subPathExpr)",
+            "variables.volumes.all(v, variables.containers.exists(c,",
             "c.resources == {'requests': {'cpu': '1m', 'memory': '4Mi'}, 'limits': {'cpu': '10m', 'memory': '16Mi'}}",
             "variables.pod.nodeSelector == {'katacontainers.io/kata-runtime': 'true', 'node.codewire.sh/runtime-candidate': 'true'}",
             "!has(c.env) && !has(c.envFrom) && !has(c.ports)",
@@ -583,10 +586,11 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         image_cache_rejected("token automount", "ServiceAccount", "automountServiceAccountToken: false", "automountServiceAccountToken: true", IMAGE_CACHE_NAME)
         image_cache_rejected("open egress", "NetworkPolicy", "  - Egress", "  - Egress\n  egress:\n  - {}", IMAGE_CACHE_NAME)
         image_cache_rejected("runtime class allowed", "ValidatingAdmissionPolicy", "!has(variables.pod.runtimeClassName)", "true")
-        image_cache_rejected("host path allowed", "ValidatingAdmissionPolicy", "has(variables.pod.volumes[0].emptyDir)", "true")
-        image_cache_rejected("any init image", "ValidatingAdmissionPolicy", f"c.image == '{IMAGE_CACHE_TOOL_IMAGE}'", "true")
-        image_cache_rejected("unbounded containers", "ValidatingAdmissionPolicy", "size(object.spec.template.spec.containers) <= 6", "true")
-        image_cache_rejected("loader environment honoured", "ValidatingAdmissionPolicy", "'--library-path=', '--preload=', ", "")
+        image_cache_rejected("host path allowed", "ValidatingAdmissionPolicy", "has(v.image) && has(v.image.reference)", "true")
+        image_cache_rejected("any idle image", "ValidatingAdmissionPolicy", f"c.image == '{IMAGE_CACHE_IDLE_IMAGE}'", "true")
+        image_cache_rejected("unbounded volumes", "ValidatingAdmissionPolicy", "size(variables.volumes) <= 6", "true")
+        image_cache_rejected("writable image mounts", "ValidatingAdmissionPolicy", "has(m.readOnly) && m.readOnly", "true")
+        image_cache_rejected("unmounted volumes", "ValidatingAdmissionPolicy", "variables.volumes.all(v, variables.containers.exists(c,", "variables.volumes.all(v, true || variables.containers.exists(c,")
         image_cache_rejected("any node", "ValidatingAdmissionPolicy", "'katacontainers.io/kata-runtime': 'true', ", "")
         image_cache_rejected("host users", "ValidatingAdmissionPolicy", "variables.pod.hostUsers == false", "true")
         image_cache_rejected("ReplicaSet list", "Role", "  - get", "  - get\n  - list", RELEASE_REVISION_ROLE)
