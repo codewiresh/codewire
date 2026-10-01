@@ -45,7 +45,7 @@ const footer = async (owner: Locator, primary?: string, dismissal = "Cancel") =>
   await expect(owner.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
   await expect(owner.locator("[data-dialog-close]")).toHaveCount(1);
   await expect(owner.locator(".cw-dialog-actions").getByRole("button", { name: dismissal, exact: true })).toBeVisible();
-  await expect(owner.locator('button[type="submit"]')).toHaveCount(primary ? 1 : 0);
+  await expect(owner.locator('button[type="submit"]:not([data-dialog-open], [data-dialog-close])')).toHaveCount(primary ? 1 : 0);
   if (primary) {
     const submit = owner.locator(".cw-dialog-actions").getByRole("button", { name: primary, exact: true });
     await expect(submit).toBeVisible();
@@ -80,7 +80,9 @@ test("five full-row choices open focused provider editors with Back and one foot
     const editor = dialog(page, title);
     await expect(page.locator("dialog[open]")).toHaveCount(1);
     await footer(editor, primary || undefined, name === "GitHub" ? "Done" : "Cancel");
-    await expect(action(editor, "Back")).toHaveAttribute("type", "button");
+    // Back opens the chooser through its own form; it never submits the editor's values.
+    expect(await action(editor, "Back").evaluate((button: HTMLButtonElement) => button.form?.matches(".cw-dialog-launcher")
+      && [...button.form.elements].every((field) => field === button || ["creation_draft", "dialog"].includes((field as HTMLInputElement).name)))).toBe(true);
     if (provider) await expect(editor.locator('[name="provider"]')).toHaveValue(provider);
     if (name === "GitHub") {
       await expect(editor.locator('input[name="name"]')).toHaveCount(0);
@@ -220,7 +222,7 @@ test("profile rows open exact-revision editors from their menu with native valid
   await editor.getByLabel("Profile name", { exact: true }).fill("Not a valid name");
   await action(editor, "Create profile").click();
   await expect(editor).toBeVisible();
-  expect(await editor.locator("form").evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false);
+  expect(await editor.locator("form:not(.cw-dialog-launcher)").evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false);
   await fits(page, editor);
   await page.screenshot({ path: test.info().outputPath("create-profile-dialog.png") });
   await action(editor, "Cancel").click();
@@ -289,7 +291,7 @@ test("inner form replacement fences pending dismissal and preserves new validati
   await action(api, "Cancel").click();
   await expect(prompt(page)).toBeVisible();
   // Emulate a late owner-form HTMX replacement from test code only.
-  await api.locator("form").evaluate((form) => {
+  await api.locator("form:not(.cw-dialog-launcher)").evaluate((form) => {
     const replacement = form.cloneNode(true) as HTMLFormElement;
     (replacement.elements.namedItem("value") as HTMLInputElement).value = "";
     const error = document.createElement("p");
@@ -391,4 +393,23 @@ test("explicit leaving-page Discard fences a dialog request that began after the
   await prompt.getByRole("button", { name: "Discard changes", exact: true }).click();
   expect(await obsoleteResponsePrevented).toBe(true);
   await expect(api.getByLabel("API key", { exact: true })).toHaveValue("");
+});
+
+test.describe("without JavaScript", () => {
+  test.use({ javaScriptEnabled: false });
+
+  test("each dialog opens and cancels through a native GET form that keeps the Create draft", async ({ page }) => {
+    const opened = page.waitForRequest((request) => request.url().includes("dialog=add-credential"));
+    await page.route("**/settings-credentials.html?**", (route) => route.fulfill({ status: 204 }));
+    await action(page, "Add credential").click();
+    const url = new URL((await opened).url());
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      creation_draft: "00000000-0000-4000-8000-000000000003", dialog: "add-credential",
+    });
+    for (const form of await page.locator("form.cw-dialog-launcher").all()) {
+      await expect(form).toHaveAttribute("method", "get");
+      await expect(form.locator('input[name="creation_draft"]')).toHaveValue("00000000-0000-4000-8000-000000000003");
+    }
+    await expect(page.locator('button[type="button"][data-dialog-open], button[type="button"][data-dialog-close]')).toHaveCount(0);
+  });
 });

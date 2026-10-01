@@ -418,6 +418,15 @@ pub(crate) struct CredentialSettingsView {
 }
 
 impl CredentialSettingsView {
+    /// The exact Create draft this page returns to, carried by the GET forms
+    /// that open a dialog without scripting.
+    pub(crate) fn creation_draft(&self) -> String {
+        url::form_urlencoded::parse(self.navigation_query.trim_start_matches('?').as_bytes())
+            .find(|(name, _)| name == "creation_draft")
+            .map(|(_, value)| value.into_owned())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn has_github_connections(&self) -> bool {
         self.credentials
             .iter()

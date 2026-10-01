@@ -1527,6 +1527,34 @@ mod tests {
     }
 
     #[test]
+    fn dialogs_open_and_cancel_through_get_forms_that_keep_the_draft() {
+        let draft = "00000000-0000-4000-8000-000000000003";
+        let html = rendered_dialogs_with_navigation("", "", &format!("?creation_draft={draft}"));
+        let draft_input =
+            format!("<input type=\"hidden\" name=\"creation_draft\" value=\"{draft}\">");
+        let launchers = html
+            .split("<form class=\"cw-dialog-launcher\"")
+            .skip(1)
+            .collect::<Vec<_>>();
+        assert!(launchers.len() > 20);
+        for form in &launchers {
+            let form = form.split("</form>").next().unwrap();
+            assert!(form.starts_with(&format!(" method=\"get\" action=\"{PATH}\">")));
+            assert!(form.contains(&draft_input), "a dialog form lost its draft");
+            assert!(form.contains("type=\"submit\""));
+            assert!(form.contains("data-dialog-open=") == form.contains("name=\"dialog\""));
+        }
+        for dialog in ["add-credential", "create-profile", "connect-github"] {
+            assert!(
+                html.contains(&format!("name=\"dialog\" value=\"{dialog}\"")),
+                "{dialog}"
+            );
+        }
+        assert!(!html.contains("type=\"button\" data-dialog-open"));
+        assert!(!html.contains("type=\"button\" data-dialog-close"));
+    }
+
+    #[test]
     fn github_connect_dialog_shows_the_one_connection_instead_of_a_new_authorization() {
         let mut data = dialog_data();
         let mut key = dialog_data().credentials.remove(0);

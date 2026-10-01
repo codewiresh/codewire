@@ -240,7 +240,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
         .getByRole("button", { name: provider, exact: true }).click();
       const connection = page.getByRole("dialog", { name: provider === "GitHub" ? "Connect GitHub" : "Connect Codex", exact: true });
       if (provider === "GitHub") {
-        const github = connection.locator("form");
+        const github = connection.locator("form:not(.cw-dialog-launcher)");
         await expect(github).toHaveAttribute("action", "/settings/credentials/_actions/github/authorize");
         await expect(github.locator('[name="name"]')).toHaveCount(0);
         const submit = connection.getByRole("button", { name: "Continue to GitHub", exact: true });

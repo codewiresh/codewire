@@ -86,7 +86,13 @@
 [data-dashboard-app] .cw-personal-api-key-row > header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); }
 [data-dashboard-app] .cw-personal-api-key-row dd ul { margin: 0; padding-left: var(--space-4); }
 
+/* A dialog launcher or Cancel is a GET form so it also works without
+   scripting; scripting opens or closes the dialog in place instead. */
+[data-dashboard-app] .cw-dialog-launcher { display: contents; }
+
 @media (scripting: none) {
+  /* The dialog named in the URL shows in place of a modal. */
+  [data-dashboard-app] .cw-credentials-page dialog[data-dialog-auto-open] { position: static; display: block; margin: var(--space-4) 0; }
   [data-dashboard-app] .cw-personal-api-keys-page [data-dialog-open],
   [data-dashboard-app] .cw-personal-api-keys-page [data-copy-api-key] { display: none; }
   [data-dashboard-app] .cw-personal-secrets-page [data-dialog-open] { display: none; }
