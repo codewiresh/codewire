@@ -22,6 +22,8 @@ pub mod prepare;
 pub mod presets;
 pub mod preview;
 pub mod proxy;
+#[cfg(test)]
+mod runtime_lease_test_support;
 pub mod secret_projects;
 pub mod secrets;
 pub mod ssh_proxy;
