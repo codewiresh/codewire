@@ -184,6 +184,61 @@ mod tests {
     }
 
     #[test]
+    fn every_accepted_form_of_a_platform_credential_is_removed() {
+        let forwarded = |headers: &HeaderMap, platform_bearer| {
+            workload_request_headers(headers, platform_bearer)
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", value.to_str().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static(HOST));
+        headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer synthetic-token"),
+        );
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic YXBwOnNlY3JldA=="),
+        );
+        headers.insert("x-app-header", HeaderValue::from_static("kept"));
+        // Spacing, tabs, repeats and a second header are all removed. A name
+        // inside another cookie's value is not a credential.
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static(
+                "theme=dark; codewire.session_token =a;\tcodewire.session_token=b; app=codewire.session_token=x",
+            ),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("codewire.session_token=second"),
+        );
+        assert_eq!(
+            forwarded(&headers, true),
+            [
+                "authorization: Basic YXBwOnNlY3JldA==",
+                "x-app-header: kept",
+                "cookie: theme=dark; app=codewire.session_token=x",
+            ]
+        );
+        let mut lowercase = HeaderMap::new();
+        lowercase.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("bEaReR cw_{}", "b".repeat(64))).unwrap(),
+        );
+        assert!(forwarded(&lowercase, false).is_empty());
+        // An unparseable cookie is dropped rather than forwarded unfiltered.
+        let mut opaque = HeaderMap::new();
+        opaque.insert(
+            header::COOKIE,
+            HeaderValue::from_bytes(b"codewire.session_token=\xff").unwrap(),
+        );
+        assert!(forwarded(&opaque, false).is_empty());
+    }
+
+    #[test]
     fn no_platform_only_cookie_header_reaches_workload() {
         let input = HeaderMap::from_iter([(
             header::COOKIE,
