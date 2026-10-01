@@ -103,9 +103,9 @@ pub(super) async fn send_failure<S: CredentialBridgeResponseSink>(
     error: BrokerRequestError,
 ) -> Result<(), ()> {
     let reason = match error {
-        BrokerRequestError::Denied | BrokerRequestError::InvalidRequest => {
-            v1::CredentialBridgeFailureReason::Denied
-        }
+        BrokerRequestError::Denied
+        | BrokerRequestError::InvalidRequest
+        | BrokerRequestError::ReconnectRequired => v1::CredentialBridgeFailureReason::Denied,
         BrokerRequestError::AuthorityUnavailable => v1::CredentialBridgeFailureReason::Unavailable,
         BrokerRequestError::UpstreamFailed => v1::CredentialBridgeFailureReason::UpstreamFailed,
         BrokerRequestError::ResponseTooLarge => v1::CredentialBridgeFailureReason::ResponseTooLarge,

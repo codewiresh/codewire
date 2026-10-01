@@ -24,10 +24,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use codewire_access::{
-    BrokerOperationId, BrokerRouteId, CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS,
-    CapabilitySlot, CredentialAuthKind, CredentialId, CredentialMetadata, DerivedGrant,
-    EnvironmentAccessBinding, GrantContext, GrantPermission, GrantPlacement, Owner,
-    PROVIDER_REFRESH_TIMEOUT_SECONDS, Placement,
+    AvailableGrants, BrokerOperationId, BrokerRouteId,
+    CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
+    CredentialId, CredentialMetadata, DerivedGrant, EnvironmentAccessBinding, GrantContext,
+    GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS, Placement,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, OAuthRefreshState, PlatformAccessProfileStore,
@@ -392,7 +392,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         permission: GrantPermission,
     ) -> Result<Admission, BrokerLeaseError> {
         let session = self.session().await?;
-        let grants = match &session.identity {
+        let AvailableGrants {
+            grants,
+            reconnect_required,
+        } = match &session.identity {
             RuntimeIdentity::Hosted { .. } => self
                 .profiles
                 .evaluate_grants(&session.context)
@@ -421,16 +424,28 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 }) {
                     return Err(BrokerLeaseError::Denied);
                 }
-                grants
+                // An owner-local selection is admitted whole; nothing is withheld.
+                AvailableGrants {
+                    grants,
+                    reconnect_required: Default::default(),
+                }
             }
             RuntimeIdentity::OwnerLocal { profile: None, .. } => {
                 return Err(BrokerLeaseError::Denied);
             }
         };
-        let mut grant = grants
+        // A credential that needs Reconnect withholds only its own slot. Say so
+        // for exactly that selected slot; every other absence stays a denial.
+        let Some(mut grant) = grants
             .into_iter()
             .find(|grant| &grant.capability_slot == slot)
-            .ok_or(BrokerLeaseError::Denied)?;
+        else {
+            return Err(if reconnect_required.contains(slot) {
+                BrokerLeaseError::ReconnectRequired
+            } else {
+                BrokerLeaseError::Denied
+            });
+        };
         if !grant.permissions.contains(&permission) {
             return Err(BrokerLeaseError::Denied);
         }
@@ -1039,7 +1054,10 @@ fn profile_error(error: PlatformProfileError) -> BrokerLeaseError {
 fn refresh_lease_error(error: BrokerLeaseError) -> BrokerRefreshError {
     match error {
         BrokerLeaseError::InvalidRequest => BrokerRefreshError::InvalidRequest,
-        BrokerLeaseError::Denied => BrokerRefreshError::Denied,
+        // A credential needing Reconnect is never refreshed again automatically.
+        BrokerLeaseError::Denied | BrokerLeaseError::ReconnectRequired => {
+            BrokerRefreshError::Denied
+        }
         BrokerLeaseError::Unavailable => BrokerRefreshError::Unavailable,
         BrokerLeaseError::InvalidResponse => BrokerRefreshError::InvalidResponse,
     }

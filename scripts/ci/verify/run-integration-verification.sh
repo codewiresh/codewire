@@ -292,7 +292,7 @@ run_database() {
     cargo test --locked -p codewire-credential-service \
       --lib tests::database::projection:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform runtime projection matrix" "$logfile" 10
+  assert_passed_count "platform runtime projection matrix" "$logfile" 11
 
   logfile="$RUN_DIR/owner-local-delegation-authority.log"
   TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" \

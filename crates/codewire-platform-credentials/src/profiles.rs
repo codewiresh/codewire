@@ -12,10 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use codewire_access::{
-    AccessError, AccessProfile, AccessProfileId, AccessProfileName, CapabilitySlot, CredentialId,
-    CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, GrantContext,
-    GrantPlacement, Owner, OwnerId, Placement, ProviderCatalog, ProviderId,
-    derive_account_github_grant, derive_grants, validate_profile_entries,
+    AccessError, AccessProfile, AccessProfileId, AccessProfileName, AvailableGrants,
+    CapabilitySlot, CredentialId, CredentialMetadata, DerivedGrant, EnvironmentAccessBinding,
+    GrantContext, GrantPlacement, Owner, OwnerId, Placement, ProviderCatalog, ProviderId,
+    derive_account_github_grant, derive_available_grants, derive_grants, validate_profile_entries,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -483,23 +483,12 @@ impl PlatformAccessProfileStore {
         validate_personal_confirmation(context, &profile, personal_owner_confirmation)?;
         let credentials = load_credentials(tx, &profile).await?;
         validate_profile_entries(&profile, &credentials, &self.catalog).map_err(access_error)?;
-        let now = unix_now()?;
+        // A credential that needs Reconnect does not block the Sandbox: like a
+        // missing GitHub connection, only its capability is unavailable until
+        // the owner reconnects it. Runtime admission withholds it per slot.
         for credential in credentials.values() {
             if !context.authorized_credentials.contains(&credential.id) {
                 return Err(Error::UnsupportedEntry);
-            }
-            match credential.status {
-                CredentialStatus::Active => {}
-                CredentialStatus::Expired => return Err(Error::ExpiredCredential),
-                CredentialStatus::RefreshFailed | CredentialStatus::Revoked => {
-                    return Err(Error::InactiveCredential);
-                }
-            }
-            if credential
-                .expires_at_unix
-                .is_some_and(|expires| expires <= now)
-            {
-                return Err(Error::ExpiredCredential);
             }
         }
         sqlx::query(
@@ -636,10 +625,9 @@ impl PlatformAccessProfileStore {
     /// One metadata admission point, not an irrevocable lease. The broker must
     /// repeat its operation, runtime identity, expiry and revocation fences when
     /// consuming material. A stopped or superseded runtime cannot derive grants.
-    pub async fn evaluate_grants(
-        &self,
-        context: &GrantContext,
-    ) -> Result<Vec<DerivedGrant>, Error> {
+    /// Each capability is admitted separately: a selected credential that needs
+    /// Reconnect is reported, without a grant, and never withholds the others.
+    pub async fn evaluate_grants(&self, context: &GrantContext) -> Result<AvailableGrants, Error> {
         let mut tx = self.begin_transaction().await?;
         lock_environment(&mut tx, context, true, false).await?;
         let grants = match find_binding(&mut tx, context).await? {
@@ -654,7 +642,10 @@ impl PlatformAccessProfileStore {
             }
             // Selecting a GitHub repository needs no profile: without a
             // binding, the creator's one GitHub connection is the only grant.
-            None => self.admit_account_github(&mut tx, context).await?,
+            None => AvailableGrants {
+                grants: self.admit_account_github(&mut tx, context).await?,
+                reconnect_required: BTreeSet::new(),
+            },
         };
         tx.commit().await.map_err(database_error)?;
         Ok(grants)
@@ -727,20 +718,10 @@ impl PlatformAccessProfileStore {
         if !found {
             return Err(Error::NotFound);
         }
-        self.admit_binding(tx, context, binding, personal_owner_confirmation)
-            .await
-    }
-
-    async fn admit_binding(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        context: &GrantContext,
-        binding: &EnvironmentAccessBinding,
-        personal_owner_confirmation: Option<&OwnerId>,
-    ) -> Result<Vec<DerivedGrant>, Error> {
-        let profile = profile_for_context(tx, context, binding).await?;
-        validate_personal_confirmation(context, &profile, personal_owner_confirmation)?;
-        let credentials = load_credentials(tx, &profile).await?;
+        // An owner-local launch admits its exact selection as a whole.
+        let (profile, credentials) = self
+            .bound_profile(tx, context, binding, personal_owner_confirmation)
+            .await?;
         derive_grants(
             context,
             binding,
@@ -750,6 +731,45 @@ impl PlatformAccessProfileStore {
             unix_now()?,
         )
         .map_err(access_error)
+    }
+
+    /// Hosted binding writes and runtime admission. A selected credential that
+    /// needs Reconnect withholds only its own capability; every other fence
+    /// still rejects the whole binding.
+    async fn admit_binding(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+        binding: &EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
+    ) -> Result<AvailableGrants, Error> {
+        let (profile, credentials) = self
+            .bound_profile(tx, context, binding, personal_owner_confirmation)
+            .await?;
+        derive_available_grants(
+            context,
+            binding,
+            &profile,
+            &credentials,
+            &self.catalog,
+            unix_now()?,
+        )
+        .map_err(access_error)
+    }
+
+    /// The bound revision and its SHARE-locked credential metadata, after the
+    /// personal confirmation fence. Material-free; this grants nothing.
+    async fn bound_profile(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+        binding: &EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
+    ) -> Result<(AccessProfile, BTreeMap<CredentialId, CredentialMetadata>), Error> {
+        let profile = profile_for_context(tx, context, binding).await?;
+        validate_personal_confirmation(context, &profile, personal_owner_confirmation)?;
+        let credentials = load_credentials(tx, &profile).await?;
+        Ok((profile, credentials))
     }
 }
 

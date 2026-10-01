@@ -718,9 +718,11 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
     error: BrokerRequestError,
 ) -> Result<(), ()> {
     let reason = match error {
-        BrokerRequestError::InvalidRequest | BrokerRequestError::Denied => {
-            v1::CredentialBridgeFailureReason::Denied
-        }
+        // HTTP routes answer ReconnectRequired themselves; any other operation
+        // keeps the existing closed Denied reason that every daemon decodes.
+        BrokerRequestError::InvalidRequest
+        | BrokerRequestError::Denied
+        | BrokerRequestError::ReconnectRequired => v1::CredentialBridgeFailureReason::Denied,
         BrokerRequestError::AuthorityUnavailable => v1::CredentialBridgeFailureReason::Unavailable,
         BrokerRequestError::UpstreamFailed => v1::CredentialBridgeFailureReason::UpstreamFailed,
         BrokerRequestError::ResponseTooLarge => v1::CredentialBridgeFailureReason::ResponseTooLarge,

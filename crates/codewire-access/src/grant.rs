@@ -159,6 +159,20 @@ pub fn validate_profile_entries(
     Ok(())
 }
 
+/// Grants for one bound profile revision, admitted one capability at a time.
+///
+/// A selected credential whose lifecycle withholds it now (refresh failed,
+/// revoked or expired) withholds only its own capability: the slot is listed
+/// in `reconnect_required` and receives no grant. Every structural, owner,
+/// authorization and catalog failure still rejects the whole selection.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AvailableGrants {
+    pub grants: Vec<DerivedGrant>,
+    pub reconnect_required: BTreeSet<CapabilitySlot>,
+}
+
+/// Admit every profile entry, or fail the whole selection. Local and
+/// platform-to-local admission of one exact selection uses this form.
 pub fn derive_grants(
     context: &GrantContext,
     binding: &EnvironmentAccessBinding,
@@ -166,6 +180,54 @@ pub fn derive_grants(
     credentials: &BTreeMap<CredentialId, CredentialMetadata>,
     catalog: &ProviderCatalog,
     now_unix: u64,
+) -> Result<Vec<DerivedGrant>, AccessError> {
+    derive_profile_grants(
+        context,
+        binding,
+        profile,
+        credentials,
+        catalog,
+        now_unix,
+        None,
+    )
+}
+
+/// Admit each capability of a hosted environment's bound profile separately,
+/// so that one credential needing Reconnect never withholds the others. This
+/// relaxes only credential lifecycle; it grants nothing [`derive_grants`] would
+/// refuse for any other reason.
+pub fn derive_available_grants(
+    context: &GrantContext,
+    binding: &EnvironmentAccessBinding,
+    profile: &AccessProfile,
+    credentials: &BTreeMap<CredentialId, CredentialMetadata>,
+    catalog: &ProviderCatalog,
+    now_unix: u64,
+) -> Result<AvailableGrants, AccessError> {
+    let mut reconnect_required = BTreeSet::new();
+    let grants = derive_profile_grants(
+        context,
+        binding,
+        profile,
+        credentials,
+        catalog,
+        now_unix,
+        Some(&mut reconnect_required),
+    )?;
+    Ok(AvailableGrants {
+        grants,
+        reconnect_required,
+    })
+}
+
+fn derive_profile_grants(
+    context: &GrantContext,
+    binding: &EnvironmentAccessBinding,
+    profile: &AccessProfile,
+    credentials: &BTreeMap<CredentialId, CredentialMetadata>,
+    catalog: &ProviderCatalog,
+    now_unix: u64,
+    mut reconnect_required: Option<&mut BTreeSet<CapabilitySlot>>,
 ) -> Result<Vec<DerivedGrant>, AccessError> {
     context.validate()?;
     binding.validate()?;
@@ -184,99 +246,138 @@ pub fn derive_grants(
     }
     validate_profile_owner(context, &profile.owner)?;
 
+    // Only credential lifecycle is per capability. Without a withheld set,
+    // as for derive_grants, every failure still rejects the whole selection.
+    let mut withhold = |slot: &CapabilitySlot, error: AccessError| {
+        let lifecycle = matches!(
+            error,
+            AccessError::CredentialInactive { .. } | AccessError::CredentialExpired { .. }
+        );
+        match reconnect_required.as_deref_mut() {
+            Some(withheld) if lifecycle => {
+                withheld.insert(slot.clone());
+                Ok(())
+            }
+            _ => Err(error),
+        }
+    };
     let mut grants =
         Vec::with_capacity(profile.entries.len() + usize::from(profile.includes_github()));
-    if profile.includes_github()
-        && let Some(grant) =
-            derive_github_singleton_grant(context, profile, credentials, catalog, now_unix)?
-    {
-        grants.push(grant);
+    if profile.includes_github() {
+        match derive_github_singleton_grant(context, profile, credentials, catalog, now_unix) {
+            Ok(Some(grant)) => grants.push(grant),
+            Ok(None) => {}
+            Err(error) => withhold(&CapabilitySlot::github(), error)?,
+        }
     }
     for (slot, credential_id) in &profile.entries {
-        if !context.authorized_credentials.contains(credential_id) {
-            return Err(AccessError::CredentialNotAuthorized {
+        match profile_entry_grant(
+            context,
+            profile,
+            slot,
+            credential_id,
+            credentials,
+            catalog,
+            now_unix,
+        ) {
+            Ok(grant) => grants.push(grant),
+            Err(error) => withhold(slot, error)?,
+        }
+    }
+    Ok(grants)
+}
+
+fn profile_entry_grant(
+    context: &GrantContext,
+    profile: &AccessProfile,
+    slot: &CapabilitySlot,
+    credential_id: &CredentialId,
+    credentials: &BTreeMap<CredentialId, CredentialMetadata>,
+    catalog: &ProviderCatalog,
+    now_unix: u64,
+) -> Result<DerivedGrant, AccessError> {
+    if !context.authorized_credentials.contains(credential_id) {
+        return Err(AccessError::CredentialNotAuthorized {
+            credential: credential_id.clone(),
+        });
+    }
+    let credential =
+        credentials
+            .get(credential_id)
+            .ok_or_else(|| AccessError::CredentialMissing {
                 credential: credential_id.clone(),
-            });
-        }
-        let credential =
-            credentials
-                .get(credential_id)
-                .ok_or_else(|| AccessError::CredentialMissing {
-                    credential: credential_id.clone(),
-                })?;
-        if &credential.id != credential_id {
-            return Err(AccessError::CredentialIdentityMismatch {
-                credential: credential_id.clone(),
-            });
-        }
-        credential.validate()?;
-        if credential.placement != context.placement.credential_storage() {
-            return Err(AccessError::PlacementMismatch {
-                subject: "credential",
-            });
-        }
-        validate_credential_owner(context, &profile.owner, credential)?;
-        match credential.status {
-            CredentialStatus::Active => {}
-            CredentialStatus::Expired => {
-                return Err(AccessError::CredentialExpired {
-                    credential: credential_id.clone(),
-                });
-            }
-            CredentialStatus::RefreshFailed | CredentialStatus::Revoked => {
-                return Err(AccessError::CredentialInactive {
-                    credential: credential_id.clone(),
-                });
-            }
-        }
-        if credential
-            .expires_at_unix
-            .is_some_and(|expires_at| expires_at <= now_unix)
-        {
+            })?;
+    if &credential.id != credential_id {
+        return Err(AccessError::CredentialIdentityMismatch {
+            credential: credential_id.clone(),
+        });
+    }
+    credential.validate()?;
+    if credential.placement != context.placement.credential_storage() {
+        return Err(AccessError::PlacementMismatch {
+            subject: "credential",
+        });
+    }
+    validate_credential_owner(context, &profile.owner, credential)?;
+    match credential.status {
+        CredentialStatus::Active => {}
+        CredentialStatus::Expired => {
             return Err(AccessError::CredentialExpired {
                 credential: credential_id.clone(),
             });
         }
-
-        let provider =
-            catalog
-                .get(&credential.provider)
-                .ok_or_else(|| AccessError::ProviderUnavailable {
-                    provider: credential.provider.clone(),
-                })?;
-        let policy =
-            provider
-                .capabilities
-                .get(slot)
-                .ok_or_else(|| AccessError::UnsupportedCapability {
-                    provider: credential.provider.clone(),
-                    slot: slot.clone(),
-                })?;
-        if !policy
-            .authentication_kinds
-            .contains(&credential.authentication_kind)
-        {
-            return Err(AccessError::UnsupportedCapability {
-                provider: credential.provider.clone(),
-                slot: slot.clone(),
+        CredentialStatus::RefreshFailed | CredentialStatus::Revoked => {
+            return Err(AccessError::CredentialInactive {
+                credential: credential_id.clone(),
             });
         }
-
-        grants.push(DerivedGrant {
-            environment_id: context.environment_id.clone(),
-            environment_generation: context.environment_generation,
-            profile: Some(GrantProfile {
-                id: profile.id.clone(),
-                revision: profile.revision,
-            }),
-            capability_slot: slot.clone(),
-            credential_id: credential_id.clone(),
-            credential_revocation_generation: credential.revocation_generation,
-            expires_at_unix: credential.expires_at_unix,
-            permissions: policy.permissions.clone(),
+    }
+    if credential
+        .expires_at_unix
+        .is_some_and(|expires_at| expires_at <= now_unix)
+    {
+        return Err(AccessError::CredentialExpired {
+            credential: credential_id.clone(),
         });
     }
-    Ok(grants)
+
+    let provider =
+        catalog
+            .get(&credential.provider)
+            .ok_or_else(|| AccessError::ProviderUnavailable {
+                provider: credential.provider.clone(),
+            })?;
+    let policy =
+        provider
+            .capabilities
+            .get(slot)
+            .ok_or_else(|| AccessError::UnsupportedCapability {
+                provider: credential.provider.clone(),
+                slot: slot.clone(),
+            })?;
+    if !policy
+        .authentication_kinds
+        .contains(&credential.authentication_kind)
+    {
+        return Err(AccessError::UnsupportedCapability {
+            provider: credential.provider.clone(),
+            slot: slot.clone(),
+        });
+    }
+
+    Ok(DerivedGrant {
+        environment_id: context.environment_id.clone(),
+        environment_generation: context.environment_generation,
+        profile: Some(GrantProfile {
+            id: profile.id.clone(),
+            revision: profile.revision,
+        }),
+        capability_slot: slot.clone(),
+        credential_id: credential_id.clone(),
+        credential_revocation_generation: credential.revocation_generation,
+        expires_at_unix: credential.expires_at_unix,
+        permissions: policy.permissions.clone(),
+    })
 }
 
 /// The account GitHub grant for a platform environment with no profile

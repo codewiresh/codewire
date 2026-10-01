@@ -499,7 +499,9 @@ fn runtime_status(error: PlatformRuntimeError) -> Status {
 
 fn lease_status(error: BrokerLeaseError) -> Status {
     match error {
-        BrokerLeaseError::Denied | BrokerLeaseError::InvalidRequest => denied(),
+        BrokerLeaseError::Denied
+        | BrokerLeaseError::InvalidRequest
+        | BrokerLeaseError::ReconnectRequired => denied(),
         BrokerLeaseError::Unavailable | BrokerLeaseError::InvalidResponse => unavailable(),
     }
 }
