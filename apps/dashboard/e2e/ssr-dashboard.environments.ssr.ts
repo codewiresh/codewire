@@ -1133,7 +1133,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(noopOperation.requestId).toBe(noopPlan.requestId);
     expect(noopOperation.desiredResources).toEqual(noopPlan.desiredResources);
     await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
-    await resizeDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await resizeDialog.getByRole("button", { name: "Done", exact: true }).click();
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/${environmentId}/`);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
     expect(await originalTerminalRoot.evaluate((root) => root.isConnected)).toBe(true);
@@ -1235,7 +1235,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(stoppedResponse.status()).toBe(200);
     expect((await stoppedResponse.json()).requestId).toBe(stoppedPlan.requestId);
     await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
-    await resizeDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await resizeDialog.getByRole("button", { name: "Done", exact: true }).click();
     const [deferred] = await sql`SELECT state, cpu_millicores, memory_mb FROM environments WHERE id = ${environmentId}`;
     expect(deferred).toMatchObject({ state: "stopped", cpu_millicores: 2000, memory_mb: 4096 });
     await expect(page.locator("[data-sandbox-resources]")).toHaveCount(2);
