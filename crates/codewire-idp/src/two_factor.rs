@@ -1,7 +1,8 @@
 //! TOTP two-factor auth handlers.
 //!
-//! Owns `/api/auth/two-factor/{enable,verify,disable,validate}`. The encrypted
-//! DB columns use the stable AES-256-GCM layout:
+//! Owns `/api/auth/two-factor/{enable,verify,disable,validate}`, and through
+//! [`replacement`] the fresh-proof replace and recovery-code routes. The
+//! encrypted DB columns use the stable AES-256-GCM layout:
 //! `base64(nonce(12B) || ciphertext || tag)`, key = sha256(session secret).
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng, rand_core::RngCore};
@@ -28,6 +29,13 @@ use crate::auth_session::{
     AuthResponse, LOCKOUT_DURATION_SECS, MAX_FAILED_ATTEMPTS, UserAuthRow, account_disabled,
     create_session, hex_id, request_info, session_cookie_string, too_many_requests, user_response,
 };
+
+mod replacement;
+
+pub use replacement::replacement_router;
+
+/// TOTP period in seconds. Steps are `unix_time / TOTP_PERIOD_SECS`.
+const TOTP_PERIOD_SECS: u64 = 30;
 
 #[derive(Clone)]
 pub struct TwoFactorState {
@@ -177,10 +185,61 @@ fn totp_from_secret(secret: &str, account_name: &str) -> Option<TOTP> {
     .ok()
 }
 
-fn validate_totp(code: &str, secret: &str, account_name: &str) -> bool {
-    totp_from_secret(secret, account_name)
-        .and_then(|totp| totp.check_current(code).ok())
-        .unwrap_or(false)
+fn unix_time() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_secs())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+/// The time step a TOTP code belongs to, within the same one-step skew that
+/// `check_current` accepts. Every candidate is compared in constant time; the
+/// latest matching step wins. Recording it lets a later proof refuse a code
+/// that was already accepted.
+fn matching_totp_step(code: &str, secret: &str, account_name: &str, time: u64) -> Option<i64> {
+    let totp = totp_from_secret(secret, account_name)?;
+    let current = time / TOTP_PERIOD_SECS;
+    let mut matched = None;
+    for step in current.saturating_sub(1)..=current.saturating_add(1) {
+        if constant_time_eq(
+            totp.generate(step * TOTP_PERIOD_SECS).as_bytes(),
+            code.as_bytes(),
+        ) {
+            matched = Some(step);
+        }
+    }
+    matched.and_then(|step| i64::try_from(step).ok())
+}
+
+fn current_totp_step(code: &str, secret: &str, account_name: &str) -> Option<i64> {
+    matching_totp_step(code, secret, account_name, unix_time()?)
+}
+
+/// Remember the newest accepted step. Callers hold the account lock, then
+/// this factor-row lock, matching every other factor mutation.
+async fn record_totp_step(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    step: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE two_factor SET last_totp_step = GREATEST(last_totp_step, $2) WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .bind(step)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn enable(
@@ -288,9 +347,10 @@ async fn verify(
         .ok_or_else(|| AppError::BadRequest("2FA not set up. Call enable first.".into()))?;
     let secret = decrypt(&enc_secret, &state.session_secret)
         .map_err(|_| AppError::InternalMsg("Failed to decrypt 2FA secret".into()))?;
-    if !validate_totp(&req.code, &secret, &user.email) {
+    let Some(step) = current_totp_step(&req.code, &secret, &user.email) else {
         return Err(AppError::BadRequest("Invalid 2FA code".into()));
-    }
+    };
+    record_totp_step(&mut tx, &user.id, step).await?;
 
     sqlx::query("UPDATE users SET two_factor_enabled = true, updated_at = NOW() WHERE id = $1")
         .bind(&user.id)
@@ -586,8 +646,11 @@ async fn validate(
 
     let secret = decrypt(&enc_secret, &state.session_secret).ok();
     if let Some(secret) = secret
-        && validate_totp(&req.code, &secret, &email)
+        && let Some(step) = current_totp_step(&req.code, &secret, &email)
     {
+        // Sign-in keeps accepting a code within its window, but a fresh proof
+        // for an account change must use a later step than this one.
+        record_totp_step(&mut tx, &user_id, step).await?;
         reset_failed_attempts(&mut tx, &user_id).await?;
         tx.commit().await?;
         return complete_login(&state, &headers, &user_id).await;
@@ -696,7 +759,42 @@ mod tests {
         let secret = Secret::generate_secret().to_encoded().to_string();
         let totp = totp_from_secret(&secret, "user@example.com").unwrap();
         let code = totp.generate_current().unwrap();
-        assert!(validate_totp(&code, &secret, "user@example.com"));
-        assert!(!validate_totp("000000", &secret, "user@example.com"));
+        assert!(current_totp_step(&code, &secret, "user@example.com").is_some());
+        let wrong = if code == "000000" { "000001" } else { "000000" };
+        assert!(current_totp_step(wrong, &secret, "user@example.com").is_none());
+    }
+
+    #[test]
+    fn totp_step_is_exact_within_one_step_of_skew() {
+        let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+        let totp = totp_from_secret(secret, "user@example.com").unwrap();
+        let time = 1_790_000_015;
+        let current = (time / TOTP_PERIOD_SECS) as i64;
+        for offset in [-1_i64, 0, 1] {
+            let step = current + offset;
+            let code = totp.generate(step as u64 * TOTP_PERIOD_SECS);
+            assert_eq!(
+                matching_totp_step(&code, secret, "user@example.com", time),
+                Some(step)
+            );
+        }
+        for offset in [-2_i64, 2] {
+            let code = totp.generate((current + offset) as u64 * TOTP_PERIOD_SECS);
+            let within = [-1_i64, 0, 1]
+                .map(|near| totp.generate((current + near) as u64 * TOTP_PERIOD_SECS));
+            if !within.contains(&code) {
+                assert_eq!(
+                    matching_totp_step(&code, secret, "user@example.com", time),
+                    None
+                );
+            }
+        }
+        assert_eq!(
+            matching_totp_step("12345", secret, "user@example.com", time),
+            None
+        );
+        assert!(constant_time_eq(b"123456", b"123456"));
+        assert!(!constant_time_eq(b"123456", b"123457"));
+        assert!(!constant_time_eq(b"123456", b"1234567"));
     }
 }

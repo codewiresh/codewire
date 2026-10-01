@@ -34,8 +34,8 @@ struct RevokeRequest {
 }
 
 #[derive(Serialize)]
-struct CurrentSession {
-    id: String,
+pub(crate) struct CurrentSession {
+    pub(crate) id: String,
     #[serde(serialize_with = "utc_time")]
     expires_at: NaiveDateTime,
 }
@@ -70,7 +70,7 @@ pub(super) fn router() -> Router<SessionAuthState> {
         .layer(DefaultBodyLimit::max(2_048))
 }
 
-fn valid_id(value: &str) -> bool {
+pub(crate) fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -78,7 +78,7 @@ fn valid_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-fn cookie_digest(headers: &HeaderMap) -> Result<String, AppError> {
+pub(crate) fn cookie_digest(headers: &HeaderMap) -> Result<String, AppError> {
     // Never fall back to an API key, OAuth token, or bearer session token.
     // Mixed authority is rejected rather than silently selecting a credential.
     if headers.contains_key(header::AUTHORIZATION) {
@@ -109,7 +109,7 @@ fn cookie_digest(headers: &HeaderMap) -> Result<String, AppError> {
     token.map(hash_session_token).ok_or(AppError::Unauthorized)
 }
 
-fn exact_origin(headers: &HeaderMap, frontend_url: &str) -> Result<(), AppError> {
+pub(crate) fn exact_origin(headers: &HeaderMap, frontend_url: &str) -> Result<(), AppError> {
     let url = reqwest::Url::parse(frontend_url).map_err(|_| unavailable())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(unavailable());
@@ -123,11 +123,11 @@ fn exact_origin(headers: &HeaderMap, frontend_url: &str) -> Result<(), AppError>
     Ok(())
 }
 
-fn unavailable() -> AppError {
+pub(crate) fn unavailable() -> AppError {
     AppError::ServiceUnavailable("Account session controls unavailable".into())
 }
 
-fn private(response: impl IntoResponse) -> Response {
+pub(crate) fn private(response: impl IntoResponse) -> Response {
     let mut response = response.into_response();
     response
         .headers_mut()
@@ -255,7 +255,7 @@ async fn revoke(
 
 /// Every operation locks the owner before the actor. In particular two
 /// sessions concurrently revoking each other cannot form reciprocal locks.
-async fn actor(
+pub(crate) async fn actor(
     tx: &mut Transaction<'_, Postgres>,
     digest: &str,
     expected_account: &str,
@@ -348,7 +348,9 @@ async fn validate_actor(
     }
 }
 
-async fn bounded_transaction(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
+pub(crate) async fn bounded_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<(), AppError> {
     // Cancellation alone does not end server-side lock waits. Honor stricter
     // configured limits and bound abandoned work/transactions on the server.
     let settings: Vec<String> = sqlx::query_scalar(

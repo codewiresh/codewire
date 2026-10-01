@@ -577,6 +577,16 @@ run_idp() {
   fi
   assert_passed_count "idp session inventory" "$logfile" 7
 
+  logfile="$RUN_DIR/idp-two-factor-replacement.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo_ci test --profile ci -p codewire-idp --test two_factor_replacement -- --nocapture \
+    | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::idp two-factor replacement DB tests skipped"
+    return 1
+  fi
+  assert_passed_count "idp two-factor replacement" "$logfile" 9
+
   logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --profile ci -p codewire-idp --test rewrap_cli -- --nocapture \

@@ -47,6 +47,96 @@ with ICU collation and60 mixed-case/punctuation IDs across the50-row boundary;
 public/migrated tables are unchanged. Its old query fails byte-order equality,
 and the explicit C-collation query preserves both ordering and cursor progress.
 
+## Authenticator replacement and recovery codes
+
+Three more cookie-only IdP routes change an enrolled factor. They share the
+session controls' boundary: exactly one Origin equal to the public frontend
+origin, exactly one session cookie and no `Authorization` header, an
+`account_id` echo that must name the session's own account, closed JSON
+bodies of at most 2 KiB, a five-second budget, bounded server-side
+transactions and `no-store` responses. They are registered individually in
+the permanent raw identity policy.
+
+| Route | Request | Success |
+|---|---|---|
+| `POST /api/auth/two-factor/replace/start` | `account_id`, `password`, `proof` | `replacement_id`, `totp_uri`, `secret`, `expires_at` |
+| `POST /api/auth/two-factor/replace/confirm` | `account_id`, `replacement_id`, `code` | `backup_codes` (10), `signed_out_sessions`, and a new session cookie |
+| `POST /api/auth/two-factor/recovery-codes/regenerate` | `account_id`, `password`, `proof` | `backup_codes` (10) |
+
+**Fresh proof.** `start` and `regenerate` share one check, which needs the
+password **and** either a code from the enrolled authenticator or an unused
+recovery code. The authenticator code must come from a later TOTP time step
+than `two_factor.last_totp_step`; sign-in, enrollment and earlier proofs
+record the steps they accept, so a code already used cannot be replayed. A
+recovery code used as proof is consumed.
+
+The check verifies the password hash before opening the transaction, then
+works in this order:
+
+1. Lock the account, then the session, then the factor row.
+2. Refuse a locked account with 429 without checking or counting anything.
+3. Re-read the password hash; it must still match the one verified.
+
+Every wrong password or code counts against the lockout that sign-in uses and
+returns one generic 422. The fifth failure locks the account for 15 minutes
+and returns 429. A complete proof resets the counter.
+
+**Replacement.** `start` stores an encrypted pending secret bound to this
+browser session, replacing any older pending replacement for the account.
+It expires after ten minutes. The secret is returned only in that response;
+no route reads it again. The enrolled factor keeps working throughout.
+
+`confirm` behaves as follows:
+
+- Another session, an old `replacement_id` or no pending replacement gets the
+  same 404.
+- A wrong code returns 422 and counts against the replacement. The fifth wrong
+  code ends it, and expiry also ends it, both with 410. Neither affects the
+  account lockout.
+- A matching code, in one transaction:
+  1. swaps the secret and ten new recovery codes into `two_factor` in place;
+  2. deletes the pending row and every unfinished sign-in challenge;
+  3. deletes **every** session of the account;
+  4. issues a new session for this browser.
+
+`signed_out_sessions` counts the other browsers. The request budget covers
+every check, but the commit runs outside it, so a late timeout cannot hide a
+committed swap.
+
+**Regeneration** replaces only the recovery codes; the authenticator and
+sessions are unchanged. Direct `disable` stays closed.
+
+**Audit and notices.** The IdP writes these audit events after commit, with
+no secret, code, URI or password in them:
+
+- `user.2fa.proof_failed`, with the operation, the reason and whether the
+  account is locked;
+- `user.2fa.replace_started`;
+- `user.2fa.replaced`, with the number of browsers signed out;
+- `user.2fa.recovery_codes_regenerated`.
+
+A configured mail transport also sends a best-effort notice in the background
+after a replacement or regeneration. The notice carries no code and only a
+password-reset link.
+
+API keys and OAuth grants survive a replacement. The factor encryption key is
+still derived from the shared session secret. Both are known limits outside
+this change.
+
+Focused proof is `cargo test -p codewire-idp --lib two_factor` and the nine
+synthetic PostgreSQL tests in `tests/two_factor_replacement.rs`. They cover:
+
+- bearer, Origin and account rejection without side effects;
+- the shared lockout, and replay of a sign-in code;
+- recovery-code consumption, and pending-secret isolation;
+- the old factor working while a replacement is pending;
+- attempts, expiry and newer starts;
+- the swap, with session revocation and cookie rotation;
+- concurrent winners, and audit hygiene.
+
+The checked-in service verification requires all nine tests and rejects
+missing-database skips.
+
 ## Dashboard Account screen
 
 `/settings/` contains account details, security, and paginated active sessions.

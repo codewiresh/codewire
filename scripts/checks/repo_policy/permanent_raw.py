@@ -268,6 +268,30 @@ def permanent_raw_surface_self_test(
     if not permanent_raw_surface_failures(unknown_identity, policy, client_sources):
         raise RuntimeError("permanent raw guard accepted an unapproved identity route")
 
+    # Fresh-proof factor changes are exactly three cookie-only IdP routes. The
+    # prior policy must reject them, and a sibling must not ride along.
+    factor_routes = {
+        "/api/auth/two-factor/replace/start",
+        "/api/auth/two-factor/replace/confirm",
+        "/api/auth/two-factor/recovery-codes/regenerate",
+    }
+    prior_factor_policy = dict(policy)
+    prior_factor_policy["allowed_raw_routes"] = [
+        route for route in policy["allowed_raw_routes"] if route not in factor_routes
+    ]
+    if not any(
+        failure.startswith("unapproved raw routes:")
+        and all(route in failure for route in factor_routes)
+        for failure in permanent_raw_surface_failures(sources, prior_factor_policy, client_sources)
+    ):
+        raise RuntimeError("permanent raw guard lost the exact two-factor replacement admission proof")
+    unknown_factor = dict(sources)
+    unknown_factor["crates/codewire-idp/src/unapproved_factor.rs"] = (
+        'fn unapproved() { Router::new().route("/api/auth/two-factor/replace/secret", get(handler)); }'
+    )
+    if not permanent_raw_surface_failures(unknown_factor, policy, client_sources):
+        raise RuntimeError("permanent raw guard accepted an unapproved two-factor route")
+
     restored_route = dict(sources)
     restored_route["crates/codewire-orchestration/src/restored_raw.rs"] = (
         'fn restored() { Router::new().route("/api/v1/restored", get(handler)); }'
