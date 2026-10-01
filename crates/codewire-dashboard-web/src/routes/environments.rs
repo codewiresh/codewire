@@ -2629,12 +2629,13 @@ mod tests {
         .render()
         .unwrap();
         let hrefs = setup_hrefs(&html);
+        // Each secret source's manage link follows its own choice.
         assert_eq!(hrefs.len(), 4);
-        assert_eq!(hrefs[0], "/settings/secrets/");
         assert_eq!(
-            hrefs[1],
+            hrefs[0],
             format!("/{}/secrets/organization/", organization.slug)
         );
+        assert_eq!(hrefs[1], "/settings/secrets/");
         assert_eq!(hrefs[2], organization.secrets_url);
         assert_eq!(hrefs[3], "/settings/credentials/");
     }

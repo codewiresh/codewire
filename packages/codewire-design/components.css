@@ -333,6 +333,52 @@ dialog.cw-discard-dialog {
   line-height: var(--leading-body);
 }
 
+/* Combobox: a text field whose choices open as a listbox below it, on the
+   same surface as menus. The option under the keyboard is aria-selected. */
+.cw-combobox { position: relative; }
+
+.cw-combobox-list {
+  position: absolute;
+  z-index: 70;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: var(--popover-max-height);
+  overflow-y: auto;
+  gap: var(--space-0-5);
+  margin: 0;
+  padding: var(--space-1);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-lg);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-popover);
+  list-style: none;
+}
+
+.cw-combobox-option {
+  display: grid;
+  gap: var(--space-0-5);
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+
+.cw-combobox-option:hover,
+.cw-combobox-option[aria-selected="true"] { background: var(--bg-surface-hover); }
+
+.cw-combobox-option strong { font-size: var(--text-secondary); font-weight: var(--weight-medium); }
+
+.cw-combobox-option code {
+  overflow-wrap: anywhere;
+  color: var(--fg-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+}
+
+.cw-combobox-option > span { color: var(--fg-secondary); font-size: var(--text-small); }
+
 /* Menus: a summary trigger and a floating panel of links and actions. The
    panel's direct items share one row; nested forms keep their own layout. */
 .cw-menu { position: relative; }
