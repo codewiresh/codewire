@@ -2,7 +2,7 @@
 //!
 //! Connect owns every control-plane procedure. This module continues to host
 //! their shared domain implementations and the deliberately non-RPC browser
-//! terminal and SSH transports.
+//! terminal/SSH transports and scoped preview-browser authorization.
 
 pub(crate) mod account;
 pub mod admin;
@@ -81,9 +81,17 @@ pub struct ApiState {
 /// The deliberately permanent browser-facing routes.
 ///
 /// Connect-RPC owns control-plane procedures. Browser terminal/SSH transports
-/// remain raw by design.
+/// and the session-owned preview handoff remain raw by design.
 pub fn router(state: ApiState, _auth: AuthState) -> Router {
     Router::new()
+        // Deliberately raw browser authorization transport, not a general
+        // credential API. Session authority stays on FRONTEND_URL's host.
+        .route(
+            "/api/v1/preview-auth/authorize",
+            get(preview::authorization::authorize_page)
+                .post(preview::authorization::authorize)
+                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024)),
+        )
         .route(
             "/api/v1/organizations/{org_id}/environments/{env_id}/terminal",
             get(terminal::terminal_websocket),
