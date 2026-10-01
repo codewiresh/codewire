@@ -534,7 +534,7 @@ for (const transition of ["disconnect", "foreground", "stopping", "exited"] as c
       await expect(page.locator("[data-terminal-connection]")).toHaveText(transition === "stopping" ? "Stopping…" : "Exited");
       if (transition === "stopping") {
         state.connections[0].route.send(JSON.stringify({ type: "status", state: "running" }));
-        await expect(page.locator("[data-terminal-connection]")).toHaveText("Running");
+        await expect(page.locator("[data-terminal-connection]")).toHaveText("Connected");
         await page.keyboard.insertText("new-input");
       }
     }
