@@ -158,7 +158,11 @@ case "${1:-} ${2:-} ${3:-}" in
     if [[ "$format" == '{{json .Provenance.SLSA}}' ]]; then
       builder='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
       [[ "$reference" != "${FAKE_BAD_PROVENANCE_REF:-}" ]] || builder='https://attacker.invalid/builder'
-      jq -n --arg builder "$builder" --arg revision "${GITHUB_SHA:?}" '{
+      revision="${GITHUB_SHA:?}"
+      if [[ -n "${FAKE_CARRIED_REF:-}" && "$reference" == "$FAKE_CARRIED_REF" ]]; then
+        revision="${FAKE_CARRIED_REVISION:?}"
+      fi
+      jq -n --arg builder "$builder" --arg revision "$revision" '{
         buildDefinition: {
           buildType: "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
           internalParameters: {builderPlatform: "linux/amd64"}
@@ -329,5 +333,65 @@ if grep -Eq '/v1/platform/data/(nexus/oci-promoter|ci/codewire/harbor-publisher)
 fi
 grep -Fq 'runtime set in the GHCR mirror' "$work/mirror.out" ||
   fail 'GHCR mirror signing omitted its result'
+
+# A carried-forward image keeps the provenance of the protected build that
+# produced its bits. Signing binds the workflow source while accepting the
+# planner-certified deployed baseline as that family's built-from revision.
+baseline_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+carried_digest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+carried_ref="registry.example.invalid/codewire/mesh@$carried_digest"
+carried_bundle="$work/carried-bundle.json"
+python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
+  --source-sha "$source_sha" \
+  --output "$carried_bundle" \
+  --candidate dashboard "$source_sha" "registry.example.invalid/codewire/dashboard@$digest" \
+  --candidate derp "$source_sha" "registry.example.invalid/codewire/derp@$digest" \
+  --candidate gateway "$source_sha" "registry.example.invalid/codewire/gateway@$digest" \
+  --candidate services "$source_sha" "registry.example.invalid/codewire/services@$digest" \
+  --candidate mesh "$source_sha" "$carried_ref"
+
+: >"$signature_state"
+: >"$cosign_log"
+: >"$curl_log"
+if ! PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    CODEWIRE_DEPLOY_BASELINE_SHA="$baseline_sha" \
+    CODEWIRE_BUILT_FROM_MESH="$baseline_sha" \
+    FAKE_CARRIED_REF="$carried_ref" FAKE_CARRIED_REVISION="$baseline_sha" \
+    "$SIGNER" "$carried_bundle" "$public_key" >"$work/carried.out" 2>"$work/carried.err"; then
+  sed -n '1,40p' "$work/carried.err" >&2
+  fail 'carried-forward runtime signing fixture failed'
+fi
+[[ "$(wc -l <"$signature_state" | tr -d ' ')" -eq 5 ]] ||
+  fail 'carried-forward signing did not sign all five Harbor references'
+carried_sign_line="$(grep '^sign ' "$cosign_log" | grep -F "$carried_ref" | head -1)"
+grep -Fq "dev.codewire.source-sha=$source_sha" <<<"$carried_sign_line" ||
+  fail 'carried-forward signature did not bind the workflow source'
+grep -Fq "dev.codewire.built-from-sha=$baseline_sha" <<<"$carried_sign_line" ||
+  fail 'carried-forward signature did not record the deployed baseline provenance'
+dashboard_sign_line="$(grep '^sign ' "$cosign_log" | grep -F 'codewire/dashboard@' | head -1)"
+grep -Fq "dev.codewire.built-from-sha=$source_sha" <<<"$dashboard_sign_line" ||
+  fail 'freshly built image signature did not record the head built-from source'
+carried_verify_line="$(grep '^verify ' "$cosign_log" | grep -F "$carried_ref" | head -1)"
+grep -Fq "dev.codewire.built-from-sha=$baseline_sha" <<<"$carried_verify_line" ||
+  fail 'carried-forward verification did not bind the deployed baseline annotation'
+
+if PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    CODEWIRE_BUILT_FROM_MESH="$baseline_sha" \
+    FAKE_CARRIED_REF="$carried_ref" FAKE_CARRIED_REVISION="$baseline_sha" \
+    "$SIGNER" "$carried_bundle" "$public_key" >"$work/unbounded.out" 2>"$work/unbounded.err"; then
+  fail 'signer accepted a built-from source without the certified baseline'
+fi
+grep -Fq 'neither the workflow source nor the certified deployed baseline' \
+  "$work/unbounded.err" || fail 'unbounded built-from rejection was not attributable'
+
+if PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    CODEWIRE_DEPLOY_BASELINE_SHA="$baseline_sha" \
+    CODEWIRE_BUILT_FROM_MESH="$baseline_sha" \
+    FAKE_CARRIED_REF="$carried_ref" FAKE_CARRIED_REVISION="$source_sha" \
+    "$SIGNER" "$carried_bundle" "$public_key" >"$work/rebadged.out" 2>"$work/rebadged.err"; then
+  fail 'signer accepted carried provenance from the wrong revision'
+fi
+grep -Fq 'Runtime provenance is invalid for mesh' "$work/rebadged.err" ||
+  fail 'wrong-revision carried provenance rejection was not attributable'
 
 printf '[test-sign-runtime-image-set] closed protected signing contract passed\n'
