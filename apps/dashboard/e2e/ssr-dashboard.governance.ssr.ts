@@ -224,6 +224,7 @@ test.describe.serial("server-rendered organization governance", () => {
       "SSR Governance",
     );
     await expect(page.getByRole("navigation", { name: "Organization navigation" })).toBeVisible();
-    await expect(page.getByText("Create key", { exact: true })).toBeInViewport();
+    // The header's Create key disclosure; its form's submit shares the name.
+    await expect(page.locator(".cw-page-header summary").filter({ hasText: "Create key" })).toBeInViewport();
   });
 });
