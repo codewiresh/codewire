@@ -498,7 +498,16 @@ test("secret settings fixture provides an explicit metadata-only Return link", a
 async function restoredCard(page: Page, draft: Draft): Promise<string> {
   return page.locator("#environment-create-card").evaluate((card, draft) => {
     const copy = card.cloneNode(true) as HTMLElement;
+    // The server returns native markup; undo the browser's combobox enhancement.
+    copy.querySelectorAll(".cw-combobox-list").forEach((list) => list.remove());
+    copy.querySelectorAll<HTMLInputElement>("input[data-combobox-options]").forEach((input) => {
+      input.setAttribute("list", input.dataset.comboboxOptions!);
+      for (const name of ["data-combobox-options", "role", "aria-autocomplete", "aria-controls", "aria-expanded", "aria-activedescendant", "autocomplete"]) input.removeAttribute(name);
+    });
     const form = copy.querySelector("form")!;
+    // Server markup is never held by an automatic restore in progress.
+    form.inert = false;
+    form.removeAttribute("aria-busy");
     form.dataset.createDraftId = draft.draft;
     form.dataset.createDraftFresh = "false";
     form.dataset.createDraftRestored = "true";
@@ -556,7 +565,7 @@ test("Create setup links carry only the current draft handle and Edit links stay
   await expect(editLink).toHaveAttribute("href", "settings-credentials.html");
 });
 
-test("explicit return offers the requested older draft, never the newer draft", async ({ page }) => {
+test("explicit return restores the requested older draft by itself, never the newer draft", async ({ page }) => {
   const requested = { ...selectionsDraft(), saved_at: Date.now() - 1000 };
   const newer = { ...selectionsDraft(), draft: "00000000-0000-4000-8000-000000000004", saved_at: Date.now() - 100 };
   newer.selections.cpu = "1000";
@@ -565,19 +574,15 @@ test("explicit return offers the requested older draft, never the newer draft", 
   let restores = 0;
   const creates: string[] = [];
   page.on("request", (request) => { if (/PrepareEnvironment|\/_actions\/sandboxes\/create/.test(request.url())) creates.push(request.url()); });
-  await exactReturnFixture(page);
-  await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
-  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
-  const html = await restoredCard(page, requested);
   await page.route("**/fixture/_fragments/create-draft", async (route) => {
     restores += 1;
     const body = new URLSearchParams(route.request().postData()!);
     expect(body.get("creation_draft")).toBe(requested.draft);
     expect(JSON.parse(body.get("metadata")!).selections.cpu).toBe("2000");
-    await route.fulfill({ status: 200, contentType: "text/html", body: html });
+    await route.fulfill({ status: 200, contentType: "text/html", body: await restoredCard(page, requested) });
   });
-  expect(restores).toBe(0);
-  await page.getByRole("button", { name: "Restore saved draft" }).click();
+  await exactReturnFixture(page);
+  await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "true");
   await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
   expect(restores).toBe(1);
   expect(creates).toEqual([]);
@@ -614,7 +619,7 @@ test("explicit return with unavailable storage keeps a usable native form", asyn
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("still-editable");
 });
 
-test("Create drafts save bounded authored fields and offer explicit recovery after reload", async ({ page }) => {
+test("Create drafts save bounded authored fields and restore them after reload", async ({ page }) => {
   await page.goto(fixtureUrl());
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Memory", { exact: true }).selectOption("4096");
@@ -636,20 +641,20 @@ test("Create drafts save bounded authored fields and offer explicit recovery aft
   expect(JSON.parse(bytes).authored).toMatchObject({
     name: "saved-name-canary", repositories: [{ url: "https://canary.invalid/private-repository", branch: "main", mount: "codewire" }], port_rows: [{ port: "3000", label: "saved-label", access: "creator" }],
   });
-  await page.reload();
-  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeVisible();
-  await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
-  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
   const draft = JSON.parse(bytes) as Draft;
   await page.route("**/fixture/_fragments/create-draft", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await restoredCard(page, draft) });
   });
-  await page.getByRole("button", { name: "Restore saved draft" }).click();
+  // Reloading brings the authored values back without any action.
+  await page.reload();
   await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "true");
   await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("2000");
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("saved-name-canary");
   await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("https://canary.invalid/private-repository");
   await expect(page.getByLabel("Preview label", { exact: true })).toHaveValue("saved-label");
+  // The restored form keeps the styled image suggestions.
+  await page.getByRole("combobox", { name: "Workspace image", exact: true }).click();
+  await expect(page.getByRole("listbox", { name: "Suggested images", exact: true })).toBeVisible();
 });
 
 test("Create drafts do not store credential-bearing repository URLs", async ({ page }) => {
@@ -883,15 +888,30 @@ test("unavailable draft storage leaves the native Create form usable", async ({ 
   await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
 });
 
-test("edited and server-rejected Create forms do not offer usable restoration", async ({ page }) => {
+test("automatic restore holds the form, gives it back on failure, and never runs for a rejected form", async ({ page }) => {
   const draft = selectionsDraft();
   const url = fixtureUrl();
   await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
   let restores = 0;
-  page.on("request", (request) => { if (request.url().endsWith("/_fragments/create-draft")) restores += 1; });
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/fixture/_fragments/create-draft", async (route) => {
+    restores += 1;
+    await held;
+    await route.fulfill({ status: 500, contentType: "text/html", body: "<p>rejected</p>" });
+  });
   await page.goto(url);
+  const form = page.locator("[data-environment-form]");
+  // While the saved draft is restored, an early keystroke cannot replace it.
+  await expect(form).toHaveJSProperty("inert", true);
+  await expect(form).toHaveAttribute("aria-busy", "true");
+  release();
+  await expect(form).toHaveJSProperty("inert", false);
+  await expect(page.locator("[data-create-draft-status]")).toContainText("could not be restored");
+  await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeEnabled();
   await page.getByLabel("Name", { exact: true }).fill("keep-current-edits");
   await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeDisabled();
+  expect(restores).toBe(1);
   await page.route("**/reference/fixtures/create-sandbox.html", async (route) => {
     const response = await route.fetch();
     const html = (await response.text()).replace('data-create-draft-fresh="true"', 'data-create-draft-fresh="false"');
@@ -899,5 +919,5 @@ test("edited and server-rejected Create forms do not offer usable restoration", 
   });
   await page.reload();
   await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
-  expect(restores).toBe(0);
+  expect(restores).toBe(1);
 });

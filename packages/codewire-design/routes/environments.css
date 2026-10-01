@@ -49,7 +49,8 @@
 .cw-create-section-label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-2); }
 .cw-create-section-label h3,
 .cw-create-panel-heading h3,
-.cw-create-panel > h2 { margin: 0; color: var(--fg-primary); font-size: var(--text-body); font-weight: var(--weight-semibold); line-height: var(--leading-ui); }
+/* Section headings read exactly like the field labels around them. */
+.cw-create-panel > h2 { margin: 0; color: var(--fg-primary); font-size: var(--text-body); font-weight: var(--weight-medium); line-height: var(--leading-ui); }
 .cw-create-section-label > div { display: flex; gap: var(--space-3); }
 .cw-create-panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: var(--border-width) solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-surface); }
 /* The optional choices arrive as one group; space them like the drawer's own sections. */
@@ -93,12 +94,15 @@
 .cw-source-fields { display: grid; min-width: 0; gap: var(--space-3); margin: 0; padding: 0; border: 0; }
 .cw-source-fields > legend { margin-bottom: var(--space-2); color: var(--fg-secondary); font-size: var(--text-small); }
 .cw-source-choices { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.cw-secret-panel nav .cw-source-choices,
 .cw-credential-panel nav .cw-source-choices { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
-.cw-secret-panel nav a,
-.cw-credential-panel nav a { color: var(--accent-text); font-size: var(--text-small); line-height: var(--leading-body); text-decoration: underline; text-underline-offset: var(--space-0-5); }
-.cw-secret-panel nav a:hover,
-.cw-credential-panel nav a:hover { color: var(--fg-primary); }
+.cw-credential-panel nav a,
+.cw-source-manage { color: var(--accent-text); font-size: var(--text-small); line-height: var(--leading-body); text-decoration: underline; text-underline-offset: var(--space-0-5); }
+.cw-credential-panel nav a:hover,
+.cw-source-manage:hover { color: var(--fg-primary); }
+/* Each secret source keeps its manage link directly beneath it, on the choice's inset. */
+.cw-source-choices > li:has(> .cw-source-manage) { display: grid; gap: var(--space-0-5); }
+.cw-source-choices > li > .cw-source-manage { justify-self: start; padding-inline: var(--space-2); }
+.cw-field > .cw-source-manage { justify-self: start; }
 .cw-source-choice { padding: var(--space-2); }
 .cw-source-choice > span { min-width: 0; overflow-wrap: anywhere; }
 .cw-source-choice small { display: block; color: var(--fg-tertiary); }
@@ -133,7 +137,7 @@
 .cw-port-row { display: grid; grid-template-columns: minmax(8rem, 1fr) auto auto; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: var(--border-width) solid var(--border-subtle); }
 .cw-port-row strong, .cw-port-row small { display: block; }
 .cw-port-row small { margin-top: var(--space-0-5); color: var(--fg-tertiary); }
-.cw-port-form { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) 9rem auto; align-items: end; gap: var(--space-3); }
+.cw-port-form { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) minmax(15rem, 1fr) auto; align-items: end; gap: var(--space-3); }
 .cw-port-preview-url { display: block; overflow-wrap: anywhere; font-size: var(--text-small); }
 .cw-port-dialog { width: min(42rem, calc(100% - var(--space-8))); }
 

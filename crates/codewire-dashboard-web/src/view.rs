@@ -683,6 +683,39 @@ pub(crate) struct OrganizationRow {
     pub(crate) url: String,
 }
 
+impl OrganizationRow {
+    /// A readable organization name; an empty name falls back to its slug so
+    /// a missing value never renders blank.
+    pub(crate) fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.slug
+        } else {
+            &self.name
+        }
+    }
+}
+
+#[cfg(test)]
+mod organization_row_tests {
+    use super::OrganizationRow;
+
+    #[test]
+    fn display_name_falls_back_to_the_slug_only_when_the_name_is_empty() {
+        let row = |name: &str| OrganizationRow {
+            id: "org".into(),
+            name: name.into(),
+            slug: "alpha-team".into(),
+            role: "owner",
+            can_admin: true,
+            billing_plan: String::new(),
+            url: String::new(),
+        };
+        assert_eq!(row("Alpha team").display_name(), "Alpha team");
+        assert_eq!(row("  ").display_name(), "alpha-team");
+        assert_eq!(row("").display_name(), "alpha-team");
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct OrganizationContext {
     pub(crate) id: String,
@@ -1566,6 +1599,81 @@ pub(crate) struct ApiKeyRow {
     pub(crate) expired: bool,
 }
 
+/// Search and status filters for an API-key inventory. Filtering only narrows
+/// rows the owning read already authorized; it never widens an inventory.
+#[derive(Debug, Default)]
+pub(crate) struct ApiKeyFilterView {
+    pub(crate) search: String,
+    pub(crate) status: String,
+    /// An organization ID the caller has validated, or empty for all.
+    pub(crate) organization: String,
+}
+
+impl ApiKeyFilterView {
+    pub(crate) fn new(search: &str, status: &str) -> Self {
+        Self {
+            search: search.trim().chars().take(128).collect(),
+            status: match status {
+                "active" | "disabled" | "expired" => status.to_owned(),
+                _ => String::new(),
+            },
+            organization: String::new(),
+        }
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        !self.search.is_empty() || !self.status.is_empty() || !self.organization.is_empty()
+    }
+
+    pub(crate) fn status_selected(&self, value: &str) -> bool {
+        self.status == value
+    }
+
+    pub(crate) fn matches(&self, key: &ApiKeyRow) -> bool {
+        let search = self.search.to_lowercase();
+        (search.is_empty()
+            || key.name.to_lowercase().contains(&search)
+            || key.prefix.to_lowercase().contains(&search))
+            && (self.status.is_empty() || key.status.eq_ignore_ascii_case(&self.status))
+    }
+}
+
+#[cfg(test)]
+mod api_key_filter_tests {
+    use super::{ApiKeyFilterView, ApiKeyRow};
+
+    fn key(name: &str, prefix: &str, status: &'static str) -> ApiKeyRow {
+        ApiKeyRow {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            prefix: prefix.to_owned(),
+            created_by: "You".to_owned(),
+            created: String::new(),
+            last_used: String::new(),
+            status,
+            status_tone: "success",
+            disabled: status == "Disabled",
+            expired: status == "Expired",
+        }
+    }
+
+    #[test]
+    fn search_matches_name_or_prefix_and_status_is_allowlisted() {
+        let ci = key("CI pipeline", "cw_y-ci…", "Active");
+        let old = key("Old deploy", "cw_-old…", "Expired");
+        let filter = ApiKeyFilterView::new("  PIPE ", "");
+        assert!(filter.active() && filter.matches(&ci) && !filter.matches(&old));
+        assert!(ApiKeyFilterView::new("-old", "").matches(&old));
+        let expired = ApiKeyFilterView::new("", "expired");
+        assert!(expired.matches(&old) && !expired.matches(&ci));
+        // Unknown statuses and oversized searches never widen or break a filter.
+        let unknown = ApiKeyFilterView::new(&"x".repeat(400), "revoked");
+        assert!(unknown.status.is_empty() && unknown.search.chars().count() == 128);
+        let none = ApiKeyFilterView::new("", "");
+        assert!(!none.active() && none.matches(&ci) && none.matches(&old));
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ApiKeyFormView {
     pub(crate) name: String,
@@ -1611,6 +1719,7 @@ pub(crate) struct ApiKeyIdSubmission {
 // one-time API-key material, and derived diagnostics must never expose it.
 pub(crate) struct ApiKeysPageView {
     pub(crate) keys: Vec<ApiKeyRow>,
+    pub(crate) filter: ApiKeyFilterView,
     pub(crate) form: ApiKeyFormView,
     pub(crate) csrf_token: String,
     pub(crate) one_time_key: String,
@@ -1619,11 +1728,19 @@ pub(crate) struct ApiKeysPageView {
     pub(crate) error: String,
 }
 
+impl ApiKeysPageView {
+    pub(crate) fn visible_count(&self) -> usize {
+        self.keys
+            .iter()
+            .filter(|key| self.filter.matches(key))
+            .count()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PersonalApiKeyRow {
     pub(crate) key: ApiKeyRow,
     pub(crate) expires: String,
-    pub(crate) scopes: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -1648,6 +1765,9 @@ pub(crate) struct PersonalApiKeyFormView {
 #[derive(Default)]
 pub(crate) struct PersonalApiKeysPageView {
     pub(crate) groups: Vec<PersonalApiKeyGroupView>,
+    pub(crate) filter: ApiKeyFilterView,
+    /// The validated organization-page cursor the filter form carries.
+    pub(crate) cursor: String,
     pub(crate) organizations: Vec<OrganizationRow>,
     pub(crate) organizations_available: bool,
     pub(crate) account_id: String,
@@ -1662,6 +1782,44 @@ pub(crate) struct PersonalApiKeysPageView {
     pub(crate) reload_url: String,
     pub(crate) first_page_url: String,
     pub(crate) next_page_url: String,
+}
+
+impl PersonalApiKeysPageView {
+    pub(crate) fn key_count(&self) -> usize {
+        self.groups.iter().map(|group| group.keys.len()).sum()
+    }
+
+    pub(crate) fn group_visible(&self, group: &PersonalApiKeyGroupView) -> bool {
+        self.filter.organization.is_empty() || self.filter.organization == group.organization.id
+    }
+
+    pub(crate) fn row_visible(
+        &self,
+        group: &PersonalApiKeyGroupView,
+        entry: &PersonalApiKeyRow,
+    ) -> bool {
+        self.group_visible(group) && self.filter.matches(&entry.key)
+    }
+
+    pub(crate) fn visible_count(&self) -> usize {
+        self.groups
+            .iter()
+            .map(|group| {
+                group
+                    .keys
+                    .iter()
+                    .filter(|entry| self.row_visible(group, entry))
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Delete is limited to organization owners and admins.
+    pub(crate) fn delete_limited(&self) -> bool {
+        self.groups
+            .iter()
+            .any(|group| !group.organization.can_admin && !group.keys.is_empty())
+    }
 }
 
 #[derive(Debug)]
