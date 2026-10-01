@@ -72,9 +72,12 @@ credentialed fetches. A grant therefore authenticates only requests whose
 `Sec-Fetch-Site` is `same-origin` or `none`, and top-level document
 navigations; a browser without Fetch Metadata must send no Origin or this
 preview's exact Origin. Unsafe cookie-authenticated requests also require the
-exact preview Origin. A private preview cannot be framed by another preview or
-called cross-origin with its grant; use a public preview or a bearer credential
-for that. Non-navigation unauthenticated requests fail rather than entering
+exact preview Origin. In browsers with Fetch Metadata, a private preview cannot
+be framed by another preview or called cross-origin with its grant; use a
+public preview or a bearer credential for that. Older browsers without it
+(Safari before 16.4) send no Origin on image, script or frame loads, so there
+a grant still accompanies those. Private previews refuse service-worker
+scripts: a worker could read the sign-in callback's one-use code. Non-navigation unauthenticated requests fail rather than entering
 sign-in.
 
 Codewire cookies and reserved Codewire headers never reach the application.

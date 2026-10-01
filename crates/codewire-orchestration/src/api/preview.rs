@@ -127,6 +127,12 @@ pub async fn preview_proxy_middleware(
     // that credential then stops here instead of reaching the workload.
     let mut platform_bearer = false;
     if target.access != "public" || target.isolation_tier == "confidential" {
+        if browser::service_worker_script(&headers) {
+            return preview_error(
+                StatusCode::FORBIDDEN,
+                "service workers are not available on private previews",
+            );
+        }
         let grant = match authorization::grant_user(
             &authorization::PreviewContext::from(&state),
             &headers,

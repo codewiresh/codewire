@@ -130,10 +130,17 @@ pub(super) fn unique_cookie<'a>(
             let Ok(pair) = std::str::from_utf8(pair) else {
                 continue;
             };
-            let Some((name, value)) = pair.trim().split_once('=') else {
+            // Only ASCII space and tab are cookie whitespace. A Unicode-aware
+            // trim would read a planted "\u{2000}__Host-…" name as ours.
+            let ascii_space = |c: char| c == ' ' || c == '\t';
+            let Some((name, value)) = pair.trim_matches(ascii_space).split_once('=') else {
                 continue;
             };
-            if name.trim() == expected {
+            let name = name.trim_matches(ascii_space);
+            if !name.is_ascii() {
+                continue;
+            }
+            if name == expected {
                 if result.is_some() || value.is_empty() {
                     return Err(());
                 }
@@ -251,6 +258,16 @@ pub(super) fn safe_cookie_request(method: &Method, headers: &HeaderMap, origin: 
     };
     site && (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
         || exact_origin(headers, origin))
+}
+
+/// A service worker on a private preview could read the sign-in callback's
+/// one-use code from its POST body, so private previews never install one.
+pub(super) fn service_worker_script(headers: &HeaderMap) -> bool {
+    headers.contains_key("service-worker")
+        || headers
+            .get("sec-fetch-dest")
+            .and_then(|value| value.to_str().ok())
+            == Some("serviceworker")
 }
 
 #[cfg(test)]
@@ -398,6 +415,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append(header::COOKIE, HeaderValue::from_bytes(&value).unwrap());
         assert_eq!(unique_cookie(&headers, GRANT_COOKIE), Ok(Some("one")));
+        // A name padded with Unicode space is someone else's cookie, not a
+        // duplicate of the grant.
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_bytes("\u{2000}__Host-codewire-preview=two".as_bytes()).unwrap(),
+        );
+        assert_eq!(unique_cookie(&headers, GRANT_COOKIE), Ok(Some("one")));
     }
 
     #[test]
@@ -469,6 +493,20 @@ mod tests {
         assert!(!safe_cookie_request(&Method::GET, &legacy, origin));
         legacy.insert(header::ORIGIN, HeaderValue::from_static(origin));
         assert!(safe_cookie_request(&Method::GET, &legacy, origin));
+    }
+
+    #[test]
+    fn service_worker_scripts_are_recognised_by_either_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("script"));
+        assert!(!service_worker_script(&headers));
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("serviceworker"));
+        assert!(service_worker_script(&headers));
+        let legacy = HeaderMap::from_iter([(
+            axum::http::HeaderName::from_static("service-worker"),
+            HeaderValue::from_static("script"),
+        )]);
+        assert!(service_worker_script(&legacy));
     }
 
     #[test]
