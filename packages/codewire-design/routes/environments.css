@@ -49,7 +49,8 @@
 .cw-create-section-label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-2); }
 .cw-create-section-label h3,
 .cw-create-panel-heading h3,
-.cw-create-panel > h2 { margin: 0; color: var(--fg-primary); font-size: var(--text-body); font-weight: var(--weight-semibold); line-height: var(--leading-ui); }
+/* Section headings read exactly like the field labels around them. */
+.cw-create-panel > h2 { margin: 0; color: var(--fg-primary); font-size: var(--text-body); font-weight: var(--weight-medium); line-height: var(--leading-ui); }
 .cw-create-section-label > div { display: flex; gap: var(--space-3); }
 .cw-create-panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: var(--border-width) solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-surface); }
 /* The optional choices arrive as one group; space them like the drawer's own sections. */
