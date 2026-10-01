@@ -319,17 +319,15 @@ test.describe("managed provider credential browser journey", () => {
       const profileId = await profileRow.locator('[name="profile_id"]').first().inputValue();
       expect(await profileCurrentRevision(profileId)).toBe(1);
 
+      const restored = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
       await returnLink.click();
       await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${draft}`);
       await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
       await expect(draftForm).toHaveAttribute("data-create-draft-actor", owner);
       await expect(draftForm).toHaveAttribute("data-create-draft-organization", orgId);
       await expect(page.getByRole("combobox", { name: "Credential profile", exact: true }).locator(`option[value="${profileId}@1"]`)).toContainText(profileName);
-      await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
-      await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("");
       const currentCsrf = await draftForm.locator('[name="_csrf"]').inputValue();
-      const restored = page.waitForResponse((response) => response.url().endsWith(`/${slug}/_fragments/create-draft`));
-      await page.getByRole("button", { name: "Restore saved draft", exact: true }).click();
+      // The draft comes back by itself; the new profile is offered, not chosen.
       const restoreResponse = await restored;
       expect(restoreResponse.status()).toBe(200);
       expect(restoreResponse.headers()["cache-control"]).toBe("private, no-store");
