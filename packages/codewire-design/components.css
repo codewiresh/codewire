@@ -286,6 +286,39 @@ dialog.cw-discard-dialog {
 .cw-status--pill[data-tone="danger"] { background: var(--destructive-muted); color: var(--destructive); }
 .cw-status--pill[data-tone="info"] { background: var(--info-muted); color: var(--info); }
 
+/* Toast: a polite status that floats over the page, so a message never moves
+   the content under it. The element stays rendered as an empty live region
+   until a message arrives; empty, it draws nothing. */
+.cw-toast {
+  position: fixed;
+  z-index: 60;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  max-width: min(var(--dialog-width), calc(100vw - var(--space-8)));
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-lg);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-popover);
+  color: var(--fg-primary);
+  font-size: var(--text-secondary);
+  line-height: var(--leading-body);
+  animation: cw-toast-in 160ms ease;
+}
+
+.cw-toast:empty {
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  animation: none;
+}
+
+@keyframes cw-toast-in {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 .cw-field-label-row {
   display: flex;
   align-items: center;
@@ -887,5 +920,6 @@ dialog.cw-discard-dialog {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .cw-drawer { animation: none; }
+  .cw-drawer,
+  .cw-toast { animation: none; }
 }

@@ -1319,13 +1319,13 @@ test.describe.serial("server-rendered environments", () => {
     await expect(deleteDialog).toBeVisible();
     await expect(deleteDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await deleteDialog.getByRole("button", { name: "Delete Sandbox", exact: true }).click();
-    await expect(page).toHaveURL(`${ssrUrl}${filteredListPath}&message=environment-destroying`);
+    await expect(page).toHaveURL(`${ssrUrl}${filteredListPath}&message=environment-destroying&environment=${environmentId}`);
     await waitForEnvironmentState(environmentId, ["destroyed"], 120_000);
     const [destroyed] = await sql`SELECT external_cleanup_completed_at FROM environments WHERE id = ${environmentId}`;
     expect(destroyed.external_cleanup_completed_at).not.toBeNull();
     await page.goto(`/${slug}/?state=destroyed`);
     row = page.locator("tr", { hasText: environmentName }).first();
-    await expect(row.locator(".cw-status")).toContainText("destroyed");
+    await expect(row.locator(".cw-status")).toContainText("deleted");
     expect(disallowedBrowserCalls).toEqual([]);
   });
 });

@@ -721,7 +721,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await button(deletion, "Cancel").click();
     await button(page, "Delete").click();
     await button(deletion, "Delete Sandbox").click();
-    await expect(page).toHaveURL(`${ORIGIN}/${slug}/?message=environment-destroying`);
+    await expect(page).toHaveURL(`${ORIGIN}/${slug}/?message=environment-destroying&environment=${id}`);
     // Independent CLI finally cleanup proves terminal destruction, even when
     // the browser loses an acknowledgment. Do not equate this redirect to it.
   });
