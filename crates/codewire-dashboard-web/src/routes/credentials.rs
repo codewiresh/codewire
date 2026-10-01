@@ -33,9 +33,10 @@ use crate::{
     templates::CredentialSettingsTemplate,
     view::{
         CredentialApiKeySubmission, CredentialOAuthSubmission, CredentialProfileCreateSubmission,
-        CredentialProfileDeleteSubmission, CredentialProfileUpdateSubmission,
-        CredentialRenameSubmission, CredentialRevisionSubmission, CredentialRotateSubmission,
-        CredentialSettingsView, CredentialSshGenerateSubmission, CredentialSshImportSubmission,
+        CredentialProfileDeleteSubmission, CredentialProfileRenameSubmission,
+        CredentialProfileUpdateSubmission, CredentialRenameSubmission,
+        CredentialRevisionSubmission, CredentialRotateSubmission, CredentialSettingsView,
+        CredentialSshGenerateSubmission, CredentialSshImportSubmission,
         GitHubAppAuthorizationSubmission, GitIdentitySubmission,
     },
 };
@@ -257,6 +258,43 @@ pub(super) async fn update_profile_action(
     {
         Ok(()) => page_redirect("profile-updated", false, &query, &headers),
         Err(error) => mutation_error(error.code, false, &dialog, &query, &headers),
+    }
+}
+
+/// Relabel a profile. The dialog's observed revision fences a stale view; the
+/// name uses the same rules as Create profile and keeps every binding.
+pub(super) async fn rename_profile_action(
+    State(state): State<AppState>,
+    CredentialQuery(query): CredentialQuery,
+    headers: HeaderMap,
+    Form(form): Form<CredentialProfileRenameSubmission>,
+) -> Response {
+    let dialog = row_action_dialog("profile", &form.profile_id, "rename");
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
+        Ok(cookie) => cookie,
+        Err(response) => return response,
+    };
+    let name = form.name.trim();
+    if exact_id(&form.profile_id).is_err()
+        || !valid_revision(form.expected_revision)
+        || !valid_name(name)
+    {
+        return page_error_redirect("profile-invalid", &dialog, &query, &headers);
+    }
+    match credentials_connect::rename_profile(
+        &state,
+        cookie,
+        form.profile_id,
+        form.expected_revision,
+        name.into(),
+    )
+    .await
+    {
+        Ok(()) => page_redirect("profile-renamed", false, &query, &headers),
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&page_path(&query), &headers)
+        }
+        Err(error) => page_error_redirect(rename_error_code(error.code), &dialog, &query, &headers),
     }
 }
 
@@ -1177,6 +1215,16 @@ fn credential_mutation_error(
     page_error_redirect(error, dialog, context, headers)
 }
 
+// The service reports a taken name and a stale revision with one conflict
+// code, so the rename dialog names both possible causes.
+fn rename_error_code(code: ErrorCode) -> &'static str {
+    if code == ErrorCode::Aborted || code == ErrorCode::AlreadyExists {
+        "profile-rename-conflict"
+    } else {
+        mutation_error_code(code, false)
+    }
+}
+
 fn mutation_error_code(code: ErrorCode, delete: bool) -> &'static str {
     if code == ErrorCode::InvalidArgument {
         "profile-invalid"
@@ -1257,7 +1305,7 @@ fn valid_row_action(kind: &str, action: &str) -> bool {
             action,
             "rename" | "reconnect" | "rotate" | "revoke" | "delete"
         ),
-        "profile" => matches!(action, "edit" | "delete"),
+        "profile" => matches!(action, "rename" | "edit" | "delete"),
         _ => false,
     }
 }
@@ -1336,6 +1384,7 @@ fn approved_message(code: &str) -> &'static str {
         "github-app-connected" => "GitHub connected through the GitHub App.",
         "profile-created" => "Credential profile created.",
         "profile-updated" => "Credential profile updated.",
+        "profile-renamed" => "Credential profile renamed.",
         "profile-deleted" => "Credential profile deleted.",
         _ => "",
     }
@@ -1381,6 +1430,9 @@ fn approved_error(code: &str) -> &'static str {
             "Check the profile name and selected credentials. Use 1–128 lowercase letters, numbers, hyphens, underscores or dots; start and end with a letter or number."
         }
         "profile-conflict" => "The credential profile changed. Reload and try again.",
+        "profile-rename-conflict" => {
+            "Another profile already uses that name, or this profile changed. Choose a different name, or reload and try again."
+        }
         "profile-in-use" => "The credential profile is still in use and cannot be deleted.",
         "request-failed" => "The credential profile change could not be completed. Try again.",
         _ => "",
@@ -1523,6 +1575,7 @@ mod tests {
             "credentials/ssh/generate",
             "credentials/ssh/import",
             "profiles/create",
+            "profiles/rename",
             "profiles/update",
             "profiles/delete",
             "git-identity",
@@ -1649,6 +1702,7 @@ mod tests {
             "create-profile",
             "credential-00000000-0000-4000-8000-000000000001-reconnect",
             "credential-00000000-0000-4000-8000-000000000001-delete",
+            "profile-00000000-0000-4000-8000-000000000002-rename",
             "profile-00000000-0000-4000-8000-000000000002-edit",
             "profile-00000000-0000-4000-8000-000000000002-delete",
         ] {
@@ -1673,6 +1727,8 @@ mod tests {
             "credential-00000000-0000-4000-8000-000000000001-revoke",
             "profile-00000000-0000-4000-8000-000000000002-reconnect",
             "profile-00000000-0000-4000-8000-000000000002-edit-delete",
+            "profile-00000000-0000-4000-8000-000000000002-rename-edit",
+            "profile-00000000-0000-4000-8000-000000000099-rename",
             "add-api-key",
         ] {
             assert!(approved_dialog(id, &data).is_empty(), "{id}");
@@ -1693,9 +1749,9 @@ mod tests {
             html.find("id=\"profiles-title\"").unwrap()
                 < html.find("id=\"create-profile\"").unwrap()
         );
-        // Two fewer than before rows opened their actions from a menu: the
-        // per-row manage dialogs for the credential and the profile are gone.
-        assert_eq!(html.matches("data-dialog id=").count(), 13);
+        // Rows open their actions from a menu with no per-row manage dialog;
+        // the profile row has Rename, Edit identities and Delete dialogs.
+        assert_eq!(html.matches("data-dialog id=").count(), 14);
         assert!(!html.contains("data-dialog-auto-open"));
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));
@@ -1716,16 +1772,18 @@ mod tests {
                 .contains("Generation")
         );
         let profile_row = html.split("class=\"cw-profile-row\"").nth(1).unwrap();
-        let (profile_primary, profile_dialog) = profile_row.split_once("<dialog").unwrap();
+        let (profile_primary, profile_dialogs) = profile_row.split_once("<dialog").unwrap();
         assert!(!profile_primary.contains("Revision"));
+        assert!(profile_primary.contains(">Rename</button>"));
         assert!(profile_primary.contains(">Edit identities</button>"));
-        assert!(
-            profile_dialog
-                .split("</dialog>")
-                .next()
-                .unwrap()
-                .contains("Revision 9")
-        );
+        let profile_edit = profile_dialogs
+            .split("id=\"profile-00000000-0000-4000-8000-000000000002-edit\"")
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(profile_edit.contains("Revision 9"));
         assert!(!html.contains("name=\"name\" value=\"legacy-github\""));
         assert!(html.contains("name=\"confirm_reconnect\" value=\"yes\" required"));
         assert!(
@@ -1773,6 +1831,82 @@ mod tests {
         assert!(html.contains("/settings/credentials/_actions/github/authorize?org=sample-org"));
         assert!(html.contains("https://github.com/apps/codewire-synthetic/installations/new"));
         assert!(html.contains("icons-v2.svg#icon-github"));
+    }
+
+    #[test]
+    fn profile_rename_is_one_name_field_fenced_by_the_observed_revision() {
+        let id = "00000000-0000-4000-8000-000000000002";
+        let html = rendered_dialogs(
+            &format!("profile-{id}-rename"),
+            approved_error("profile-rename-conflict"),
+        );
+        let profile_row = html.split("class=\"cw-profile-row\"").nth(1).unwrap();
+        let menu = profile_row.split("</details>").next().unwrap();
+        let items: Vec<_> = menu
+            .split("class=\"cw-menu-item")
+            .skip(1)
+            .map(|item| item.split('>').nth(1).unwrap().split('<').next().unwrap())
+            .collect();
+        assert_eq!(items, ["Rename", "Edit identities", "Delete"]);
+        assert!(menu.contains(&format!(
+            "action=\"{PATH}#profile-{id}-rename\"><input type=\"hidden\" name=\"dialog\" value=\"profile-{id}-rename\">"
+        )));
+        assert_eq!(html.matches("data-dialog-auto-open").count(), 1);
+        let dialog = html
+            .split(&format!(
+                "id=\"profile-{id}-rename\" aria-labelledby=\"profile-{id}-rename-title\" data-dialog-auto-open>"
+            ))
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(dialog.contains(&format!(
+            "<h2 id=\"profile-{id}-rename-title\">Rename work</h2>"
+        )));
+        assert!(dialog.contains("role=\"alert\">Another profile already uses that name"));
+        assert!(dialog.contains(&format!(
+            "action=\"{PATH}_actions/profiles/rename?org=sample-org\""
+        )));
+        for hidden in [
+            "name=\"_csrf\" value=\"synthetic-csrf\"".to_owned(),
+            format!("name=\"profile_id\" value=\"{id}\""),
+            "name=\"expected_revision\" value=\"9\"".to_owned(),
+        ] {
+            assert!(dialog.contains(&hidden), "{hidden}");
+        }
+        // One Name field with Create profile's rules, prefilled and labelled.
+        assert_eq!(dialog.matches("<input class=\"cw-input\"").count(), 1);
+        assert_eq!(dialog.matches("<select").count(), 0);
+        assert!(dialog.contains(&format!(
+            "<label class=\"cw-label\" for=\"profile-{id}-name\">New name</label><input class=\"cw-input\" id=\"profile-{id}-name\" name=\"name\" autofocus pattern=\"[a-z0-9]([a-z0-9_.\\-]*[a-z0-9])?\" maxlength=\"128\" value=\"work\""
+        )));
+        assert!(dialog.contains(&format!(
+            "<button class=\"cw-button\" type=\"submit\" form=\"profile-{id}-rename-form\">Save name</button>"
+        )));
+        assert!(dialog.contains(&format!(
+            "<form class=\"cw-dialog-launcher\" method=\"get\" action=\"{PATH}\"><button class=\"cw-button cw-button--outline\" type=\"submit\" data-dialog-close>Cancel</button></form>"
+        )));
+        assert_eq!(
+            rename_error_code(ErrorCode::AlreadyExists),
+            "profile-rename-conflict"
+        );
+        assert_eq!(
+            rename_error_code(ErrorCode::Aborted),
+            "profile-rename-conflict"
+        );
+        assert_eq!(
+            rename_error_code(ErrorCode::InvalidArgument),
+            "profile-invalid"
+        );
+        assert_eq!(
+            rename_error_code(ErrorCode::PermissionDenied),
+            "request-failed"
+        );
+        assert_eq!(
+            approved_message("profile-renamed"),
+            "Credential profile renamed."
+        );
     }
 
     #[test]

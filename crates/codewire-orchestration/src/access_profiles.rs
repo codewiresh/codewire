@@ -116,6 +116,28 @@ impl AccessProfiles {
             .map_err(profile_error)
     }
 
+    /// Relabel only: the current revision, entries and bindings are unchanged.
+    /// The name uses create's rules; a stale revision or taken name conflicts.
+    pub async fn rename(
+        &self,
+        user: &AuthUser,
+        id: &str,
+        expected_revision: u64,
+        name: &str,
+    ) -> AppResult<AccessProfile> {
+        let owner = personal_owner(user)?;
+        positive_revision(expected_revision)?;
+        self.profiles
+            .rename(
+                &owner,
+                &profile_id(id)?,
+                expected_revision,
+                profile_name(name)?,
+            )
+            .await
+            .map_err(profile_error)
+    }
+
     pub async fn delete(&self, user: &AuthUser, id: &str, expected_revision: u64) -> AppResult<()> {
         let owner = personal_owner(user)?;
         positive_revision(expected_revision)?;

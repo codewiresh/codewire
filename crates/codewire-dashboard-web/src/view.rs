@@ -479,6 +479,15 @@ pub(crate) struct CredentialProfileUpdateSubmission {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct CredentialProfileRenameSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) profile_id: String,
+    pub(crate) expected_revision: u64,
+    pub(crate) name: String,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct CredentialProfileDeleteSubmission {
     #[serde(rename = "_csrf")]
     pub(crate) csrf: String,

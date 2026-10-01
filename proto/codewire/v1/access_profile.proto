@@ -15,6 +15,7 @@ service AccessProfileService {
   }
   rpc CreateAccessProfile(CreateAccessProfileRequest) returns (CreateAccessProfileResponse);
   rpc UpdateAccessProfile(UpdateAccessProfileRequest) returns (UpdateAccessProfileResponse);
+  rpc RenameAccessProfile(RenameAccessProfileRequest) returns (RenameAccessProfileResponse);
   rpc DeleteAccessProfile(DeleteAccessProfileRequest) returns (DeleteAccessProfileResponse);
 
   rpc GetEnvironmentAccessProfile(GetEnvironmentAccessProfileRequest) returns (GetEnvironmentAccessProfileResponse) {
@@ -30,7 +31,8 @@ message AccessProfileEntry {
 }
 
 // An immutable revision. Updating a profile creates a new revision; existing
-// environment bindings keep their explicitly selected revision. A personal
+// environment bindings keep their explicitly selected revision. The name is a
+// mutable label on the profile, not part of a revision. A personal
 // profile always includes the owner's one GitHub connection, resolved at
 // launch; GitHub is never an entry.
 message AccessProfile {
@@ -81,6 +83,23 @@ message UpdateAccessProfileRequest {
 }
 
 message UpdateAccessProfileResponse {
+  AccessProfile access_profile = 1;
+}
+
+// Metadata-only rename: preserve the identity, current revision, every
+// historical revision, entries and environment bindings. No revision is
+// created. expected_revision must still be current at publication, so a
+// rename prepared from a stale view is rejected. The name follows
+// CreateAccessProfile's rules and must not match another of the owner's
+// profiles. Selections that name a profile resolve at admission; existing
+// bindings pin an ID and revision and are unaffected.
+message RenameAccessProfileRequest {
+  string access_profile_id = 1;
+  uint64 expected_revision = 2;
+  string name = 3;
+}
+
+message RenameAccessProfileResponse {
   AccessProfile access_profile = 1;
 }
 

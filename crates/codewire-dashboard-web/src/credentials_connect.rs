@@ -15,9 +15,9 @@ use codewire_proto::codewire::v1::{
     Credential, CredentialAuthenticationKind, CredentialMutationServiceClient,
     CredentialServiceClient, CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest,
     EnrollCodexRequest, EnrollCodexResponse, GenerateSshCredentialRequest, GetCredentialRequest,
-    ListAccessProfilesRequest, ListCredentialsRequest, RenameCredentialRequest,
-    RevokeCredentialRequest, RotateApiKeyCredentialRequest, UpdateAccessProfileRequest,
-    enroll_codex_response, get_credential_request,
+    ListAccessProfilesRequest, ListCredentialsRequest, RenameAccessProfileRequest,
+    RenameCredentialRequest, RevokeCredentialRequest, RotateApiKeyCredentialRequest,
+    UpdateAccessProfileRequest, enroll_codex_response, get_credential_request,
 };
 use connectrpc::{
     ConnectError, ErrorCode,
@@ -827,6 +827,34 @@ pub(crate) async fn update_profile(
     Ok(())
 }
 
+/// A rename is a label change: the acknowledged profile must keep its
+/// identity and the exact revision the dialog observed.
+pub(crate) async fn rename_profile(
+    state: &AppState,
+    cookie: HeaderValue,
+    profile_id: String,
+    expected_revision: u64,
+    name: String,
+) -> Result<(), ConnectError> {
+    if expected_revision == 0 || expected_revision > i64::MAX as u64 {
+        return Err(invalid_metadata());
+    }
+    let response = profile_client(state, cookie)
+        .rename_access_profile(RenameAccessProfileRequest {
+            access_profile_id: profile_id.clone(),
+            expected_revision,
+            name: name.clone(),
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    let profile = response
+        .access_profile
+        .into_option()
+        .ok_or_else(invalid_metadata)?;
+    validate_profile_rename_ack(&profile, &profile_id, &name, expected_revision)
+}
+
 pub(crate) async fn delete_profile(
     state: &AppState,
     cookie: HeaderValue,
@@ -1170,6 +1198,22 @@ fn validate_profile_ack(
         return Err(invalid_metadata());
     }
     Ok(())
+}
+
+fn validate_profile_rename_ack(
+    profile: &AccessProfile,
+    expected_id: &str,
+    expected_name: &str,
+    expected_revision: u64,
+) -> Result<(), ConnectError> {
+    let entries = canonical_entries(&profile.entries)?;
+    validate_profile_ack(
+        profile,
+        Some(expected_id),
+        Some(expected_name),
+        expected_revision,
+        &entries,
+    )
 }
 
 pub(crate) fn credential_slot(credential: &Credential) -> Result<&'static str, ConnectError> {

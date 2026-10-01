@@ -288,6 +288,8 @@ test.describe("managed provider credential browser journey", () => {
 
       // Every personal profile includes the account's GitHub connection; a
       // profile never selects or pins a GitHub credential.
+      // Created under a draft name, then renamed from its row menu.
+      const createdName = "github-repository-draft";
       const profileName = "github-repository-browser";
       await page.getByRole("button", { name: "Create profile", exact: true }).click();
       const createProfile = page.locator('form[action^="/settings/credentials/_actions/profiles/create"]');
@@ -309,14 +311,27 @@ test.describe("managed provider credential browser journey", () => {
       await page.goto(new URL(validation.headers().location, ssrUrl).toString());
       await expect(page.getByRole("dialog", { name: "Create profile", exact: true })).toBeVisible();
       await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
-      await createProfile.getByRole("textbox", { name: "Profile name", exact: true }).fill(profileName);
+      await createProfile.getByRole("textbox", { name: "Profile name", exact: true }).fill(createdName);
       await page.getByRole("dialog", { name: "Create profile", exact: true })
         .getByRole("button", { name: "Create profile", exact: true }).click();
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=profile-created`);
-      let profileRow = page.locator(".cw-profile-row", { hasText: profileName });
+      let profileRow = page.locator(".cw-profile-row", { hasText: createdName });
       await expect(profileRow).toHaveCount(1);
       await expect(profileRow).toContainText(`GitHub: @${name}`);
       const profileId = await profileRow.locator('[name="profile_id"]').first().inputValue();
+      expect(await profileCurrentRevision(profileId)).toBe(1);
+      // A rename relabels the profile in place: same identity, no new revision.
+      await profileRow.locator("details.cw-menu > summary").click();
+      await profileRow.getByRole("button", { name: "Rename", exact: true }).click();
+      const renameProfile = page.getByRole("dialog", { name: `Rename ${createdName}`, exact: true });
+      await renameProfile.getByRole("textbox", { name: "New name", exact: true }).fill(profileName);
+      await renameProfile.getByRole("button", { name: "Save name", exact: true }).click();
+      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=profile-renamed`);
+      await expect(page.getByRole("status")).toHaveText("Credential profile renamed.");
+      await expect(page.locator(".cw-profile-row", { hasText: createdName })).toHaveCount(0);
+      profileRow = page.locator(".cw-profile-row", { hasText: profileName });
+      await expect(profileRow).toHaveCount(1);
+      await expect(profileRow.locator('[name="profile_id"]').first()).toHaveValue(profileId);
       expect(await profileCurrentRevision(profileId)).toBe(1);
 
       await returnLink.click();

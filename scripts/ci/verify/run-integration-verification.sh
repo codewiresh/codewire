@@ -192,7 +192,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 13
+  assert_passed_count "platform access profile matrix" "$logfile" 14
 
   logfile="$RUN_DIR/platform-owner-source-authority.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -208,7 +208,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --test access_profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "public access profile restricted API matrix" "$logfile" 7
+  assert_passed_count "public access profile restricted API matrix" "$logfile" 8
 
   logfile="$RUN_DIR/public-credential-metadata.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

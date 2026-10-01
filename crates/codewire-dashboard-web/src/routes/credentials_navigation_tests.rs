@@ -3,6 +3,7 @@ use super::*;
 
 const PATH: &str = "/settings/credentials/";
 const CREATE: &str = "/settings/credentials/_actions/profiles/create";
+const RENAME: &str = "/settings/credentials/_actions/profiles/rename";
 
 #[tokio::test]
 async fn github_native_authorize_records_only_fresh_verified_navigation() {
@@ -523,6 +524,125 @@ async fn navigation_does_not_change_credentials_authentication_or_mutation_fence
                 .iter()
                 .any(|(path, _)| path.ends_with("/ListOrganizations"))
         );
+    }
+}
+
+#[tokio::test]
+async fn profile_rename_sends_only_the_observed_revision_and_new_label() {
+    let dialog = format!("dialog=profile-{PROJECT}-rename");
+    for (mode, name, outcome, writes) in [
+        ("success", "  personal  ", "message=profile-renamed", 1),
+        ("success", "Not a profile name", "error=profile-invalid", 0),
+        ("success", "", "error=profile-invalid", 0),
+        (
+            "mutation conflict",
+            "personal",
+            "error=profile-rename-conflict",
+            1,
+        ),
+        ("mutation denied", "personal", "error=request-failed", 1),
+        // An acknowledgement that published a revision is not a rename.
+        (
+            "rename advances revision",
+            "personal",
+            "error=request-failed",
+            1,
+        ),
+        ("mutation unauthenticated", "personal", "/login", 1),
+    ] {
+        let (upstream, calls) = fixture(mode).await;
+        let dashboard = serve(crate::app(config(&upstream.origin))).await;
+        let csrf = crate::security::new_csrf_token();
+        let response = client()
+            .post(format!(
+                "{}{RENAME}?creation_draft={DRAFT}",
+                dashboard.origin
+            ))
+            .headers(authority(&csrf))
+            .form(&[
+                ("_csrf", csrf.as_str()),
+                ("profile_id", PROJECT),
+                ("expected_revision", "9"),
+                ("name", name),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{mode} {name}");
+        let target = response.headers()[header::LOCATION].to_str().unwrap();
+        assert!(target.contains(outcome), "{mode} {name}: {target}");
+        if outcome.starts_with("error=") {
+            assert!(target.starts_with(&format!("{PATH}?creation_draft={DRAFT}&")));
+            assert!(target.ends_with(&format!("&{dialog}")), "{target}");
+        } else if outcome.starts_with("message=") {
+            assert_eq!(
+                target,
+                format!("{PATH}?creation_draft={DRAFT}&message=profile-renamed")
+            );
+        } else {
+            // The login continuation keeps the page and its draft.
+            let continuation =
+                url::form_urlencoded::parse(target.split_once('?').unwrap().1.as_bytes())
+                    .find(|(key, _)| key == "return_to")
+                    .unwrap()
+                    .1
+                    .into_owned();
+            assert_eq!(continuation, format!("{PATH}?creation_draft={DRAFT}"));
+        }
+        let calls = calls.lock().unwrap();
+        let sent: Vec<_> = calls.iter().filter(|(path, _)| mutation(path)).collect();
+        assert_eq!(sent.len(), writes, "{mode} {name}");
+        if let Some((path, bytes)) = sent.first() {
+            assert!(path.ends_with("/codewire.v1.AccessProfileService/RenameAccessProfile"));
+            let mut input = bytes.as_slice();
+            let request =
+                codewire_proto::codewire::v1::RenameAccessProfileRequest::decode(&mut input)
+                    .unwrap();
+            assert_eq!(request.access_profile_id, PROJECT);
+            assert_eq!(request.expected_revision, 9);
+            assert_eq!(request.name, "personal");
+            assert!(!String::from_utf8_lossy(bytes).contains(DRAFT));
+        }
+        // Rename never edits identities or falls back to another mutation.
+        assert!(
+            !calls
+                .iter()
+                .any(|(path, _)| path.ends_with("/UpdateAccessProfile")
+                    || path.ends_with("/GetAccessProfile"))
+        );
+    }
+    for (mode, expected) in [
+        ("foreign origin", StatusCode::FORBIDDEN),
+        ("bad csrf", StatusCode::FORBIDDEN),
+    ] {
+        let (upstream, calls) = fixture("success").await;
+        let dashboard = serve(crate::app(config(&upstream.origin))).await;
+        let csrf = crate::security::new_csrf_token();
+        let mut headers = authority(&csrf);
+        if mode == "foreign origin" {
+            headers.insert(header::ORIGIN, "https://foreign.invalid".parse().unwrap());
+        }
+        let response = client()
+            .post(format!("{}{RENAME}", dashboard.origin))
+            .headers(headers)
+            .form(&[
+                (
+                    "_csrf",
+                    if mode == "bad csrf" {
+                        "bad-token"
+                    } else {
+                        csrf.as_str()
+                    },
+                ),
+                ("profile_id", PROJECT),
+                ("expected_revision", "9"),
+                ("name", "personal"),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{mode}");
+        assert!(!calls.lock().unwrap().iter().any(|(path, _)| mutation(path)));
     }
 }
 

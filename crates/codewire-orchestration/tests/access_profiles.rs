@@ -14,7 +14,7 @@ mod destroy;
 mod sources;
 
 use anyhow::{Context as _, Result, ensure};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -28,7 +28,8 @@ async fn public_profiles_auth_owner_pagination_and_immutable_revision_cas() -> R
         // Real API-key authentication succeeds but the account policy rejects
         // every operation, even though this fixture's owning user is an admin.
         for method in ["ListAccessProfiles", "GetAccessProfile", "CreateAccessProfile",
-            "UpdateAccessProfile", "DeleteAccessProfile", "GetEnvironmentAccessProfile"] {
+            "UpdateAccessProfile", "RenameAccessProfile", "DeleteAccessProfile",
+            "GetEnvironmentAccessProfile"] {
             h.rpc.error(method, Auth::ApiKey, json!({}), "permission_denied").await?;
         }
         let cookie = h.rpc.ok("CreateAccessProfile", Auth::Cookie,
@@ -57,6 +58,8 @@ async fn public_profiles_auth_owner_pagination_and_immutable_revision_cas() -> R
             json!({"accessProfileId":id(&profile)?,"expectedRevision":"1","entries":[]}), "not_found").await?;
         h.rpc.error("DeleteAccessProfile", Auth::Bob,
             json!({"accessProfileId":id(&profile)?,"expectedRevision":"1"}), "not_found").await?;
+        h.rpc.error("RenameAccessProfile", Auth::Bob,
+            json!({"accessProfileId":id(&profile)?,"expectedRevision":"1","name":"taken"}), "not_found").await?;
 
         let mut seen = Vec::new();
         let mut token = String::new();
@@ -108,6 +111,181 @@ async fn public_profiles_auth_owner_pagination_and_immutable_revision_cas() -> R
         h.rpc.error("ListAccessProfiles", Auth::Cookie, json!({}), "unauthenticated").await?;
         Ok(())
     }.await;
+    h.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn public_profile_rename_keeps_the_revision_and_uses_create_name_rules() -> Result<()> {
+    let h = Harness::create().await?;
+    let result = async {
+        let profile = h.rpc.create("work", CREDENTIAL).await?;
+        h.rpc.create("other", CREDENTIAL).await?;
+        // Bob's own profile name never collides with Alice's.
+        h.rpc
+            .ok(
+                "CreateAccessProfile",
+                Auth::Bob,
+                json!({"name":"personal","entries":entries(OTHER_CREDENTIAL)}),
+            )
+            .await?;
+        let rename = |revision: &str, name: &str| -> Result<Value> {
+            Ok(json!({"accessProfileId":id(&profile)?,"expectedRevision":revision,"name":name}))
+        };
+        // The same name rules as CreateAccessProfile, checked before any write.
+        for name in [
+            "",
+            "WORK",
+            "work profile",
+            "-work",
+            "work.",
+            &"a".repeat(129),
+        ] {
+            h.rpc
+                .error(
+                    "RenameAccessProfile",
+                    Auth::Alice,
+                    rename("1", name)?,
+                    "invalid_argument",
+                )
+                .await?;
+        }
+        for revision in ["0", "18446744073709551615"] {
+            h.rpc
+                .error(
+                    "RenameAccessProfile",
+                    Auth::Alice,
+                    rename(revision, "personal")?,
+                    "invalid_argument",
+                )
+                .await?;
+        }
+        h.rpc
+            .error(
+                "RenameAccessProfile",
+                Auth::Alice,
+                json!({"accessProfileId":"not an id","expectedRevision":"1","name":"personal"}),
+                "invalid_argument",
+            )
+            .await?;
+        // A taken name conflicts as it does on create; so does a stale view.
+        h.rpc
+            .error(
+                "RenameAccessProfile",
+                Auth::Alice,
+                rename("1", "other")?,
+                "already_exists",
+            )
+            .await?;
+        h.rpc
+            .error(
+                "RenameAccessProfile",
+                Auth::Alice,
+                rename("2", "personal")?,
+                "already_exists",
+            )
+            .await?;
+        let unchanged = h
+            .rpc
+            .ok(
+                "GetAccessProfile",
+                Auth::Alice,
+                json!({"accessProfileId":id(&profile)?}),
+            )
+            .await?;
+        ensure!(
+            unchanged["accessProfile"] == profile,
+            "a rejected rename changed the profile"
+        );
+
+        let renamed = h
+            .rpc
+            .ok(
+                "RenameAccessProfile",
+                Auth::Cookie,
+                rename("1", "personal")?,
+            )
+            .await?;
+        let mut expected = profile.clone();
+        expected["name"] = json!("personal");
+        ensure!(
+            renamed["accessProfile"] == expected,
+            "rename changed more than the name"
+        );
+        ensure!(
+            renamed["accessProfile"]["revision"] == "1",
+            "rename published a revision"
+        );
+        let current = h
+            .rpc
+            .ok("GetAccessProfile", Auth::Alice, json!({"name":"personal"}))
+            .await?;
+        ensure!(current == renamed);
+        let historical = h
+            .rpc
+            .ok(
+                "GetAccessProfile",
+                Auth::Alice,
+                json!({"accessProfileId":id(&profile)?,"revision":"1"}),
+            )
+            .await?;
+        ensure!(historical == renamed, "the label is not part of a revision");
+        h.rpc
+            .error(
+                "GetAccessProfile",
+                Auth::Alice,
+                json!({"name":"work"}),
+                "not_found",
+            )
+            .await?;
+        h.rpc
+            .error(
+                "GetAccessProfile",
+                Auth::Alice,
+                json!({"accessProfileId":id(&profile)?,"revision":"2"}),
+                "not_found",
+            )
+            .await?;
+        let revisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM platform_access_profile_revisions WHERE profile_id=$1",
+        )
+        .bind(id(&profile)?)
+        .fetch_one(&h.db)
+        .await?;
+        ensure!(revisions == 1);
+
+        // Editing advances from the preserved revision; the old name is free.
+        let updated = h
+            .rpc
+            .ok(
+                "UpdateAccessProfile",
+                Auth::Alice,
+                json!({"accessProfileId":id(&profile)?,"expectedRevision":"1","entries":[]}),
+            )
+            .await?;
+        ensure!(
+            updated["accessProfile"]["revision"] == "2"
+                && updated["accessProfile"]["name"] == "personal"
+        );
+        h.rpc
+            .error(
+                "RenameAccessProfile",
+                Auth::Alice,
+                rename("1", "later")?,
+                "already_exists",
+            )
+            .await?;
+        h.rpc.create("work", CREDENTIAL).await?;
+        let later = h
+            .rpc
+            .ok("RenameAccessProfile", Auth::Alice, rename("2", "later")?)
+            .await?;
+        ensure!(
+            later["accessProfile"]["revision"] == "2" && later["accessProfile"]["name"] == "later"
+        );
+        Ok(())
+    }
+    .await;
     h.finish(result).await
 }
 

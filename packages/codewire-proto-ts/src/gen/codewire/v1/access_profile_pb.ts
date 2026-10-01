@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/access_profile.proto.
  */
 export const file_codewire_v1_access_profile: GenFile = /*@__PURE__*/
-  fileDesc("CiBjb2Rld2lyZS92MS9hY2Nlc3NfcHJvZmlsZS5wcm90bxILY29kZXdpcmUudjEiRAoSQWNjZXNzUHJvZmlsZUVudHJ5EhcKD2NhcGFiaWxpdHlfc2xvdBgBIAEoCRIVCg1jcmVkZW50aWFsX2lkGAIgASgJIm0KDUFjY2Vzc1Byb2ZpbGUSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIQCghyZXZpc2lvbhgDIAEoBBIwCgdlbnRyaWVzGAQgAygLMh8uY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZUVudHJ5IkIKGUxpc3RBY2Nlc3NQcm9maWxlc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiagoaTGlzdEFjY2Vzc1Byb2ZpbGVzUmVzcG9uc2USMwoPYWNjZXNzX3Byb2ZpbGVzGAEgAygLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkidgoXR2V0QWNjZXNzUHJvZmlsZVJlcXVlc3QSGwoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAlIABIOCgRuYW1lGAIgASgJSAASFQoIcmV2aXNpb24YAyABKARIAYgBAUIKCghzZWxlY3RvckILCglfcmV2aXNpb24iTgoYR2V0QWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSJcChpDcmVhdGVBY2Nlc3NQcm9maWxlUmVxdWVzdBIMCgRuYW1lGAEgASgJEjAKB2VudHJpZXMYAiADKAsyHy5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlRW50cnkiUQobQ3JlYXRlQWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSKEAQoaVXBkYXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QSGQoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAkSGQoRZXhwZWN0ZWRfcmV2aXNpb24YAiABKAQSMAoHZW50cmllcxgDIAMoCzIfLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGVFbnRyeSJRChtVcGRhdGVBY2Nlc3NQcm9maWxlUmVzcG9uc2USMgoOYWNjZXNzX3Byb2ZpbGUYASABKAsyGi5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlIlIKGkRlbGV0ZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0EhkKEWFjY2Vzc19wcm9maWxlX2lkGAEgASgJEhkKEWV4cGVjdGVkX3JldmlzaW9uGAIgASgEIh0KG0RlbGV0ZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZSJ1Ch9FbnZpcm9ubWVudEFjY2Vzc1Byb2ZpbGVCaW5kaW5nEhYKDmVudmlyb25tZW50X2lkGAEgASgJEhkKEWFjY2Vzc19wcm9maWxlX2lkGAIgASgJEh8KF2FjY2Vzc19wcm9maWxlX3JldmlzaW9uGAMgASgEIjwKIkdldEVudmlyb25tZW50QWNjZXNzUHJvZmlsZVJlcXVlc3QSFgoOZW52aXJvbm1lbnRfaWQYASABKAkijAEKI0dldEVudmlyb25tZW50QWNjZXNzUHJvZmlsZVJlc3BvbnNlEj0KB2JpbmRpbmcYASABKAsyLC5jb2Rld2lyZS52MS5FbnZpcm9ubWVudEFjY2Vzc1Byb2ZpbGVCaW5kaW5nEiYKHnBlcnNvbmFsX2NyZWRlbnRpYWxzX2NvbmZpcm1lZBgCIAEoCDKuBQoUQWNjZXNzUHJvZmlsZVNlcnZpY2USagoSTGlzdEFjY2Vzc1Byb2ZpbGVzEiYuY29kZXdpcmUudjEuTGlzdEFjY2Vzc1Byb2ZpbGVzUmVxdWVzdBonLmNvZGV3aXJlLnYxLkxpc3RBY2Nlc3NQcm9maWxlc1Jlc3BvbnNlIgOQAgESZAoQR2V0QWNjZXNzUHJvZmlsZRIkLmNvZGV3aXJlLnYxLkdldEFjY2Vzc1Byb2ZpbGVSZXF1ZXN0GiUuY29kZXdpcmUudjEuR2V0QWNjZXNzUHJvZmlsZVJlc3BvbnNlIgOQAgESaAoTQ3JlYXRlQWNjZXNzUHJvZmlsZRInLmNvZGV3aXJlLnYxLkNyZWF0ZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0GiguY29kZXdpcmUudjEuQ3JlYXRlQWNjZXNzUHJvZmlsZVJlc3BvbnNlEmgKE1VwZGF0ZUFjY2Vzc1Byb2ZpbGUSJy5jb2Rld2lyZS52MS5VcGRhdGVBY2Nlc3NQcm9maWxlUmVxdWVzdBooLmNvZGV3aXJlLnYxLlVwZGF0ZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZRJoChNEZWxldGVBY2Nlc3NQcm9maWxlEicuY29kZXdpcmUudjEuRGVsZXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QaKC5jb2Rld2lyZS52MS5EZWxldGVBY2Nlc3NQcm9maWxlUmVzcG9uc2UShQEKG0dldEVudmlyb25tZW50QWNjZXNzUHJvZmlsZRIvLmNvZGV3aXJlLnYxLkdldEVudmlyb25tZW50QWNjZXNzUHJvZmlsZVJlcXVlc3QaMC5jb2Rld2lyZS52MS5HZXRFbnZpcm9ubWVudEFjY2Vzc1Byb2ZpbGVSZXNwb25zZSIDkAIBQrUBCg9jb20uY29kZXdpcmUudjFCEkFjY2Vzc1Byb2ZpbGVQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z");
+  fileDesc("CiBjb2Rld2lyZS92MS9hY2Nlc3NfcHJvZmlsZS5wcm90bxILY29kZXdpcmUudjEiRAoSQWNjZXNzUHJvZmlsZUVudHJ5EhcKD2NhcGFiaWxpdHlfc2xvdBgBIAEoCRIVCg1jcmVkZW50aWFsX2lkGAIgASgJIm0KDUFjY2Vzc1Byb2ZpbGUSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIQCghyZXZpc2lvbhgDIAEoBBIwCgdlbnRyaWVzGAQgAygLMh8uY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZUVudHJ5IkIKGUxpc3RBY2Nlc3NQcm9maWxlc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiagoaTGlzdEFjY2Vzc1Byb2ZpbGVzUmVzcG9uc2USMwoPYWNjZXNzX3Byb2ZpbGVzGAEgAygLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkidgoXR2V0QWNjZXNzUHJvZmlsZVJlcXVlc3QSGwoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAlIABIOCgRuYW1lGAIgASgJSAASFQoIcmV2aXNpb24YAyABKARIAYgBAUIKCghzZWxlY3RvckILCglfcmV2aXNpb24iTgoYR2V0QWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSJcChpDcmVhdGVBY2Nlc3NQcm9maWxlUmVxdWVzdBIMCgRuYW1lGAEgASgJEjAKB2VudHJpZXMYAiADKAsyHy5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlRW50cnkiUQobQ3JlYXRlQWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSKEAQoaVXBkYXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QSGQoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAkSGQoRZXhwZWN0ZWRfcmV2aXNpb24YAiABKAQSMAoHZW50cmllcxgDIAMoCzIfLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGVFbnRyeSJRChtVcGRhdGVBY2Nlc3NQcm9maWxlUmVzcG9uc2USMgoOYWNjZXNzX3Byb2ZpbGUYASABKAsyGi5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlImAKGlJlbmFtZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0EhkKEWFjY2Vzc19wcm9maWxlX2lkGAEgASgJEhkKEWV4cGVjdGVkX3JldmlzaW9uGAIgASgEEgwKBG5hbWUYAyABKAkiUQobUmVuYW1lQWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSJSChpEZWxldGVBY2Nlc3NQcm9maWxlUmVxdWVzdBIZChFhY2Nlc3NfcHJvZmlsZV9pZBgBIAEoCRIZChFleHBlY3RlZF9yZXZpc2lvbhgCIAEoBCIdChtEZWxldGVBY2Nlc3NQcm9maWxlUmVzcG9uc2UidQofRW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlQmluZGluZxIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIZChFhY2Nlc3NfcHJvZmlsZV9pZBgCIAEoCRIfChdhY2Nlc3NfcHJvZmlsZV9yZXZpc2lvbhgDIAEoBCI8CiJHZXRFbnZpcm9ubWVudEFjY2Vzc1Byb2ZpbGVSZXF1ZXN0EhYKDmVudmlyb25tZW50X2lkGAEgASgJIowBCiNHZXRFbnZpcm9ubWVudEFjY2Vzc1Byb2ZpbGVSZXNwb25zZRI9CgdiaW5kaW5nGAEgASgLMiwuY29kZXdpcmUudjEuRW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlQmluZGluZxImCh5wZXJzb25hbF9jcmVkZW50aWFsc19jb25maXJtZWQYAiABKAgymAYKFEFjY2Vzc1Byb2ZpbGVTZXJ2aWNlEmoKEkxpc3RBY2Nlc3NQcm9maWxlcxImLmNvZGV3aXJlLnYxLkxpc3RBY2Nlc3NQcm9maWxlc1JlcXVlc3QaJy5jb2Rld2lyZS52MS5MaXN0QWNjZXNzUHJvZmlsZXNSZXNwb25zZSIDkAIBEmQKEEdldEFjY2Vzc1Byb2ZpbGUSJC5jb2Rld2lyZS52MS5HZXRBY2Nlc3NQcm9maWxlUmVxdWVzdBolLmNvZGV3aXJlLnYxLkdldEFjY2Vzc1Byb2ZpbGVSZXNwb25zZSIDkAIBEmgKE0NyZWF0ZUFjY2Vzc1Byb2ZpbGUSJy5jb2Rld2lyZS52MS5DcmVhdGVBY2Nlc3NQcm9maWxlUmVxdWVzdBooLmNvZGV3aXJlLnYxLkNyZWF0ZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZRJoChNVcGRhdGVBY2Nlc3NQcm9maWxlEicuY29kZXdpcmUudjEuVXBkYXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QaKC5jb2Rld2lyZS52MS5VcGRhdGVBY2Nlc3NQcm9maWxlUmVzcG9uc2USaAoTUmVuYW1lQWNjZXNzUHJvZmlsZRInLmNvZGV3aXJlLnYxLlJlbmFtZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0GiguY29kZXdpcmUudjEuUmVuYW1lQWNjZXNzUHJvZmlsZVJlc3BvbnNlEmgKE0RlbGV0ZUFjY2Vzc1Byb2ZpbGUSJy5jb2Rld2lyZS52MS5EZWxldGVBY2Nlc3NQcm9maWxlUmVxdWVzdBooLmNvZGV3aXJlLnYxLkRlbGV0ZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZRKFAQobR2V0RW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlEi8uY29kZXdpcmUudjEuR2V0RW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlUmVxdWVzdBowLmNvZGV3aXJlLnYxLkdldEVudmlyb25tZW50QWNjZXNzUHJvZmlsZVJlc3BvbnNlIgOQAgFCtQEKD2NvbS5jb2Rld2lyZS52MUISQWNjZXNzUHJvZmlsZVByb3RvUAFaQWdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS92MTtjb2Rld2lyZXYxogIDQ1hYqgILQ29kZXdpcmUuVjHKAgtDb2Rld2lyZVxWMeICF0NvZGV3aXJlXFYxXEdQQk1ldGFkYXRh6gIMQ29kZXdpcmU6OlYxYgZwcm90bzM");
 
 /**
  * An opaque credential reference for one supported capability. No provider
@@ -39,7 +39,8 @@ export const AccessProfileEntrySchema: GenMessage<AccessProfileEntry> = /*@__PUR
 
 /**
  * An immutable revision. Updating a profile creates a new revision; existing
- * environment bindings keep their explicitly selected revision. A personal
+ * environment bindings keep their explicitly selected revision. The name is a
+ * mutable label on the profile, not part of a revision. A personal
  * profile always includes the owner's one GitHub connection, resolved at
  * launch; GitHub is never an entry.
  *
@@ -259,6 +260,58 @@ export const UpdateAccessProfileResponseSchema: GenMessage<UpdateAccessProfileRe
   messageDesc(file_codewire_v1_access_profile, 9);
 
 /**
+ * Metadata-only rename: preserve the identity, current revision, every
+ * historical revision, entries and environment bindings. No revision is
+ * created. expected_revision must still be current at publication, so a
+ * rename prepared from a stale view is rejected. The name follows
+ * CreateAccessProfile's rules and must not match another of the owner's
+ * profiles. Selections that name a profile resolve at admission; existing
+ * bindings pin an ID and revision and are unaffected.
+ *
+ * @generated from message codewire.v1.RenameAccessProfileRequest
+ */
+export type RenameAccessProfileRequest = Message<"codewire.v1.RenameAccessProfileRequest"> & {
+  /**
+   * @generated from field: string access_profile_id = 1;
+   */
+  accessProfileId: string;
+
+  /**
+   * @generated from field: uint64 expected_revision = 2;
+   */
+  expectedRevision: bigint;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message codewire.v1.RenameAccessProfileRequest.
+ * Use `create(RenameAccessProfileRequestSchema)` to create a new message.
+ */
+export const RenameAccessProfileRequestSchema: GenMessage<RenameAccessProfileRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_access_profile, 10);
+
+/**
+ * @generated from message codewire.v1.RenameAccessProfileResponse
+ */
+export type RenameAccessProfileResponse = Message<"codewire.v1.RenameAccessProfileResponse"> & {
+  /**
+   * @generated from field: codewire.v1.AccessProfile access_profile = 1;
+   */
+  accessProfile?: AccessProfile | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.RenameAccessProfileResponse.
+ * Use `create(RenameAccessProfileResponseSchema)` to create a new message.
+ */
+export const RenameAccessProfileResponseSchema: GenMessage<RenameAccessProfileResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_access_profile, 11);
+
+/**
  * @generated from message codewire.v1.DeleteAccessProfileRequest
  */
 export type DeleteAccessProfileRequest = Message<"codewire.v1.DeleteAccessProfileRequest"> & {
@@ -278,7 +331,7 @@ export type DeleteAccessProfileRequest = Message<"codewire.v1.DeleteAccessProfil
  * Use `create(DeleteAccessProfileRequestSchema)` to create a new message.
  */
 export const DeleteAccessProfileRequestSchema: GenMessage<DeleteAccessProfileRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_access_profile, 10);
+  messageDesc(file_codewire_v1_access_profile, 12);
 
 /**
  * @generated from message codewire.v1.DeleteAccessProfileResponse
@@ -291,7 +344,7 @@ export type DeleteAccessProfileResponse = Message<"codewire.v1.DeleteAccessProfi
  * Use `create(DeleteAccessProfileResponseSchema)` to create a new message.
  */
 export const DeleteAccessProfileResponseSchema: GenMessage<DeleteAccessProfileResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_access_profile, 11);
+  messageDesc(file_codewire_v1_access_profile, 13);
 
 /**
  * Exact selection, not an access grant or proof that a runtime is ready.
@@ -320,7 +373,7 @@ export type EnvironmentAccessProfileBinding = Message<"codewire.v1.EnvironmentAc
  * Use `create(EnvironmentAccessProfileBindingSchema)` to create a new message.
  */
 export const EnvironmentAccessProfileBindingSchema: GenMessage<EnvironmentAccessProfileBinding> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_access_profile, 12);
+  messageDesc(file_codewire_v1_access_profile, 14);
 
 /**
  * @generated from message codewire.v1.GetEnvironmentAccessProfileRequest
@@ -337,7 +390,7 @@ export type GetEnvironmentAccessProfileRequest = Message<"codewire.v1.GetEnviron
  * Use `create(GetEnvironmentAccessProfileRequestSchema)` to create a new message.
  */
 export const GetEnvironmentAccessProfileRequestSchema: GenMessage<GetEnvironmentAccessProfileRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_access_profile, 13);
+  messageDesc(file_codewire_v1_access_profile, 15);
 
 /**
  * @generated from message codewire.v1.GetEnvironmentAccessProfileResponse
@@ -361,7 +414,7 @@ export type GetEnvironmentAccessProfileResponse = Message<"codewire.v1.GetEnviro
  * Use `create(GetEnvironmentAccessProfileResponseSchema)` to create a new message.
  */
 export const GetEnvironmentAccessProfileResponseSchema: GenMessage<GetEnvironmentAccessProfileResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_access_profile, 14);
+  messageDesc(file_codewire_v1_access_profile, 16);
 
 /**
  * AccessProfileService manages the authenticated user's personal platform
@@ -403,6 +456,14 @@ export const AccessProfileService: GenService<{
     methodKind: "unary";
     input: typeof UpdateAccessProfileRequestSchema;
     output: typeof UpdateAccessProfileResponseSchema;
+  },
+  /**
+   * @generated from rpc codewire.v1.AccessProfileService.RenameAccessProfile
+   */
+  renameAccessProfile: {
+    methodKind: "unary";
+    input: typeof RenameAccessProfileRequestSchema;
+    output: typeof RenameAccessProfileResponseSchema;
   },
   /**
    * @generated from rpc codewire.v1.AccessProfileService.DeleteAccessProfile
