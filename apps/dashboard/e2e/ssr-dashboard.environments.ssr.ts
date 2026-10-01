@@ -89,7 +89,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     const form = page.locator("[data-environment-form]");
     await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
     await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
-    await page.getByLabel("CPU", { exact: true }).selectOption("2000");
+    await page.locator("#environment-create-card").getByLabel("CPU", { exact: true }).selectOption("2000");
     await page.getByLabel("Delete after").fill("8h");
     await page.getByLabel("Name", { exact: true }).fill("draft-name-restored");
     await page.getByLabel("Repository URL", { exact: true }).fill("https://draft-canary.invalid/private-repository");
@@ -100,7 +100,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     // place of the original, or interpret discarded inventory selectors.
     await page.goto(`/${slug}/new/`);
     await expect(form).not.toHaveAttribute("data-create-draft-id", requestedDraft!);
-    await page.getByLabel("CPU", { exact: true }).selectOption("4000");
+    await page.locator("#environment-create-card").getByLabel("CPU", { exact: true }).selectOption("4000");
     await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
     for (const suffix of [
       "creation_draft=unavailable",
@@ -457,10 +457,12 @@ test.describe.serial("server-rendered environments", () => {
     await expect(drawer).toHaveCSS("transform", "none");
     await expect(page.locator("#environment-name")).toBeFocused();
     const ttl = page.getByLabel("Delete after");
-    await expect(ttl).toHaveValue("infinity");
+    // No preset is selected, so the field states what empty does.
+    await expect(ttl).toHaveValue("");
+    await expect(ttl).toHaveAttribute("placeholder", "Not scheduled");
     await ttl.fill("0");
     await ttl.press("Tab");
-    await expect(ttl).toHaveValue("infinity");
+    await expect(ttl).toHaveValue("");
     await page.locator("#environment-name").focus();
     await expect(page.locator("#environment-snapshot, .cw-snapshot-meter")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
@@ -566,10 +568,10 @@ test.describe.serial("server-rendered environments", () => {
     ].join(","))).toHaveCount(0);
     await expect(page.getByLabel("Install Command")).toHaveValue("bun install");
     await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
-    await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
-    await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
-    await expect(page.getByLabel("Disk", { exact: true })).toHaveValue("10");
-    await expect(page.getByLabel("Delete after")).toHaveValue("infinity");
+    await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("1000");
+    await expect(page.locator("#environment-create-card").getByLabel("Memory", { exact: true })).toHaveValue("2048");
+    await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("10");
+    await expect(page.getByLabel("Delete after")).toHaveValue("");
     await expect(page.getByLabel("Workspace image")).toHaveValue(
       "registry.example.test/team/workspace:v1",
     );
@@ -620,7 +622,7 @@ test.describe.serial("server-rendered environments", () => {
     test.skip(!isMobile, "mobile responsive and visual contract");
     await page.goto(`/${slug}/new/`);
     await expect(page.getByRole("heading", { name: "Create Sandbox" })).toBeVisible();
-    await expect(page.getByLabel("Delete after")).toHaveValue("infinity");
+    await expect(page.getByLabel("Delete after")).toHaveValue("");
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await page.locator(".cw-drawer-body").evaluate((element) => { element.scrollTop = 0; });
     expect(await page.locator("#environment-create-card").evaluate((element) => element.getBoundingClientRect().top)).toBe(0);
@@ -662,7 +664,7 @@ test.describe.serial("server-rendered environments", () => {
     expect((await response).status()).toBe(422);
     const ttl = page.getByLabel("Delete after");
     await expect(ttl).toHaveAttribute("aria-invalid", "true");
-    await expect(ttl).toHaveAccessibleDescription(/TTL must be infinity or 60 seconds to 365 days/);
+    await expect(ttl).toHaveAccessibleDescription(/Enter a duration from 60 seconds to 365 days/);
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     await expect(page.locator('[name="confirm_personal_credentials"]')).toHaveCount(0);
@@ -795,9 +797,9 @@ test.describe.serial("server-rendered environments", () => {
     });
 
     await openConfiguredImageForm(page);
-    await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
-    await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
-    await expect(page.getByLabel("Disk", { exact: true })).toHaveValue("10");
+    await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("1000");
+    await expect(page.locator("#environment-create-card").getByLabel("Memory", { exact: true })).toHaveValue("2048");
+    await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("10");
     await page.getByLabel("Name").fill(environmentName);
     await page.getByLabel("Secret project", { exact: true }).selectOption(secretProjectId);
     await page.getByRole("button", { name: "Create Sandbox" }).click();
@@ -1133,7 +1135,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(noopOperation.requestId).toBe(noopPlan.requestId);
     expect(noopOperation.desiredResources).toEqual(noopPlan.desiredResources);
     await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
-    await resizeDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await resizeDialog.getByRole("button", { name: "Done", exact: true }).click();
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/${environmentId}/`);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
     expect(await originalTerminalRoot.evaluate((root) => root.isConnected)).toBe(true);
@@ -1219,8 +1221,8 @@ test.describe.serial("server-rendered environments", () => {
     await page.goto(filteredDetailPath);
     // Stopped compute changes are saved for Start, not a disguised restart.
     await page.getByRole("button", { name: "Resize", exact: true }).click();
-    await resizeDialog.getByLabel("CPU (millicores)", { exact: true }).fill("750");
-    await resizeDialog.getByLabel("Memory (MiB)", { exact: true }).fill("1536");
+    await resizeDialog.getByLabel("CPU", { exact: true }).selectOption("2000");
+    await resizeDialog.getByLabel("Memory", { exact: true }).selectOption("4096");
     const stoppedReview = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/plan"));
     await resizeDialog.getByRole("button", { name: "Review resize", exact: true }).click();
     const stoppedPlanResponse = await stoppedReview;
@@ -1235,11 +1237,11 @@ test.describe.serial("server-rendered environments", () => {
     expect(stoppedResponse.status()).toBe(200);
     expect((await stoppedResponse.json()).requestId).toBe(stoppedPlan.requestId);
     await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
-    await resizeDialog.getByRole("button", { name: "Close", exact: true }).click();
+    await resizeDialog.getByRole("button", { name: "Done", exact: true }).click();
     const [deferred] = await sql`SELECT state, cpu_millicores, memory_mb FROM environments WHERE id = ${environmentId}`;
-    expect(deferred).toMatchObject({ state: "stopped", cpu_millicores: 750, memory_mb: 1536 });
+    expect(deferred).toMatchObject({ state: "stopped", cpu_millicores: 2000, memory_mb: 4096 });
     await expect(page.locator("[data-sandbox-resources]")).toHaveCount(2);
-    await expect(page.locator("[data-sandbox-resources]")).toHaveText(["0.75 vCPU · 1536 MiB · 10 GiB", "0.75 vCPU · 1536 MiB · 10 GiB"], { timeout: 30_000 });
+    await expect(page.locator("[data-sandbox-resources]")).toHaveText(["2 vCPU · 4 GiB · 10 GiB", "2 vCPU · 4 GiB · 10 GiB"], { timeout: 30_000 });
     await page.goto(`/${slug}/`);
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("stopped");

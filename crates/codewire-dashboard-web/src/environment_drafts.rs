@@ -203,6 +203,8 @@ impl SelectionDraft {
         form.memory.clone_from(&selections.memory);
         form.disk.clone_from(&selections.disk);
         form.ttl.clone_from(&selections.ttl);
+        // A draft saved without its own lifetime follows the restored preset.
+        form.follow_preset_ttl();
         form.isolation_tier.clone_from(&selections.isolation_tier);
         form.selected_agents.clone_from(&selections.agents);
         form.app_ports = selections
@@ -304,6 +306,8 @@ impl Selections {
     }
 }
 
+/// Empty asks for the default lifetime; "0" and "infinity" are older drafts'
+/// spellings of the same request.
 fn valid_ttl(value: &str) -> bool {
     if matches!(value, "" | "0" | "infinity") {
         return true;
@@ -564,6 +568,8 @@ mod tests {
                 "invalid draft selection {key}"
             );
         }
+        // Drafts now save an empty lifetime for the default; "0" and
+        // "infinity" from older drafts still restore.
         for value in ["", "0", "infinity", "1m", "8h", "365d"] {
             let mut valid = metadata();
             valid["selections"]["ttl"] = serde_json::json!(value);

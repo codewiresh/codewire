@@ -373,9 +373,9 @@ def preflight_archive(stream, size: int) -> None:
     raise SealError("Docker archive lacks a complete terminator")
 
 
-def verify_archive(path: Path, expected: dict[str, str]) -> None:
+def verify_archive(path: Path, expected: dict[str, str], *, image_identity: str = "manifest") -> None:
     try:
-        verify_archive_contents(path, expected)
+        verify_archive_contents(path, expected, image_identity)
     except (tarfile.TarError, UnicodeError, ValueError) as error:
         raise SealError("Docker archive metadata is invalid") from error
 
@@ -420,7 +420,7 @@ def verify_oci_blob(archive, members: dict, descriptor: dict, media: set[str],
 
 
 def verify_oci_index(archive, members: dict, expected: dict[str, str], compatibility: dict,
-                     deadline: float) -> dict[str, str]:
+                     deadline: float, image_identity: str) -> dict[str, str]:
     """Admit only Docker-save's observed single-platform OCI manifest chain."""
     require(decode(archive_bytes(archive, members, "oci-layout", JSON_BOUND))
             == {"imageLayoutVersion": "1.0.0"}, "unsupported OCI archive layout")
@@ -444,7 +444,10 @@ def verify_oci_index(archive, members: dict, expected: dict[str, str], compatibi
         tag = reference.removeprefix("docker.io/library/")
         require(reference == "docker.io/library/" + tag and tag in expected and tag not in found
                 and annotations["org.opencontainers.image.ref.name"] == tag.rsplit(":", 1)[-1]
-                and descriptor.get("digest") == expected[tag] and descriptor["digest"] not in digests,
+                and isinstance(descriptor.get("digest"), str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", descriptor["digest"])
+                and descriptor["digest"] not in digests
+                and (image_identity != "manifest" or descriptor.get("digest") == expected[tag]),
                 "OCI archive tag or manifest identity differs")
         name = verify_oci_blob(archive, members, descriptor,
                                {"application/vnd.oci.image.manifest.v1+json"}, hashes, deadline,
@@ -467,12 +470,25 @@ def verify_oci_index(archive, members: dict, expected: dict[str, str], compatibi
                        for layer in manifest["layers"]]
         require(layer_names == selected["layers"] and len(set(layer_names)) == len(layer_names),
                 "OCI ordered layers differ from the Docker compatibility manifest")
-        found[tag] = descriptor["digest"]
+        if image_identity == "config":
+            require(manifest["config"]["digest"] == expected[tag],
+                    "OCI config differs from the admitted image ID")
+            require(all(layer["mediaType"] == "application/vnd.oci.image.layer.v1.tar"
+                        for layer in manifest["layers"]),
+                    "classic image identity requires uncompressed OCI layers")
+            config_value = decode(archive_bytes(archive, members, config, INPUT_BOUND))
+            require(isinstance(config_value, dict) and config_value.get("rootfs") == {
+                "type": "layers", "diff_ids": [layer["digest"] for layer in manifest["layers"]]},
+                "OCI layers differ from the admitted config rootfs.diff_ids")
+            found[tag] = manifest["config"]["digest"]
+        else:
+            found[tag] = descriptor["digest"]
         digests.add(descriptor["digest"])
     return found
 
 
-def verify_archive_contents(path: Path, expected: dict[str, str]) -> None:
+def verify_archive_contents(path: Path, expected: dict[str, str], image_identity: str) -> None:
+    require(image_identity in ("manifest", "config"), "unsupported Docker image identity")
     deadline = time.monotonic() + 120
     with regular_reader(path) as (descriptor, before):
         with os.fdopen(os.dup(descriptor), "rb") as stream:
@@ -512,7 +528,9 @@ def verify_archive_contents(path: Path, expected: dict[str, str]) -> None:
                         compatibility[tag] = {"config": config_name, "config_id": image_id, "layers": layers}
                 require(set(found) == set(expected), "Docker archive tag inventory differs")
                 if "index.json" in members:
-                    found = verify_oci_index(archive, members, expected, compatibility, deadline)
+                    found = verify_oci_index(archive, members, expected, compatibility, deadline, image_identity)
+                else:
+                    require(image_identity == "config", "manifest image identity requires an OCI index")
                 require(found == expected, "Docker archive tags do not match admitted image IDs")
 
 
@@ -611,6 +629,27 @@ def reuse(root: Path, cargo_ci: Path, run_dir: Path) -> Path:
         return admitted_reuse(root, profiles, value, provenance(root), load_inventory(root))
 
 
+def image_identity_mode() -> str:
+    """Select identity from the admitting daemon, never from archive contents."""
+    value = decode(run("docker", "info", "--format",
+                       '{"driver":{{json .Driver}},"status":{{json .DriverStatus}}}'))
+    require(isinstance(value, dict) and set(value) == {"driver", "status"}
+            and isinstance(value["driver"], str) and 0 < len(value["driver"]) <= 64
+            and (value["status"] is None or isinstance(value["status"], list)),
+            "Docker image store metadata is invalid")
+    status = value["status"] or []
+    require(len(status) <= 32 and all(isinstance(pair, list) and len(pair) == 2
+            and all(isinstance(item, str) and len(item) <= 128 for item in pair) for pair in status)
+            and len({pair[0] for pair in status}) == len(status),
+            "Docker image store status is invalid")
+    driver_type = dict(status).get("driver-type")
+    if driver_type == "io.containerd.snapshotter.v1":
+        return "manifest"
+    require(driver_type is None and value["driver"] in ("overlay2", "vfs"),
+            "unsupported Docker image store")
+    return "config"
+
+
 def inspect_products(inventory, head: str) -> dict[str, str]:
     result = {}
     template = ('{"id":{{json .Id}},"os":{{json .Os}},"arch":{{json .Architecture}},'
@@ -663,7 +702,9 @@ def seal(root: Path, cargo_ci: Path, run_dir: Path) -> Path:
         destination = profile / f"{binding['source_head']}-{binding['source_tree']}"
         require(not destination.exists() and not destination.is_symlink(),
                 f"unadmitted artifact directory retained without overwrite: {destination}")
+        image_identity = image_identity_mode()
         expected = inspect_products(inventory, binding["source_head"])
+        print(f"kind artifact image identity: {image_identity}", file=sys.stderr)
         budget, files = Budget(), {}
         with tempfile.TemporaryDirectory(prefix=".sealing-", dir=profile) as temporary:
             stage = Path(temporary)
@@ -671,9 +712,10 @@ def seal(root: Path, cargo_ci: Path, run_dir: Path) -> Path:
             run("docker", "image", "save", "--output", str(archive), *inventory.PRODUCT_IMAGES,
                 timeout=900, file_limit=FILE_BOUND)
             archive_size = seal_archive_mode(archive, budget)
-            verify_archive(archive, expected)
-            require(inspect_products(inventory, binding["source_head"]) == expected,
-                    "product tags changed during archive publication")
+            verify_archive(archive, expected, image_identity=image_identity)
+            require(image_identity_mode() == image_identity
+                    and inspect_products(inventory, binding["source_head"]) == expected,
+                    "product tags or image store changed during archive publication")
             files["images.tar"] = {"sha256": digest(archive), "bytes": archive_size, "mode": 0o400}
             copy_smokes(inventory, cargo_ci, run_dir, stage, destination, budget, files)
             for name, checksum in binding["inputs"].items():

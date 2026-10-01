@@ -4,8 +4,9 @@
 //! daemon-init also copies the daemon from) and sometimes the workspace and
 //! DinD images. Without a cache, the first sandbox on a runtime node after a
 //! release waits for those pulls. Orchestration renders those exact digests,
-//! so it also keeps them warm: one `cw-image-cache` DaemonSet holds one idle
-//! container per image on every `katacontainers.io/kata-runtime` node.
+//! so it also keeps them warm: one `cw-image-cache` DaemonSet on every
+//! `katacontainers.io/kata-runtime` node mounts each image as a read-only OCI
+//! image volume, which makes the kubelet pull it and keeps it in use.
 //!
 //! The DaemonSet carries two image sets, ordered by release: the orchestration
 //! Deployment revision of the Pod that rendered them. Each orchestration Pod
@@ -22,14 +23,15 @@
 //! skipped and counted. Per-organization preset images are not cached: they
 //! are user-chosen, unbounded, and may name any registry.
 //!
-//! Every cache container runs the same idle process, whatever its image
-//! contains. An init container copies BusyBox and the musl dynamic loader out
-//! of the pinned DinD image ([`IMAGE_CACHE_TOOL_IMAGE`]) into an `emptyDir`;
-//! each cache container then runs `sleep` through that loader, with an empty
-//! `--library-path` and `--preload` so an image's `LD_LIBRARY_PATH` or
-//! `LD_PRELOAD` cannot load its own code. This works in images without a
-//! shell or libc and needs no extra image. The loader is x86-64 only, like
-//! every current runtime node.
+//! Nothing from a cached image ever runs. The Pod has one container, running
+//! BusyBox `sleep` from the pinned DinD image's own root filesystem
+//! ([`IMAGE_CACHE_IDLE_IMAGE`]); every other image is an image volume
+//! (`volumes[].image`, GA and locked on in Kubernetes 1.36) mounted read-only
+//! into it. The kubelet pulls image volumes with the Pod's pull secrets and
+//! its image garbage collector counts an image mounted by a container as in
+//! use. Executing from an `emptyDir` is not an option on Talos: the kubelet's
+//! state tree is `kubelet_state_t`, which pods may read and write but not use
+//! as a container entrypoint.
 //!
 //! This slice does not gate orchestration readiness on the cache. A new
 //! orchestration Pod adds its set and continues; the warm gauge reports
@@ -69,13 +71,14 @@ pub const IMAGE_CACHE_NODE_SELECTOR: [(&str, &str); 2] = [
     ("node.codewire.sh/runtime-candidate", "true"),
 ];
 pub const RUNTIME_CANDIDATE_TAINT_KEY: &str = "node.codewire.sh/runtime-candidate";
-/// The only image the init container may run: the DinD image the sandbox
+/// The only image the idle container may run: the DinD image the sandbox
 /// runtime policy already pins. The admission policy pins the same string.
-pub const IMAGE_CACHE_TOOL_IMAGE: &str = DEFAULT_DIND_IMAGE;
+/// It is cached by running it, so it is never also an image volume.
+pub const IMAGE_CACHE_IDLE_IMAGE: &str = DEFAULT_DIND_IMAGE;
 /// Bumped whenever the rendered Pod shape changes for the same image sets.
 /// A Pod never rewrites a DaemonSet rendered by a newer renderer. A test
 /// fails until a render change bumps it.
-pub const IMAGE_CACHE_RENDER_VERSION: u32 = 1;
+pub const IMAGE_CACHE_RENDER_VERSION: u32 = 2;
 /// Registries the admission policy accepts. Kept in the same order and
 /// spelling as `deployments/k8s/orchestration/image-cache-authz.yaml`.
 pub const APPROVED_IMAGE_REGISTRIES: [&str; 2] = ["registry.example.invalid/", "docker.io/library/"];
@@ -86,14 +89,12 @@ pub const APPROVED_IMAGE_PATTERN: &str = "^(registry[.]example[.]invalid|docker[
 const MAX_SETS: usize = 2;
 /// Workspace, gateway and DinD per set.
 const MAX_SET_IMAGES: usize = 3;
-/// The admission policy's container bound.
+/// The admission policy's image volume bound.
 pub const MAX_CACHED_IMAGES: usize = MAX_SETS * MAX_SET_IMAGES;
 const MAX_RETIRED: usize = 16;
-const TOOL_VOLUME: &str = "cw-image-cache-tool";
-const TOOL_DIR: &str = "/cw-image-cache";
-const TOOL_CONTAINER: &str = "tool";
-const BUSYBOX: &str = "busybox";
-const MUSL_LOADER: &str = "ld-musl-x86_64.so.1";
+const IDLE_CONTAINER: &str = "idle";
+/// Image volumes mount at `<root>/<volume name>`.
+pub const IMAGE_VOLUME_ROOT: &str = "/cw-image-cache";
 const CACHE_UID: i64 = 65532;
 /// About 68 years; BusyBox `sleep` takes seconds.
 const IDLE_SECONDS: &str = "2147483647";
@@ -359,28 +360,9 @@ fn container_resources() -> Value {
     })
 }
 
-/// The idle command every cache container runs. The empty loader options
-/// override an image's `LD_LIBRARY_PATH` and `LD_PRELOAD`.
+/// The idle container's command, from the pinned DinD image's own BusyBox.
 pub fn idle_command() -> Vec<String> {
-    vec![
-        format!("{TOOL_DIR}/{MUSL_LOADER}"),
-        "--library-path=".into(),
-        "--preload=".into(),
-        format!("{TOOL_DIR}/{BUSYBOX}"),
-        "sleep".into(),
-        IDLE_SECONDS.into(),
-    ]
-}
-
-/// The init container's command: copy the idle binaries into the emptyDir.
-pub fn tool_command() -> Vec<String> {
-    vec![
-        format!("/bin/{BUSYBOX}"),
-        "cp".into(),
-        format!("/bin/{BUSYBOX}"),
-        format!("/lib/{MUSL_LOADER}"),
-        format!("{TOOL_DIR}/"),
-    ]
+    vec!["/bin/busybox".into(), "sleep".into(), IDLE_SECONDS.into()]
 }
 
 /// Unique images across the held sets, newest release first.
@@ -394,23 +376,36 @@ pub fn cached_images(sets: &[ImageSet]) -> Vec<String> {
     images
 }
 
+/// The cached images held as image volumes: every cached image except the
+/// idle image, which the container itself keeps in use.
+pub fn volume_images(sets: &[ImageSet]) -> Vec<String> {
+    cached_images(sets)
+        .into_iter()
+        .filter(|image| image != IMAGE_CACHE_IDLE_IMAGE)
+        .take(MAX_CACHED_IMAGES)
+        .collect()
+}
+
 /// The DaemonSet `spec` for `sets` (newest release first).
 pub fn render_spec(sets: &[ImageSet]) -> Value {
-    let containers: Vec<Value> = cached_images(sets)
-        .into_iter()
-        .take(MAX_CACHED_IMAGES)
+    let images = volume_images(sets);
+    let name = |index: usize| format!("image-{index}");
+    let volumes: Vec<Value> = images
+        .iter()
         .enumerate()
         .map(|(index, image)| {
             json!({
-                "name": format!("image-{index}"),
-                "image": image,
-                "imagePullPolicy": "IfNotPresent",
-                "command": idle_command(),
-                "securityContext": container_security_context(),
-                "resources": container_resources(),
-                "volumeMounts": [
-                    { "name": TOOL_VOLUME, "mountPath": TOOL_DIR, "readOnly": true },
-                ],
+                "name": name(index),
+                "image": { "reference": image, "pullPolicy": "IfNotPresent" },
+            })
+        })
+        .collect();
+    let mounts: Vec<Value> = (0..images.len())
+        .map(|index| {
+            json!({
+                "name": name(index),
+                "mountPath": format!("{IMAGE_VOLUME_ROOT}/{}", name(index)),
+                "readOnly": true,
             })
         })
         .collect();
@@ -448,21 +443,18 @@ pub fn render_spec(sets: &[ImageSet]) -> Value {
                     "runAsGroup": CACHE_UID,
                     "seccompProfile": { "type": "RuntimeDefault" },
                 },
-                "initContainers": [
+                "containers": [
                     {
-                        "name": TOOL_CONTAINER,
-                        "image": IMAGE_CACHE_TOOL_IMAGE,
+                        "name": IDLE_CONTAINER,
+                        "image": IMAGE_CACHE_IDLE_IMAGE,
                         "imagePullPolicy": "IfNotPresent",
-                        "command": tool_command(),
+                        "command": idle_command(),
                         "securityContext": container_security_context(),
                         "resources": container_resources(),
-                        "volumeMounts": [ { "name": TOOL_VOLUME, "mountPath": TOOL_DIR } ],
+                        "volumeMounts": mounts,
                     },
                 ],
-                "containers": containers,
-                "volumes": [
-                    { "name": TOOL_VOLUME, "emptyDir": { "sizeLimit": "8Mi" } },
-                ],
+                "volumes": volumes,
             },
         },
     })
@@ -574,20 +566,30 @@ pub fn plan(cfg: &RenderConfig, live: Option<&Value>, desired: &DesiredSet) -> P
     }
 }
 
-/// Init and cache container images, in order; detects edits the annotation
-/// does not record.
+/// Container images and image volume references, in order; detects edits
+/// the annotation does not record.
 fn live_images(daemon_set: &Value) -> Vec<String> {
     let spec = daemon_set.pointer("/spec/template/spec");
-    ["initContainers", "containers"]
-        .iter()
-        .flat_map(|field| {
-            spec.and_then(|spec| spec.get(field))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .map(|container| container["image"].as_str().unwrap_or_default().to_owned())
-        .collect()
+    let list = |field: &str| {
+        spec.and_then(|spec| spec.get(field))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut images = Vec::new();
+    for container in list("initContainers").iter().chain(&list("containers")) {
+        images.push(container["image"].as_str().unwrap_or_default().to_owned());
+    }
+    for volume in list("volumes") {
+        images.push(
+            volume
+                .pointer("/image/reference")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    images
 }
 
 /// DaemonSet rollout status, from `status`.
@@ -635,10 +637,18 @@ mod tests {
     /// Every render version with the spec hash of the canonical render
     /// ([`canonical_state`]). A render change alters the hash; append the new
     /// hash under a bumped `IMAGE_CACHE_RENDER_VERSION`.
-    const RENDER_HISTORY: &[(u32, &str)] = &[(
-        1,
-        "d1f20498b4b3d5d2dd156333b012a6dd89ee6cbab09a7e00c1ff435db341cf8e",
-    )];
+    const RENDER_HISTORY: &[(u32, &str)] = &[
+        // One idle container per image, BusyBox copied into an emptyDir.
+        (
+            1,
+            "d1f20498b4b3d5d2dd156333b012a6dd89ee6cbab09a7e00c1ff435db341cf8e",
+        ),
+        // One idle DinD container; cached images as image volumes.
+        (
+            2,
+            "c46cf29f1834914680fef859418962896543769e8dda195062667229146aee8f",
+        ),
+    ];
 
     fn cfg() -> RenderConfig {
         RenderConfig {
@@ -647,7 +657,7 @@ mod tests {
     }
 
     /// A release's set, independent of the runtime image constants except
-    /// the DinD tool image, which is part of the render.
+    /// the DinD idle image, which is part of the render.
     fn release(gateway: &str, revision: u64) -> DesiredSet {
         DesiredSet {
             images: vec![WORKSPACE.into(), gateway.into(), DIND.into()],
@@ -858,7 +868,7 @@ mod tests {
         let (live, _) = apply(None, &release(GATEWAY_A, 1));
         let (live, _) = apply(live, &release(GATEWAY_B, 2));
         let mut edited = live.unwrap();
-        edited["spec"]["template"]["spec"]["containers"][0]["image"] =
+        edited["spec"]["template"]["spec"]["volumes"][0]["image"]["reference"] =
             "docker.io/library/busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000".into();
         assert!(matches!(
             plan(&cfg(), Some(&edited), &release(GATEWAY_A, 1)),
@@ -939,12 +949,19 @@ mod tests {
             );
         }
         let spec = render_spec(&disjoint.sets);
+        let pod = &spec["template"]["spec"];
+        assert_eq!(pod["volumes"].as_array().unwrap().len(), MAX_CACHED_IMAGES);
         assert_eq!(
-            spec["template"]["spec"]["containers"]
+            pod["containers"][0]["volumeMounts"]
                 .as_array()
                 .unwrap()
                 .len(),
             MAX_CACHED_IMAGES
+        );
+        // The idle image is the container's, never also a volume.
+        assert_eq!(
+            volume_images(&state.sets),
+            [WORKSPACE, GATEWAY_B, GATEWAY_A]
         );
     }
 
@@ -1015,21 +1032,31 @@ mod tests {
                 "node.codewire.sh/runtime-candidate": "true",
             })
         );
-        assert_eq!(pod["initContainers"][0]["image"], IMAGE_CACHE_TOOL_IMAGE);
-        for container in pod["containers"].as_array().unwrap() {
-            assert!(is_approved_image(container["image"].as_str().unwrap()));
-            assert_eq!(container["command"], json!(idle_command()));
-            assert_eq!(container["volumeMounts"][0]["readOnly"], true);
-        }
-        let containers = pod["containers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .chain(pod["initContainers"].as_array().unwrap());
-        for container in containers {
-            assert_eq!(container["securityContext"], container_security_context());
-            assert_eq!(container["resources"], container_resources());
-            assert!(container.get("env").is_none() && container.get("ports").is_none());
+        assert!(pod.get("initContainers").is_none());
+        let containers = pod["containers"].as_array().unwrap();
+        assert_eq!(containers.len(), 1);
+        let idle = &containers[0];
+        assert_eq!(idle["image"], IMAGE_CACHE_IDLE_IMAGE);
+        assert_eq!(idle["command"], json!(idle_command()));
+        assert_eq!(idle["securityContext"], container_security_context());
+        assert_eq!(idle["resources"], container_resources());
+        assert!(idle.get("env").is_none() && idle.get("ports").is_none());
+        let volumes = pod["volumes"].as_array().unwrap();
+        let mounts = idle["volumeMounts"].as_array().unwrap();
+        assert_eq!(volumes.len(), mounts.len());
+        for (volume, mount) in volumes.iter().zip(mounts) {
+            // Every image volume is mounted, so the kubelet counts it in use.
+            assert_eq!(volume["name"], mount["name"]);
+            assert!(is_approved_image(
+                volume["image"]["reference"].as_str().unwrap()
+            ));
+            assert_eq!(volume["image"]["pullPolicy"], "IfNotPresent");
+            assert_eq!(mount["readOnly"], true);
+            assert_eq!(
+                mount["mountPath"],
+                format!("{IMAGE_VOLUME_ROOT}/{}", volume["name"].as_str().unwrap())
+            );
+            assert_eq!(volume.as_object().unwrap().len(), 2, "image volumes only");
         }
         assert_eq!(
             spec["updateStrategy"]["rollingUpdate"],
@@ -1054,10 +1081,10 @@ mod tests {
             .collect();
         for fragment in [
             cel_list(&idle_command()),
-            cel_list(&tool_command()),
-            format!("c.image.matches('{APPROVED_IMAGE_PATTERN}')"),
-            format!("c.image == '{IMAGE_CACHE_TOOL_IMAGE}'"),
-            format!("size(object.spec.template.spec.containers) <= {MAX_CACHED_IMAGES}"),
+            format!("v.image.reference.matches('{APPROVED_IMAGE_PATTERN}')"),
+            format!("c.image == '{IMAGE_CACHE_IDLE_IMAGE}'"),
+            format!("size(variables.volumes) <= {MAX_CACHED_IMAGES}"),
+            format!("m.mountPath == '{IMAGE_VOLUME_ROOT}/' + m.name"),
             format!("variables.pod.nodeSelector == {{{}}}", node_selector.join(", ")),
             format!("request.name == '{IMAGE_CACHE_NAME}'"),
             format!("variables.pod.serviceAccountName == '{IMAGE_CACHE_SERVICE_ACCOUNT}'"),

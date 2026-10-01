@@ -16,8 +16,9 @@ use uuid::Uuid;
 // The shared helper bounds dispatch to 60 seconds. Private Launch/Restart allow
 // the 30-second projection rendezvous plus cleanup; Stop/control retain five
 // seconds. Bound admission and durable settlement as well.
-// If this outer deadline wins, any acquired lease remains unresolved. Never
-// release on timeout or interpret lease expiry as evidence of remote absence.
+// If this outer deadline wins, the shared helper's owner task still settles any
+// acquired lease from the dispatch outcome; this caller only reports it as
+// unknown. Never release on timeout or treat lease expiry as remote absence.
 const OWNER_TIMEOUT: Duration = Duration::from_secs(75);
 const SETUP_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -66,9 +67,12 @@ where
     // the lease and transferring it to the owner. Dropping a JoinHandle detaches
     // it; a vanished HTTP caller cannot cancel or compensate this mutation.
     tokio::spawn(async move {
+        let operation_pool = pool.clone();
+        let operation_environment_id = environment_id.clone();
         tokio::time::timeout(
             owner_timeout,
-            run_environment_runtime_mutation(&pool, &org_id, &environment_id, async {
+            run_environment_runtime_mutation(&pool, &org_id, &environment_id, async move {
+                let (pool, environment_id) = (operation_pool, operation_environment_id);
                 // This is a known local rejection after deletion admission but
                 // before polling the mutating RPC. A running Pod may still be
                 // replaced by its setup owner. Stop remains available then.

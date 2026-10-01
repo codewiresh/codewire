@@ -1,14 +1,19 @@
 # Runtime-node image cache (Program #2238 A2b). Orchestration reconciles one
-# DaemonSet, cw-image-cache, in the shared sandbox namespace. It holds one idle
-# container per image orchestration renders (workspace default, gateway and
-# daemon-init, DinD) for the current and previous release, on every
-# katacontainers.io/kata-runtime node, so a sandbox start after a release
-# does not wait for a pull.
+# DaemonSet, cw-image-cache, in the shared sandbox namespace. On every
+# katacontainers.io/kata-runtime node it mounts each image orchestration renders
+# (workspace default, gateway and daemon-init, DinD) for the current and
+# previous release as a read-only OCI image volume, so the kubelet pulls them
+# and its image garbage collector keeps them in use. A sandbox start after a
+# release then does not wait for a pull.
 #
-# The Pods run under the node's default runtime (runc), not Kata, in a user
-# namespace (hostUsers: false): they only keep images referenced. They run as
-# the dedicated cw-image-cache identity, which has no token and no RBAC, never
-# codewire-sandbox.
+# The Pod's one container runs BusyBox sleep from the pinned DinD image's own
+# root filesystem. Nothing from a cached image runs, and nothing runs from a
+# volume: on Talos an emptyDir is kubelet_state_t, which SELinux does not allow
+# as a container entrypoint.
+#
+# The Pod runs under the node's default runtime (runc), not Kata, in a user
+# namespace (hostUsers: false), as the dedicated cw-image-cache identity, which
+# has no token and no RBAC, never codewire-sandbox.
 #
 # The sandbox namespace is used because its Kyverno policy
 # (codewire-shared-sandbox-runtime-security) re-applies Pod Security baseline
@@ -86,10 +91,10 @@ subjects:
 ---
 # Every DaemonSet write by the orchestration identity must be the exact idle
 # image cache: its name and labels; a runc Pod in a user namespace on Kata
-# runtime nodes, with the dedicated tokenless identity; one emptyDir; no host
-# namespaces or privilege; at most six cache containers running only the idle
-# command through the loader copied by one init container from the pinned DinD
-# image; and only digest-pinned images from Harbor or Docker Official Images.
+# runtime nodes, with the dedicated tokenless identity; no host namespaces or
+# privilege; one container running only BusyBox sleep from the pinned DinD
+# image; no init containers; and at most six image volumes, each a
+# digest-pinned image from Harbor or Docker Official Images, mounted read-only.
 # The Rust renderer (crates/codewire-orchestration/src/sandbox/image_cache.rs)
 # has a test that this file pins its commands, images, selector and resources.
 apiVersion: admissionregistration.k8s.io/v1
@@ -114,14 +119,10 @@ spec:
   variables:
     - name: pod
       expression: object.spec.template.spec
-    # filter(c, false) keeps both branches the same typed list.
-    - name: initContainers
-      expression: >-
-        has(object.spec.template.spec.initContainers) ?
-        object.spec.template.spec.initContainers :
-        object.spec.template.spec.containers.filter(c, false)
     - name: containers
-      expression: object.spec.template.spec.containers + variables.initContainers
+      expression: object.spec.template.spec.containers
+    - name: volumes
+      expression: "has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : []"
     - name: labels
       expression: >-
         {'app.kubernetes.io/name': 'cw-image-cache', 'app.kubernetes.io/component': 'image-cache', 'app.kubernetes.io/part-of': 'codewire', 'app.kubernetes.io/managed-by': 'codewire'}
@@ -154,34 +155,34 @@ spec:
         has(variables.pod.hostUsers) && variables.pod.hostUsers == false
       message: the image cache must not share host namespaces and must run in a user namespace
     - expression: >-
-        has(variables.pod.volumes) && size(variables.pod.volumes) == 1 &&
-        variables.pod.volumes[0].name == 'cw-image-cache-tool' &&
-        has(variables.pod.volumes[0].emptyDir) &&
+        size(variables.volumes) <= 6 &&
+        variables.volumes.all(v, v.name.matches('^image-[0-9]$') &&
+        has(v.image) && has(v.image.reference) &&
+        v.image.reference.matches('^(registry[.]example[.]invalid|docker[.]io/library)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$') &&
+        has(v.image.pullPolicy) && v.image.pullPolicy == 'IfNotPresent') &&
         !has(variables.pod.resourceClaims)
-      message: the image cache may mount only its one emptyDir volume, with no hostPath, Secret, projected or device sources
+      message: the image cache may mount only up to six image volumes of digest-pinned images from registry.example.invalid or docker.io/library, with no other volume sources
     - expression: >-
-        variables.containers.all(c,
-        c.image.matches('^(registry[.]example[.]invalid|docker[.]io/library)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'))
-      message: image cache images must be digest-pinned references from registry.example.invalid or docker.io/library
-    - expression: >-
-        size(variables.initContainers) == 1 &&
-        variables.initContainers.all(c,
+        (!has(object.spec.template.spec.initContainers) || size(object.spec.template.spec.initContainers) == 0) &&
+        size(variables.containers) == 1 &&
+        variables.containers.all(c, c.name == 'idle' &&
         c.image == 'docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c' &&
         has(c.command) &&
-        c.command == ['/bin/busybox', 'cp', '/bin/busybox', '/lib/ld-musl-x86_64.so.1', '/cw-image-cache/'] &&
-        !has(c.args) && !has(c.restartPolicy) &&
-        has(c.volumeMounts) && size(c.volumeMounts) == 1 &&
-        c.volumeMounts[0].name == 'cw-image-cache-tool' && c.volumeMounts[0].mountPath == '/cw-image-cache')
-      message: the image cache's one init container may only copy the idle binaries out of the pinned DinD image
+        c.command == ['/bin/busybox', 'sleep', '2147483647'] &&
+        !has(c.args))
+      message: the image cache runs only one idle container, BusyBox sleep from the pinned DinD image, and no init containers
     - expression: >-
-        size(object.spec.template.spec.containers) <= 6 &&
-        object.spec.template.spec.containers.all(c,
-        has(c.command) &&
-        c.command == ['/cw-image-cache/ld-musl-x86_64.so.1', '--library-path=', '--preload=', '/cw-image-cache/busybox', 'sleep', '2147483647'] &&
-        !has(c.args) &&
-        has(c.volumeMounts) && c.volumeMounts.all(m,
-        m.name == 'cw-image-cache-tool' && has(m.readOnly) && m.readOnly))
-      message: image cache containers may only idle, at most six, with the tool volume mounted read-only
+        variables.containers.all(c,
+        (has(c.volumeMounts) ? size(c.volumeMounts) : 0) == size(variables.volumes) &&
+        (!has(c.volumeMounts) || c.volumeMounts.all(m,
+        has(m.readOnly) && m.readOnly &&
+        m.mountPath == '/cw-image-cache/' + m.name &&
+        !has(m.subPath) && !has(m.subPathExpr) &&
+        (!has(m.mountPropagation) || m.mountPropagation == 'None') &&
+        variables.volumes.exists(v, v.name == m.name)))) &&
+        variables.volumes.all(v, variables.containers.exists(c,
+        has(c.volumeMounts) && c.volumeMounts.exists(m, m.name == v.name)))
+      message: every image cache volume must be mounted read-only, once, at its own path in the idle container
     - expression: >-
         variables.containers.all(c,
         has(c.securityContext) &&
