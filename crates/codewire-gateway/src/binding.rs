@@ -293,8 +293,9 @@ mod tests {
     use codewire_gateway_proto::DaemonAuthToken;
     use codewire_proto::codewire::internal::v1::{
         DirectUdpTransport as ProtoDirectUdpTransport, EndpointList as ProtoEndpointList,
-        GatewayBindingService, IssueGatewayBindingResponse,
-        PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
+        GatewayBindingService, IssueGatewayBindingResponse, IssueGatewayDaemonCredentialRequest,
+        IssueGatewayDaemonCredentialResponse, PeerRelayTransport as ProtoPeerRelayTransport,
+        RuntimeTransport as ProtoRuntimeTransport,
     };
     use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
     use std::sync::{Arc, Mutex};
@@ -397,6 +398,14 @@ mod tests {
                 ..Default::default()
             })
         }
+
+        async fn issue_gateway_daemon_credential(
+            &self,
+            _ctx: RequestContext,
+            _request: ServiceRequest<'_, IssueGatewayDaemonCredentialRequest>,
+        ) -> ServiceResult<IssueGatewayDaemonCredentialResponse> {
+            Err(ConnectError::unimplemented("not served by this fixture"))
+        }
     }
 
     struct NotReadyBindingService;
@@ -409,6 +418,14 @@ mod tests {
             _request: ServiceRequest<'_, IssueGatewayBindingRequest>,
         ) -> ServiceResult<IssueGatewayBindingResponse> {
             Err(ConnectError::not_found("binding not ready"))
+        }
+
+        async fn issue_gateway_daemon_credential(
+            &self,
+            _ctx: RequestContext,
+            _request: ServiceRequest<'_, IssueGatewayDaemonCredentialRequest>,
+        ) -> ServiceResult<IssueGatewayDaemonCredentialResponse> {
+            Err(ConnectError::unimplemented("not served by this fixture"))
         }
     }
 
@@ -618,6 +635,14 @@ mod tests {
                 sidecar_token: "synthetic-coordinate-token".into(),
                 ..Default::default()
             })
+        }
+
+        async fn issue_gateway_daemon_credential(
+            &self,
+            _ctx: RequestContext,
+            _request: ServiceRequest<'_, IssueGatewayDaemonCredentialRequest>,
+        ) -> ServiceResult<IssueGatewayDaemonCredentialResponse> {
+            Err(ConnectError::unimplemented("not served by this fixture"))
         }
     }
 

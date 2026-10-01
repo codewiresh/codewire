@@ -8,6 +8,7 @@ use std::sync::Arc;
 use codewire_proto::codewire::internal::v1::{
     DirectUdpTransport as ProtoDirectUdpTransport, EndpointList as ProtoEndpointList,
     GatewayBindingService, IssueGatewayBindingRequest, IssueGatewayBindingResponse,
+    IssueGatewayDaemonCredentialRequest, IssueGatewayDaemonCredentialResponse,
     PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
 };
 use codewire_server_core::AppError;
@@ -55,6 +56,20 @@ impl GatewayBindingService for GatewayBindingConnectService {
             .await
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(proto_gateway_binding(binding))
+    }
+
+    /// The claim-time binding contract (Program #2238 B1) declares this RPC
+    /// before its authority is served: the gateway ownership-chain check and
+    /// the binding lookup land with the workspace-binding listener. Until
+    /// then every caller gets `unimplemented` and nothing is looked up.
+    async fn issue_gateway_daemon_credential(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, IssueGatewayDaemonCredentialRequest>,
+    ) -> ServiceResult<IssueGatewayDaemonCredentialResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "gateway daemon credentials are not served yet",
+        ))
     }
 }
 

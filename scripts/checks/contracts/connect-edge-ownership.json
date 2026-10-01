@@ -49,7 +49,9 @@
     "deployments/k8s/overlays/local-kind-static/ingress.yaml": "codewire-mesh",
     "tests/e2e/kind/ingress.yaml": "codewire-mesh"
   },
-  "pending": {},
+  "pending": {
+    "codewire.internal.v1.WorkspaceBindingService": "TODO(Program #2238 B1): serve on the dedicated workspace-binding listener (8087), then classify its closed internal listener ownership."
+  },
   "unrouted": {
     "codewire.internal.v1.GatewayBindingService": {
       "binary": "orchestration",

@@ -109,6 +109,7 @@ mod tests {
     use codewire_gateway_proto::{
         CREDENTIAL_GATEWAY_TOKEN_AUDIENCE, CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
         GATEWAY_BINDING_SERVICE_ACCOUNT, GATEWAY_BINDING_TOKEN_AUDIENCE,
+        WORKSPACE_BINDING_TOKEN_AUDIENCE,
     };
     use k8s_openapi::api::authentication::v1::{
         TokenReview, TokenReviewSpec, TokenReviewStatus, UserInfo,
@@ -298,6 +299,10 @@ mod tests {
             },
             |status: &mut TokenReviewStatus| {
                 status.audiences = Some(vec![CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE.into()])
+            },
+            // A workspace Pod's binding token never authenticates as a gateway.
+            |status: &mut TokenReviewStatus| {
+                status.audiences = Some(vec![WORKSPACE_BINDING_TOKEN_AUDIENCE.into()])
             },
         ] {
             let mut status = valid_status();

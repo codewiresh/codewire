@@ -18,6 +18,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codewire_gateway_proto::{
     CREDENTIAL_GATEWAY_TOKEN_AUDIENCE, CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
     GATEWAY_BINDING_SERVICE_ACCOUNT, GATEWAY_BINDING_TOKEN_AUDIENCE,
+    WORKSPACE_BINDING_TOKEN_AUDIENCE,
 };
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec, TokenReviewStatus};
 use kube::api::PostParams;
@@ -37,6 +38,7 @@ pub enum PodIdentityPurpose {
     GatewayBinding,
     CredentialGateway,
     CredentialWorkspace,
+    WorkspaceBinding,
 }
 
 impl PodIdentityPurpose {
@@ -45,6 +47,7 @@ impl PodIdentityPurpose {
             Self::GatewayBinding => GATEWAY_BINDING_TOKEN_AUDIENCE,
             Self::CredentialGateway => CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
             Self::CredentialWorkspace => CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
+            Self::WorkspaceBinding => WORKSPACE_BINDING_TOKEN_AUDIENCE,
         }
     }
 
@@ -53,9 +56,10 @@ impl PodIdentityPurpose {
         // account. Distinct audiences prevent purpose substitution; live Pod
         // role/owner checks are additionally required by the runtime authority.
         match self {
-            Self::GatewayBinding | Self::CredentialGateway | Self::CredentialWorkspace => {
-                GATEWAY_BINDING_SERVICE_ACCOUNT
-            }
+            Self::GatewayBinding
+            | Self::CredentialGateway
+            | Self::CredentialWorkspace
+            | Self::WorkspaceBinding => GATEWAY_BINDING_SERVICE_ACCOUNT,
         }
     }
 }
