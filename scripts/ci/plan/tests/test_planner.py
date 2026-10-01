@@ -1516,6 +1516,31 @@ class PlannerFixtureTests(unittest.TestCase):
             )
         )
 
+    def test_kind_suite_fixture_is_policy_only_without_artifact_changes(self) -> None:
+        path = "scripts/ci/tests/test-kind-e2e-suites.sh"
+        self.assertIn(path, PRODUCTION_GRAPH["non_artifact_inputs"])
+        self.repo.write(path, "#!/usr/bin/env bash\nset -euo pipefail\n", 0o755)
+        self.repo.commit("kind suite fixture change")
+        document = self.repo.plan()
+        self.assertFalse(document["degraded_reasons"])
+        self.assertTrue(all(
+            artifact["state"] == "unaffected"
+            for artifact in document["artifacts"].values()
+        ))
+        capabilities = select_capabilities([path])
+        self.assertIn("|policy|", capabilities["selection"])
+
+    def test_unknown_kind_suite_fixture_neighbor_remains_unclassified(self) -> None:
+        # The exact fixture exemption must not cover its unreviewed neighbors.
+        self.repo.write(
+            "scripts/ci/tests/test-kind-e2e-suites.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            0o755,
+        )
+        self.repo.change("scripts/ci/tests/test-kind-e2e-unreviewed.sh", "# Unknown input\n")
+        document = self.repo.plan()
+        self.assertEqual(self.states(document), ("unclassified",) * 2)
+
     def test_credential_acceptance_paths_keep_capability_checks_without_artifact_changes(self) -> None:
         for path in CREDENTIAL_ACCEPTANCE_PATHS:
             self.assertIn(path, PRODUCTION_GRAPH["non_artifact_inputs"])

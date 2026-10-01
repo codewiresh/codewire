@@ -13,10 +13,10 @@
   <body class="cw-body" data-route="dashboard-settings-api-keys" hx-history="false">
     <div class="cw-app" data-dashboard-app data-mobile-open="false">
       <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
-      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span>Codewire</span></a></header>
+      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
       <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
-      <main class="cw-main">{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-settings-page">
+      <main class="cw-main">{% include "console-header.html" %}<div class="cw-page cw-settings-page">
         <div class="cw-settings-layout">
           {% let settings_section = "api-keys" %}{% include "settings-nav.html" %}
           <div class="cw-settings-content cw-personal-api-keys-page">
@@ -53,9 +53,9 @@
 {% if group.truncated %}<p class="cw-alert cw-alert--warning" role="status">Showing your first 100 keys for this organization. Open the organization inventory for the remaining keys.</p>{% endif %}
 {% if group.keys.is_empty() %}<p class="cw-settings-muted">You have no API keys in this organization.</p>
 {% else %}
-<ul class="cw-personal-api-keys">
+<ul class="cw-row-list">
 {% for entry in group.keys %}{% let key_index = loop.index %}
-<li class="cw-personal-api-key-row"><header><h4>{{ entry.key.name }}</h4><span class="cw-credential-status cw-credential-status--{{ entry.key.status_tone }}">{{ entry.key.status }}</span></header>
+<li class="cw-personal-api-key-row"><header><h4>{{ entry.key.name }}</h4><span class="cw-status cw-status--pill cw-credential-status" data-tone="{{ entry.key.status_tone }}">{{ entry.key.status }}</span></header>
 <p class="cw-settings-muted">Prefix <code>{{ entry.key.prefix }}</code> · Last used {{ entry.key.last_used }}</p>
 <details class="cw-disclosure cw-credential-secondary"><summary>Key details</summary><dl class="cw-settings-details"><div><dt>Created</dt><dd>{{ entry.key.created }}</dd></div><div><dt>Expires</dt><dd>{{ entry.expires }}</dd></div><div><dt>Scope labels</dt><dd>{% if entry.scopes.is_empty() %}None{% else %}<ul>{% for scope in entry.scopes %}<li><code>{{ scope }}</code></li>{% endfor %}</ul>{% endif %}</dd></div></dl></details>
 <ul class="cw-credential-action-list" aria-label="Actions for {{ entry.key.name }}">
@@ -80,4 +80,4 @@
 </div></section>
 {% if !page.first_page_url.is_empty() || !page.next_page_url.is_empty() %}<nav class="cw-session-pagination" aria-label="Organization pages">{% if !page.first_page_url.is_empty() %}<a href="{{ page.first_page_url }}">First page</a>{% endif %}{% if !page.next_page_url.is_empty() %}<a href="{{ page.next_page_url }}">Next page</a>{% endif %}</nav>{% endif %}
 {% endif %}
-</div></div></div></div></main></div></body></html>
+</div></div></div></main></div></body></html>

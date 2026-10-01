@@ -121,13 +121,13 @@ test("unavailable organization inventory is not confused with no memberships", a
   await page.goto(fixture("-unavailable"));
   await expect(page.getByRole("status")).toContainText("does not mean you have no API keys");
   await expect(action(page, "Create key")).toBeDisabled();
-  await expect(page.locator("form")).toHaveCount(0);
+  await expect(page.locator("form:not([data-sign-out])")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "New organization", exact: true })).toHaveCount(0);
   await page.goto(fixture("-empty"));
   await expect(page.getByText("Join or create an organization before creating an API key.", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "New organization", exact: true })).toHaveAttribute("href", "/organizations/new/");
   await expect(action(page, "Create key")).toBeDisabled();
-  await expect(page.locator("form")).toHaveCount(0);
+  await expect(page.locator("form:not([data-sign-out])")).toHaveCount(0);
   await fits(page);
 });
 
@@ -138,7 +138,7 @@ test("one-time reveal replaces inventory, supports copy and clears only its raw 
   const value = page.locator("[data-one-time-api-key]");
   await expect(value).toHaveCount(1);
   await expect(value).toHaveText(syntheticKey);
-  await expect(page.locator(".cw-personal-api-key-groups, form, dialog")).toHaveCount(0);
+  await expect(page.locator(".cw-personal-api-key-groups, form:not([data-sign-out]), dialog")).toHaveCount(0);
   await expect(action(page, "Create key")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Done", exact: true })).toHaveAttribute("href", "settings-api-keys.html");
   const copy = page.locator("[data-copy-api-key]");
@@ -201,7 +201,7 @@ test.describe("without JavaScript", () => {
     await expect(page.locator("[data-copy-api-key]")).toBeHidden();
     await value.click();
     expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(syntheticKey);
-    await expect(page.locator("form, dialog")).toHaveCount(0);
+    await expect(page.locator("form:not([data-sign-out]), dialog")).toHaveCount(0);
     await page.getByRole("link", { name: "Done", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Your organization keys", exact: true })).toBeVisible();
     await expect(page.locator("[data-one-time-api-key]")).toHaveCount(0);

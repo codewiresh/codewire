@@ -5,7 +5,7 @@
   {% if repositories.is_empty() %}<p role="status">No repositories are available on this page for your GitHub account.</p>{% endif %}
   <ul class="cw-github-repository-list">
     {% for repository in repositories %}
-    <li><button type="button" data-select-github-repository data-repository-url="{{ repository.clone_url }}" data-repository-branch="{{ repository.default_branch }}" data-repository-name="{{ repository.full_name }}" data-repository-private="{{ repository.is_private }}"{% if repository.disabled %} disabled{% endif %}><span class="cw-github-repository-copy"><strong>{{ repository.full_name }}</strong><small>{% if repository.is_private %}Private{% else %}Public{% endif %}{% if repository.archived %} · Archived{% endif %}{% if repository.disabled %} · Unavailable{% endif %}</small></span><span class="cw-github-repository-action">Add</span></button></li>
+    <li><button class="cw-row-button" type="button" data-select-github-repository data-repository-url="{{ repository.clone_url }}" data-repository-branch="{{ repository.default_branch }}" data-repository-name="{{ repository.full_name }}" data-repository-private="{{ repository.is_private }}"{% if repository.disabled %} disabled{% endif %}><span class="cw-github-repository-copy"><strong>{{ repository.full_name }}</strong><small>{% if repository.is_private %}Private{% else %}Public{% endif %}{% if repository.archived %} · Archived{% endif %}{% if repository.disabled %} · Unavailable{% endif %}</small></span><span class="cw-github-repository-action">Add</span></button></li>
     {% endfor %}
   </ul>
   {% if !next_page_token.is_empty() %}<button class="cw-button cw-button--outline" type="button" data-github-next data-page-token="{{ next_page_token }}">Next page</button>{% endif %}
