@@ -500,13 +500,18 @@ impl server::Handler for Peer {
     async fn channel_open_session(
         &mut self,
         channel: Channel<server::Msg>,
+        reply: server::ChannelOpenHandle,
         _: &mut server::Session,
-    ) -> std::result::Result<bool, Self::Error> {
+    ) -> std::result::Result<(), Self::Error> {
         if self.admitted || !self.channels.is_empty() {
-            return Ok(false);
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         }
         self.channels.insert(channel.id(), channel);
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn exec_request(

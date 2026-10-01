@@ -80,11 +80,14 @@ impl russh::client::Handler for AcceptAllKeys {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        // Mirrors Go's gossh.InsecureIgnoreHostKey(): sandbox sidecars
-        // have ephemeral host keys.
-        Ok(true)
+        // Sandbox sidecars have ephemeral public host keys. Host certificates
+        // remain unsupported when the library exposes both identity types.
+        Ok(matches!(
+            server_public_key,
+            russh::keys::PublicKeyOrCertificate::PublicKey { .. }
+        ))
     }
 }
 
@@ -318,6 +321,39 @@ impl SidecarSftp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sidecar_accepts_public_keys_and_rejects_host_certificates() {
+        use russh::keys::ssh_key::{
+            PrivateKey,
+            certificate::{Builder, CertType},
+            private::Ed25519Keypair,
+        };
+
+        let key = PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32]));
+        let public_key = key.public_key().clone().into();
+        assert!(
+            russh::client::Handler::check_server_key(&mut AcceptAllKeys, &public_key)
+                .await
+                .unwrap()
+        );
+
+        let mut builder = Builder::new(
+            vec![0; 32],
+            key.public_key().key_data().clone(),
+            0,
+            u64::MAX,
+        )
+        .unwrap();
+        builder.cert_type(CertType::Host).unwrap();
+        builder.valid_principal("sidecar.test").unwrap();
+        let certificate = builder.sign(&key).unwrap().into();
+        assert!(
+            !russh::client::Handler::check_server_key(&mut AcceptAllKeys, &certificate)
+                .await
+                .unwrap()
+        );
+    }
 
     #[test]
     fn sidecar_config_uses_classic_kex() {

@@ -228,10 +228,12 @@ impl server::Handler for Peer {
     async fn channel_open_session(
         &mut self,
         channel: Channel<server::Msg>,
+        reply: server::ChannelOpenHandle,
         _: &mut server::Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         self.channels.insert(channel.id(), channel);
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
     async fn subsystem_request(
         &mut self,
