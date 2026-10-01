@@ -349,6 +349,14 @@
   margin-bottom: var(--space-6);
 }
 
+/* A page title with its count beside it, outside the heading's name. */
+.cw-page-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 :is(.cw-page-title, .cw-context-page-header h2) {
   margin: 0;
   color: var(--fg-primary);
@@ -890,6 +898,7 @@ fieldset.cw-field > legend {
 .cw-select {
   appearance: none;
   padding-right: calc(var(--control-padding-x) + var(--space-5));
+  white-space: nowrap;
   background-image: var(--icon-chevron-down);
   background-position: right var(--control-padding-x) center;
   background-repeat: no-repeat;

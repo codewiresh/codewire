@@ -133,7 +133,7 @@
 .cw-port-row { display: grid; grid-template-columns: minmax(8rem, 1fr) auto auto; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: var(--border-width) solid var(--border-subtle); }
 .cw-port-row strong, .cw-port-row small { display: block; }
 .cw-port-row small { margin-top: var(--space-0-5); color: var(--fg-tertiary); }
-.cw-port-form { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) 9rem auto; align-items: end; gap: var(--space-3); }
+.cw-port-form { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) minmax(15rem, 1fr) auto; align-items: end; gap: var(--space-3); }
 .cw-port-preview-url { display: block; overflow-wrap: anywhere; font-size: var(--text-small); }
 .cw-port-dialog { width: min(42rem, calc(100% - var(--space-8))); }
 

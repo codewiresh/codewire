@@ -36,7 +36,7 @@
   vertical-align: middle;
 }
 
-.cw-table th {
+.cw-table thead th {
   height: 2.25rem;
   background: var(--bg-surface);
   color: var(--fg-tertiary);
@@ -44,10 +44,48 @@
   font-weight: var(--weight-medium);
 }
 
+/* A row header names its row; it reads as a cell, not a column heading. */
+.cw-table tbody th {
+  color: var(--fg-primary);
+  font-weight: var(--weight-regular);
+}
+
 .cw-table tbody tr:hover { background: var(--bg-primary); }
 
-.cw-table tbody tr:last-child td {
+.cw-table tbody tr:last-child :is(td, th) {
   border-bottom: 0;
+}
+
+/* A table whose rows open menus lets them overflow. It fits phones by hiding
+   secondary columns and tightening cell insets instead of scrolling sideways. */
+.cw-table-shell--menus { overflow: visible; }
+.cw-table-shell--menus .cw-table-actions { width: var(--space-12); text-align: right; }
+
+@media (max-width: 48rem) {
+  .cw-table-shell--menus .cw-table-secondary { display: none; }
+  .cw-table-shell--menus :is(th, td) { padding-inline: var(--space-2); }
+  .cw-table-shell--menus .cw-table-actions { width: var(--space-10); }
+}
+
+/* Inventory pages: search and filters above the table, wrapping on phones. */
+.cw-inventory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.cw-inventory-toolbar .cw-input { flex: 1 1 var(--control-width-sm); max-width: var(--control-width); }
+.cw-inventory-toolbar .cw-select { flex: none; width: var(--control-width-sm); }
+
+/* A cell whose name leads and whose identifier sits below it. */
+.cw-cell-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  overflow-wrap: anywhere;
 }
 
 .cw-dialog-backdrop {
@@ -211,6 +249,7 @@ dialog.cw-discard-dialog {
   align-items: center;
   gap: var(--space-2);
   text-transform: capitalize;
+  white-space: nowrap;
 }
 
 .cw-status::before {
