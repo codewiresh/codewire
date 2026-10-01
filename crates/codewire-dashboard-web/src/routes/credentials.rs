@@ -654,7 +654,12 @@ pub(super) async fn github_app_callback(
         .filter(|dialog| !dialog.is_empty())
         .unwrap_or_else(|| "connect-github".to_owned());
     let response = if !query.error.is_empty() {
-        page_error_redirect("github-app-cancelled", &dialog, &context, &headers)
+        page_error_redirect(
+            github_callback_error(&query.error),
+            &dialog,
+            &context,
+            &headers,
+        )
     } else if !valid_github_app_callback_code(&query.code) {
         page_error_redirect("github-app-failed", &dialog, &context, &headers)
     } else {
@@ -685,6 +690,16 @@ pub(super) async fn github_app_callback(
     let response =
         super::remember_organization_choice(response, &state.public_origin, &context.org);
     github_app_callback_response(response, clear)
+}
+
+/// GitHub reports a person's choice to cancel as `access_denied`; every other
+/// callback error is a setup problem. Its text is never shown.
+fn github_callback_error(error: &str) -> &'static str {
+    if error == "access_denied" {
+        "github-app-cancelled"
+    } else {
+        "github-app-rejected"
+    }
 }
 
 fn github_app_installation_url(app_slug: &str) -> String {
@@ -1347,6 +1362,9 @@ fn approved_error(code: &str) -> &'static str {
         "github-app-cancelled" => {
             "GitHub App authorization was cancelled. No credential was changed."
         }
+        "github-app-rejected" => {
+            "GitHub could not authorize Codewire, so no credential was changed. Ask an administrator to check the Codewire GitHub App settings."
+        }
         "github-app-failed" => {
             "This GitHub connection attempt expired or could not be verified. Continue to GitHub to start a new attempt."
         }
@@ -1914,6 +1932,19 @@ mod tests {
             response.headers()[header::CACHE_CONTROL],
             HeaderValue::from_static("no-store, max-age=0")
         );
+    }
+
+    #[test]
+    fn github_callback_errors_separate_a_cancellation_from_a_setup_problem() {
+        assert_eq!(
+            github_callback_error("access_denied"),
+            "github-app-cancelled"
+        );
+        for error in ["redirect_uri_mismatch", "application_suspended", "<script>"] {
+            assert_eq!(github_callback_error(error), "github-app-rejected");
+        }
+        let message = approved_error("github-app-rejected");
+        assert!(message.contains("no credential was changed") && !message.contains("redirect"));
     }
 
     #[test]
