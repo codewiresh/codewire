@@ -850,4 +850,143 @@
   window.addEventListener("pageshow", () => {
     document.querySelectorAll("[data-environment-form]").forEach(resetCreateSubmission);
   });
+
+  // Workspace image choices open as a listbox on the menu surface instead of
+  // the browser's datalist popup. Without scripting the datalist still works.
+  // Options are read when the list opens, because Create choices load late.
+  const comboboxStates = new WeakMap();
+  const comboboxInput = (node) => node instanceof HTMLInputElement && node.matches("[data-combobox] input[data-combobox-options]") ? node : null;
+  const enhanceComboboxes = () => {
+    document.querySelectorAll("[data-combobox] input[list]").forEach((input) => {
+      if (!(input instanceof HTMLInputElement) || !input.id) return;
+      const listbox = document.createElement("ul");
+      listbox.id = `${input.id}-choices`;
+      listbox.className = "cw-combobox-list";
+      listbox.setAttribute("role", "listbox");
+      listbox.setAttribute("aria-label", input.closest("[data-combobox]").dataset.comboboxLabel || "Suggestions");
+      listbox.hidden = true;
+      input.dataset.comboboxOptions = input.getAttribute("list");
+      input.removeAttribute("list");
+      input.setAttribute("role", "combobox");
+      input.setAttribute("aria-autocomplete", "list");
+      input.setAttribute("aria-controls", listbox.id);
+      input.setAttribute("aria-expanded", "false");
+      input.autocomplete = "off";
+      input.closest("[data-combobox]").append(listbox);
+      comboboxStates.set(input, { listbox, options: [], active: -1 });
+    });
+  };
+  const closeCombobox = (input) => {
+    const state = comboboxStates.get(input);
+    if (!state || state.listbox.hidden) return false;
+    state.listbox.hidden = true;
+    state.active = -1;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    return true;
+  };
+  const activateOption = (input, index) => {
+    const state = comboboxStates.get(input);
+    if (!state || !state.options.length) return;
+    state.active = (index + state.options.length) % state.options.length;
+    state.options.forEach((option, position) => option.setAttribute("aria-selected", String(position === state.active)));
+    const active = state.options[state.active];
+    input.setAttribute("aria-activedescendant", active.id);
+    active.scrollIntoView({ block: "nearest" });
+  };
+  const openCombobox = (input, filter) => {
+    const state = comboboxStates.get(input);
+    const source = document.getElementById(input.dataset.comboboxOptions || "");
+    if (!state || !(source instanceof HTMLDataListElement)) return;
+    const query = filter ? input.value.trim().toLowerCase() : "";
+    const found = [...source.options].filter((option) => option.value
+      && (!query || option.value.toLowerCase().includes(query) || option.label.toLowerCase().includes(query)));
+    // While typing, a value that already equals every match needs no suggestion.
+    const matches = filter && found.every((option) => option.value === input.value) ? [] : found;
+    state.options = matches.map((option, index) => {
+      const item = document.createElement("li");
+      item.id = `${state.listbox.id}-${index}`;
+      item.className = "cw-combobox-option";
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", "false");
+      item.dataset.value = option.value;
+      const name = document.createElement("strong");
+      name.textContent = option.label || option.value;
+      if (option.dataset.official === "true") {
+        const badge = document.createElement("span");
+        badge.className = "cw-badge";
+        badge.dataset.tone = "info";
+        badge.textContent = "Official";
+        name.append(" ", badge);
+      }
+      const reference = document.createElement("code");
+      reference.textContent = option.value;
+      item.append(name, reference);
+      if (option.dataset.description) {
+        const description = document.createElement("span");
+        description.textContent = option.dataset.description;
+        item.append(description);
+      }
+      return item;
+    });
+    state.listbox.replaceChildren(...state.options);
+    state.active = -1;
+    input.removeAttribute("aria-activedescendant");
+    const open = state.options.length > 0;
+    state.listbox.hidden = !open;
+    input.setAttribute("aria-expanded", String(open));
+  };
+  const chooseOption = (input, option) => {
+    closeCombobox(input);
+    input.value = option.dataset.value || "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  document.addEventListener("keydown", (event) => {
+    const input = comboboxInput(event.target);
+    const state = input && comboboxStates.get(input);
+    if (!state) return;
+    const open = !state.listbox.hidden;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) openCombobox(input, false);
+      activateOption(input, event.key === "ArrowDown" ? state.active + 1 : state.active < 0 ? -1 : state.active - 1);
+    } else if (event.key === "Enter" && open && state.active >= 0) {
+      event.preventDefault();
+      chooseOption(input, state.options[state.active]);
+    } else if (event.key === "Escape" && closeCombobox(input)) {
+      // Close only the list, not the Create drawer around it.
+      event.preventDefault();
+      event.stopPropagation();
+    } else if (event.key === "Tab") {
+      closeCombobox(input);
+    }
+  }, true);
+  document.addEventListener("input", (event) => {
+    const input = comboboxInput(event.target);
+    if (!input || !event.isTrusted) return;
+    if (input.value.trim()) openCombobox(input, true); else closeCombobox(input);
+  });
+  document.addEventListener("click", (event) => {
+    const input = comboboxInput(event.target);
+    if (input) {
+      const state = comboboxStates.get(input);
+      if (state?.listbox.hidden) openCombobox(input, false); else closeCombobox(input);
+      return;
+    }
+    const option = event.target instanceof Element ? event.target.closest(".cw-combobox-option") : null;
+    const owner = option && document.querySelector(`[aria-controls="${option.parentElement?.id}"]`);
+    if (option && comboboxInput(owner)) chooseOption(owner, option);
+  });
+  // Keep focus in the field while a pointer picks an option.
+  document.addEventListener("mousedown", (event) => {
+    if (event.target instanceof Element && event.target.closest(".cw-combobox-list")) event.preventDefault();
+  });
+  document.addEventListener("focusout", (event) => {
+    const input = comboboxInput(event.target);
+    if (input) closeCombobox(input);
+  });
+  enhanceComboboxes();
+  document.addEventListener("htmx:afterSwap", enhanceComboboxes);
+  window.addEventListener("pageshow", enhanceComboboxes);
 })();
