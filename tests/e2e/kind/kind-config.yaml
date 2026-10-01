@@ -6,6 +6,11 @@
 # use plain HTTP via 127.0.0.1 (the hostless ingress); the coordinator bidi
 # smoke uses localhost SNI plus TLS+ALPN h2 through 10443.
 # Both paths cross nginx ingress instead of talking directly to a service.
+#
+# Every hostPort below is a default: kind/common.sh renders each one through
+# its KIND_*_HOST_PORT variable at cluster creation, so multiple harness
+# clusters can coexist on one workstation with distinct port assignments.
+# The in-cluster containerPorts and NodePorts always stay fixed.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -43,9 +48,7 @@ nodes:
         protocol: TCP
       # Postgres (NodePort 30432) — lets the host-side Go e2e suite seed
       # an API key and assert lifecycle journal rows against the in-cluster DB
-      # without relying on kubectl port-forward. The integrated harness may
-      # render a different host port through KIND_POSTGRES_HOST_PORT when the
-      # default is already occupied; the in-cluster NodePort remains fixed.
+      # without relying on kubectl port-forward.
       - containerPort: 30432
         hostPort: 25432
         protocol: TCP
