@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Account settings, authenticator replaced fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/settings.css">
+  <script src="../../dashboard.js" defer></script><script src="../../organizations.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+<main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>account</span><span>/</span><strong>console</strong></div><div class="cw-console-account"><a class="cw-console-support" href="#docs">Support</a><details class="cw-menu cw-user-menu"><summary class="cw-button cw-button--outline cw-button--small cw-button--pill">Example user<svg class="cw-icon cw-user-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary><div class="cw-menu-panel cw-menu-panel--end"><div class="cw-user-menu-identity"><strong>Example user</strong><span>Authenticated account</span></div><a href="settings-account.html">Settings</a><a href="#docs">Docs</a><form data-sign-out><button class="cw-menu-item" type="button">Sign Out</button></form></div></details></div></header><div class="cw-page cw-settings-page"><div class="cw-settings-layout">
+  <aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
+<nav class="cw-context-nav-links" aria-label="Settings">
+  <h3 id="settings-personal-title" class="cw-section-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title"><li><a class="cw-nav-link" href="settings-account.html" aria-current="page">Account</a></li><li><a class="cw-nav-link" href="settings-credentials.html">Credentials</a></li><li><a class="cw-nav-link" href="settings-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="settings-api-keys.html">API Keys</a></li></ul>
+
+</nav></aside>
+  <div class="cw-settings-content cw-account-page">
+    <header class="cw-page-header"><div><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, security and browser sessions.</p></div></header>
+    <section id="account-details" class="cw-card cw-settings-card" aria-labelledby="account-title">
+      <header class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account details</h2><p class="cw-card-description">Your Codewire account identity. GitHub connections do not change it.</p></header>
+      <div class="cw-card-content"><dl class="cw-settings-details"><div><dt>Name</dt><dd>Codewire Owner</dd></div><div><dt>Email</dt><dd>owner@example.test · Verified</dd></div><div><dt>Created</dt><dd>Sep 9, 2026, 17:00 UTC</dd></div></dl></div>
+    </section>
+    <section id="security" class="cw-card cw-settings-card" aria-labelledby="security-title">
+      <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>
+      <div class="cw-card-content"><ul class="cw-row-list">
+        <li class="cw-security-row"><div><h3>Two-factor authentication</h3><p>Sign-in asks for a code from your authenticator app. Recovery codes each work once.</p></div><div class="cw-security-actions"><span class="cw-status cw-status--pill" data-tone="success">Enabled</span><form class="cw-dialog-launcher" method="get" action="settings-account.html#replace-authenticator"><input type="hidden" name="dialog" value="replace-authenticator"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-dialog-open="replace-authenticator" aria-haspopup="dialog" aria-controls="replace-authenticator">Replace authenticator</button></form><form class="cw-dialog-launcher" method="get" action="settings-account.html#regenerate-recovery-codes"><input type="hidden" name="dialog" value="regenerate-recovery-codes"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-dialog-open="regenerate-recovery-codes" aria-haspopup="dialog" aria-controls="regenerate-recovery-codes">Regenerate recovery codes</button></form></div></li>
+        <li class="cw-security-row"><div><h3>Password</h3><p>Get a reset link by email.</p></div><a class="cw-button cw-button--outline cw-button--small" href="/forgot-password">Reset password</a></li>
+      </ul></div>
+    </section>
+    <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator" aria-labelledby="replace-authenticator-title">
+      <header class="cw-dialog-header"><h2 id="replace-authenticator-title">Replace authenticator</h2></header>
+      <div class="cw-dialog-body"><p>Confirm it's you before adding a new authenticator app. Your current authenticator and recovery codes keep working until the new one is verified.</p>
+        <form id="replace-authenticator-form" class="cw-form" method="post" action="/settings/_actions/two-factor/replace/start"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account">
+          <div class="cw-field"><label class="cw-label" for="replace-authenticator-password">Password</label><input class="cw-input" id="replace-authenticator-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus data-dialog-private></div>
+          <div class="cw-field"><label class="cw-label" for="replace-authenticator-proof">Current code or recovery code</label><input class="cw-input cw-input--mono" id="replace-authenticator-proof" name="proof" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" required aria-describedby="replace-authenticator-proof-help" data-dialog-private><p class="cw-field-help" id="replace-authenticator-proof-help">The six-digit code your current authenticator shows now, or one unused recovery code.</p></div>
+        </form></div>
+      <footer class="cw-dialog-actions"><form class="cw-dialog-launcher" method="get" action="settings-account.html#security"><button class="cw-button cw-button--outline" type="submit" data-dialog-close>Cancel</button></form><button class="cw-button" type="submit" form="replace-authenticator-form">Continue</button></footer>
+    </dialog>
+    <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator-done" aria-labelledby="replace-authenticator-done-title" data-dialog-auto-open>
+      <header class="cw-dialog-header"><h2 id="replace-authenticator-done-title">Authenticator replaced</h2></header>
+      <div class="cw-dialog-body"><p role="status">Your old authenticator and recovery codes no longer work, and your other browsers were signed out. Save these new recovery codes now. Each works once, and Codewire won't show them again.</p>
+        <ul class="cw-backup-codes" aria-label="New recovery codes"><li><code data-testid="recovery-code">0a1b2c3d4e</code></li><li><code data-testid="recovery-code">5f6a7b8c9d</code></li><li><code data-testid="recovery-code">e0f1a2b3c4</code></li><li><code data-testid="recovery-code">d5e6f7a8b9</code></li><li><code data-testid="recovery-code">c0d1e2f3a4</code></li><li><code data-testid="recovery-code">b5c6d7e8f9</code></li><li><code data-testid="recovery-code">a0b1c2d3e4</code></li><li><code data-testid="recovery-code">f5a6b7c8d9</code></li><li><code data-testid="recovery-code">e9d8c7b6a5</code></li><li><code data-testid="recovery-code">f4e3d2c1b0</code></li></ul></div>
+      <footer class="cw-dialog-actions"><a class="cw-button" href="settings-account.html#security">Done</a></footer>
+    </dialog>
+    <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="regenerate-recovery-codes" aria-labelledby="regenerate-recovery-codes-title">
+      <header class="cw-dialog-header"><h2 id="regenerate-recovery-codes-title">Regenerate recovery codes</h2></header>
+      <div class="cw-dialog-body"><p>Confirm it's you to make ten new recovery codes. Your current recovery codes stop working as soon as the new ones are made. Your authenticator keeps working.</p>
+        <form id="regenerate-recovery-codes-form" class="cw-form" method="post" action="/settings/_actions/two-factor/recovery-codes/regenerate"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account">
+          <div class="cw-field"><label class="cw-label" for="regenerate-recovery-codes-password">Password</label><input class="cw-input" id="regenerate-recovery-codes-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus data-dialog-private></div>
+          <div class="cw-field"><label class="cw-label" for="regenerate-recovery-codes-proof">Current code or recovery code</label><input class="cw-input cw-input--mono" id="regenerate-recovery-codes-proof" name="proof" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" required aria-describedby="regenerate-recovery-codes-proof-help" data-dialog-private><p class="cw-field-help" id="regenerate-recovery-codes-proof-help">The six-digit code your authenticator shows now, or one unused recovery code.</p></div>
+        </form></div>
+      <footer class="cw-dialog-actions"><form class="cw-dialog-launcher" method="get" action="settings-account.html#security"><button class="cw-button cw-button--outline" type="submit" data-dialog-close>Cancel</button></form><button class="cw-button" type="submit" form="regenerate-recovery-codes-form">Regenerate codes</button></footer>
+    </dialog>
+    <section id="sessions" class="cw-card cw-settings-card" aria-labelledby="sessions-title">
+      <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2></header>
+      <div class="cw-card-content">
+        <p class="cw-alert cw-alert--success" role="status">Your other browsers were signed out, and this browser has a new session. <a href="settings-account.html#sessions">Reload sessions</a></p>
+        <form id="sign-out"><button class="cw-button cw-button--outline" type="button">Sign out of this browser</button></form>
+      </div>
+    </section>
+  </div>
+</div></div></main>
+</body>
+</html>

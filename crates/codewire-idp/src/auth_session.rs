@@ -62,6 +62,14 @@ use crate::email_password::{
 
 mod session_inventory;
 
+// The cookie-only account controls share one boundary: exact Origin, the
+// session cookie and never a bearer, an owner-first lock order and a bounded,
+// private transaction. Two-factor replacement reuses it unchanged.
+pub(crate) use session_inventory::{
+    actor as lock_account_actor, bounded_transaction, cookie_digest, exact_origin, private,
+    unavailable, valid_id,
+};
+
 /// Web session lifetime: 8 hours (`auth.SessionDuration`, 28800s).
 pub(crate) const SESSION_DURATION_SECS: i64 = 8 * 60 * 60;
 /// Account lockout window after 5 failed sign-ins: 15 minutes.
@@ -488,7 +496,7 @@ pub(crate) fn hash_password(password: &str) -> Result<String, AppError> {
 /// Go-produced hash of the same format. A malformed hash or mismatch
 /// is a non-match, never an error the caller distinguishes (Go folds
 /// `err != nil || !match` into the same failure branch).
-fn verify_password(password: &str, encoded_hash: &str) -> bool {
+pub(crate) fn verify_password(password: &str, encoded_hash: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(encoded_hash) else {
         return false;
     };
@@ -675,6 +683,37 @@ pub(crate) async fn log_audit(
     .await;
 }
 
+/// [`log_audit`] inside the caller's transaction. Unlike the best-effort pool
+/// variant this returns its error: a failed insert aborts the transaction, so
+/// the change and its audit row commit together or not at all.
+pub(crate) async fn log_audit_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    action: &str,
+    user_id: &str,
+    ip: &str,
+    ua: &str,
+    metadata: serde_json::Value,
+    severity: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs
+            (id, timestamp, action, user_id, ip_address, user_agent, metadata, severity)
+        VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(hex_id())
+    .bind(action)
+    .bind(user_id)
+    .bind(ip)
+    .bind(ua)
+    .bind(metadata)
+    .bind(severity)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Insert a web session row (mirrors `auth.CreateSession`): a 64-hex
 /// token, a 32-hex id, `expires_at = NOW() + 8h`. Returns the
 /// browser-safe session metadata plus the raw token for `Set-Cookie`.
@@ -684,6 +723,20 @@ pub(crate) async fn create_session(
     ip: &str,
     ua: &str,
 ) -> Result<CreatedSession, AppError> {
+    create_session_in(pool, user_id, ip, ua).await
+}
+
+/// [`create_session`] on any executor, so a caller can issue the session in
+/// the same transaction that revokes the account's other sessions.
+pub(crate) async fn create_session_in<'e, E>(
+    executor: E,
+    user_id: &str,
+    ip: &str,
+    ua: &str,
+) -> Result<CreatedSession, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let id = hex_id();
     let token = hex_token();
     let token_hash = hash_session_token(&token);
@@ -705,7 +758,7 @@ pub(crate) async fn create_session(
     .bind(SESSION_DURATION_SECS)
     .bind(ip)
     .bind(ua)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "failed to create session");

@@ -176,7 +176,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 60
+  assert_passed_count "server-core migration matrix" "$logfile" 66
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
@@ -576,6 +576,16 @@ run_idp() {
     return 1
   fi
   assert_passed_count "idp session inventory" "$logfile" 7
+
+  logfile="$RUN_DIR/idp-two-factor-replacement.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo_ci test --profile ci -p codewire-idp --test two_factor_replacement -- --nocapture \
+    | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::idp two-factor replacement DB tests skipped"
+    return 1
+  fi
+  assert_passed_count "idp two-factor replacement" "$logfile" 11
 
   logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
