@@ -683,6 +683,39 @@ pub(crate) struct OrganizationRow {
     pub(crate) url: String,
 }
 
+impl OrganizationRow {
+    /// A readable organization name; an empty name falls back to its slug so
+    /// a missing value never renders blank.
+    pub(crate) fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.slug
+        } else {
+            &self.name
+        }
+    }
+}
+
+#[cfg(test)]
+mod organization_row_tests {
+    use super::OrganizationRow;
+
+    #[test]
+    fn display_name_falls_back_to_the_slug_only_when_the_name_is_empty() {
+        let row = |name: &str| OrganizationRow {
+            id: "org".into(),
+            name: name.into(),
+            slug: "alpha-team".into(),
+            role: "owner",
+            can_admin: true,
+            billing_plan: String::new(),
+            url: String::new(),
+        };
+        assert_eq!(row("Alpha team").display_name(), "Alpha team");
+        assert_eq!(row("  ").display_name(), "alpha-team");
+        assert_eq!(row("").display_name(), "alpha-team");
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct OrganizationContext {
     pub(crate) id: String,
