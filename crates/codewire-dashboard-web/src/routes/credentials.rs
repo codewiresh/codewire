@@ -1539,7 +1539,13 @@ mod tests {
         assert!(launchers.len() > 20);
         for form in &launchers {
             let form = form.split("</form>").next().unwrap();
-            assert!(form.starts_with(&format!(" method=\"get\" action=\"{PATH}\">")));
+            // A launcher returns to its dialog; Cancel returns to the page.
+            let action = form.split('"').nth(3).unwrap();
+            if form.contains("data-dialog-open=") {
+                assert!(action.starts_with(&format!("{PATH}#")), "{action}");
+            } else {
+                assert_eq!(action, PATH);
+            }
             assert!(form.contains(&draft_input), "a dialog form lost its draft");
             assert!(form.contains("type=\"submit\""));
             assert!(form.contains("data-dialog-open=") == form.contains("name=\"dialog\""));

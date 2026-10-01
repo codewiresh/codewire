@@ -403,6 +403,9 @@ test.describe("without JavaScript", () => {
     await page.route("**/settings-credentials.html?**", (route) => route.fulfill({ status: 204 }));
     await action(page, "Add credential").click();
     const url = new URL((await opened).url());
+    // The fragment brings the dialog into view on the reloaded page.
+    await expect(page.locator("form.cw-dialog-launcher").filter({ has: page.locator('input[name="dialog"][value="add-credential"]') }).first())
+      .toHaveAttribute("action", "settings-credentials.html#add-credential");
     expect(Object.fromEntries(url.searchParams)).toEqual({
       creation_draft: "00000000-0000-4000-8000-000000000003", dialog: "add-credential",
     });
