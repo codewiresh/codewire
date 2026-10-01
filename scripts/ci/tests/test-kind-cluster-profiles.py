@@ -18,6 +18,7 @@ import socket
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -73,6 +74,15 @@ def bind_port(port: int):
         listener.close()
 
 
+def touch_ctime(path: Path) -> None:
+    # Rewrite identical timestamps until the kernel records a newer change time.
+    info = path.stat()
+    deadline = time.monotonic() + 5
+    while path.stat().st_ctime_ns == info.st_ctime_ns:
+        assert time.monotonic() < deadline, "change time did not advance"
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+
 class ProfileTests(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory(prefix="kind-profile-test-")
@@ -126,6 +136,91 @@ class ProfileTests(unittest.TestCase):
         path, manifest = self.seal(value)
         admitted = self.profiles.record_artifacts(value["cluster_name"], value["ownership_nonce"], path)
         return admitted, path, manifest
+
+    def cargo_aliases(self, cluster="alpha"):
+        # Cargo hard-links each final binary to its deps output, and rustc links
+        # incremental work products between sessions and into deps.
+        target = self.path(cluster) / "watch-target/debug"
+        groups = ((b"synthetic executable", 0o755, ("deps/codewire-0123abcd", "codewire")),
+                  (b"synthetic dependency graph", 0o644,
+                   ("incremental/codewire-1a2b/s-h1-abc/dep-graph.bin",
+                    "incremental/codewire-1a2b/s-h1-abc-working/dep-graph.bin")),
+                  (b"synthetic object", 0o644,
+                   ("deps/codewire-0123abcd.cgu.o", "incremental/codewire-1a2b/s-h1-abc/cgu.o",
+                    "incremental/codewire-1a2b/s-h1-abc-working/cgu.o")))
+        paths = []
+        for data, mode, names in groups:
+            members = [target / name for name in names]
+            for member in members:
+                member.parent.mkdir(parents=True, exist_ok=True)
+            members[0].write_bytes(data)
+            members[0].chmod(mode)
+            for member in members[1:]:
+                os.link(members[0], member)
+            paths.append(members)
+        for directory in (target.parent, target, *target.rglob("*")):
+            if directory.is_dir():
+                directory.chmod(0o755)
+        return paths
+
+    def tree_state(self, cluster):
+        state = {}
+        for directory, _, files in os.walk(self.path(cluster)):
+            state[directory] = sorted(files)
+            for name in files:
+                member = Path(directory) / name
+                info = member.lstat()
+                state[str(member)] = (info.st_ino, info.st_nlink, info.st_mode, info.st_ctime_ns,
+                                      member.read_bytes())
+        return state
+
+    @contextmanager
+    def before_removal(self, mutate):
+        original = profile.remove_private_tree
+        pending = [mutate]
+
+        def remove(*args, **kwargs):
+            while pending:
+                pending.pop()()
+            return original(*args, **kwargs)
+
+        with patch.object(profile, "remove_private_tree", remove):
+            yield
+
+    @contextmanager
+    def before_open(self, name, mutate):
+        original = os.open
+
+        def open_member(path, flags, *args, **kwargs):
+            if path == name and not flags & os.O_DIRECTORY:
+                mutate()
+            return original(path, flags, *args, **kwargs)
+
+        with patch.object(profile.os, "open", open_member):
+            yield
+
+    @contextmanager
+    def after_unlink(self, name, mutate):
+        original = os.unlink
+
+        def unlink(path, *args, **kwargs):
+            original(path, *args, **kwargs)
+            if path == name:
+                mutate()
+
+        with patch.object(profile.os, "unlink", unlink):
+            yield
+
+    def assert_alias_mutation_fails_closed(self, cluster, hook, message):
+        value = self.profiles.ensure(cluster)
+        first, second = self.cargo_aliases(cluster)[0]
+        outside = Path(self.scratch.name) / f"{cluster}-outside-alias"
+        with hook(first, second, outside), self.assertRaisesRegex(profile.ProfileError, message):
+            self.profiles.purge(cluster, value["ownership_nonce"])
+        self.assertTrue((self.path(cluster) / "profile.json").is_file())
+        self.assertTrue(first.is_file())
+        if outside.exists():
+            self.assertEqual(outside.read_bytes(), first.read_bytes())
 
     def test_seven_real_loopback_leases_are_saved_and_stable(self):
         first = self.profiles.ensure("alpha")
@@ -673,8 +768,9 @@ class ProfileTests(unittest.TestCase):
         retained.write_bytes(b"retained bytes")
         retained.chmod(0o600)
         member = self.path() / "run/invalid"
-        for kind in ("symlink", "hardlink", "fifo", "shared-mode"):
-            if kind == "symlink":
+        alias = self.path() / "run/invalid-alias"
+        for kind in ("symlink", "hardlink", "fifo", "shared-mode", "symlink-alias", "shared-mode-alias"):
+            if kind.startswith("symlink"):
                 member.symlink_to(outside)
             elif kind == "hardlink":
                 os.link(outside, member)
@@ -683,12 +779,145 @@ class ProfileTests(unittest.TestCase):
             else:
                 member.write_bytes(b"shared writable bytes")
                 member.chmod(0o666)
+            if kind.endswith("-alias"):
+                # Accounted aliases inside the profile never admit a symlink or shared member.
+                os.link(member, alias, follow_symlinks=False)
             with self.subTest(kind=kind), self.assertRaises(profile.ProfileError):
                 self.profiles.purge("alpha", value["ownership_nonce"])
             self.assertEqual((self.path() / "profile.json").read_bytes(), before)
             self.assertEqual(retained.read_bytes(), b"retained bytes")
             self.assertEqual(outside.read_bytes(), b"preserve unrelated bytes")
             member.unlink()
+            alias.unlink(missing_ok=True)
+
+    def test_purge_removes_internal_cargo_hardlink_alias_groups(self):
+        value = self.profiles.ensure("alpha")
+        other = self.profiles.ensure("beta")
+        neighbor = (self.path("beta") / "profile.json").read_bytes()
+        outside = Path(self.scratch.name) / "unrelated"
+        outside.write_bytes(b"preserve unrelated bytes")
+        groups = self.cargo_aliases()
+        self.assertEqual([members[0].stat().st_nlink for members in groups], [2, 2, 3])
+        self.assertEqual(self.profiles.purge("alpha", value["ownership_nonce"]),
+                         {"cluster_name": "alpha", "purged": True})
+        self.assertFalse(self.path().exists())
+        self.assertEqual((self.path("beta") / "profile.json").read_bytes(), neighbor)
+        self.assertEqual(self.profiles.ensure("beta"), other)
+        self.assertEqual(outside.read_bytes(), b"preserve unrelated bytes")
+
+    def test_purge_refuses_external_and_neighbor_aliases_without_effect(self):
+        value = self.profiles.ensure("alpha")
+        self.profiles.ensure("beta")
+        groups = self.cargo_aliases()
+        for kind, alias in (("external", Path(self.scratch.name) / "external-alias"),
+                            ("neighbor", self.path("beta") / "neighbor-alias")):
+            os.link(groups[2][0], alias)
+            before, neighbor = self.tree_state("alpha"), self.tree_state("beta")
+            with self.subTest(kind=kind), self.assertRaisesRegex(profile.ProfileError, "outside the private profile"):
+                self.profiles.purge("alpha", value["ownership_nonce"])
+            self.assertEqual(self.tree_state("alpha"), before)
+            self.assertEqual(self.tree_state("beta"), neighbor)
+            alias.unlink()
+        self.profiles.purge("alpha", value["ownership_nonce"])
+        self.assertFalse(self.path().exists())
+
+    def test_purge_refuses_alias_mutation_after_inventory(self):
+        def replace(first, second, outside):
+            replacement = second.with_name("replacement")
+            replacement.write_bytes(second.read_bytes())
+            replacement.chmod(0o755)
+            os.replace(replacement, second)
+
+        def grow(first, second, outside):
+            with first.open("ab") as output:
+                output.write(b"changed")
+
+        def retime(first, second, outside):
+            info = first.stat()
+            os.utime(first, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+
+        for cluster, kind, mutate, message in (
+                ("gamma", "replacement", replace, "changed after inspection"),
+                ("delta", "link-count", lambda first, second, outside: os.link(first, outside),
+                 "changed before removal"),
+                ("epsilon", "size", grow, "changed before removal"),
+                ("zeta", "mtime", retime, "changed before removal"),
+                ("theta", "ctime", lambda first, second, outside: touch_ctime(first), "changed before removal")):
+            with self.subTest(kind=kind):
+                self.assert_alias_mutation_fails_closed(
+                    cluster, lambda first, second, outside: self.before_removal(lambda: mutate(first, second, outside)),
+                    message)
+
+    def test_purge_alias_removal_accepts_only_its_own_link_transition(self):
+        # Removal unlinks debug/codewire before its deps alias, so each hook acts between
+        # the purge's own unlink of one alias and its check of the next.
+        for cluster, kind, hook, message in (
+                ("gamma", "ctime", lambda first, second, outside: self.before_open(
+                    first.name, lambda: touch_ctime(first)), "changed before removal"),
+                ("delta", "link-count", lambda first, second, outside: self.before_open(
+                    first.name, lambda: os.link(first, outside)), "changed before removal"),
+                ("epsilon", "decrement", lambda first, second, outside: self.after_unlink(
+                    second.name, lambda: os.link(first, outside)), "changed during removal")):
+            with self.subTest(kind=kind):
+                self.assert_alias_mutation_fails_closed(cluster, hook, message)
+
+    def test_purge_resumes_guarded_partial_removal_without_admitting_normal_operations(self):
+        value = self.profiles.ensure("alpha")
+        self.profiles.ensure("beta")
+        neighbor = self.tree_state("beta")
+        admission = (self.path() / "profile.json").read_bytes()
+        first, _ = self.cargo_aliases()[0]
+        with self.before_open(first.name, lambda: touch_ctime(first)):
+            with self.assertRaisesRegex(profile.ProfileError, "changed before removal"):
+                self.profiles.purge("alpha", value["ownership_nonce"])
+        self.assertFalse((self.path() / "run").exists())
+        self.assertTrue((self.path() / "operation.lock").is_file())
+        self.assertEqual((self.path() / "profile.json").read_bytes(), admission)
+        for operation in (lambda: self.profiles.load("alpha"),
+                          lambda: self.profiles.ensure("alpha"),
+                          lambda: self.profiles.env("alpha"),
+                          lambda: self.profiles.save(value)):
+            with self.assertRaisesRegex(profile.ProfileError, "profile run directory"):
+                operation()
+        with self.assertRaisesRegex(profile.ProfileError, "nonce mismatch"):
+            self.profiles.purge("alpha", "0" * 32)
+        self.assertEqual((self.path() / "profile.json").read_bytes(), admission)
+        self.assertEqual(self.profiles.purge("alpha", value["ownership_nonce"]),
+                         {"cluster_name": "alpha", "purged": True})
+        self.assertFalse(self.path().exists())
+        self.assertEqual(self.tree_state("beta"), neighbor)
+
+    def test_purge_resume_keeps_present_runtime_and_kubeconfig_guards(self):
+        for cluster, kind in (("gamma", "run-symlink"), ("delta", "run-file"),
+                              ("epsilon", "run-mode"), ("zeta", "kubeconfig-link"),
+                              ("eta", "kubeconfig-mode")):
+            with self.subTest(kind=kind):
+                value = self.profiles.ensure(cluster)
+                root = self.path(cluster)
+                outside = Path(self.scratch.name) / (cluster + "-outside")
+                outside.write_bytes(b"preserve unrelated bytes")
+                outside.chmod(0o600)
+                runtime = root / "run"
+                runtime.rmdir()
+                if kind == "run-symlink":
+                    runtime.symlink_to(outside)
+                elif kind == "run-file":
+                    runtime.write_bytes(b"not a directory")
+                    runtime.chmod(0o600)
+                elif kind == "run-mode":
+                    runtime.mkdir(mode=0o755)
+                    runtime.chmod(0o755)
+                elif kind == "kubeconfig-link":
+                    os.link(outside, root / "kubeconfig")
+                else:
+                    (root / "kubeconfig").write_bytes(b"synthetic config")
+                    (root / "kubeconfig").chmod(0o644)
+                admission = (root / "profile.json").read_bytes()
+                with self.assertRaises(profile.ProfileError):
+                    self.profiles.purge(cluster, value["ownership_nonce"])
+                self.assertEqual((root / "profile.json").read_bytes(), admission)
+                self.assertTrue((root / "operation.lock").is_file())
+                self.assertEqual(outside.read_bytes(), b"preserve unrelated bytes")
 
     def test_cli_list_and_safe_collision_message_identify_recovery_action(self):
         value = self.profiles.ensure("alpha")

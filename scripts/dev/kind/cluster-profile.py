@@ -215,7 +215,12 @@ def write_json(path: Path, value: dict) -> None:
     atomic_write(path, data)
 
 
-def inspect_private_tree(descriptor: int, *, deadline: float, budget: list[int], depth: int = 0) -> dict:
+def member_state(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_size, info.st_mtime_ns)
+
+
+def inspect_private_tree(descriptor: int, *, deadline: float, budget: list[int], links: dict,
+                         directories: set, depth: int = 0) -> dict:
     require(depth <= 64 and time.monotonic() < deadline, "profile purge inventory exceeded its bound")
     result = {}
     with os.scandir(descriptor) as entries:
@@ -226,24 +231,34 @@ def inspect_private_tree(descriptor: int, *, deadline: float, budget: list[int],
             info = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
             require(info.st_uid == os.getuid() and not stat.S_IMODE(info.st_mode) & 0o022,
                     "profile purge found a foreign or writable shared member")
+            identity = (info.st_dev, info.st_ino)
             children = None
             if stat.S_ISDIR(info.st_mode):
+                require(identity not in directories, "profile purge found a repeated directory")
+                directories.add(identity)
                 child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
                                 dir_fd=descriptor)
                 try:
-                    require((os.fstat(child).st_dev, os.fstat(child).st_ino) == (info.st_dev, info.st_ino),
+                    require((os.fstat(child).st_dev, os.fstat(child).st_ino) == identity,
                             "profile purge directory changed during inspection")
-                    children = inspect_private_tree(child, deadline=deadline, budget=budget, depth=depth + 1)
+                    children = inspect_private_tree(child, deadline=deadline, budget=budget, links=links,
+                                                    directories=directories, depth=depth + 1)
                 finally:
                     os.close(child)
             else:
-                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
-                        "profile purge refuses links and special files")
+                require(stat.S_ISREG(info.st_mode), "profile purge refuses links and special files")
+                # Cargo hard-links build outputs inside its target directory. Count every
+                # name so purge can prove that each link of a file is a member of this tree.
+                first, seen = links.get(identity, (info, 0))
+                require((*member_state(first), first.st_nlink, first.st_ctime_ns)
+                        == (*member_state(info), info.st_nlink, info.st_ctime_ns),
+                        "profile purge member changed during inspection")
+                links[identity] = (first, seen + 1)
             result[entry.name] = (info, children)
     return result
 
 
-def remove_private_tree(descriptor: int, inventory: dict, *, deadline: float) -> None:
+def remove_private_tree(descriptor: int, inventory: dict, *, deadline: float, links: dict) -> None:
     # Leave admission metadata and its operation lock until the other members
     # have been removed, keeping an ordinary partial cache purge identifiable.
     for name in sorted(inventory, key=lambda name: (name in ("profile.json", "operation.lock"), name)):
@@ -259,16 +274,27 @@ def remove_private_tree(descriptor: int, inventory: dict, *, deadline: float) ->
             try:
                 require((os.fstat(child).st_dev, os.fstat(child).st_ino) == (before.st_dev, before.st_ino),
                         "profile purge directory changed before removal")
-                remove_private_tree(child, children, deadline=deadline)
+                remove_private_tree(child, children, deadline=deadline, links=links)
             finally:
                 os.close(child)
             os.rmdir(name, dir_fd=descriptor)
         else:
-            require(current.st_nlink == 1
-                    and (current.st_size, current.st_mtime_ns, current.st_ctime_ns)
-                    == (before.st_size, before.st_mtime_ns, before.st_ctime_ns),
-                    "profile purge file changed before removal")
-            os.unlink(name, dir_fd=descriptor)
+            identity = (before.st_dev, before.st_ino)
+            remaining, changed = links[identity]
+            member = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=descriptor)
+            try:
+                held = os.fstat(member)
+                require(member_state(held) == member_state(before)
+                        and (held.st_nlink, held.st_ctime_ns) == (remaining, changed),
+                        "profile purge file changed before removal")
+                os.unlink(name, dir_fd=descriptor)
+                held = os.fstat(member)
+                require(member_state(held) == member_state(before) and held.st_nlink == remaining - 1,
+                        "profile purge file changed during removal")
+            finally:
+                os.close(member)
+            # Our own unlink changes the link count and change time of the remaining aliases.
+            links[identity] = (remaining - 1, held.st_ctime_ns)
 
 
 @dataclass(frozen=True)
@@ -422,15 +448,21 @@ class Profiles:
         self.validate_mutable_paths(value["cluster_name"])
         write_json(self.path(value["cluster_name"]) / "profile.json", value)
 
-    def validate_mutable_paths(self, cluster: str) -> None:
+    def validate_mutable_paths(self, cluster: str, *, allow_absent_run: bool = False) -> None:
         """Check paths handed to writers without opening any kubeconfig data."""
-        try:
-            descriptor = directory_fd(self.path(cluster) / "run")
-        except (OSError, ProfileError) as error:
-            raise ProfileError("profile run directory must be owned, private and without symlinks") from error
-        os.close(descriptor)
         descriptor = directory_fd(self.path(cluster))
         try:
+            try:
+                os.stat("run", dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                require(allow_absent_run,
+                        "profile run directory must be owned, private and without symlinks")
+            else:
+                try:
+                    runtime = directory_fd(self.path(cluster) / "run")
+                except (OSError, ProfileError) as error:
+                    raise ProfileError("profile run directory must be owned, private and without symlinks") from error
+                os.close(runtime)
             try:
                 info = os.stat("kubeconfig", dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:
@@ -785,21 +817,32 @@ class Profiles:
 
     def purge(self, cluster: str, nonce: str) -> dict:
         with self.operation(cluster), self.registry():
-            value = self.load(cluster)
+            # A guarded partial purge may already have removed run/. Read the
+            # strict controls first; only this nonce-bound retirement may resume.
+            value, _ = read_json(self.path(cluster) / "profile.json")
+            self.validate(value, cluster, self.daemon)
             require(value["ownership_nonce"] == nonce, "profile ownership nonce mismatch")
             require(value["lifecycle"] in ("allocated", "deleted"),
                     "bound profile must be explicitly stopped before purge")
+            self.validate_mutable_paths(cluster, allow_absent_run=True)
             require(not self.docker.nodes(cluster), "profile purge refuses a live or replacement named node")
             with self.free_ports(value["ports"]):
                 directory = directory_fd(self.path(cluster))
                 parent = directory_fd(self.namespace)
                 try:
                     deadline = time.monotonic() + 30
-                    inventory = inspect_private_tree(directory, deadline=deadline, budget=[8192])
+                    root = os.fstat(directory)
+                    links: dict = {}
+                    inventory = inspect_private_tree(directory, deadline=deadline, budget=[8192], links=links,
+                                                     directories={(root.st_dev, root.st_ino)})
+                    require(all(seen == first.st_nlink for first, seen in links.values()),
+                            "profile purge refuses links outside the private profile")
                     info = os.stat(cluster, dir_fd=parent, follow_symlinks=False)
                     require((info.st_dev, info.st_ino) == (os.fstat(directory).st_dev, os.fstat(directory).st_ino),
                             "profile directory changed before purge")
-                    remove_private_tree(directory, inventory, deadline=deadline)
+                    remove_private_tree(directory, inventory, deadline=deadline,
+                                        links={identity: (first.st_nlink, first.st_ctime_ns)
+                                               for identity, (first, _) in links.items()})
                     os.rmdir(cluster, dir_fd=parent)
                     os.fsync(parent)
                 finally:
