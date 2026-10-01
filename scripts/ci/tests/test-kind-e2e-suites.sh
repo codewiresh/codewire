@@ -1161,7 +1161,7 @@ env \
   KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
-  ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
+  ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" FIXTURE="$FIXTURE" bash -seu <<'BASH'
   fail() { printf "[sealed-kind-test] ERROR: %s\n" "$*" >&2; exit 1; }
   record() { printf "%s\n" "$1" >>"$CALLS"; }
   assert_no_public_dind_images() {
@@ -1170,6 +1170,39 @@ env \
     if grep -Eq '^[[:space:]]*(-[[:space:]]+)?(image|SANDBOX_DIND_IMAGE):.*docker[.]io/library/docker:29[.]7[.]1-dind' "$1"; then
       fail 'sealed Kind overlay retained the public DinD image'
     fi
+  }
+  assert_no_nodeport_roulette() {
+    # Every NodePort Service port must be pinned: an auto-allocated port can
+    # claim one of the harness's explicit allocations (the derp http/stun
+    # roulette that starved coordinator 30090), and apply order decides the
+    # loser. This guard fails in seconds instead of one CI leg in N.
+    python3 - "$1" <<'PY'
+import sys
+import yaml
+
+services = 0
+ports = 0
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for document in yaml.safe_load_all(handle):
+        if not isinstance(document, dict) or document.get("kind") != "Service":
+            continue
+        spec = document.get("spec") or {}
+        if spec.get("type") != "NodePort":
+            continue
+        services += 1
+        for port in spec.get("ports") or []:
+            ports += 1
+            if not isinstance(port.get("nodePort"), int):
+                print(
+                    f"NodePort Service {document['metadata']['name']} leaves "
+                    f"port {port.get('port')} to allocation roulette",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+if services == 0 or ports == 0:
+    print("Kind overlay carries no NodePort Services; the roulette guard is stale", file=sys.stderr)
+    raise SystemExit(1)
+PY
   }
   # shellcheck source=scripts/ci/verify/kind/common.sh
   source "$COMMON"
@@ -1237,6 +1270,39 @@ env \
   assert_no_public_dind_images "$kind_rendered"
   grep -Fq "c.image == '$DEFAULT_KIND_DIND_IMAGE'" "$kind_rendered" ||
     fail 'sealed Kind overlay changed the image-cache admission pin'
+  # Every NodePort Service port in the harness topology must be pinned: an
+  # auto-allocated port can claim one of the explicit allocations (the
+  # ingress controller's unpinned NodePort pair starved coordinator 30090 on
+  # one apply order), and allocation order decides the loser. Cover the
+  # vendored ingress manifest, the e2e overlay render, and both local-kind
+  # overlay renders so this fails in seconds instead of one CI leg in N.
+  kubectl kustomize "$ROOT/deployments/k8s/overlays/local-kind" \
+    >"$FIXTURE/local-kind-overlay.yaml"
+  kubectl kustomize "$ROOT/deployments/k8s/overlays/local-kind-static" \
+    >"$FIXTURE/local-kind-static-overlay.yaml"
+  for topology in \
+      "$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml" \
+      "$kind_rendered" \
+      "$FIXTURE/local-kind-overlay.yaml" \
+      "$FIXTURE/local-kind-static-overlay.yaml"; do
+    assert_no_nodeport_roulette "$topology" ||
+      fail "NodePort roulette guard accepted ${topology}"
+  done
+  unpinned="$FIXTURE/ingress-unpinned-nodeport.yaml"
+  python3 - "$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml" "$unpinned" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+pin = "    nodePort: 30446\n"
+if text.count(pin) != 1:
+    raise SystemExit("ingress controller nodePort pin moved; the roulette guard fixture is stale")
+open(sys.argv[2], "w", encoding="utf-8").write(text.replace(pin, "", 1))
+PY
+  if (assert_no_nodeport_roulette "$unpinned") >"$FIXTURE/unpinned-nodeport.out" 2>&1; then
+    fail 'NodePort roulette guard accepted an unpinned Service port'
+  fi
+  grep -Fq 'leaves port 80 to allocation roulette' \
+    "$FIXTURE/unpinned-nodeport.out" ||
+    fail 'NodePort roulette guard did not identify the unpinned port'
 
   # Both actual pull surfaces must still fail even though the pinned admission
   # expression above is permitted. Use the real render for the config fixture.
