@@ -99,6 +99,71 @@ pub(crate) async fn environments(
         .collect())
 }
 
+/// The Sandbox inventory. Orchestration's default list leaves out Sandboxes
+/// being deleted, so those are asked for by state: a deleted Sandbox stays in
+/// its place, shown as Deleting, until it is gone. Destroyed Sandboxes are
+/// listed only on request, and that list already includes deleting ones.
+pub(crate) async fn inventory(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+    include_destroyed: bool,
+) -> Result<Vec<EnvironmentRow>, ConnectError> {
+    if include_destroyed {
+        return environments(state, cookie, org_id, true).await;
+    }
+    let list = |request: ListEnvironmentsRequest| {
+        let client = environment_client(state, cookie.clone());
+        async move {
+            client
+                .list_environments(request)
+                .await
+                .map(|response| response.into_owned().environments)
+        }
+    };
+    let (listed, deleting) = tokio::try_join!(
+        list(ListEnvironmentsRequest {
+            org_id: org_id.to_owned(),
+            page_size: 100,
+            ..Default::default()
+        }),
+        list(ListEnvironmentsRequest {
+            org_id: org_id.to_owned(),
+            state: EnvironmentState::Destroying.into(),
+            page_size: 100,
+            ..Default::default()
+        }),
+    )?;
+    Ok(merge_inventory(listed, deleting)
+        .into_iter()
+        .map(environment_row)
+        .collect())
+}
+
+/// Newest first, as orchestration lists them. A Sandbox in both lists changed
+/// state between the two reads; its deleting copy is kept, and the next
+/// refresh shows whatever followed.
+fn merge_inventory(listed: Vec<Environment>, deleting: Vec<Environment>) -> Vec<Environment> {
+    let deleting_ids: std::collections::HashSet<String> = deleting
+        .iter()
+        .map(|environment| environment.id.clone())
+        .collect();
+    let mut merged: Vec<Environment> = listed
+        .into_iter()
+        .filter(|environment| !deleting_ids.contains(&environment.id))
+        .chain(deleting)
+        .collect();
+    merged.sort_by_key(|environment| {
+        std::cmp::Reverse(
+            environment
+                .created_at
+                .as_option()
+                .map(|created| (created.seconds, created.nanos)),
+        )
+    });
+    merged
+}
+
 pub(crate) async fn environment(
     state: &AppState,
     cookie: HeaderValue,
@@ -1040,6 +1105,58 @@ mod tests {
         timestamp.nanos = nanos;
         environment.shutdown_at = Some(timestamp).into();
         environment
+    }
+
+    /// A deleted Sandbox keeps its place in the inventory, read as Deleting,
+    /// until orchestration reports it destroyed.
+    #[test]
+    fn inventory_keeps_deleting_sandboxes_in_place_and_reads_them_as_deleting() {
+        let sandbox = |id: &str, created: i64, state: EnvironmentState| {
+            let mut environment = Environment {
+                id: id.into(),
+                name: id.into(),
+                state: state.into(),
+                ..Default::default()
+            };
+            let mut timestamp = environment.created_at.into_option().unwrap_or_default();
+            timestamp.seconds = created;
+            environment.created_at = Some(timestamp).into();
+            environment
+        };
+        let rows: Vec<_> = merge_inventory(
+            vec![
+                sandbox("newest", 40, EnvironmentState::Running),
+                sandbox("raced", 30, EnvironmentState::Error),
+                sandbox("oldest", 10, EnvironmentState::Stopped),
+            ],
+            vec![
+                sandbox("deleting", 20, EnvironmentState::Destroying),
+                sandbox("raced", 30, EnvironmentState::Destroying),
+            ],
+        )
+        .into_iter()
+        .map(environment_row)
+        .collect();
+        let listed: Vec<_> = rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.state_label()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("newest", "running"),
+                ("raced", "deleting…"),
+                ("deleting", "deleting…"),
+                ("oldest", "stopped"),
+            ]
+        );
+        let deleting = &rows[2];
+        assert!(deleting.deletion_started());
+        assert!(!deleting.can_destroy && !deleting.can_start && !deleting.can_stop);
+        assert!(!rows[0].deletion_started() && !rows[3].deletion_started());
+        let destroyed = environment_row(sandbox("gone", 1, EnvironmentState::Destroyed));
+        assert_eq!(destroyed.state_label(), "deleted");
+        assert!(destroyed.deletion_started());
     }
 
     #[test]

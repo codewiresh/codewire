@@ -538,19 +538,81 @@
     const list = event.target instanceof Element && event.target.id === "environment-list" ? event.target : null;
     if (!list) return;
     const status = document.querySelector("[data-environment-list-error]");
-    if (status) status.hidden = false;
+    if (status) {
+      // The page has one polite status. It announces the failure once; the
+      // note stays until a refresh succeeds.
+      const announcer = document.querySelector("[data-inventory-status]");
+      if (status.hidden && announcer) showInventoryStatus(announcer, status.textContent);
+      status.hidden = false;
+    }
     if (list.dataset.environmentsLoading === "true") {
       const loading = list.querySelector('[role="status"]');
       if (loading) { loading.textContent = "Sandbox list is unavailable. Retrying…"; loading.setAttribute("role", "alert"); }
     }
   };
   ["htmx:sendError", "htmx:responseError", "htmx:timeout"].forEach((name) => document.addEventListener(name, environmentListError));
+  // Each list refresh is compared with the rows it replaces, and every
+  // observed lifecycle transition is announced once in the polite inventory
+  // status. Rows are tracked by Sandbox id and state in memory only: an
+  // unchanged row announces nothing on later refreshes, and a reload simply
+  // shows the current state. A Sandbox being deleted that leaves the list
+  // under the same search and filter is gone.
+  const inventoryStatusMs = 8_000;
+  let inventory = null;
+  let inventoryStatusTimer = 0;
+  const inventorySnapshot = (list) => {
+    const shell = list.querySelector("[data-list-state]");
+    const rows = new Map();
+    list.querySelectorAll("tr[data-environment-id]").forEach((row) => {
+      const { environmentId: id, environmentName: name, environmentState: state } = row.dataset;
+      if (canonicalId(id) && name && state) rows.set(id, { name, state });
+    });
+    return { query: shell ? `${shell.dataset.listSearch ?? ""}\n${shell.dataset.listState}` : null, rows };
+  };
+  const transitionMessage = (name, before, after) => {
+    if (before === "destroying") {
+      if (after === undefined || after === "destroyed") return `${name} deleted.`;
+      return after === "error" ? `${name} could not be deleted.` : "";
+    }
+    if (after === "destroying") return `Deleting ${name}…`;
+    if (after === "stopped") return `${name} stopped.`;
+    // Resize reports its own outcome; every other return to running is news.
+    if (after === "running" && before !== "resizing") return `${name} is running.`;
+    return "";
+  };
+  const showInventoryStatus = (status, message) => {
+    window.clearTimeout(inventoryStatusTimer);
+    status.textContent = message;
+    inventoryStatusTimer = window.setTimeout(() => { status.textContent = ""; }, inventoryStatusMs);
+  };
+  const observeInventory = (list) => {
+    const next = inventorySnapshot(list);
+    const status = document.querySelector("[data-inventory-status]");
+    if (status && inventory && inventory.query !== null && inventory.query === next.query) {
+      const messages = [];
+      inventory.rows.forEach((before, id) => {
+        const after = next.rows.get(id);
+        if (after?.state === before.state) return;
+        const message = transitionMessage(after?.name ?? before.name, before.state, after?.state);
+        if (message) messages.push(message);
+      });
+      if (messages.length) showInventoryStatus(status, messages.join(" "));
+    }
+    inventory = next;
+  };
+  const initialList = document.getElementById("environment-list");
+  if (initialList) inventory = inventorySnapshot(initialList);
+  // The server names what became of a just-deleted Sandbox. Setting it again
+  // once the page has loaded announces it, and starts its timer.
+  const initialStatus = document.querySelector("[data-inventory-status]");
+  if (initialStatus?.textContent) showInventoryStatus(initialStatus, initialStatus.textContent);
   document.addEventListener("htmx:afterSwap", (event) => {
     const list = event.target instanceof Element && event.target.id === "environment-list" ? event.target : null;
     if (!list) return;
     list.dataset.environmentsLoading = "false";
     const status = document.querySelector("[data-environment-list-error]");
     if (status) status.hidden = true;
+    observeInventory(list);
   });
 
   const nextIndex = (container, selector, minimum = 0) => {

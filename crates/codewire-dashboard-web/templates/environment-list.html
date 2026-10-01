@@ -1,22 +1,23 @@
 {% if page.environments.is_empty() %}
-<div class="cw-table-shell cw-sandbox-table-shell">
+<div class="cw-table-shell cw-sandbox-table-shell" data-list-search="{{ page.search }}" data-list-state="{{ page.state }}">
   <table class="cw-table cw-sandbox-table"><thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead><tbody><tr><td colspan="6"><div class="cw-state"><strong>No Sandboxes found</strong><p>Start an isolated workspace from a repository or image.</p><a class="cw-button cw-button--pill" href="{{ organization.environments_url }}new/" data-drawer-trigger>Create Sandbox</a></div></td></tr></tbody></table>
 </div>
 {% else %}
-<div class="cw-table-shell cw-sandbox-table-shell">
+<div class="cw-table-shell cw-sandbox-table-shell" data-list-search="{{ page.search }}" data-list-state="{{ page.state }}">
   <table class="cw-table cw-sandbox-table">
     <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead>
     <tbody>
       {% for sandbox in page.environments %}
-      <tr>
+      <tr data-environment-id="{{ sandbox.id }}" data-environment-name="{{ sandbox.name }}" data-environment-state="{{ sandbox.state }}">
         <td><a class="cw-environment-name" href="{{ page.detail_url(organization.slug, sandbox.id) }}" title="{{ sandbox.id }}">{{ sandbox.name }}</a>{% if !sandbox.preset_name.is_empty() %}<small class="cw-environment-preset">{{ sandbox.preset_name }}</small>{% endif %}{% if sandbox.isolation_tier == "confidential" %}<small class="cw-environment-preset">Confidential</small>{% endif %}<small class="cw-environment-preset cw-sandbox-lifetime">Automatic deletion: {% let lifetime = sandbox %}{% include "environment-lifetime.html" %}</small></td>
-        <td><span class="cw-status cw-status--pill" data-tone="{{ sandbox.state_tone }}"><span class="cw-sr-only" aria-hidden="true">{{ sandbox.state_symbol }}</span>{{ sandbox.state }}</span></td>
+        <td><span class="cw-status cw-status--pill" data-tone="{{ sandbox.state_tone }}"><span class="cw-sr-only" aria-hidden="true">{{ sandbox.state_symbol }}</span>{{ sandbox.state_label() }}</span></td>
         <td class="cw-mono">{{ sandbox.resources }}</td>
         <td>{{ sandbox.last_event }}</td>
         <td>{{ sandbox.created }}</td>
         <td class="cw-action-cell"><details class="cw-menu cw-row-menu"><summary class="cw-icon-button" aria-label="Actions for {{ sandbox.name }}">•••</summary><div class="cw-menu-panel cw-menu-panel--end">
           <a href="{{ page.detail_url(organization.slug, sandbox.id) }}">Open Sandbox</a>
           <span class="cw-row-menu-meta">{{ sandbox.cost }} usage</span>
+          {% if sandbox.deletion_started() %}<p class="cw-row-menu-note">{% if sandbox.state == "destroyed" %}This Sandbox was deleted.{% else %}Deletion in progress. No other actions are available.{% endif %}</p>{% else %}
           <details class="cw-disclosure cw-menu-resize"><summary>Secrets and credentials</summary>
             {% if let Some(sources) = sandbox.sources %}
             <dl class="cw-source-summary"><dt>Sandbox operation</dt><dd>{{ sources.operation_generation }}</dd><dt>Application sources</dt><dd>{% if sources.organization %}Organization{% endif %}{% if sources.personal %} Personal{% endif %}{% if !sources.project.is_empty() %} {{ sources.project }}{% endif %}{% if !sources.organization && !sources.personal && sources.project.is_empty() %}None{% endif %}</dd><dt>Credential profile</dt><dd>{% if sources.profile.is_empty() %}None{% else %}{{ sources.profile }} · revision {{ sources.profile_revision }}{% endif %}</dd></dl>
@@ -33,6 +34,7 @@
           {% for port in sandbox.ports %}{% if port.has_preview %}<a href="{{ port.preview_url }}" target="_blank" rel="noopener noreferrer">{{ port.label }} preview</a>{% endif %}{% endfor %}
           {% endif %}
           {% if sandbox.can_destroy %}<details class="cw-disclosure cw-menu-confirm cw-menu-danger"><summary>Delete</summary><form method="post" action="/{{ organization.slug }}/_actions/sandboxes/delete" hx-post="/{{ organization.slug }}/_actions/sandboxes/delete"><input type="hidden" name="_csrf" value="{{ page.create_form.csrf_token }}"><input type="hidden" name="environment_id" value="{{ sandbox.id }}"><input type="hidden" name="list_search" value="{{ page.search }}"><input type="hidden" name="list_state" value="{{ page.state }}"><p>Delete <strong>{{ sandbox.name }}</strong>? This cannot be undone.</p><button class="cw-button cw-danger-button cw-button--small" type="submit">Delete permanently</button></form></details>{% endif %}
+          {% endif %}
         </div></details></td>
       </tr>
       {% endfor %}

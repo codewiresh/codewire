@@ -838,6 +838,22 @@ pub(crate) struct EnvironmentRow {
 }
 
 impl EnvironmentRow {
+    /// The lifecycle state as people read it. Deletion uses the product's
+    /// Delete language; every other state reads as its name.
+    pub(crate) fn state_label(&self) -> &'static str {
+        match self.state {
+            "destroying" => "deleting…",
+            "destroyed" => "deleted",
+            state => state,
+        }
+    }
+
+    /// Delete was accepted: the Sandbox is going or gone, so no lifecycle,
+    /// resource or connection action applies to it any more.
+    pub(crate) fn deletion_started(&self) -> bool {
+        matches!(self.state, "destroying" | "destroyed")
+    }
+
     pub(crate) fn cpu_resize_choices(&self) -> Vec<ResourceChoice> {
         current_resource_choices(CPU_CHOICES, self.cpu_millicores, "millicores")
     }
@@ -1568,6 +1584,9 @@ pub(crate) struct EnvironmentsPageView {
     pub(crate) resize_operation: Option<EnvironmentResizeOperationView>,
     pub(crate) search: String,
     pub(crate) state: String,
+    /// The inventory's one polite status: an action's outcome, including what
+    /// became of a Sandbox just deleted. Script replaces it as later list
+    /// refreshes observe transitions.
     pub(crate) message: String,
     pub(crate) error: String,
 }

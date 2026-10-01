@@ -81,6 +81,9 @@ pub(super) struct EnvironmentsQuery {
     resize_operation: String,
     #[serde(default)]
     message: String,
+    /// The Sandbox a Delete named, so the list can say what became of it.
+    #[serde(default)]
+    environment: String,
     #[serde(default)]
     error: String,
 }
@@ -1743,20 +1746,15 @@ where
             headers,
         );
     }
+    let environment_id = submission.environment_id.clone();
     match operation(state, cookie, organization.id, submission.environment_id).await {
         Ok(()) => {
             let destination = if message == "environment-destroying" {
-                list_context.list_url(slug)
+                deletion_feedback_path(&list_context.list_url(slug), &environment_id)
             } else {
-                continuation
+                lifecycle_feedback_path(&continuation, message, "")
             };
-            mutation_redirect(
-                state,
-                lifecycle_feedback_path(&destination, message, ""),
-                "",
-                "",
-                headers,
-            )
+            mutation_redirect(state, destination, "", "", headers)
         }
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&continuation, headers)
@@ -1782,6 +1780,17 @@ fn lifecycle_return_path(
     } else {
         context.list_url(slug)
     }
+}
+
+/// Delete lands on the list and names the Sandbox there, so the page can say
+/// what became of it. Only a canonical Sandbox id is ever echoed.
+fn deletion_feedback_path(path: &str, environment_id: &str) -> String {
+    let mut target = lifecycle_feedback_path(path, "environment-destroying", "");
+    if super::terminal::canonical_environment_id(environment_id) {
+        target.push_str("&environment=");
+        target.push_str(environment_id);
+    }
+    target
 }
 
 fn lifecycle_feedback_path(path: &str, message: &str, error: &str) -> String {
@@ -1847,6 +1856,11 @@ async fn build_page(
     form.draft_organization.clone_from(&organization.id);
     let mut environments =
         filtered_environments(state, cookie.clone(), &organization.id, query).await?;
+    let message = if query.message == "environment-destroying" {
+        deletion_announcement(state, cookie.clone(), &organization.id, &query.environment).await
+    } else {
+        page_message(&query.message).to_owned()
+    };
     let confidential_actions_allowed =
         state.confidential_storage_enabled && (!state.confidential_admin_only || is_admin);
     for environment in &mut environments {
@@ -1961,9 +1975,41 @@ async fn build_page(
         resize_operation,
         search: bounded_query(&query.search),
         state: allowlisted_state(&query.state).to_owned(),
-        message: page_message(&query.message).to_owned(),
+        message,
         error: page_error(&query.error).to_owned(),
     })
+}
+
+/// What became of the Sandbox a Delete named: still deleting, deleted, or not
+/// deleted. Reading it is presentation only; when it cannot be read, the page
+/// still confirms the accepted request.
+async fn deletion_announcement(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+    environment_id: &str,
+) -> String {
+    const REQUESTED: &str = "Sandbox deletion requested.";
+    if !super::terminal::canonical_environment_id(environment_id) {
+        return REQUESTED.to_owned();
+    }
+    match environment_connect::environment_data(state, cookie, org_id, environment_id).await {
+        Ok(environment) if environment.id == environment_id => deletion_outcome(environment),
+        _ => REQUESTED.to_owned(),
+    }
+}
+
+fn deletion_outcome(environment: codewire_proto::codewire::v1::Environment) -> String {
+    let deleting = environment.desired_state.to_i32()
+        == codewire_proto::codewire::v1::DesiredState::Destroyed as i32;
+    let sandbox = environment_connect::environment_row(environment);
+    match sandbox.state {
+        "destroying" => format!("Deleting {}…", sandbox.name),
+        "destroyed" => format!("{} deleted.", sandbox.name),
+        "error" if deleting => format!("{} could not be deleted.", sandbox.name),
+        // A later lifecycle superseded the deletion: the list says the rest.
+        _ => String::new(),
+    }
 }
 
 async fn filtered_environments(
@@ -1972,7 +2018,7 @@ async fn filtered_environments(
     org_id: &str,
     query: &EnvironmentsQuery,
 ) -> Result<Vec<crate::view::EnvironmentRow>, ConnectError> {
-    let mut environments = environment_connect::environments(
+    let mut environments = environment_connect::inventory(
         state,
         cookie,
         org_id,
@@ -2377,7 +2423,6 @@ pub(super) fn page_message(value: &str) -> &'static str {
         "environment-created" => "Sandbox creation started.",
         "environment-started" => "Sandbox start requested.",
         "environment-stopping" => "Sandbox stop requested.",
-        "environment-destroying" => "Sandbox destruction requested.",
         "environment-sources-unchanged" => "Sandbox sources are unchanged.",
         "environment-sources-stored" => "Sandbox sources saved. The Sandbox remains stopped.",
         "environment-sources-restarting" => "Sandbox sources saved; managed restart requested.",
@@ -3506,6 +3551,246 @@ mod tests {
             page_error("setup-running"),
             "Setup is still running. Nothing was applied. You can resize when it finishes."
         );
+    }
+
+    fn lifecycle_test_row(
+        id: &str,
+        name: &str,
+        state: codewire_proto::codewire::v1::EnvironmentState,
+    ) -> crate::view::EnvironmentRow {
+        environment_connect::environment_row(codewire_proto::codewire::v1::Environment {
+            id: id.into(),
+            name: name.into(),
+            state: state.into(),
+            setup_complete: true,
+            ..Default::default()
+        })
+    }
+
+    fn lifecycle_test_page(environments: Vec<crate::view::EnvironmentRow>) -> EnvironmentsPageView {
+        EnvironmentsPageView {
+            environments,
+            environments_loading: false,
+            create_form: default_create_form("csrf".into(), false),
+            source_editor: None,
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: String::new(),
+            state: "all".into(),
+            message: String::new(),
+            error: String::new(),
+        }
+    }
+
+    /// Owner report (2026-10-01): a deleted Sandbox vanished at once behind a
+    /// green "destruction requested" banner. It now stays listed, read as
+    /// Deleting and offering only its detail page, until it is gone; a
+    /// failed deletion offers Delete again.
+    #[test]
+    fn deleting_sandbox_stays_listed_as_deleting_with_no_lifecycle_actions() {
+        use codewire_proto::codewire::v1::EnvironmentState;
+        const RUNNING: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        const DELETING: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        const FAILED: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let organization = test_organization();
+        let page = lifecycle_test_page(vec![
+            lifecycle_test_row(RUNNING, "quiet-mesa", EnvironmentState::Running),
+            lifecycle_test_row(DELETING, "old-pier", EnvironmentState::Destroying),
+            lifecycle_test_row(FAILED, "dry-harbor", EnvironmentState::Error),
+        ]);
+        let list = EnvironmentListTemplate {
+            organization: &organization,
+            page: &page,
+        }
+        .render()
+        .unwrap();
+        let sandbox = |id: &str| {
+            list.split_once(&format!("<tr data-environment-id=\"{id}\""))
+                .and_then(|(_, rest)| rest.split_once("</tr>"))
+                .map(|(row, _)| row)
+                .expect("listed Sandbox")
+        };
+        let deleting = sandbox(DELETING);
+        assert!(deleting.starts_with(
+            " data-environment-name=\"old-pier\" data-environment-state=\"destroying\">"
+        ));
+        assert!(deleting.contains("data-tone=\"warning\"><span class=\"cw-sr-only\" aria-hidden=\"true\">◌</span>deleting…</span>"));
+        assert!(deleting.contains(&format!("href=\"/test/{DELETING}/\">Open Sandbox</a>")));
+        assert!(deleting.contains(
+            "<p class=\"cw-row-menu-note\">Deletion in progress. No other actions are available.</p>"
+        ));
+        for action in [
+            ">Stop</button>",
+            "<summary>Stop</summary>",
+            ">Start</button>",
+            ">Resize</summary>",
+            ">Ports</a>",
+            ">Terminal</a>",
+            ">VS Code</a>",
+            "<summary>Delete</summary>",
+            "Secrets and credentials",
+            "<form",
+        ] {
+            assert!(
+                !deleting.contains(action),
+                "a deleting Sandbox offers {action}"
+            );
+        }
+        let running = sandbox(RUNNING);
+        for action in [
+            ">Stop</button>",
+            ">Resize</summary>",
+            ">Ports</a>",
+            ">Terminal</a>",
+            "<summary>Delete</summary>",
+        ] {
+            assert!(running.contains(action), "a running Sandbox lacks {action}");
+        }
+        let failed = sandbox(FAILED);
+        assert!(failed.contains(">error</span>"));
+        assert!(failed.contains(">Start</button>"));
+        assert!(failed.contains("Delete permanently"));
+        // Script compares refreshes only under the same search and filter.
+        assert!(list.contains("data-list-search=\"\" data-list-state=\"all\">"));
+    }
+
+    #[test]
+    fn delete_names_the_sandbox_in_a_polite_status_instead_of_a_success_banner() {
+        use codewire_proto::codewire::v1::{DesiredState, Environment, EnvironmentState};
+        let id = "5d1db799-4300-4ab3-b957-efb980760542";
+        let list = SandboxListContext::new("a&b", "running").list_url("my-org");
+        let target = deletion_feedback_path(&list, id);
+        let url = Url::parse(&format!("https://codewire.invalid{target}")).unwrap();
+        assert_eq!(url.path(), "/my-org/");
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            [
+                ("search".into(), "a&b".into()),
+                ("state".into(), "running".into()),
+                ("message".into(), "environment-destroying".into()),
+                ("environment".into(), id.into()),
+            ]
+        );
+        for invalid in ["", "../other", "5D1DB799-4300-4AB3-B957-EFB980760542"] {
+            assert_eq!(
+                deletion_feedback_path("/my-org/", invalid),
+                "/my-org/?message=environment-destroying"
+            );
+        }
+        // No green banner: the polite status says what became of it.
+        assert_eq!(page_message("environment-destroying"), "");
+        let outcome = |state: EnvironmentState, desired: DesiredState| {
+            deletion_outcome(Environment {
+                id: id.into(),
+                name: "quiet-mesa".into(),
+                state: state.into(),
+                desired_state: desired.into(),
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            outcome(EnvironmentState::Destroying, DesiredState::Destroyed),
+            "Deleting quiet-mesa…"
+        );
+        assert_eq!(
+            outcome(EnvironmentState::Destroyed, DesiredState::Destroyed),
+            "quiet-mesa deleted."
+        );
+        assert_eq!(
+            outcome(EnvironmentState::Error, DesiredState::Destroyed),
+            "quiet-mesa could not be deleted."
+        );
+        assert_eq!(outcome(EnvironmentState::Error, DesiredState::Started), "");
+        assert_eq!(
+            outcome(EnvironmentState::Running, DesiredState::Started),
+            ""
+        );
+
+        let organization = test_organization();
+        let mut page = lifecycle_test_page(vec![lifecycle_test_row(
+            id,
+            "quiet-mesa",
+            EnvironmentState::Destroying,
+        )]);
+        page.message = "Deleting quiet-mesa…".into();
+        let render = |page: &EnvironmentsPageView| {
+            OrganizationEnvironmentsContentTemplate {
+                organization: &organization,
+                page,
+            }
+            .render()
+            .unwrap()
+        };
+        let html = render(&page);
+        assert!(html.contains(
+            "<p class=\"cw-toast\" role=\"status\" data-inventory-status>Deleting quiet-mesa…</p>"
+        ));
+        assert!(!html.contains("cw-alert--success"));
+        assert!(html.contains(&format!("<tr data-environment-id=\"{id}\"")));
+        // Background refreshes stay quiet; the status speaks for transitions.
+        assert!(html.contains("<div id=\"environment-list\" aria-live=\"off\" hx-get="));
+        page.message.clear();
+        assert!(
+            render(&page)
+                .contains("<p class=\"cw-toast\" role=\"status\" data-inventory-status></p>")
+        );
+        // Kind found a second status after Create: the list page has exactly
+        // one polite status, empty or carrying any action's outcome, and the
+        // refresh-failure note speaks through it rather than as its own.
+        for message in ["", "Sandbox creation started.", "Deleting quiet-mesa…"] {
+            page.message = message.into();
+            let html = render(&page);
+            // The closed Create drawer is hidden, so its form statuses are
+            // not on the page until it opens.
+            let (before, drawer) = html.split_once("<div class=\"cw-drawer-layer\"").unwrap();
+            let (drawer, after) = drawer.split_once("<div id=\"environment-list\"").unwrap();
+            assert!(drawer.contains("data-open=\"false\" hidden>"));
+            let page_statuses = before.matches("role=\"status\"").count()
+                + after.matches("role=\"status\"").count();
+            assert_eq!(page_statuses, 1, "{message:?}");
+            assert!(html.contains(&format!(
+                "<p class=\"cw-toast\" role=\"status\" data-inventory-status>{message}</p>"
+            )));
+            assert!(
+                html.contains("<p class=\"cw-field-help\" data-environment-list-error hidden>")
+            );
+        }
+    }
+
+    #[test]
+    fn detail_page_of_a_deleting_or_deleted_sandbox_offers_no_dead_controls() {
+        use codewire_proto::codewire::v1::EnvironmentState;
+        const ID: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let organization = test_organization();
+        let detail =
+            |state| render_terminal(&organization, lifecycle_test_row(ID, "quiet-mesa", state));
+        let deleting = detail(EnvironmentState::Destroying);
+        assert!(deleting.contains("data-sandbox-state data-tone=\"warning\">deleting…</span>"));
+        assert!(deleting.contains(
+            "data-sandbox-observation-status role=\"status\">This Sandbox is being deleted.</p>"
+        ));
+        assert!(
+            deleting.contains("<div class=\"cw-sandbox-actions\" data-sandbox-actions hidden>")
+        );
+        assert!(deleting.contains("data-terminal-running=\"false\" hidden>"));
+        assert!(deleting.contains("data-sandbox-deleted hidden><a class=\"cw-link-button\""));
+        let deleted = detail(EnvironmentState::Destroyed);
+        assert!(deleted.contains("data-sandbox-state data-tone=\"neutral\">deleted</span>"));
+        assert!(deleted.contains(
+            "data-sandbox-observation-status role=\"status\">This Sandbox was deleted.</p>"
+        ));
+        assert!(deleted.contains(
+            "<p class=\"cw-field-help\" data-sandbox-deleted><a class=\"cw-link-button\" href=\"/test/\">Back to Sandboxes</a></p>"
+        ));
+        assert!(deleted.contains("<div class=\"cw-sandbox-actions\" data-sandbox-actions hidden>"));
+        assert!(deleted.contains("data-terminal-running=\"false\" hidden>"));
+        let running = detail(EnvironmentState::Running);
+        assert!(running.contains("data-sandbox-observation-status role=\"status\" hidden></p>"));
+        assert!(running.contains("<div class=\"cw-sandbox-actions\" data-sandbox-actions>"));
+        assert!(running.contains("data-sandbox-deleted hidden>"));
+        assert!(running.contains("data-terminal-running=\"true\">"));
     }
 
     #[test]

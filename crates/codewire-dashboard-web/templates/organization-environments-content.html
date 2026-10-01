@@ -1,5 +1,5 @@
 <section id="organization-content" class="cw-org-content" aria-live="polite">
-  {% if !page.message.is_empty() %}<div class="cw-alert cw-alert--success" role="status">{{ page.message }}</div>{% endif %}
+  <p class="cw-toast" role="status" data-inventory-status>{{ page.message }}</p>
   {% if !page.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ page.error }}</div>{% endif %}
 
   <div class="cw-environment-toolbar">
@@ -17,10 +17,10 @@
   <div class="cw-drawer-layer" data-drawer data-create-url="{{ organization.environments_url }}new/{{ page.create_form.draft_return.query() }}" data-close-url="{{ organization.environments_url }}" data-open="{% if page.create_form.expanded %}true{% else %}false{% endif %}"{% if !page.create_form.expanded %} hidden{% endif %}><a class="cw-drawer-backdrop" href="{{ organization.environments_url }}" data-drawer-close aria-label="Close Create Sandbox"></a>{% let form = page.create_form %}{% include "environment-create-form.html" %}</div>
   {% endif %}
 
-  <div id="environment-list" hx-get="/{{ organization.slug }}/_fragments/sandboxes" hx-trigger="{% if page.environments_loading %}load, {% endif %}every 5s" hx-include="#environment-filters" hx-swap="innerHTML" data-environments-loading="{{ page.environments_loading }}">
+  <div id="environment-list" aria-live="off" hx-get="/{{ organization.slug }}/_fragments/sandboxes" hx-trigger="{% if page.environments_loading %}load, {% endif %}every 5s" hx-include="#environment-filters" hx-swap="innerHTML" data-environments-loading="{{ page.environments_loading }}">
     {% if page.environments_loading %}<p role="status">Loading Sandboxes…</p>{% else %}{% include "environment-list.html" %}{% endif %}
   </div>
-  <p class="cw-field-help" role="status" data-environment-list-error hidden>Sandbox list could not be refreshed. Retrying…</p>
+  <p class="cw-field-help" data-environment-list-error hidden>Sandbox list could not be refreshed. Retrying…</p>
 
   <dialog class="cw-dialog" data-dialog data-inventory-stop-dialog aria-labelledby="inventory-stop-title" aria-describedby="inventory-stop-description">
     <header class="cw-dialog-header"><h2 id="inventory-stop-title">Stop <span data-inventory-stop-name>Sandbox</span>?</h2></header>
