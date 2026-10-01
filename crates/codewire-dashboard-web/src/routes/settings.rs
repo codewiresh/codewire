@@ -116,6 +116,13 @@ pub(super) async fn settings(
                 expires: display_time(Some(&session.expires_at)),
             })
             .collect();
+        // This browser leads its page; the rest keep the IdP's order.
+        settings.sessions.sort_by_key(|session| !session.current);
+        settings.current_session_listed = settings.sessions.iter().any(|session| session.current);
+        settings.later_sessions_page = query
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| !cursor.is_empty());
         if let Some(next) = inventory.next_cursor {
             let mut query_string = url::form_urlencoded::Serializer::new(String::new());
             query_string.append_pair("cursor", &next);
@@ -459,6 +466,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            current_session_listed: true,
             first_sessions_url: "/settings/?org=sample#sessions".into(),
             next_sessions_url: "/settings/?org=sample&cursor=session-other#sessions".into(),
             ..Default::default()
@@ -469,20 +477,27 @@ mod tests {
         }
         .render()
         .unwrap();
+        // Other sessions are revoked through an exact native confirmation.
         assert_eq!(
             body.matches("name=\"account_id\" value=\"account-1\"")
                 .count(),
-            2
+            1
         );
-        for id in ["session-current", "session-other"] {
-            assert!(body.contains(&format!("name=\"session_id\" value=\"{id}\"")));
-            assert!(body.contains(&format!("data-dialog-open=\"revoke-session-{id}\"")));
-            assert!(body.contains(&format!("data-dialog id=\"revoke-session-{id}\"")));
-        }
+        assert!(body.contains("name=\"session_id\" value=\"session-other\""));
+        assert!(body.contains("data-dialog-open=\"revoke-session-session-other\""));
+        assert!(body.contains("data-dialog id=\"revoke-session-session-other\""));
         assert_eq!(
             body.matches("data-dialog-close autofocus>Cancel").count(),
-            2
+            1
         );
+        // This browser's row signs it out directly, and it is the only sign-out form.
+        assert!(!body.contains("revoke-session-session-current"));
+        assert_eq!(body.matches("id=\"sign-out\"").count(), 1);
+        assert_eq!(
+            body.matches(">Sign out of this browser</button>").count(),
+            1
+        );
+        assert!(!body.contains("First page"));
         assert!(body.contains("Next page"));
         assert!(body.contains("cursor=session-other"));
         assert!(!body.contains("<dialog open"));

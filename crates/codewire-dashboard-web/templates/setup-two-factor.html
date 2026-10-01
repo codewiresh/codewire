@@ -40,8 +40,8 @@
           <form class="cw-form" method="post" action="/setup-2fa/_actions/skip">
             <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
             {% if !view.return_to.is_empty() %}<input type="hidden" name="return_to" value="{{ view.return_to }}">{% endif %}
-            <button class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" type="submit">Skip for now</button>
-            <p class="cw-help">You will be asked again the next time you sign in.</p>
+            <button class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" type="submit">Set up later</button>
+            <p class="cw-help">You can set it up anytime from Account › Security. Codewire asks again at your next sign-in.</p>
           </form>
         </div>
       </section>

@@ -129,14 +129,14 @@ test.describe.serial("cookie-owned Account session controls", () => {
     } finally { await other.close(); }
   });
 
-  test("confirmed current-session revoke clears its cookie and invalidates the saved token", async ({ page, browser }) => {
+  test("this browser's row signs it out, clears its cookie and invalidates the saved token", async ({ page, browser }) => {
     await page.context().addCookies([{ name: "codewire.session_token", value: current.token, url: origin }]);
     await page.goto(`/settings/?org=${slug}`);
-    if (await page.locator(`button[data-dialog-open="revoke-session-${current.id}"]`).count() === 0) await page.getByRole("link", { name: "Next page", exact: true }).click();
-    await page.getByRole("button", { name: "Sign out this browser", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Sign out this browser?", exact: true });
-    await expect(dialog).toContainText(current.id);
-    await dialog.getByRole("button", { name: "Sign out this browser", exact: true }).click();
+    const thisBrowser = page.locator(".cw-account-session").filter({ has: page.getByRole("heading", { name: "This browser", exact: true }) });
+    if (await thisBrowser.count() === 0) await page.getByRole("link", { name: "Next page", exact: true }).click();
+    await expect(thisBrowser.locator("header > code")).toHaveText(current.id);
+    // Signing out this browser needs no confirmation, as in the sidebar.
+    await thisBrowser.getByRole("button", { name: "Sign out of this browser", exact: true }).click();
     await expect(page).toHaveURL(/\/login$/);
     expect((await page.context().cookies()).some((cookie) => cookie.name === "codewire.session_token")).toBe(false);
     const other = await browser.newContext({ storageState: { cookies: [], origins: [] } });

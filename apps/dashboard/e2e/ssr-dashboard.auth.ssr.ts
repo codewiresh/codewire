@@ -285,7 +285,7 @@ test.describe.serial("server-rendered identity flows", () => {
     const login = await signInThroughRust(page, skipSetupEmail, TEST_PASSWORD);
     expect(login.headers().location).toMatch(/^\/setup-2fa/);
     await expect(page.getByRole("heading", { name: "Secure your account" })).toBeVisible();
-    const skipped = await submitAndCapture(page, "/setup-2fa/_actions/skip", /skip for now/i);
+    const skipped = await submitAndCapture(page, "/setup-2fa/_actions/skip", /set up later/i);
     expect(skipped.status()).toBe(303);
     await expect(page).toHaveURL(/\/dashboard/);
     await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();

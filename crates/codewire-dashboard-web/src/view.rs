@@ -318,6 +318,10 @@ pub(crate) struct SettingsPageView {
     pub(crate) current_session_id: String,
     pub(crate) current_session_expiry: String,
     pub(crate) sessions: Vec<AccountSessionRowView>,
+    // The current session is one of the listed rows, so its row owns sign-out.
+    pub(crate) current_session_listed: bool,
+    // A later page of sessions links back to the first.
+    pub(crate) later_sessions_page: bool,
     pub(crate) next_sessions_url: String,
     pub(crate) first_sessions_url: String,
     pub(crate) csrf_token: String,
@@ -414,6 +418,15 @@ pub(crate) struct CredentialSettingsView {
 }
 
 impl CredentialSettingsView {
+    /// The exact Create draft this page returns to, carried by the GET forms
+    /// that open a dialog without scripting.
+    pub(crate) fn creation_draft(&self) -> String {
+        url::form_urlencoded::parse(self.navigation_query.trim_start_matches('?').as_bytes())
+            .find(|(name, _)| name == "creation_draft")
+            .map(|(_, value)| value.into_owned())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn has_github_connections(&self) -> bool {
         self.credentials
             .iter()

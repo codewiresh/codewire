@@ -214,7 +214,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page.locator("dialog[open]")).toHaveCount(0);
       await openGithubConnection(page);
       const connection = page.getByRole("dialog", { name: "Connect GitHub", exact: true });
-      const form = connection.locator("form");
+      const form = connection.locator("form:not(.cw-dialog-launcher)");
       await expect(form.locator('[name="name"]')).toHaveCount(0);
       await expect(connection.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
         .toHaveAttribute("href", "/assets/codewire/icons-v2.svg#icon-github");
@@ -392,9 +392,8 @@ test.describe("managed provider credential browser journey", () => {
       // was: profiles show GitHub as missing, Create cannot browse.
       await page.goto("/settings/credentials/");
       row = credentialRows.filter({ hasText: name });
-      await row.getByRole("button", { name: `Manage ${name}`, exact: true }).click();
-      await page.getByRole("dialog", { name: `Manage ${name}`, exact: true })
-        .getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
+      await row.locator("details.cw-menu > summary").click();
+      await row.getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
       await page.getByRole("dialog", { name: "Disconnect GitHub?", exact: true })
         .getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
       await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=credential-deleted/);

@@ -654,7 +654,12 @@ pub(super) async fn github_app_callback(
         .filter(|dialog| !dialog.is_empty())
         .unwrap_or_else(|| "connect-github".to_owned());
     let response = if !query.error.is_empty() {
-        page_error_redirect("github-app-cancelled", &dialog, &context, &headers)
+        page_error_redirect(
+            github_callback_error(&query.error),
+            &dialog,
+            &context,
+            &headers,
+        )
     } else if !valid_github_app_callback_code(&query.code) {
         page_error_redirect("github-app-failed", &dialog, &context, &headers)
     } else {
@@ -685,6 +690,16 @@ pub(super) async fn github_app_callback(
     let response =
         super::remember_organization_choice(response, &state.public_origin, &context.org);
     github_app_callback_response(response, clear)
+}
+
+/// GitHub reports a person's choice to cancel as `access_denied`; every other
+/// callback error is a setup problem. Its text is never shown.
+fn github_callback_error(error: &str) -> &'static str {
+    if error == "access_denied" {
+        "github-app-cancelled"
+    } else {
+        "github-app-rejected"
+    }
 }
 
 fn github_app_installation_url(app_slug: &str) -> String {
@@ -1271,9 +1286,8 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
     ) || requested_row_id(requested, "credential").is_some_and(|id| {
         data.credentials.iter().any(|credential| {
             credential.id == id
-                && (requested == row_dialog("credential", id)
-                    || requested == row_action_dialog("credential", id, "rename")
-                        && credential.oauth_provider != "github"
+                && (requested == row_action_dialog("credential", id, "rename")
+                    && credential.oauth_provider != "github"
                     || requested == row_action_dialog("credential", id, "reconnect")
                         && credential.oauth
                     || requested == row_action_dialog("credential", id, "rotate")
@@ -1284,8 +1298,11 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
                     || requested == row_action_dialog("credential", id, "delete")
                         && (credential.revoked || credential.oauth_provider == "github"))
         })
-    }) || requested_row_id(requested, "profile")
-        .is_some_and(|id| data.profiles.iter().any(|profile| profile.id == id));
+    }) || requested_row_id(requested, "profile").is_some_and(|id| {
+        // Rows open their actions directly; there is no per-row manage dialog.
+        requested != row_dialog("profile", id)
+            && data.profiles.iter().any(|profile| profile.id == id)
+    });
     if allowed {
         requested.to_owned()
     } else {
@@ -1344,6 +1361,9 @@ fn approved_error(code: &str) -> &'static str {
         }
         "github-app-cancelled" => {
             "GitHub App authorization was cancelled. No credential was changed."
+        }
+        "github-app-rejected" => {
+            "GitHub could not authorize Codewire, so no credential was changed. Ask an administrator to check the Codewire GitHub App settings."
         }
         "github-app-failed" => {
             "This GitHub connection attempt expired or could not be verified. Continue to GitHub to start a new attempt."
@@ -1525,6 +1545,40 @@ mod tests {
     }
 
     #[test]
+    fn dialogs_open_and_cancel_through_get_forms_that_keep_the_draft() {
+        let draft = "00000000-0000-4000-8000-000000000003";
+        let html = rendered_dialogs_with_navigation("", "", &format!("?creation_draft={draft}"));
+        let draft_input =
+            format!("<input type=\"hidden\" name=\"creation_draft\" value=\"{draft}\">");
+        let launchers = html
+            .split("<form class=\"cw-dialog-launcher\"")
+            .skip(1)
+            .collect::<Vec<_>>();
+        assert!(launchers.len() > 20);
+        for form in &launchers {
+            let form = form.split("</form>").next().unwrap();
+            // A launcher returns to its dialog; Cancel returns to the page.
+            let action = form.split('"').nth(3).unwrap();
+            if form.contains("data-dialog-open=") {
+                assert!(action.starts_with(&format!("{PATH}#")), "{action}");
+            } else {
+                assert_eq!(action, PATH);
+            }
+            assert!(form.contains(&draft_input), "a dialog form lost its draft");
+            assert!(form.contains("type=\"submit\""));
+            assert!(form.contains("data-dialog-open=") == form.contains("name=\"dialog\""));
+        }
+        for dialog in ["add-credential", "create-profile", "connect-github"] {
+            assert!(
+                html.contains(&format!("name=\"dialog\" value=\"{dialog}\"")),
+                "{dialog}"
+            );
+        }
+        assert!(!html.contains("type=\"button\" data-dialog-open"));
+        assert!(!html.contains("type=\"button\" data-dialog-close"));
+    }
+
+    #[test]
     fn github_connect_dialog_shows_the_one_connection_instead_of_a_new_authorization() {
         let mut data = dialog_data();
         let mut key = dialog_data().credentials.remove(0);
@@ -1593,8 +1647,6 @@ mod tests {
             "generate-ssh",
             "import-ssh",
             "create-profile",
-            "credential-00000000-0000-4000-8000-000000000001",
-            "profile-00000000-0000-4000-8000-000000000002",
             "credential-00000000-0000-4000-8000-000000000001-reconnect",
             "credential-00000000-0000-4000-8000-000000000001-delete",
             "profile-00000000-0000-4000-8000-000000000002-edit",
@@ -1610,6 +1662,9 @@ mod tests {
             "connect-github\" autofocus",
             "credential-00000000-0000-4000-8000-000000000099",
             "profile-00000000-0000-4000-8000-000000000001",
+            // Rows open their actions from a menu; the old manage dialogs are gone.
+            "credential-00000000-0000-4000-8000-000000000001",
+            "profile-00000000-0000-4000-8000-000000000002",
             "credential-00000000-0000-4000-8000-000000000099-reconnect",
             "credential-00000000-0000-4000-8000-000000000001-edit",
             "credential-00000000-0000-4000-8000-000000000001-rename",
@@ -1638,7 +1693,9 @@ mod tests {
             html.find("id=\"profiles-title\"").unwrap()
                 < html.find("id=\"create-profile\"").unwrap()
         );
-        assert_eq!(html.matches("data-dialog id=").count(), 15);
+        // Two fewer than before rows opened their actions from a menu: the
+        // per-row manage dialogs for the credential and the profile are gone.
+        assert_eq!(html.matches("data-dialog id=").count(), 13);
         assert!(!html.contains("data-dialog-auto-open"));
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));
@@ -1648,6 +1705,8 @@ mod tests {
         assert!(!credential_primary.contains("Generation"));
         assert!(!credential_primary.contains("Expires"));
         assert!(credential_primary.contains("Active"));
+        assert!(credential_primary.contains("aria-label=\"Actions for "));
+        assert!(!credential_primary.contains("Manage "));
         // The GitHub connection dialog carries no Details or Generation copy.
         assert!(
             !credential_dialog
@@ -1659,6 +1718,7 @@ mod tests {
         let profile_row = html.split("class=\"cw-profile-row\"").nth(1).unwrap();
         let (profile_primary, profile_dialog) = profile_row.split_once("<dialog").unwrap();
         assert!(!profile_primary.contains("Revision"));
+        assert!(profile_primary.contains(">Edit identities</button>"));
         assert!(
             profile_dialog
                 .split("</dialog>")
@@ -1872,6 +1932,19 @@ mod tests {
             response.headers()[header::CACHE_CONTROL],
             HeaderValue::from_static("no-store, max-age=0")
         );
+    }
+
+    #[test]
+    fn github_callback_errors_separate_a_cancellation_from_a_setup_problem() {
+        assert_eq!(
+            github_callback_error("access_denied"),
+            "github-app-cancelled"
+        );
+        for error in ["redirect_uri_mismatch", "application_suspended", "<script>"] {
+            assert_eq!(github_callback_error(error), "github-app-rejected");
+        }
+        let message = approved_error("github-app-rejected");
+        assert!(message.contains("no credential was changed") && !message.contains("redirect"));
     }
 
     #[test]
