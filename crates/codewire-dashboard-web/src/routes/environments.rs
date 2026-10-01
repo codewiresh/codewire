@@ -1791,7 +1791,13 @@ fn lifecycle_feedback_path(path: &str, message: &str, error: &str) -> String {
         target.query_pairs_mut().append_pair("message", message);
     } else if matches!(
         error,
-        "invalid" | "not-authorized" | "not-found" | "unavailable"
+        "invalid"
+            | "not-authorized"
+            | "not-found"
+            | "quota"
+            | "rate-limited"
+            | "unconfirmed"
+            | "unavailable"
     ) {
         target.query_pairs_mut().append_pair("error", error);
     }
@@ -2355,6 +2361,13 @@ fn mutation_error(error: &ConnectError) -> &'static str {
         ErrorCode::InvalidArgument | ErrorCode::FailedPrecondition => "invalid",
         ErrorCode::PermissionDenied => "not-authorized",
         ErrorCode::NotFound => "not-found",
+        // Quota refusals carry a reason; a bare ResourceExhausted is a rate limit.
+        ErrorCode::ResourceExhausted => match connect_error_reason(error).as_deref() {
+            Some("quota_exceeded" | "resource_limit_exceeded") => "quota",
+            _ => "rate-limited",
+        },
+        // The request may have been applied: never suggest a blind retry.
+        ErrorCode::Internal | ErrorCode::Unknown | ErrorCode::DeadlineExceeded => "unconfirmed",
         _ => "unavailable",
     }
 }
@@ -2438,6 +2451,13 @@ pub(super) fn page_error(value: &str) -> &'static str {
         "invalid" => "The Sandbox request was invalid for its current state.",
         "not-authorized" => "You do not have permission to change that Sandbox.",
         "not-found" => "The Sandbox no longer exists.",
+        "quota" => {
+            "This would exceed your organization's Sandbox quota. Stop or delete a Sandbox, then try again."
+        }
+        "rate-limited" => "Too many Sandbox changes at once. Wait a moment, then try again.",
+        "unconfirmed" => {
+            "The Sandbox change could not be confirmed. Check its current state before trying again."
+        }
         "unavailable" => "The Sandbox service is temporarily unavailable.",
         _ => "",
     }
@@ -2804,7 +2824,7 @@ mod tests {
                 id: "port-id".into(),
                 port: 3000,
                 label: "web".into(),
-                access: "Creator",
+                access: "Sandbox creator",
                 preview_url: "https://web-5d1db-test.preview.example".into(),
                 has_preview: true,
             }],
@@ -2841,7 +2861,7 @@ mod tests {
             2
         );
         assert!(html.contains("hx-target=\"#sandbox-ports-content\""));
-        assert!(html.contains("Internal 3000"));
+        assert!(html.contains("Internal port 3000 · Sandbox creator"));
         assert!(html.contains("https://web-5d1db-test.preview.example"));
         assert!(html.contains("name=\"port\" type=\"number\""));
         assert!(html.contains("value=\"8080\""));
@@ -2941,6 +2961,27 @@ mod tests {
                 "detail",
                 "",
                 "not-authorized",
+                format!("/my-org/{id}/"),
+                "list_search",
+            ),
+            (
+                "detail",
+                "",
+                "quota",
+                format!("/my-org/{id}/"),
+                "list_search",
+            ),
+            (
+                "detail",
+                "",
+                "rate-limited",
+                format!("/my-org/{id}/"),
+                "list_search",
+            ),
+            (
+                "detail",
+                "",
+                "unconfirmed",
                 format!("/my-org/{id}/"),
                 "list_search",
             ),
@@ -3186,6 +3227,43 @@ mod tests {
         ));
         assert!(!valid_repository_url("https://token@example.test/private"));
         assert!(!valid_repository_url("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn lifecycle_failures_name_quota_rate_limits_and_unconfirmed_outcomes() {
+        let quota = codewire_proto::google::rpc::ErrorInfo {
+            reason: "quota_exceeded".to_owned(),
+            domain: "codewire.dev".to_owned(),
+            ..Default::default()
+        };
+        let quota = ConnectError::resource_exhausted("untrusted upstream detail").with_detail(
+            connectrpc::ErrorDetail::from_message("google.rpc.ErrorInfo", &quota),
+        );
+        assert_eq!(mutation_error(&quota), "quota");
+        assert_eq!(
+            mutation_error(&ConnectError::resource_exhausted("slow down")),
+            "rate-limited"
+        );
+        assert_eq!(
+            mutation_error(&ConnectError::internal("boom")),
+            "unconfirmed"
+        );
+        assert_eq!(
+            mutation_error(&ConnectError::deadline_exceeded("late")),
+            "unconfirmed"
+        );
+        assert_eq!(
+            mutation_error(&ConnectError::unavailable("down")),
+            "unavailable"
+        );
+        assert_eq!(
+            mutation_error(&ConnectError::failed_precondition("stopped")),
+            "invalid"
+        );
+        for code in ["quota", "rate-limited", "unconfirmed"] {
+            assert!(!page_error(code).is_empty(), "{code}");
+            assert!(!page_error(code).contains("untrusted"));
+        }
     }
 
     #[test]
