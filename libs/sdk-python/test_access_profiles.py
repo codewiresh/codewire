@@ -57,6 +57,12 @@ class AccessProfileFixture:
             raise ConnectError(Code.ABORTED, "stale revision")
         return pb.UpdateAccessProfileResponse(access_profile=self.profile())
 
+    def rename_access_profile(self, request, ctx):
+        self.record("RenameAccessProfile", request, ctx)
+        profile = self.profile()
+        profile.name = request.name
+        return pb.RenameAccessProfileResponse(access_profile=profile)
+
     def delete_access_profile(self, request, ctx):
         self.record("DeleteAccessProfile", request, ctx)
         return pb.DeleteAccessProfileResponse()
@@ -115,10 +121,17 @@ class AccessProfilesTestCase(unittest.TestCase):
         self.cw.access_profiles.update("profile-one", EXACT, [])
         self.assertEqual(self.fixture.calls[-1][1].expected_revision, EXACT)
         self.assertEqual(len(self.fixture.calls[-1][1].entries), 0)
+        renamed = self.cw.access_profiles.rename("profile-one", EXACT, "personal", "renamed")
+        self.assertEqual((renamed["name"], renamed["revision"]), ("renamed", EXACT))
+        request = self.fixture.calls[-1][1]
+        self.assertEqual((request.access_profile_id, request.expected_revision,
+                          request.expected_name, request.name),
+                         ("profile-one", EXACT, "personal", "renamed"))
         self.cw.access_profiles.delete("profile-one", MAXIMUM)
         self.assertEqual(self.fixture.calls[-1][1].expected_revision, MAXIMUM)
         self.assertEqual(self.paths, [f"/codewire.v1.AccessProfileService/{method}" for method in
-                                    ["CreateAccessProfile", "UpdateAccessProfile", "DeleteAccessProfile"]])
+                                    ["CreateAccessProfile", "UpdateAccessProfile",
+                                     "RenameAccessProfile", "DeleteAccessProfile"]])
 
     def test_duplicate_slots_and_invalid_revisions_fail_before_transport(self):
         for invoke in [lambda: self.cw.access_profiles.create("personal", [ENTRY, ENTRY]),
@@ -131,6 +144,8 @@ class AccessProfilesTestCase(unittest.TestCase):
         for revision in [0, -1, MAXIMUM + 1, True, 1.5]:
             with self.assertRaisesRegex(ValueError, "positive uint64"):
                 self.cw.access_profiles.get("profile-one", revision=revision)
+            with self.assertRaisesRegex(ValueError, "positive uint64"):
+                self.cw.access_profiles.rename("profile-one", revision, "personal", "renamed")
         self.assertEqual(self.fixture.calls, [])
 
     def test_binding_read_preserves_presence_and_stored_consent(self):

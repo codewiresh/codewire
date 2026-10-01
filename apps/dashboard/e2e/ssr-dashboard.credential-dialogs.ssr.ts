@@ -229,7 +229,7 @@ test("profile rows open exact-revision editors from their menu with native valid
   await discard(page);
   await expect(create).toBeFocused();
   const menu = await rowMenu(row);
-  await expect(menuItems(menu)).toHaveText(["Edit identities", "Delete"]);
+  await expect(menuItems(menu)).toHaveText(["Rename", "Edit identities", "Delete"]);
   await action(menu, "Edit identities").click();
   const edit = dialog(page, "Edit work");
   await footer(edit, "Save profile");
@@ -253,6 +253,48 @@ test("profile rows open exact-revision editors from their menu with native valid
   await expect(codex).toHaveValue("fixture-codex");
   await expect(edit.locator('[name="expected_revision"]')).toHaveValue("8");
   expect(posts).toBe(0);
+});
+
+test("profile Rename edits one name at the observed revision and posts only the label", async ({ page }) => {
+  const posts: { path: string; fields: Record<string, string> }[] = [];
+  await page.route("**/settings/credentials/_actions/**", async (route) => {
+    const request = route.request();
+    posts.push({ path: new URL(request.url()).pathname, fields: Object.fromEntries(new URLSearchParams(request.postData() || "")) });
+    await route.fulfill({ status: 204 });
+  });
+  const menu = await rowMenu(page.locator(".cw-profile-row"));
+  await action(menu, "Rename").click();
+  const rename = dialog(page, "Rename work");
+  await footer(rename, "Save name");
+  await expect(page.locator("dialog[open]")).toHaveCount(1);
+  const field = rename.getByLabel("New name", { exact: true });
+  await expect(field).toBeFocused();
+  await expect(field).toHaveValue("work");
+  await expect(rename.getByRole("textbox")).toHaveCount(1);
+  await expect(rename.getByRole("combobox")).toHaveCount(0);
+  await expect(rename.locator('[name="profile_id"]')).toHaveValue("fixture-profile");
+  await expect(rename.locator('[name="expected_revision"]')).toHaveValue("7");
+  await expect(rename.locator('[name="expected_name"]')).toHaveValue("work");
+  // Create profile's native name rules apply before anything is sent.
+  await field.fill("Not a valid name");
+  await action(rename, "Save name").click();
+  await expect(rename).toBeVisible();
+  expect(await rename.locator("form:not(.cw-dialog-launcher)").evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false);
+  expect(posts).toEqual([]);
+  // An edited name asks before Cancel discards it, then returns to the menu.
+  await action(rename, "Cancel").click();
+  await discard(page);
+  await expect(action(menu, "Rename")).toBeFocused();
+  await action(menu, "Rename").click();
+  await expect(field).toHaveValue("work");
+  await field.fill("personal");
+  await fits(page, rename);
+  await page.screenshot({ path: test.info().outputPath("profile-rename-dialog.png") });
+  await action(rename, "Save name").click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0]).toEqual({ path: "/settings/credentials/_actions/profiles/rename", fields: {
+    _csrf: "design-fixture-only", profile_id: "fixture-profile", expected_revision: "7", expected_name: "work", name: "personal",
+  } });
 });
 
 test("Keep editing, Escape and backdrop retain private DOM and fresh hidden authority", async ({ page }) => {

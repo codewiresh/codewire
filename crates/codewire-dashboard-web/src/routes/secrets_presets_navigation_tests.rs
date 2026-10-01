@@ -68,6 +68,7 @@ fn mutation(path: &str) -> bool {
         "/RenameUserSecret",
         "/RenameProjectSecret",
         "/CreateAccessProfile",
+        "/RenameAccessProfile",
         "/CompleteGithubAppAuthorization",
     ]
     .iter()
@@ -132,8 +133,12 @@ async fn fixture(mode: &'static str) -> (TestServer, Calls) {
             } else if path.ends_with("/GetCredential") {
                 codewire_proto::codewire::v1::GetCredentialResponse { credential: Some(synthetic_github_credential(7)).into(), ..Default::default() }.encode_to_vec()
             } else if mutation(&path) {
-                if mode == "mutation denied" || mode == "mutation unauthenticated" {
-                    let (status, code) = if mode == "mutation denied" { (StatusCode::FORBIDDEN, "permission_denied") } else { (StatusCode::UNAUTHORIZED, "unauthenticated") };
+                if mode == "mutation denied" || mode == "mutation unauthenticated" || mode == "mutation conflict" {
+                    let (status, code) = match mode {
+                        "mutation denied" => (StatusCode::FORBIDDEN, "permission_denied"),
+                        "mutation conflict" => (StatusCode::CONFLICT, "already_exists"),
+                        _ => (StatusCode::UNAUTHORIZED, "unauthenticated"),
+                    };
                     return (status, Json(serde_json::json!({"code": code, "message": "synthetic failure"}))).into_response();
                 }
                 if path.ends_with("/CreateAccessProfile") {
@@ -141,6 +146,13 @@ async fn fixture(mode: &'static str) -> (TestServer, Calls) {
                     let mut input = body.as_ref();
                     let request = CreateAccessProfileRequest::decode(&mut input).unwrap();
                     CreateAccessProfileResponse { access_profile: Some(AccessProfile { id: PROJECT.into(), name: request.name, revision: 1, entries: request.entries, ..Default::default() }).into(), ..Default::default() }.encode_to_vec()
+                } else if path.ends_with("/RenameAccessProfile") {
+                    use codewire_proto::codewire::v1::{AccessProfile, RenameAccessProfileRequest, RenameAccessProfileResponse};
+                    let mut input = body.as_ref();
+                    let request = RenameAccessProfileRequest::decode(&mut input).unwrap();
+                    // A rename acknowledges the same identity at the same revision.
+                    let revision = if mode == "rename advances revision" { request.expected_revision + 1 } else { request.expected_revision };
+                    RenameAccessProfileResponse { access_profile: Some(AccessProfile { id: request.access_profile_id, name: request.name, revision, entries: Vec::new(), ..Default::default() }).into(), ..Default::default() }.encode_to_vec()
                 } else if path.ends_with("/CompleteGithubAppAuthorization") {
                     use codewire_proto::codewire::v1::{CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse};
                     let mut input = body.as_ref();

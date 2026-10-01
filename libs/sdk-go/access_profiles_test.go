@@ -84,6 +84,12 @@ func (f *accessProfileFixture) UpdateAccessProfile(_ context.Context, request *c
 	}
 	return connect.NewResponse(&codewirev1.UpdateAccessProfileResponse{AccessProfile: accessProfileProto()}), nil
 }
+func (f *accessProfileFixture) RenameAccessProfile(_ context.Context, request *connect.Request[codewirev1.RenameAccessProfileRequest]) (*connect.Response[codewirev1.RenameAccessProfileResponse], error) {
+	f.record("RenameAccessProfile", request.Msg)
+	profile := accessProfileProto()
+	profile.Name = request.Msg.Name
+	return connect.NewResponse(&codewirev1.RenameAccessProfileResponse{AccessProfile: profile}), nil
+}
 func (f *accessProfileFixture) DeleteAccessProfile(_ context.Context, request *connect.Request[codewirev1.DeleteAccessProfileRequest]) (*connect.Response[codewirev1.DeleteAccessProfileResponse], error) {
 	f.record("DeleteAccessProfile", request.Msg)
 	return connect.NewResponse(&codewirev1.DeleteAccessProfileResponse{}), nil
@@ -179,6 +185,14 @@ func TestAccessProfilesMutationAndBindingMetadata(t *testing.T) {
 	if update.ExpectedRevision != accessExact || len(update.Entries) != 0 {
 		t.Fatal("exact CAS/empty replacement changed")
 	}
+	renamed, err := client.AccessProfiles.Rename(ctx, "profile-one", accessExact, "personal", "renamed")
+	if err != nil || renamed.Name != "renamed" || renamed.Revision != accessExact {
+		t.Fatalf("rename result: %v %v", renamed, err)
+	}
+	rename := fixture.last().(*codewirev1.RenameAccessProfileRequest)
+	if rename.AccessProfileId != "profile-one" || rename.ExpectedRevision != accessExact || rename.ExpectedName != "personal" || rename.Name != "renamed" {
+		t.Fatal("rename request changed")
+	}
 	if err := client.AccessProfiles.Delete(ctx, "profile-one", ^uint64(0)); err != nil {
 		t.Fatal(err)
 	}
@@ -215,6 +229,9 @@ func TestAccessProfilesRejectDuplicateSlotsAndZeroRevisionWithoutTransport(t *te
 	}
 	if err := client.AccessProfiles.Delete(ctx, "profile-one", 0); err == nil {
 		t.Fatal("zero CAS accepted")
+	}
+	if _, err := client.AccessProfiles.Rename(ctx, "profile-one", 0, "personal", "renamed"); err == nil {
+		t.Fatal("zero rename CAS accepted")
 	}
 	if fixture.count() != 0 {
 		t.Fatal("invalid local input reached transport")

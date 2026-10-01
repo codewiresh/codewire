@@ -1025,3 +1025,161 @@ async fn personal_profiles_include_github_without_ever_pinning_it() -> Result<()
     .await;
     db.finish(result).await
 }
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn rename_relabels_the_profile_without_a_revision_or_rebinding() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("rename-user").await?;
+        let org = db.organization("rename-org").await?;
+        let stranger = db.user("rename-stranger").await?;
+        let store = db.store(Arc::new(SyntheticKek::default()));
+        let codex = store
+            .create(
+                &user,
+                registration("Rename", Kind::OAuth),
+                &value(OLD_VALUE),
+            )
+            .await?;
+        let context = environment(
+            &db,
+            &user,
+            &org,
+            "rename-env",
+            std::slice::from_ref(&codex.metadata.id),
+        )
+        .await?;
+        let profiles = profiles(&db);
+        let original = profiles
+            .create(&user, name("work"), entries(&codex.metadata.id))
+            .await?;
+        let other = profiles
+            .create(&user, name("other"), BTreeMap::new())
+            .await?;
+        // Another owner's name never collides with this owner's profiles.
+        profiles
+            .create(&org, name("personal"), BTreeMap::new())
+            .await?;
+        let selected = profiles
+            .create_binding(
+                &context,
+                binding(&context, &original),
+                Some(&context.user_id),
+            )
+            .await?;
+        let grants = profiles.evaluate_grants(&context).await?;
+
+        let work = name("work");
+        // A name the owner already uses conflicts exactly as on create.
+        ensure!(
+            profiles
+                .rename(&user, &original.id, 1, &work, name("other"))
+                .await
+                == Err(Error::AlreadyExists)
+        );
+        for wrong in [&org, &stranger] {
+            ensure!(
+                profiles
+                    .rename(wrong, &original.id, 1, &work, name("taken"))
+                    .await
+                    == Err(Error::NotFound)
+            );
+        }
+        ensure!(
+            profiles
+                .rename(&user, &original.id, 0, &work, name("personal"))
+                .await
+                == Err(Error::InvalidInput)
+        );
+        // A stale revision or a stale observed name is the same stale view.
+        ensure!(
+            profiles
+                .rename(&user, &original.id, 2, &work, name("personal"))
+                .await
+                == Err(Error::StaleRevision)
+        );
+        ensure!(
+            profiles
+                .rename(&user, &original.id, 1, &name("other"), name("personal"))
+                .await
+                == Err(Error::StaleRevision)
+        );
+        ensure!(profiles.get(&user, &original.id).await? == original);
+        // Renaming to the current name is a no-op.
+        ensure!(
+            profiles
+                .rename(&user, &original.id, 1, &work, work.clone())
+                .await?
+                == original
+        );
+
+        let renamed = profiles
+            .rename(&user, &original.id, 1, &work, name("personal"))
+            .await?;
+        ensure!(
+            renamed
+                == AccessProfile {
+                    name: name("personal"),
+                    ..original.clone()
+                }
+        );
+        // A second rename prepared from the same view cannot overwrite it.
+        ensure!(
+            profiles
+                .rename(&user, &original.id, 1, &work, name("team"))
+                .await
+                == Err(Error::StaleRevision)
+        );
+        ensure!(profiles.get(&user, &original.id).await? == renamed);
+        ensure!(profiles.resolve(&user, &name("personal")).await? == renamed);
+        ensure!(profiles.resolve(&user, &work).await == Err(Error::NotFound));
+        // The name labels the profile, not a revision: history reads show it,
+        // and the bound revision, its binding and its grants are unchanged.
+        ensure!(profiles.get_revision(&user, &original.id, 1).await? == renamed);
+        ensure!(profiles.get_binding(&context).await? == selected);
+        ensure!(profiles.evaluate_grants(&context).await? == grants);
+        let revisions: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM platform_access_profile_revisions WHERE profile_id=$1), \
+             (SELECT current_revision FROM platform_access_profiles WHERE id=$1)",
+        )
+        .bind(original.id.as_str())
+        .fetch_one(&db.pool)
+        .await?;
+        ensure!(revisions == (1, 1), "rename published a revision");
+        ensure!(profiles.get(&user, &other.id).await? == other);
+
+        // The old name is free again, and an edit still advances from the
+        // revision the rename preserved; a rename then needs that new revision.
+        profiles
+            .create(&user, work.clone(), BTreeMap::new())
+            .await?;
+        let updated = profiles
+            .update(&user, &original.id, 1, BTreeMap::new())
+            .await?;
+        ensure!(updated.revision == 2 && updated.name == name("personal"));
+        let personal = name("personal");
+        ensure!(
+            profiles
+                .rename(&user, &original.id, 1, &personal, name("later"))
+                .await
+                == Err(Error::StaleRevision)
+        );
+        // Two concurrent renames from one view: the row lock admits exactly one.
+        let (left, right) = tokio::join!(
+            profiles.rename(&user, &original.id, 2, &personal, name("alpha")),
+            profiles.rename(&user, &original.id, 2, &personal, name("beta")),
+        );
+        let later = match (left, right) {
+            (Ok(profile), Err(Error::StaleRevision)) | (Err(Error::StaleRevision), Ok(profile)) => {
+                profile
+            }
+            _ => anyhow::bail!("profile rename did not have exactly one winner"),
+        };
+        ensure!(later.revision == 2 && later.entries.is_empty());
+        ensure!(profiles.get(&user, &original.id).await? == later);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
