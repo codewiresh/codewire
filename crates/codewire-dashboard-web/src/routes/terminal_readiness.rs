@@ -65,6 +65,14 @@ fn lifecycle_pending(state: &str, desired: &str) -> bool {
     }
 }
 
+/// A create or start that has not converged stays deletable. Destroy already
+/// supersedes the `started` intent in any state but destroying/destroyed, and
+/// a retry that cannot converge must not leave the Sandbox with no action
+/// (#2328). Pending stop, resize, and destroy intents keep their own guard.
+fn start_intent_unconverged(state: &str, desired: &str) -> bool {
+    desired == "started" && matches!(state, "pending" | "creating" | "starting")
+}
+
 impl Readiness {
     fn new(row: EnvironmentRow, setup_complete: bool, desired_state: i32) -> Self {
         let desired_state = desired_state_name(desired_state);
@@ -87,7 +95,8 @@ impl Readiness {
                 disk_gib: row.disk_gb,
                 start_eligible: allowed && !pending && row.can_start,
                 stop_eligible: allowed && !pending && row.can_stop,
-                delete_eligible: !pending && row.can_destroy,
+                delete_eligible: row.can_destroy
+                    && (!pending || start_intent_unconverged(row.state, desired_state)),
                 actions_allowed: allowed,
                 pending,
             },
@@ -263,6 +272,47 @@ mod tests {
         ] {
             assert!(lifecycle_pending(state, "started"));
         }
+    }
+
+    #[test]
+    fn unconverged_create_or_start_stays_deletable_but_other_pending_intents_do_not() {
+        use codewire_proto::codewire::v1::{Environment, EnvironmentState};
+        let readiness = |state: EnvironmentState, desired: DesiredState| {
+            let row = environment_connect::environment_row(Environment {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                state: state.into(),
+                ..Default::default()
+            });
+            serde_json::to_value(Readiness::new(row, false, desired as i32)).unwrap()
+        };
+        // #2328: a pending-create retry waiting on a suspended Sandbox hid
+        // Delete together with every other action.
+        for state in [
+            EnvironmentState::Pending,
+            EnvironmentState::Creating,
+            EnvironmentState::Starting,
+        ] {
+            let value = readiness(state, DesiredState::Started);
+            assert_eq!(value["detail"]["pending"], true, "{state:?}");
+            assert_eq!(value["detail"]["deleteEligible"], true, "{state:?}");
+            assert_eq!(value["detail"]["startEligible"], false, "{state:?}");
+            assert_eq!(value["detail"]["stopEligible"], false, "{state:?}");
+        }
+        for (state, desired) in [
+            (EnvironmentState::Running, DesiredState::Stopped),
+            (EnvironmentState::Stopping, DesiredState::Stopped),
+            (EnvironmentState::Resizing, DesiredState::Resized),
+            (EnvironmentState::Running, DesiredState::Destroyed),
+            (EnvironmentState::Destroying, DesiredState::Destroyed),
+        ] {
+            let value = readiness(state, desired);
+            assert_eq!(value["detail"]["pending"], true, "{state:?}");
+            assert_eq!(value["detail"]["deleteEligible"], false, "{state:?}");
+        }
+        assert_eq!(
+            readiness(EnvironmentState::Running, DesiredState::Started)["detail"]["deleteEligible"],
+            true
+        );
     }
 
     #[test]

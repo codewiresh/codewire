@@ -10,6 +10,7 @@ pub fn env_phase_label(phase: &str) -> &str {
         "ensure_namespace" => "Creating namespace",
         "create_claim" => "Creating sandbox",
         "wait_for_ready" => "Waiting for sandbox ready",
+        "resume_workspace" => "Resuming suspended sandbox",
         "store_backend" => "Storing backend info",
         "gateway_ready" => "Gateway ready",
         "pod_scheduled" => "Workspace pod scheduled",

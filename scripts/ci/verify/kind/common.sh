@@ -2895,13 +2895,16 @@ VALUES (
   250, 256, 1, NOW(),
   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 );
+-- Resize waits for setup to release a running runtime; this fixture models a
+-- Sandbox whose setup already completed.
 INSERT INTO sandbox_environment_backend (
-  environment_id, namespace, sandbox_claim_name, sandbox_claim_uid, pod_name, pod_ip
+  environment_id, namespace, sandbox_claim_name, sandbox_claim_uid, pod_name, pod_ip,
+  setup_complete
 )
 VALUES (
   '$environment_id', '$SANDBOX_NS', '$claim_name',
   '$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}')',
-  '$pod_name', '$pod_ip'
+  '$pod_name', '$pod_ip', true
 );
 COMMIT;
 SQL
