@@ -96,6 +96,8 @@ pub(crate) struct AuthFormView {
     pub(crate) turnstile_site_key: String,
     pub(crate) show_totp_code: bool,
     pub(crate) forgot_password_link: bool,
+    /// Sign-in that finishes at the private-preview handoff; switches fixed copy only.
+    pub(crate) preview_sign_in: bool,
     pub(crate) secondary_label: &'static str,
     pub(crate) secondary_url: String,
 }

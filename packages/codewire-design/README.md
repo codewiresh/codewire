@@ -68,5 +68,7 @@ The homepage template, `reference/fixtures/home.html`, and `docs/design/story.ht
 share `routes/public.css`, `public.js`, and the white Codewire artwork. The Rust
 asset tests verify homepage parity after resolving fixture asset paths.
 The homepage, sign-in, and sign-up share the decorative background in `cosmos.css`
-and `cosmos.js`. The auth template and `reference/fixtures/login.html` and
-`reference/fixtures/signup.html` share `routes/auth.css`.
+and `cosmos.js`. The auth template and `reference/fixtures/login.html`,
+`reference/fixtures/login-preview.html` and `reference/fixtures/signup.html`
+share `routes/auth.css`. `login-preview.html` is the same sign-in reached from
+the private-preview redirect: only its title and one fixed context line differ.

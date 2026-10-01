@@ -29,6 +29,10 @@ use crate::{
 };
 
 const SECRET_TTL_SECONDS: u32 = 10 * 60;
+/// Where the private-preview sign-in redirect returns a signed-out visitor:
+/// the orchestration handoff (`AUTHORIZE_PATH`) with one sealed, URL-safe
+/// base64 `challenge` (crates/codewire-orchestration/src/api/preview).
+const PREVIEW_HANDOFF_CONTINUATION: &str = "/api/v1/preview-auth/authorize?challenge=";
 const TURNSTILE_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self' data:; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'";
 
 #[derive(Serialize)]
@@ -797,6 +801,7 @@ fn base_view(query: AuthQuery) -> AuthFormView {
         turnstile_site_key: String::new(),
         show_totp_code: false,
         forgot_password_link: false,
+        preview_sign_in: false,
         secondary_label: "",
         secondary_url: String::new(),
     }
@@ -814,7 +819,27 @@ fn login_view(query: AuthQuery, error: String) -> AuthFormView {
     view.forgot_password_link = true;
     view.secondary_label = "Need an account? Create one";
     view.secondary_url = auth_path_from_view("/signup", &view);
+    if continues_to_preview_handoff(&view) {
+        view.title = "Sign in to view preview";
+        view.preview_sign_in = true;
+    }
     view
+}
+
+/// Whether a successful sign-in from this view finishes at the private-preview
+/// handoff. Only the already-validated continuation decides, and it only picks
+/// fixed copy: no part of it is shown. An OIDC request completes elsewhere.
+fn continues_to_preview_handoff(view: &AuthFormView) -> bool {
+    view.auth_request_id.is_empty()
+        && view
+            .return_to
+            .strip_prefix(PREVIEW_HANDOFF_CONTINUATION)
+            .is_some_and(|challenge| {
+                !challenge.is_empty()
+                    && challenge
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
 }
 
 fn signup_view(query: AuthQuery, error: String) -> AuthFormView {
@@ -1057,6 +1082,217 @@ mod tests {
         assert!(!setup_debug.contains("totp-secret-marker"));
         assert!(!setup_debug.contains("backup-code-marker"));
         assert!(setup_debug.contains("backup_code_count: 1"));
+    }
+
+    const PREVIEW_CHALLENGE: &str = "c2VhbGVk-Y29udGludWF0aW9u_UHJldmlld01hcmtlcg";
+    const PREVIEW_TITLE: &str = "<title>Sign in to view preview · Codewire</title>";
+    const PREVIEW_HEADING: &str =
+        "<h1 id=\"auth-title\" class=\"cw-page-title\">Sign in to view preview</h1>";
+    const PREVIEW_CONTEXT: &str =
+        "<p class=\"cw-auth-copy\">You'll return to the preview after signing in.</p>";
+    const LOGIN_TITLE: &str = "<title>Sign in · Codewire</title>";
+    const LOGIN_HEADING: &str =
+        "<h1 id=\"auth-title\" class=\"cw-page-title\">Log in to Codewire</h1>";
+
+    fn preview_continuation() -> String {
+        format!("{PREVIEW_HANDOFF_CONTINUATION}{PREVIEW_CHALLENGE}")
+    }
+
+    fn between<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
+        let (_, rest) = body.split_once(start).expect("start marker");
+        rest.split_once(end).expect("end marker").0
+    }
+
+    async fn login_page(origin: &str, pairs: &[(&str, &str)]) -> String {
+        // Encode exactly as the preview redirect does before following it.
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        for (name, value) in pairs {
+            query.append_pair(name, value);
+        }
+        let response = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client")
+            .get(format!("{origin}/login?{}", query.finish()))
+            .send()
+            .await
+            .expect("login page");
+        assert_eq!(response.status(), StatusCode::OK);
+        response.text().await.expect("login body")
+    }
+
+    #[tokio::test]
+    async fn only_a_validated_preview_handoff_continuation_shows_preview_sign_in() {
+        let app = crate::app(crate::Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            runtime_mode: crate::RuntimeMode::CurrentThread,
+            public_origin: "https://app.example.test".into(),
+            api_origin: "http://127.0.0.1:9".parse().unwrap(),
+            credential_origin: "http://127.0.0.1:9".parse().unwrap(),
+            identity_origin_string: "http://127.0.0.1:9".into(),
+            browser_api_origin: "http://127.0.0.1:9".into(),
+            billing_origin: "http://127.0.0.1:9".parse().unwrap(),
+            docs_root: Default::default(),
+            confidential_storage_enabled: false,
+            confidential_admin_only: true,
+            turnstile_site_key: String::new(),
+            github_app_slug: String::new(),
+            github_app_client_id: String::new(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let continuation = preview_continuation();
+        let body = login_page(&origin, &[("return_to", &continuation)]).await;
+        for fragment in [PREVIEW_TITLE, PREVIEW_HEADING, PREVIEW_CONTEXT] {
+            assert!(body.contains(fragment), "missing {fragment}");
+        }
+        assert!(!body.contains(LOGIN_HEADING));
+        // The same sign-in form, still carrying the unchanged continuation.
+        assert!(body.contains("action=\"/login/_actions/sign-in\""));
+        assert!(body.contains("name=\"_csrf\""));
+        assert!(body.contains("id=\"email\""));
+        assert!(body.contains("id=\"password\""));
+        // The continuation reaches only the places it already did: the hidden
+        // return_to and the sign-up link. The context copy echoes none of it.
+        assert_eq!(body.matches(PREVIEW_CHALLENGE).count(), 2);
+        let header = between(&body, "<header class=\"cw-auth-header\">", "</header>");
+        let copy: String = header
+            .split("href=\"")
+            .enumerate()
+            .map(|(index, part)| match index {
+                0 => part,
+                _ => part.split_once('"').map_or("", |(_, rest)| rest),
+            })
+            .collect();
+        let title = between(&body, "<title>", "</title>");
+        for reflected in [PREVIEW_CHALLENGE, "preview-auth", "challenge", "authorize"] {
+            assert!(
+                !copy.contains(reflected),
+                "context copy reflects {reflected}"
+            );
+            assert!(!title.contains(reflected), "title reflects {reflected}");
+        }
+
+        for return_to in [
+            "/dashboard/",
+            "",
+            "https://evil.example/api/v1/preview-auth/authorize?challenge=abc",
+            "//evil.example/api/v1/preview-auth/authorize?challenge=abc",
+            "/\\evil.example/api/v1/preview-auth/authorize?challenge=abc",
+            "/api/v1/preview-auth/authorize?challenge=",
+            "/api/v1/preview-auth/authorize",
+            "/api/v1/preview-auth/authorize?challenge=abc&next=/x",
+            "/api/v1/preview-auth/authorize?challenge=abc#fragment",
+            "/api/v1/preview-auth/authorize?challenge=%3Cscript%3E",
+            "/api/v1/preview-auth/authorize?challenge=<script>",
+            "/api/v1/preview-auth/authorize?challenge=abc\nLocation: https://evil.example",
+            "/api/v1/preview-auth/authorizeX?challenge=abc",
+            "/api/v1/preview-auth/../preview-auth/authorize?challenge=abc",
+            "/dashboard/?next=/api/v1/preview-auth/authorize?challenge=abc",
+        ] {
+            let body = login_page(&origin, &[("return_to", return_to)]).await;
+            assert!(body.contains(LOGIN_TITLE), "{return_to:?}");
+            assert!(body.contains(LOGIN_HEADING), "{return_to:?}");
+            assert!(!body.contains("Sign in to view preview"), "{return_to:?}");
+            assert!(!body.contains(PREVIEW_CONTEXT), "{return_to:?}");
+        }
+        // An OIDC request completes at its callback, not the preview.
+        let body = login_page(
+            &origin,
+            &[
+                ("authRequestID", "request-id"),
+                ("return_to", &continuation),
+            ],
+        )
+        .await;
+        assert!(body.contains(LOGIN_HEADING));
+        assert!(!body.contains(PREVIEW_CONTEXT));
+        server.abort();
+    }
+
+    #[test]
+    fn a_rejected_preview_sign_in_keeps_its_context() {
+        let form = AuthFormSubmission {
+            csrf: String::new(),
+            email: String::new(),
+            password: String::new(),
+            confirm_password: String::new(),
+            name: String::new(),
+            invite_code: String::new(),
+            reason: String::new(),
+            turnstile_response: String::new(),
+            code: String::new(),
+            auth_request_id: String::new(),
+            return_to: preview_continuation(),
+        };
+        let view = login_view(form_query(&form), "Email and password are required.".into());
+        assert!(view.preview_sign_in);
+        assert_eq!(view.return_to, preview_continuation());
+        // Other auth forms keep their own copy for the same continuation.
+        assert!(!signup_view(form_query(&form), String::new()).preview_sign_in);
+        assert!(!two_factor_view(form_query(&form), String::new()).preview_sign_in);
+    }
+
+    #[test]
+    fn preview_sign_in_template_and_fixture_share_the_copy_and_order() {
+        let view = login_view(
+            AuthQuery {
+                return_to: preview_continuation(),
+                ..Default::default()
+            },
+            String::new(),
+        );
+        let product = AuthFormTemplate { view: &view }
+            .render()
+            .expect("render preview sign-in");
+        let fixture = include_str!(
+            "../../../../packages/codewire-design/reference/fixtures/login-preview.html"
+        );
+        for html in [product.as_str(), fixture] {
+            let mut from = 0;
+            for fragment in [
+                PREVIEW_TITLE,
+                "<div class=\"cw-cosmos\" aria-hidden=\"true\">",
+                "<main class=\"cw-auth-shell\">",
+                "<section class=\"cw-auth-panel\" aria-labelledby=\"auth-title\">",
+                "<header class=\"cw-auth-header\">",
+                PREVIEW_HEADING,
+                PREVIEW_CONTEXT,
+                "<p class=\"cw-auth-switch\">Don't have an account? <a href=\"",
+                "<form class=\"cw-form\" method=\"post\" action=\"/login/_actions/sign-in\">",
+                "<input type=\"hidden\" name=\"return_to\" value=\"",
+                "<button class=\"cw-button cw-button--pill cw-button--large cw-auth-submit\" type=\"submit\">Sign in</button>",
+            ] {
+                let at = html[from..]
+                    .find(fragment)
+                    .unwrap_or_else(|| panic!("missing or out of order: {fragment}"));
+                from += at + fragment.len();
+            }
+        }
+    }
+
+    #[test]
+    fn preview_handoff_continuation_matches_the_preview_redirect() {
+        let browser = include_str!("../../../codewire-orchestration/src/api/preview/browser.rs");
+        let authorization =
+            include_str!("../../../codewire-orchestration/src/api/preview/authorization.rs");
+        assert!(browser.contains(
+            "pub(super) const AUTHORIZE_PATH: &str = \"/api/v1/preview-auth/authorize\";"
+        ));
+        assert!(browser.contains("Ok(URL_SAFE_NO_PAD.encode(bytes))"));
+        assert!(
+            authorization.contains("let local = format!(\"{AUTHORIZE_PATH}?challenge={id}\");")
+        );
+        assert!(authorization.contains(".append_pair(\"return_to\", &local)"));
+        assert!(authorization.contains("redirect(&format!(\"{frontend}/login?{query}\"))"));
+        assert_eq!(
+            PREVIEW_HANDOFF_CONTINUATION,
+            "/api/v1/preview-auth/authorize?challenge="
+        );
     }
 
     #[test]
