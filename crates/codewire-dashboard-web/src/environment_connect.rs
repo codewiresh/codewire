@@ -786,7 +786,8 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         memory_mb: environment.memory_mb,
         disk_gb: environment.disk_gb,
         hourly_rate: format!("${:.2}/h", per_second * 3_600.0),
-        can_start: state == "stopped",
+        // Start from error asks the runtime to retry creation.
+        can_start: matches!(state, "stopped" | "error"),
         can_stop: state == "running",
         can_destroy: !matches!(state, "destroying" | "destroyed"),
         confidential_actions_allowed: true,
@@ -855,9 +856,9 @@ fn port_row(port: Port) -> EnvironmentPortRow {
         port: port.port,
         label: port.label,
         access: match port.access.to_i32() {
-            value if value == PortAccess::Public as i32 => "Public",
-            value if value == PortAccess::OrgMembers as i32 => "Org",
-            _ => "Creator",
+            value if value == PortAccess::Public as i32 => "Anyone with the URL",
+            value if value == PortAccess::OrgMembers as i32 => "Organization members",
+            _ => "Sandbox creator",
         },
         has_preview: valid_assigned_preview_url(&preview_url),
         preview_url,

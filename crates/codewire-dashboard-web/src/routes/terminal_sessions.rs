@@ -99,6 +99,8 @@ fn connect_failure(error: ConnectError, mutation: bool) -> Response {
         ErrorCode::PermissionDenied => failure(StatusCode::FORBIDDEN, "not-authorized"),
         ErrorCode::NotFound => failure(StatusCode::NOT_FOUND, "not-found"),
         ErrorCode::InvalidArgument => failure(StatusCode::BAD_REQUEST, "invalid-request"),
+        // The daemon refuses a launch at its session limit before creating one.
+        ErrorCode::ResourceExhausted if mutation => failure(StatusCode::CONFLICT, "session-limit"),
         // A timed-out/lost reply is not proof that launch/stop did not happen.
         // Do not forward raw messages or automatic retry advice.
         _ if mutation => failure(StatusCode::CONFLICT, "session-outcome-unknown"),
@@ -383,6 +385,24 @@ mod tests {
                 .sessions
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn a_launch_refused_at_the_session_limit_is_named_but_reads_stay_unavailable() {
+        let body = |response: Response| async move {
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            (status, String::from_utf8(bytes.to_vec()).unwrap())
+        };
+        let limit = ConnectError::new(ErrorCode::ResourceExhausted, "private-limit-canary");
+        let (status, text) = body(connect_failure(limit.clone(), true)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(text.contains("session-limit") && !text.contains("canary"));
+        let (status, text) = body(connect_failure(limit, false)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(text.contains("sessions-unavailable"));
     }
 
     #[test]
