@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{title} · Codewire</title>
+    <link rel="stylesheet" href="{frontend}/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="{frontend}/assets/codewire/routes/auth-v2.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="preview-authorization">
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="{frontend}/" aria-label="Codewire home"><img src="{frontend}/assets/codewire/brand-icon-v1.svg" width="48" height="48" alt="Codewire"></a>
+      <section class="cw-auth-panel" aria-labelledby="preview-title">
+        <header class="cw-auth-header"><h1 id="preview-title" class="cw-page-title">{title}</h1></header>
+        <form id="preview-form" class="cw-form" method="post" action="{form_origin}">
+          {body}
+        </form>
+      </section>
+    </main>
+    {script_html}
+  </body>
+</html>

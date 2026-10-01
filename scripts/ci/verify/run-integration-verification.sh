@@ -176,7 +176,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 54
+  assert_passed_count "server-core migration matrix" "$logfile" 59
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
@@ -203,6 +203,13 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib --test access_profiles \
       --test credentials --test environment_external_cleanup --test environment_sources --no-run
+
+  logfile="$RUN_DIR/preview-browser-authorization.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      api::preview::authorization::database_tests:: -- --ignored --nocapture \
+      | tee "$logfile"
+  assert_passed_count "preview browser authorization matrix" "$logfile" 7
 
   logfile="$RUN_DIR/public-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

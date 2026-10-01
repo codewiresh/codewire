@@ -17,8 +17,21 @@ use crate::confidential_storage::require_interactive_access;
 const PREVIEW_SERVICE_HEADER: &str = "x-codewire-service";
 const PREVIEW_SERVICE_NAME: &str = "codewire-orchestration";
 
+pub(crate) mod authorization;
+mod browser;
+mod headers;
+
+/// Authorize one target, then return its response to the browser. A workload
+/// redirect must never cause the service to fetch another internal origin.
+pub fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 #[derive(Debug, Clone)]
 struct PreviewTarget {
+    port_id: String,
     port: i32,
     env_id: String,
     access: String,
@@ -54,37 +67,51 @@ pub async fn preview_proxy_middleware(
     if !is_preview_host(&host, &state.preview_base_domain) {
         return next.run(request).await;
     }
+    if request.uri().path() == browser::CALLBACK_PATH {
+        let context = authorization::PreviewContext::from(&state);
+        return match authorization::callback(&context, request, &host).await {
+            Ok(response) => authorization::no_store(response),
+            Err(response) if response.status() == StatusCode::FORBIDDEN => {
+                authorization::denied_page(&context)
+            }
+            Err(response) => authorization::no_store(response),
+        };
+    }
+    if request.uri().path().starts_with("/.codewire/") {
+        return preview_error(StatusCode::NOT_FOUND, "preview endpoint not found");
+    }
 
     let method = request.method().clone();
     let uri = request.uri().clone();
     let headers = request.headers().clone();
     let body = request.into_body();
 
-    let host_match = match resolve_preview_host(&state, &host).await {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            return next
-                .run(
-                    Request::builder()
-                        .method(method)
-                        .uri(uri)
-                        .body(body)
-                        .expect("request rebuild"),
-                )
-                .await;
-        }
-        Err(PreviewHostError::Invalid) => {
-            return preview_error(StatusCode::BAD_REQUEST, "invalid preview hostname");
-        }
-        Err(PreviewHostError::Internal) => {
-            return preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-        }
-        Err(PreviewHostError::NotFound) => {
-            return preview_error(StatusCode::NOT_FOUND, "preview hostname not found");
-        }
-    };
+    let host_match =
+        match resolve_preview_host(&state.pool, &state.preview_base_domain, &host).await {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                return next
+                    .run(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .body(body)
+                            .expect("request rebuild"),
+                    )
+                    .await;
+            }
+            Err(PreviewHostError::Invalid) => {
+                return preview_error(StatusCode::BAD_REQUEST, "invalid preview hostname");
+            }
+            Err(PreviewHostError::Internal) => {
+                return preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            }
+            Err(PreviewHostError::NotFound) => {
+                return preview_error(StatusCode::NOT_FOUND, "preview hostname not found");
+            }
+        };
 
-    let target = match resolve_preview_target(&state, &host_match).await {
+    let target = match resolve_preview_target(&state.pool, &host_match).await {
         Ok(target) => target,
         Err(response) => return response,
     };
@@ -96,11 +123,67 @@ pub async fn preview_proxy_middleware(
         );
     }
 
+    // Whether the proxy authenticated with the request's Bearer credential;
+    // that credential then stops here instead of reaching the workload.
+    let mut platform_bearer = false;
     if target.access != "public" || target.isolation_tier == "confidential" {
-        let user = match authenticate_socket_request(&state, &headers, "").await {
+        let grant = match authorization::grant_user(
+            &authorization::PreviewContext::from(&state),
+            &headers,
+            &host,
+            &host_match,
+            &target,
+        )
+        .await
+        {
+            Ok(user) => user,
+            Err(response) => return response,
+        };
+        if grant.is_some()
+            && !browser::safe_cookie_request(&method, &headers, &format!("https://{host}"))
+        {
+            return preview_error(StatusCode::FORBIDDEN, "preview request origin denied");
+        }
+        // The account session cookie is host-only on the dashboard origin, so
+        // one sent to a preview host was planted by another preview. Only the
+        // preview grant or a Bearer credential authenticates here.
+        let authenticated = match grant {
+            Some(user) => Ok(user),
+            None => {
+                let mut bearer_only = headers.clone();
+                bearer_only.remove(header::COOKIE);
+                platform_bearer = bearer_only.contains_key(header::AUTHORIZATION);
+                authenticate_socket_request(&state, &bearer_only, "").await
+            }
+        };
+        let user = match authenticated {
             Ok(user) => user,
             Err(response) if response.status() == StatusCode::UNAUTHORIZED => {
-                return redirect_to_login(&state.frontend_url, uri.to_string().as_str());
+                // Only an actual top-level browser navigation starts sign-in.
+                // API requests, POST bodies and upgrade handshakes fail closed.
+                if method != axum::http::Method::GET
+                    || headers.contains_key(header::UPGRADE)
+                    || headers.get("sec-fetch-mode").and_then(|v| v.to_str().ok())
+                        != Some("navigate")
+                    || headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok())
+                        != Some("document")
+                {
+                    return response;
+                }
+                return match authorization::start(
+                    &authorization::PreviewContext::from(&state),
+                    &headers,
+                    &host_match,
+                    &target,
+                    &host,
+                    uri.path_and_query()
+                        .map(|value| value.as_str())
+                        .unwrap_or("/"),
+                )
+                .await
+                {
+                    Ok(response) | Err(response) => response,
+                };
             }
             Err(response) => return response,
         };
@@ -109,8 +192,10 @@ pub async fn preview_proxy_middleware(
         // that boundary before creator/member shortcuts can grant access to
         // an environment owned by the same user in another organization.
         if !user.permits_organization(&host_match.org_id) {
-            return preview_error(
-                StatusCode::FORBIDDEN,
+            return preview_forbidden(
+                &state,
+                &method,
+                &headers,
                 "forbidden: API key belongs to another organization",
             );
         }
@@ -129,7 +214,7 @@ pub async fn preview_proxy_middleware(
                         "global administrator user credential required"
                     },
                 ),
-                _ => preview_error(StatusCode::FORBIDDEN, "forbidden"),
+                _ => preview_forbidden(&state, &method, &headers, "forbidden"),
             };
         }
 
@@ -145,20 +230,34 @@ pub async fn preview_proxy_middleware(
             .await
             .is_err()
             {
-                return preview_error(
-                    StatusCode::FORBIDDEN,
+                return preview_forbidden(
+                    &state,
+                    &method,
+                    &headers,
                     "forbidden: no access to this environment",
                 );
             }
         } else if target.access == "creator" && user.user_id != target.created_by {
-            return preview_error(
-                StatusCode::FORBIDDEN,
+            return preview_forbidden(
+                &state,
+                &method,
+                &headers,
                 "forbidden: only the creator can access this preview",
             );
         }
     }
 
-    proxy_to_preview_target(&state, method, uri, headers, body, &host, &target).await
+    proxy_to_preview_target(
+        &state,
+        method,
+        uri,
+        headers,
+        platform_bearer,
+        body,
+        &host,
+        &target,
+    )
+    .await
 }
 
 fn request_host<'a>(headers: &'a HeaderMap, uri: &'a axum::http::Uri) -> Option<&'a str> {
@@ -191,11 +290,12 @@ fn normalize_dns_name(name: &str) -> String {
 }
 
 async fn resolve_preview_host(
-    state: &ApiState,
+    pool: &sqlx::PgPool,
+    base_domain: &str,
     host: &str,
 ) -> Result<Option<PreviewHostMatch>, PreviewHostError> {
     let rows = sqlx::query("SELECT id, slug FROM organizations ORDER BY length(slug) DESC")
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await
         .map_err(|_| PreviewHostError::Internal)?;
     let orgs = rows.iter().filter_map(|row| {
@@ -203,7 +303,7 @@ async fn resolve_preview_host(
         let slug: String = row.try_get("slug").ok()?;
         Some((id, slug))
     });
-    match_preview_host(host, &state.preview_base_domain, orgs)
+    match_preview_host(host, base_domain, orgs)
 }
 
 fn match_preview_host<I>(
@@ -242,27 +342,30 @@ where
 }
 
 async fn resolve_preview_target(
-    state: &ApiState,
+    pool: &sqlx::PgPool,
     host_match: &PreviewHostMatch,
 ) -> Result<PreviewTarget, Response> {
-    let row = sqlx::query(
-        r#"SELECT ep.port, e.id, ep.access, e.created_by, e.state, e.isolation_tier,
+    let rows = sqlx::query(
+        r#"SELECT ep.id AS port_id, ep.port, e.id,
+                  ep.access, e.created_by, e.state, e.isolation_tier,
                   COALESCE(b.pod_ip, '') AS pod_ip
              FROM environment_ports ep
              JOIN environments e ON e.id = ep.environment_id
              LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
             WHERE ep.label = $1
-              AND e.id LIKE $2
-              AND e.org_id = $3"#,
+              AND starts_with(e.id, $2)
+              AND e.org_id = $3
+              AND ep.deletion_requested_at IS NULL
+            LIMIT 2"#,
     )
     .bind(&host_match.label)
-    .bind(format!("{}%", host_match.env_prefix))
+    .bind(&host_match.env_prefix)
     .bind(&host_match.org_id)
-    .fetch_optional(&state.pool)
+    .fetch_all(pool)
     .await
     .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
 
-    let Some(row) = row else {
+    let [row] = rows.as_slice() else {
         return Err(preview_error(
             StatusCode::NOT_FOUND,
             "port mapping not found",
@@ -290,6 +393,9 @@ async fn resolve_preview_target(
     }
 
     Ok(PreviewTarget {
+        port_id: row
+            .try_get("port_id")
+            .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
         port: row
             .try_get("port")
             .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
@@ -309,11 +415,13 @@ async fn resolve_preview_target(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn proxy_to_preview_target(
     state: &ApiState,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
+    platform_bearer: bool,
     body: Body,
     original_host: &str,
     target: &PreviewTarget,
@@ -325,10 +433,7 @@ async fn proxy_to_preview_target(
         return preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable");
     };
     let mut req = state.http_client.request(method, target_url);
-    for (name, value) in headers.iter() {
-        if is_hop_by_hop(name.as_str()) || name == header::HOST {
-            continue;
-        }
+    for (name, value) in headers::workload_request_headers(&headers, platform_bearer).iter() {
         req = req.header(name.as_str(), value.as_bytes());
     }
     req = req
@@ -346,11 +451,36 @@ async fn proxy_to_preview_target(
     };
 
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let builder = preview_response_builder(status, resp.headers());
+    let builder = preview_response_builder(status, resp.headers(), original_host);
     let body = stream_preview_response(resp.bytes_stream(), target.env_id.clone());
-    builder
+    let response = builder
         .body(body)
-        .unwrap_or_else(|_| preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable"))
+        .unwrap_or_else(|_| preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable"));
+    if target.access != "public" || target.isolation_tier == "confidential" {
+        private_response(response)
+    } else {
+        response
+    }
+}
+
+fn private_response(mut response: Response) -> Response {
+    // An application cannot opt authenticated content into a shared cache.
+    // Apply equally to conditional/304 responses so cached metadata is replaced.
+    let headers = response.headers_mut();
+    for name in [
+        "cache-control",
+        "surrogate-control",
+        "cdn-cache-control",
+        "cloudflare-cdn-cache-control",
+    ] {
+        headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static("private, no-store"),
+        );
+    }
+    headers.insert(header::EXPIRES, HeaderValue::from_static("0"));
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    response
 }
 
 fn stream_preview_request(body: Body) -> reqwest::Body {
@@ -371,12 +501,10 @@ where
 fn preview_response_builder(
     status: StatusCode,
     headers: &HeaderMap,
+    preview_host: &str,
 ) -> axum::http::response::Builder {
     let mut builder = Response::builder().status(status);
-    for (name, value) in headers {
-        if is_hop_by_hop(name.as_str()) {
-            continue;
-        }
+    for (name, value) in headers::browser_response_headers(headers, preview_host).iter() {
         let Ok(name) = HeaderName::from_bytes(name.as_str().as_bytes()) else {
             continue;
         };
@@ -397,21 +525,20 @@ fn preview_error(status: StatusCode, message: &'static str) -> Response {
     response
 }
 
-fn redirect_to_login(frontend_url: &str, redirect_uri: &str) -> Response {
-    let frontend = frontend_url.trim_end_matches('/');
-    let encoded: String = url::form_urlencoded::byte_serialize(redirect_uri.as_bytes()).collect();
-    let location = format!("{frontend}/sign-in?redirect_uri={encoded}");
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location.as_str())
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(PREVIEW_SERVICE_HEADER, PREVIEW_SERVICE_NAME)
-        .body(Body::from(format!(
-            r#"<a href="{location}">Found</a>.
-
-"#
-        )))
-        .expect("static redirect")
+fn preview_forbidden(
+    state: &ApiState,
+    method: &axum::http::Method,
+    headers: &HeaderMap,
+    message: &'static str,
+) -> Response {
+    if *method == axum::http::Method::GET
+        && headers.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) == Some("navigate")
+        && headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document")
+    {
+        authorization::denied_page(&authorization::PreviewContext::from(state))
+    } else {
+        preview_error(StatusCode::FORBIDDEN, message)
+    }
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
@@ -436,6 +563,71 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
+
+    #[tokio::test]
+    async fn workload_redirect_is_returned_not_followed_and_stays_private() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let destination = format!("http://{address}/must-not-fetch");
+        let location = destination.clone();
+        let router = axum::Router::new()
+            .route(
+                "/",
+                axum::routing::get(move || async move {
+                    (
+                        StatusCode::FOUND,
+                        [
+                            (header::LOCATION, location),
+                            (header::CACHE_CONTROL, "public, max-age=86400".into()),
+                        ],
+                    )
+                }),
+            )
+            .route(
+                "/must-not-fetch",
+                axum::routing::get(move || async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    "redirect target must not be requested"
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let result = http_client()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        server.abort();
+        let _ = server.await;
+        let upstream = result.expect("synthetic redirect request");
+        assert_eq!(upstream.status(), StatusCode::FOUND);
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let response = private_response(
+            preview_response_builder(
+                upstream.status(),
+                upstream.headers(),
+                "web-abcde-org.preview.test",
+            )
+            .body(Body::empty())
+            .unwrap(),
+        );
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers()[header::LOCATION], destination);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        assert!(
+            include_str!("../main.rs")
+                .contains("http_client: codewire_orchestration::api::preview::http_client()?")
+        );
+    }
 
     #[test]
     fn non_preview_hosts_pass_through() {
@@ -527,6 +719,43 @@ mod tests {
     }
 
     #[test]
+    fn private_preview_overrides_hostile_cache_headers_including_not_modified() {
+        for status in [StatusCode::OK, StatusCode::NOT_MODIFIED] {
+            let mut response = Response::builder()
+                .status(status)
+                .body(Body::empty())
+                .unwrap();
+            for name in [
+                "cache-control",
+                "surrogate-control",
+                "cdn-cache-control",
+                "cloudflare-cdn-cache-control",
+            ] {
+                response.headers_mut().append(
+                    HeaderName::from_static(name),
+                    HeaderValue::from_static("public, max-age=86400"),
+                );
+                response.headers_mut().append(
+                    HeaderName::from_static(name),
+                    HeaderValue::from_static("s-maxage=86400"),
+                );
+            }
+            let response = private_response(response);
+            assert_eq!(response.status(), status);
+            for name in [
+                "cache-control",
+                "surrogate-control",
+                "cdn-cache-control",
+                "cloudflare-cdn-cache-control",
+            ] {
+                assert_eq!(response.headers()[name], "private, no-store");
+                assert_eq!(response.headers().get_all(name).iter().count(), 1);
+            }
+            assert_eq!(response.headers()[header::EXPIRES], "0");
+        }
+    }
+
+    #[test]
     fn preview_response_preserves_end_to_end_headers_and_filters_hop_by_hop_headers() {
         let headers = HeaderMap::from_iter([
             (
@@ -540,9 +769,13 @@ mod tests {
             ),
         ]);
 
-        let response = preview_response_builder(StatusCode::PARTIAL_CONTENT, &headers)
-            .body(Body::empty())
-            .unwrap();
+        let response = preview_response_builder(
+            StatusCode::PARTIAL_CONTENT,
+            &headers,
+            "web-abcde-org.preview.test",
+        )
+        .body(Body::empty())
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(

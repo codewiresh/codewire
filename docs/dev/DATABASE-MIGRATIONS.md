@@ -615,6 +615,57 @@ proves the ledger and migration 29 checksum are restored, the column is absent,
 session records are discarded, the pre-0030 fingerprint returns, and a
 separate schema survives. These tests and instructions authorize no live reset.
 
+### Preview browser authorization
+
+Migration `0031_preview_browser_authorization.sql` adds two tables without
+changing versions 1–30, previous rows, credential formats or existing helpers.
+`preview_auth_challenges` stores bounded short-lived handoffs, with digests for
+the nonce, client binding and optional one-use authorization code. Anonymous
+starts use an encrypted stateless continuation; the application allocates a row
+only after authenticated automatic handoff. Consumption retains the ID and
+`consumed_at` tombstone until expiry, preventing the same continuation from
+allocating a replacement code. A consumed row requires a bound code and cannot
+record consumption after its challenge expiry.
+
+`preview_browser_grants` stores only the digest of the preview capability,
+bound to the exact session, organization, environment, port and host. Neither
+table stores raw session cookies, authorization codes or preview tokens.
+
+The database constrains lowercase SHA-256 digest shapes, host/path lengths,
+the five-minute challenge ceiling, the complete optional session/code/expiry
+tuple and one grant per originating session and exact preview scope. Grants
+have no independent expiry; every use requires a live parent session and
+current policy. Immediate foreign keys cascade after
+session, port, environment or organization deletion; existing account
+disablement removes sessions and therefore their preview capabilities. Exact
+cross-resource ownership, canonical host/path validation, current audience and
+membership, atomic code consumption and earlier runtime expiry remain the
+application's responsibility; foreign-key existence alone is not authorization.
+Challenge-expiry and parent/client indexes support bounded lookup and
+retirement. This
+migration grants no new role, privilege, provider material access or public
+preview audience.
+
+The 30→31 fixture independently pins the complete prior history and migration30
+from accepted canonical `3ac1cfcb3b840aef5d96af55246897d552a094dd`.
+The accepted version30 schema fingerprint remains separately pinned as
+`ACCEPTED_PRE_PREVIEW_SCHEMA_FINGERPRINT`. Fixtures
+cover fresh apply, retained sessions and protected application/credential rows,
+unchanged prior helper definitions and ledger, second-startup no-op with saved
+preview capabilities and consumed tombstones, constraints/indexes and all owner
+cascades. A disposable database event trigger fails after both new tables exist,
+proving SQLx rolls
+back their DDL and ledger before a successful retry. These are database proof,
+not evidence of deployed browser authorization or audience enforcement.
+
+There is no in-place downgrade. Stop preview authorization writers, then replay
+the selected version30 source into only an empty, disposable application
+`public` schema. The rollback fixture proves removal of preview capabilities,
+restoration of prior ledger/schema/helpers, discarded credential/session rows,
+and preservation of a separate schema. Other databases, schemas, cluster roles,
+and external OpenBao material remain outside this boundary. This documents a
+recovery boundary and authorizes no live reset or direct credential access.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

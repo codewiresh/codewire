@@ -228,6 +228,25 @@ def permanent_raw_surface_failures(
 def permanent_raw_surface_self_test(
     sources: dict[str, str], policy: dict[str, Any], client_sources: dict[str, str]
 ) -> None:
+    # Admit only the browser confirmation transport, never a family of raw
+    # credential APIs. Preserve the old-policy failure and sibling rejection.
+    preview_route = "/api/v1/preview-auth/authorize"
+    prior_preview_policy = dict(policy)
+    prior_preview_policy["allowed_raw_routes"] = [
+        route for route in policy["allowed_raw_routes"] if route != preview_route
+    ]
+    if not any(
+        failure.startswith("unapproved raw routes:") and preview_route in failure
+        for failure in permanent_raw_surface_failures(sources, prior_preview_policy, client_sources)
+    ):
+        raise RuntimeError("permanent raw guard lost the exact preview-route admission proof")
+    unknown_preview = dict(sources)
+    unknown_preview["crates/codewire-orchestration/src/unapproved_preview.rs"] = (
+        'fn unapproved() { Router::new().route("/api/v1/preview-auth/tokens", get(handler)); }'
+    )
+    if not permanent_raw_surface_failures(unknown_preview, policy, client_sources):
+        raise RuntimeError("permanent raw guard accepted an unapproved preview credential API")
+
     # The cookie-owned IdP inventory is an explicit identity boundary, not a
     # wildcard exception for new control-plane or authentication procedures.
     session_routes = {"/api/auth/sessions", "/api/auth/sessions/revoke"}
