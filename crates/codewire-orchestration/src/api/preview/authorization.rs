@@ -146,10 +146,12 @@ pub(super) fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response.headers_mut().insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
+    // Keep a page's own policy: the handoff pages need `strict-origin` so
+    // their automatic POST carries a real Origin (see `page`).
+    response
+        .headers_mut()
+        .entry(header::REFERRER_POLICY)
+        .or_insert(HeaderValue::from_static("no-referrer"));
     response.headers_mut().insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -791,6 +793,35 @@ mod tests {
         assert!(html.contains("<main"));
         assert!(html.contains("<form"));
         assert!(html.contains("<script nonce=\"synthetic-nonce\">"));
+    }
+
+    #[test]
+    fn handler_no_store_keeps_the_handoff_referrer_policy() {
+        // `authorize_page` and `authorize` wrap the page in `no_store` again.
+        // Overwriting its policy with no-referrer made the browser send
+        // `Origin: null`, so every signed-in handoff failed with 400 on Dev.
+        let handoff = no_store(page(
+            "https://dashboard.test",
+            "Opening preview",
+            "<button type=\"submit\">Continue to preview</button>",
+            "https://dashboard.test/api/v1/preview-auth/authorize",
+            Some((
+                "synthetic-nonce",
+                "document.getElementById('preview-form').requestSubmit();",
+            )),
+        ));
+        assert_eq!(handoff.headers()[header::REFERRER_POLICY], "strict-origin");
+        assert_eq!(
+            handoff
+                .headers()
+                .get_all(header::REFERRER_POLICY)
+                .iter()
+                .count(),
+            1
+        );
+        let error = no_store(invalid());
+        assert_eq!(error.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(error.headers()[header::CACHE_CONTROL], "no-store");
     }
 
     #[tokio::test]
