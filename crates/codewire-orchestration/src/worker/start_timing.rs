@@ -21,14 +21,25 @@ pub(super) struct PodStageTiming {
 }
 
 impl PodStageTiming {
-    pub fn metadata(&self) -> serde_json::Value {
+    /// `pod_uid` identifies the Pod incarnation, so its marks are recorded
+    /// once however many times create reaches it.
+    pub fn metadata(&self, pod_uid: &str) -> serde_json::Value {
         serde_json::json!({
             "duration_ms": duration_ms(self.duration),
             "at": self.completed_at.to_string(),
             "since_pod_created_ms": duration_ms(self.since_pod_created),
+            "pod_uid": pod_uid,
         })
     }
 }
+
+/// The `environment_logs` phases that carry Pod start marks.
+pub(super) const POD_STAGE_PHASES: [&str; 4] = [
+    StartStage::PodScheduled.as_str(),
+    StartStage::PodInitialized.as_str(),
+    StartStage::PodRunning.as_str(),
+    StartStage::PodContainersReady.as_str(),
+];
 
 /// Consecutive Pod start stages. A stage is reported only when both of its
 /// bounding marks are known, so a missing mark never folds two stages into
@@ -133,11 +144,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            stages[1].metadata(),
+            stages[1].metadata("pod-uid-1"),
             serde_json::json!({
                 "duration_ms": 33_000,
                 "at": at(36).unwrap().to_string(),
                 "since_pod_created_ms": 36_000,
+                "pod_uid": "pod-uid-1",
             })
         );
     }

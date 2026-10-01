@@ -29,7 +29,7 @@ use crate::{
 };
 
 const SECRET_TTL_SECONDS: u32 = 10 * 60;
-const TURNSTILE_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self'; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'";
+const TURNSTILE_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self' data:; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'";
 
 #[derive(Serialize)]
 struct CredentialsRequest<'a> {
