@@ -412,6 +412,18 @@ pub(crate) fn router() -> Router<AppState> {
             post(settings::revoke_session_action).layer(DefaultBodyLimit::max(2048)),
         )
         .route(
+            "/settings/_actions/two-factor/replace/start",
+            post(settings::replace_authenticator_start_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/two-factor/replace/confirm",
+            post(settings::replace_authenticator_confirm_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/two-factor/recovery-codes/regenerate",
+            post(settings::regenerate_recovery_codes_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
             "/settings/_actions/sign-out",
             post(authentication::sign_out_action),
         )

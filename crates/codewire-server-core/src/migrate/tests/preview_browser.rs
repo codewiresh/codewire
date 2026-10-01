@@ -120,7 +120,7 @@ async fn preview_fresh_schema_constrains_digests_lifetimes_bindings_and_indexes(
     let result = async {
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(embedded_max_version()? == VERSION);
+        anyhow::ensure!(embedded_max_version()? >= VERSION);
         seed(&pool).await?;
         seed_capabilities(&pool).await?;
         let measured = fingerprint(&pool).await?;
@@ -202,7 +202,7 @@ async fn preview_upgrade_preserves30_rows_helpers_and_second_startup() -> anyhow
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len() == 31 && after[..30] == before && after[30].0 == VERSION);
+        anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..30] == before && after[30].0 == VERSION);
         anyhow::ensure!(rows(&pool, false).await? == original && helpers(&pool).await? == old_helpers);
         anyhow::ensure!(sqlx::query_scalar::<_, bool>("SELECT NOT EXISTS(SELECT 1 FROM preview_auth_challenges) AND NOT EXISTS(SELECT 1 FROM preview_browser_grants)").fetch_one(&pool).await?);
         seed_capabilities(&pool).await?;
@@ -279,7 +279,7 @@ async fn preview_failed_forward_rolls_back_both_tables_and_ledger_then_retries()
         pool.close().await;
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(!absent(&pool).await? && applied_migrations(&pool).await?.len() == 31 && rows(&pool, false).await? == original);
+        anyhow::ensure!(!absent(&pool).await? && applied_migrations(&pool).await?.len() == MIGRATOR.iter().count() && rows(&pool, false).await? == original);
         pool.close().await;
         Ok(())
     }.await;
@@ -300,7 +300,9 @@ const PREVIEW_DOWN: &str = "BEGIN; \
 async fn preview_down_restores30_in_place_and_keeps_every_other_row() -> anyhow::Result<()> {
     let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
     let result = async {
-        ensure_schema(&db.url).await?;
+        // The down statement applies to a version-31 ledger, so stop there
+        // even when later migrations exist.
+        apply_migrations_before(&db.url, VERSION + 1).await?;
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&db.url)
@@ -322,7 +324,7 @@ async fn preview_down_restores30_in_place_and_keeps_every_other_row() -> anyhow:
             .max_connections(1)
             .connect(&db.url)
             .await?;
-        anyhow::ensure!(applied_migrations(&pool).await?.len() == 31);
+        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
         anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
         anyhow::ensure!(rows(&pool, false).await? == original);
         pool.close().await;

@@ -27,13 +27,10 @@
 .cw-device-code-field > .cw-label { margin-inline: auto; }
 .cw-device-code-field .cw-field-help { text-align: center; }
 
-/* Two-factor setup and recovery codes. */
+/* Two-factor setup and recovery codes. The QR code and recovery-code list
+   are shared components; this sheet lays out the setup page around them. */
 .cw-setup-grid { display: grid; gap: var(--space-6); }
 .cw-setup-grid h2 { margin: 0 0 var(--space-3); }
-.cw-qr { display: grid; width: fit-content; margin: 0 auto var(--space-3); place-items: center; padding: var(--space-4); border-radius: var(--radius-md); background: var(--qr-light); }
-.cw-qr svg { display: block; width: min(12rem, 60vw); height: auto; aspect-ratio: 1; }
-.cw-backup-codes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.cw-backup-codes li { padding: var(--space-2); border-radius: var(--radius-sm); background: var(--bg-surface-hover); text-align: center; }
 
 /* Invitation details. */
 .cw-invite-details { display: grid; gap: var(--space-3); margin: 0; }
@@ -43,5 +40,5 @@
 
 @media (max-width: 34rem) {
   .cw-auth-shell { padding-inline: var(--space-4); }
-  .cw-auth-actions, .cw-backup-codes { grid-template-columns: minmax(0, 1fr); }
+  .cw-auth-actions { grid-template-columns: minmax(0, 1fr); }
 }

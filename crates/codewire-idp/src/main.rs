@@ -122,7 +122,7 @@ async fn serve() -> anyhow::Result<()> {
     let access_admin = codewire_idp::access_admin::router(
         pool.clone(),
         idp_cfg.frontend_url.clone(),
-        email,
+        email.clone(),
         auth_state.clone(),
     );
     let two_factor = codewire_idp::two_factor::router(
@@ -130,6 +130,15 @@ async fn serve() -> anyhow::Result<()> {
         cfg.session_secret.clone(),
         secure,
         auth_state,
+    );
+    // Fresh-proof authenticator replacement and recovery-code regeneration:
+    // cookie-only, exact-Origin account controls.
+    let two_factor_replacement = codewire_idp::two_factor::replacement_router(
+        pool.clone(),
+        cfg.session_secret.clone(),
+        secure,
+        idp_cfg.frontend_url.clone(),
+        email,
     );
 
     let app = AppBuilder::new("codewire-idp")
@@ -140,7 +149,8 @@ async fn serve() -> anyhow::Result<()> {
         .merge(session_auth)
         .merge(email_password)
         .merge(access_admin)
-        .merge(two_factor);
+        .merge(two_factor)
+        .merge(two_factor_replacement);
 
     tracing::info!(
         bind = %cfg.bind_addr,

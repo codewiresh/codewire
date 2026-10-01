@@ -689,6 +689,18 @@ pub(super) async fn skip_two_factor_setup_action(
     }
 }
 
+/// The authenticator setup QR code as inline SVG. Shared by first setup and
+/// Account › Security replacement so both render the same one-time code.
+pub(super) fn totp_qr_svg(totp_uri: &str) -> Option<String> {
+    QrCode::new(totp_uri.as_bytes()).ok().map(|code| {
+        code.render::<svg::Color>()
+            .min_dimensions(256, 256)
+            .dark_color(svg::Color("#08090a"))
+            .light_color(svg::Color("#ffffff"))
+            .build()
+    })
+}
+
 fn setup_two_factor_response(
     state: &AppState,
     status: StatusCode,
@@ -696,14 +708,8 @@ fn setup_two_factor_response(
     return_to: String,
     error: String,
 ) -> Response {
-    let qr_svg = match QrCode::new(setup.totp_uri.as_bytes()) {
-        Ok(code) => code
-            .render::<svg::Color>()
-            .min_dimensions(256, 256)
-            .dark_color(svg::Color("#08090a"))
-            .light_color(svg::Color("#ffffff"))
-            .build(),
-        Err(_) => return error_page(WebError::IdentityUnavailable),
+    let Some(qr_svg) = totp_qr_svg(&setup.totp_uri) else {
+        return error_page(WebError::IdentityUnavailable);
     };
     let csrf = new_csrf_token();
     let view = SetupTwoFactorView {
