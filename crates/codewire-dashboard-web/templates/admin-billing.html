@@ -15,7 +15,7 @@
       <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
       <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
-      <main class="cw-main">{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-admin-stack">
+      <main class="cw-main">{% let crumb_scope = "admin" %}{% let crumb_page = "billing" %}{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-admin-stack">
         <header class="cw-admin-heading"><div><h1 class="cw-page-title">Billing Catalog</h1><p>Edit plan limits, billing settings, and Stripe price IDs from Codewire instead of treating Stripe as the product catalog.</p></div><span class="cw-badge">{{ catalog.plans.len() }} plans · {{ catalog.prices.len() }} prices · {{ catalog.settings.len() }} settings</span></header>
         {% if !catalog.message.is_empty() %}<div class="cw-alert cw-alert--success" role="status">{{ catalog.message }}</div>{% endif %}
         {% if !catalog.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ catalog.error }}</div>{% endif %}
