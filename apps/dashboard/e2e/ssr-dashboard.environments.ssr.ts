@@ -1067,7 +1067,7 @@ test.describe.serial("server-rendered environments", () => {
       has: page.getByText("web", { exact: true }),
     });
     await expect(configuredPort).toHaveCount(1);
-    await expect(configuredPort).toContainText("3000 · Creator");
+    await expect(configuredPort).toContainText("3000 · Sandbox creator");
     await portPanel.getByRole("spinbutton", { name: "Internal port", exact: true }).fill("8080");
     await portPanel.getByLabel("Preview label", { exact: true }).fill("manual-http");
     await portPanel.getByRole("button", { name: "Add port", exact: true }).click();
@@ -1088,7 +1088,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(portPanel.getByRole("status").filter({ hasText: "Port deleted" })).toBeVisible();
     await expect(port).toHaveCount(0);
     await expect(configuredPort).toHaveCount(1);
-    await expect(configuredPort).toContainText("3000 · Creator");
+    await expect(configuredPort).toContainText("3000 · Sandbox creator");
 
     await portPanel.getByRole("button", { name: "Done", exact: true }).click();
     await expect(portPanel).not.toBeVisible();

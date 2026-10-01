@@ -854,9 +854,9 @@ fn port_row(port: Port) -> EnvironmentPortRow {
         port: port.port,
         label: port.label,
         access: match port.access.to_i32() {
-            value if value == PortAccess::Public as i32 => "Public",
-            value if value == PortAccess::OrgMembers as i32 => "Org",
-            _ => "Creator",
+            value if value == PortAccess::Public as i32 => "Anyone with the URL",
+            value if value == PortAccess::OrgMembers as i32 => "Organization members",
+            _ => "Sandbox creator",
         },
         has_preview: valid_assigned_preview_url(&preview_url),
         preview_url,

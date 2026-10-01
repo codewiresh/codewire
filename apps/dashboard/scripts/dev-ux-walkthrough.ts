@@ -401,7 +401,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await ports.getByLabel("Preview label", { exact: true }).fill("ux-preview");
     await expect(ports.getByLabel("Who can open the preview?", { exact: true })).toHaveValue("creator");
     await button(ports, "Add port").click();
-    await expect(port).toContainText("8080 · Creator");
+    await expect(port).toContainText("8080 · Sandbox creator");
   });
   await stage("ports-preview-url", async () => {
     const open = port.getByRole("link", { name: "Open preview", exact: true });

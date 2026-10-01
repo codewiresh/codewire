@@ -2823,7 +2823,7 @@ mod tests {
                 id: "port-id".into(),
                 port: 3000,
                 label: "web".into(),
-                access: "Creator",
+                access: "Sandbox creator",
                 preview_url: "https://web-5d1db-test.preview.example".into(),
                 has_preview: true,
             }],
@@ -2860,7 +2860,7 @@ mod tests {
             2
         );
         assert!(html.contains("hx-target=\"#sandbox-ports-content\""));
-        assert!(html.contains("Internal 3000"));
+        assert!(html.contains("Internal port 3000 · Sandbox creator"));
         assert!(html.contains("https://web-5d1db-test.preview.example"));
         assert!(html.contains("name=\"port\" type=\"number\""));
         assert!(html.contains("value=\"8080\""));

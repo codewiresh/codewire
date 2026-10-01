@@ -14,7 +14,7 @@ test("ports load in place and late dismissed responses cannot redirect or replac
   const ports = page.getByRole("button", { name: "Ports", exact: true });
   const dialog = page.getByRole("dialog", { name: "Ports · Example Sandbox", exact: true });
   await ports.click();
-  await expect(dialog.getByText("Internal 3000 · Creator", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Internal port 3000 · Sandbox creator", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("link", { name: "Open preview" })).toHaveAttribute("href", "https://web-5d1db-example.preview.example.test");
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: test.info().outputPath("ports-dialog.png") });
@@ -40,7 +40,7 @@ test("ports load in place and late dismissed responses cannot redirect or replac
   // request runs after the obsolete response has been suppressed.
   await expect.poll(() => requests).toBe(2);
   await expect(page.locator("#sandbox-ports-content")).toHaveJSProperty("inert", false);
-  await expect(dialog.getByText("Internal 3000 · Creator", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Internal port 3000 · Sandbox creator", { exact: true })).toBeVisible();
   await expect(page.getByText("Stale response", { exact: true })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
   await page.unroute("**/reference/fixtures/terminal-ports.html");
