@@ -911,7 +911,13 @@ pub(crate) async fn create_environment_core(
     )?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
-    run_organization_runtime_mutation(pool, org_id, async {
+    // The admitted operation outlives a dropped request, so it owns its inputs.
+    let owned_state = state.clone();
+    let owned_user = user.clone();
+    let owned_org_id = org_id.to_owned();
+    run_organization_runtime_mutation(pool, org_id, async move {
+        let (state, user, org_id) = (&owned_state, &owned_user, owned_org_id.as_str());
+        let pool = &state.pool;
         let result: AppResult<Environment> = async {
             let preset: Preset = if body.preset_id.as_deref().is_some_and(|s| !s.is_empty()) {
                 let preset_id = body.preset_id.clone().unwrap();

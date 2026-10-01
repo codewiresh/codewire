@@ -670,11 +670,16 @@ async fn resize_environment_core_inner(
 
     let quota = get_org_quota(&state.pool, &params.org_id).await;
     let dispatch_ambiguous = AtomicBool::new(false);
+    // The admitted operation outlives a dropped request, so it owns its inputs.
+    let owned_state = state.clone();
+    let owned_params = params.clone();
     let operation = run_environment_runtime_mutation(
         &state.pool,
         &params.org_id,
         &params.environment_id,
-        async {
+        async move {
+            let state = &owned_state;
+            let params = owned_params;
             let result: AppResult<(EnvironmentResizeOperation, bool)> = async {
                 let (operation, admitted) = begin_resize_operation(
                     &state.pool,
