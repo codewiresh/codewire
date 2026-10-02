@@ -265,7 +265,7 @@ pub struct CodexProviderProjection {
 
 impl CodexProviderProjection {
     /// Project an exact per-environment Kubernetes gateway on HTTPS port443.
-    /// Codex 0.149.0's supported command-backed bearer mechanism re-reads the
+    /// Codex 0.157.0's supported command-backed bearer mechanism re-reads the
     /// dedicated projected Pod capability on demand and after one401 retry.
     /// The caller also mounts public roots and sets CODEX_CA_CERTIFICATE to
     /// [`CODEX_PLATFORM_ROOTS_FILE`]. This is environment-level capability

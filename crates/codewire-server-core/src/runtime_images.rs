@@ -6,7 +6,7 @@
 //! this default applies only when that is unset.
 
 /// Workspace image used when a Sandbox does not choose one.
-pub const DEFAULT_WORKSPACE_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:920add04d53620ffbefc5df89738381c5268466538211d297a81d16fba10338a";
+pub const DEFAULT_WORKSPACE_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:ad1f2db5ff86c616ea7fb7b8c3f196b271a0bc5b75a636f4b4ffd77fb1ee2313";
 
 /// Gateway sidecar image used when `SANDBOX_GATEWAY_IMAGE` is unset.
 pub const DEFAULT_GATEWAY_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:1f5972c44d7063815d4d5163f06fc8db5428a5a57dacc4816841cc5cd97ce190";
