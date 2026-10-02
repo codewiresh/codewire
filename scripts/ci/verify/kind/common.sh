@@ -375,6 +375,24 @@ validate_retained_cluster() {
   fi
 
   log "retained Kind cluster ${KIND_CLUSTER_NAME} accepted at compatibility version ${KIND_E2E_COMPATIBILITY_VERSION}"
+  renew_retained_synthetic_bearer
+}
+
+# A retained cluster outlives the four-hour synthetic product bearer that the
+# contract seed issues (tests/fixtures/billing/seed.sql). Renew only that seeded
+# token's lifetime, so a retained suite authenticates as on a fresh cluster.
+renew_retained_synthetic_bearer() {
+  local renewed
+  renewed="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 -qtAc \
+      "UPDATE oidc_access_tokens SET expires_at = NOW() + INTERVAL '4 hours'
+         WHERE token_hash = encode(digest('at_kind_connect_oidc_codewire_api', 'sha256'), 'hex')
+           AND client_id = 'oidc_kind_connect' RETURNING 1")" || return $?
+  if [ "$(printf '%s' "$renewed" | tr -d '[:space:]')" != 1 ]; then
+    echo '::error::retained Kind cluster lacks the seeded synthetic product bearer' >&2
+    return 1
+  fi
+  log "renewed the seeded synthetic product bearer"
 }
 
 # The prepared marker is scoped to its own cluster: parallel CI shard clusters
