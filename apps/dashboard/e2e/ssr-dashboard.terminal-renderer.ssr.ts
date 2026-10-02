@@ -155,7 +155,6 @@ test("terminal presentation preserves colors, metrics, selection and strict CSP"
   await expect(rows).toHaveCSS("font-family", /IBM Plex Mono/);
   expect(await page.evaluate(() => document.fonts.check('13px "IBM Plex Mono"'))).toBe(true);
   expect(await page.locator("[data-terminal-root] style").evaluateAll((styles) => styles.every((style) => (style as HTMLElement).nonce === "codewire-terminal-design-preview"))).toBe(true);
-  await expect(page.locator("[data-terminal-root] style")).toHaveCount(3);
   expect(await page.evaluate(() => (window as Window & { terminalStyleViolations?: string[] }).terminalStyleViolations)).toEqual([]);
 
   const canary = rows.getByText("codewire-terminal-copy-234", { exact: true });

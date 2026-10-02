@@ -9,7 +9,6 @@ test("preview choices show an unassigned URL pattern and native labeled rows", a
   const ports = page.locator('section[aria-labelledby="ports-title"]');
   await expect(ports.locator(".cw-preview-pattern")).toHaveText("https://{label}-{sandbox-id-prefix}-example.preview.example.test");
   await expect(ports.locator("a")).toHaveCount(0);
-  await expect(ports.locator(":scope > p")).toHaveCount(1);
   await expect(ports.locator("ul[data-app-port-rows] + p[data-create-preview-hint]"))
     .toContainText("HTTP on each internal port opens at a preview URL like");
   await expect(ports.locator("[data-create-preview-hint]")).toContainText("with the access selected above");

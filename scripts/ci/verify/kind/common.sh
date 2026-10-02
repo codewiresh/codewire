@@ -29,27 +29,75 @@ fi
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 KIND_CONFIG="${KIND_CONFIG:-$ROOT/tests/e2e/kind/kind-config.yaml}"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-kind-e2e-${KIND_CLUSTER_NAME}}"
-mkdir -p "$RUN_DIR"
+# Host topology for this harness cluster. Every hostPort the checked-in Kind
+# config maps is templated, so multiple sessions can run multiple harness
+# clusters on one workstation with distinct KIND_CLUSTER_NAME and port
+# assignments; the defaults keep every existing flow unchanged.
+if [ -n "${KIND_INGRESS_HOST_PORT:-}" ] && [ -n "${KIND_INGRESS_HTTP_HOST_PORT:-}" ] \
+    && [ "$KIND_INGRESS_HOST_PORT" != "$KIND_INGRESS_HTTP_HOST_PORT" ]; then
+  echo '::error::Kind ingress port selectors conflict' >&2
+  return 2
+fi
+if [ -n "${KIND_COORDINATOR_DIRECT_HOST_PORT:-}" ] && [ -n "${KIND_COORDINATOR_HOST_PORT:-}" ] \
+    && [ "$KIND_COORDINATOR_DIRECT_HOST_PORT" != "$KIND_COORDINATOR_HOST_PORT" ]; then
+  echo '::error::Kind coordinator port selectors conflict' >&2
+  return 2
+fi
+if [ -n "${KIND_ORCHESTRATION_HTTP_URL:-}" ] && [ -n "${KIND_ORCHESTRATION_URL:-}" ] \
+    && [ "$KIND_ORCHESTRATION_HTTP_URL" != "$KIND_ORCHESTRATION_URL" ]; then
+  echo '::error::Kind orchestration endpoint selectors conflict' >&2
+  return 2
+fi
+if [ -n "${KIND_TEMPORAL_FRONTEND_URL:-}" ] && [ -n "${KIND_TEMPORAL_ADDRESS:-}" ] \
+    && [ "$KIND_TEMPORAL_FRONTEND_URL" != "$KIND_TEMPORAL_ADDRESS" ]; then
+  echo '::error::Kind Temporal endpoint selectors conflict' >&2
+  return 2
+fi
+KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-${KIND_INGRESS_HTTP_HOST_PORT:-8090}}"
+KIND_INGRESS_TLS_HOST_PORT="${KIND_INGRESS_TLS_HOST_PORT:-10443}"
+KIND_TEMPORAL_HOST_PORT="${KIND_TEMPORAL_HOST_PORT:-7233}"
+KIND_ORCHESTRATION_HOST_PORT="${KIND_ORCHESTRATION_HOST_PORT:-8084}"
+KIND_COORDINATOR_DIRECT_HOST_PORT="${KIND_COORDINATOR_DIRECT_HOST_PORT:-${KIND_COORDINATOR_HOST_PORT:-18092}}"
+KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
+KIND_HOST_PORT_VARS=(
+  KIND_INGRESS_HOST_PORT
+  KIND_INGRESS_TLS_HOST_PORT
+  KIND_TEMPORAL_HOST_PORT
+  KIND_ORCHESTRATION_HOST_PORT
+  KIND_COORDINATOR_DIRECT_HOST_PORT
+  KIND_POSTGRES_HOST_PORT
+)
+kind_host_port_var_seen=":"
+for kind_host_port_var in "${KIND_HOST_PORT_VARS[@]}"; do
+  kind_host_port_value="${!kind_host_port_var}"
+  if ! [[ "$kind_host_port_value" =~ ^[0-9]+$ ]] \
+      || [ "$kind_host_port_value" -lt 1024 ] \
+      || [ "$kind_host_port_value" -gt 65535 ]; then
+    echo "::error::${kind_host_port_var} must be an unprivileged TCP port"
+    exit 2
+  fi
+  case "$kind_host_port_var_seen" in
+    *":${kind_host_port_value}:"*)
+      echo "::error::${kind_host_port_var} duplicates another requested Kind host port (${kind_host_port_value})"
+      exit 2
+      ;;
+  esac
+  kind_host_port_var_seen+="${kind_host_port_value}:"
+done
+unset kind_host_port_var kind_host_port_value kind_host_port_var_seen
 # Use the hostless HTTP server for the edge and transitional REST probes. The
 # coordinator TLS ingress intentionally owns Host/SNI localhost below.
-KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:8090}"
-KIND_INGRESS_TLS_URL="${KIND_INGRESS_TLS_URL:-https://localhost:10443}"
-KIND_INGRESS_HTTP_HOST_PORT="${KIND_INGRESS_HTTP_HOST_PORT:-8090}"
-KIND_INGRESS_TLS_HOST_PORT="${KIND_INGRESS_TLS_HOST_PORT:-10443}"
-KIND_ORCHESTRATION_HOST_PORT="${KIND_ORCHESTRATION_HOST_PORT:-8084}"
-KIND_COORDINATOR_HOST_PORT="${KIND_COORDINATOR_HOST_PORT:-18092}"
-KIND_TEMPORAL_HOST_PORT="${KIND_TEMPORAL_HOST_PORT:-7233}"
-KIND_ORCHESTRATION_URL="${KIND_ORCHESTRATION_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}"
-KIND_COORDINATOR_DIRECT_URL="${KIND_COORDINATOR_DIRECT_URL:-http://127.0.0.1:${KIND_COORDINATOR_HOST_PORT}}"
-KIND_TEMPORAL_ADDRESS="${KIND_TEMPORAL_ADDRESS:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}"
-KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
-if ! [[ "$KIND_POSTGRES_HOST_PORT" =~ ^[0-9]+$ ]] \
-    || [ "$KIND_POSTGRES_HOST_PORT" -lt 1024 ] \
-    || [ "$KIND_POSTGRES_HOST_PORT" -gt 65535 ]; then
-  echo "::error::KIND_POSTGRES_HOST_PORT must be an unprivileged TCP port"
-  exit 2
-fi
+KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:${KIND_INGRESS_HOST_PORT}}"
+KIND_INGRESS_TLS_URL="${KIND_INGRESS_TLS_URL:-https://localhost:${KIND_INGRESS_TLS_HOST_PORT}}"
+KIND_ORCHESTRATION_URL="${KIND_ORCHESTRATION_HTTP_URL:-${KIND_ORCHESTRATION_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}}"
+KIND_TEMPORAL_ADDRESS="${KIND_TEMPORAL_FRONTEND_URL:-${KIND_TEMPORAL_ADDRESS:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}}"
+KIND_INGRESS_HTTP_HOST_PORT="${KIND_INGRESS_HTTP_HOST_PORT:-$KIND_INGRESS_HOST_PORT}"
+KIND_COORDINATOR_HOST_PORT="${KIND_COORDINATOR_HOST_PORT:-$KIND_COORDINATOR_DIRECT_HOST_PORT}"
 KIND_DATABASE_URL="postgres://codewire:codewire@127.0.0.1:${KIND_POSTGRES_HOST_PORT}/codewire"
+KIND_TEMPORAL_FRONTEND_URL="$KIND_TEMPORAL_ADDRESS"
+KIND_ORCHESTRATION_HTTP_URL="$KIND_ORCHESTRATION_URL"
+KIND_COORDINATOR_DIRECT_URL="${KIND_COORDINATOR_DIRECT_URL:-http://127.0.0.1:${KIND_COORDINATOR_DIRECT_HOST_PORT}}"
+mkdir -p "$RUN_DIR"
 KEEP_KIND_CLUSTER="${KEEP_KIND_CLUSTER:-0}"
 KIND_HOST_LOCK_TIMEOUT_SECONDS="${KIND_HOST_LOCK_TIMEOUT_SECONDS:-1200}"
 if ! [[ "$KIND_HOST_LOCK_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
@@ -156,6 +204,93 @@ readonly DEFAULT_KIND_WORKSPACE_IMAGE DEFAULT_KIND_DIND_IMAGE \
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
+}
+
+log_kind_bound_endpoints() {
+  log "cluster ${KIND_CLUSTER_NAME} bound endpoints:"
+  log "  ingress http       ${KIND_INGRESS_URL}"
+  log "  ingress tls        ${KIND_INGRESS_TLS_URL}"
+  log "  temporal frontend  ${KIND_TEMPORAL_FRONTEND_URL}"
+  log "  orchestration http ${KIND_ORCHESTRATION_HTTP_URL}"
+  log "  coordinator direct ${KIND_COORDINATOR_DIRECT_URL}"
+  log "  postgres           ${KIND_DATABASE_URL}"
+}
+
+# Best-effort holder identity for one held host port: a kind node container
+# resolves to its cluster name, any other Docker publisher to its container
+# name, and a non-Docker listener to a plain marker. Empty when nothing holds
+# the port as far as this process can observe.
+kind_host_port_holder() {
+  local port="$1" container
+  container="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null \
+    | awk -v needle=":${port}->" 'index($0, needle) {print $1; exit}')"
+  if [ -n "$container" ]; then
+    case "$container" in
+      *-control-plane) printf 'kind cluster %s' "${container%-control-plane}" ;;
+      *) printf 'Docker container %s' "$container" ;;
+    esac
+    return 0
+  fi
+  if ss -Hltn "sport = :${port}" 2>/dev/null | grep -q .; then
+    printf 'a non-Docker listener on this host'
+    return 0
+  fi
+  return 1
+}
+
+# Fail fast when a requested host port is already held, naming the owner so a
+# session never mutates another session's cluster by accident. Runs before the
+# slow build phase in `up` and again inside create_cluster as the backstop.
+# An optional first argument excludes a selected cluster's own holders from
+# this observation. create_cluster still refuses to replace an existing cluster.
+require_kind_host_ports_available() {
+  local ignore_cluster="${1:-}"
+  local port_var requested_port holder failures=0
+  for port_var in "${KIND_HOST_PORT_VARS[@]}"; do
+    requested_port="${!port_var}"
+    if holder="$(kind_host_port_holder "$requested_port")"; then
+      if [ -n "$ignore_cluster" ] && [ "$holder" = "kind cluster ${ignore_cluster}" ]; then
+        continue
+      fi
+      echo "::error::${port_var}=${requested_port} for Kind cluster ${KIND_CLUSTER_NAME} is held by ${holder}; stop that owner or choose a different ${port_var}"
+      failures=1
+    fi
+  done
+  [ "$failures" -eq 0 ]
+}
+
+# The templated host-port mappings as "default:requested" lines, one per
+# hostPort the checked-in Kind config declares.
+kind_host_port_mappings() {
+  printf '%s\n' \
+    "8090:${KIND_INGRESS_HOST_PORT}" \
+    "10443:${KIND_INGRESS_TLS_HOST_PORT}" \
+    "7233:${KIND_TEMPORAL_HOST_PORT}" \
+    "8084:${KIND_ORCHESTRATION_HOST_PORT}" \
+    "18092:${KIND_COORDINATOR_DIRECT_HOST_PORT}" \
+    "25432:${KIND_POSTGRES_HOST_PORT}"
+}
+
+# Render every templated hostPort mapping to its requested host port. The
+# checked-in config keeps the default values, each exactly once; the rendered
+# copy is per-run state under RUN_DIR.
+render_kind_host_port_mappings() {
+  python3 - "$ROOT/scripts/dev/kind/cluster-profile.py" "$1" "$2" "$(kind_host_port_mappings)" <<'PY_RENDER'
+import importlib.util
+from pathlib import Path
+import sys
+spec = importlib.util.spec_from_file_location("kind_port_renderer", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+with Path(sys.argv[2]).open("rb") as stream:
+    data = stream.read(module.JSON_BOUND + 1)
+module.require(len(data) <= module.JSON_BOUND, "Kind config template exceeds its bound")
+replacements = {int(original): int(requested) for original, requested in
+                (line.split(":") for line in sys.argv[4].splitlines())}
+Path(sys.argv[3]).write_text(module.render_host_ports(data.decode(), replacements))
+PY_RENDER
+
 }
 
 acquire_kind_host_lock() {
@@ -652,6 +787,19 @@ reclaim_cancelled_ci_clusters() {
     return 1
   fi
 
+  # The checked-in config names the default host ports; this run binds their
+  # requested renderings, so the ownership check runs against those.
+  local requested requested_ports=""
+  while IFS= read -r port; do
+    if ! requested="$(awk -F: -v port="$port" \
+        '$1 == port { print $2; found = 1 } END { exit !found }' \
+        < <(kind_host_port_mappings))"; then
+      echo "::error::Kind config host port ${port} has no KIND_*_HOST_PORT mapping"
+      return 1
+    fi
+    requested_ports+="${requested}"$'\n'
+  done <<< "$ports"
+
   if ! running_containers="$(docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' 2>&1)"; then
     echo "::error::failed to inspect Docker port ownership before Kind startup: ${running_containers}"
     return 1
@@ -666,7 +814,7 @@ reclaim_cancelled_ci_clusters() {
       echo "::error::fixed Kind host port ${port} remains occupied after cancelled-run cleanup: ${owners}"
       return 1
     fi
-  done <<< "$ports"
+  done <<< "$requested_ports"
 }
 
 http_code() {
@@ -990,6 +1138,7 @@ create_cluster() {
     echo "::error::Kind cluster already exists; it cannot be replaced implicitly"
     return 1
   fi
+  require_kind_host_ports_available "$KIND_CLUSTER_NAME" || return $?
 
   log "checking Docker runtime for kind"
   docker version || return $?
@@ -1003,12 +1152,7 @@ create_cluster() {
       --cluster "$CLUSTER" --template "$ROOT/tests/e2e/kind/kind-config.yaml" >/dev/null || return $?
     rendered_kind_config="$KIND_CONFIG"
   else
-  if [ "$(grep -Fc 'hostPort: 25432' "$kind_config")" -ne 1 ]; then
-    echo "::error::Kind config must contain exactly one default Postgres host-port mapping"
-    exit 1
-  fi
-  sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/" \
-    "$kind_config" >"$rendered_kind_config" || return $?
+    render_kind_host_port_mappings "$kind_config" "$rendered_kind_config" || return $?
   fi
   local create_status=0
   kind create cluster --name "$KIND_CLUSTER_NAME" --config "$rendered_kind_config" --wait 120s || create_status=$?
@@ -1036,6 +1180,7 @@ create_cluster() {
     echo '::error::Kind reported creation success without the expected node; ownership is unconfirmed' >&2
     return 1
   fi
+  log_kind_bound_endpoints
   configure_remote_dind_kind_network || return $?
 }
 
@@ -1059,11 +1204,11 @@ start_remote_dind_kind_forwarding() {
 
   python3 -u "$ROOT/scripts/ci/verify/kind/forward-remote-dind-ports.py" \
     --target "$node" \
-    --forward "${KIND_INGRESS_HTTP_HOST_PORT}:80" \
+    --forward "${KIND_INGRESS_HOST_PORT}:80" \
     --forward "${KIND_INGRESS_TLS_HOST_PORT}:443" \
     --forward "${KIND_TEMPORAL_HOST_PORT}:30733" \
     --forward "${KIND_ORCHESTRATION_HOST_PORT}:30084" \
-    --forward "${KIND_COORDINATOR_HOST_PORT}:30090" \
+    --forward "${KIND_COORDINATOR_DIRECT_HOST_PORT}:30090" \
     --forward "${KIND_POSTGRES_HOST_PORT}:30432" \
     >"$forwarder_log" 2>&1 &
   REMOTE_DIND_FORWARDER_PID=$!
@@ -2360,7 +2505,7 @@ connect_edge_probes() {
   log "Connect edge probes OK (${events} stream chunks over ${spread}s)"
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_URL" \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
     "$CARGO_CI_DIR/prepare-stream-smoke"
@@ -2721,7 +2866,7 @@ exec_service_connect_smoke() {
   local invalid_command invalid_connect_payload invalid_connect
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_URL" \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
@@ -2951,7 +3096,7 @@ SQL
   environment_session_protocol_smoke "$environment_id" || return $?
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_URL" \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
@@ -3101,7 +3246,7 @@ environment_session_protocol_smoke() {
       return "$status"
     }
 
-  if ! SMOKE_SESSION_BASE_URL="$KIND_ORCHESTRATION_URL" \
+  if ! SMOKE_SESSION_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_ACCESS_TOKEN=at_kind_connect_oidc_codewire_api \
@@ -3545,8 +3690,8 @@ temporal_fencing_smoke() {
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   log "running final Temporal activity-fencing smoke"
   DATABASE_URL="$KIND_DATABASE_URL" \
-    TEMPORAL_ADDRESS="$KIND_TEMPORAL_ADDRESS" \
-    SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_URL" \
+    TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL" \
+    SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_WORKSPACE_IMAGE="$workspace_image" \
     "$CARGO_CI_DIR/temporal-fencing-smoke"
 }
@@ -3883,7 +4028,7 @@ rust_reconciler_ttl_e2e() {
   log "running Rust reconciler TTL Kubernetes e2e"
   KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" \
     DATABASE_URL="$KIND_DATABASE_URL" \
-    SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_URL" \
+    SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     SMOKE_SESSION_TOKEN=contract-admin-session-token \
     SMOKE_ORG_ID=org_contract_1 \

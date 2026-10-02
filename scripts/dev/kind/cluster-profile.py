@@ -48,11 +48,13 @@ PROFILE_KEYS = {"schema", "cluster_name", "docker_id", "ownership_nonce", "creat
 ARTIFACT_KEYS = {"schema", "cluster_name", "docker_id", "ownership_nonce",
                  "source_head", "source_tree", "product_images", "files"}
 ENV_CONFLICT_KEYS = {"KIND_CLUSTER_NAME", "KUBE_CONTEXT", "KUBECONFIG", "KIND_CONFIG", "RUN_DIR",
+                     "KIND_INGRESS_HOST_PORT", "KIND_COORDINATOR_DIRECT_HOST_PORT",
                      "KIND_INGRESS_HTTP_HOST_PORT", "KIND_INGRESS_TLS_HOST_PORT",
                      "KIND_ORCHESTRATION_HOST_PORT", "KIND_COORDINATOR_HOST_PORT",
                      "KIND_TEMPORAL_HOST_PORT", "KIND_POSTGRES_HOST_PORT", "KIND_WATCH_HOST_PORT",
                      "KIND_INGRESS_URL", "KIND_INGRESS_TLS_URL", "KIND_ORCHESTRATION_URL",
                      "KIND_COORDINATOR_DIRECT_URL", "KIND_TEMPORAL_ADDRESS", "KIND_DATABASE_URL",
+                     "KIND_ORCHESTRATION_HTTP_URL", "KIND_TEMPORAL_FRONTEND_URL",
                      "KIND_WATCH_ADDR", "KIND_PUBLIC_ORIGIN", "KIND_BROWSER_API_ORIGIN"}
 
 
@@ -63,6 +65,29 @@ class ProfileError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ProfileError(message)
+
+
+def render_host_ports(text: str, replacements: dict[int, int], *, bind_loopback: bool = False) -> str:
+    """Render the checked-in six mappings once, including swapped assignments."""
+    require(set(replacements) == set(DEFAULT_PORTS.values()),
+            "Kind renderer requires exactly the six checked-in host mappings")
+    require(all(type(port) is int and 1024 <= port <= 65535 for port in replacements.values())
+            and len(set(replacements.values())) == len(replacements),
+            "Kind requested host ports must be distinct unprivileged TCP ports")
+    mappings = [int(match.group(1)) for match in re.finditer(r"(?m)^[ \t]*hostPort: ([0-9]+)[ \t]*$", text)]
+    require(len(mappings) == len(DEFAULT_PORTS) and set(mappings) == set(DEFAULT_PORTS.values()),
+            "Kind template must contain exactly the six checked-in host mappings")
+    if bind_loopback:
+        require(re.search(r"(?m)^[ \t]*listenAddress:", text) is None,
+                "Kind template has unexpected host listen-address mappings")
+
+    def render(match):
+        line = f"{match.group(1)}hostPort: {replacements[int(match.group(2))]}{match.group(3)}"
+        if bind_loopback:
+            line += f'\n{match.group(1)}listenAddress: "127.0.0.1"'
+        return line
+
+    return re.sub(r"(?m)^([ \t]*)hostPort: ([0-9]+)([ \t]*)$", render, text)
 
 
 def acquire_lock(descriptor: int) -> None:
@@ -773,6 +798,10 @@ class Profiles:
                           ("orchestration", "ORCHESTRATION"), ("coordinator", "COORDINATOR"),
                           ("temporal", "TEMPORAL"), ("postgres", "POSTGRES"), ("watch", "WATCH")):
             result[f"KIND_{key}_HOST_PORT"] = str(ports[name])
+        result["KIND_INGRESS_HOST_PORT"] = result["KIND_INGRESS_HTTP_HOST_PORT"]
+        result["KIND_COORDINATOR_DIRECT_HOST_PORT"] = result["KIND_COORDINATOR_HOST_PORT"]
+        result["KIND_ORCHESTRATION_HTTP_URL"] = result["KIND_ORCHESTRATION_URL"]
+        result["KIND_TEMPORAL_FRONTEND_URL"] = result["KIND_TEMPORAL_ADDRESS"]
         for image in IMAGE_NAMES:
             result[f"KIND_PROFILE_{image.upper()}_IMAGE_ID"] = artifacts.get("product_images", {}).get(image, "")
         return result
@@ -897,15 +926,8 @@ class Profiles:
                     pass
             # Named host mappings bind only loopback. Node ports, Host/SNI and
             # the complete suite topology remain unchanged.
-            require(re.search(r"(?m)^[ \t]*listenAddress:", text) is None,
-                    "Kind template has unexpected host listen-address mappings")
-            mappings = [int(match.group(1)) for match in re.finditer(r"(?m)^\s*hostPort: ([0-9]+)\s*$", text)]
-            require(len(mappings) == len(DEFAULT_PORTS) and set(mappings) == set(DEFAULT_PORTS.values()),
-                    "Kind template must contain exactly the six checked-in host mappings")
             replacements = {original: value["ports"][name] for name, original in DEFAULT_PORTS.items()}
-            text = re.sub(r"(?m)^([ \t]*)hostPort: ([0-9]+)([ \t]*)$",
-                          lambda match: (f"{match.group(1)}hostPort: {replacements[int(match.group(2))]}"
-                                         f"{match.group(3)}\n{match.group(1)}listenAddress: \"127.0.0.1\""), text)
+            text = render_host_ports(text, replacements, bind_loopback=True)
             path = self.path(cluster) / "kind-config.yaml"
             if path.exists() or path.is_symlink():
                 with owned_file(path):

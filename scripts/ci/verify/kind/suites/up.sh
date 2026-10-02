@@ -38,6 +38,7 @@ run_kind_up() {
     echo "::error::Kind cluster ${KIND_CLUSTER_NAME} already exists; update a service with make kind-deploy, or delete the cluster to recreate it"
     return 1
   fi
+  require_kind_host_ports_available || return $?
   trap cleanup EXIT
 
   ingress_path_drift_check || return $?

@@ -1017,10 +1017,14 @@ class ProfileTests(unittest.TestCase):
         fields = self.profiles.env("alpha")
         ports = value["ports"]
         expected = {"KIND_INGRESS_URL": f"http://127.0.0.1:{ports['http']}",
+                    "KIND_INGRESS_HOST_PORT": str(ports["http"]),
+                    "KIND_COORDINATOR_DIRECT_HOST_PORT": str(ports["coordinator"]),
                     "KIND_INGRESS_TLS_URL": f"https://localhost:{ports['tls']}",
                     "KIND_ORCHESTRATION_URL": f"http://127.0.0.1:{ports['orchestration']}",
+                    "KIND_ORCHESTRATION_HTTP_URL": f"http://127.0.0.1:{ports['orchestration']}",
                     "KIND_COORDINATOR_DIRECT_URL": f"http://127.0.0.1:{ports['coordinator']}",
                     "KIND_TEMPORAL_ADDRESS": f"http://127.0.0.1:{ports['temporal']}",
+                    "KIND_TEMPORAL_FRONTEND_URL": f"http://127.0.0.1:{ports['temporal']}",
                     "KIND_DATABASE_URL": f"postgres://codewire:codewire@127.0.0.1:{ports['postgres']}/codewire",
                     "KIND_WATCH_ADDR": f"127.0.0.1:{ports['watch']}",
                     "KUBE_CONTEXT": "kind-alpha", "KUBECONFIG": str(self.path() / "kubeconfig"),
@@ -1028,7 +1032,7 @@ class ProfileTests(unittest.TestCase):
                     "KIND_PROFILE_ARTIFACT_ROOT": str(self.path() / "artifacts")}
         for key, value in expected.items():
             self.assertEqual(fields[key], value)
-        self.assertEqual(len(fields), 39)
+        self.assertEqual(len(fields), 43)
         self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]+", key) for key in fields))
         self.assertTrue(all(isinstance(value, str) and "\0" not in value for value in fields.values()))
 

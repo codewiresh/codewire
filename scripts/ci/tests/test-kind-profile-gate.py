@@ -35,11 +35,17 @@ KIND_PROFILE=1
 KIND_CLUSTER_NAME=synthetic-profile
 CLUSTER=synthetic-profile
 KIND_INGRESS_URL=http://127.0.0.1:60400
+KIND_INGRESS_HOST_PORT=60400
+KIND_INGRESS_HTTP_HOST_PORT=60400
 KIND_INGRESS_TLS_URL=https://localhost:60401
 KIND_INGRESS_TLS_HOST_PORT=60401
 KIND_ORCHESTRATION_URL=http://127.0.0.1:60402
+KIND_ORCHESTRATION_HTTP_URL=http://127.0.0.1:60402
 KIND_COORDINATOR_DIRECT_URL=http://127.0.0.1:60403
+KIND_COORDINATOR_DIRECT_HOST_PORT=60403
+KIND_COORDINATOR_HOST_PORT=60403
 KIND_TEMPORAL_ADDRESS=http://127.0.0.1:60404
+KIND_TEMPORAL_FRONTEND_URL=http://127.0.0.1:60404
 KIND_PROFILE_ARTIFACT_DIR="$RUN_DIR/artifacts"
 kind_profile_verify_node() {{ :; }}
 kind_profile_verify_artifacts() {{ :; }}
@@ -82,6 +88,33 @@ trap - EXIT
         ])
         with self.assertRaises(ProcessLookupError):
             os.kill(captured["pid"], 0)
+
+    def test_old_and_canonical_endpoint_selectors_have_one_assignment(self):
+        pairs = (("KIND_INGRESS_HOST_PORT", "KIND_INGRESS_HTTP_HOST_PORT", "60400"),
+                 ("KIND_COORDINATOR_DIRECT_HOST_PORT", "KIND_COORDINATOR_HOST_PORT", "60403"),
+                 ("KIND_ORCHESTRATION_HTTP_URL", "KIND_ORCHESTRATION_URL", "http://127.0.0.1:60402"),
+                 ("KIND_TEMPORAL_FRONTEND_URL", "KIND_TEMPORAL_ADDRESS", "http://127.0.0.1:60404"))
+        for canonical, legacy, port in pairs:
+            for selection in ({canonical: port}, {legacy: port},
+                              {canonical: port, legacy: port},
+                              {canonical: port, legacy: "60499" if port.isdigit() else "http://127.0.0.1:60499"}):
+                with self.subTest(selection=selection):
+                    environment = os.environ.copy()
+                    for key in ("CLUSTER", "KIND_PROFILE", *(key for pair in pairs for key in pair[:2])):
+                        environment.pop(key, None)
+                    environment.update(selection)
+                    script = f'''
+set -euo pipefail
+ROOT={shlex.quote(str(ROOT))}
+RUN_DIR={shlex.quote(str(self.directory))}
+source "$ROOT/scripts/ci/verify/kind/common.sh"
+printf '%s:%s' "${{{canonical}}}" "${{{legacy}}}"
+'''
+                    result = subprocess.run(["bash", "-c", script], capture_output=True,
+                                            text=True, env=environment, timeout=15)
+                    conflict = len(selection) == 2 and len(set(selection.values())) == 2
+                    self.assertEqual(result.returncode, 2 if conflict else 0, result.stderr)
+                    self.assertEqual(result.stdout, "" if conflict else f"{port}:{port}")
 
     def test_archive_import_failure_stops_before_support_import(self):
         result = self.shell('''
@@ -256,6 +289,7 @@ exit 42
     def test_docker_failure_cannot_start_a_create_transaction(self):
         result = self.shell('''
 KIND_PROFILE=0
+require_kind_host_ports_available() { :; }
 kind() {
   [ "$*" = 'get clusters' ] || { echo mutation >"$RUN_DIR/mutation"; return 99; }
 }
@@ -265,9 +299,38 @@ if create_cluster; then exit 90; else exit "$?"; fi
         self.assertEqual(result.returncode, 37, result.stderr)
         self.assertFalse((self.directory / "mutation").exists())
 
+    def test_second_port_check_failure_stops_before_cluster_creation(self):
+        result = self.shell('''
+KIND_PROFILE=0
+KIND_CLUSTER_NAME_EXPLICIT=1
+source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
+observations=0
+require_tool() { :; }
+prepare_kind_temp_runtime() { :; }
+acquire_kind_host_lock() { :; }
+kind() {
+  [ "$*" = 'get clusters' ] || { echo mutation >"$RUN_DIR/mutation"; return 99; }
+}
+require_kind_host_ports_available() {
+  observations=$((observations + 1))
+  [ "$observations" = 1 ] || return 47
+}
+ingress_path_drift_check() { :; }
+build_images_and_smokes() { :; }
+docker() { echo mutation >"$RUN_DIR/mutation"; return 99; }
+cleanup() { :; }
+if run_kind_up; then exit 90; else status=$?; fi
+[ "$observations" = 2 ] || exit 91
+[ "$KIND_CREATED_BY_TRANSACTION" = 0 ] || exit 92
+exit "$status"
+''')
+        self.assertEqual(result.returncode, 47, result.stderr)
+        self.assertFalse((self.directory / "mutation").exists())
+
     def test_failed_create_never_adopts_a_node_now_visible_by_name(self):
         result = self.shell('''
 KIND_PROFILE=0
+require_kind_host_ports_available() { :; }
 kind() {
   case "$*" in
     'get clusters') return 0 ;;

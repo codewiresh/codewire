@@ -35,6 +35,10 @@ if args[0] == "env":
     if mode == "missing": fields = [p for p in fields if p[0] != "KUBECONFIG"]
     if mode == "wrong-binding":
         fields = [[k, "kind-other" if k == "KUBE_CONTEXT" else v] for k, v in fields]
+    if mode == "missing-alias":
+        fields = [pair for pair in fields if pair[0] != "KIND_INGRESS_HOST_PORT"]
+    if mode == "conflicting-alias":
+        fields = [[k, "31199" if k == "KIND_INGRESS_HOST_PORT" else v] for k, v in fields]
     if mode == "literal":
         fields = [[k, "$(touch " + str(state / "executed") + ")" if k == "KIND_PUBLIC_ORIGIN" else v] for k, v in fields]
     if mode == "odd":
@@ -206,6 +210,10 @@ class DeveloperProfileTests(unittest.TestCase):
             "KIND_PUBLIC_ORIGIN": f"http://127.0.0.1:{31106 + offset}",
             "KIND_BROWSER_API_ORIGIN": f"http://127.0.0.1:{31100 + offset}",
         })
+        values.update({"KIND_INGRESS_HOST_PORT": values["KIND_INGRESS_HTTP_HOST_PORT"],
+                       "KIND_COORDINATOR_DIRECT_HOST_PORT": values["KIND_COORDINATOR_HOST_PORT"],
+                       "KIND_ORCHESTRATION_HTTP_URL": values["KIND_ORCHESTRATION_URL"],
+                       "KIND_TEMPORAL_FRONTEND_URL": values["KIND_TEMPORAL_ADDRESS"]})
         (directory / "fields.json").write_text(json.dumps(list(values.items())))
         if name == "dev-a": self.values = values
 
@@ -307,7 +315,8 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assert_no_runtime_calls()
 
     def test_rejects_invalid_field_streams(self) -> None:
-        for mode in ("unknown", "duplicate", "missing", "wrong-binding", "odd", "failure"):
+        for mode in ("unknown", "duplicate", "missing", "wrong-binding", "odd", "failure",
+                     "missing-alias", "conflicting-alias"):
             with self.subTest(mode=mode):
                 result = self.run_script("dev-loop.sh", "status", FAKE_FIELD_MODE=mode)
                 self.assertNotEqual(result.returncode, 0)
