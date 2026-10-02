@@ -246,7 +246,114 @@ class WorkflowContractTests(unittest.TestCase):
             "cargo test",
         ):
             self.assertNotIn(forbidden, commands)
-        self.assertEqual(named_step(edge, "Run Kind")["run"], "scripts/ci/verify/kind-e2e.sh")
+        shard = named_step(edge, "Run the shard Kind gate")
+        self.assertIn('scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"', shard["run"])
+
+    def test_edge_kind_shards_cover_the_gate_on_per_shard_clusters(self) -> None:
+        edge = self.jobs["edge-kind"]
+        self.assertEqual(edge["timeout-minutes"], 45)
+        self.assertEqual(
+            edge["name"], "Edge / Kind verification (${{ matrix.shard.slug }})",
+        )
+        expected_shards = [
+            {"slug": "environment", "suites": "runtime-acceptance"},
+            {"slug": "dashboard", "suites": "dashboard-browser"},
+            {
+                "slug": "workspace",
+                "suites": "workspace-services final-fencing credentials",
+            },
+            {"slug": "edge", "suites": "edge-contract integrated"},
+        ]
+        self.assertEqual(
+            edge["strategy"],
+            {"fail-fast": True, "matrix": {"shard": expected_shards}},
+        )
+
+        cluster_name = "codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}"
+        kind_step_names = (
+            "Run the shard Kind gate",
+            "Delete the shard Kind cluster",
+        )
+        for step_name in kind_step_names:
+            with self.subTest(step=step_name):
+                step = named_step(edge, step_name)
+                self.assertEqual(step["env"]["KIND_CLUSTER_NAME"], cluster_name)
+        shard = named_step(edge, "Run the shard Kind gate")
+        self.assertIn('scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"', shard["run"])
+        indices = [edge["steps"].index(named_step(edge, name)) for name in kind_step_names]
+        self.assertEqual(indices, sorted(indices))
+        self.assertEqual(
+            named_step(edge, "Delete the shard Kind cluster")["run"],
+            'kind delete cluster --name "$KIND_CLUSTER_NAME" || true',
+        )
+        cancel = named_step(edge, "Cancel the run after this failure")
+        self.assertIs(edge["steps"][-1], cancel)
+
+        # A failed dashboard leg uploads its Playwright test results before
+        # teardown; no other leg has browser output to preserve.
+        upload = named_step(edge, "Upload dashboard browser test results on failure")
+        self.assertEqual(upload["uses"], UPLOAD)
+        self.assertEqual(
+            upload["if"],
+            "${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted'"
+            " && matrix.shard.slug == 'dashboard' }}",
+        )
+        self.assertEqual(upload["with"], {
+            "name": "kind-dashboard-test-results-${{ github.run_id }}-${{ matrix.shard.slug }}",
+            "path": "apps/dashboard/test-results/",
+            "if-no-files-found": "ignore",
+            "retention-days": 5,
+        })
+        self.assertLess(
+            edge["steps"].index(upload),
+            edge["steps"].index(named_step(edge, "Delete the shard Kind cluster")),
+        )
+
+        # Edge static verification runs once, in the edge leg; the locked
+        # browser host dependencies belong only to the dashboard leg.
+        self.assertIn(
+            "matrix.shard.slug == 'edge'",
+            named_step(edge, "Run Edge static verification")["if"],
+        )
+        for step_name in ("Install locked dashboard browser-test dependencies",):
+            self.assertIn(
+                "matrix.shard.slug == 'dashboard'", named_step(edge, step_name)["if"],
+            )
+        bun = [step for step in edge["steps"] if "setup-bun@" in step.get("uses", "")]
+        self.assertEqual(len(bun), 1)
+        self.assertIn("matrix.shard.slug == 'dashboard'", bun[0]["if"])
+
+        # Every mapped suite dispatches to a retained suite, and their union
+        # covers every probe group of the serial integrated gate: edge/host-key
+        # (edge-contract), coordinator and billing (integrated), credentials
+        # bootstrap and native (credentials), workspace services and Temporal
+        # workflow (workspace-services), final fencing, dashboard browser, and
+        # TTL acceptance. Sandbox supply-chain provenance is covered only
+        # nested inside that TTL acceptance, while its product-created
+        # workspace is alive; no shard invokes it standalone because every
+        # workspace-service fixture self-cleans. The serial gate's remaining
+        # static step, ingress_path_drift_check, runs inside run_kind_up ahead
+        # of every shard's image build.
+        dispatcher = (ROOT / "scripts/ci/verify/kind-e2e.sh").read_text(encoding="utf-8")
+        suites = [suite for shard in expected_shards for suite in shard["suites"].split()]
+        for suite in suites:
+            with self.subTest(suite=suite):
+                self.assertIn(f"\n    {suite})\n", dispatcher)
+        self.assertEqual(set(suites), {
+            "edge-contract", "integrated", "credentials", "workspace-services",
+            "final-fencing", "dashboard-browser", "runtime-acceptance",
+        })
+        self.assertNotIn("sandbox-supply-chain", suites)
+        ttl_smoke = (ROOT / "crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs")
+        self.assertIn('.args(["suite", "sandbox-supply-chain"])',
+                      ttl_smoke.read_text(encoding="utf-8"))
+        up_source = (ROOT / "scripts/ci/verify/kind/suites/up.sh").read_text(encoding="utf-8")
+        up_body = up_source.split("run_kind_up() {", 1)[1]
+        self.assertLess(
+            up_body.index("ingress_path_drift_check"),
+            up_body.index("build_images_and_smokes"),
+        )
+        self.assertIn("edge-kind", self.jobs["required-verification"]["needs"])
 
     def test_download_guard_exports_only_a_fresh_external_directory(self) -> None:
         guard = named_step(

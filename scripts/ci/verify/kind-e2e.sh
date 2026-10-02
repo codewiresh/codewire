@@ -39,7 +39,9 @@ kind_e2e_usage() {
 usage:
   scripts/ci/verify/kind-e2e.sh
   KIND_CLUSTER_NAME=<new-cluster> scripts/ci/verify/kind-e2e.sh up
+  KIND_CLUSTER_NAME=<new-cluster> scripts/ci/verify/kind-e2e.sh shard <suite> [<suite>...]
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite edge-contract
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite integrated
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite credentials
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite workspace-services
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
@@ -58,7 +60,27 @@ dispatch_kind_e2e() {
     return
   fi
   if [ "${1:-}" = "up" ] && [ "$#" -eq 1 ]; then
-    run_kind_up
+    run_kind_up || return $?
+    log "cluster ${KIND_CLUSTER_NAME} is up; no test suites ran"
+    return
+  fi
+  # A shard brings its cluster up and runs every mapped suite in this one
+  # process: the remote DinD network attachment and loopback forwarders are
+  # process state, so separate up/suite invocations would strand the cluster.
+  if [ "${1:-}" = "shard" ]; then
+    if [ "$#" -lt 2 ]; then
+      echo "::error::the Kind shard command requires at least one suite name"
+      kind_e2e_usage
+      return 2
+    fi
+    run_kind_up || return $?
+    log "cluster ${KIND_CLUSTER_NAME} is up; running shard suites: ${*:2}"
+    shift
+    local suite
+    for suite in "$@"; do
+      dispatch_kind_e2e suite "$suite" || return $?
+    done
+    log "Kind shard suites green: $*"
     return
   fi
   if [ "${1:-}" = "credentials" ]; then
@@ -86,6 +108,9 @@ dispatch_kind_e2e() {
   case "$2" in
     edge-contract)
       run_retained_edge_contract_suite
+      ;;
+    integrated)
+      run_retained_integrated_suite
       ;;
     credentials)
       run_retained_credentials_suite

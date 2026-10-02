@@ -1702,17 +1702,42 @@ jobs:
 
   edge-kind:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
-    name: Edge / Kind verification
+    name: Edge / Kind verification (${{ matrix.shard.slug }})
     runs-on: ci-heavy
-    # Builds run on independent producers; this job imports exact outputs and
-    # retains the complete runtime/browser/real-time rotation gate and cleanup.
-    timeout-minutes: 85
+    # Builds run on independent producers; every shard leg imports the exact
+    # same outputs, brings up its own disposable cluster, and runs only its
+    # mapped retained suites, so the gate's wall time is its longest shard
+    # instead of their serial sum. Required verification needs the one matrix
+    # job, so every shard must be green.
+    timeout-minutes: 45
     needs: [verification-selection, kind-workspace, kind-product, kind-smokes]
     if: ${{ always() && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.edge_kind_expected == 'true' && (needs.verification-selection.outputs.tested_tree_receipt == 'accepted' || !contains(needs.verification-selection.outputs.selection, '|kind|') || (needs.kind-workspace.result == 'success' && needs.kind-product.result == 'success' && needs.kind-smokes.result == 'success')) }}
+    strategy:
+      fail-fast: true
+      matrix:
+        shard:
+          # environment: product-runtime acceptance, including the reconciler
+          # TTL gate with its nested sandbox supply-chain observation.
+          - slug: environment
+            suites: runtime-acceptance
+          # dashboard: the full Rust dashboard Playwright suite.
+          - slug: dashboard
+            suites: dashboard-browser
+          # workspace: service/exec/FileService/resize, Temporal workflow and
+          # final fencing, and the synthetic credential journey (bootstrap
+          # plus native acceptance). Sandbox supply-chain provenance is
+          # observed by the environment shard's TTL acceptance while its
+          # product-created workspace is alive; a standalone invocation here
+          # would see only self-cleaned fixtures and fail by design.
+          - slug: workspace
+            suites: workspace-services final-fencing credentials
+          # edge: host-key/edge/Connect contract plus the coordinator runtime
+          # and billing Connect contract (the integrated gate's remainder).
+          - slug: edge
+            suites: edge-contract integrated
     env:
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
-      KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
       KIND_INGRESS_CONTROLLER_IMAGE: registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
       KIND_INGRESS_CERTGEN_IMAGE: registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
@@ -1733,7 +1758,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
       - name: Run Edge static verification
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') && matrix.shard.slug == 'edge' }}
         run: scripts/ci/verify/run-product-verification.sh edge
 
       - name: Verify sealed Rust toolchain
@@ -1741,12 +1766,12 @@ jobs:
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - uses: https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && matrix.shard.slug == 'dashboard' }}
         with:
           bun-version: '1.3.9'
 
       - name: Install locked dashboard browser-test dependencies
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && matrix.shard.slug == 'dashboard' }}
         run: |
           set -euo pipefail
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts
@@ -1805,9 +1830,38 @@ jobs:
           name: ${{ needs.kind-smokes.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-inputs/smokes
 
-      - name: Run Kind
+      - name: Run the shard Kind gate
+        # up and the suites must share one process: the remote DinD network
+        # attachment and loopback forwarders are process state, so separate
+        # steps would strand the shard's cluster before its first suite.
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
-        run: scripts/ci/verify/kind-e2e.sh
+        env:
+          KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
+          KIND_SHARD_SUITES: ${{ matrix.shard.suites }}
+        run: |
+          set -euo pipefail
+          read -r -a suites <<<"$KIND_SHARD_SUITES"
+          scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"
+
+      - name: Upload dashboard browser test results on failure
+        # The dashboard leg's Playwright error contexts (error-context.md,
+        # screenshots, traces) are the only rendered-DOM evidence when a
+        # browser spec fails on a shard cluster. Upload them before teardown.
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && matrix.shard.slug == 'dashboard' }}
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: kind-dashboard-test-results-${{ github.run_id }}-${{ matrix.shard.slug }}
+          path: apps/dashboard/test-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Delete the shard Kind cluster
+        # Teardown is best-effort, like the old in-process cleanup: a green
+        # leg must not fail on a transient DinD hiccup while deleting.
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        env:
+          KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
+        run: kind delete cluster --name "$KIND_CLUSTER_NAME" || true
 
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run

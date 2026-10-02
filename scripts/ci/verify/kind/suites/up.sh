@@ -34,11 +34,11 @@ run_kind_up() {
   acquire_kind_host_lock
   trap cleanup EXIT
 
+  ingress_path_drift_check
   KIND_BUILD_SMOKES=0 build_images_and_smokes
   create_cluster
   load_images_into_kind
   deploy_overlay
   deploy_agent_sandbox
   mark_retained_cluster_prepared
-  log "cluster ${KIND_CLUSTER_NAME} is up; no test suites ran"
 }

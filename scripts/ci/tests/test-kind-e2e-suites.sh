@@ -421,6 +421,8 @@ PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$browser_fixture/bin/chromium" \
 # the exact two-token command and unknown input fails closed.
 : >"$CALLS"
 run_integrated_kind_suite() { record integrated; }
+run_kind_up() { record up; }
+run_retained_integrated_suite() { record integrated-retained; }
 run_retained_dashboard_browser_suite() { record dashboard-browser-retained; }
 run_retained_final_fencing_suite() { record final-fencing; }
 run_retained_environment_session_suite() { record environment-session; }
@@ -428,6 +430,124 @@ run_retained_sandbox_supply_chain_suite() { record sandbox-supply-chain; }
 run_retained_runtime_acceptance_suite() { record runtime-acceptance; }
 dispatch_kind_e2e
 printf '%s\n' integrated | cmp -s - "$CALLS" || fail 'no-argument dispatch changed'
+
+: >"$CALLS"
+dispatch_kind_e2e up
+printf '%s\n' up | cmp -s - "$CALLS" || fail 'up dispatch changed'
+
+# A shard brings its cluster up and runs every mapped suite in one process, so
+# the remote DinD attachment and loopback forwarders survive into each suite.
+: >"$CALLS"
+dispatch_kind_e2e shard environment-session runtime-acceptance
+printf '%s\n' up environment-session runtime-acceptance | cmp -s - "$CALLS" ||
+  fail 'shard dispatch did not chain up and its suites in order'
+
+: >"$CALLS"
+run_retained_environment_session_suite() { record environment-session; return 44; }
+if dispatch_kind_e2e shard environment-session runtime-acceptance; then
+  fail 'shard dispatch accepted a failed suite'
+else
+  [ "$?" -eq 44 ] || fail 'shard dispatch lost the suite failure status'
+fi
+printf '%s\n' up environment-session | cmp -s - "$CALLS" ||
+  fail 'shard dispatch continued after a failed suite'
+run_retained_environment_session_suite() { record environment-session; }
+
+expect_failure empty-shard dispatch_kind_e2e shard
+grep -Fq 'the Kind shard command requires at least one suite name' \
+  "$FIXTURE/empty-shard.out" || fail 'empty shard did not explain its failure'
+grep -Fq 'cluster ${KIND_CLUSTER_NAME} is up; no test suites ran' "$SCRIPT" ||
+  fail 'standalone up no longer reports its suite-free exit'
+
+# Restore the production up replaced by the dispatch spies.
+# shellcheck source=scripts/ci/verify/kind/suites/up.sh
+source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
+
+# Up refuses an implicit cluster name and an already-existing cluster before
+# touching the host runtime, the lock, or any image.
+(
+  require_tool() { :; }
+  KIND_CLUSTER_NAME=up-implicit KIND_CLUSTER_NAME_EXPLICIT=0
+  expect_failure up-implicit-name run_kind_up
+  grep -Fq 'up requires an explicit KIND_CLUSTER_NAME' \
+    "$FIXTURE/up-implicit-name.out" || fail 'implicit up name was not decisive'
+)
+(
+  require_tool() { :; }
+  kind() {
+    [ "$*" = 'get clusters' ] || fail "unexpected up-guard kind invocation: $*"
+    printf '%s\n' up-existing
+  }
+  prepare_kind_temp_runtime() { fail 'existing-cluster up touched the host runtime'; }
+  KIND_CLUSTER_NAME=up-existing KIND_CLUSTER_NAME_EXPLICIT=1
+  expect_failure up-existing-cluster run_kind_up
+  grep -Fq 'already exists' "$FIXTURE/up-existing-cluster.out" ||
+    fail 'existing-cluster up was not decisive'
+)
+
+# Up restores the serial gate's static ingress drift check between the host
+# lock and the image build, so every CI shard leg runs it.
+: >"$CALLS"
+(
+  require_tool() { :; }
+  prepare_kind_temp_runtime() { record temp-runtime; }
+  acquire_kind_host_lock() { record acquire-lock; }
+  cleanup() { :; }
+  ingress_path_drift_check() { record ingress-drift; }
+  build_images_and_smokes() { record build; }
+  create_cluster() { record create-cluster; }
+  load_images_into_kind() { record load; }
+  deploy_overlay() { record deploy; }
+  deploy_agent_sandbox() { record agent-sandbox; }
+  mark_retained_cluster_prepared() { record prepared-marker; }
+  kind() {
+    [ "$*" = 'get clusters' ] || fail "unexpected up kind invocation: $*"
+    printf '%s\n' other-cluster
+  }
+  KIND_CLUSTER_NAME=up-fixture KIND_CLUSTER_NAME_EXPLICIT=1
+  run_kind_up
+)
+cat >"$FIXTURE/want-up-order" <<'EOF'
+temp-runtime
+acquire-lock
+ingress-drift
+build
+create-cluster
+load
+deploy
+agent-sandbox
+prepared-marker
+EOF
+cmp -s "$FIXTURE/want-up-order" "$CALLS" || {
+  diff -u "$FIXTURE/want-up-order" "$CALLS" >&2 || true
+  fail 'kind up order changed'
+}
+
+: >"$CALLS"
+if (
+  require_tool() { :; }
+  prepare_kind_temp_runtime() { record temp-runtime; }
+  acquire_kind_host_lock() { record acquire-lock; }
+  cleanup() { :; }
+  # The real check exits on failure; exit here too so the fixture does not
+  # depend on set -e surviving the if-condition subshell.
+  ingress_path_drift_check() { record ingress-drift; exit 43; }
+  build_images_and_smokes() { fail 'kind up continued after an ingress drift failure'; }
+  kind() { printf '%s\n' other-cluster; }
+  KIND_CLUSTER_NAME=up-fixture KIND_CLUSTER_NAME_EXPLICIT=1
+  run_kind_up
+); then
+  fail 'kind up accepted an ingress drift failure'
+else
+  [ "$?" -eq 43 ] || fail 'kind up lost the ingress drift failure status'
+fi
+printf '%s\n' temp-runtime acquire-lock ingress-drift | cmp -s - "$CALLS" ||
+  fail 'kind up continued after an ingress drift failure'
+
+: >"$CALLS"
+dispatch_kind_e2e suite integrated
+printf '%s\n' integrated-retained | cmp -s - "$CALLS" ||
+  fail 'integrated dispatch changed'
 
 : >"$CALLS"
 dispatch_kind_e2e suite dashboard-browser
@@ -569,6 +689,200 @@ cmp -s "$FIXTURE/want-order" "$CALLS" || {
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
 
+# The retained integrated remainder validates its cluster, proves the consumed
+# or rebuilt smoke set, quiesces the agent-sandbox controller so the synthetic
+# binding fixture keeps its patched status, reruns exactly the coordinator and
+# billing probe groups, and restores the controller — never an image build,
+# cluster lifecycle change, or deletion.
+integrated_fixture_kubectl() {
+  case "$*" in
+    '-n agent-sandbox-system get deploy/agent-sandbox-controller -o jsonpath={.spec.replicas}')
+      record get-replicas
+      printf '1'
+      ;;
+    '-n agent-sandbox-system scale deploy/agent-sandbox-controller --replicas=0')
+      record scale-0
+      ;;
+    '-n agent-sandbox-system wait pod -l app=agent-sandbox-controller --for=delete --timeout=60s')
+      record wait-delete
+      ;;
+    '-n agent-sandbox-system scale deploy/agent-sandbox-controller --replicas=1')
+      record scale-restore
+      ;;
+    '-n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=180s')
+      record rollout-restore
+      ;;
+    *) fail "unexpected integrated-suite kubectl invocation: $*" ;;
+  esac
+}
+: >"$CALLS"
+(
+  validate_retained_cluster() { record validate; }
+  build_retained_kind_smokes() { record smokes; }
+  coordinator_runtime_smokes() { record coordinator; }
+  billing_contract_through_ingress() { record billing; }
+  require_tool() { :; }
+  kubectl() { integrated_fixture_kubectl "$@"; }
+  build_images_and_smokes() { fail 'retained integrated suite rebuilt images'; }
+  create_cluster() { fail 'retained integrated suite recreated its cluster'; }
+  deploy_overlay() { fail 'retained integrated suite redeployed its cluster'; }
+  docker() { fail "retained integrated suite invoked Docker: $*"; }
+  log() { :; }
+  RETAINED_KUBECONFIG=""
+  run_retained_integrated_suite
+)
+cat >"$FIXTURE/want-integrated-retained-order" <<'EOF'
+validate
+smokes
+get-replicas
+scale-0
+wait-delete
+coordinator
+scale-restore
+rollout-restore
+billing
+EOF
+cmp -s "$FIXTURE/want-integrated-retained-order" "$CALLS" || {
+  diff -u "$FIXTURE/want-integrated-retained-order" "$CALLS" >&2 || true
+  fail 'retained integrated suite order changed'
+}
+
+for failed_step in validate smokes coordinator billing; do
+  : >"$CALLS"
+  if (
+    validate_retained_cluster() {
+      record validate
+      [ "$failed_step" != validate ] || return 41
+    }
+    build_retained_kind_smokes() {
+      record smokes
+      [ "$failed_step" != smokes ] || return 42
+    }
+    coordinator_runtime_smokes() {
+      record coordinator
+      [ "$failed_step" != coordinator ] || return 43
+    }
+    billing_contract_through_ingress() {
+      record billing
+      [ "$failed_step" != billing ] || return 44
+    }
+    require_tool() { :; }
+    kubectl() { integrated_fixture_kubectl "$@"; }
+    stop_gateway_port_forward() { :; }
+    dump_cluster_state() { record dump; }
+    kind() { record "kind:$*"; }
+    docker() { record "docker:$*"; }
+    log() { record "log:$*"; }
+    RETAINED_KUBECONFIG=""
+    run_retained_integrated_suite
+  ) >"$FIXTURE/integrated-retained-${failed_step}.out" 2>&1; then
+    fail "retained integrated suite accepted a failed ${failed_step} step"
+  else
+    retained_status=$?
+  fi
+  case "$failed_step" in
+    validate) expected_status=41 ;;
+    smokes) expected_status=42 ;;
+    coordinator) expected_status=43 ;;
+    billing) expected_status=44 ;;
+  esac
+  [ "$retained_status" -eq "$expected_status" ] ||
+    fail "retained integrated suite lost the ${failed_step} failure status"
+  case "$failed_step" in
+    validate)
+      if grep -Eq '^(get-replicas|scale-0|coordinator|billing)$' "$CALLS"; then
+        fail 'retained integrated suite ran a probe after a failed validate step'
+      fi
+      ;;
+    smokes)
+      if grep -Eq '^(get-replicas|scale-0|coordinator|billing)$' "$CALLS"; then
+        fail 'retained integrated suite quiesced the controller after a failed smokes step'
+      fi
+      ;;
+    coordinator)
+      # The controller must come back even when the coordinator probes fail;
+      # billing must not run.
+      grep -Fxq scale-restore "$CALLS" ||
+        fail 'retained integrated suite stranded the scaled-down controller'
+      grep -Fxq rollout-restore "$CALLS" ||
+        fail 'retained integrated suite did not await the restored controller'
+      if grep -Fxq billing "$CALLS"; then
+        fail 'retained integrated suite ran billing after a failed coordinator step'
+      fi
+      ;;
+    billing)
+      grep -Fxq scale-restore "$CALLS" ||
+        fail 'retained integrated suite skipped the controller restore'
+      ;;
+  esac
+  grep -Fxq dump "$CALLS" ||
+    fail 'retained integrated suite did not diagnose its failure'
+  if grep -Eq '^(kind:|docker:)|suite green' "$CALLS"; then
+    fail 'retained integrated suite claimed green or changed its retained runtime after failure'
+  fi
+done
+
+# In the CI artifact mode the retained smoke set is consumed by `up`; the
+# retained builder verifies it instead of rebuilding on an empty cache.
+mkdir -p "$FIXTURE/consumed-ci/examples" "$FIXTURE/consumed-run"
+for consumed_binary in \
+    crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke \
+    file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke \
+    temporal-fencing-smoke reconciler-ttl-smoke cw \
+    examples/platform-run-smoke examples/environment-session-smoke \
+    examples/coordinator-ingress-smoke; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$consumed_binary"
+  chmod +x "$FIXTURE/consumed-ci/$consumed_binary"
+done
+: >"$FIXTURE/consumed-run/credential-bootstrap-build.jsonl"
+: >"$FIXTURE/consumed-run/billing-contract-build.jsonl"
+(
+  CARGO_CI_DIR="$FIXTURE/consumed-ci"
+  RUN_DIR="$FIXTURE/consumed-run"
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-ci
+  log() { :; }
+  build_retained_kind_smokes
+)
+(
+  CARGO_CI_DIR="$FIXTURE/consumed-ci"
+  RUN_DIR="$FIXTURE/consumed-run"
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-ci
+  log() { :; }
+  rm -f "$FIXTURE/consumed-ci/temporal-fencing-smoke"
+  expect_failure missing-consumed-smoke build_retained_kind_smokes
+  grep -Fq 'consumed Kind smoke binary is missing' \
+    "$FIXTURE/missing-consumed-smoke.out" ||
+    fail 'missing consumed smoke binary was not decisive'
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/temporal-fencing-smoke"
+  chmod +x "$FIXTURE/consumed-ci/temporal-fencing-smoke"
+  rm -f "$FIXTURE/consumed-run/billing-contract-build.jsonl"
+  expect_failure missing-consumed-receipt build_retained_kind_smokes
+  grep -Fq 'consumed Kind smoke build receipt is missing' \
+    "$FIXTURE/missing-consumed-receipt.out" ||
+    fail 'missing consumed smoke build receipt was not decisive'
+)
+# The verified consumed inventory is exactly the artifact transport contract.
+python3 - "$ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+common = (root / "scripts/ci/verify/kind/common.sh").read_text()
+artifacts = (root / "scripts/ci/verify/kind-build-artifacts.py").read_text()
+suite_block = common.split("build_retained_kind_smokes() {", 1)[1].split("\n}", 1)[0]
+verified = set()
+for span in re.findall(r"for consumed in(.*?); do", suite_block, re.S):
+    verified |= set(re.findall(r"[a-z][a-z0-9.-]+(?:/[a-z0-9.-]+)*", span))
+smoke_block = artifacts.split("SMOKE_FILES = {", 1)[1].split("}", 1)[0]
+transport = set(re.findall(r'^\s{4}"[a-z0-9-]+": "((?:examples/)?[a-z0-9-]+)",$',
+                           smoke_block, re.M))
+test_block = artifacts.split("TEST_FILES = {", 1)[1].split("}", 1)[0]
+transport |= set(re.findall(r'^\s{8}"([a-z0-9.-]+\.jsonl)"', test_block, re.M))
+assert transport, "artifact transport inventory did not parse"
+assert verified == transport, f"consumed verification drifted: {verified ^ transport}"
+PY
+
 # Unchanged sealed/release fixtures below exercise their original runtime
 # selection. Source-build selection has its own closed receipt fixture.
 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release
@@ -607,6 +921,12 @@ acquire_kind_host_lock
 [ -f "$KIND_HOST_LOCK_FILE" ] || fail 'Kind host lock file was not created'
 grep -Eq '^flock:-w 37 [0-9]+$' "$CALLS" ||
   fail 'Kind host lock is not acquired with the configured bound'
+
+# A suite nested in the same process — the shard path runs up and runtime
+# acceptance back to back — must not flock the file its caller already holds.
+: >"$CALLS"
+acquire_kind_host_lock
+[ ! -s "$CALLS" ] || fail 'nested Kind host lock acquisition re-acquired the lock'
 
 # Cancelled-run cleanup owns the current transaction and run-ID-suffixed CI
 # clusters, but it must preserve every unrelated local Kind cluster.
@@ -841,7 +1161,7 @@ env \
   KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
-  ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
+  ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" FIXTURE="$FIXTURE" bash -seu <<'BASH'
   fail() { printf "[sealed-kind-test] ERROR: %s\n" "$*" >&2; exit 1; }
   record() { printf "%s\n" "$1" >>"$CALLS"; }
   assert_no_public_dind_images() {
@@ -850,6 +1170,39 @@ env \
     if grep -Eq '^[[:space:]]*(-[[:space:]]+)?(image|SANDBOX_DIND_IMAGE):.*docker[.]io/library/docker:29[.]7[.]1-dind' "$1"; then
       fail 'sealed Kind overlay retained the public DinD image'
     fi
+  }
+  assert_no_nodeport_roulette() {
+    # Every NodePort Service port must be pinned: an auto-allocated port can
+    # claim one of the harness's explicit allocations (the derp http/stun
+    # roulette that starved coordinator 30090), and apply order decides the
+    # loser. This guard fails in seconds instead of one CI leg in N.
+    python3 - "$1" <<'PY'
+import sys
+import yaml
+
+services = 0
+ports = 0
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for document in yaml.safe_load_all(handle):
+        if not isinstance(document, dict) or document.get("kind") != "Service":
+            continue
+        spec = document.get("spec") or {}
+        if spec.get("type") != "NodePort":
+            continue
+        services += 1
+        for port in spec.get("ports") or []:
+            ports += 1
+            if not isinstance(port.get("nodePort"), int):
+                print(
+                    f"NodePort Service {document['metadata']['name']} leaves "
+                    f"port {port.get('port')} to allocation roulette",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+if services == 0 or ports == 0:
+    print("Kind overlay carries no NodePort Services; the roulette guard is stale", file=sys.stderr)
+    raise SystemExit(1)
+PY
   }
   # shellcheck source=scripts/ci/verify/kind/common.sh
   source "$COMMON"
@@ -898,6 +1251,8 @@ env \
   fi
   [ "$(grep -Fc "$KIND_DIND_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
     fail 'sealed Kind overlay does not contain the local DinD alias once'
+  [ "$(grep -Fc 'SANDBOX_IMAGE_CACHE: disabled' "$kind_rendered")" -eq 1 ] ||
+    fail 'sealed Kind overlay does not disable the public-image cache'
   if grep -Eq 'SANDBOX_(FULL_WARM_PROFILES|WARM_POOL_WORKSPACE_IMAGE)' "$kind_rendered"; then
     fail 'sealed Kind overlay retained removed shared warm-pool configuration'
   fi
@@ -915,6 +1270,39 @@ env \
   assert_no_public_dind_images "$kind_rendered"
   grep -Fq "c.image == '$DEFAULT_KIND_DIND_IMAGE'" "$kind_rendered" ||
     fail 'sealed Kind overlay changed the image-cache admission pin'
+  # Every NodePort Service port in the harness topology must be pinned: an
+  # auto-allocated port can claim one of the explicit allocations (the
+  # ingress controller's unpinned NodePort pair starved coordinator 30090 on
+  # one apply order), and allocation order decides the loser. Cover the
+  # vendored ingress manifest, the e2e overlay render, and both local-kind
+  # overlay renders so this fails in seconds instead of one CI leg in N.
+  kubectl kustomize "$ROOT/deployments/k8s/overlays/local-kind" \
+    >"$FIXTURE/local-kind-overlay.yaml"
+  kubectl kustomize "$ROOT/deployments/k8s/overlays/local-kind-static" \
+    >"$FIXTURE/local-kind-static-overlay.yaml"
+  for topology in \
+      "$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml" \
+      "$kind_rendered" \
+      "$FIXTURE/local-kind-overlay.yaml" \
+      "$FIXTURE/local-kind-static-overlay.yaml"; do
+    assert_no_nodeport_roulette "$topology" ||
+      fail "NodePort roulette guard accepted ${topology}"
+  done
+  unpinned="$FIXTURE/ingress-unpinned-nodeport.yaml"
+  python3 - "$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml" "$unpinned" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+pin = "    nodePort: 30446\n"
+if text.count(pin) != 1:
+    raise SystemExit("ingress controller nodePort pin moved; the roulette guard fixture is stale")
+open(sys.argv[2], "w", encoding="utf-8").write(text.replace(pin, "", 1))
+PY
+  if (assert_no_nodeport_roulette "$unpinned") >"$FIXTURE/unpinned-nodeport.out" 2>&1; then
+    fail 'NodePort roulette guard accepted an unpinned Service port'
+  fi
+  grep -Fq 'leaves port 80 to allocation roulette' \
+    "$FIXTURE/unpinned-nodeport.out" ||
+    fail 'NodePort roulette guard did not identify the unpinned port'
 
   # Both actual pull surfaces must still fail even though the pinned admission
   # expression above is permitted. Use the real render for the config fixture.
@@ -1183,6 +1571,60 @@ if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/' \
   fail 'Forgejo CI still uses the Nexus recovery alias for an approved Kind input'
 fi
 
+# The CI gate shards the retained suites across four matrix legs, each with its
+# own cluster and a 45-minute ceiling; Required verification aggregates the one
+# matrix job, so every shard must be green.
+edge_kind_block="$(awk '
+  $0 == "  edge-kind:" { selected=1; next }
+  selected && /^  [a-z][a-z-]*:$/ { exit }
+  selected { print }
+' "$ROOT/.gitea/workflows/ci.yaml")"
+[ -n "$edge_kind_block" ] || fail 'ci.yaml lost the edge-kind job'
+for shard_contract in \
+    'name: Edge / Kind verification (${{ matrix.shard.slug }})' \
+    'timeout-minutes: 45' \
+    'fail-fast: true' \
+    'slug: environment' \
+    'suites: runtime-acceptance' \
+    'slug: dashboard' \
+    'suites: dashboard-browser' \
+    'slug: workspace' \
+    'suites: workspace-services final-fencing credentials' \
+    'slug: edge' \
+    'suites: edge-contract integrated' \
+    'KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}' \
+    'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' \
+    'kind delete cluster --name "$KIND_CLUSTER_NAME" || true'; do
+  grep -Fq "$shard_contract" <<<"$edge_kind_block" ||
+    fail "Kind shard matrix is missing: $shard_contract"
+done
+# Edge static verification runs once, in the edge leg; the browser host
+# dependencies belong only to the dashboard leg.
+grep -Fq "contains(needs.verification-selection.outputs.selection, '|edge_kind|') && matrix.shard.slug == 'edge' }}" \
+  <<<"$edge_kind_block" || fail 'Edge static verification is not pinned to the edge shard'
+[ "$(grep -Fc "matrix.shard.slug == 'dashboard'" <<<"$edge_kind_block")" -eq 3 ] ||
+  fail 'browser host dependencies and the failure upload are not pinned to the dashboard shard'
+# Sandbox supply-chain provenance requires a live product workspace: every
+# workspace-service fixture self-cleans, so no shard may invoke it standalone.
+# It runs only nested inside the TTL acceptance (pinned above against
+# reconciler-ttl-smoke.rs).
+if grep -Fq 'suites: workspace-services final-fencing sandbox-supply-chain' <<<"$edge_kind_block"; then
+  fail 'a shard invokes sandbox-supply-chain standalone; it needs a live product workspace'
+fi
+grep -Fq '.args(["suite", "sandbox-supply-chain"])' \
+  "$ROOT/crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs" ||
+  fail 'TTL acceptance no longer nests the sandbox supply-chain observation'
+required_block="$(awk '
+  $0 == "  required-verification:" { selected=1; next }
+  selected && /^  [a-z][a-z-]*:$/ { exit }
+  selected { print }
+' "$ROOT/.gitea/workflows/ci.yaml")"
+grep -Fq '      - edge-kind' <<<"$required_block" ||
+  fail 'Required verification does not aggregate the Kind shard matrix'
+grep -Fq 'VERIFICATION_EDGE_KIND_RESULT: ${{ needs.edge-kind.result }}' \
+  "$ROOT/.gitea/workflows/ci.yaml" ||
+  fail 'Required verification does not consume the aggregated shard result'
+
 # Restore the production API recovery implementation after the load-order spy.
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
@@ -1328,7 +1770,8 @@ FAKE_CONTEXT=kind-retained-fixture
 FAKE_MARKER_VERSION="$KIND_E2E_COMPATIBILITY_VERSION"
 FAKE_MARKER_CLUSTER="$KIND_CLUSTER_NAME"
 FAKE_MARKER_WORKSPACE="$(kind_workspace_runtime_image)"
-FAKE_MARKER_MISSING=0
+FAKE_SCOPED_MARKER=1
+FAKE_LEGACY_MARKER=0
 FAKE_RETAINED_EXPORT_FAIL=0
 FAKE_RETAINED_REACHABLE=1
 HOSTNAME=retained-local-host
@@ -1348,31 +1791,67 @@ kind() {
     *) fail "unexpected fake kind invocation: $*" ;;
   esac
 }
+fake_marker_read() {
+  # $1 = marker present (1/0), $2 = full kubectl arguments
+  if [ "$1" != 1 ]; then
+    printf 'NotFound\n' >&2
+    return 1
+  fi
+  case "$2" in
+    *compatibility_version*) printf '%s' "$FAKE_MARKER_VERSION" ;;
+    *cluster-name*) printf '%s' "$FAKE_MARKER_CLUSTER" ;;
+    *workspace-image*) printf '%s' "$FAKE_MARKER_WORKSPACE" ;;
+    *) fail "unexpected fake marker field: $2" ;;
+  esac
+}
 kubectl() {
+  local scoped_marker
+  scoped_marker="configmap/$(kind_e2e_prepared_configmap)"
   case "$*" in
     'config current-context') printf '%s\n' "$FAKE_CONTEXT" ;;
     *'cluster-info'*)
       [ "$FAKE_RETAINED_REACHABLE" = 1 ] &&
         grep -Fqx 'server: https://127.0.0.1:6443' "$KUBECONFIG"
       ;;
-    *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"compatibility_version"*)
-      if [ "$FAKE_MARKER_MISSING" = 1 ]; then
-        printf 'NotFound\n' >&2
-        return 1
-      fi
-      printf '%s' "$FAKE_MARKER_VERSION"
+    *"${scoped_marker} "*)
+      fake_marker_read "$FAKE_SCOPED_MARKER" "$*"
       ;;
-    *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"cluster-name"*)
-      printf '%s' "$FAKE_MARKER_CLUSTER"
-      ;;
-    *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"workspace-image"*)
-      printf '%s' "$FAKE_MARKER_WORKSPACE"
+    *"configmap/${KIND_E2E_PREPARED_CONFIGMAP} "*)
+      fake_marker_read "$FAKE_LEGACY_MARKER" "$*"
       ;;
     *'get deployment/'*) printf '1' ;;
     *'get crd/sandboxclaims.extensions.agents.x-k8s.io'*) return 0 ;;
     *) fail "unexpected fake kubectl invocation: $*" ;;
   esac
 }
+
+# The prepared marker is scoped to its own cluster name so parallel shard
+# clusters and successive local clusters can never alias one marker.
+[ "$(kind_e2e_prepared_configmap)" = codewire-kind-e2e-prepared-retained-fixture ] ||
+  fail 'prepared marker is not scoped to the cluster name'
+(
+  KIND_CLUSTER_NAME=shard_One
+  [ "$(kind_e2e_prepared_configmap)" = codewire-kind-e2e-prepared-shard-one ] ||
+    fail 'prepared marker scoping does not sanitize to a ConfigMap name'
+)
+: >"$CALLS"
+(
+  # Restore the production definitions replaced by the earlier order spies.
+  # shellcheck source=scripts/ci/verify/kind/common.sh
+  source "$COMMON"
+  kubectl() { record "$*"; cat >/dev/null; }
+  kubectl_apply() { record "apply:$*"; cat >/dev/null; }
+  kind_workspace_runtime_image() { printf 'workspace:fixture\n'; }
+  mark_retained_cluster_prepared
+)
+grep -Fq 'create configmap codewire-kind-e2e-prepared-retained-fixture' "$CALLS" ||
+  fail 'prepared marker create is not cluster-scoped'
+grep -Fq -- '--from-literal=cluster-name=retained-fixture' "$CALLS" ||
+  fail 'prepared marker lost its exact cluster binding'
+grep -Fq -- '--from-literal=workspace-image=workspace:fixture' "$CALLS" ||
+  fail 'prepared marker lost its workspace binding'
+grep -Fq -- '--from-literal=compatibility_version=1' "$CALLS" ||
+  fail 'prepared marker lost its version binding'
 
 KIND_CLUSTER_NAME_EXPLICIT=1
 expect_failure missing-cluster validate_retained_cluster
@@ -1386,14 +1865,23 @@ grep -Fq 'does not match retained Kind context' "$FIXTURE/wrong-context.out" ||
   fail 'wrong context rejection was not decisive'
 
 FAKE_CONTEXT=kind-retained-fixture
-FAKE_MARKER_MISSING=1
+FAKE_SCOPED_MARKER=0
+FAKE_LEGACY_MARKER=0
 expect_failure missing-marker validate_retained_cluster
 grep -Fq 'is unprepared' "$FIXTURE/missing-marker.out" || {
   sed -n '1,80p' "$FIXTURE/missing-marker.out" >&2
   fail 'missing marker rejection was not decisive'
 }
 
-FAKE_MARKER_MISSING=0
+# A marker written before the name was cluster-scoped still satisfies the
+# readback through the legacy name; its cluster-name field remains the binding.
+FAKE_LEGACY_MARKER=1
+validate_retained_cluster >"$FIXTURE/legacy-accepted.out"
+grep -Fq 'accepted at compatibility version' "$FIXTURE/legacy-accepted.out" ||
+  fail 'legacy prepared marker was not accepted through the fallback'
+
+FAKE_SCOPED_MARKER=1
+FAKE_LEGACY_MARKER=0
 FAKE_MARKER_VERSION=0
 expect_failure incompatible-marker validate_retained_cluster
 grep -Fq 'marker is incompatible' "$FIXTURE/incompatible-marker.out" ||
@@ -1428,6 +1916,21 @@ FAKE_MARKER_WORKSPACE="$(kind_workspace_runtime_image)"
 validate_retained_cluster >"$FIXTURE/accepted.out"
 grep -Fq 'accepted at compatibility version' "$FIXTURE/accepted.out" ||
   fail 'compatible retained cluster was not accepted'
+
+# The cluster-workspace readback prefers the cluster-scoped marker and falls
+# back to the legacy unscoped name written by earlier harnesses.
+[ "$(KIND_RETAINED_USE_CLUSTER_WORKSPACE=1 kind_workspace_runtime_image)" = "$FAKE_MARKER_WORKSPACE" ] ||
+  fail 'cluster workspace readback did not use the scoped marker'
+FAKE_SCOPED_MARKER=0
+FAKE_LEGACY_MARKER=1
+[ "$(KIND_RETAINED_USE_CLUSTER_WORKSPACE=1 kind_workspace_runtime_image)" = "$FAKE_MARKER_WORKSPACE" ] ||
+  fail 'cluster workspace readback did not use the legacy marker fallback'
+FAKE_LEGACY_MARKER=0
+if KIND_RETAINED_USE_CLUSTER_WORKSPACE=1 kind_workspace_runtime_image \
+    >"$FIXTURE/missing-readback.out" 2>&1; then
+  fail 'missing cluster workspace readback unexpectedly succeeded'
+fi
+FAKE_SCOPED_MARKER=1
 
 # A provenance probe nested inside retained runtime acceptance owns a separate
 # private kubeconfig. Its exit must not remove the parent suite's active file.
