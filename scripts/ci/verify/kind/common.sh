@@ -18,18 +18,50 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 KIND_CONFIG="${KIND_CONFIG:-$ROOT/tests/e2e/kind/kind-config.yaml}"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-kind-e2e-${KIND_CLUSTER_NAME}}"
 mkdir -p "$RUN_DIR"
+# Host topology for this harness cluster. Every hostPort the checked-in Kind
+# config maps is templated, so multiple sessions can run multiple harness
+# clusters on one workstation with distinct KIND_CLUSTER_NAME and port
+# assignments; the defaults keep every existing flow unchanged.
+KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-8090}"
+KIND_INGRESS_TLS_HOST_PORT="${KIND_INGRESS_TLS_HOST_PORT:-10443}"
+KIND_TEMPORAL_HOST_PORT="${KIND_TEMPORAL_HOST_PORT:-7233}"
+KIND_ORCHESTRATION_HOST_PORT="${KIND_ORCHESTRATION_HOST_PORT:-8084}"
+KIND_COORDINATOR_DIRECT_HOST_PORT="${KIND_COORDINATOR_DIRECT_HOST_PORT:-18092}"
+KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
+KIND_HOST_PORT_VARS=(
+  KIND_INGRESS_HOST_PORT
+  KIND_INGRESS_TLS_HOST_PORT
+  KIND_TEMPORAL_HOST_PORT
+  KIND_ORCHESTRATION_HOST_PORT
+  KIND_COORDINATOR_DIRECT_HOST_PORT
+  KIND_POSTGRES_HOST_PORT
+)
+kind_host_port_var_seen=":"
+for kind_host_port_var in "${KIND_HOST_PORT_VARS[@]}"; do
+  kind_host_port_value="${!kind_host_port_var}"
+  if ! [[ "$kind_host_port_value" =~ ^[0-9]+$ ]] \
+      || [ "$kind_host_port_value" -lt 1024 ] \
+      || [ "$kind_host_port_value" -gt 65535 ]; then
+    echo "::error::${kind_host_port_var} must be an unprivileged TCP port"
+    exit 2
+  fi
+  case "$kind_host_port_var_seen" in
+    *":${kind_host_port_value}:"*)
+      echo "::error::${kind_host_port_var} duplicates another requested Kind host port (${kind_host_port_value})"
+      exit 2
+      ;;
+  esac
+  kind_host_port_var_seen+="${kind_host_port_value}:"
+done
+unset kind_host_port_var kind_host_port_value kind_host_port_var_seen
 # Use the hostless HTTP server for the edge and transitional REST probes. The
 # coordinator TLS ingress intentionally owns Host/SNI localhost below.
-KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:8090}"
-KIND_INGRESS_TLS_URL="${KIND_INGRESS_TLS_URL:-https://localhost:10443}"
-KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
-if ! [[ "$KIND_POSTGRES_HOST_PORT" =~ ^[0-9]+$ ]] \
-    || [ "$KIND_POSTGRES_HOST_PORT" -lt 1024 ] \
-    || [ "$KIND_POSTGRES_HOST_PORT" -gt 65535 ]; then
-  echo "::error::KIND_POSTGRES_HOST_PORT must be an unprivileged TCP port"
-  exit 2
-fi
+KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:${KIND_INGRESS_HOST_PORT}}"
+KIND_INGRESS_TLS_URL="${KIND_INGRESS_TLS_URL:-https://localhost:${KIND_INGRESS_TLS_HOST_PORT}}"
 KIND_DATABASE_URL="postgres://codewire:codewire@127.0.0.1:${KIND_POSTGRES_HOST_PORT}/codewire"
+KIND_TEMPORAL_FRONTEND_URL="${KIND_TEMPORAL_FRONTEND_URL:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}"
+KIND_ORCHESTRATION_HTTP_URL="${KIND_ORCHESTRATION_HTTP_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}"
+KIND_COORDINATOR_DIRECT_URL="${KIND_COORDINATOR_DIRECT_URL:-http://127.0.0.1:${KIND_COORDINATOR_DIRECT_HOST_PORT}}"
 KEEP_KIND_CLUSTER="${KEEP_KIND_CLUSTER:-0}"
 KIND_HOST_LOCK_TIMEOUT_SECONDS="${KIND_HOST_LOCK_TIMEOUT_SECONDS:-1200}"
 if ! [[ "$KIND_HOST_LOCK_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
@@ -129,6 +161,89 @@ readonly DEFAULT_KIND_WORKSPACE_IMAGE DEFAULT_KIND_DIND_IMAGE \
 
 log() {
   printf '[kind-e2e] %s\n' "$*"
+}
+
+log_kind_bound_endpoints() {
+  log "cluster ${KIND_CLUSTER_NAME} bound endpoints:"
+  log "  ingress http       ${KIND_INGRESS_URL}"
+  log "  ingress tls        ${KIND_INGRESS_TLS_URL}"
+  log "  temporal frontend  ${KIND_TEMPORAL_FRONTEND_URL}"
+  log "  orchestration http ${KIND_ORCHESTRATION_HTTP_URL}"
+  log "  coordinator direct ${KIND_COORDINATOR_DIRECT_URL}"
+  log "  postgres           ${KIND_DATABASE_URL}"
+}
+
+# Best-effort holder identity for one held host port: a kind node container
+# resolves to its cluster name, any other Docker publisher to its container
+# name, and a non-Docker listener to a plain marker. Empty when nothing holds
+# the port as far as this process can observe.
+kind_host_port_holder() {
+  local port="$1" container
+  container="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null \
+    | awk -v needle=":${port}->" 'index($0, needle) {print $1; exit}')"
+  if [ -n "$container" ]; then
+    case "$container" in
+      *-control-plane) printf 'kind cluster %s' "${container%-control-plane}" ;;
+      *) printf 'Docker container %s' "$container" ;;
+    esac
+    return 0
+  fi
+  if ss -Hltn "sport = :${port}" 2>/dev/null | grep -q .; then
+    printf 'a non-Docker listener on this host'
+    return 0
+  fi
+  return 1
+}
+
+# Fail fast when a requested host port is already held, naming the owner so a
+# session never mutates another session's cluster by accident. Runs before the
+# slow build phase in `up` and again inside create_cluster as the backstop.
+# An optional first argument names a cluster whose own holders are ignored:
+# create_cluster deletes and recreates that cluster, freeing its ports.
+require_kind_host_ports_available() {
+  local ignore_cluster="${1:-}"
+  local port_var requested_port holder failures=0
+  for port_var in "${KIND_HOST_PORT_VARS[@]}"; do
+    requested_port="${!port_var}"
+    if holder="$(kind_host_port_holder "$requested_port")"; then
+      if [ -n "$ignore_cluster" ] && [ "$holder" = "kind cluster ${ignore_cluster}" ]; then
+        continue
+      fi
+      echo "::error::${port_var}=${requested_port} for Kind cluster ${KIND_CLUSTER_NAME} is held by ${holder}; stop that owner or choose a different ${port_var}"
+      failures=1
+    fi
+  done
+  [ "$failures" -eq 0 ]
+}
+
+# The templated host-port mappings as "default:requested" lines, one per
+# hostPort the checked-in Kind config declares.
+kind_host_port_mappings() {
+  printf '%s\n' \
+    "8090:${KIND_INGRESS_HOST_PORT}" \
+    "10443:${KIND_INGRESS_TLS_HOST_PORT}" \
+    "7233:${KIND_TEMPORAL_HOST_PORT}" \
+    "8084:${KIND_ORCHESTRATION_HOST_PORT}" \
+    "18092:${KIND_COORDINATOR_DIRECT_HOST_PORT}" \
+    "25432:${KIND_POSTGRES_HOST_PORT}"
+}
+
+# Render every templated hostPort mapping to its requested host port. The
+# checked-in config keeps the default values, each exactly once; the rendered
+# copy is per-run state under RUN_DIR.
+render_kind_host_port_mappings() {
+  local source="$1" output="$2"
+  local mapping default_port requested_port
+  cp "$source" "$output"
+  while IFS= read -r mapping; do
+    default_port="${mapping%%:*}"
+    requested_port="${mapping##*:}"
+    if [ "$(grep -cE "hostPort: ${default_port}\$" "$source")" -ne 1 ]; then
+      echo "::error::Kind config must contain exactly one default host-port mapping for ${default_port}"
+      exit 1
+    fi
+    sed -i "s/hostPort: ${default_port}\$/hostPort: ${requested_port}/" "$output"
+  done < <(kind_host_port_mappings)
 }
 
 acquire_kind_host_lock() {
@@ -462,6 +577,19 @@ reclaim_cancelled_ci_clusters() {
     return 1
   fi
 
+  # The checked-in config names the default host ports; this run binds their
+  # requested renderings, so the ownership check runs against those.
+  local requested requested_ports=""
+  while IFS= read -r port; do
+    if ! requested="$(awk -F: -v port="$port" \
+        '$1 == port { print $2; found = 1 } END { exit !found }' \
+        < <(kind_host_port_mappings))"; then
+      echo "::error::Kind config host port ${port} has no KIND_*_HOST_PORT mapping"
+      return 1
+    fi
+    requested_ports+="${requested}"$'\n'
+  done <<< "$ports"
+
   if ! running_containers="$(docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' 2>&1)"; then
     echo "::error::failed to inspect Docker port ownership before Kind startup: ${running_containers}"
     return 1
@@ -476,7 +604,7 @@ reclaim_cancelled_ci_clusters() {
       echo "::error::fixed Kind host port ${port} remains occupied after cancelled-run cleanup: ${owners}"
       return 1
     fi
-  done <<< "$ports"
+  done <<< "$requested_ports"
 }
 
 http_code() {
@@ -737,6 +865,7 @@ create_cluster() {
     log "deleting existing kind cluster ${KIND_CLUSTER_NAME}"
     kind delete cluster --name "$KIND_CLUSTER_NAME"
   fi
+  require_kind_host_ports_available "$KIND_CLUSTER_NAME"
 
   log "checking Docker runtime for kind"
   docker version
@@ -745,16 +874,12 @@ create_cluster() {
   log "creating kind cluster ${KIND_CLUSTER_NAME}"
   kind_config="$KIND_CONFIG"
   rendered_kind_config="$RUN_DIR/kind-config.yaml"
-  if [ "$(grep -Fc 'hostPort: 25432' "$kind_config")" -ne 1 ]; then
-    echo "::error::Kind config must contain exactly one default Postgres host-port mapping"
-    exit 1
-  fi
-  sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/" \
-    "$kind_config" >"$rendered_kind_config"
+  render_kind_host_port_mappings "$kind_config" "$rendered_kind_config"
   if ! kind create cluster --name "$KIND_CLUSTER_NAME" --config "$rendered_kind_config" --wait 120s; then
     echo "::error::kind cluster creation failed. This gate needs a runner with a real privileged Docker runtime capable of starting kind node containers; rootless Podman/netavark runners are not sufficient."
     exit 1
   fi
+  log_kind_bound_endpoints
   configure_remote_dind_kind_network
 }
 
@@ -778,11 +903,11 @@ start_remote_dind_kind_forwarding() {
 
   python3 -u "$ROOT/scripts/ci/verify/kind/forward-remote-dind-ports.py" \
     --target "$node" \
-    --forward 8090:80 \
-    --forward 10443:443 \
-    --forward 7233:30733 \
-    --forward 8084:30084 \
-    --forward 18092:30090 \
+    --forward "${KIND_INGRESS_HOST_PORT}:80" \
+    --forward "${KIND_INGRESS_TLS_HOST_PORT}:443" \
+    --forward "${KIND_TEMPORAL_HOST_PORT}:30733" \
+    --forward "${KIND_ORCHESTRATION_HOST_PORT}:30084" \
+    --forward "${KIND_COORDINATOR_DIRECT_HOST_PORT}:30090" \
     --forward "${KIND_POSTGRES_HOST_PORT}:30432" \
     >"$forwarder_log" 2>&1 &
   REMOTE_DIND_FORWARDER_PID=$!
@@ -2045,7 +2170,7 @@ connect_edge_probes() {
   log "Connect edge probes OK (${events} stream chunks over ${spread}s)"
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
     "$CARGO_CI_DIR/prepare-stream-smoke"
@@ -2323,7 +2448,7 @@ SQL
     # boundary and was accepted by the coordinator, not only parsed by the
     # issuer.
     for i in $(seq 1 20); do
-      if KIND_COORDINATOR_DIRECT_URL="http://127.0.0.1:18092" \
+      if KIND_COORDINATOR_DIRECT_URL="$KIND_COORDINATOR_DIRECT_URL" \
         KIND_COORDINATOR_ENVIRONMENT="$bound_environment_id" \
         KIND_COORDINATOR_SIDECAR_TOKEN="$sidecar_token" \
         KIND_COORDINATOR_BINDING_PROBE=1 \
@@ -2349,7 +2474,7 @@ coordinator_ingress_smoke() {
   local certificate_dir certificate_pem certificate_der alpn_output
 
   curl_settled -X GET \
-    "http://127.0.0.1:18092/api/v1/internal/gateway/coordinate"
+    "${KIND_COORDINATOR_DIRECT_URL}/api/v1/internal/gateway/coordinate"
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::retired primary coordinator WebSocket returned ${PROBE_CODE}, want 404"
     exit 1
@@ -2357,7 +2482,7 @@ coordinator_ingress_smoke() {
   curl_settled -X POST \
     -H 'content-type: application/connect+proto' \
     --data-binary '' \
-    "http://127.0.0.1:18092/coordinator.v1.CoordinatorService/Coordinate"
+    "${KIND_COORDINATOR_DIRECT_URL}/coordinator.v1.CoordinatorService/Coordinate"
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::retired coordinator.v1 route returned ${PROBE_CODE}, want 404"
     exit 1
@@ -2371,7 +2496,7 @@ coordinator_ingress_smoke() {
   openssl x509 -in "$certificate_pem" -outform DER -out "$certificate_der"
 
   if ! alpn_output="$(openssl s_client \
-    -connect localhost:10443 \
+    -connect "localhost:${KIND_INGRESS_TLS_HOST_PORT}" \
     -servername localhost \
     -CAfile "$certificate_pem" \
     -verify_return_error \
@@ -2389,7 +2514,7 @@ coordinator_ingress_smoke() {
   fi
 
   KIND_COORDINATOR_URL="$KIND_INGRESS_TLS_URL" \
-    KIND_COORDINATOR_DIRECT_URL="http://127.0.0.1:18092" \
+    KIND_COORDINATOR_DIRECT_URL="$KIND_COORDINATOR_DIRECT_URL" \
     KIND_COORDINATOR_CA_DER="$certificate_der" \
     "$CARGO_CI_DIR/examples/coordinator-ingress-smoke"
   rm -rf "$certificate_dir"
@@ -2402,7 +2527,7 @@ exec_service_connect_smoke() {
   local invalid_command invalid_connect_payload invalid_connect
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
@@ -2626,7 +2751,7 @@ SQL
   environment_session_protocol_smoke "$environment_id"
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
-    SMOKE_DIRECT_BASE_URL=http://127.0.0.1:8084 \
+    SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
@@ -2768,7 +2893,7 @@ environment_session_protocol_smoke() {
   kubectl -n "$NS" get secret/codewire-kind-ingress-ca \
     -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem"
 
-  if ! SMOKE_SESSION_BASE_URL=http://127.0.0.1:8084 \
+  if ! SMOKE_SESSION_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_ACCESS_TOKEN=at_kind_connect_oidc_codewire_api \
@@ -3200,8 +3325,8 @@ temporal_fencing_smoke() {
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   log "running final Temporal activity-fencing smoke"
   DATABASE_URL="$KIND_DATABASE_URL" \
-    TEMPORAL_ADDRESS="http://127.0.0.1:7233" \
-    SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
+    TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL" \
+    SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_WORKSPACE_IMAGE="$workspace_image" \
     "$CARGO_CI_DIR/temporal-fencing-smoke"
 }
@@ -3538,7 +3663,7 @@ rust_reconciler_ttl_e2e() {
   log "running Rust reconciler TTL Kubernetes e2e"
   KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" \
     DATABASE_URL="$KIND_DATABASE_URL" \
-    SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
+    SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     SMOKE_SESSION_TOKEN=contract-admin-session-token \
     SMOKE_ORG_ID=org_contract_1 \

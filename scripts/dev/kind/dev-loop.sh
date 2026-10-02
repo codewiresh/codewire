@@ -14,12 +14,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
+KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-8090}"
 KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
 KIND_PUBLIC_ORIGIN="${KIND_PUBLIC_ORIGIN:-}"
 WATCH_ADDR="${KIND_WATCH_ADDR:-127.0.0.1:5182}"
 # Dashboard source to serve; set to another worktree to review stacked UI work.
 SOURCE_ROOT="${KIND_WATCH_SOURCE_ROOT:-$ROOT}"
-INGRESS="http://127.0.0.1:8090"
+INGRESS="http://127.0.0.1:${KIND_INGRESS_HOST_PORT}"
 # Where the browser reaches the cluster API (terminals, streams). It must share
 # KIND_PUBLIC_ORIGIN's host; expose the ingress there over the Tailnet with
 # `sudo tailscale serve --bg --http=8090 http://127.0.0.1:8090`.

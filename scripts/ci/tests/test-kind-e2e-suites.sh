@@ -14,6 +14,7 @@ FINAL_FENCING="$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
 ENVIRONMENT_SESSION="$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
 SANDBOX_SUPPLY_CHAIN="$ROOT/scripts/ci/verify/kind/suites/sandbox-supply-chain.sh"
 RUNTIME_ACCEPTANCE="$ROOT/scripts/ci/verify/kind/suites/runtime-acceptance.sh"
+UP="$ROOT/scripts/ci/verify/kind/suites/up.sh"
 mkdir -p "$ROOT/.tmp"
 FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
@@ -308,14 +309,54 @@ grep -Fq 'process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || workspaceImage' \
 grep -Fq '(${presetId}, ${workspaceRuntimeImage},' \
   "$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts" ||
   fail 'dashboard lifecycle preset ignores its selected runtime workspace image'
+grep -Fq 'KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-8090}"' "$COMMON" ||
+  fail 'Kind ingress host port is not configurable with the accepted default'
+grep -Fq 'KIND_INGRESS_TLS_HOST_PORT="${KIND_INGRESS_TLS_HOST_PORT:-10443}"' "$COMMON" ||
+  fail 'Kind ingress TLS host port is not configurable with the accepted default'
+grep -Fq 'KIND_TEMPORAL_HOST_PORT="${KIND_TEMPORAL_HOST_PORT:-7233}"' "$COMMON" ||
+  fail 'Kind Temporal host port is not configurable with the accepted default'
+grep -Fq 'KIND_ORCHESTRATION_HOST_PORT="${KIND_ORCHESTRATION_HOST_PORT:-8084}"' "$COMMON" ||
+  fail 'Kind orchestration host port is not configurable with the accepted default'
+grep -Fq 'KIND_COORDINATOR_DIRECT_HOST_PORT="${KIND_COORDINATOR_DIRECT_HOST_PORT:-18092}"' "$COMMON" ||
+  fail 'Kind coordinator direct host port is not configurable with the accepted default'
 grep -Fq 'KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"' "$COMMON" ||
   fail 'Kind Postgres host port is not configurable with the accepted default'
 grep -Fq "KIND_POSTGRES_IMAGE='docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee'" "$COMMON" ||
   fail 'Kind Postgres support input is not bound to the reviewed linux/amd64 manifest'
 grep -Fq "KIND_TEMPORAL_IMAGE='docker.io/temporalio/auto-setup:1.29.0@sha256:6605395ec22aa6a1993bb0bfd35002b011603e21d11c4a71ee646038c59e8909'" "$COMMON" ||
   fail 'Kind Temporal support input is not bound to the reviewed linux/amd64 manifest'
-grep -Fq 'sed "s/hostPort: 25432/hostPort: ${KIND_POSTGRES_HOST_PORT}/"' "$COMMON" ||
-  fail 'Kind cluster creation does not render the configured Postgres host port'
+grep -Fq 'KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:${KIND_INGRESS_HOST_PORT}}"' "$COMMON" ||
+  fail 'Kind ingress URL does not follow the requested ingress host port'
+grep -Fq 'KIND_TEMPORAL_FRONTEND_URL="${KIND_TEMPORAL_FRONTEND_URL:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}"' "$COMMON" ||
+  fail 'Kind Temporal client address does not follow the requested host port'
+grep -Fq 'KIND_ORCHESTRATION_HTTP_URL="${KIND_ORCHESTRATION_HTTP_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}"' "$COMMON" ||
+  fail 'Kind orchestration client address does not follow the requested host port'
+grep -Fq 'KIND_COORDINATOR_DIRECT_URL="${KIND_COORDINATOR_DIRECT_URL:-http://127.0.0.1:${KIND_COORDINATOR_DIRECT_HOST_PORT}}"' "$COMMON" ||
+  fail 'Kind coordinator direct address does not follow the requested host port'
+grep -Fq 'render_kind_host_port_mappings "$kind_config" "$rendered_kind_config"' "$COMMON" ||
+  fail 'Kind cluster creation does not render the requested host-port mappings'
+grep -Fq 'sed -i "s/hostPort: ${default_port}\$/hostPort: ${requested_port}/" "$output"' "$COMMON" ||
+  fail 'Kind host-port rendering does not rewrite each requested mapping'
+grep -Fq 'require_kind_host_ports_available "$KIND_CLUSTER_NAME"' "$COMMON" ||
+  fail 'Kind cluster creation does not preflight requested host-port ownership'
+grep -Fq 'log_kind_bound_endpoints' "$COMMON" ||
+  fail 'Kind cluster creation does not print the bound endpoint set'
+grep -Fq 'require_kind_host_ports_available || return $?' "$UP" ||
+  fail 'kind-e2e.sh up does not fail fast when requested host ports are held'
+grep -Fq -- '--forward "${KIND_INGRESS_HOST_PORT}:80"' "$COMMON" ||
+  fail 'remote DinD forwarding does not follow the requested ingress host port'
+grep -Fq -- '--forward "${KIND_INGRESS_TLS_HOST_PORT}:443"' "$COMMON" ||
+  fail 'remote DinD forwarding does not follow the requested ingress TLS host port'
+grep -Fq -- '--forward "${KIND_TEMPORAL_HOST_PORT}:30733"' "$COMMON" ||
+  fail 'remote DinD forwarding does not follow the requested Temporal host port'
+grep -Fq -- '--forward "${KIND_ORCHESTRATION_HOST_PORT}:30084"' "$COMMON" ||
+  fail 'remote DinD forwarding does not follow the requested orchestration host port'
+grep -Fq -- '--forward "${KIND_COORDINATOR_DIRECT_HOST_PORT}:30090"' "$COMMON" ||
+  fail 'remote DinD forwarding does not follow the requested coordinator host port'
+grep -Fq 'TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL"' "$COMMON" ||
+  fail 'Temporal fencing smoke does not dial the requested Temporal endpoint'
+grep -Fq 'SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_HTTP_URL"' "$COMMON" ||
+  fail 'orchestration smoke callers do not dial the requested orchestration endpoint'
 grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
   fail 'Kind cluster creation does not adapt the remote DinD network boundary'
 [[ "$(grep -Fc '"$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"' "$COMMON")" -eq 1 ]] ||
@@ -323,6 +364,11 @@ grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
+for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '127.0.0.1:8090' 'localhost:10443'; do
+  if grep -Fq "$hardcoded_loopback" "$COMMON"; then
+    fail "Kind harness still hardcodes client address ${hardcoded_loopback}"
+  fi
+done
 grep -Fq 'audience: codewire.internal.gateway-binding.v1' "$COMMON" ||
   fail 'Kind gateway-binding fixture does not project the exact audience'
 grep -Fq 'mountPath: /var/run/secrets/codewire/gateway-binding' "$COMMON" ||
@@ -490,6 +536,7 @@ source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
 : >"$CALLS"
 (
   require_tool() { :; }
+  require_kind_host_ports_available() { record port-preflight; }
   prepare_kind_temp_runtime() { record temp-runtime; }
   acquire_kind_host_lock() { record acquire-lock; }
   cleanup() { :; }
@@ -508,6 +555,7 @@ source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
   run_kind_up
 )
 cat >"$FIXTURE/want-up-order" <<'EOF'
+port-preflight
 temp-runtime
 acquire-lock
 ingress-drift
@@ -526,6 +574,7 @@ cmp -s "$FIXTURE/want-up-order" "$CALLS" || {
 : >"$CALLS"
 if (
   require_tool() { :; }
+  require_kind_host_ports_available() { record port-preflight; }
   prepare_kind_temp_runtime() { record temp-runtime; }
   acquire_kind_host_lock() { record acquire-lock; }
   cleanup() { :; }
@@ -541,7 +590,7 @@ if (
 else
   [ "$?" -eq 43 ] || fail 'kind up lost the ingress drift failure status'
 fi
-printf '%s\n' temp-runtime acquire-lock ingress-drift | cmp -s - "$CALLS" ||
+printf '%s\n' port-preflight temp-runtime acquire-lock ingress-drift | cmp -s - "$CALLS" ||
   fail 'kind up continued after an ingress drift failure'
 
 : >"$CALLS"
@@ -927,6 +976,68 @@ grep -Eq '^flock:-w 37 [0-9]+$' "$CALLS" ||
 : >"$CALLS"
 acquire_kind_host_lock
 [ ! -s "$CALLS" ] || fail 'nested Kind host lock acquisition re-acquired the lock'
+
+# Every checked-in hostPort renders to its requested assignment, so a shifted
+# cluster never binds a host port another session's default topology holds.
+cat >"$FIXTURE/kind-config-render.yaml" <<'EOF'
+nodes:
+  - extraPortMappings:
+      - containerPort: 80
+        hostPort: 8090
+      - containerPort: 443
+        hostPort: 10443
+      - containerPort: 30733
+        hostPort: 7233
+      - containerPort: 30084
+        hostPort: 8084
+      - containerPort: 30090
+        hostPort: 18092
+      - containerPort: 30432
+        hostPort: 25432
+EOF
+(
+  KIND_INGRESS_HOST_PORT=18090
+  KIND_TEMPORAL_HOST_PORT=17233
+  KIND_POSTGRES_HOST_PORT=25433
+  render_kind_host_port_mappings "$FIXTURE/kind-config-render.yaml" "$FIXTURE/kind-config-rendered.yaml"
+) || fail 'default Kind host-port mappings were not accepted for rendering'
+for rendered in 'hostPort: 18090' 'hostPort: 10443' 'hostPort: 17233' 'hostPort: 8084' 'hostPort: 18092' 'hostPort: 25433'; do
+  grep -Fq "$rendered" "$FIXTURE/kind-config-rendered.yaml" ||
+    fail "requested Kind host-port mapping ${rendered} was not rendered"
+done
+if grep -Eq 'hostPort: (8090|7233|25432)$' "$FIXTURE/kind-config-rendered.yaml"; then
+  fail 'default Kind host ports survived requested-port rendering'
+fi
+
+# A held requested port fails fast and names the owning cluster; shifted
+# assignments pass, and the cluster being recreated ignores its own holders.
+docker() {
+  [ "${1:-}" = ps ] || fail "unexpected Docker invocation during port preflight: $*"
+  printf '%s\n' 'codewire-ux-2099-control-plane 0.0.0.0:8090->80/tcp, 0.0.0.0:10443->443/tcp'
+}
+ss() { return 1; }
+if require_kind_host_ports_available >"$FIXTURE/preflight-held.out" 2>&1; then
+  fail 'held default Kind host ports were not rejected before startup'
+fi
+grep -Fq 'KIND_INGRESS_HOST_PORT=8090' "$FIXTURE/preflight-held.out" ||
+  fail 'held-port error does not name the requested assignment'
+grep -Fq 'held by kind cluster codewire-ux-2099' "$FIXTURE/preflight-held.out" ||
+  fail 'held-port error does not name the owning Kind cluster'
+(
+  KIND_INGRESS_HOST_PORT=18090
+  KIND_INGRESS_TLS_HOST_PORT=10444
+  require_kind_host_ports_available
+) || fail 'shifted Kind host-port assignments were rejected'
+docker() {
+  [ "${1:-}" = ps ] || fail "unexpected Docker invocation during port preflight: $*"
+  printf '%s\n' 'codewire-e2e-ci-control-plane 0.0.0.0:8090->80/tcp'
+}
+require_kind_host_ports_available codewire-e2e-ci ||
+  fail 'ports held by the cluster being recreated block its replacement'
+if require_kind_host_ports_available >/dev/null 2>&1; then
+  fail 'ports held by an existing cluster were accepted for a new cluster'
+fi
+unset -f docker ss
 
 # Cancelled-run cleanup owns the current transaction and run-ID-suffixed CI
 # clusters, but it must preserve every unrelated local Kind cluster.
