@@ -782,7 +782,7 @@ mod tests {
                 .count(),
             1
         );
-        assert!(disks.iter().any(|disk| *disk == "path=/runtime/catalog/runtime.raw,readonly=on,direct=off,id=cw-runtime,serial=CWRUNTIME1,image_type=raw,backing_files=off,sparse=off,lock_granularity=full"));
+        assert!(disks.contains(&"path=/runtime/catalog/runtime.raw,readonly=on,direct=off,id=cw-runtime,serial=CWRUNTIME1,image_type=raw,backing_files=off,sparse=off,lock_granularity=full"));
         let original = config();
         assert!(matches!(
             original

@@ -1958,6 +1958,7 @@ dependencies = [
  "bytes",
  "codewire-access",
  "codewire-client",
+ "codewire-cw-release",
  "codewire-daemon",
  "codewire-daemon-bridge",
  "codewire-egress-broker",

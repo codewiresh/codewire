@@ -20,10 +20,13 @@ use codewire_proto::codewire::v1::{
     download_file_response, run_request, run_response, upload_file_request,
 };
 use connectrpc::client::{ClientConfig, Http2Connection, SharedHttp2Connection};
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::linux::supervisor_peer::SupervisorPeerPin;
+
 use crate::supervisor::{NativeRuntimeConfig, NativeSupervisorClient, SupervisorError};
-use crate::uds::{UdsError, owner_only_connector};
+use crate::uds::{UdsError, supervisor_peer_connector};
 
 const LOCAL_AUTHORITY: &str = "http://codewire-local-control";
 const FILE_CHUNK_BYTES: usize = 64 * 1024;
@@ -37,6 +40,7 @@ const MAXIMUM_EXEC_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct NativePublicEnvironmentClient {
+    _supervisor_peer: Arc<SupervisorPeerPin>,
     inner: EnvironmentServiceClient<SharedHttp2Connection>,
     org_id: String,
     environment_id: String,
@@ -55,6 +59,7 @@ impl NativePublicEnvironmentClient {
     ) -> Result<Self, NativePublicClientError> {
         let target = connect_target(config, target).await?;
         Ok(Self {
+            _supervisor_peer: target.peer_pin,
             inner: EnvironmentServiceClient::new(target.transport, target.client_config),
             org_id: target.org_id,
             environment_id: target.environment_id,
@@ -120,6 +125,7 @@ impl NativePublicEnvironmentClient {
 
 #[derive(Clone)]
 pub struct NativePublicSessionClient {
+    _supervisor_peer: Arc<SupervisorPeerPin>,
     inner: PublicEnvironmentSessionClient<SharedHttp2Connection>,
     org_id: String,
     environment_id: String,
@@ -132,6 +138,7 @@ impl NativePublicSessionClient {
     ) -> Result<Self, NativePublicClientError> {
         let target = connect_target(config, target).await?;
         Ok(Self {
+            _supervisor_peer: target.peer_pin,
             inner: PublicEnvironmentSessionClient::new(target.transport, target.client_config),
             org_id: target.org_id,
             environment_id: target.environment_id,
@@ -289,6 +296,7 @@ impl NativePublicSessionClient {
 
 #[derive(Clone)]
 pub struct NativePublicDataClient {
+    _supervisor_peer: Arc<SupervisorPeerPin>,
     exec: ExecServiceClient<SharedHttp2Connection>,
     files: FileServiceClient<SharedHttp2Connection>,
     org_id: String,
@@ -308,6 +316,7 @@ impl NativePublicDataClient {
     ) -> Result<Self, NativePublicClientError> {
         let target = connect_target(config, target).await?;
         Ok(Self {
+            _supervisor_peer: target.peer_pin,
             exec: ExecServiceClient::new(target.transport.clone(), target.client_config.clone()),
             files: FileServiceClient::new(target.transport, target.client_config),
             org_id: target.org_id,
@@ -490,6 +499,7 @@ impl NativePublicDataClient {
 }
 
 struct ConnectedTarget {
+    peer_pin: Arc<SupervisorPeerPin>,
     transport: SharedHttp2Connection,
     client_config: ClientConfig,
     org_id: String,
@@ -500,12 +510,12 @@ async fn connect_target(
     config: &NativeRuntimeConfig,
     target: &str,
 ) -> Result<ConnectedTarget, NativePublicClientError> {
-    let _supervisor = NativeSupervisorClient::connect_or_start(config).await?;
+    let supervisor = NativeSupervisorClient::connect_or_start(config).await?;
     let authority: http::Uri = LOCAL_AUTHORITY
         .parse()
         .map_err(|_| NativePublicClientError::Configuration)?;
     let transport = Http2Connection::connect_with_connector(
-        owner_only_connector(&config.supervisor_socket())?,
+        supervisor_peer_connector(supervisor.supervisor_peer_pin()),
         authority.clone(),
     )
     .await
@@ -523,6 +533,7 @@ async fn connect_target(
         return Err(NativePublicClientError::Protocol);
     }
     Ok(ConnectedTarget {
+        peer_pin: supervisor.supervisor_peer_pin(),
         transport,
         client_config,
         org_id: environment.org_id,
