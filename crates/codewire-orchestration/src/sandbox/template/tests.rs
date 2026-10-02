@@ -1786,6 +1786,7 @@ mod tests {
             "",
             &format!("sh {}", daemon.display()),
             &format!("sh {}", workload.display()),
+            true,
         );
         let mut supervisor = tokio::process::Command::new("sh")
             .arg("-c")
@@ -3303,4 +3304,235 @@ mod tests {
             load_golden("sandboxwarmpool.golden.json"),
         );
     }
+
+    // ------------------------------------------- identity-free (B2, §13)
+
+    const IDENTITY_FREE_BINDING_URL: &str =
+        "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
+
+    fn identity_free_opts() -> TemplateOpts {
+        TemplateOpts {
+            workspace_identity: WorkspaceIdentity::Binding {
+                binding_url: IDENTITY_FREE_BINDING_URL.into(),
+            },
+            ..credential_opts()
+        }
+    }
+
+    /// Invariant 1 / design §13: names that must never appear in an
+    /// identity-free workspace template.
+    const IDENTITY_FREE_FORBIDDEN_NAMES: [&str; 16] = [
+        "CODEWIRE_DAEMON_AUTH_TOKEN",
+        "CODEWIRE_ENVIRONMENT_ID",
+        "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
+        "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",
+        "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS",
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "CODEX_HOME",
+        "CODEX_CA_CERTIFICATE",
+        "SSH_AUTH_SOCK",
+        "credential-codex-config",
+        "cw-credential-codex-",
+        "codewire-client-bootstrap",
+        "codex-bootstrap",
+        "codewire.sh/environment-id",
+    ];
+
+    fn assert_identity_free(template: &Value, opts: &TemplateOpts) {
+        let text = template.to_string();
+        for forbidden in IDENTITY_FREE_FORBIDDEN_NAMES {
+            assert!(!text.contains(forbidden), "{forbidden} in an identity-free template");
+        }
+        for value in [
+            opts.environment_id.as_str(),
+            opts.organization_id.as_str(),
+            opts.gateway_token.as_str(),
+            opts.daemon_auth_token.as_str(),
+        ] {
+            assert!(!text.contains(value), "environment value in an identity-free template");
+        }
+        if let Some(digest) = opts.projection_selection_sha256 {
+            let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert!(!text.contains(&hex));
+        }
+        // No egress to the environment's own gateway; exactly one new rule,
+        // TCP 8087 to orchestration in the server namespace.
+        let egress = template["spec"]["networkPolicy"]["egress"].as_array().unwrap();
+        assert!(!egress.iter().any(|rule| rule.to_string().contains("\"port\":8443")));
+        let binding_rules: Vec<_> = egress
+            .iter()
+            .filter(|rule| rule.to_string().contains("\"port\":8087"))
+            .collect();
+        assert_eq!(binding_rules.len(), 1);
+        assert_eq!(
+            binding_rules[0],
+            &json!({
+                "to": [{
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "dev" } },
+                    "podSelector": { "matchLabels": { "app.kubernetes.io/component": "orchestration" } },
+                }],
+                "ports": [{ "protocol": "TCP", "port": 8087 }],
+            })
+        );
+        // The binding token, URL and downward-API UID are in the workspace
+        // container only, and the token volume has the exact audience.
+        let spec = &template["spec"]["podTemplate"]["spec"];
+        let volume = spec["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["name"] == "workspace-binding-identity")
+            .expect("binding token volume");
+        assert_eq!(
+            volume["projected"]["sources"][0]["serviceAccountToken"],
+            json!({
+                "audience": "codewire.internal.workspace-binding.v1",
+                "expirationSeconds": 600,
+                "path": "token",
+            })
+        );
+        assert_eq!(volume["projected"]["defaultMode"], 0o440);
+        assert_eq!(spec["automountServiceAccountToken"], false);
+        for container in spec["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(spec["initContainers"].as_array().into_iter().flatten())
+        {
+            let mounts_token = container["volumeMounts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|mount| mount["name"] == "workspace-binding-identity");
+            assert_eq!(mounts_token, container["name"] == "workspace", "{}", container["name"]);
+        }
+        let workspace = spec["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|container| container["name"] == "workspace")
+            .unwrap();
+        let env = workspace["env"].as_array().unwrap();
+        assert!(env.contains(&json!({
+            "name": "CODEWIRE_WORKSPACE_BINDING_URL",
+            "value": IDENTITY_FREE_BINDING_URL,
+        })));
+        assert!(env.contains(&json!({
+            "name": "CODEWIRE_POD_UID",
+            "valueFrom": { "fieldRef": { "fieldPath": "metadata.uid" } },
+        })));
+        // Pod readiness is the daemon's local marker, never the binding.
+        assert!(
+            workspace["readinessProbe"]
+                .to_string()
+                .contains("test -f /codewire/run/daemon/ready")
+        );
+    }
+
+    #[test]
+    fn identity_free_templates_carry_no_environment_state() {
+        let mut variants = vec![identity_free_opts()];
+        // No credential runtime, no clients.
+        variants.push(TemplateOpts {
+            credential_runtime: None,
+            managed_credential_clients: Default::default(),
+            projection_selection_sha256: None,
+            ..identity_free_opts()
+        });
+        // The runc profile copies the daemon with an init container.
+        variants.push(TemplateOpts {
+            runtime_profile: RUNTIME_PROFILE_RUNC.into(),
+            ..identity_free_opts()
+        });
+        // Without DinD.
+        variants.push(TemplateOpts {
+            docker_mode: DOCKER_MODE_NONE.into(),
+            ..identity_free_opts()
+        });
+        // A custom image under the keepalive supervisor.
+        variants.push(TemplateOpts {
+            image: "example.invalid/custom:golden".into(),
+            image_command: vec!["sleep".into(), "infinity".into()],
+            ..identity_free_opts()
+        });
+        // Every managed client selected.
+        variants.push(TemplateOpts {
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots([
+                    "codex",
+                    "openai",
+                    "anthropic",
+                    "ssh",
+                    "github",
+                ])
+                .unwrap(),
+            ..identity_free_opts()
+        });
+        for opts in variants {
+            let template = render_sandbox_template("dev-sandboxes", &opts);
+            assert_identity_free(&template, &opts);
+        }
+    }
+
+    /// Two environments of one shape render the same pod template: nothing
+    /// environment-specific remains (C1 later shares one object per key).
+    #[test]
+    fn identity_free_pod_templates_do_not_differ_by_environment() {
+        let first = identity_free_opts();
+        let second = TemplateOpts {
+            environment_id: "1d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6".into(),
+            organization_id: "org-other".into(),
+            operation_generation: 12,
+            gateway_token: "gw-token-other".into(),
+            daemon_auth_token: "daemon-token-other".into(),
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap(),
+            projection_selection_sha256: Some([0x11; 32]),
+            ..identity_free_opts()
+        };
+        let render = |opts: &TemplateOpts| render_sandbox_template("dev-sandboxes", opts)["spec"].clone();
+        assert_eq!(render(&first), render(&second));
+    }
+
+    #[test]
+    fn identity_free_template_matches_golden_file() {
+        let opts = identity_free_opts();
+        assert_eq!(
+            render_sandbox_template("dev-sandboxes", &opts),
+            load_golden("identity-free-sandboxtemplate.golden.json"),
+        );
+        let runc = TemplateOpts {
+            runtime_profile: RUNTIME_PROFILE_RUNC.into(),
+            ..identity_free_opts()
+        };
+        assert_eq!(
+            render_sandbox_template("dev-sandboxes", &runc),
+            load_golden("identity-free-sandboxtemplate-runc.golden.json"),
+        );
+    }
+
+    /// The identity-free gateway fetches its daemon credential over its own
+    /// binding; the legacy rendering is unchanged for rollback and
+    /// confidential.
+    #[test]
+    fn identity_free_gateway_gets_no_daemon_token_and_no_codex_config_map() {
+        let opts = identity_free_opts();
+        let env = build_sidecar_env(&opts);
+        assert!(!env.iter().any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
+        assert!(!serde_json::to_string(&env).unwrap().contains(&opts.daemon_auth_token));
+        assert!(env.iter().any(|entry| entry["name"] == GATEWAY_BINDING_URL_ENV));
+        assert!(render_credential_codex_config("dev-sandboxes", &opts).is_none());
+        let legacy = credential_opts();
+        assert!(build_sidecar_env(&legacy)
+            .iter()
+            .any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
+        assert!(render_credential_codex_config("dev-sandboxes", &legacy).is_some());
+        // The per-environment daemon policy keeps the gateway 8443 egress
+        // that left the shared template.
+        let policy = render_workspace_daemon_network_policy("dev-sandboxes", &opts);
+        assert!(policy["spec"]["egress"].to_string().contains("\"port\":8443"));
+    }
+
 }

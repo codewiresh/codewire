@@ -25,7 +25,7 @@ use crate::sandbox::client::{
 use crate::sandbox::template::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts,
-    WORKSPACE_READY_TIMEOUT, confidential_init_data, runtime_profile_spec,
+    WORKSPACE_READY_TIMEOUT, WorkspaceIdentity, confidential_init_data, runtime_profile_spec,
     validate_managed_runtime_profile,
 };
 use crate::sandbox::{
@@ -155,6 +155,41 @@ pub(super) fn requires_running_runtime_identity(state: &str, desired_state: &str
 
 // ── Worker sandbox config (the cfg slice the create path reads) ────────
 
+/// `SANDBOX_WORKSPACE_IDENTITY_MODE` (Program #2238 B2): how new hosted
+/// commodity workspace Pods are rendered. `binding` is the default;
+/// `environment-token` is the rollback, which renders legacy Pods while every
+/// reader stays scope-aware, so Pod-scope Pods keep working.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WorkspaceIdentityMode {
+    #[default]
+    Binding,
+    EnvironmentToken,
+}
+
+impl WorkspaceIdentityMode {
+    pub const ENV: &'static str = "SANDBOX_WORKSPACE_IDENTITY_MODE";
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "" | "binding" => Some(Self::Binding),
+            "environment-token" => Some(Self::EnvironmentToken),
+            _ => None,
+        }
+    }
+}
+
+/// The dedicated orchestration Service that serves only
+/// `WorkspaceBindingService` (design §3.5).
+pub const WORKSPACE_BINDING_SERVICE_NAME: &str = "codewire-orchestration-workspace-binding";
+
+/// The in-cluster URL a workspace daemon long-polls for its binding.
+pub fn workspace_binding_url(server_namespace: &str) -> String {
+    format!(
+        "http://{WORKSPACE_BINDING_SERVICE_NAME}.{server_namespace}.svc.cluster.local:{}",
+        codewire_gateway_proto::WORKSPACE_BINDING_PORT
+    )
+}
+
 /// Runtime configuration consumed by the environment-create handler.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxWorkerCfg {
@@ -196,6 +231,7 @@ pub struct SandboxWorkerCfg {
     pub runtime_transport_zones_json: String,
     pub pod_namespace: String,
     pub debug_tailnet: bool,
+    pub workspace_identity_mode: WorkspaceIdentityMode,
 }
 
 impl SandboxWorkerCfg {
@@ -282,6 +318,15 @@ impl SandboxWorkerCfg {
             debug_tailnet: !std::env::var("CODEWIRE_DEBUG_TAILNET")
                 .unwrap_or_default()
                 .is_empty(),
+            workspace_identity_mode: WorkspaceIdentityMode::parse(
+                &std::env::var(WorkspaceIdentityMode::ENV).unwrap_or_default(),
+            )
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} must be binding or environment-token",
+                    WorkspaceIdentityMode::ENV
+                )
+            }),
         }
     }
 }
@@ -390,6 +435,21 @@ pub fn environment_template_opts(
     };
 
     let uses_runtime_transport_registry = !cfg.runtime_transport_zones_json.trim().is_empty();
+    // Commodity workspaces are identity-free (design §13); confidential keeps
+    // its measured environment-bound init-data until B2c. A Pod reaches the
+    // binding listener, and its gateway the binding RPC, only with the
+    // orchestration namespace and a coordinator known.
+    let workspace_identity = if cfg.workspace_identity_mode == WorkspaceIdentityMode::Binding
+        && runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
+        && !cfg.pod_namespace.trim().is_empty()
+        && !(cfg.coordinator_url.trim().is_empty() && cfg.api_base_url.trim().is_empty())
+    {
+        WorkspaceIdentity::Binding {
+            binding_url: workspace_binding_url(cfg.pod_namespace.trim()),
+        }
+    } else {
+        WorkspaceIdentity::EnvironmentToken
+    };
 
     Ok(TemplateOpts {
         name: environment_template_name(template_base, env_id),
@@ -408,6 +468,7 @@ pub fn environment_template_opts(
         confidential_storage_manifest_uri: String::new(),
         gateway_token: gateway_token.to_string(),
         daemon_auth_token: daemon_auth_token.to_string(),
+        workspace_identity,
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
         server_namespace: cfg.pod_namespace.clone(),
@@ -1408,48 +1469,12 @@ async fn run_environment_create(
                 )
                 .await?;
                 observe_create_stage(StartStage::CreateClaim, profile, claim_elapsed);
-
-                // The gateway serves readiness only after it reaches the
-                // workspace daemon, so this wait covers the workspace cold
-                // start. Same metadata shape as the restart path, less the
-                // Pod IP, which the backend row records once a probe sees it.
-                let gateway_started = std::time::Instant::now();
-                emit_create_log(
-                    authority,
-                    "gateway_ready",
-                    "started",
-                    GATEWAY_READY_STARTED_MESSAGE,
-                    None,
-                )
-                .await?;
-                let gateway_result = authority
-                    .run_while_authoritative_for_states(
-                        CREATE_MUTATION_STATES,
-                        client.wait_for_credential_gateway_ready(
-                            &template_opts,
-                            ready_timeout_for_isolation(&env.isolation_tier),
-                        ),
-                    )
-                    .await;
-                let gateway_elapsed = gateway_started.elapsed();
-                let gateway_meta = Some(serde_json::json!({
-                    "duration_ms": duration_ms(gateway_elapsed),
-                    "namespace": backend.namespace,
-                }));
-                if let Err(e) = gateway_result {
-                    emit_create_log(
-                        authority,
-                        "gateway_ready",
-                        "failed",
-                        &format!("{e:#}"),
-                        gateway_meta,
-                    )
-                    .await?;
-                    record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
-                    return Err(e);
-                }
-                emit_create_log(authority, "gateway_ready", "completed", "", gateway_meta).await?;
-                observe_create_stage(StartStage::GatewayReady, profile, gateway_elapsed);
+                // Design §10: create no longer waits for the gateway here. The
+                // gateway Pod starts and pulls in parallel; an identity-free
+                // daemon listens only once bound, and the binding is recorded
+                // after the Claim is Ready, so the gateway readiness wait
+                // (`gateway_ready`) runs in the runtime-identity gate, after
+                // `workspace_bind`.
             }
 
             CreateAction::StoreBackend => {
@@ -2054,7 +2079,23 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         );
     }
 
-    ensure_gateway_stack_for_environment(
+    // On create this wait is the `gateway_ready` stage (A0a): the gateway
+    // fetches the bound Pod's daemon credential, reaches the daemon and turns
+    // Ready. Start records its own `gateway_ready` once running.
+    let creating = matches!(env.state.as_str(), "pending" | "creating");
+    let gateway_started = std::time::Instant::now();
+    if creating {
+        emit_authoritative_environment_log_for_states(
+            authority,
+            states,
+            "gateway_ready",
+            "started",
+            GATEWAY_READY_STARTED_MESSAGE,
+            None,
+        )
+        .await?;
+    }
+    let gateway_result = ensure_gateway_stack_for_environment(
         ctx,
         &ctx.sandbox_cfg,
         env,
@@ -2063,7 +2104,45 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         authority,
         states,
     )
-    .await?;
+    .await;
+    if creating {
+        let gateway_elapsed = gateway_started.elapsed();
+        let gateway_meta = Some(serde_json::json!({
+            "duration_ms": duration_ms(gateway_elapsed),
+            "namespace": namespace,
+        }));
+        match &gateway_result {
+            Ok(()) => {
+                emit_authoritative_environment_log_for_states(
+                    authority,
+                    states,
+                    "gateway_ready",
+                    "completed",
+                    "",
+                    gateway_meta,
+                )
+                .await?;
+                observe_create_stage(
+                    StartStage::GatewayReady,
+                    start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+                    gateway_elapsed,
+                );
+            }
+            Err(error) if !super::activity_authority::is_authority_lost(error) => {
+                emit_authoritative_environment_log_for_states(
+                    authority,
+                    states,
+                    "gateway_ready",
+                    "failed",
+                    &format!("{error:#}"),
+                    gateway_meta,
+                )
+                .await?;
+            }
+            Err(_) => {}
+        }
+    }
+    gateway_result?;
     authority.ensure_for_states(states).await
 }
 
@@ -2141,6 +2220,112 @@ fn _claim_name_used(env_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity_mode_env() -> EnvironmentRow {
+        EnvironmentRow {
+            id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            org_id: "org-1".into(),
+            preset_id: None,
+            env_type: "sandbox".into(),
+            state: "creating".into(),
+            desired_state: "started".into(),
+            isolation_tier: "standard".into(),
+            external_cleanup_completed_at: None,
+            cpu_millicores: 2000,
+            memory_mb: 4096,
+            disk_gb: 10,
+            ttl_seconds: None,
+            project_spec: codewire_project::ProjectSpec::default(),
+            operation_generation: 7,
+            projection_selection: Ok(None),
+            managed_credential_clients: Ok(Default::default()),
+        }
+    }
+
+    /// `SANDBOX_WORKSPACE_IDENTITY_MODE`: `binding` (the default) renders
+    /// identity-free commodity Pods; confidential, the rollback mode and a
+    /// configuration without the orchestration namespace or a coordinator
+    /// render legacy Pods.
+    #[test]
+    fn the_identity_mode_selects_identity_free_commodity_rendering() {
+        assert_eq!(
+            WorkspaceIdentityMode::parse(""),
+            Some(WorkspaceIdentityMode::Binding)
+        );
+        assert_eq!(
+            WorkspaceIdentityMode::parse("binding"),
+            Some(WorkspaceIdentityMode::Binding)
+        );
+        assert_eq!(
+            WorkspaceIdentityMode::parse("environment-token"),
+            Some(WorkspaceIdentityMode::EnvironmentToken)
+        );
+        for invalid in ["Binding", "token", "legacy", "pod"] {
+            assert_eq!(WorkspaceIdentityMode::parse(invalid), None);
+        }
+        assert_eq!(
+            WorkspaceIdentityMode::default(),
+            WorkspaceIdentityMode::Binding
+        );
+        let cfg = SandboxWorkerCfg {
+            runtime_profile: "commodity".into(),
+            pod_namespace: "dev".into(),
+            api_base_url: "https://codewire-dev.sh".into(),
+            ..Default::default()
+        };
+        let render = |cfg: &SandboxWorkerCfg, env: &EnvironmentRow| {
+            environment_template_opts(
+                cfg,
+                "ghcr.io/codewiresh/workspace:1",
+                "base",
+                env,
+                7,
+                "tok",
+                "daemon-tok",
+            )
+            .unwrap()
+            .workspace_identity
+        };
+        let env = identity_mode_env();
+        assert_eq!(
+            render(&cfg, &env),
+            WorkspaceIdentity::Binding {
+                binding_url:
+                    "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+                        .into()
+            }
+        );
+        let rollback = SandboxWorkerCfg {
+            workspace_identity_mode: WorkspaceIdentityMode::EnvironmentToken,
+            ..cfg.clone()
+        };
+        assert_eq!(render(&rollback, &env), WorkspaceIdentity::EnvironmentToken);
+        let no_namespace = SandboxWorkerCfg {
+            pod_namespace: String::new(),
+            ..cfg.clone()
+        };
+        assert_eq!(
+            render(&no_namespace, &env),
+            WorkspaceIdentity::EnvironmentToken
+        );
+        let no_coordinator = SandboxWorkerCfg {
+            api_base_url: String::new(),
+            coordinator_url: String::new(),
+            ..cfg.clone()
+        };
+        assert_eq!(
+            render(&no_coordinator, &env),
+            WorkspaceIdentity::EnvironmentToken
+        );
+        let confidential = EnvironmentRow {
+            isolation_tier: "confidential".into(),
+            ..identity_mode_env()
+        };
+        assert_eq!(
+            render(&cfg, &confidential),
+            WorkspaceIdentity::EnvironmentToken
+        );
+    }
 
     #[test]
     fn isolation_tier_selects_only_the_product_runtime_profile() {

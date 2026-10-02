@@ -123,6 +123,24 @@ const WORKSPACE_DISK_GIB_ANNOTATION_KEY: &str = "codewire.sh/disk-gib";
 const APP_PREVIEW_MIN_PORT: i64 = 1;
 const APP_PREVIEW_MAX_PORT: i64 = 65535;
 
+/// How a hosted workspace Pod gets its environment identity (Program #2238
+/// B2, design §8 and §13).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceIdentity {
+    /// Today's rendering: the environment-wide daemon token, environment ID,
+    /// generation, projection digest and managed clients are rendered into
+    /// the workspace container. Confidential Pods always use it (B2c), and
+    /// `SANDBOX_WORKSPACE_IDENTITY_MODE=environment-token` selects it for
+    /// rollback.
+    #[default]
+    EnvironmentToken,
+    /// Identity-free: the Pod carries only a Pod-bound projected token for the
+    /// workspace-binding audience, its own UID from the downward API and the
+    /// binding listener URL. Everything environment-specific comes from the
+    /// bind response.
+    Binding { binding_url: String },
+}
+
 /// Inputs for rendering one environment-scoped sandbox template.
 #[derive(Clone, Default)]
 pub struct TemplateOpts {
@@ -145,6 +163,8 @@ pub struct TemplateOpts {
     pub confidential_storage_manifest_uri: String,
     pub gateway_token: String,
     pub daemon_auth_token: String,
+    /// How the workspace Pod is bound to this environment.
+    pub workspace_identity: WorkspaceIdentity,
     pub api_base_url: String,
     pub coordinator_url: String,
     pub server_namespace: String,
@@ -209,6 +229,7 @@ impl fmt::Debug for TemplateOpts {
             )
             .field("gateway_token", &"<redacted>")
             .field("daemon_auth_token", &"<redacted>")
+            .field("workspace_identity", &self.workspace_identity)
             .field("api_base_url", &self.api_base_url)
             .field("coordinator_url", &self.coordinator_url)
             .field("server_namespace", &self.server_namespace)
@@ -272,6 +293,19 @@ impl fmt::Debug for TemplateOpts {
 impl TemplateOpts {
     pub fn runtime_profile_spec(&self) -> RuntimeProfileSpec {
         runtime_profile_spec(&self.runtime_profile, &self.docker_mode, self.dind_enabled)
+    }
+
+    /// The workspace-binding listener URL when this workspace is rendered
+    /// identity-free.
+    pub fn workspace_binding_url(&self) -> Option<&str> {
+        match &self.workspace_identity {
+            WorkspaceIdentity::Binding { binding_url } => Some(binding_url),
+            WorkspaceIdentity::EnvironmentToken => None,
+        }
+    }
+
+    pub fn identity_free(&self) -> bool {
+        self.workspace_binding_url().is_some()
     }
 
     pub fn validate_confidential_storage_manifest(&self) -> anyhow::Result<()> {

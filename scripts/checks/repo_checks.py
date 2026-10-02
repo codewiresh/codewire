@@ -15,6 +15,7 @@ from repo_policy.orchestration_security import check_orchestration_host_key_auth
 from repo_policy.permanent_raw import check_permanent_raw_surface
 from repo_policy.production import check_production_source_ownership
 from repo_policy.proto import check_proto_package_boundaries
+from repo_policy.workspace_identity import check_identity_free_workspace
 from repo_policy.source_classification import (
     check_go_source_classification,
     check_retired_reference_source,
@@ -46,6 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     prod_parser.add_argument("--self-test", action="store_true")
     prod_parser.add_argument("--root", default=str(ROOT))
     prod_parser.set_defaults(func=check_production_source_ownership)
+    identity_free_parser = subparsers.add_parser("identity-free-workspace")
+    identity_free_parser.add_argument("--self-test", action="store_true")
+    identity_free_parser.set_defaults(func=check_identity_free_workspace)
     host_key_parser = subparsers.add_parser("orchestration-host-key-authz")
     host_key_parser.add_argument("--self-test", action="store_true")
     host_key_parser.set_defaults(func=check_orchestration_host_key_authz)

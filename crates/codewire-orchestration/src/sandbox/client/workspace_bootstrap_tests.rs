@@ -134,6 +134,11 @@ fn apply_patch_fixture(object: &mut Value, patch: &Value) -> bool {
                 .as_array_mut()
                 .unwrap()
                 .remove(key.parse::<usize>().unwrap());
+        } else if operation["op"] == "replace" {
+            let member = parent
+                .get_mut(&key)
+                .expect("a replaced member must already exist");
+            *member = operation["value"].clone();
         } else {
             assert_eq!(operation["op"], "add");
             match parent {
@@ -1268,4 +1273,196 @@ fn daemon_delivery_must_be_exactly_one_route() {
             "{case}"
         );
     }
+}
+
+// ------------------------------------------ identity-free upgrade (B2 §12)
+
+fn binding_opts() -> TemplateOpts {
+    TemplateOpts {
+        server_namespace: "dev".into(),
+        workspace_identity: super::super::template::WorkspaceIdentity::Binding {
+            binding_url:
+                "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087".into(),
+        },
+        ..opts()
+    }
+}
+
+fn legacy_fixture() -> Fixture {
+    let mut fixture = fixture();
+    for object in [&mut fixture.template, &mut fixture.sandbox] {
+        object["spec"]["podTemplate"]["spec"]["containers"][1]["env"]
+            .as_array_mut()
+            .unwrap()
+            .push(
+                json!({"name":"CODEWIRE_DAEMON_AUTH_TOKEN","value":"synthetic-daemon-capability"}),
+            );
+    }
+    fixture
+}
+
+fn patches(state: &Fixture) -> Vec<&Value> {
+    state
+        .requests
+        .iter()
+        .filter(|(method, _, _)| *method == Method::PATCH)
+        .map(|(_, _, patch)| patch)
+        .collect()
+}
+
+/// With the mode at `binding`, start replaces a suspended legacy
+/// environment's whole workspace Pod spec in its template and Sandbox, and
+/// the template's egress, keeping volumeClaimTemplates and Pod metadata, so
+/// the resumed Pod binds with Pod scope. A second start changes nothing.
+#[tokio::test]
+async fn binding_mode_upgrades_a_suspended_legacy_environment_on_start() {
+    let before = legacy_fixture();
+    let original_metadata = before.sandbox["spec"]["podTemplate"]["metadata"].clone();
+    let (sandboxes, state) = client(before);
+    let opts = binding_opts();
+    for _ in 0..2 {
+        sandboxes
+            .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+            .await
+            .unwrap();
+    }
+    let state = state.lock().unwrap();
+    let rendered = render_sandbox_template(NS, &opts);
+    assert_eq!(patches(&state).len(), 2, "the second start must be a no-op");
+    for object in [&state.template, &state.sandbox] {
+        assert_eq!(
+            object["spec"]["podTemplate"]["spec"],
+            rendered["spec"]["podTemplate"]["spec"]
+        );
+        assert_eq!(
+            object["spec"]["volumeClaimTemplates"],
+            json!([{"fixture":"immutable"}])
+        );
+        assert!(
+            !object["spec"]["podTemplate"]
+                .to_string()
+                .contains("CODEWIRE_DAEMON_AUTH_TOKEN")
+        );
+    }
+    assert_eq!(
+        state.template["spec"]["networkPolicy"],
+        rendered["spec"]["networkPolicy"]
+    );
+    assert!(state.sandbox["spec"].get("networkPolicy").is_none());
+    assert_eq!(
+        state.sandbox["spec"]["podTemplate"]["metadata"],
+        original_metadata
+    );
+    assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+    for patch in patches(&state) {
+        assert_eq!(patch[0]["path"], "/metadata/uid");
+        assert_eq!(patch[1]["path"], "/metadata/resourceVersion");
+    }
+    // No Pod is read or written, and no Codex ConfigMap is created.
+    assert!(
+        state
+            .requests
+            .iter()
+            .all(|(_, path, _)| !path.contains("/pods/"))
+    );
+    assert!(state.config_map.is_none());
+}
+
+/// A conflicting write during the upgrade never reports success.
+#[tokio::test]
+async fn an_upgrade_that_races_another_writer_fails_closed() {
+    for race in [
+        Race::TemplateVersion,
+        Race::SandboxVersion,
+        Race::SandboxUid,
+    ] {
+        let mut before = legacy_fixture();
+        before.race = Some(race);
+        let (sandboxes, _) = client(before);
+        assert!(
+            sandboxes
+                .reconcile_workspace_bootstrap(
+                    &binding_opts(),
+                    &claim_name(ENV),
+                    CLAIM_UID,
+                    &expected_sandbox()
+                )
+                .await
+                .is_err()
+        );
+    }
+}
+
+/// Rollback (`environment-token`) renders legacy Pods for new environments
+/// but leaves an identity-free one untouched: it keeps binding with Pod
+/// scope. Its template carries no environment label; the environment-owned
+/// shadow pool names it.
+#[tokio::test]
+async fn rollback_mode_leaves_an_identity_free_environment_untouched() {
+    let mut before = fixture();
+    let rendered = render_sandbox_template(NS, &binding_opts());
+    for object in [&mut before.template, &mut before.sandbox] {
+        object["spec"]["podTemplate"]["spec"] = rendered["spec"]["podTemplate"]["spec"].clone();
+    }
+    before.template["metadata"]["labels"] = json!({});
+    let (sandboxes, state) = client(before);
+    sandboxes
+        .reconcile_workspace_bootstrap(&opts(), &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    // Binding mode accepts the unlabelled identity-free template too.
+    sandboxes
+        .reconcile_workspace_bootstrap(
+            &binding_opts(),
+            &claim_name(ENV),
+            CLAIM_UID,
+            &expected_sandbox(),
+        )
+        .await
+        .unwrap();
+    assert!(patches(&state.lock().unwrap()).is_empty());
+}
+
+/// An unlabelled template that is not identity-free is not this
+/// environment's, and an object rendering both identities is ambiguous.
+#[tokio::test]
+async fn unowned_or_ambiguous_templates_are_refused_without_writes() {
+    let mut unlabelled = legacy_fixture();
+    unlabelled.template["metadata"]["labels"] = json!({});
+    let (sandboxes, state) = client(unlabelled);
+    assert!(
+        sandboxes
+            .reconcile_workspace_bootstrap(
+                &binding_opts(),
+                &claim_name(ENV),
+                CLAIM_UID,
+                &expected_sandbox()
+            )
+            .await
+            .is_err()
+    );
+    assert!(patches(&state.lock().unwrap()).is_empty());
+
+    let mut ambiguous = legacy_fixture();
+    ambiguous.sandbox["spec"]["podTemplate"]["spec"]["containers"][1]["env"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"CODEWIRE_WORKSPACE_BINDING_URL","value":"http://x:8087"}));
+    let (sandboxes, state) = client(ambiguous);
+    assert!(
+        sandboxes
+            .reconcile_workspace_bootstrap(
+                &binding_opts(),
+                &claim_name(ENV),
+                CLAIM_UID,
+                &expected_sandbox()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        patches(&state.lock().unwrap())
+            .iter()
+            .all(|patch| !patch.to_string().contains("sandbox-incarnation"))
+    );
 }

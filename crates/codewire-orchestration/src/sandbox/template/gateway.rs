@@ -101,14 +101,16 @@ pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
         opts.gateway_token != opts.daemon_auth_token,
         "hosted coordinate and daemon capabilities must be distinct"
     );
-    let mut env = vec![
-        json!({
-            "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
-            "value": workspace_daemon_service_addr(&opts.environment_id),
-        }),
-        json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.daemon_auth_token }),
-        json!({ "name": "CODEWIRE_GATEWAY_TOKEN", "value": opts.gateway_token }),
-    ];
+    let mut env = vec![json!({
+        "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
+        "value": workspace_daemon_service_addr(&opts.environment_id),
+    })];
+    // An identity-free workspace's gateway fetches the daemon credential of
+    // the currently bound Pod with IssueGatewayDaemonCredential (design §9).
+    if !opts.identity_free() {
+        env.push(json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.daemon_auth_token }));
+    }
+    env.push(json!({ "name": "CODEWIRE_GATEWAY_TOKEN", "value": opts.gateway_token }));
     if !opts.environment_id.is_empty() {
         env.push(json!({ "name": "CODEWIRE_ENVIRONMENT_ID", "value": opts.environment_id }));
     }
