@@ -249,7 +249,7 @@ if grep -qF 'ghcr.io/codewiresh/base:latest' "$WORKSPACE_DOCKERFILE"; then
 fi
 grep -Eq '^FROM ubuntu:noble@sha256:[0-9a-f]{64}$' "$ROOT/images/base/Dockerfile" ||
   fail 'base image foundation is not digest-pinned'
-grep -Eq '^FROM rust:1\.91\.1-slim-bookworm@sha256:[0-9a-f]{64} AS cw-toolchain$' \
+grep -Eq '^FROM rust:1\.93\.0-slim-bookworm@sha256:[0-9a-f]{64} AS cw-toolchain$' \
   "$WORKSPACE_DOCKERFILE" || fail 'workspace builder foundation is not digest-pinned'
 for dockerfile in "$ROOT/images/base/Dockerfile" "$WORKSPACE_DOCKERFILE"; do
   grep -qF 'amd64)' "$dockerfile" || fail "$dockerfile omits amd64 installers"

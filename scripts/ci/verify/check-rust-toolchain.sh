@@ -59,6 +59,9 @@ readonly RUST_BUILD_BASE_DOCKERFILE='deployments/docker/rust-base.Dockerfile'
 readonly RUST_BUILD_WRAPPER='scripts/ci/images/run-rust-build.sh'
 readonly BAKE_FILE='docker-bake.hcl'
 readonly WORKSPACE_DOCKERFILE='images/workspace/Dockerfile'
+readonly RUNNER_IMAGE_ASSERTION='scripts/ci/setup/assert-ci-runner-image.sh'
+readonly VMM_INITRAMFS_BUILDER='scripts/ci/verify/build-local-vmm-initramfs.sh'
+readonly RUNTIME_IMAGE_AUDIT='scripts/checks/security/audit-runtime-images.sh'
 readonly -a CURATED_MANIFESTS=(
   'deployments/docker/derp.Cargo.toml'
   'deployments/docker/gateway.Cargo.toml'
@@ -90,7 +93,8 @@ list_inputs() {
     printf '%s\n' "${entry%:*}"
   done
   printf '%s\n' "$CANARY_WORKFLOW" "$WORKSPACE_DOCKERFILE" \
-    "$RUST_BUILD_BASE_DOCKERFILE" "$RUST_BUILD_WRAPPER" "$BAKE_FILE"
+    "$RUST_BUILD_BASE_DOCKERFILE" "$RUST_BUILD_WRAPPER" "$BAKE_FILE" \
+    "$RUNNER_IMAGE_ASSERTION" "$VMM_INITRAMFS_BUILDER" "$RUNTIME_IMAGE_AUDIT"
   printf '%s\n' "${SHIPPED_RUST_DOCKERFILES[@]}" "${CURATED_MANIFESTS[@]}"
   find "$ROOT/crates" -mindepth 2 -maxdepth 2 -name Cargo.toml -printf '%P\n' \
     | sed 's#^#crates/#'
@@ -117,6 +121,10 @@ channel="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)"[[:s
 workspace_pin="rust-version = \"$channel\""
 [[ "$(grep -Fxc "$workspace_pin" "$ROOT/Cargo.toml" || true)" -eq 1 ]] ||
   die "root workspace Rust version differs from $channel"
+[[ "$(grep -Fxc "readonly rust_version='$channel'" "$ROOT/$RUNNER_IMAGE_ASSERTION" || true)" -eq 1 ]] ||
+  die "sealed CI runner compiler differs from $channel"
+[[ "$(grep -Fxc "readonly REQUIRED_RUST='$channel'" "$ROOT/$VMM_INITRAMFS_BUILDER" || true)" -eq 1 ]] ||
+  die "local VMM guest builder compiler differs from $channel"
 
 while IFS= read -r manifest; do
   if is_detached_manifest "$manifest"; then
@@ -185,9 +193,13 @@ while IFS= read -r workflow; do
 done < <(grep -Rl --include='*.yaml' --include='*.yml' \
   -E -- '--default-toolchain[[:space:]]+stable' "$ROOT/.gitea/workflows" || true)
 
-rust_build_image="rust:${channel}-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33"
+rust_build_image="rust:${channel}-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382"
 [[ "$(grep -Fxc "ARG RUST_IMAGE=$rust_build_image" "$ROOT/$RUST_BUILD_BASE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "$RUST_BUILD_BASE_DOCKERFILE does not declare exactly one reviewed $rust_build_image input"
+[[ "$(grep -Fxc "ARG RUST_IMAGE=$rust_build_image" "$ROOT/apps/dashboard/Dockerfile" || true)" -eq 1 ]] ||
+  die "dashboard docs builder does not select the reviewed $rust_build_image input"
+[[ "$(grep -Fxc "readonly rust_build_digest='${rust_build_image##*@sha256:}'" "$ROOT/$RUNTIME_IMAGE_AUDIT" || true)" -eq 1 ]] ||
+  die 'runtime image audit Rust build digest differs from the reviewed foundation'
 grep -Fq "test \"\$(rustc --version)\" = 'rustc ${channel} " \
   "$ROOT/$RUST_BUILD_BASE_DOCKERFILE" ||
   die "$RUST_BUILD_BASE_DOCKERFILE does not verify exact Rust $channel"
@@ -208,7 +220,8 @@ for dockerfile in "${SHIPPED_RUST_DOCKERFILES[@]}"; do
     die "$dockerfile must not add cargo-chef ahead of the measured sccache experiment"
   fi
 done
-[[ "$(grep -Fc "FROM rust:${channel}-slim-bookworm@sha256:" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+rust_workspace_image="rust:${channel}-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57"
+[[ "$(grep -Fxc "FROM $rust_workspace_image AS cw-toolchain" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build-stage compiler differs from $channel"
 [[ "$(grep -Fxc "RUN rustup component add --toolchain ${channel} rustfmt clippy" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build stage does not select exact $channel rustfmt and clippy components"
