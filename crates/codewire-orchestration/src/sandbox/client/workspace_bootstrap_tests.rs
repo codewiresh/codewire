@@ -1012,6 +1012,56 @@ async fn actual_pod_clients_require_exact_token_env_mounts_and_init_not_just_sel
 }
 
 #[tokio::test]
+async fn stored_pod_omitting_blank_client_values_still_certifies_its_bootstrap() {
+    let mut opts = opts();
+    opts.managed_credential_clients =
+        codewire_access::ManagedCredentialClients::from_profile_slots(["openai", "anthropic"])
+            .unwrap();
+    // The Pod API omits an empty `value`, so a stored Pod keeps only the name
+    // of each blank placeholder the Anthropic client renders.
+    let stored = |opts: &TemplateOpts| {
+        let mut fixture = fixture();
+        install_selected_client_recipe(&mut fixture, opts);
+        let mut blank = Vec::new();
+        for entry in fixture.pod["spec"]["containers"][1]["env"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if entry["value"] == "" {
+                entry.as_object_mut().unwrap().remove("value");
+                blank.push(entry["name"].as_str().unwrap().to_owned());
+            }
+        }
+        (fixture, blank)
+    };
+    let (fixture, blank) = stored(&opts);
+    assert!(blank.contains(&"ANTHROPIC_API_KEY".to_owned()), "{blank:?}");
+    let (stored_client, _) = client(fixture);
+    assert!(
+        stored_client
+            .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
+            .await
+            .unwrap()
+    );
+
+    // A placeholder that must stay blank still fails when it carries a value.
+    let (mut fixture, _) = stored(&opts);
+    fixture.pod["spec"]["containers"][1]["env"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["name"] == "ANTHROPIC_API_KEY")
+        .unwrap()["value"] = json!("unexpected-routing-placeholder");
+    let (valued_client, _) = client(fixture);
+    assert!(
+        !valued_client
+            .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn newly_selected_codex_public_bootstrap_precedes_suspended_recipe_publication() {
     let (client, state) = client(fixture());
     let mut opts = opts();
