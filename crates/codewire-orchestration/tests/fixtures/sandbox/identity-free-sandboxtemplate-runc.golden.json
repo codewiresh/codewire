@@ -1,0 +1,364 @@
+{
+  "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+  "kind": "SandboxTemplate",
+  "metadata": {
+    "labels": {},
+    "name": "tmpl-golden-commodity",
+    "namespace": "dev-sandboxes"
+  },
+  "spec": {
+    "networkPolicy": {
+      "egress": [
+        {
+          "to": [
+            {
+              "ipBlock": {
+                "cidr": "0.0.0.0/0",
+                "except": [
+                  "10.0.0.0/8",
+                  "100.64.0.0/10",
+                  "127.0.0.0/8",
+                  "172.16.0.0/12",
+                  "192.168.0.0/16",
+                  "169.254.0.0/16"
+                ]
+              }
+            },
+            {
+              "ipBlock": {
+                "cidr": "::/0",
+                "except": [
+                  "fc00::/7"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 53,
+              "protocol": "UDP"
+            },
+            {
+              "port": 53,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 443,
+              "protocol": "TCP"
+            },
+            {
+              "port": 80,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/name": "rke2-ingress-nginx"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8087,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "podTemplate": {
+      "metadata": {
+        "annotations": {
+          "codewire.sh/disk-gib": "40",
+          "codewire.sh/workspace": "true"
+        },
+        "labels": {
+          "codewire.sh/type": "workspace"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "sh",
+              "-c",
+              "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group; while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; shutdown() { kill -TERM \"$daemon_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; trap 'shutdown; exit 143' TERM; trap 'shutdown; exit 130' INT; wait \"$daemon_pid\"; status=$?; trap - TERM INT; exit \"$status\""
+            ],
+            "env": [
+              {
+                "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
+                "value": "0.0.0.0:7777"
+              },
+              {
+                "name": "HOME",
+                "value": "/home/codewire"
+              },
+              {
+                "name": "USER",
+                "value": "codewire"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_BINDING_URL",
+                "value": "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+              },
+              {
+                "name": "CODEWIRE_POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              }
+            ],
+            "image": "ghcr.io/codewiresh/workspace:golden",
+            "name": "workspace",
+            "ports": [
+              {
+                "containerPort": 7777,
+                "name": "daemon",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-ec",
+                  "test -f /codewire/run/daemon/ready"
+                ]
+              },
+              "failureThreshold": 3,
+              "periodSeconds": 2,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "resizePolicy": [
+              {
+                "resourceName": "cpu",
+                "restartPolicy": "NotRequired"
+              },
+              {
+                "resourceName": "memory",
+                "restartPolicy": "NotRequired"
+              }
+            ],
+            "resources": {
+              "limits": {
+                "cpu": "2000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              },
+              "requests": {
+                "cpu": "2000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              }
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-ec",
+                  "test -f /codewire/run/daemon/ready"
+                ]
+              },
+              "failureThreshold": 600,
+              "periodSeconds": 1,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/home/codewire",
+                "name": "workspace"
+              },
+              {
+                "mountPath": "/workspace",
+                "name": "workspace"
+              },
+              {
+                "mountPath": "/codewire/bin",
+                "name": "codewire-bin"
+              },
+              {
+                "mountPath": "/codewire/run",
+                "name": "codewire-run"
+              },
+              {
+                "mountPath": "/run/codewire-credentials/workspace",
+                "name": "credential-workspace-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/run/codewire-credentials/gateway-roots",
+                "name": "credential-gateway-roots",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/run/codewire-codex",
+                "name": "credential-codex-home"
+              },
+              {
+                "mountPath": "/var/run/secrets/codewire/workspace-binding",
+                "name": "workspace-binding-identity",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "initContainers": [
+          {
+            "command": [
+              "sh",
+              "-c",
+              "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw"
+            ],
+            "image": "git.example.invalid/codewire/gateway:golden",
+            "name": "codewire-daemon-init",
+            "resources": {
+              "limits": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              },
+              "requests": {
+                "cpu": "25m",
+                "memory": "32Mi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/codewire/bin",
+                "name": "codewire-bin"
+              },
+              {
+                "mountPath": "/codewire/run",
+                "name": "codewire-run"
+              }
+            ]
+          }
+        ],
+        "restartPolicy": "Never",
+        "runtimeClassName": "runc",
+        "securityContext": {
+          "fsGroup": 1000,
+          "fsGroupChangePolicy": "OnRootMismatch",
+          "runAsGroup": 1000,
+          "runAsUser": 1000
+        },
+        "serviceAccountName": "codewire-sandbox",
+        "volumes": [
+          {
+            "emptyDir": {},
+            "name": "codewire-bin"
+          },
+          {
+            "emptyDir": {},
+            "name": "codewire-run"
+          },
+          {
+            "name": "credential-workspace-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.credential-workspace.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "configMap": {
+              "name": "synthetic-trust-1"
+            },
+            "name": "credential-gateway-roots"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "256Mi"
+            },
+            "name": "credential-codex-home"
+          },
+          {
+            "name": "workspace-binding-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.workspace-binding.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "volumeClaimTemplates": [
+      {
+        "metadata": {
+          "name": "workspace"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "40Gi"
+            }
+          },
+          "storageClassName": "local-path"
+        }
+      }
+    ]
+  }
+}

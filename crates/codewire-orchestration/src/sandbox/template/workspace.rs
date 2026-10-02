@@ -5,13 +5,20 @@ use serde_json::{Map, Value, json};
 use super::credentials;
 use super::encoding::kata_policy_init_data_annotation;
 use super::naming::{workspace_daemon_service_name, workspace_selector, workspace_template_labels};
-use super::network::workspace_egress_rules;
+use super::network::{identity_free_workspace_egress_rules, workspace_egress_rules};
 use super::runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_COMMODITY,
     RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, dind_image, dind_memory_limit_gib,
     docker_data_size_gib, kata_coco_kernel_params_annotation, uses_kata_policy_init_data,
     workspace_storage_class,
 };
+use codewire_gateway_proto::{
+    WORKSPACE_BINDING_TOKEN_AUDIENCE, WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS,
+    WORKSPACE_BINDING_TOKEN_MOUNT_PATH, WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV,
+};
+// The binding recorder recognizes a Pod-scope Pod by this exact volume.
+use crate::worker::workspace_binding::WORKSPACE_BINDING_VOLUME;
+
 use super::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE,
     DIND_SOCKET_PATH, EXTENSIONS_API_VERSION, HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
@@ -52,12 +59,19 @@ pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
     if let Some(config) = &opts.credential_runtime {
         config.assert_namespace(namespace);
     }
+    // An identity-free template carries no environment label (design §13);
+    // its environment-owned shadow pool names it.
+    let labels = if opts.identity_free() {
+        json!({})
+    } else {
+        json!({ super::LABEL_ENV_ID: opts.environment_id })
+    };
     json!({
         "apiVersion": EXTENSIONS_API_VERSION,
         "kind": "SandboxTemplate",
         "metadata": {
             "name": opts.name, "namespace": namespace,
-            "labels": { super::LABEL_ENV_ID: opts.environment_id },
+            "labels": labels,
         },
         "spec": render_sandbox_blueprint(opts),
     })
@@ -90,6 +104,7 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
                 WAIT_DAEMON_CMD,
                 HOSTED_DAEMON_CMD,
                 &entrypoint,
+                !opts.identity_free(),
             )
             .into(),
         ]
@@ -170,11 +185,19 @@ pub(super) fn custom_workspace_supervisor_command(
     wait_daemon: &str,
     daemon_command: &str,
     entrypoint: &str,
+    unset_environment_token: bool,
 ) -> String {
+    // A legacy workload starts without the rendered environment token; an
+    // identity-free container has none to remove.
+    let workload = if unset_environment_token {
+        format!("(unset {DAEMON_AUTH_TOKEN_ENV}; exec {entrypoint})")
+    } else {
+        format!("(exec {entrypoint})")
+    };
     format!(
         "{ensure_user} {wait_daemon} \
          {daemon_command} & daemon_pid=$!; \
-         (unset {DAEMON_AUTH_TOKEN_ENV}; exec {entrypoint}) & workload_pid=$!; \
+         {workload} & workload_pid=$!; \
          shutdown() {{ \
            kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; \
            wait \"$workload_pid\" 2>/dev/null || true; \
@@ -306,7 +329,11 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         );
     }
 
-    let egress = workspace_egress_rules(opts);
+    let egress = if opts.identity_free() {
+        identity_free_workspace_egress_rules(opts)
+    } else {
+        workspace_egress_rules(opts)
+    };
     spec.insert("networkPolicy".into(), json!({ "egress": egress }));
 
     Value::Object(spec)
@@ -344,10 +371,26 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("workspace mounts")
             .extend(credentials::workspace_mounts(opts));
-        ws["env"]
+        // An identity-free daemon expands its managed clients into child
+        // environments from the bind response; nothing is rendered here.
+        if !opts.identity_free() {
+            ws["env"]
+                .as_array_mut()
+                .expect("workspace env")
+                .extend(credentials::workspace_environment(opts));
+        }
+    }
+    if opts.identity_free() {
+        // Workspace container only; never DinD or an init container.
+        volumes.push(workspace_binding_token_volume());
+        ws["volumeMounts"]
             .as_array_mut()
-            .expect("workspace env")
-            .extend(credentials::workspace_environment(opts));
+            .expect("workspace mounts")
+            .push(json!({
+                "name": WORKSPACE_BINDING_VOLUME,
+                "mountPath": WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
+                "readOnly": true,
+            }));
     }
 
     let mut spec = Map::new();
@@ -394,7 +437,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
-        apply_docker_socket_probes(ws, &runtime_spec);
+        apply_docker_socket_probes(ws, opts, &runtime_spec);
 
         containers.push(ws.clone());
         let mut dind = dind_container(opts, &runtime_spec, false);
@@ -411,7 +454,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
-        apply_docker_socket_probes(ws, &runtime_spec);
+        apply_docker_socket_probes(ws, opts, &runtime_spec);
 
         containers.push(ws.clone());
         let mut dind = dind_container(opts, &runtime_spec, true);
@@ -420,18 +463,25 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         }
         containers.push(dind);
     } else {
+        if opts.identity_free() {
+            apply_daemon_ready_probes(ws, &runtime_spec);
+        }
         containers.push(ws.clone());
     }
 
+    // An identity-free daemon writes the Codex config itself after binding
+    // (design §17.1), so no init container copies a per-environment
+    // ConfigMap.
     if daemon_image_volume {
         if opts.credential_runtime.is_some()
+            && !opts.identity_free()
             && let Some(init) = client_bootstrap_container(support_image, opts)
         {
             spec.insert("initContainers".into(), json!([init]));
         }
     } else {
         let mut init = daemon_init_container(support_image);
-        if opts.credential_runtime.is_some() {
+        if opts.credential_runtime.is_some() && !opts.identity_free() {
             credentials::configure_bootstrap(&mut init, opts);
         }
         spec.insert("initContainers".into(), json!([init]));
@@ -459,29 +509,75 @@ fn configure_confidential_workspace_device(container: &mut Value) {
 /// probe keeps its 2-second period. The startup budget is the tier's ready
 /// timeout: create or start has already failed before the kubelet would stop
 /// a slow Docker start.
-fn apply_docker_socket_probes(ws: &mut Value, runtime_spec: &RuntimeProfileSpec) {
-    let ready_timeout = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+fn apply_docker_socket_probes(
+    ws: &mut Value,
+    opts: &TemplateOpts,
+    runtime_spec: &RuntimeProfileSpec,
+) {
+    let ready_timeout = ready_timeout(runtime_spec);
+    // An identity-free daemon writes its local readiness marker before it
+    // binds; Pod readiness never depends on the binding, because
+    // orchestration binds only after the Pod is Ready (design §8, §10).
+    let command = if opts.identity_free() {
+        DAEMON_READY_AND_DOCKER_PROBE
+    } else {
+        DOCKER_PROBE
+    };
+    ws["startupProbe"] = exec_probe(command, 1, ready_timeout.as_secs());
+    ws["readinessProbe"] = exec_probe(command, 2, 3);
+}
+
+/// Without DinD an identity-free workspace is Ready once its daemon process
+/// is up, signalled by the marker; before B2 it had no readiness probe.
+fn apply_daemon_ready_probes(ws: &mut Value, runtime_spec: &RuntimeProfileSpec) {
+    let ready_timeout = ready_timeout(runtime_spec);
+    ws["startupProbe"] = exec_probe(DAEMON_READY_PROBE, 1, ready_timeout.as_secs());
+    ws["readinessProbe"] = exec_probe(DAEMON_READY_PROBE, 2, 3);
+}
+
+fn ready_timeout(runtime_spec: &RuntimeProfileSpec) -> std::time::Duration {
+    if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
         CONFIDENTIAL_WORKSPACE_READY_TIMEOUT
     } else {
         WORKSPACE_READY_TIMEOUT
-    };
-    ws["startupProbe"] = docker_socket_probe(1, ready_timeout.as_secs());
-    ws["readinessProbe"] = docker_socket_probe(2, 3);
+    }
 }
 
-fn docker_socket_probe(period_seconds: u64, failure_threshold: u64) -> Value {
+const DOCKER_PROBE: &str = "docker version --format '{{.Server.Version}}' >/dev/null";
+const DAEMON_READY_PROBE: &str = "test -f /codewire/run/daemon/ready";
+const DAEMON_READY_AND_DOCKER_PROBE: &str = "test -f /codewire/run/daemon/ready && docker version --format '{{.Server.Version}}' >/dev/null";
+
+fn exec_probe(command: &str, period_seconds: u64, failure_threshold: u64) -> Value {
     json!({
         "exec": {
             "command": [
                 "sh",
                 "-ec",
-                "docker version --format '{{.Server.Version}}' >/dev/null",
+                command,
             ],
         },
         "periodSeconds": period_seconds,
         "timeoutSeconds": 2,
         "failureThreshold": failure_threshold,
         "successThreshold": 1,
+    })
+}
+
+/// The Pod-bound projected token the daemon presents to `BindWorkspace`
+/// (design §3.4). Same mode and lifetime as the gateway's binding token.
+fn workspace_binding_token_volume() -> Value {
+    json!({
+        "name": WORKSPACE_BINDING_VOLUME,
+        "projected": {
+            "defaultMode": 0o440,
+            "sources": [{
+                "serviceAccountToken": {
+                    "audience": WORKSPACE_BINDING_TOKEN_AUDIENCE,
+                    "expirationSeconds": WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS,
+                    "path": "token",
+                },
+            }],
+        },
     })
 }
 
@@ -639,6 +735,21 @@ fn dind_container(
 }
 
 fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
+    if let Some(binding_url) = opts.workspace_binding_url() {
+        // Design §13: no daemon token, environment ID, generation, projection
+        // digest, managed clients or derived client variables. The daemon
+        // gets all of them from its binding.
+        return vec![
+            json!({ "name": "CODEWIRE_WORKSPACE_SHIM_ADDR", "value": WORKSPACE_DAEMON_LISTEN_ADDR }),
+            json!({ "name": "HOME", "value": HOME_ROOT }),
+            json!({ "name": "USER", "value": "codewire" }),
+            json!({ "name": WORKSPACE_BINDING_URL_ENV, "value": binding_url }),
+            json!({
+                "name": WORKSPACE_POD_UID_ENV,
+                "valueFrom": { "fieldRef": { "fieldPath": "metadata.uid" } },
+            }),
+        ];
+    }
     codewire_gateway_proto::DaemonAuthToken::new(opts.daemon_auth_token.clone())
         .expect("hosted workspace requires a canonical daemon auth token");
     let mut environment = vec![

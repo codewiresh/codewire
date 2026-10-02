@@ -238,6 +238,11 @@ async fn main() -> anyhow::Result<()> {
     .map(Arc::new);
 
     let sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
+    if kube.is_some()
+        && let Err(error) = sandbox_cfg.require_workspace_binding_config()
+    {
+        panic!("{error}");
+    }
     let synced_zones = codewire_orchestration::runtime_transport::sync_catalog_json(
         &pool,
         &sandbox_cfg.runtime_transport_zones_json,
