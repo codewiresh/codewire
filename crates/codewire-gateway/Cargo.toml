@@ -25,6 +25,7 @@ codewire-tls = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
 http = { workspace = true }
+prometheus = { workspace = true }
 prost-types = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

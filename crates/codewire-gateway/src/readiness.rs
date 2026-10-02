@@ -98,7 +98,19 @@ impl ReadinessState {
 pub fn router(state: ReadinessState) -> Router {
     Router::new()
         .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
         .with_state(state)
+}
+
+/// Counters only, from the gateway's private registry.
+async fn metrics() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        crate::metrics::render(),
+    )
 }
 
 pub async fn readiness_check(ssh_listen_addr: &str) -> io::Result<()> {
@@ -270,6 +282,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn metrics_serves_only_the_gateway_counters() {
+        crate::metrics::observe_daemon_credential_refresh(
+            crate::metrics::RefreshOutcome::Unchanged,
+        );
+        let response = router(ReadinessState::new("127.0.0.1:1"))
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            text.contains(
+                "codewire_gateway_daemon_credential_refreshes_total{result=\"unchanged\"}"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("process_"), "{text}");
     }
 
     #[tokio::test]

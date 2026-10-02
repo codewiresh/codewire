@@ -49,7 +49,8 @@ fn fixture(
                 if list_failure && plural == "sandboxtemplates" {
                     (StatusCode::FORBIDDEN, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403}))
                 } else {
-                    let items: Vec<_> = objects.iter().filter(|((resource, _), value)| resource == plural && value["metadata"]["labels"][LABEL_ENV_ID] == "env-test").map(|(_, value)| value.clone()).collect();
+                    // PVCs are listed unfiltered: the residue scan matches them itself.
+                    let items: Vec<_> = objects.iter().filter(|((resource, _), value)| resource == plural && (plural == "persistentvolumeclaims" || value["metadata"]["labels"][LABEL_ENV_ID] == "env-test")).map(|(_, value)| value.clone()).collect();
                     (StatusCode::OK, json!({"apiVersion":"v1","kind":"List","metadata":{},"items":items}))
                 }
             } else {
@@ -171,4 +172,71 @@ async fn cleanup_name_hint_cannot_adopt_a_foreign_template() {
             .is_err()
     );
     assert_eq!(objects.lock().unwrap().len(), 4);
+}
+
+/// Design §12: destroy's storage proof also counts the recorded workspace PVC
+/// UID, so a restore-born PVC the fork has not adopted yet (no owner, no
+/// environment label, only the tracking label) is deleted and proven gone. A
+/// PVC with another UID is never selected by the recorded UID.
+#[tokio::test]
+async fn destroy_proves_the_recorded_workspace_pvc_gone_even_before_adoption() {
+    let (client, objects) = fixture(false, false, false);
+    for (name, uid) in [
+        ("workspace-restored", "9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c"),
+        (
+            "workspace-unrelated",
+            "3f2b1c0d-1111-4a2b-8c3d-4e5f6a7b8c9d",
+        ),
+    ] {
+        objects.lock().unwrap().insert(
+            ("persistentvolumeclaims".into(), name.into()),
+            json!({"apiVersion":"v1","kind":"PersistentVolumeClaim",
+                "metadata":{"name":name,"namespace":"dev-sandboxes","uid":uid,
+                    "labels":{"agents.x-k8s.io/sandbox-name-hash":"d0258436"}}}),
+        );
+    }
+    let recorded = Some("9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c");
+    let unscoped = client
+        .environment_residue("env-test", "", None, false)
+        .await
+        .unwrap();
+    assert!(
+        !unscoped
+            .resources
+            .iter()
+            .any(|resource| resource.starts_with("PersistentVolumeClaim/"))
+    );
+    let residue = client
+        .environment_residue_with_recorded_storage("env-test", "", None, false, recorded)
+        .await
+        .unwrap();
+    assert!(
+        residue
+            .resources
+            .contains(&"PersistentVolumeClaim/workspace-restored".to_owned())
+    );
+    assert!(
+        !residue
+            .resources
+            .contains(&"PersistentVolumeClaim/workspace-unrelated".to_owned())
+    );
+    client
+        .delete_environment_resources_with_recorded_storage(
+            "env-test",
+            "",
+            None,
+            false,
+            recorded,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let remaining = objects.lock().unwrap();
+    assert!(
+        !remaining.contains_key(&("persistentvolumeclaims".into(), "workspace-restored".into()))
+    );
+    assert!(remaining.contains_key(&(
+        "persistentvolumeclaims".into(),
+        "workspace-unrelated".into()
+    )));
 }

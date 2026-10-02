@@ -1,6 +1,8 @@
 pub mod config;
 mod console_client;
 mod environment_client;
+#[cfg(unix)]
+mod hosted_binding;
 mod hosted_exec;
 mod mesh;
 mod organization_client;
@@ -463,14 +465,54 @@ where
 }
 
 async fn run_hosted_daemon() -> anyhow::Result<()> {
-    use tokio_stream::wrappers::TcpListenerStream;
     use tracing_subscriber::EnvFilter;
 
     let _ = tracing_subscriber::fmt()
         .json()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
-    let config = codewire_daemon::Config::from_env()?;
+    match codewire_daemon::HostedDaemonMode::from_env()? {
+        codewire_daemon::HostedDaemonMode::EnvironmentToken(config) => {
+            serve_hosted_daemon(*config, false).await
+        }
+        codewire_daemon::HostedDaemonMode::Binding(config) => run_bound_hosted_daemon(config).await,
+    }
+}
+
+/// Identity-free Pod (Program #2238 B2): mark local readiness, bind, install
+/// the bound state, then listen. Nothing listens before an accepted binding.
+#[cfg(unix)]
+async fn run_bound_hosted_daemon(
+    config: codewire_daemon::WorkspaceBindingConfig,
+) -> anyhow::Result<()> {
+    let paths = codewire_daemon::hosted_state::HostedStatePaths::default();
+    paths
+        .mark_ready()
+        .context("write hosted daemon readiness marker")?;
+    tracing::info!("hosted environment daemon waiting for its workspace binding");
+    let client = hosted_binding::BindingClient::new(
+        config.binding_url(),
+        config.token_path(),
+        hosted_binding::BindTiming::default(),
+    )
+    .context("configure workspace binding client")?;
+    let binding = hosted_binding::bind_until_accepted(&client, &config).await;
+    paths
+        .install_binding(&binding)
+        .context("install hosted daemon binding")?;
+    serve_hosted_daemon(config.into_config(&binding), true).await
+}
+
+#[cfg(not(unix))]
+async fn run_bound_hosted_daemon(
+    _config: codewire_daemon::WorkspaceBindingConfig,
+) -> anyhow::Result<()> {
+    anyhow::bail!("workspace binding requires a Unix hosted daemon")
+}
+
+async fn serve_hosted_daemon(config: codewire_daemon::Config, bound: bool) -> anyhow::Result<()> {
+    use tokio_stream::wrappers::TcpListenerStream;
+
     config
         .prepare_native_launch_directory()
         .context("prepare hosted launch process directory")?;
@@ -480,7 +522,15 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
     let local_addr = listener
         .local_addr()
         .context("read hosted daemon listener address")?;
-    tracing::info!(daemon_listen_addr = %local_addr, "hosted environment daemon listening");
+    tracing::info!(daemon_listen_addr = %local_addr, bound, "hosted environment daemon listening");
+    // An environment-token Pod also writes the marker once it listens, so one
+    // readiness probe shape serves both modes. It is advisory there.
+    #[cfg(unix)]
+    if !bound
+        && let Err(error) = codewire_daemon::hosted_state::HostedStatePaths::default().mark_ready()
+    {
+        tracing::warn!(error = %error, "hosted daemon readiness marker unavailable");
+    }
     codewire_daemon::serve_grpc_with_incoming(
         config,
         TcpListenerStream::new(listener),

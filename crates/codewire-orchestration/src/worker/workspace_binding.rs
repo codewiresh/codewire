@@ -1,19 +1,26 @@
-//! Shadow recording of claim-time workspace bindings (Program #2238 B1,
-//! design §5, §6 and §16).
+//! Claim-time workspace bindings (Program #2238, design §5, §6, §10, §12 and
+//! §16).
 //!
 //! `write_binding` is the only writer of `sandbox_workspace_bindings` and of
 //! the backend pointer (`pod_uid`, `bound_at`). It runs inside a
-//! generation-fenced environment transaction. In B1 a bounded leader loop
-//! drives it for running environments, after the same checks the cutover
-//! will enforce:
+//! generation-fenced environment transaction, after these checks:
 //! - the converged Claim → Sandbox → Pod chain;
 //! - images that equal the Sandbox template, with pinned digests matching;
 //! - the workspace PVC resolved by UID.
 //!
-//! In shadow mode a failed check is counted and logged, never enforced: no Pod
-//! is deleted, no activity fails, and no reader authorizes from bindings. The
-//! loop also records `workspace_pvc_uid` the first time it resolves the PVC of
-//! any environment that has a Sandbox, stopped ones included.
+//! B2 enforces them on every lifecycle path: create, start, a replaced Pod
+//! while running and daemon repair all call [`bind_workspace_runtime`] after
+//! claim readiness and label convergence and before the gateway readiness
+//! wait. A failed check fails the activity, and an unbound identity-free Pod
+//! that failed is deleted with a UID precondition so it never serves. A legacy
+//! Pod (environment scope) keeps its rendered token and is never deleted
+//! here. Stop and destroy release the binding; a restore adoption is the one
+//! path that moves the recorded PVC UID.
+//!
+//! The bounded leader loop still records legacy running environments in
+//! shadow mode (counted and logged, never enforced) and records
+//! `workspace_pvc_uid` the first time it resolves the PVC of any environment
+//! that has a Sandbox, stopped ones included.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
@@ -26,10 +33,13 @@ use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use sqlx::{PgConnection, PgPool};
 
 use super::WorkerContext;
-use super::activity_authority::{ActivityAuthority, is_authority_lost};
-use super::env_data::{EnvironmentRow, load_environment};
-use super::gatewayauth::WorkspaceCredentialScope;
-use crate::sandbox::client::{SandboxClient, WorkspacePvc};
+use super::activity_authority::{ActivityAuthority, await_external_mutation, is_authority_lost};
+use super::env_data::{BackendRow, EnvironmentRow, load_environment, load_environment_in};
+use super::env_log::emit_authoritative_environment_log_for_states;
+use super::gatewayauth::{WorkspaceCredentialScope, daemon_credential_for};
+use crate::sandbox::client::{
+    RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity, WorkspacePvc,
+};
 use crate::sandbox::{ClaimOpts, LABEL_OPERATION_GENERATION};
 
 /// Environments examined per pass.
@@ -573,7 +583,7 @@ struct BackendFacts {
 }
 
 async fn load_backend_facts(
-    ctx: &WorkerContext,
+    pool: &PgPool,
     environment_id: &str,
 ) -> anyhow::Result<Option<BackendFacts>> {
     let row: Option<BackendFactsRow> = sqlx::query_as(
@@ -581,7 +591,7 @@ async fn load_backend_facts(
            FROM sandbox_environment_backend WHERE environment_id = $1",
     )
     .bind(environment_id)
-    .fetch_optional(&ctx.pool)
+    .fetch_optional(pool)
     .await?;
     Ok(
         row.and_then(|(namespace, claim_name, claim_uid, workspace_pvc_uid)| {
@@ -605,7 +615,15 @@ pub(crate) async fn record_workspace_binding_shadow(
     ctx: &WorkerContext,
     environment_id: &str,
 ) -> RecordResult {
-    let attempt = tokio::time::timeout(RECORD_ATTEMPT_TIMEOUT, record(ctx, environment_id)).await;
+    let Some(kube) = ctx.kube.as_ref() else {
+        observe_record(RecordResult::Unavailable);
+        return RecordResult::Unavailable;
+    };
+    let attempt = tokio::time::timeout(
+        RECORD_ATTEMPT_TIMEOUT,
+        record_backfill(&ctx.pool, kube, environment_id),
+    )
+    .await;
     let result = match attempt.unwrap_or_else(|_| Err(anyhow::anyhow!("binding attempt timed out")))
     {
         Ok(result) => result,
@@ -626,11 +644,18 @@ pub(crate) async fn record_workspace_binding_shadow(
     result
 }
 
-async fn record(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<RecordResult> {
-    let Some(kube) = ctx.kube.as_ref() else {
-        return Ok(RecordResult::Unavailable);
-    };
-    let env = load_environment(&ctx.pool, environment_id).await?;
+/// The backfill's recording of a running environment. It records only a
+/// legacy Pod's environment scope: a Pod-scope binding is served by the 8087
+/// listener and the gateway RPC, so it is recorded only by the enforced
+/// lifecycle path ([`record_workspace_binding`]), which re-checks the captured
+/// projection under the lock and deletes a Pod that fails (review M1). An
+/// identity-free Pod is left `NotReady` here, never bound or deleted.
+async fn record_backfill(
+    pool: &PgPool,
+    kube: &kube::Client,
+    environment_id: &str,
+) -> anyhow::Result<RecordResult> {
+    let env = load_environment(pool, environment_id).await?;
     if env.env_type != "sandbox"
         || env.state != "running"
         || env.desired_state != "started"
@@ -638,11 +663,11 @@ async fn record(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<Rec
     {
         return Ok(RecordResult::NotReady);
     }
-    let Some(backend) = load_backend_facts(ctx, environment_id).await? else {
+    let Some(backend) = load_backend_facts(pool, environment_id).await? else {
         return Ok(RecordResult::NotReady);
     };
     let authority =
-        ActivityAuthority::capture(&ctx.pool, environment_id, env.operation_generation).await?;
+        ActivityAuthority::capture(pool, environment_id, env.operation_generation).await?;
     let client = SandboxClient::new(kube.clone(), &backend.namespace);
     let opts = ClaimOpts {
         environment_id: env.id.clone(),
@@ -675,6 +700,10 @@ async fn record(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<Rec
             environment_id,
             "workspace Pod changed after observation",
         ));
+    }
+    // M1: only the enforced lifecycle path records a Pod-scope binding.
+    if credential_scope(&pod) == Some(WorkspaceCredentialScope::Pod) {
+        return Ok(RecordResult::NotReady);
     }
     // §5.3: images.
     if !images_match(&runtime.sandbox, &pod) {
@@ -709,7 +738,7 @@ async fn record(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<Rec
         ));
     };
     let captured = match scope {
-        WorkspaceCredentialScope::Pod => pod_scope_capture(&env),
+        WorkspaceCredentialScope::Pod => return Ok(RecordResult::NotReady),
         WorkspaceCredentialScope::Environment => environment_scope_capture(&pod),
     };
     let Some(captured) = captured else {
@@ -789,7 +818,7 @@ async fn first_pvc(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<
     if !matches!(state.as_str(), "running" | "stopped") || generation <= 0 {
         return Ok(RecordResult::NotReady);
     }
-    let Some(backend) = load_backend_facts(ctx, environment_id).await? else {
+    let Some(backend) = load_backend_facts(&ctx.pool, environment_id).await? else {
         return Ok(RecordResult::NotReady);
     };
     if backend.workspace_pvc_uid.is_some() {
@@ -820,6 +849,778 @@ async fn first_pvc(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<
         WriteOutcome::Recorded => RecordResult::Recorded,
         WriteOutcome::Unchanged => RecordResult::Unchanged,
     })
+}
+
+// ------------------------------------------------------- enforced (B2)
+
+/// Lifecycle states a binding may be recorded and served in: create
+/// (including a retried create, which resumes in `pending` without passing
+/// through `creating` again), start, a running environment's replaced Pod,
+/// and a resize that replaces the Pod (`resizing`). The listener lookup and
+/// the gateway credential RPC use the same set.
+pub(crate) const BINDABLE_STATES: [&str; 5] =
+    ["pending", "creating", "starting", "running", "resizing"];
+
+/// Why an enforced binding attempt did not record. Every reason is a closed,
+/// value-blind category: no Kubernetes status, identifier or token text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum BindRefused {
+    /// A §5 check failed for this Pod.
+    #[error("workspace binding check failed: {0}")]
+    Denied(&'static str),
+    /// The Pod is already bound to another environment. Never deleted here.
+    #[error("workspace Pod is bound to another environment")]
+    BoundElsewhere,
+    /// Claim and Pod are not Ready or labels have not converged.
+    #[error("workspace runtime identity has not converged")]
+    NotConverged,
+    /// The observed Pod is gone or was replaced since the observation.
+    #[error("workspace Pod changed after the runtime observation")]
+    PodChanged,
+    /// The Claim → Sandbox → Pod chain could not be read or verified (an API
+    /// error, a replaced or terminating object). Never a reason to delete.
+    #[error("workspace runtime chain could not be verified")]
+    ChainUnverified,
+}
+
+/// A refused check: the reason, the Pod's rendered scope when known, and
+/// whether the failure is definitive about the Pod itself. Only a definitive
+/// failure on an unbound identity-free Pod deletes it; a read or resolution
+/// error never does.
+type Refusal = (BindRefused, Option<WorkspaceCredentialScope>, bool);
+
+/// What one checked attempt would record, before the fenced write.
+struct CheckedBinding {
+    record: BindingRecord,
+    pod: WorkspacePodIdentity,
+}
+
+/// The §5.1–§5.5 checks against live objects, shared by the enforced path.
+/// `observation` pins the exact Sandbox and Pod incarnation the caller
+/// observed and waited on; anything else is refused, never relabelled.
+async fn check_bindable_runtime(
+    client: &SandboxClient,
+    env: &EnvironmentRow,
+    backend: &BackendFacts,
+    observation: &RuntimeIdentityObservation,
+) -> anyhow::Result<Result<CheckedBinding, Refusal>> {
+    let opts = ClaimOpts {
+        environment_id: env.id.clone(),
+        org_id: env.org_id.clone(),
+        operation_generation: env.operation_generation,
+        ..Default::default()
+    };
+    let refuse = |reason, scope, definitive| Ok(Err((reason, scope, definitive)));
+    // §5.1 and §10 (amended): the exact chain, bind-ready. Claim Ready is not
+    // required and never suffices.
+    let runtime = match client
+        .read_bindable_runtime(&opts, &backend.claim_name, &backend.claim_uid)
+        .await
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return refuse(BindRefused::ChainUnverified, None, false),
+    };
+    if runtime.observation != *observation {
+        return refuse(BindRefused::PodChanged, None, false);
+    }
+    if !runtime.bind_ready {
+        return refuse(BindRefused::NotConverged, None, false);
+    }
+    let pod_identity = runtime.observation.pod().clone();
+    let sandbox_uid = runtime.observation.sandbox_uid().to_owned();
+
+    // §5.2: re-read the Pod.
+    let Some(pod) = client.get_workspace_pod(&pod_identity.name).await? else {
+        return refuse(BindRefused::PodChanged, None, false);
+    };
+    let scope = credential_scope(&pod);
+    if !pod_still_observed(&pod, &pod_identity.uid, &sandbox_uid) {
+        return refuse(BindRefused::PodChanged, scope, false);
+    }
+    // §5.3: images.
+    if !images_match(&runtime.sandbox, &pod) {
+        return refuse(BindRefused::Denied("images"), scope, true);
+    }
+    // §5.4: the workspace PVC, by UID. A resolution error may be an API
+    // failure, so it refuses without deleting; the Pod mounting another claim
+    // than the resolved one is definitive.
+    let pvc = match client
+        .resolve_workspace_pvc(
+            &backend.claim_name,
+            &backend.claim_uid,
+            backend.workspace_pvc_uid.as_deref(),
+        )
+        .await
+    {
+        Ok(pvc) => pvc,
+        Err(_) => return refuse(BindRefused::Denied("workspace PVC"), scope, false),
+    };
+    if !pvc_matches(&pod, &pvc) {
+        return refuse(BindRefused::Denied("workspace volume"), scope, true);
+    }
+    // §5.5: scope and captured bootstrap.
+    let Some(credential) = scope else {
+        return refuse(BindRefused::Denied("credential scope"), None, true);
+    };
+    let captured = match credential {
+        WorkspaceCredentialScope::Pod => pod_scope_capture(env),
+        WorkspaceCredentialScope::Environment => environment_scope_capture(&pod),
+    };
+    let Some(captured) = captured else {
+        return refuse(BindRefused::Denied("bootstrap capture"), scope, true);
+    };
+    Ok(Ok(CheckedBinding {
+        record: BindingRecord {
+            environment_id: env.id.clone(),
+            organization_id: env.org_id.clone(),
+            pod_uid: pod_identity.uid.clone(),
+            namespace: backend.namespace.clone(),
+            pod_name: pod_identity.name.clone(),
+            claim_uid: backend.claim_uid.clone(),
+            sandbox_uid,
+            workspace_pvc_uid: match pvc {
+                WorkspacePvc::VolumeLess => None,
+                WorkspacePvc::Claim { uid, .. } => Some(uid),
+            },
+            operation_generation: captured.operation_generation,
+            projection_selection_sha256: captured.projection_selection_sha256,
+            managed_credential_clients: captured.managed_credential_clients,
+            credential_scope: credential,
+        },
+        pod: pod_identity,
+    }))
+}
+
+/// Whether any binding row, live or released, names this Pod UID.
+async fn pod_has_binding(pool: &PgPool, pod_uid: &str) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM sandbox_workspace_bindings WHERE pod_uid = $1)",
+    )
+    .bind(pod_uid)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Record the binding of the exact observed Pod (design §5), enforced.
+///
+/// The caller has observed the runtime identity and waited for the Claim,
+/// Sandbox and Pod to be Ready with converged labels; this runs before the
+/// gateway readiness wait (§10), so a Pod-scope daemon can listen and the
+/// gateway can fetch its credential. A refused check fails the activity.
+/// An unbound identity-free Pod that failed a check is deleted with a UID
+/// precondition so it never serves (§5.6); a Pod bound to another
+/// environment and a legacy environment-scope Pod are never deleted here.
+pub(crate) async fn record_workspace_binding(
+    kube: &kube::Client,
+    env: &EnvironmentRow,
+    backend: &BackendRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    observation: &RuntimeIdentityObservation,
+) -> anyhow::Result<WriteOutcome> {
+    anyhow::ensure!(
+        env.id == authority.environment_id()
+            && env.operation_generation == authority.operation_generation()
+            && env.operation_generation > 0
+            && states.iter().all(|state| BINDABLE_STATES.contains(state)),
+        "workspace binding authority does not match the environment"
+    );
+    let pool = authority.pool();
+    let facts = load_backend_facts(pool, &env.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("workspace binding backend is incomplete"))?;
+    anyhow::ensure!(
+        facts.namespace == backend.namespace
+            && facts.claim_name == backend.claim_name
+            && facts.claim_uid == backend.claim_uid,
+        "workspace binding backend association changed"
+    );
+    let client = SandboxClient::new(kube.clone(), &facts.namespace);
+    let checked = match check_bindable_runtime(&client, env, &facts, observation).await? {
+        Ok(checked) => checked,
+        Err((reason, scope, definitive)) => {
+            if definitive
+                && scope != Some(WorkspaceCredentialScope::Environment)
+                && !pod_has_binding(pool, &observation.pod().uid).await?
+            {
+                // §5.6: an unbound identity-free Pod that failed a check never
+                // serves. The UID precondition never deletes a replacement.
+                let pod = observation.pod();
+                authority
+                    .run_external_mutation(
+                        states,
+                        client.delete_workspace_pod_if_uid(&pod.name, &pod.uid),
+                    )
+                    .await?;
+                tracing::warn!(env = %env.id, %reason, "deleted an unbound workspace Pod that failed binding");
+            }
+            return Err(reason.into());
+        }
+    };
+    let mut guard = authority.begin_external_mutation(states).await?;
+    let outcome = await_external_mutation(async {
+        // A Pod-scope capture must still equal the environment row this
+        // fenced transaction locked: the selection can be republished within
+        // one operation generation.
+        if checked.record.credential_scope == WorkspaceCredentialScope::Pod {
+            let current = load_environment_in(guard.transaction(), &env.id).await?;
+            let recaptured = pod_scope_capture(&current);
+            anyhow::ensure!(
+                recaptured.as_ref().is_some_and(|recaptured| {
+                    recaptured.operation_generation == checked.record.operation_generation
+                        && recaptured.projection_selection_sha256
+                            == checked.record.projection_selection_sha256
+                        && recaptured.managed_credential_clients
+                            == checked.record.managed_credential_clients
+                }),
+                super::activity_authority::AuthorityLost
+            );
+        }
+        match write_binding(guard.transaction(), &checked.record).await {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => Err(match error.downcast_ref::<WriteRefused>() {
+                Some(WriteRefused::BoundElsewhere) => BindRefused::BoundElsewhere.into(),
+                Some(WriteRefused::Released) => BindRefused::Denied("released binding").into(),
+                Some(WriteRefused::BackendChanged) => {
+                    BindRefused::Denied("backend association").into()
+                }
+                Some(WriteRefused::PvcMismatch) => BindRefused::Denied("workspace PVC").into(),
+                None => error,
+            }),
+        }
+    })
+    .await?;
+    guard.commit().await?;
+    debug_assert_eq!(checked.pod, *observation.pod());
+    Ok(outcome)
+}
+
+/// [`record_workspace_binding`] with its environment log row
+/// (`workspace_bind`, with `duration_ms`, which A0a's stage metric reads)
+/// and its closed-category counter. A repeat for an already-bound Pod is
+/// silent. Returns the elapsed time of a newly recorded binding.
+pub(crate) async fn bind_workspace_runtime(
+    kube: &kube::Client,
+    env: &EnvironmentRow,
+    backend: &BackendRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    observation: &RuntimeIdentityObservation,
+) -> anyhow::Result<Option<Duration>> {
+    let started = Instant::now();
+    let result = record_workspace_binding(kube, env, backend, authority, states, observation).await;
+    let elapsed = started.elapsed();
+    let metadata = Some(serde_json::json!({
+        "duration_ms": i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX),
+    }));
+    match result {
+        Ok(WriteOutcome::Recorded) => {
+            observe_record(RecordResult::Recorded);
+            emit_authoritative_environment_log_for_states(
+                authority,
+                states,
+                "workspace_bind",
+                "completed",
+                "",
+                metadata,
+            )
+            .await?;
+            Ok(Some(elapsed))
+        }
+        Ok(WriteOutcome::Unchanged) => {
+            observe_record(RecordResult::Unchanged);
+            Ok(None)
+        }
+        Err(error) if is_authority_lost(&error) => {
+            observe_record(RecordResult::NotReady);
+            Err(error)
+        }
+        Err(error) => {
+            let (result, message) = match error.downcast_ref::<BindRefused>() {
+                Some(BindRefused::BoundElsewhere) => {
+                    tracing::error!(env = %env.id, "workspace Pod is bound to another environment");
+                    (RecordResult::Conflict, error.to_string())
+                }
+                Some(
+                    BindRefused::NotConverged
+                    | BindRefused::PodChanged
+                    | BindRefused::ChainUnverified,
+                ) => (RecordResult::NotReady, error.to_string()),
+                Some(BindRefused::Denied(_)) => (RecordResult::Denied, error.to_string()),
+                None => (
+                    RecordResult::Unavailable,
+                    "workspace binding is unavailable".to_owned(),
+                ),
+            };
+            observe_record(result);
+            emit_authoritative_environment_log_for_states(
+                authority,
+                states,
+                "workspace_bind",
+                "failed",
+                &message,
+                metadata,
+            )
+            .await?;
+            Err(error)
+        }
+    }
+}
+
+/// How often [`bind_before_ready`] re-reads the chain while the caller waits.
+const EARLY_BIND_POLL: Duration = Duration::from_millis(500);
+
+/// Design §10 (amended): while the caller waits for the gateway or for Claim
+/// Ready, record an identity-free Pod's binding as soon as the exact chain is
+/// bind-ready ([`BindableRuntime::bind_ready`]), so its daemon listens and the
+/// gateway connects while DinD's Docker daemon is still starting. It records
+/// through the enforced [`bind_workspace_runtime`], with every §5 check and
+/// the locked re-check of the captured values.
+///
+/// Returns the record time when this call recorded the binding, or `None`
+/// when the Pod was already bound or is a legacy Pod, which keeps the
+/// post-ready order unchanged. A refusal that can clear (labels not yet
+/// converged, a replaced Pod, an unreadable chain) is retried; any other
+/// refusal fails exactly as the post-ready bind does. The caller drops this
+/// future once its own wait ends.
+pub(crate) async fn bind_before_ready(
+    kube: &kube::Client,
+    authority: &ActivityAuthority,
+    states: &[&str],
+) -> anyhow::Result<Option<Duration>> {
+    let pool = authority.pool();
+    loop {
+        let env = load_environment(pool, authority.environment_id()).await?;
+        let backend = super::env_data::load_backend_row(pool, authority.environment_id())
+            .await
+            .ok()
+            .filter(|backend| !backend.namespace.is_empty() && !backend.claim_uid.is_empty());
+        if let Some(backend) = backend {
+            let client = SandboxClient::new(kube.clone(), &backend.namespace);
+            let opts = ClaimOpts {
+                environment_id: env.id.clone(),
+                org_id: env.org_id.clone(),
+                operation_generation: authority.operation_generation(),
+                ..Default::default()
+            };
+            if let Ok(runtime) = client
+                .read_bindable_runtime(&opts, &backend.claim_name, &backend.claim_uid)
+                .await
+                && runtime.bind_ready
+            {
+                if credential_scope(&runtime.pod) != Some(WorkspaceCredentialScope::Pod) {
+                    return Ok(None);
+                }
+                match bind_workspace_runtime(
+                    kube,
+                    &env,
+                    &backend,
+                    authority,
+                    states,
+                    &runtime.observation,
+                )
+                .await
+                {
+                    Ok(elapsed) => return Ok(elapsed),
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<BindRefused>(),
+                            Some(
+                                BindRefused::NotConverged
+                                    | BindRefused::PodChanged
+                                    | BindRefused::ChainUnverified
+                            )
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        tokio::time::sleep(EARLY_BIND_POLL).await;
+    }
+}
+
+/// Bind a workspace Pod that replaced the previous one while the environment
+/// stays `running` (daemon repair, design §10): observe the exact chain for
+/// the replacement, wait for it to converge, then record its binding before
+/// any daemon or gateway wait. A legacy replacement records its environment
+/// scope; an identity-free one gets the binding its daemon long-polls for.
+pub(crate) async fn bind_replacement_runtime(
+    kube: &kube::Client,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    replacement: &WorkspacePodIdentity,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let pool = authority.pool();
+    let env = load_environment(pool, authority.environment_id()).await?;
+    let backend = super::env_data::load_backend_row(pool, authority.environment_id()).await?;
+    anyhow::ensure!(
+        !backend.namespace.is_empty() && !backend.claim_uid.is_empty(),
+        "workspace binding backend is incomplete"
+    );
+    let client = SandboxClient::new(kube.clone(), &backend.namespace);
+    let opts = ClaimOpts {
+        environment_id: env.id.clone(),
+        org_id: env.org_id.clone(),
+        operation_generation: authority.operation_generation(),
+        ..Default::default()
+    };
+    let observation = client
+        .observe_claim_runtime_identity(&opts, &backend.claim_name, &backend.claim_uid)
+        .await?;
+    if observation.pod() != replacement {
+        return Err(BindRefused::PodChanged.into());
+    }
+    authority
+        .run_while_authoritative_for_states(
+            states,
+            client.wait_for_claim_runtime_identity(
+                &opts,
+                &backend.claim_name,
+                &backend.claim_uid,
+                &observation,
+                timeout,
+            ),
+        )
+        .await?;
+    bind_workspace_runtime(kube, &env, &backend, authority, states, &observation).await?;
+    Ok(())
+}
+
+/// The live binding's Pod is still present, so it is not released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the bound workspace Pod is still present")]
+pub(crate) struct BoundPodPresent;
+
+/// Whether the Pod a binding recorded is absent: its name no longer exists,
+/// or now names a Pod with another UID. A terminating Pod is still present.
+/// Pod UIDs are never reused, so an observed absence is final.
+pub(crate) async fn bound_pod_absent(
+    kube: &kube::Client,
+    namespace: &str,
+    pod_name: &str,
+    pod_uid: &str,
+) -> anyhow::Result<bool> {
+    let pod = SandboxClient::new(kube.clone(), namespace)
+        .get_workspace_pod(pod_name)
+        .await?;
+    Ok(pod.is_none_or(|pod| pod.metadata.uid.as_deref() != Some(pod_uid)))
+}
+
+/// Release exactly `pod_uid`'s live binding and clear a backend pointer to
+/// it, inside a transaction that already holds the environment row lock.
+async fn release_absent_binding(
+    tx: &mut PgConnection,
+    environment_id: &str,
+    pod_uid: &str,
+) -> anyhow::Result<bool> {
+    let released = sqlx::query(
+        "UPDATE sandbox_workspace_bindings SET released_at = GREATEST(now(), bound_at)
+          WHERE environment_id = $1 AND pod_uid = $2 AND released_at IS NULL",
+    )
+    .bind(environment_id)
+    .bind(pod_uid)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    sqlx::query(
+        "UPDATE sandbox_environment_backend SET pod_uid = NULL, bound_at = NULL
+          WHERE environment_id = $1 AND pod_uid = $2",
+    )
+    .bind(environment_id)
+    .bind(pod_uid)
+    .execute(&mut *tx)
+    .await?;
+    Ok(released > 0)
+}
+
+/// Release the environment's live binding once its Pod is observed absent
+/// (design §10: stop, restart before resume, destroy), and clear the backend
+/// pointer, inside the caller's generation fence. A present Pod refuses with
+/// [`BoundPodPresent`] and changes nothing, so the caller retries after its
+/// deletion. Idempotent: no live binding releases nothing.
+pub(crate) async fn release_workspace_binding(
+    kube: &kube::Client,
+    authority: &ActivityAuthority,
+    states: &[&str],
+) -> anyhow::Result<bool> {
+    let live: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT pod_uid, namespace, pod_name FROM sandbox_workspace_bindings
+          WHERE environment_id = $1 AND released_at IS NULL",
+    )
+    .bind(authority.environment_id())
+    .fetch_optional(authority.pool())
+    .await?;
+    let Some((pod_uid, namespace, pod_name)) = live else {
+        return Ok(false);
+    };
+    if !bound_pod_absent(kube, &namespace, &pod_name, &pod_uid).await? {
+        return Err(BoundPodPresent.into());
+    }
+    let mut guard = authority.begin_external_mutation(states).await?;
+    let released =
+        release_absent_binding(guard.transaction(), authority.environment_id(), &pod_uid).await?;
+    guard.commit().await?;
+    Ok(released)
+}
+
+/// The backfill's release of one live binding whose Pod is observed absent
+/// (design §10's rule). It needs no generation: the absence of a Pod UID is
+/// final, and it changes only that UID's row and a pointer to it, under the
+/// environment row lock every binding writer takes first. A present Pod, or a
+/// binding already released, is `Unchanged`.
+pub(crate) async fn release_binding_if_pod_absent(
+    pool: &PgPool,
+    kube: &kube::Client,
+    pod_uid: &str,
+) -> anyhow::Result<RecordResult> {
+    let live: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT environment_id, namespace, pod_name FROM sandbox_workspace_bindings
+          WHERE pod_uid = $1 AND released_at IS NULL",
+    )
+    .bind(pod_uid)
+    .fetch_optional(pool)
+    .await?;
+    let Some((environment_id, namespace, pod_name)) = live else {
+        return Ok(RecordResult::Unchanged);
+    };
+    if !bound_pod_absent(kube, &namespace, &pod_name, pod_uid).await? {
+        return Ok(RecordResult::Unchanged);
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT 1 FROM environments WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(&environment_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let released = release_absent_binding(&mut tx, &environment_id, pod_uid).await?;
+    tx.commit().await?;
+    if !released {
+        return Ok(RecordResult::Unchanged);
+    }
+    tracing::info!(
+        env = %environment_id,
+        pod_uid,
+        "workspace binding released after its Pod was observed absent"
+    );
+    Ok(RecordResult::Recorded)
+}
+
+/// Why a restore adoption was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AdoptionRefused {
+    #[error("restored workspace PVC UID is not canonical")]
+    InvalidUid,
+    #[error("a restore adoption needs a stopped workspace with no live binding")]
+    Bound,
+    #[error("the restored workspace PVC does not resolve for this environment")]
+    NotResolvable,
+    #[error("workspace binding backend association changed")]
+    BackendChanged,
+}
+
+/// namespace, claim UID, binding pointer, recorded workspace PVC UID.
+type AdoptionBackendRow = (String, Option<String>, Option<String>, Option<String>);
+
+/// Restore-born PVC adoption (design §12): the single documented path that
+/// moves `backend.workspace_pvc_uid` to a different PVC. The restore creates
+/// a same-name PVC with the fork's tracking label and a `dataSource` of a
+/// same-environment `VolumeSnapshot`; this records its UID, taken from the
+/// create response, before resume. It is generation-fenced, requires no
+/// live binding, and logs the old and new UIDs. The resolver then accepts
+/// that PVC by UID through the adoption window until the fork adopts it; a
+/// same-name PVC that no adoption recorded fails both resolve and bind.
+pub async fn adopt_restored_workspace_pvc(
+    kube: &kube::Client,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    backend: &BackendRow,
+    restored_pvc_uid: &str,
+) -> anyhow::Result<()> {
+    if !crate::workspace_binding::canonical_uid(restored_pvc_uid) {
+        return Err(AdoptionRefused::InvalidUid.into());
+    }
+    let client = SandboxClient::new(kube.clone(), &backend.namespace);
+    // The restored PVC must already resolve under the adoption window.
+    match client
+        .resolve_workspace_pvc(
+            &backend.claim_name,
+            &backend.claim_uid,
+            Some(restored_pvc_uid),
+        )
+        .await
+    {
+        Ok(WorkspacePvc::Claim { .. }) => {}
+        _ => return Err(AdoptionRefused::NotResolvable.into()),
+    }
+    let mut guard = authority.begin_external_mutation(states).await?;
+    let row: Option<AdoptionBackendRow> = sqlx::query_as(
+        "SELECT namespace, sandbox_claim_uid, pod_uid, workspace_pvc_uid
+           FROM sandbox_environment_backend WHERE environment_id = $1 FOR UPDATE",
+    )
+    .bind(authority.environment_id())
+    .fetch_optional(&mut **guard.transaction())
+    .await?;
+    let Some((namespace, claim_uid, pointer, previous)) = row else {
+        return Err(AdoptionRefused::BackendChanged.into());
+    };
+    if namespace != backend.namespace || claim_uid.as_deref() != Some(backend.claim_uid.as_str()) {
+        return Err(AdoptionRefused::BackendChanged.into());
+    }
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sandbox_workspace_bindings
+                         WHERE environment_id = $1 AND released_at IS NULL)",
+    )
+    .bind(authority.environment_id())
+    .fetch_one(&mut **guard.transaction())
+    .await?;
+    if pointer.is_some() || live {
+        return Err(AdoptionRefused::Bound.into());
+    }
+    sqlx::query(
+        "UPDATE sandbox_environment_backend SET workspace_pvc_uid = $2 WHERE environment_id = $1",
+    )
+    .bind(authority.environment_id())
+    .bind(restored_pvc_uid)
+    .execute(&mut **guard.transaction())
+    .await?;
+    guard.commit().await?;
+    tracing::info!(
+        env = %authority.environment_id(),
+        previous_pvc_uid = previous.as_deref().unwrap_or(""),
+        restored_pvc_uid,
+        "adopted the restored workspace PVC"
+    );
+    Ok(())
+}
+
+// --------------------------------------------------------------- readers
+
+/// The live binding of an environment's current backend pointer.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EnvironmentBinding {
+    pub pod_uid: String,
+    pub operation_generation: i64,
+    pub projection_selection_sha256: Option<String>,
+    pub managed_credential_clients: String,
+    pub credential_scope: WorkspaceCredentialScope,
+}
+
+impl std::fmt::Debug for EnvironmentBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EnvironmentBinding")
+            .field("pod_uid", &self.pod_uid)
+            .field("credential_scope", &self.credential_scope)
+            .finish_non_exhaustive()
+    }
+}
+
+type EnvironmentBindingRow = (String, i64, Option<String>, String, String);
+
+const LIVE_ENVIRONMENT_BINDING: &str = "SELECT w.pod_uid, w.operation_generation,
+              w.projection_selection_sha256, w.managed_credential_clients, w.credential_scope
+         FROM sandbox_environment_backend b
+         JOIN sandbox_workspace_bindings w
+           ON w.environment_id = b.environment_id AND w.pod_uid = b.pod_uid
+        WHERE b.environment_id = $1 AND b.bound_at IS NOT NULL AND w.released_at IS NULL";
+
+fn environment_binding_from_row(
+    (pod_uid, operation_generation, digest, clients, scope): EnvironmentBindingRow,
+) -> anyhow::Result<EnvironmentBinding> {
+    Ok(EnvironmentBinding {
+        pod_uid,
+        operation_generation,
+        projection_selection_sha256: digest,
+        managed_credential_clients: clients,
+        credential_scope: WorkspaceCredentialScope::parse(&scope)
+            .ok_or_else(|| anyhow::anyhow!("workspace binding scope is invalid"))?,
+    })
+}
+
+/// The live binding the backend pointer names, if any.
+pub(crate) async fn live_environment_binding(
+    executor: impl sqlx::PgExecutor<'_>,
+    environment_id: &str,
+) -> anyhow::Result<Option<EnvironmentBinding>> {
+    sqlx::query_as::<_, EnvironmentBindingRow>(LIVE_ENVIRONMENT_BINDING)
+        .bind(environment_id)
+        .fetch_optional(executor)
+        .await?
+        .map(environment_binding_from_row)
+        .transpose()
+}
+
+/// The current workspace Pod is not bound yet and is not a legacy Pod, so
+/// no daemon credential is issued for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the workspace daemon is not bound yet")]
+pub(crate) struct DaemonNotBound;
+
+/// The credential orchestration presents to the environment's daemon
+/// (design §7). A live binding decides it. Without one, only a legacy Pod,
+/// which renders the environment token itself, receives that token: an
+/// identity-free Pod that is not bound yet, or a Pod whose scope cannot be
+/// read, gets nothing, so the environment token never reaches a Pod that was
+/// not rendered with it.
+pub(crate) async fn environment_daemon_credential(
+    pool: &PgPool,
+    kube: Option<&kube::Client>,
+    session_secret: &str,
+    environment_id: &str,
+) -> anyhow::Result<String> {
+    if let Some(binding) = live_environment_binding(pool, environment_id).await? {
+        return daemon_credential_for(
+            session_secret,
+            environment_id,
+            &binding.pod_uid,
+            binding.credential_scope,
+        );
+    }
+    let namespace: Option<String> = sqlx::query_scalar(
+        "SELECT namespace FROM sandbox_environment_backend WHERE environment_id = $1",
+    )
+    .bind(environment_id)
+    .fetch_optional(pool)
+    .await?;
+    let (Some(namespace), Some(kube)) = (namespace.filter(|namespace| !namespace.is_empty()), kube)
+    else {
+        return Err(DaemonNotBound.into());
+    };
+    let pod = SandboxClient::new(kube.clone(), &namespace)
+        .current_workspace_pod_object(environment_id)
+        .await
+        .map_err(|_| DaemonNotBound)?;
+    if credential_scope(&pod) != Some(WorkspaceCredentialScope::Environment) {
+        return Err(DaemonNotBound.into());
+    }
+    super::gatewayauth::issue_token(
+        session_secret,
+        environment_id,
+        super::gatewayauth::SCOPE_DAEMON,
+    )
+}
+
+/// Stale-bootstrap comparison for a bound Pod-scope runtime (design §12): the
+/// binding row's captured generation, projection digest and managed clients
+/// against the current template options, with the same rule as the rendered
+/// environment check: the generation only matters while a projection is
+/// selected.
+pub(crate) fn binding_bootstrap_current(
+    binding: &EnvironmentBinding,
+    opts: &crate::sandbox::template::TemplateOpts,
+) -> bool {
+    let digest = opts.projection_selection_sha256.map(|digest| {
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    });
+    binding.projection_selection_sha256 == digest
+        && binding.managed_credential_clients == opts.managed_credential_clients.encode()
+        && (digest.is_none() || binding.operation_generation == opts.operation_generation)
 }
 
 // ------------------------------------------------------------- backfill
@@ -894,8 +1695,10 @@ pub(crate) struct BackfillState {
     unbound: Option<String>,
     bound: Option<String>,
     pvcs: Option<String>,
+    releases: Option<String>,
     binding_backoff: Backoffs,
     pvc_backoff: Backoffs,
+    release_backoff: Backoffs,
 }
 
 /// Running environments without a binding, then a rotation over the bound
@@ -920,6 +1723,19 @@ const UNRESOLVED_PVC: &str = "SELECT e.id FROM environments e
        AND e.deletion_requested_at IS NULL AND b.sandbox_claim_uid IS NOT NULL
        AND b.workspace_pvc_uid IS NULL AND e.id > $1
      ORDER BY e.id LIMIT $2";
+
+/// Live bindings of environments that are not stably running, by Pod UID:
+/// destroyed, stopped, failed or still changing. Each is released once its
+/// Pod is observed absent, which also reaches bindings an earlier binary left
+/// live. A running environment's replaced Pod is not swept here: the rebind
+/// its liveness trigger enqueues releases it atomically with the new binding.
+const UNRELEASED_INACTIVE: &str = "SELECT w.pod_uid FROM sandbox_workspace_bindings w
+      JOIN environments e ON e.id = w.environment_id
+     WHERE w.released_at IS NULL
+       AND NOT (e.state = 'running' AND e.desired_state = 'started'
+                AND e.deletion_requested_at IS NULL)
+       AND w.pod_uid > $1
+     ORDER BY w.pod_uid LIMIT $2";
 
 async fn next_batch(
     pool: &PgPool,
@@ -1003,6 +1819,36 @@ pub(crate) async fn backfill_pass(ctx: &WorkerContext, state: &mut BackfillState
             if state.pvc_backoff.ready(&id, Instant::now()) {
                 let result = record_first_workspace_pvc(ctx, &id).await;
                 state.pvc_backoff.observe(&id, result, Instant::now());
+            }
+        }
+        if let Some(kube) = ctx.kube.as_ref() {
+            for pod_uid in rotate(
+                &ctx.pool,
+                UNRELEASED_INACTIVE,
+                &mut state.releases,
+                BACKFILL_BATCH,
+            )
+            .await?
+            {
+                if Instant::now() >= deadline {
+                    return Ok(());
+                }
+                state.releases = Some(pod_uid.clone());
+                if state.release_backoff.ready(&pod_uid, Instant::now()) {
+                    let result = tokio::time::timeout(
+                        RECORD_ATTEMPT_TIMEOUT,
+                        release_binding_if_pod_absent(&ctx.pool, kube, &pod_uid),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("binding release timed out")))
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(pod_uid, error = %error, "workspace binding release failed");
+                        RecordResult::Unavailable
+                    });
+                    state
+                        .release_backoff
+                        .observe(&pod_uid, result, Instant::now());
+                }
             }
         }
         Ok(())

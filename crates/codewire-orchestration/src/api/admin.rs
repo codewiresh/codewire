@@ -385,9 +385,10 @@ pub struct AdminEnvironmentStartupSummary {
 /// Summarized startup phases, in presentation order. Every stage that
 /// `start_metrics` observes is listed, so the admin summary and Prometheus
 /// describe the same stages.
-const STARTUP_PHASES: [&str; 8] = [
+const STARTUP_PHASES: [&str; 9] = [
     "create_claim",
     "wait_for_ready",
+    "workspace_bind",
     "gateway_ready",
     "pod_scheduled",
     "pod_initialized",

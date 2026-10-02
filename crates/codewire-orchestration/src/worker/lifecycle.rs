@@ -27,6 +27,7 @@ use super::setup::{
     handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
     jittered_duration, wait_for_sidecar,
 };
+use super::workspace_binding::release_workspace_binding;
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, Snapshot};
 use crate::sandbox::client::{
@@ -338,6 +339,9 @@ pub async fn handle_environment_stop(
             wait_for_workspace_suspension(&client, &env, &backend, &previous, DELETED_TIMEOUT),
         )
         .await?;
+    // Design §10: the Pod is observed absent, so its binding is released. A
+    // later start binds the new Pod UID.
+    release_workspace_binding(&client.client, authority, STOP_MUTATION_STATES).await?;
     if let Err(e) = authority
         .run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(env_id))
         .await
@@ -652,7 +656,23 @@ pub(super) async fn restart_workspace_bootstrap(
             .await
     })
     .await?;
+    // Every previous Pod is gone: release its binding before the resumed Pod
+    // gets a new UID and its own binding.
+    release_workspace_binding(&client.client, authority, states).await?;
     refresh_workspace_bootstrap(ctx, env, backend, opts, &suspended, authority, states).await?;
+    // Converge the identity labels for this generation before resume, so the
+    // resumed Pod carries them and can be bound before Claim Ready (design
+    // §10, amended). The post-ready reconcile repeats this idempotently.
+    authority
+        .run_external_mutation(
+            states,
+            client.reconcile_claim_runtime_identity(
+                &claim_opts,
+                &backend.claim_name,
+                &backend.claim_uid,
+            ),
+        )
+        .await?;
     run_template_mutation(
         authority,
         opts,
@@ -785,12 +805,19 @@ pub async fn handle_environment_start(
         return Err(error);
     }
 
-    // Wait for the sandbox to become ready again.
+    // Wait for the sandbox to become ready again, binding an identity-free
+    // Pod as soon as it is bind-ready (design §10, amended).
     if let Err(e) = await_reconcile_or_cancel(
         &activity_ctx,
-        authority.run_while_authoritative_for_states(
+        super::create::wait_with_early_bind(
+            ctx,
+            &env,
+            authority,
             START_MUTATION_STATES,
-            client.wait_for_ready(env_id, ready_timeout),
+            authority.run_while_authoritative_for_states(
+                START_MUTATION_STATES,
+                client.wait_for_ready(env_id, ready_timeout),
+            ),
         ),
     )
     .await
@@ -1051,6 +1078,11 @@ pub async fn handle_environment_destroy(
 
     let per_environment_template =
         destroy_template_hint(&ctx.pool, env.preset_id.as_deref(), env_id).await?;
+    // The storage proof also counts the recorded workspace PVC UID (design
+    // §12).
+    let recorded_pvc_uid = backend
+        .as_ref()
+        .and_then(|row| row.workspace_pvc_uid.clone());
 
     for namespace in namespaces {
         if namespace.trim().is_empty() {
@@ -1060,11 +1092,12 @@ pub async fn handle_environment_destroy(
         if let Err(error) = authority
             .run_external_mutation(
                 DESTROY_CLEANUP_MUTATION_STATES,
-                client.delete_environment_resources(
+                client.delete_environment_resources_with_recorded_storage(
                     env_id,
                     known_sandbox_name,
                     per_environment_template.as_deref(),
                     env.isolation_tier == "confidential",
+                    recorded_pvc_uid.as_deref(),
                     DELETED_TIMEOUT,
                 ),
             )
@@ -1075,6 +1108,19 @@ pub async fn handle_environment_destroy(
                 "delete environment resources in {namespace}: {error:#}"
             ));
         }
+    }
+
+    // Design §10: release the binding only after its Pod is observed absent,
+    // which the deletion above waited for and the release re-reads by UID.
+    // Destroying is not a bindable state and neither the environment ID nor
+    // a Pod UID is ever reused, so a recreated environment or Pod cannot meet
+    // this binding; the cleanup marker below refuses while it is still live.
+    if let Some(kube) = ctx.kube.as_ref()
+        && let Err(error) =
+            release_workspace_binding(kube, authority, DESTROY_CLEANUP_MUTATION_STATES).await
+    {
+        record_environment_error(&svc, authority, env_id, &format!("{error:#}")).await?;
+        return Err(anyhow::anyhow!("release workspace binding: {error:#}"));
     }
 
     if env.isolation_tier == "confidential" {

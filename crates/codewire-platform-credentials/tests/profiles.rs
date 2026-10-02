@@ -207,7 +207,11 @@ async fn profiles_are_exact_owner_scoped_and_use_only_explicit_catalog_metadata(
             )
             .await?;
         let shared = store
-            .create(&org, registration("Shared", Kind::OAuth), &value(NEW_VALUE))
+            .create(
+                &org,
+                registration("Shared", Kind::ApiKey),
+                &value(NEW_VALUE),
+            )
             .await?;
         let profiles = profiles(&db);
         let first = profiles
@@ -488,7 +492,7 @@ async fn binding_cas_and_each_runtime_admission_recheck_credentials_and_catalog(
         let user = db.user("admission-user").await?;
         let org = db.organization("admission-org").await?;
         let store = db.store(Arc::new(SyntheticKek::default()));
-        let credential = store.create(&org, registration("Shared", Kind::OAuth), &value(OLD_VALUE)).await?;
+        let credential = store.create(&org, registration("Shared", Kind::ApiKey), &value(OLD_VALUE)).await?;
         let mut context = environment(&db, &user, &org, "admission-env", std::slice::from_ref(&credential.metadata.id)).await?;
         context.allow_personal_credentials = false;
         let profiles = profiles(&db);
@@ -633,7 +637,7 @@ async fn profile_publication_holds_credential_and_owner_fences_against_deletion(
         const BARRIER: i32 = 19_220_019;
         let org = db.organization("publication-org").await?;
         let store = db.store(Arc::new(SyntheticKek::default()));
-        let credential = store.create(&org, registration("Revoked selection", Kind::OAuth), &value(OLD_VALUE)).await?;
+        let credential = store.create(&org, registration("Revoked selection", Kind::ApiKey), &value(OLD_VALUE)).await?;
         let revoked = store.revoke(&org, &credential.metadata.id, credential.version).await?;
         sqlx::raw_sql(&format!(
             "CREATE FUNCTION pause_profile_publication() RETURNS trigger LANGUAGE plpgsql AS $$ \
@@ -1178,6 +1182,107 @@ async fn rename_relabels_the_profile_without_a_revision_or_rebinding() -> Result
         };
         ensure!(later.revision == 2 && later.entries.is_empty());
         ensure!(profiles.get(&user, &original.id).await? == later);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn no_organization_profile_selects_binds_or_admits_an_organization_oauth_credential()
+-> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("org-oauth-user").await?;
+        let org = db.organization("org-oauth-org").await?;
+        let store = db.store(Arc::new(SyntheticKek::default()));
+        let api_key = store
+            .create(&org, registration("Shared key", Kind::ApiKey), &value(OLD_VALUE))
+            .await?;
+        // A row written before organizations were refused OAuth; the store
+        // itself no longer registers one.
+        let legacy = store
+            .create(&org, registration("Legacy login", Kind::ApiKey), &value(OLD_VALUE))
+            .await?;
+        sqlx::query("UPDATE platform_credentials SET authentication_kind='oauth' WHERE id=$1")
+            .bind(legacy.metadata.id.as_str())
+            .execute(&db.pool)
+            .await?;
+        let mut context = environment(
+            &db,
+            &user,
+            &org,
+            "org-oauth-env",
+            &[api_key.metadata.id.clone(), legacy.metadata.id.clone()],
+        )
+        .await?;
+        context.allow_personal_credentials = false;
+        let profiles = profiles(&db);
+
+        // Editing: no profile revision may select it.
+        ensure!(
+            profiles
+                .create(&org, name("login"), entries(&legacy.metadata.id))
+                .await
+                == Err(Error::UnsupportedEntry)
+        );
+        let profile = profiles
+            .create(&org, name("work"), entries(&api_key.metadata.id))
+            .await?;
+        ensure!(
+            profiles
+                .update(&org, &profile.id, 1, entries(&legacy.metadata.id))
+                .await
+                == Err(Error::UnsupportedEntry)
+        );
+        let selected = profiles
+            .create_binding(&context, binding(&context, &profile), None)
+            .await?;
+        ensure!(profiles.evaluate_grants(&context).await?.grants.len() == 1);
+
+        // A bound revision whose credential is an organization OAuth login is
+        // refused as a whole at Sandbox creation, rebinding and runtime
+        // admission. It is never a per-capability Reconnect.
+        sqlx::query(
+            "UPDATE platform_access_profile_entries SET credential_id=$2 WHERE profile_id=$1",
+        )
+        .bind(profile.id.as_str())
+        .bind(legacy.metadata.id.as_str())
+        .execute(&db.pool)
+        .await?;
+        ensure!(profiles.evaluate_grants(&context).await == Err(Error::UnsupportedEntry));
+        ensure!(
+            profiles
+                .replace_binding(&context, &selected, selected.clone(), None)
+                .await
+                == Err(Error::UnsupportedEntry)
+        );
+        sqlx::query("DELETE FROM platform_environment_access_bindings WHERE environment_id=$1")
+            .bind(context.environment_id.as_str())
+            .execute(&db.pool)
+            .await?;
+        sqlx::query(
+            "UPDATE environments SET state='pending', environment_operation_generation=0 WHERE id=$1",
+        )
+        .bind(context.environment_id.as_str())
+        .execute(&db.pool)
+        .await?;
+        let mut pending = context.clone();
+        pending.environment_generation = 0;
+        let mut tx = profiles.begin_transaction().await?;
+        ensure!(
+            profiles
+                .create_pending_binding_in(&mut tx, &pending, selected.clone(), None)
+                .await
+                == Err(Error::UnsupportedEntry)
+        );
+        tx.rollback().await?;
+        let bindings: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM platform_environment_access_bindings")
+                .fetch_one(&db.pool)
+                .await?;
+        ensure!(bindings == 0);
         Ok(())
     }
     .await;

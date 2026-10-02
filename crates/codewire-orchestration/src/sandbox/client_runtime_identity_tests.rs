@@ -243,6 +243,116 @@ fn propagation_requires_all_labels_and_current_sandbox_readiness_not_claim_gener
     assert!(!evaluate(stale, sandbox(7), pod(7)));
 }
 
+/// A Pod whose containers have started from resolved images while DinD's
+/// Docker daemon is still starting: neither the Pod nor anything above it is
+/// Ready yet.
+fn started_pod(generation: i64) -> Value {
+    let mut pod = pod(generation);
+    pod["spec"] = json!({
+        "containers": [{ "name": "workspace", "image": "w" }, { "name": "dind", "image": "d" }],
+        "initContainers": [{ "name": "daemon-init", "image": "i" }]
+    });
+    pod["status"] = json!({
+        "phase": "Running",
+        "conditions": [{ "type": "Ready", "status": "False" }],
+        "containerStatuses": [
+            { "name": "workspace", "image": "w", "imageID": "w@sha256:1", "ready": true, "started": true, "restartCount": 0 },
+            { "name": "dind", "image": "d", "imageID": "d@sha256:2", "ready": false, "started": true, "restartCount": 0 }
+        ],
+        "initContainerStatuses": [
+            { "name": "daemon-init", "image": "i", "imageID": "i@sha256:3", "ready": false, "started": false,
+              "restartCount": 0, "state": { "terminated": { "exitCode": 0 } } }
+        ]
+    });
+    pod
+}
+
+#[test]
+fn the_bind_trigger_needs_converged_labels_and_started_containers_not_readiness() {
+    let evaluate = |claim: Value, sandbox: Value, pod: Value| {
+        runtime_bind_ready(
+            &serde_json::from_value(claim).unwrap(),
+            &serde_json::from_value(sandbox).unwrap(),
+            &serde_json::from_value(pod).unwrap(),
+            &opts(),
+        )
+    };
+    let not_ready = |mut object: Value| {
+        object["status"]["conditions"][0]["status"] = json!("False");
+        object
+    };
+    // DinD still starting: nothing is Ready, yet the chain is bind-ready.
+    assert!(evaluate(
+        not_ready(claim(7)),
+        not_ready(sandbox(7)),
+        started_pod(7)
+    ));
+    assert!(!runtime_identity_converged(
+        &serde_json::from_value(not_ready(claim(7))).unwrap(),
+        &serde_json::from_value(not_ready(sandbox(7))).unwrap(),
+        &serde_json::from_value(started_pod(7)).unwrap(),
+        &opts(),
+    ));
+    // Labels on each object.
+    assert!(!evaluate(claim(6), sandbox(7), started_pod(7)));
+    assert!(!evaluate(claim(7), sandbox(6), started_pod(7)));
+    assert!(!evaluate(claim(7), sandbox(7), started_pod(6)));
+    // The Sandbox status must report the current spec, whatever its status.
+    let mut stale = sandbox(7);
+    stale["status"]["conditions"][0]["observedGeneration"] = json!(3);
+    assert!(!evaluate(claim(7), stale, started_pod(7)));
+    let mut missing = sandbox(7);
+    missing["status"]["conditions"] = json!([]);
+    assert!(!evaluate(claim(7), missing, started_pod(7)));
+    // No object may be deleting.
+    for target in ["claim", "sandbox", "pod"] {
+        let (mut c, mut s, mut p) = (claim(7), sandbox(7), started_pod(7));
+        let object = match target {
+            "claim" => &mut c,
+            "sandbox" => &mut s,
+            _ => &mut p,
+        };
+        object["metadata"]["deletionTimestamp"] = json!("2026-10-02T00:00:00Z");
+        assert!(!evaluate(c, s, p), "{target} deleting");
+    }
+    // The Pod is Running and every container started from a resolved image.
+    type Mutation = (&'static str, fn(&mut Value));
+    let mutations: [Mutation; 7] = [
+        ("pending", |p| p["status"]["phase"] = json!("Pending")),
+        ("not started", |p| {
+            p["status"]["containerStatuses"][1]["started"] = json!(false)
+        }),
+        ("no imageID", |p| {
+            p["status"]["containerStatuses"][1]["imageID"] = json!("")
+        }),
+        ("missing status", |p| {
+            p["status"]["containerStatuses"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+        }),
+        ("init running", |p| {
+            p["status"]["initContainerStatuses"][0]["state"] = json!({ "running": {} });
+        }),
+        ("init failed", |p| {
+            p["status"]["initContainerStatuses"][0]["state"]["terminated"]["exitCode"] = json!(1);
+        }),
+        ("init without imageID", |p| {
+            p["status"]["initContainerStatuses"][0]["imageID"] = json!("")
+        }),
+    ];
+    for (label, mutate) in mutations {
+        let mut pod = started_pod(7);
+        mutate(&mut pod);
+        assert!(!evaluate(claim(7), sandbox(7), pod), "{label}");
+    }
+    // A restartable init sidecar counts once started.
+    let mut sidecar = started_pod(7);
+    sidecar["status"]["initContainerStatuses"][0]["state"] = json!({ "running": {} });
+    sidecar["status"]["initContainerStatuses"][0]["started"] = json!(true);
+    assert!(evaluate(claim(7), sandbox(7), sidecar));
+}
+
 #[tokio::test]
 async fn publisher_sends_only_the_validated_conditional_patch() {
     let (client, requests) = client(vec![(StatusCode::OK, claim(6)), (StatusCode::OK, claim(7))]);
@@ -395,5 +505,124 @@ async fn partial_propagation_wait_is_bounded_and_does_not_mutate() {
             .unwrap()
             .iter()
             .all(|(method, _, _)| method == Method::GET)
+    );
+}
+
+fn unbound_claim() -> Value {
+    let mut claim = claim(7);
+    claim["status"] = json!({ "conditions": [] });
+    claim
+}
+
+/// Design §12: the Pod name comes from the bound Sandbox's controller-
+/// published annotation, never the Claim's own name.
+#[tokio::test]
+async fn the_pod_name_follows_the_bound_sandbox_and_never_the_claim_name() {
+    let (sandboxes, requests) = client(vec![
+        (StatusCode::OK, claim(7)),
+        (StatusCode::OK, sandbox(7)),
+    ]);
+    assert_eq!(sandboxes.get_pod_name("env-test").await.unwrap(), POD);
+    assert!(
+        requests.lock().unwrap()[1]
+            .1
+            .ends_with(&format!("/sandboxes/{SANDBOX}"))
+    );
+
+    // An unbound Claim has no runtime: no fallback to `sandbox-<env>`.
+    let (sandboxes, requests) = client(vec![(StatusCode::OK, unbound_claim())]);
+    assert!(sandboxes.get_pod_name("env-test").await.is_err());
+    assert!(client_requests_end(&requests, 1));
+    let (sandboxes, _) = client(vec![(StatusCode::OK, unbound_claim())]);
+    assert!(sandboxes.bound_sandbox_name("env-test").await.is_err());
+}
+
+fn client_requests_end(requests: &Recorded, count: usize) -> bool {
+    requests.lock().unwrap().len() == count
+}
+
+/// Once bound, the current workspace Pod must be the bound incarnation; a
+/// replacement under the same name is refused until its own binding exists.
+#[tokio::test]
+async fn the_current_workspace_pod_is_the_bound_incarnation() {
+    let responses = || {
+        vec![
+            (StatusCode::OK, claim(7)),
+            (StatusCode::OK, sandbox(7)),
+            (StatusCode::OK, pod(7)),
+        ]
+    };
+    let (sandboxes, _) = client(responses());
+    assert_eq!(
+        sandboxes
+            .current_workspace_pod("env-test", None)
+            .await
+            .unwrap(),
+        WorkspacePodIdentity {
+            name: POD.into(),
+            uid: POD_UID.into(),
+        }
+    );
+    let (sandboxes, _) = client(responses());
+    assert!(
+        sandboxes
+            .current_workspace_pod("env-test", Some(POD_UID))
+            .await
+            .is_ok()
+    );
+    let (sandboxes, _) = client(responses());
+    assert!(
+        sandboxes
+            .current_workspace_pod("env-test", Some("replacement-uid"))
+            .await
+            .is_err()
+    );
+    // A Pod the Sandbox does not control is not the workspace.
+    let mut foreign = pod(7);
+    foreign["metadata"]["ownerReferences"][0]["uid"] = json!("other-sandbox");
+    let (sandboxes, _) = client(vec![
+        (StatusCode::OK, claim(7)),
+        (StatusCode::OK, sandbox(7)),
+        (StatusCode::OK, foreign),
+    ]);
+    assert!(
+        sandboxes
+            .current_workspace_pod("env-test", None)
+            .await
+            .is_err()
+    );
+}
+
+/// The liveness and create probes find the Pod through the bound Sandbox,
+/// and report none for an unbound Claim instead of guessing its name.
+#[tokio::test]
+async fn the_probe_resolves_the_pod_through_the_sandbox_without_a_name_fallback() {
+    let (sandboxes, requests) = client(vec![
+        (StatusCode::OK, claim(7)),
+        (StatusCode::OK, claim(7)),
+        (StatusCode::OK, sandbox(7)),
+        (StatusCode::OK, pod(7)),
+    ]);
+    let probe = sandboxes.probe_environment("env-test").await.unwrap();
+    assert!(probe.claim_ready && probe.pod_exists);
+    assert_eq!(
+        (probe.pod_name.as_str(), probe.pod_uid.as_str()),
+        (POD, POD_UID)
+    );
+    assert!(
+        requests.lock().unwrap()[3]
+            .1
+            .ends_with(&format!("/pods/{POD}"))
+    );
+
+    let (sandboxes, requests) = client(vec![
+        (StatusCode::OK, unbound_claim()),
+        (StatusCode::OK, unbound_claim()),
+    ]);
+    let probe = sandboxes.probe_environment("env-test").await.unwrap();
+    assert!(probe.claim_exists && !probe.pod_exists && probe.pod_name.is_empty());
+    assert!(
+        client_requests_end(&requests, 2),
+        "the probe guessed a Pod name"
     );
 }

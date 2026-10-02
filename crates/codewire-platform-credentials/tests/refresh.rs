@@ -16,9 +16,9 @@ use codewire_access::{
     CredentialStatus, Owner, builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
-    CredentialMetadataReader, CredentialRecord, CredentialVersion, OAuthRefreshAttemptInfo,
-    OAuthRefreshState as State, PlatformCredentialError as Error, PlatformCredentialStore,
-    StartedOAuthRefresh,
+    CredentialMetadataReader, CredentialRecord, CredentialRegistration, CredentialVersion,
+    OAuthRefreshAttemptInfo, OAuthRefreshState as State, PlatformCredentialError as Error,
+    PlatformCredentialStore, StartedOAuthRefresh,
 };
 use codewire_protected_store::secret_envelope::{
     DEK_BYTES, DekContext, GeneratedDek, KekProvider, KekProviderKind, SecretEnvelopeError,
@@ -67,11 +67,7 @@ async fn replica(
     Ok((pool, store))
 }
 
-async fn create(
-    store: &PlatformCredentialStore,
-    owner: &Owner,
-    name: &str,
-) -> Result<CredentialRecord> {
+fn expiring_oauth(name: &str) -> Result<CredentialRegistration> {
     let mut input = registration(name, Kind::OAuth);
     input.expires_at_unix = Some(
         std::time::SystemTime::now()
@@ -79,7 +75,36 @@ async fn create(
             .as_secs()
             + 3_600,
     );
-    Ok(store.create(owner, input, &value(OLD_VALUE)).await?)
+    Ok(input)
+}
+
+async fn create(
+    store: &PlatformCredentialStore,
+    owner: &Owner,
+    name: &str,
+) -> Result<CredentialRecord> {
+    Ok(store
+        .create(owner, expiring_oauth(name)?, &value(OLD_VALUE))
+        .await?)
+}
+
+/// Organizations can no longer register an OAuth login. This stands in for a
+/// row written before that rule: registered as an API key, then relabelled.
+/// Its material is never read here; only reservation and deletion fences are.
+async fn legacy_organization_oauth(
+    db: &TestDatabase,
+    store: &PlatformCredentialStore,
+    organization: &Owner,
+    mut input: CredentialRegistration,
+) -> Result<CredentialRecord> {
+    ensure!(organization.is_organization() && input.authentication_kind == Kind::OAuth);
+    input.authentication_kind = Kind::ApiKey;
+    let record = store.create(organization, input, &value(OLD_VALUE)).await?;
+    sqlx::query("UPDATE platform_credentials SET authentication_kind='oauth' WHERE id=$1")
+        .bind(record.metadata.id.as_str())
+        .execute(&db.pool)
+        .await?;
+    Ok(store.record(organization, &record.metadata.id).await?)
 }
 
 async fn started(
@@ -819,7 +844,9 @@ async fn owner_deletion_during_wrapped_dek_preparation_prevents_reservation() ->
         let owner = db.organization("prepare-delete-org").await?;
         let provider = Arc::new(SyntheticKek::default());
         let store = db.store(provider.clone());
-        let record = create(&store, &owner, "Never reserved").await?;
+        let record =
+            legacy_organization_oauth(&db, &store, &owner, expiring_oauth("Never reserved")?)
+                .await?;
         provider.generate_gate.arm();
         let task = {
             let store = store.clone();
@@ -871,7 +898,8 @@ async fn reservation_owner_lock_precedes_deletion_and_exact_cascades_preserve_ot
         let org = db.organization("same-owner-text").await?;
         let user = db.user("same-owner-text").await?;
         let store = db.store(Arc::new(SyntheticKek::default()));
-        let record = create(&store, &org, "Organization").await?;
+        let record =
+            legacy_organization_oauth(&db, &store, &org, expiring_oauth("Organization")?).await?;
         let unrelated = create(&store, &user, "Personal").await?;
         let (unrelated_attempt, unrelated_permit) = started(&store, &user, &unrelated).await?;
         store.stage_oauth_refresh(&unrelated_permit.prepare_result(&value(NEW_VALUE))?).await?;
@@ -1283,10 +1311,17 @@ async fn keepalive_candidates_are_idle_active_oauth_without_an_owned_attempt() -
         store
             .promote_oauth_refresh(&user, &rotated.metadata.id, rotated.version, rotated_attempt)
             .await?;
-        // Organization credentials count only while their organization is live.
-        let shared = aged(new(org.clone(), oauth("Shared")).await?, true);
+        // A legacy organization OAuth row counts only while its organization
+        // is live.
+        let shared = aged(
+            legacy_organization_oauth(&db, &store, &org, oauth("Shared")).await?,
+            true,
+        );
         age(shared.metadata.id.clone()).await?;
-        let orphaned = aged(new(deleting.clone(), oauth("Orphaned")).await?, false);
+        let orphaned = aged(
+            legacy_organization_oauth(&db, &store, &deleting, oauth("Orphaned")).await?,
+            false,
+        );
         age(orphaned.metadata.id.clone()).await?;
         begin_organization_deletion(&db.pool, &admin_user(), deleting.id().as_str()).await?;
         let _ = fresh;

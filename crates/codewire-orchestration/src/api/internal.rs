@@ -262,8 +262,9 @@ pub(crate) async fn gateway_daemon_authority(
               AND w.released_at IS NULL
             WHERE e.id = $1
               AND e.type = 'sandbox'
-              AND e.state IN ('creating', 'starting', 'running')
-              AND e.desired_state = 'started'
+              AND e.state IN ('pending', 'creating', 'starting', 'running', 'resizing')
+              AND (e.desired_state = 'started'
+                   OR (e.state = 'resizing' AND e.desired_state = 'resized'))
               AND e.deletion_requested_at IS NULL"#,
     )
     .bind(environment_id)

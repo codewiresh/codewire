@@ -9,7 +9,8 @@ use axum::{Router, body::Body};
 use base64::Engine as _;
 use codewire_access::{
     AccessProfile, AccessProfileName, CapabilitySlot, CredentialId, EnvironmentAccessBinding,
-    EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId, builtin_provider_catalog,
+    EnvironmentId, GrantContext, GrantPlacement, MANAGED_CREDENTIAL_CLIENTS_ENV,
+    ManagedCredentialClients, Owner, OwnerId, builtin_provider_catalog,
 };
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator,
@@ -17,7 +18,9 @@ use codewire_credential_broker::platform::bridge::{
 use codewire_credential_broker::platform::{PlatformRuntimeAuthority, PlatformRuntimeError};
 use codewire_platform_credentials::PlatformAccessProfileStore;
 use codewire_protected_store::secret_envelope::TestKekProvider;
-use codewire_server_core::pod_identity::PodIdentityPurpose;
+use codewire_server_core::pod_identity::{
+    KubernetesPodIdentityVerifier, PodIdentityPurpose, VerifiedPodIdentity,
+};
 use http::{Request, Response, StatusCode};
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::core::v1::Pod;
@@ -31,7 +34,9 @@ use uuid::Uuid;
 
 use crate::KubernetesPlatformBridgeAuthenticator;
 use crate::authority::{Scope, WORKSPACE_AUTHORIZATION, unix_now};
-use crate::objects::{gateway_chain, gateway_environment, workspace_chain};
+use crate::objects::{
+    binding_managed_clients, gateway_chain, gateway_environment, validate_lineage, workspace_chain,
+};
 
 mod database;
 
@@ -58,6 +63,11 @@ pub(crate) fn scope() -> Scope {
         claim_name: "synthetic-claim".into(),
         claim_uid: CLAIM_UID.into(),
         pod_name: WORKSPACE.into(),
+        pod_uid: WORKSPACE_UID.into(),
+        binding_claim_uid: CLAIM_UID.into(),
+        binding_sandbox_uid: SANDBOX_UID.into(),
+        managed_credential_clients: ManagedCredentialClients::default().encode().into(),
+        credential_scope: "pod".into(),
         member_id: "synthetic-membership".into(),
         member_role: "member".into(),
         profile_id: Some(Uuid::new_v4().to_string()),
@@ -558,5 +568,207 @@ fn authority_errors_have_closed_value_blind_display_debug_and_sources() {
     ] {
         assert!(error.source().is_none());
         assert!(!format!("{error} {error:?}").contains("synthetic-sensitive"));
+    }
+}
+
+/// A real verifier result for one fixture Pod, reviewed by the fixture's
+/// TokenReview responder. There is no other way to construct one.
+async fn verified_identity(
+    fixture: &KubeFixture,
+    purpose: PodIdentityPurpose,
+    role: &str,
+) -> Result<VerifiedPodIdentity> {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {}", token(role, unix_now()? + 600)).parse()?,
+    );
+    Ok(
+        KubernetesPodIdentityVerifier::new(Some(fixture.client()), purpose)
+            .authenticate(&headers)
+            .await?,
+    )
+}
+
+#[tokio::test]
+async fn lineage_requires_the_bound_pod_uid_and_the_recorded_claim_and_sandbox() -> Result<()> {
+    let fixture = KubeFixture::new();
+    let client = fixture.client();
+    let workspace = verified_identity(
+        &fixture,
+        PodIdentityPurpose::CredentialWorkspace,
+        "workspace",
+    )
+    .await?;
+    let gateway: Pod = serde_json::from_value(objects()[&pod_path(GATEWAY)].clone())?;
+    let lineage = validate_lineage(&client, &scope(), &gateway, &workspace)
+        .await
+        .map_err(|error| anyhow::anyhow!("bound lineage was denied: {error}"))?;
+    ensure!(!lineage.managed_github());
+
+    // The binding names another Pod, a malformed UID or another Claim: denied
+    // before any Kubernetes read.
+    for fault in 0..5 {
+        let mut selected = scope();
+        match fault {
+            0 => selected.pod_uid = Uuid::new_v4().to_string(),
+            1 => selected.pod_uid = WORKSPACE_UID.to_uppercase(),
+            2 => selected.pod_uid = String::new(),
+            3 => selected.binding_claim_uid = Uuid::new_v4().to_string(),
+            _ => selected.binding_sandbox_uid = "synthetic-sandbox".into(),
+        }
+        fixture.paths.lock().unwrap().clear();
+        ensure!(
+            matches!(
+                validate_lineage(&client, &selected, &gateway, &workspace).await,
+                Err(PlatformRuntimeError::Denied)
+            ),
+            "binding fault {fault} was admitted"
+        );
+        ensure!(
+            fixture.paths.lock().unwrap().is_empty(),
+            "binding fault {fault} reached Kubernetes"
+        );
+    }
+
+    // The binding records another Sandbox than the live chain's.
+    let mut selected = scope();
+    selected.binding_sandbox_uid = Uuid::new_v4().to_string();
+    ensure!(matches!(
+        validate_lineage(&client, &selected, &gateway, &workspace).await,
+        Err(PlatformRuntimeError::Denied)
+    ));
+
+    // A Sandbox re-created under the same names, with a consistent live chain,
+    // is not the recorded one.
+    let replacement = Uuid::new_v4().to_string();
+    {
+        let mut values = fixture.objects.lock().unwrap();
+        let sandbox = values
+            .values_mut()
+            .find(|value| value["kind"] == "Sandbox")
+            .unwrap();
+        sandbox["metadata"]["uid"] = json!(replacement);
+        values.get_mut(&pod_path(WORKSPACE)).unwrap()["metadata"]["ownerReferences"][0]["uid"] =
+            json!(replacement);
+    }
+    ensure!(matches!(
+        validate_lineage(&client, &scope(), &gateway, &workspace).await,
+        Err(PlatformRuntimeError::Denied)
+    ));
+    let mut rebound = scope();
+    rebound.binding_sandbox_uid = replacement;
+    validate_lineage(&client, &rebound, &gateway, &workspace)
+        .await
+        .map_err(|error| anyhow::anyhow!("rebound lineage was denied: {error}"))?;
+    Ok(())
+}
+
+fn workspace_with_clients(clients: Option<&str>) -> Pod {
+    let environment = clients.map_or_else(
+        || json!([]),
+        |value| json!([{"name": MANAGED_CREDENTIAL_CLIENTS_ENV, "value": value}]),
+    );
+    serde_json::from_value(json!({
+        "spec": {"containers": [{"name": "workspace", "env": environment}]}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn managed_clients_come_from_the_recorded_binding() {
+    let github = ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
+    let none = ManagedCredentialClients::default();
+    let with = |clients: ManagedCredentialClients, credential_scope: &str| {
+        let mut selected = scope();
+        selected.managed_credential_clients = clients.encode().into();
+        selected.credential_scope = credential_scope.into();
+        selected
+    };
+
+    // A claim-time Pod: only the binding counts. Its environment is not read,
+    // so neither an absent, conflicting nor malformed value changes the result.
+    for rendered in [
+        None,
+        Some(none.encode()),
+        Some(github.encode()),
+        Some("github"),
+    ] {
+        let pod = workspace_with_clients(rendered);
+        assert_eq!(
+            binding_managed_clients(&with(github, "pod"), &pod),
+            Ok(github)
+        );
+        assert_eq!(binding_managed_clients(&with(none, "pod"), &pod), Ok(none));
+    }
+
+    // A pre-binding Pod: its rendered environment must agree with the binding.
+    let environment = |rendered| {
+        binding_managed_clients(
+            &with(github, "environment"),
+            &workspace_with_clients(rendered),
+        )
+    };
+    assert_eq!(environment(Some(github.encode())), Ok(github));
+    assert_eq!(environment(None), Err(PlatformRuntimeError::Denied));
+    assert_eq!(
+        environment(Some(none.encode())),
+        Err(PlatformRuntimeError::Denied)
+    );
+    assert_eq!(
+        environment(Some("github")),
+        Err(PlatformRuntimeError::Denied)
+    );
+    assert_eq!(
+        binding_managed_clients(&with(none, "environment"), &workspace_with_clients(None)),
+        Ok(none)
+    );
+    assert_eq!(
+        binding_managed_clients(
+            &with(none, "environment"),
+            &workspace_with_clients(Some(github.encode()))
+        ),
+        Err(PlatformRuntimeError::Denied)
+    );
+
+    // A malformed recorded selection or an unknown scope is denied.
+    for credential_scope in ["pod", "environment"] {
+        let mut selected = with(github, credential_scope);
+        for malformed in ["", "github", "v1:none ", "V1:CODEX"] {
+            selected.managed_credential_clients = malformed.into();
+            assert_eq!(
+                binding_managed_clients(&selected, &workspace_with_clients(Some(malformed))),
+                Err(PlatformRuntimeError::Denied)
+            );
+        }
+    }
+    for credential_scope in ["", "POD", "node", "environment "] {
+        assert_eq!(
+            binding_managed_clients(&with(none, credential_scope), &workspace_with_clients(None)),
+            Err(PlatformRuntimeError::Denied)
+        );
+    }
+}
+
+#[test]
+fn scope_equality_covers_every_binding_field() {
+    // `same_authority` and the projection's locked re-read compare whole
+    // scopes, so a binding moved mid-session must change the scope.
+    for field in 0..5 {
+        let mut changed = scope();
+        match field {
+            0 => changed.pod_uid = Uuid::new_v4().to_string(),
+            1 => changed.binding_claim_uid = Uuid::new_v4().to_string(),
+            2 => changed.binding_sandbox_uid = Uuid::new_v4().to_string(),
+            3 => {
+                changed.managed_credential_clients =
+                    ManagedCredentialClients::from_profile_slots(["github"])
+                        .unwrap()
+                        .encode()
+                        .into()
+            }
+            _ => changed.credential_scope = "environment".into(),
+        }
+        assert!(changed != scope(), "binding field {field} is not compared");
     }
 }

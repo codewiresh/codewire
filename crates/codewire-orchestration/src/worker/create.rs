@@ -11,8 +11,12 @@ use super::env_data::{
     BackendRow, EnvironmentRow, load_backend_row, load_environment, load_environment_in,
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::issue_environment_tokens;
+use super::gatewayauth::{WorkspaceCredentialScope, issue_environment_tokens};
 use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
+use super::workspace_binding::{
+    EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
+    credential_scope, live_environment_binding,
+};
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{
@@ -1012,15 +1016,20 @@ async fn run_environment_create(
                     .await?;
                     return Err(e);
                 }
-                if let Err(e) = authority
-                    .run_while_authoritative_for_states(
+                if let Err(e) = wait_with_early_bind(
+                    ctx,
+                    &env,
+                    authority,
+                    CREATE_MUTATION_STATES,
+                    authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
                         client.wait_for_ready(
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
                         ),
-                    )
-                    .await
+                    ),
+                )
+                .await
                 {
                     emit_authoritative_environment_log_for_states(
                         authority,
@@ -1421,15 +1430,20 @@ async fn run_environment_create(
                     None,
                 )
                 .await?;
-                let gateway_result = authority
-                    .run_while_authoritative_for_states(
+                let gateway_result = wait_with_early_bind(
+                    ctx,
+                    &env,
+                    authority,
+                    CREATE_MUTATION_STATES,
+                    authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
                         client.wait_for_credential_gateway_ready(
                             &template_opts,
                             ready_timeout_for_isolation(&env.isolation_tier),
                         ),
-                    )
-                    .await;
+                    ),
+                )
+                .await;
                 let gateway_elapsed = gateway_started.elapsed();
                 let gateway_meta = Some(serde_json::json!({
                     "duration_ms": duration_ms(gateway_elapsed),
@@ -1952,6 +1966,45 @@ pub(super) async fn reconcile_runtime_identity(
     reconcile_runtime_identity_for_pod(ctx, env, backend, authority, states, None).await
 }
 
+/// Run `wait` (the gateway or Claim Ready wait of create and start) while
+/// [`bind_before_ready`] records an identity-free Pod's binding as soon as its
+/// chain is bind-ready (design §10, amended). The wait decides the outcome:
+/// a recorded or skipped bind lets it continue, a refused bind fails it, and
+/// the bind is dropped once the wait ends. The post-ready runtime-identity
+/// reconcile still binds, idempotently, before MarkRunning and setup.
+pub(super) async fn wait_with_early_bind<T>(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    wait: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let Some(kube) = ctx.kube.as_ref() else {
+        return wait.await;
+    };
+    let bind = bind_before_ready(kube, authority, states);
+    tokio::pin!(wait);
+    tokio::pin!(bind);
+    let mut binding = true;
+    loop {
+        tokio::select! {
+            result = &mut wait => return result,
+            result = &mut bind, if binding => {
+                binding = false;
+                if let Some(elapsed) = result?
+                    && matches!(env.state.as_str(), "creating" | "starting")
+                {
+                    observe_create_stage(
+                        StartStage::WorkspaceBind,
+                        start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+                        elapsed,
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub(super) async fn reconcile_runtime_identity_for_pod(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
@@ -2002,9 +2055,16 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
             expected_pod.is_none_or(|expected| observation.pod() == expected),
             "workspace Pod changed after the ready observation"
         );
-        if !client
-            .workspace_bootstrap_matches(&template_opts, &claim_name, &claim_uid, observation.pod())
-            .await?
+        let binding = live_environment_binding(&mut **guard.transaction(), &env.id).await?;
+        if !workspace_bootstrap_current(
+            &client,
+            &template_opts,
+            &claim_name,
+            &claim_uid,
+            observation.pod(),
+            binding.as_ref(),
+        )
+        .await?
         {
             return Err(WorkspaceBootstrapMismatch.into());
         }
@@ -2016,6 +2076,44 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
     .await?;
     guard.commit().await?;
 
+    // Design §10: Claim Ready with converged labels, then the binding, then
+    // the gateway. An identity-free daemon listens only once bound and the
+    // gateway reaches it only after that, so the gateway wait comes last.
+    // Under the amended trigger the binding usually happened during an
+    // earlier wait; this wait binds early too, for a start whose Claim showed
+    // a stale Ready and a replacement Pod that is still starting Docker.
+    wait_with_early_bind(
+        ctx,
+        env,
+        authority,
+        states,
+        authority.run_while_authoritative_for_states(
+            states,
+            client.wait_for_claim_runtime_identity(
+                &opts,
+                &claim_name,
+                &claim_uid,
+                &observation,
+                ready_timeout_for_isolation(&env.isolation_tier),
+            ),
+        ),
+    )
+    .await?;
+    let kube = ctx
+        .kube
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("sandbox backend is not configured"))?;
+    if let Some(elapsed) =
+        bind_workspace_runtime(kube, env, backend, authority, states, &observation).await?
+        && matches!(env.state.as_str(), "creating" | "starting")
+    {
+        observe_create_stage(
+            StartStage::WorkspaceBind,
+            start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+            elapsed,
+        );
+    }
+
     ensure_gateway_stack_for_environment(
         ctx,
         &ctx.sandbox_cfg,
@@ -2026,19 +2124,39 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         states,
     )
     .await?;
-    authority
-        .run_while_authoritative_for_states(
-            states,
-            client.wait_for_claim_runtime_identity(
-                &opts,
-                &claim_name,
-                &claim_uid,
-                &observation,
-                ready_timeout_for_isolation(&env.isolation_tier),
-            ),
-        )
-        .await?;
     authority.ensure_for_states(states).await
+}
+
+/// Stale-bootstrap check for the observed Pod (design §12). A bound Pod-scope
+/// runtime compares the binding row's captured generation, digest and
+/// clients; a legacy environment-scope Pod compares the environment it was
+/// rendered with, as before; an identity-free Pod that is not bound yet is
+/// current by construction, because its binding captures the current
+/// environment row under the same fence.
+async fn workspace_bootstrap_current(
+    client: &SandboxClient,
+    template_opts: &TemplateOpts,
+    claim_name: &str,
+    claim_uid: &str,
+    pod: &WorkspacePodIdentity,
+    binding: Option<&EnvironmentBinding>,
+) -> anyhow::Result<bool> {
+    let live_pod = client
+        .get_workspace_pod(&pod.name)
+        .await?
+        .filter(|live| live.metadata.uid.as_deref() == Some(pod.uid.as_str()))
+        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap Pod was replaced"))?;
+    match credential_scope(&live_pod) {
+        Some(WorkspaceCredentialScope::Environment) => {
+            client
+                .workspace_bootstrap_matches(template_opts, claim_name, claim_uid, pod)
+                .await
+        }
+        Some(WorkspaceCredentialScope::Pod) => Ok(binding
+            .filter(|binding| binding.pod_uid == pod.uid)
+            .is_none_or(|binding| binding_bootstrap_current(binding, template_opts))),
+        None => anyhow::bail!("workspace credential scope is ambiguous"),
+    }
 }
 
 async fn record_error(

@@ -419,7 +419,11 @@ async fn lock_helpers_preserve_exact_owner_and_environment_scope() -> Result<()>
                 )
                 .await?;
             let shared = broker
-                .create(&org, registration("Shared", Kind::OAuth), &value(NEW_VALUE))
+                .create(
+                    &org,
+                    registration("Shared", Kind::ApiKey),
+                    &value(NEW_VALUE),
+                )
                 .await?;
             let manager = profiles(&db.pool);
             let user_profile = manager
@@ -781,7 +785,11 @@ async fn restricted_broker_final_admission_rejects_revoke_and_owner_deletion_dur
             let provider = Arc::new(SyntheticKek::default());
             let broker = store(&pool, provider.clone());
             let record: CredentialRecord = broker
-                .create(&owner, registration("Work", Kind::OAuth), &value(OLD_VALUE))
+                .create(
+                    &owner,
+                    registration("Work", Kind::ApiKey),
+                    &value(OLD_VALUE),
+                )
                 .await?;
             provider.unwrap_gate.arm();
             let read_store = broker.clone();

@@ -459,7 +459,7 @@ async fn owner_selection_rechecks_organization_profile_owner_membership_and_dele
     let result = async {
         let selection = seed(&db).await?;
         let record = db.store(selection.provider.clone()).create(
-            &selection.organization, registration("Organization source", CredentialAuthKind::OAuth), &value(OLD_VALUE),
+            &selection.organization, registration("Organization source", CredentialAuthKind::ApiKey), &value(OLD_VALUE),
         ).await?;
         let profile = profiles(&db.pool).create(
             &selection.organization, AccessProfileName::parse("organization-source")?,

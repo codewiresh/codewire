@@ -267,7 +267,8 @@ async fn organization_profile_does_not_change_the_personal_application_source_ow
         grant_projection(&f).await?;
         sqlx::query("UPDATE platform_access_profiles SET user_id=NULL,organization_id=$1")
             .bind(&f.scope.organization).execute(&f.db.pool).await?;
-        sqlx::query("UPDATE platform_credentials SET user_id=NULL,organization_id=$1")
+        // Organizations hold API keys, never an OAuth login.
+        sqlx::query("UPDATE platform_credentials SET user_id=NULL,organization_id=$1,authentication_kind='api_key'")
             .bind(&f.scope.organization).execute(&f.db.pool).await?;
         sqlx::query("UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by=NULL")
             .execute(&f.db.pool).await?;

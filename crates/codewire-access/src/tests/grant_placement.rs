@@ -41,7 +41,7 @@ fn evaluate(
         &binding(profile),
         profile,
         &BTreeMap::from([(selected.id.clone(), selected.clone())]),
-        &catalog([CredentialAuthKind::OAuth]),
+        &catalog([CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey]),
         NOW,
     )
 }
@@ -261,6 +261,12 @@ fn organization_restriction_follows_storage_not_execution_target() {
             );
             continue;
         }
+        // OAuth logins are personal; an organization holds an API key instead.
+        assert_eq!(
+            evaluate(&context, &profile, &selected),
+            Err(AccessError::OrganizationOAuthUnsupported)
+        );
+        selected.authentication_kind = CredentialAuthKind::ApiKey;
         assert_eq!(evaluate(&context, &profile, &selected).unwrap().len(), 1);
         context.organization_id = Some(owner_id("org-other"));
         assert_eq!(
@@ -284,6 +290,11 @@ fn platform_to_local_retains_personal_confirmation_and_exact_organization_owner(
 
     selected.owner = Owner::Organization(owner_id("org-one"));
     context.allow_personal_credentials = false;
+    assert_eq!(
+        evaluate(&context, &profile, &selected),
+        Err(AccessError::OrganizationOAuthUnsupported)
+    );
+    selected.authentication_kind = CredentialAuthKind::ApiKey;
     assert_eq!(evaluate(&context, &profile, &selected).unwrap().len(), 1);
     context.organization_id = Some(owner_id("org-other"));
     assert_eq!(

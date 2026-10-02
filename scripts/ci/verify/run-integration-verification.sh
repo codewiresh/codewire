@@ -186,13 +186,13 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential storage matrix" "$logfile" 21
+  assert_passed_count "platform credential storage matrix" "$logfile" 22
 
   logfile="$RUN_DIR/platform-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 14
+  assert_passed_count "platform access profile matrix" "$logfile" 15
 
   logfile="$RUN_DIR/platform-owner-source-authority.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -351,7 +351,7 @@ run_database() {
     echo "::error::environment external cleanup matrix skipped"
     return 1
   fi
-  assert_passed_count "environment external cleanup matrix" "$logfile" 8
+  assert_passed_count "environment external cleanup matrix" "$logfile" 9
 
   logfile="$RUN_DIR/environment-session-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -416,7 +416,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'worker::workspace_binding::database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "workspace binding recorder matrix" "$logfile" 10
+  assert_passed_count "workspace binding recorder matrix" "$logfile" 19
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -816,6 +816,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "/api/v1/namespaces/" + namespace
                 + "/pods/" + runtime["pod_name"]
             ):
+                # A legacy (environment-token) workspace Pod controlled by its
+                # Sandbox: with no live binding, orchestration presents the
+                # environment daemon token only to a Pod rendered with it.
                 self.json_response({
                     "apiVersion": "v1",
                     "kind": "Pod",
@@ -823,9 +826,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "name": runtime["pod_name"],
                         "namespace": namespace,
                         "uid": runtime["pod_uid"],
+                        "ownerReferences": [{
+                            "apiVersion": "agents.x-k8s.io/v1beta1",
+                            "kind": "Sandbox",
+                            "name": runtime["pod_name"],
+                            "uid": runtime["pod_uid"] + "-sandbox",
+                            "controller": True,
+                        }],
                     },
                     "spec": {
-                        "containers": [],
+                        "containers": [{
+                            "name": "workspace",
+                            "image": "exec-contract-workspace",
+                            "env": [{
+                                "name": "CODEWIRE_DAEMON_AUTH_TOKEN",
+                                "value": "exec-contract-fixture",
+                            }],
+                        }],
                         "nodeName": "exec-contract-node",
                     },
                     "status": {

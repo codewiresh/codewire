@@ -71,6 +71,8 @@ pub enum AccessError {
     PlacementMismatch { subject: &'static str },
     #[error("organization credential access is not supported by local placement")]
     LocalOrganizationUnsupported,
+    #[error("organizations cannot hold OAuth credentials; OAuth logins are personal")]
+    OrganizationOAuthUnsupported,
     #[error("personal credentials require an explicitly confirmed shared-environment policy")]
     PersonalCredentialsForbidden,
     #[error("access profile owner is incompatible with the environment organization")]

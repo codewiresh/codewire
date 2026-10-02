@@ -846,7 +846,8 @@ impl LifecycleStore for PgLifecycleStore {
         // proof covers every runtime effect they could have left. An
         // organization-wide one may concern another environment, so it stays
         // for organization deletion to resolve after every environment's
-        // proof.
+        // proof. A live workspace binding also blocks the marker: destroy
+        // releases it once its Pod is observed absent (design §10).
         let tag = sqlx::query(
             r#"WITH target AS (
                        SELECT id, org_id
@@ -870,6 +871,12 @@ impl LifecycleStore for PgLifecycleStore {
                              SELECT 1
                              FROM environment_ports port
                              WHERE port.environment_id = environments.id
+                         )
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM sandbox_workspace_bindings binding
+                             WHERE binding.environment_id = environments.id
+                               AND binding.released_at IS NULL
                          )
                        FOR UPDATE
                    ), resolved_dispatches AS (

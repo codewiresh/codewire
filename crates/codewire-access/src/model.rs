@@ -44,6 +44,12 @@ impl Owner {
     pub fn is_organization(&self) -> bool {
         matches!(self, Self::Organization(_))
     }
+
+    /// OAuth logins (Codex ChatGPT and GitHub) are personal: an organization
+    /// may hold API keys and SSH keys, but never an OAuth credential.
+    pub fn may_hold(&self, kind: CredentialAuthKind) -> bool {
+        !(self.is_organization() && kind == CredentialAuthKind::OAuth)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

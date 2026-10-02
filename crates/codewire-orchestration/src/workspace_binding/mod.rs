@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use codewire_server_core::bounded_http1::BoundedHttp1Limits;
 
+pub(crate) use authorize::canonical_uid;
 pub use service::{WorkspaceBindingState, workspace_binding_router};
 pub use store::{
     BindingNotifications, BindingStore, PgBindingStore, WORKSPACE_BINDINGS_CHANNEL,
@@ -75,3 +76,6 @@ pub fn app(router: connectrpc::Router) -> axum::Router {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod fairness_tests;

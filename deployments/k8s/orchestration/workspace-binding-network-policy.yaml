@@ -1,0 +1,45 @@
+# Ingress to orchestration's dedicated WorkspaceBindingService listener
+# (TCP 8087, Program #2238 design §3.5 and §14). Only workspace Pods in the
+# sandbox namespace may open it. The namespace is selected by its immutable
+# kubernetes.io/metadata.name, which each overlay sets to its own sandbox
+# namespace, never by a label anyone allowed to edit namespaces could add.
+#
+# NetworkPolicies add together and isolate a selected Pod for every port, so
+# the first rule keeps every other port open to every source, exactly as with
+# no policy: the API (8084), the internal gateway-binding and mesh listener
+# (8085) and anything else orchestration serves accept what they accepted
+# before. Only 8087 narrows. A bound workspace's token is still required on
+# 8087; this is defence in depth, not its authentication.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-orchestration-workspace-binding
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: orchestration
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 1
+          endPort: 8086
+        - protocol: TCP
+          port: 8088
+          endPort: 65535
+        - protocol: UDP
+          port: 1
+          endPort: 65535
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prod-sandboxes
+          podSelector:
+            matchLabels:
+              codewire.sh/type: workspace
+      ports:
+        - protocol: TCP
+          port: 8087
