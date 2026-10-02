@@ -55,6 +55,10 @@ pub struct BindableRuntime {
     /// Ready, and identity labels converged on Claim, Sandbox template and Pod.
     /// Claim Ready alone never counts.
     pub converged: bool,
+    /// The amended record trigger (design §10): labels converged, the Sandbox
+    /// status current, the Pod Running with every container started from a
+    /// resolved image. Claim and Pod readiness are not required.
+    pub bind_ready: bool,
 }
 
 impl RuntimeIdentityObservation {
@@ -87,11 +91,14 @@ impl SandboxClient {
             .await?;
         let converged =
             runtime_identity_converged(&snapshot.claim, &snapshot.sandbox, &snapshot.pod, opts);
+        let bind_ready =
+            runtime_bind_ready(&snapshot.claim, &snapshot.sandbox, &snapshot.pod, opts);
         Ok(BindableRuntime {
             sandbox: snapshot.sandbox,
             pod: snapshot.pod,
             observation: snapshot.observation,
             converged,
+            bind_ready,
         })
     }
 

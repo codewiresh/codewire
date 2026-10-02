@@ -660,6 +660,19 @@ pub(super) async fn restart_workspace_bootstrap(
     // gets a new UID and its own binding.
     release_workspace_binding(&client.client, authority, states).await?;
     refresh_workspace_bootstrap(ctx, env, backend, opts, &suspended, authority, states).await?;
+    // Converge the identity labels for this generation before resume, so the
+    // resumed Pod carries them and can be bound before Claim Ready (design
+    // §10, amended). The post-ready reconcile repeats this idempotently.
+    authority
+        .run_external_mutation(
+            states,
+            client.reconcile_claim_runtime_identity(
+                &claim_opts,
+                &backend.claim_name,
+                &backend.claim_uid,
+            ),
+        )
+        .await?;
     run_template_mutation(
         authority,
         opts,
@@ -792,12 +805,19 @@ pub async fn handle_environment_start(
         return Err(error);
     }
 
-    // Wait for the sandbox to become ready again.
+    // Wait for the sandbox to become ready again, binding an identity-free
+    // Pod as soon as it is bind-ready (design §10, amended).
     if let Err(e) = await_reconcile_or_cancel(
         &activity_ctx,
-        authority.run_while_authoritative_for_states(
+        super::create::wait_with_early_bind(
+            ctx,
+            &env,
+            authority,
             START_MUTATION_STATES,
-            client.wait_for_ready(env_id, ready_timeout),
+            authority.run_while_authoritative_for_states(
+                START_MUTATION_STATES,
+                client.wait_for_ready(env_id, ready_timeout),
+            ),
         ),
     )
     .await

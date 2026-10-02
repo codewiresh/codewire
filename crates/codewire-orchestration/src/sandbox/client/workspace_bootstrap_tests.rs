@@ -1423,6 +1423,79 @@ async fn rollback_mode_leaves_an_identity_free_environment_untouched() {
     assert!(patches(&state.lock().unwrap()).is_empty());
 }
 
+/// Review L5: an upgrade interrupted after the template but before the
+/// Sandbox is finished under rollback too, so the resumed Pod renders from an
+/// identity-free Sandbox instead of looping on a legacy one beside an
+/// identity-free template. The finished state is stable on the next start.
+#[tokio::test]
+async fn rollback_mode_finishes_a_partial_identity_upgrade() {
+    for upgraded_template in [true, false] {
+        let mut before = legacy_fixture();
+        let rendered = render_sandbox_template(NS, &binding_opts());
+        let upgraded = if upgraded_template {
+            &mut before.template
+        } else {
+            &mut before.sandbox
+        };
+        upgraded["spec"]["podTemplate"]["spec"] = rendered["spec"]["podTemplate"]["spec"].clone();
+        if upgraded_template {
+            before.template["spec"]["networkPolicy"] = rendered["spec"]["networkPolicy"].clone();
+        }
+        let (sandboxes, state) = client(before);
+        let rollback = TemplateOpts {
+            server_namespace: "dev".into(),
+            ..opts()
+        };
+        for _ in 0..2 {
+            sandboxes
+                .reconcile_workspace_bootstrap(
+                    &rollback,
+                    &claim_name(ENV),
+                    CLAIM_UID,
+                    &expected_sandbox(),
+                )
+                .await
+                .unwrap();
+        }
+        let state = state.lock().unwrap();
+        assert_eq!(
+            patches(&state).len(),
+            1,
+            "only the legacy half is patched, once"
+        );
+        for object in [&state.template, &state.sandbox] {
+            assert_eq!(
+                object["spec"]["podTemplate"]["spec"],
+                rendered["spec"]["podTemplate"]["spec"]
+            );
+        }
+        assert_eq!(
+            state.template["spec"]["networkPolicy"],
+            rendered["spec"]["networkPolicy"]
+        );
+        assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+    }
+
+    // Without the orchestration namespace the half upgrade is refused, never
+    // skipped.
+    let mut before = legacy_fixture();
+    before.template["spec"]["podTemplate"]["spec"] =
+        render_sandbox_template(NS, &binding_opts())["spec"]["podTemplate"]["spec"].clone();
+    let (sandboxes, state) = client(before);
+    assert!(
+        sandboxes
+            .reconcile_workspace_bootstrap(
+                &opts(),
+                &claim_name(ENV),
+                CLAIM_UID,
+                &expected_sandbox()
+            )
+            .await
+            .is_err()
+    );
+    assert!(patches(&state.lock().unwrap()).is_empty());
+}
+
 /// An unlabelled template that is not identity-free is not this
 /// environment's, and an object rendering both identities is ambiguous.
 #[tokio::test]

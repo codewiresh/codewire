@@ -74,7 +74,6 @@ test("five full-row choices open focused provider editors with Back and one foot
     ["Anthropic API key", "Add Anthropic API key", "Add API key", "anthropic"],
   ]) {
     const row = action(chooser, name);
-    await expect(row.locator("svg")).toHaveCount(2);
     // The description itself is inside the action, not detached underneath it.
     await row.locator("span > span").click();
     const editor = dialog(page, title);

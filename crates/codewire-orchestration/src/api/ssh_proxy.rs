@@ -328,10 +328,11 @@ async fn probe_shim_health(
         Err(err) => return (false, format!("port-forward: {err}")),
     };
     // The live binding decides the credential (design §7), never a name.
-    let token = match environment_daemon_credential(pool, session_secret, env_id).await {
-        Ok(token) => token,
-        Err(_) => return (false, "authorize daemon health probe".into()),
-    };
+    let token =
+        match environment_daemon_credential(pool, Some(&sb.client), session_secret, env_id).await {
+            Ok(token) => token,
+            Err(_) => return (false, "authorize daemon health probe".into()),
+        };
     let channel = match daemon_channel_from_port_forward(stream).await {
         Ok(channel) => channel,
         Err(error) => return (false, format!("daemon transport: {error}")),

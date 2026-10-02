@@ -1,6 +1,8 @@
 # Ingress to orchestration's dedicated WorkspaceBindingService listener
-# (TCP 8087, Program #2238 design §3.5 and §14). Only workspace Pods in
-# Codewire sandbox namespaces may open it.
+# (TCP 8087, Program #2238 design §3.5 and §14). Only workspace Pods in the
+# sandbox namespace may open it. The namespace is selected by its immutable
+# kubernetes.io/metadata.name, which each overlay sets to its own sandbox
+# namespace, never by a label anyone allowed to edit namespaces could add.
 #
 # NetworkPolicies add together and isolate a selected Pod for every port, so
 # the first rule keeps every other port open to every source, exactly as with
@@ -34,7 +36,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              codewire.sh/resource-type: sandbox
+              kubernetes.io/metadata.name: prod-sandboxes
           podSelector:
             matchLabels:
               codewire.sh/type: workspace

@@ -1029,6 +1029,109 @@ fn runtime_identity_converged(
         && matches!((ready.next(), ready.next()), (Some(condition), None) if condition.status == "True")
 }
 
+/// The Sandbox's single `Ready` condition reports the current spec: its
+/// `observedGeneration` equals `metadata.generation`, whatever its status. A
+/// stale status could describe a Pod rendered from an older spec, which a
+/// binding check would misread as an image mismatch.
+fn sandbox_status_current(sandbox: &DynamicObject) -> bool {
+    let Some(generation) = sandbox
+        .metadata
+        .generation
+        .filter(|generation| *generation > 0)
+    else {
+        return false;
+    };
+    let Some(conditions) = sandbox
+        .data
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let mut ready = conditions
+        .iter()
+        .filter(|condition| condition.get("type").and_then(Value::as_str) == Some("Ready"));
+    matches!((ready.next(), ready.next()), (Some(condition), None)
+        if condition.get("observedGeneration").and_then(Value::as_i64) == Some(generation))
+}
+
+/// Every container the Pod spec declares has started from a resolved image:
+/// each regular container reports `started` with a non-empty `imageID`, and
+/// each init container has a non-empty `imageID` and either completed
+/// successfully or, as a restartable sidecar, started. Readiness is not
+/// required, so a DinD container whose Docker daemon is still starting
+/// counts.
+pub(crate) fn pod_containers_started(pod: &Pod) -> bool {
+    let (Some(spec), Some(status)) = (pod.spec.as_ref(), pod.status.as_ref()) else {
+        return false;
+    };
+    let statuses = status.container_statuses.as_deref().unwrap_or_default();
+    let init_statuses = status
+        .init_container_statuses
+        .as_deref()
+        .unwrap_or_default();
+    let resolved = |status: &ContainerStatus| !status.image_id.trim().is_empty();
+    statuses.len() == spec.containers.len()
+        && spec.containers.iter().all(|container| {
+            statuses.iter().any(|status| {
+                status.name == container.name && status.started == Some(true) && resolved(status)
+            })
+        })
+        && init_statuses.len() == spec.init_containers.as_deref().unwrap_or_default().len()
+        && spec.init_containers.iter().flatten().all(|container| {
+            init_statuses.iter().any(|status| {
+                status.name == container.name
+                    && resolved(status)
+                    && (status.started == Some(true)
+                        || status
+                            .state
+                            .as_ref()
+                            .and_then(|state| state.terminated.as_ref())
+                            .is_some_and(|terminated| terminated.exit_code == 0))
+            })
+        })
+}
+
+/// Design §10 (amended): the record step's trigger, checked while the caller
+/// still waits for Claim Ready. Claim Ready adds no security property beyond
+/// label convergence, so it is not required here; it still gates MarkRunning
+/// and setup. The exact UID chain and the absence of `deletionTimestamp` are
+/// checked when the chain is read; images, the PVC, the credential scope and
+/// the captured values by the recorder.
+pub(crate) fn runtime_bind_ready(
+    claim: &DynamicObject,
+    sandbox: &DynamicObject,
+    pod: &Pod,
+    opts: &ClaimOpts,
+) -> bool {
+    let labels = runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "workspace",
+    );
+    runtime_claim_labels_match(claim, opts)
+        && json_labels_match(
+            sandbox.data.pointer("/spec/podTemplate/metadata/labels"),
+            &labels,
+        )
+        && pod.metadata.labels.as_ref().is_some_and(|current| {
+            labels
+                .iter()
+                .all(|(key, value)| current.get(key) == Some(value))
+        })
+        && claim.metadata.deletion_timestamp.is_none()
+        && sandbox.metadata.deletion_timestamp.is_none()
+        && pod.metadata.deletion_timestamp.is_none()
+        && sandbox_status_current(sandbox)
+        && pod
+            .status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref())
+            == Some("Running")
+        && pod_containers_started(pod)
+}
+
 /// Namespaced client for SandboxClaim operations.
 #[derive(Clone)]
 pub struct SandboxClient {
@@ -1161,6 +1264,22 @@ impl SandboxClient {
         env_id: &str,
         bound_pod_uid: Option<&str>,
     ) -> anyhow::Result<WorkspacePodIdentity> {
+        let pod = self.current_workspace_pod_object(env_id).await?;
+        let pod_name = pod.metadata.name.clone().unwrap_or_default();
+        let pod_uid = pod.metadata.uid.clone().unwrap_or_default();
+        anyhow::ensure!(
+            bound_pod_uid.is_none_or(|bound| bound == pod_uid),
+            "workspace Pod is not the bound incarnation"
+        );
+        Ok(WorkspacePodIdentity {
+            name: pod_name,
+            uid: pod_uid,
+        })
+    }
+
+    /// The current workspace Pod object through the same exact chain as
+    /// [`Self::current_workspace_pod`], for callers that inspect its spec.
+    pub async fn current_workspace_pod_object(&self, env_id: &str) -> anyhow::Result<Pod> {
         let sandbox_name = self.bound_sandbox_name(env_id).await?;
         let sandbox = self
             .sandboxes()
@@ -1174,7 +1293,7 @@ impl SandboxClient {
             .get(pod_name)
             .await
             .map_err(|_| anyhow::anyhow!("workspace Pod is unavailable"))?;
-        let pod_uid = runtime_object_uid(&pod.metadata, &self.namespace, pod_name)?;
+        runtime_object_uid(&pod.metadata, &self.namespace, pod_name)?;
         require_runtime_controller(
             &pod.metadata,
             "agents.x-k8s.io/v1beta1",
@@ -1182,14 +1301,7 @@ impl SandboxClient {
             &sandbox_name,
             sandbox_uid,
         )?;
-        anyhow::ensure!(
-            bound_pod_uid.is_none_or(|bound| bound == pod_uid),
-            "workspace Pod is not the bound incarnation"
-        );
-        Ok(WorkspacePodIdentity {
-            name: pod_name.to_owned(),
-            uid: pod_uid.to_owned(),
-        })
+        Ok(pod)
     }
 
     pub async fn get_workspace_pod_identity_by_name(
@@ -1914,11 +2026,41 @@ impl SandboxClient {
         // Rollback (`environment-token`) renders legacy Pods for new
         // environments but leaves an identity-free one as it is: it keeps
         // binding, and environment values patched into it would make its
-        // binding-mode daemon refuse to start.
-        if workspace_object_identity_free(&before.template)?
-            || workspace_object_identity_free(&before.sandbox)?
-        {
-            return Ok(());
+        // binding-mode daemon refuse to start. Only both objects count as
+        // identity-free (review L5). An upgrade interrupted between the
+        // template and the Sandbox is finished rather than skipped, so a start
+        // never resumes a legacy Sandbox beside an identity-free template and
+        // loops on its stale bootstrap.
+        match (
+            workspace_object_identity_free(&before.template)?,
+            workspace_object_identity_free(&before.sandbox)?,
+        ) {
+            (true, true) => return Ok(()),
+            (false, false) => {}
+            (true, false) | (false, true) => {
+                anyhow::ensure!(
+                    !opts.server_namespace.trim().is_empty()
+                        && opts.runtime_profile_spec().profile
+                            != super::template::RUNTIME_PROFILE_CONFIDENTIAL,
+                    "a partial workspace identity upgrade cannot be finished here"
+                );
+                let finish = TemplateOpts {
+                    workspace_identity: super::template::WorkspaceIdentity::Binding {
+                        binding_url: crate::worker::create::workspace_binding_url(
+                            opts.server_namespace.trim(),
+                        ),
+                    },
+                    ..opts.clone()
+                };
+                return self
+                    .reconcile_identity_free_bootstrap(
+                        &finish,
+                        expected_claim_name,
+                        expected_claim_uid,
+                        expected_sandbox,
+                    )
+                    .await;
+            }
         }
         let recovery = if opts.runtime_profile_spec().profile
             == super::template::RUNTIME_PROFILE_CONFIDENTIAL

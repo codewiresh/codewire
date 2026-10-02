@@ -14,8 +14,8 @@ use super::env_log::emit_authoritative_environment_log_for_states;
 use super::gatewayauth::{WorkspaceCredentialScope, issue_environment_tokens};
 use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
 use super::workspace_binding::{
-    EnvironmentBinding, bind_workspace_runtime, binding_bootstrap_current, credential_scope,
-    live_environment_binding,
+    EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
+    credential_scope, live_environment_binding,
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
@@ -174,6 +174,34 @@ impl WorkspaceIdentityMode {
             "" | "binding" => Some(Self::Binding),
             "environment-token" => Some(Self::EnvironmentToken),
             _ => None,
+        }
+    }
+}
+
+impl SandboxWorkerCfg {
+    /// Review L2: a commodity workspace binds through the binding Service in
+    /// the orchestration namespace (`POD_NAMESPACE`), and its gateway fetches
+    /// the daemon credential from the coordinator or API URL. Without them
+    /// `environment_template_opts` would silently render legacy
+    /// environment-token Pods, so a worker with a sandbox backend refuses to
+    /// start instead, like an invalid `SANDBOX_WORKSPACE_IDENTITY_MODE`. Both
+    /// modes need them: under rollback the gateway still reads the binding
+    /// for existing identity-free environments.
+    pub fn require_workspace_binding_config(&self) -> Result<(), String> {
+        let mut missing = Vec::new();
+        if self.pod_namespace.trim().is_empty() {
+            missing.push("POD_NAMESPACE");
+        }
+        if self.coordinator_url.trim().is_empty() && self.api_base_url.trim().is_empty() {
+            missing.push("CODEWIRE_COORDINATOR_URL or CODEWIRE_API_URL");
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "commodity workspace binding requires {}",
+                missing.join(" and ")
+            ))
         }
     }
 }
@@ -1082,15 +1110,20 @@ async fn run_environment_create(
                     .await?;
                     return Err(e);
                 }
-                if let Err(e) = authority
-                    .run_while_authoritative_for_states(
+                if let Err(e) = wait_with_early_bind(
+                    ctx,
+                    &env,
+                    authority,
+                    CREATE_MUTATION_STATES,
+                    authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
                         client.wait_for_ready(
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
                         ),
-                    )
-                    .await
+                    ),
+                )
+                .await
                 {
                     emit_authoritative_environment_log_for_states(
                         authority,
@@ -1474,12 +1507,59 @@ async fn run_environment_create(
                 )
                 .await?;
                 observe_create_stage(StartStage::CreateClaim, profile, claim_elapsed);
-                // Design §10: create no longer waits for the gateway here. The
-                // gateway Pod starts and pulls in parallel; an identity-free
-                // daemon listens only once bound, and the binding is recorded
-                // after the Claim is Ready, so the gateway readiness wait
-                // (`gateway_ready`) runs in the runtime-identity gate, after
-                // `workspace_bind`.
+
+                // The gateway serves readiness only after it reaches the
+                // workspace daemon, so this wait covers the workspace cold
+                // start up to the daemon listening. An identity-free daemon
+                // listens once bound, and `bind_before_ready` records that
+                // binding beside this wait as soon as the Pod's containers
+                // have started (design §10, amended), so the daemon is
+                // reachable before Docker is ready and the next pass may still
+                // wait for the claim (`wait_for_ready`). Same metadata shape as
+                // the restart path, less the Pod IP, which the backend row
+                // records once a probe sees it.
+                let gateway_started = std::time::Instant::now();
+                emit_create_log(
+                    authority,
+                    "gateway_ready",
+                    "started",
+                    GATEWAY_READY_STARTED_MESSAGE,
+                    None,
+                )
+                .await?;
+                let gateway_result = wait_with_early_bind(
+                    ctx,
+                    &env,
+                    authority,
+                    CREATE_MUTATION_STATES,
+                    authority.run_while_authoritative_for_states(
+                        CREATE_MUTATION_STATES,
+                        client.wait_for_credential_gateway_ready(
+                            &template_opts,
+                            ready_timeout_for_isolation(&env.isolation_tier),
+                        ),
+                    ),
+                )
+                .await;
+                let gateway_elapsed = gateway_started.elapsed();
+                let gateway_meta = Some(serde_json::json!({
+                    "duration_ms": duration_ms(gateway_elapsed),
+                    "namespace": backend.namespace,
+                }));
+                if let Err(e) = gateway_result {
+                    emit_create_log(
+                        authority,
+                        "gateway_ready",
+                        "failed",
+                        &format!("{e:#}"),
+                        gateway_meta,
+                    )
+                    .await?;
+                    record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
+                    return Err(e);
+                }
+                emit_create_log(authority, "gateway_ready", "completed", "", gateway_meta).await?;
+                observe_create_stage(StartStage::GatewayReady, profile, gateway_elapsed);
             }
 
             CreateAction::StoreBackend => {
@@ -1983,6 +2063,45 @@ pub(super) async fn reconcile_runtime_identity(
     reconcile_runtime_identity_for_pod(ctx, env, backend, authority, states, None).await
 }
 
+/// Run `wait` (the gateway or Claim Ready wait of create and start) while
+/// [`bind_before_ready`] records an identity-free Pod's binding as soon as its
+/// chain is bind-ready (design §10, amended). The wait decides the outcome:
+/// a recorded or skipped bind lets it continue, a refused bind fails it, and
+/// the bind is dropped once the wait ends. The post-ready runtime-identity
+/// reconcile still binds, idempotently, before MarkRunning and setup.
+pub(super) async fn wait_with_early_bind<T>(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    wait: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let Some(kube) = ctx.kube.as_ref() else {
+        return wait.await;
+    };
+    let bind = bind_before_ready(kube, authority, states);
+    tokio::pin!(wait);
+    tokio::pin!(bind);
+    let mut binding = true;
+    loop {
+        tokio::select! {
+            result = &mut wait => return result,
+            result = &mut bind, if binding => {
+                binding = false;
+                if let Some(elapsed) = result?
+                    && matches!(env.state.as_str(), "creating" | "starting")
+                {
+                    observe_create_stage(
+                        StartStage::WorkspaceBind,
+                        start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+                        elapsed,
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub(super) async fn reconcile_runtime_identity_for_pod(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
@@ -2057,8 +2176,15 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
     // Design §10: Claim Ready with converged labels, then the binding, then
     // the gateway. An identity-free daemon listens only once bound and the
     // gateway reaches it only after that, so the gateway wait comes last.
-    authority
-        .run_while_authoritative_for_states(
+    // Under the amended trigger the binding usually happened during an
+    // earlier wait; this wait binds early too, for a start whose Claim showed
+    // a stale Ready and a replacement Pod that is still starting Docker.
+    wait_with_early_bind(
+        ctx,
+        env,
+        authority,
+        states,
+        authority.run_while_authoritative_for_states(
             states,
             client.wait_for_claim_runtime_identity(
                 &opts,
@@ -2067,8 +2193,9 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
                 &observation,
                 ready_timeout_for_isolation(&env.isolation_tier),
             ),
-        )
-        .await?;
+        ),
+    )
+    .await?;
     let kube = ctx
         .kube
         .as_ref()
@@ -2084,23 +2211,10 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         );
     }
 
-    // On create this wait is the `gateway_ready` stage (A0a): the gateway
-    // fetches the bound Pod's daemon credential, reaches the daemon and turns
-    // Ready. Start records its own `gateway_ready` once running.
-    let creating = matches!(env.state.as_str(), "pending" | "creating");
-    let gateway_started = std::time::Instant::now();
-    if creating {
-        emit_authoritative_environment_log_for_states(
-            authority,
-            states,
-            "gateway_ready",
-            "started",
-            GATEWAY_READY_STARTED_MESSAGE,
-            None,
-        )
-        .await?;
-    }
-    let gateway_result = ensure_gateway_stack_for_environment(
+    // Create's `gateway_ready` stage (A0a) is the CreateClaim wait, which the
+    // early bind lets finish while Docker starts; here the gateway is
+    // normally ready already.
+    ensure_gateway_stack_for_environment(
         ctx,
         &ctx.sandbox_cfg,
         env,
@@ -2109,45 +2223,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         authority,
         states,
     )
-    .await;
-    if creating {
-        let gateway_elapsed = gateway_started.elapsed();
-        let gateway_meta = Some(serde_json::json!({
-            "duration_ms": duration_ms(gateway_elapsed),
-            "namespace": namespace,
-        }));
-        match &gateway_result {
-            Ok(()) => {
-                emit_authoritative_environment_log_for_states(
-                    authority,
-                    states,
-                    "gateway_ready",
-                    "completed",
-                    "",
-                    gateway_meta,
-                )
-                .await?;
-                observe_create_stage(
-                    StartStage::GatewayReady,
-                    start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
-                    gateway_elapsed,
-                );
-            }
-            Err(error) if !super::activity_authority::is_authority_lost(error) => {
-                emit_authoritative_environment_log_for_states(
-                    authority,
-                    states,
-                    "gateway_ready",
-                    "failed",
-                    &format!("{error:#}"),
-                    gateway_meta,
-                )
-                .await?;
-            }
-            Err(_) => {}
-        }
-    }
-    gateway_result?;
+    .await?;
     authority.ensure_for_states(states).await
 }
 
@@ -2244,6 +2320,52 @@ mod tests {
             operation_generation: 7,
             projection_selection: Ok(None),
             managed_credential_clients: Ok(Default::default()),
+        }
+    }
+
+    /// Review L2: a worker with a sandbox backend refuses to start without
+    /// the binding Service namespace or a coordinator/API URL, instead of
+    /// silently rendering legacy Pods.
+    #[test]
+    fn missing_binding_configuration_fails_startup() {
+        let complete = SandboxWorkerCfg {
+            pod_namespace: "dev".into(),
+            api_base_url: "https://codewire-dev.sh".into(),
+            ..Default::default()
+        };
+        assert_eq!(complete.require_workspace_binding_config(), Ok(()));
+        let coordinator_only = SandboxWorkerCfg {
+            api_base_url: String::new(),
+            coordinator_url: "http://codewire-coordinator.dev.svc.cluster.local:8090".into(),
+            ..complete.clone()
+        };
+        assert_eq!(coordinator_only.require_workspace_binding_config(), Ok(()));
+        for (cfg, missing) in [
+            (
+                SandboxWorkerCfg {
+                    pod_namespace: " ".into(),
+                    ..complete.clone()
+                },
+                "POD_NAMESPACE",
+            ),
+            (
+                SandboxWorkerCfg {
+                    api_base_url: String::new(),
+                    ..complete.clone()
+                },
+                "CODEWIRE_COORDINATOR_URL or CODEWIRE_API_URL",
+            ),
+            (
+                SandboxWorkerCfg {
+                    workspace_identity_mode: WorkspaceIdentityMode::EnvironmentToken,
+                    pod_namespace: String::new(),
+                    ..complete.clone()
+                },
+                "POD_NAMESPACE",
+            ),
+        ] {
+            let error = cfg.require_workspace_binding_config().unwrap_err();
+            assert!(error.contains(missing), "{error}");
         }
     }
 
