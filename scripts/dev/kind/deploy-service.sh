@@ -10,7 +10,9 @@
 # (the in-workspace `cw` carried by the gateway image; sandboxes created
 # afterwards run it). Each image is always the gate-built base plus every
 # binary deployed since, so repeated deploys never stack layers; a new base
-# from the gate or `up` resets it.
+# from the gate or `up` resets it. credential-service also rebuilds the
+# synthetic fixture (/codewire-kind-fixtures/credential-service) that the
+# gate's fake credential mode runs, so both modes run the current source.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -28,10 +30,17 @@ crate="codewire-${SERVICE}"
 bin="$crate"
 destination=/
 features=""
+fixture=""
+fixture_features=""
 case "$SERVICE" in
   idp | billing | coordinator) ;;
   orchestration) features="kind-e2e" ;;
-  credential-service) features="enrollment,kind-e2e" ;;
+  credential-service)
+    features="enrollment,kind-e2e"
+    # Built exactly as services.Dockerfile builds the fake-mode fixture.
+    fixture=credential-service
+    fixture_features=enrollment
+    ;;
   dashboard)
     image=codewire-dashboard
     crate=codewire-dashboard-web
@@ -63,16 +72,16 @@ base="$(docker image inspect --format "{{ index .Config.Labels \"${BASE_LABEL}\"
 if [ -z "$base" ] || [ "$base" = "<no value>" ]; then
   base="$current"
 fi
-mkdir -p "$STATE/bin"
+mkdir -p "$STATE/bin" "$STATE/fixtures"
 if [ "$(cat "$STATE/base" 2>/dev/null || true)" != "$base" ]; then
   log "new base image ${base:7:12}; forgetting earlier dev binaries"
-  rm -f "$STATE/bin/"*
+  rm -f "$STATE/bin/"* "$STATE/fixtures/"*
   printf '%s\n' "$base" >"$STATE/base"
 fi
 
 docker buildx inspect "$BUILDER" >/dev/null 2>&1 \
   || docker buildx create --name "$BUILDER" --driver docker-container >/dev/null
-log "compiling ${crate} ${bin}${features:+ (features ${features})}"
+log "compiling ${crate} ${bin}${features:+ (features ${features})}${fixture:+ and the ${fixture} fixture}"
 out="$(mktemp -d "$STATE/out.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
 # One build target per worktree: crates built from another worktree's source
@@ -81,19 +90,31 @@ tree="$(printf '%s' "$ROOT" | sha256sum | cut -c1-16)"
 KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bin" KIND_DEV_FEATURES="$features" \
   docker buildx bake --builder "$BUILDER" --file "$ROOT/docker-bake.hcl" \
     --set "kind-dev-binary.args.KIND_DEV_TREE=${tree}" \
+    --set "kind-dev-binary.args.KIND_DEV_FIXTURE_FEATURES=${fixture_features}" \
     --set "kind-dev-binary.output=type=local,dest=${out}" kind-dev-binary
 [ -x "$out/$bin" ] || die "the build produced no ${bin} binary"
 install -m 0755 "$out/$bin" "$STATE/bin/$bin"
+if [ -n "$fixture" ]; then
+  [ -x "$out/kind-fixtures/$bin" ] || die "the build produced no ${fixture} fixture"
+  install -m 0755 "$out/kind-fixtures/$bin" "$STATE/fixtures/$fixture"
+fi
 
-log "layering $(cd "$STATE/bin" && echo *) onto the base image"
+shopt -s nullglob
+fixtures=("$STATE/fixtures/"*)
+shopt -u nullglob
+log "layering $(cd "$STATE/bin" && echo *)${fixtures[*]:+ and fixtures $(cd "$STATE/fixtures" && echo *)} onto the base image"
 docker tag "$base" "$BASE_IMAGE"
 {
   printf 'FROM %s\n' "$BASE_IMAGE"
   for binary in "$STATE/bin/"*; do
     printf 'COPY %s %s%s\n' "$(basename "$binary")" "$destination" "$(basename "$binary")"
   done
+  for binary in "${fixtures[@]}"; do
+    printf 'COPY --from=fixtures %s /codewire-kind-fixtures/%s\n' "$(basename "$binary")" "$(basename "$binary")"
+  done
   printf 'LABEL %s=%s\n' "$BASE_LABEL" "$base"
-} | docker buildx build --builder default --load --quiet -t "$IMAGE" -f - "$STATE/bin" >/dev/null
+} | docker buildx build --builder default --load --quiet -t "$IMAGE" -f - \
+  --build-context "fixtures=$STATE/fixtures" "$STATE/bin" >/dev/null
 
 log "loading ${IMAGE} into ${KIND_CLUSTER_NAME}"
 kind load docker-image "$IMAGE" --name "$KIND_CLUSTER_NAME" >/dev/null

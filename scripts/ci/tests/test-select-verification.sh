@@ -219,6 +219,9 @@ run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head fal
 # scripts/dev/kind helper still selects the Kind gate.
 run_paths_case kind_retained_helpers_main push refs/heads/main false \
   'policy policy_shell' scripts/dev/kind/dev-loop.sh scripts/ci/tests/test-kind-runtime-images.sh
+run_paths_case kind_deploy_helper_main push refs/heads/main false \
+  'policy policy_shell' scripts/dev/kind/deploy-service.sh \
+  deployments/docker/kind-dev-binary.Dockerfile
 run_paths_case kind_dev_helper_main push refs/heads/main false \
   'edge_kind kind policy policy_shell' scripts/dev/kind/kind-forwards.sh
 run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head false \
