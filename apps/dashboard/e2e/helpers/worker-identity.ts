@@ -9,7 +9,7 @@ import {
 } from "./db";
 import { workerIdentityEmail, workerIdentityName } from "./synthetic-users";
 
-const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 
 export const workerAuthStatePath = (index: number) => (
