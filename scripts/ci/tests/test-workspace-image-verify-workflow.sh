@@ -143,7 +143,7 @@ done
 grep -qF 'dynamic_bun_runner="bun""x"' "$AGENT_CONTRACT" ||
   fail 'verification omits the installed Bun package runner without invoking it literally'
 grep -qF 'test -O' "$AGENT_CONTRACT" || fail 'verification does not prove user ownership'
-grep -qF 'npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0' "$AGENT_CONTRACT" ||
+grep -qF 'npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.157.0' "$AGENT_CONTRACT" ||
   fail 'verification does not prove the explicit user-scoped Codex install plan'
 grep -qF -- '--tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256m' "$VERIFY" ||
   fail 'verification omits the fresh persistent-home boundary'
