@@ -33,6 +33,25 @@ pub const WORKSPACE_BINDING_TOKEN_PATH: &str = "/var/run/secrets/codewire/worksp
 pub const WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS: i64 = 600;
 /// Dedicated orchestration listener that serves only `WorkspaceBindingService`.
 pub const WORKSPACE_BINDING_PORT: u16 = 8087;
+/// Selects the hosted daemon's binding mode: the URL of the dedicated
+/// workspace-binding listener. A binding-mode Pod carries no environment
+/// identity; it comes only from the bind response.
+pub const WORKSPACE_BINDING_URL_ENV: &str = "CODEWIRE_WORKSPACE_BINDING_URL";
+/// The workspace Pod's own UID from the downward API. The daemon compares it
+/// with the reviewed Pod UID in the bind response.
+pub const WORKSPACE_POD_UID_ENV: &str = "CODEWIRE_POD_UID";
+/// Owner-only (0700) daemon state directory under the Pod's `/codewire/run`.
+pub const HOSTED_DAEMON_STATE_DIRECTORY: &str = "/codewire/run/daemon";
+/// Local readiness marker: the daemon process is up and its binding loop
+/// runs. It never depends on binding, because orchestration binds a Pod only
+/// after the Pod is Ready.
+pub const HOSTED_DAEMON_READY_FILE: &str = "/codewire/run/daemon/ready";
+/// Owner-read-only (0400) copy of a bound daemon's credential, read by the
+/// fixed-purpose hosted exec instead of its inherited environment.
+pub const HOSTED_DAEMON_CREDENTIAL_FILE: &str = "/codewire/run/daemon/credential";
+/// Server-side long-poll requested by an unbound daemon; the listener clamps
+/// it to its own maximum.
+pub const WORKSPACE_BINDING_WAIT_SECONDS: u32 = 20;
 pub const DAEMON_PROTOCOL_VERSION: u32 = 1;
 pub const DAEMON_MINIMUM_PROTOCOL_VERSION: u32 = 1;
 pub const DAEMON_CAPABILITY_EXEC: &str = "exec.v1";
@@ -171,6 +190,21 @@ mod tests {
             GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS
         );
         assert_eq!(WORKSPACE_BINDING_PORT, 8087);
+    }
+
+    #[test]
+    fn hosted_daemon_binding_state_lives_in_one_owner_directory() {
+        assert_eq!(WORKSPACE_BINDING_URL_ENV, "CODEWIRE_WORKSPACE_BINDING_URL");
+        assert_eq!(WORKSPACE_POD_UID_ENV, "CODEWIRE_POD_UID");
+        assert_eq!(HOSTED_DAEMON_STATE_DIRECTORY, "/codewire/run/daemon");
+        for file in [HOSTED_DAEMON_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE] {
+            let (directory, name) = file.rsplit_once('/').unwrap();
+            assert_eq!(directory, HOSTED_DAEMON_STATE_DIRECTORY);
+            assert!(!name.is_empty());
+        }
+        assert_ne!(HOSTED_DAEMON_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE);
+        // The wait stays well inside the listener's 35s connection deadline.
+        assert!((1..=20).contains(&WORKSPACE_BINDING_WAIT_SECONDS));
     }
 
     #[test]

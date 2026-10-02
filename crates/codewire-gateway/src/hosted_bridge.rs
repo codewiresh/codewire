@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use codewire_daemon::client::{CredentialBridgeResponseSender, SessionClient};
+use codewire_daemon::client::{CredentialBridgeResponseSender, SessionClient, SessionClientError};
 use codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use codewire_gateway_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
 use codewire_gateway_proto::codewire::bridge::v1;
@@ -20,6 +20,7 @@ use tonic::{Status, Streaming};
 use uuid::Uuid;
 
 use crate::credentials::{credential_metadata, read_gateway_token};
+use crate::daemon::DaemonSessionClient;
 
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(10);
 const BROKER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -66,17 +67,28 @@ struct DrainFailure;
 /// Readiness never awaits this owner. Before initial broker admission a launch
 /// may wait only within its existing finite projection deadline. New epochs
 /// reread tokens; no request from an old epoch is retained or replayed.
+///
+/// Each epoch presents the gateway's current daemon credential, and a daemon
+/// that refuses it as unauthenticated asks an issued credential to refresh,
+/// so the relay follows a replaced workspace Pod (Program #2238 B2).
 pub(crate) async fn run(
     config: HostedBridgeConfig,
-    daemon: SessionClient,
+    daemon: DaemonSessionClient,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let cancellation = CancellationToken::new();
+    let unauthenticated = || daemon.credential().report_unauthenticated();
     let service = async {
         loop {
-            if run_epoch(&config, &daemon, cancellation.child_token())
-                .await
-                .is_err()
+            let session = daemon.credential_client();
+            if run_epoch(
+                &config,
+                &session,
+                &unauthenticated,
+                cancellation.child_token(),
+            )
+            .await
+            .is_err()
             {
                 return Err(DrainFailure.into());
             }
@@ -102,14 +114,23 @@ pub(crate) async fn run(
 async fn run_epoch(
     config: &HostedBridgeConfig,
     daemon: &SessionClient,
+    unauthenticated: &(dyn Fn() + Send + Sync),
     cancellation: CancellationToken,
 ) -> Result<(), DrainFailure> {
-    run_epoch_with_lifetime(config, daemon, cancellation, EPOCH_MAX_LIFETIME).await
+    run_epoch_with_lifetime(
+        config,
+        daemon,
+        unauthenticated,
+        cancellation,
+        EPOCH_MAX_LIFETIME,
+    )
+    .await
 }
 
 async fn run_epoch_with_lifetime(
     config: &HostedBridgeConfig,
     daemon: &SessionClient,
+    unauthenticated: &(dyn Fn() + Send + Sync),
     cancellation: CancellationToken,
     lifetime: Duration,
 ) -> Result<(), DrainFailure> {
@@ -120,7 +141,13 @@ async fn run_epoch_with_lifetime(
     };
     let result = async {
         let prepare = async {
-            let (prepared, output) = preparation.await.map_err(|_| ())?;
+            let (prepared, output) = preparation.await.map_err(|error| {
+                if matches!(&error, SessionClientError::Status(status)
+                    if status.code() == tonic::Code::Unauthenticated)
+                {
+                    unauthenticated();
+                }
+            })?;
             let gateway = read_gateway_token(&config.gateway_token)
                 .await
                 .map_err(|_| ())?;

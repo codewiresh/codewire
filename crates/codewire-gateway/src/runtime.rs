@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use codewire_gateway_proto::DaemonAuthToken;
 use codewire_tailnet::netstack::TcpListener as TailnetTcpListener;
 use codewire_tls::TlsListener;
 use std::net::{IpAddr, SocketAddr};
@@ -14,11 +13,13 @@ use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant, sleep, timeout};
 
 use crate::binding::{
-    BindingPollConfig, BindingPollResult, poll_binding_once, poll_binding_until_ready,
+    BindingPollConfig, BindingPollResult, IssuedDaemonCredential, fetch_daemon_credential_once,
+    poll_binding_once, poll_binding_until_ready,
 };
 use crate::config::{CredentialRuntimeConfig, DockerProxyConfig, GatewayConfig};
 use crate::credentials::CredentialIngress;
 use crate::daemon::{DaemonClientError, DaemonSessionClient};
+use crate::daemon_credential::DaemonCredential;
 use crate::docker_proxy::{DockerProxySettings, serve_docker_socket_proxy};
 use crate::host_key;
 use crate::readiness::{
@@ -75,6 +76,13 @@ const DAEMON_CONNECT_BACKOFF: DaemonConnectBackoff = DaemonConnectBackoff {
 };
 /// Failed attempts are logged at debug; this interval bounds the warnings.
 const DAEMON_WAIT_WARN_INTERVAL: Duration = Duration::from_secs(30);
+/// Fetching an identity-free workspace's daemon credential sits on the same
+/// critical path (Program #2238 B2): orchestration records the binding, the
+/// daemon starts listening at once, and this fetch must follow within a
+/// quarter second. The schedule matches the daemon connect retry.
+const DAEMON_CREDENTIAL_BACKOFF: DaemonConnectBackoff = DAEMON_CONNECT_BACKOFF;
+/// A burst of refusals costs at most one credential fetch per interval.
+const DAEMON_CREDENTIAL_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
     run_gateway_until_shutdown(config, shutdown_signal()).await
@@ -214,7 +222,7 @@ async fn run_gateway_services(
         shim_addr = %config.shim_addr,
         "rust gateway waiting for workspace daemon; readyz reports not ready until connected"
     );
-    let daemon_client = wait_for_daemon(&config, tasks).await?;
+    let daemon_client = wait_for_daemon(&config, tasks, shutdown_rx.clone()).await?;
     let host_key = host_key::load_or_create(&config.host_key_path)
         .with_context(|| format!("load host key {}", config.host_key_path))?;
 
@@ -223,7 +231,7 @@ async fn run_gateway_services(
     {
         *hosted_relay = Some(tokio::spawn(crate::hosted_bridge::run(
             bridge,
-            daemon_client.credential_client(),
+            daemon_client.clone(),
             shutdown_rx.clone(),
         )));
     }
@@ -600,19 +608,58 @@ async fn serve_tailnet_tcp_proxy_listener(
 
 /// Wait for the daemon while still failing on any listener started before it
 /// (credential HTTPS, `/readyz`). The owner cancels this future on shutdown.
+///
+/// A legacy workspace's daemon accepts the rendered environment token. An
+/// identity-free workspace's daemon listens only once bound and accepts only
+/// its Pod's credential, which this gateway fetches through its own
+/// authenticated binding first, without waiting for `running` (design §9).
 async fn wait_for_daemon(
     config: &GatewayConfig,
     tasks: &mut JoinSet<Result<()>>,
+    shutdown_rx: watch::Receiver<bool>,
 ) -> Result<DaemonSessionClient> {
-    let connect = connect_daemon_with_retry(
-        &config.shim_addr,
-        config.daemon_auth_token.clone(),
-        DAEMON_CONNECT_BACKOFF,
-    );
-    tokio::pin!(connect);
+    let credential = match config.daemon_auth_token.clone() {
+        Some(token) => DaemonCredential::rendered(token),
+        None => {
+            let binding = BindingPollConfig::from_gateway_config(config)
+                .context("workspace daemon credential requires a gateway binding")?;
+            tracing::info!(
+                "rust gateway fetching the bound workspace daemon credential; readyz reports not ready until connected"
+            );
+            let issued = until_task_failure(
+                tasks,
+                fetch_daemon_credential_with_retry(&binding, DAEMON_CREDENTIAL_BACKOFF),
+            )
+            .await?;
+            tracing::info!(
+                workspace_pod_uid = %issued.workspace_pod_uid,
+                "rust gateway received the workspace daemon credential"
+            );
+            let credential = DaemonCredential::issued(issued.token, issued.workspace_pod_uid);
+            tasks.spawn(refresh_daemon_credential(
+                credential.clone(),
+                binding,
+                shutdown_rx,
+            ));
+            credential
+        }
+    };
+    until_task_failure(
+        tasks,
+        connect_daemon_with_retry(&config.shim_addr, credential, DAEMON_CONNECT_BACKOFF),
+    )
+    .await
+}
+
+/// Drive `future` while failing on any task that fails first.
+async fn until_task_failure<T>(
+    tasks: &mut JoinSet<Result<()>>,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::pin!(future);
     loop {
         tokio::select! {
-            client = &mut connect => return client,
+            result = &mut future => return result,
             joined = tasks.join_next(), if !tasks.is_empty() => match joined {
                 Some(Ok(Ok(()))) | None => {}
                 Some(Ok(Err(err))) => return Err(err),
@@ -622,13 +669,111 @@ async fn wait_for_daemon(
     }
 }
 
+/// Fetch the bound Pod's daemon credential until it is issued. `not_found`
+/// (no binding recorded yet) and `unavailable` are the ordinary cold-start
+/// answers; every other refusal is retried too, because exiting would only
+/// turn a slow start into CrashLoopBackOff. Only an unusable binding URL fails.
+async fn fetch_daemon_credential_with_retry(
+    binding: &BindingPollConfig,
+    backoff: DaemonConnectBackoff,
+) -> Result<IssuedDaemonCredential> {
+    let client = binding
+        .client()
+        .context("build gateway binding client for the daemon credential")?;
+    let started = Instant::now();
+    let mut last_warning: Option<Instant> = None;
+    let mut attempts = 0u32;
+    loop {
+        attempts = attempts.saturating_add(1);
+        let outcome = match fetch_daemon_credential_once(&client, binding).await {
+            Ok(Some(issued)) => {
+                if attempts > 1 {
+                    tracing::info!(
+                        attempts,
+                        waited_ms = elapsed_ms(started),
+                        "workspace daemon credential issued after retry"
+                    );
+                }
+                return Ok(issued);
+            }
+            Ok(None) => None,
+            // Value-blind: the error carries a code, never a credential.
+            Err(error) => Some(error.to_string()),
+        };
+        let next_retry = backoff.delay_after(started.elapsed());
+        let now = Instant::now();
+        match outcome {
+            Some(error)
+                if last_warning.is_none_or(|warned| {
+                    now.duration_since(warned) >= DAEMON_WAIT_WARN_INTERVAL
+                }) =>
+            {
+                last_warning = Some(now);
+                tracing::warn!(
+                    attempts,
+                    waited_ms = elapsed_ms(started),
+                    next_retry_ms = next_retry.as_millis() as u64,
+                    error = %error,
+                    "workspace daemon credential refused; gateway stays not ready and keeps retrying"
+                );
+            }
+            _ => tracing::debug!(
+                attempts,
+                waited_ms = elapsed_ms(started),
+                next_retry_ms = next_retry.as_millis() as u64,
+                "workspace daemon credential not issued yet; retrying"
+            ),
+        }
+        sleep(next_retry).await;
+    }
+}
+
+/// Fetch the credential again whenever the daemon refuses it, and install it
+/// when it changed (a replaced workspace Pod). The daemon Service address is
+/// stable, so the next call reaches the replacement with its credential.
+async fn refresh_daemon_credential(
+    credential: DaemonCredential,
+    binding: BindingPollConfig,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            _ = wait_for_shutdown(shutdown_rx.clone()) => return Ok(()),
+            _ = credential.refresh_requested() => {}
+        }
+        let issued = tokio::select! {
+            _ = wait_for_shutdown(shutdown_rx.clone()) => return Ok(()),
+            issued = fetch_daemon_credential_with_retry(&binding, DAEMON_CREDENTIAL_BACKOFF) => issued?,
+        };
+        let previous = credential.workspace_pod_uid();
+        if credential.replace(issued.token, issued.workspace_pod_uid.clone()) {
+            tracing::info!(
+                previous_workspace_pod_uid = ?previous,
+                workspace_pod_uid = %issued.workspace_pod_uid,
+                "rust gateway refreshed the workspace daemon credential"
+            );
+        } else {
+            tracing::debug!("workspace daemon credential unchanged after a refusal");
+        }
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    return Ok(());
+                }
+            }
+            _ = sleep(DAEMON_CREDENTIAL_REFRESH_INTERVAL) => {}
+        }
+    }
+}
+
 /// Retry until connected. Only a connection failure or an attempt timeout is
 /// retried; an invalid endpoint or client configuration cannot recover.
 async fn connect_daemon_with_retry(
     shim_addr: &str,
-    auth_token: DaemonAuthToken,
+    credential: impl Into<DaemonCredential>,
     backoff: DaemonConnectBackoff,
 ) -> Result<DaemonSessionClient> {
+    let credential = credential.into();
     let started = Instant::now();
     let mut last_warning: Option<Instant> = None;
     let mut attempts = 0u32;
@@ -637,7 +782,7 @@ async fn connect_daemon_with_retry(
         attempts = attempts.saturating_add(1);
         let error = match timeout(
             backoff.attempt_timeout,
-            DaemonSessionClient::connect_shim(shim_addr, auth_token.clone()),
+            DaemonSessionClient::connect_shim(shim_addr, credential.clone()),
         )
         .await
         {
@@ -805,6 +950,7 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     mod credentials;
+    mod daemon_credential;
     use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
     use codewire_gateway_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,
@@ -879,7 +1025,7 @@ mod tests {
             api_url: None,
             binding_url: None,
             coordinator_url: None,
-            daemon_auth_token: DaemonAuthToken::new("gateway-runtime-test-token").unwrap(),
+            daemon_auth_token: Some(DaemonAuthToken::new("gateway-runtime-test-token").unwrap()),
             derp_url: None,
             stun: None,
             stun_servers: Vec::new(),
@@ -937,7 +1083,7 @@ mod tests {
             api_url: None,
             binding_url: None,
             coordinator_url: None,
-            daemon_auth_token: DaemonAuthToken::new("gateway-runtime-test-token").unwrap(),
+            daemon_auth_token: Some(DaemonAuthToken::new("gateway-runtime-test-token").unwrap()),
             derp_url: None,
             stun: None,
             stun_servers: Vec::new(),
