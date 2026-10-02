@@ -266,6 +266,16 @@ pub(crate) struct Scope {
     pub(crate) claim_name: String,
     pub(crate) claim_uid: String,
     pub(crate) pod_name: String,
+    /// The backend pointer: the UID of the workspace Pod orchestration bound
+    /// to this environment. The reviewed workspace Pod must be exactly this one.
+    pub(crate) pod_uid: String,
+    /// The live binding's recorded SandboxClaim and Sandbox UIDs.
+    pub(crate) binding_claim_uid: String,
+    pub(crate) binding_sandbox_uid: String,
+    /// Canonical managed-client selection captured when the Pod was bound.
+    pub(crate) managed_credential_clients: String,
+    /// `pod` (claim-time binding) or `environment` (a pre-binding Pod).
+    pub(crate) credential_scope: String,
     pub(crate) member_id: String,
     pub(crate) member_role: String,
     pub(crate) profile_id: Option<String>,
@@ -360,9 +370,17 @@ impl Resolved {
 // The exact same scope query is used inside projection capture/final locks.
 // Membership remains mandatory even for the creator. Optional provider binding
 // does not relax environment state, generation or backend/Pod identity.
+// The workspace is authorized by its claim-time binding: the backend pointer
+// names the bound Pod UID, and only that environment's live binding of that
+// Pod scopes (Program #2238 B2, design section 11). An unbound or released
+// runtime is never inferred from names. Every column read here is granted to
+// the restricted role, and nothing else of the binding is.
 pub(crate) const SCOPE_QUERY: &str = "SELECT e.id AS environment_id,e.created_by AS creator,e.org_id AS organization, \
      e.environment_operation_generation AS generation,s.namespace,s.sandbox_claim_name AS claim_name, \
-     s.sandbox_claim_uid AS claim_uid,s.pod_name,m.id AS member_id,m.role AS member_role, \
+     s.sandbox_claim_uid AS claim_uid,s.pod_name,s.pod_uid, \
+     w.claim_uid AS binding_claim_uid,w.sandbox_uid AS binding_sandbox_uid, \
+     w.managed_credential_clients,w.credential_scope, \
+     m.id AS member_id,m.role AS member_role, \
      b.profile_id,b.profile_revision,b.personal_owner_confirmed_by AS confirmed_by, \
      p.user_id AS profile_user,p.organization_id AS profile_organization \
      FROM public.environments e \
@@ -370,11 +388,14 @@ pub(crate) const SCOPE_QUERY: &str = "SELECT e.id AS environment_id,e.created_by
      JOIN public.organizations o ON o.id=e.org_id AND o.deletion_state='active' \
      JOIN public.org_members m ON m.org_id=e.org_id AND m.user_id=e.created_by \
      JOIN public.sandbox_environment_backend s ON s.environment_id=e.id \
+     JOIN public.sandbox_workspace_bindings w ON w.environment_id=e.id AND w.pod_uid=s.pod_uid \
+     AND w.released_at IS NULL \
      LEFT JOIN public.platform_environment_access_bindings b ON b.environment_id=e.id \
      LEFT JOIN public.platform_access_profiles p ON p.id=b.profile_id \
      WHERE e.id=$1 AND e.type='sandbox' AND e.state='running' AND e.desired_state='started' \
      AND e.deletion_requested_at IS NULL AND e.environment_operation_generation>0 \
-     AND s.sandbox_claim_name IS NOT NULL AND s.sandbox_claim_uid IS NOT NULL AND s.pod_name IS NOT NULL";
+     AND s.sandbox_claim_name IS NOT NULL AND s.sandbox_claim_uid IS NOT NULL AND s.pod_name IS NOT NULL \
+     AND s.pod_uid IS NOT NULL AND s.bound_at IS NOT NULL";
 
 impl AuthoritySource {
     async fn scope(&self, environment: &str) -> Result<Scope, Error> {
@@ -483,9 +504,9 @@ impl AuthoritySource {
         let lineage =
             validate_lineage(&self.client, &scope, &gateway, &identities.workspace).await?;
         // Selecting a GitHub repository needs no profile. Orchestration records
-        // that choice once, when it renders the verified workspace Pod with the
-        // GitHub client; only then is the creator's active connection
-        // authorized. A missing connection is omitted, never fabricated.
+        // that choice once, in the verified workspace Pod's binding; only then
+        // is the creator's active connection authorized. A missing connection
+        // is omitted, never fabricated.
         if profile.is_none()
             && lineage.managed_github()
             && let Some(github) =
