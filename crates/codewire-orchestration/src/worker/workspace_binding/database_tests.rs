@@ -814,9 +814,9 @@ impl FakeKube {
                     "containerStatuses": [
                         {"name": "workspace", "image": WORKSPACE_IMAGE, "imageID":
                             "registry.example.test/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
-                         "ready": true, "restartCount": 0},
+                         "ready": true, "started": true, "restartCount": 0},
                         {"name": "dind", "image": DIND_IMAGE, "imageID": "docker.io/library/docker@sha256:aaaa",
-                         "ready": true, "restartCount": 0}]},
+                         "ready": true, "started": true, "restartCount": 0}]},
             }),
         );
         fake.put(
@@ -1094,7 +1094,7 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         fenced_write(&db.pool, &pod_scope).await?;
         let secret = "synthetic-session-secret";
         ensure!(
-            environment_daemon_credential(&db.pool, secret, ENV_A).await?
+            environment_daemon_credential(&db.pool, None, secret, ENV_A).await?
                 == crate::worker::gatewayauth::issue_workspace_daemon_credential(
                     secret, ENV_A, POD_1
                 )?
@@ -1125,16 +1125,32 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         ensure!(pointer(&db.pool, ENV_A).await? == (None, false, Some(PVC.into())));
         ensure!(bindings(&db.pool).await? == vec![(POD_1.into(), ENV_A.into(), true)]);
         ensure!(live_environment_binding(&db.pool, ENV_A).await?.is_none());
-        // With no live binding the legacy environment token is the fallback;
-        // an identity-free daemon never accepts it.
+        // With no live binding only a legacy current Pod receives the
+        // environment token (review L4). An unbound identity-free Pod, an
+        // unreadable Pod, or no Kubernetes client gets no credential at all.
+        let legacy = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Environment);
         ensure!(
-            environment_daemon_credential(&db.pool, secret, ENV_A).await?
+            environment_daemon_credential(&db.pool, Some(&legacy.client()), secret, ENV_A).await?
                 == crate::worker::gatewayauth::issue_token(
                     secret,
                     ENV_A,
                     crate::worker::gatewayauth::SCOPE_DAEMON
                 )?
         );
+        let unbound = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Pod);
+        for kube in [
+            Some(unbound.client()),
+            Some(FakeKube::default().client()),
+            None,
+        ] {
+            let error = environment_daemon_credential(&db.pool, kube.as_ref(), secret, ENV_A)
+                .await
+                .expect_err("an unbound non-legacy Pod received the environment token");
+            ensure!(
+                error.downcast_ref::<DaemonNotBound>().is_some(),
+                "{error:#}"
+            );
+        }
         let store = PgBindingStore::from_pool(db.pool.clone());
         ensure!(
             store
@@ -1351,6 +1367,411 @@ async fn db_the_release_sweep_frees_only_bindings_whose_pod_is_absent() -> Resul
             rotate(&db.pool, UNRELEASED_INACTIVE, &mut cursor, 64)
                 .await?
                 .is_empty()
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Review M1: the backfill never records a Pod-scope binding, which the 8087
+/// listener and the gateway RPC would serve without the enforced path's
+/// locked re-check. It leaves an identity-free Pod `NotReady`, unbound and
+/// undeleted, and still records a legacy Pod's environment scope.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_the_backfill_never_records_a_pod_scope_binding() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        let identity_free = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+        ensure!(
+            record_backfill(&db.pool, &identity_free.client(), ENV_A).await?
+                == RecordResult::NotReady
+        );
+        ensure!(bindings(&db.pool).await?.is_empty());
+        ensure!(pointer(&db.pool, ENV_A).await?.0.is_none());
+        ensure!(identity_free.deletes().is_empty());
+
+        let legacy = FakeKube::runtime(ENV_B, POD_2, WorkspaceCredentialScope::Environment);
+        ensure!(
+            record_backfill(&db.pool, &legacy.client(), ENV_B).await? == RecordResult::Recorded
+        );
+        let scope: String = sqlx::query_scalar(
+            "SELECT credential_scope FROM sandbox_workspace_bindings WHERE pod_uid = $1",
+        )
+        .bind(POD_2)
+        .fetch_one(&db.pool)
+        .await?;
+        ensure!(scope == "environment");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A Claim → Sandbox → Pod chain that is bind-ready but not Ready: DinD's
+/// Docker daemon is still starting, so the DinD container has started but is
+/// not ready, the Pod is not Ready, and neither the Sandbox nor the Claim is
+/// Ready, while the Sandbox status reports its current generation.
+fn dind_starting(environment: &str, pod_uid: &str, scope: WorkspaceCredentialScope) -> FakeKube {
+    let fake = FakeKube::runtime(environment, pod_uid, scope);
+    let name = format!("sandbox-{environment}");
+    fake.update(
+        &format!("{CLAIMS_API}/{NAMESPACE}/sandboxclaims/{name}"),
+        |claim| {
+            claim["status"]["conditions"][0]["status"] = json!("False");
+        },
+    );
+    fake.update(
+        &format!("{SANDBOXES_API}/{NAMESPACE}/sandboxes/{name}"),
+        |sandbox| {
+            sandbox["status"]["conditions"][0]["status"] = json!("False");
+        },
+    );
+    fake.update(&pod_path(environment), |pod| {
+        pod["status"]["conditions"][0]["status"] = json!("False");
+        pod["status"]["containerStatuses"][1]["ready"] = json!(false);
+        pod["status"]["containerStatuses"][1]["state"] = json!({"running": {}});
+    });
+    fake
+}
+
+/// Design §10 (amended): an identity-free Pod is bound while DinD is still
+/// starting, before any Claim, Sandbox or Pod readiness, through the same
+/// enforced recorder. A legacy Pod is left to the post-ready path.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_bind_happens_while_dind_is_still_starting() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        let starting = dind_starting(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+        let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
+        let bound = tokio::time::timeout(
+            Duration::from_secs(5),
+            bind_before_ready(&starting.client(), &authority, &["creating"]),
+        )
+        .await??;
+        ensure!(bound.is_some(), "the early bind did not record");
+        ensure!(pointer(&db.pool, ENV_A).await?.0.as_deref() == Some(POD_1));
+        let live = live_environment_binding(&db.pool, ENV_A).await?;
+        ensure!(live.is_some_and(|live| live.credential_scope == WorkspaceCredentialScope::Pod));
+        // Already bound: the post-ready bind and a second early bind change nothing.
+        ensure!(
+            enforced(
+                &db.pool,
+                &FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod),
+                ENV_A,
+                POD_1,
+                &["creating"]
+            )
+            .await?
+                == WriteOutcome::Unchanged
+        );
+        ensure!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                bind_before_ready(&starting.client(), &authority, &["creating"]),
+            )
+            .await??
+            .is_none()
+        );
+        ensure!(starting.deletes().is_empty());
+
+        set_state(&db.pool, ENV_B, "starting").await?;
+        let legacy = dind_starting(ENV_B, POD_2, WorkspaceCredentialScope::Environment);
+        let authority = ActivityAuthority::capture(&db.pool, ENV_B, GENERATION).await?;
+        ensure!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                bind_before_ready(&legacy.client(), &authority, &["starting"]),
+            )
+            .await??
+            .is_none()
+        );
+        ensure!(pointer(&db.pool, ENV_B).await?.0.is_none());
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Design §10 (amended): each bind-ready condition, missing on its own,
+/// refuses the bind and records nothing. The chain and readiness conditions
+/// refuse without deleting; a definitive check failure on the unbound
+/// identity-free Pod deletes it, as before.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
+    type Mutation = Box<dyn Fn(&FakeKube)>;
+    let name = format!("sandbox-{ENV_A}");
+    let claim = format!("{CLAIMS_API}/{NAMESPACE}/sandboxclaims/{name}");
+    let sandbox = format!("{SANDBOXES_API}/{NAMESPACE}/sandboxes/{name}");
+    let pod = pod_path(ENV_A);
+    let pvc = pvc_path(ENV_A);
+    let edit = |path: &String, change: fn(&mut serde_json::Value)| -> Mutation {
+        let path = path.clone();
+        Box::new(move |fake: &FakeKube| fake.update(&path, change))
+    };
+    let cases: Vec<(&str, Mutation, BindRefused, bool)> = vec![
+        (
+            "Claim labels",
+            edit(&claim, |o| {
+                o["metadata"]["labels"]["codewire.sh/environment-operation-generation"] = json!("2")
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "Claim Pod labels",
+            edit(&claim, |o| {
+                o["spec"]["additionalPodMetadata"]["labels"]["codewire.sh/environment-operation-generation"] =
+                    json!("2")
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "Sandbox template labels",
+            edit(&sandbox, |o| {
+                o["spec"]["podTemplate"]["metadata"]["labels"]["codewire.sh/environment-operation-generation"] =
+                    json!("2")
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "Pod labels",
+            edit(&pod, |o| {
+                o["metadata"]["labels"]["codewire.sh/environment-operation-generation"] = json!("2")
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "stale Sandbox status",
+            edit(&sandbox, |o| {
+                o["status"]["conditions"][0]["observedGeneration"] = json!(1)
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "no Sandbox condition",
+            edit(&sandbox, |o| o["status"]["conditions"] = json!([])),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "Pod not Running",
+            edit(&pod, |o| o["status"]["phase"] = json!("Pending")),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "container not started",
+            edit(&pod, |o| {
+                o["status"]["containerStatuses"][1]["started"] = json!(false)
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "container without imageID",
+            edit(&pod, |o| {
+                o["status"]["containerStatuses"][1]["imageID"] = json!("")
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "container without status",
+            edit(&pod, |o| {
+                o["status"]["containerStatuses"]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop();
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "init container not finished",
+            edit(&pod, |o| {
+                o["spec"]["initContainers"] = json!([{"name": "daemon-init", "image": DIND_IMAGE}]);
+                o["status"]["initContainerStatuses"] = json!([{"name": "daemon-init", "image": DIND_IMAGE,
+                "imageID": "docker.io/library/docker@sha256:aaaa", "ready": false, "started": false,
+                "restartCount": 0, "state": {"waiting": {"reason": "PodInitializing"}}}]);
+            }),
+            BindRefused::NotConverged,
+            false,
+        ),
+        (
+            "Claim deleting",
+            edit(&claim, |o| {
+                o["metadata"]["deletionTimestamp"] = json!("2026-10-02T00:00:00Z")
+            }),
+            BindRefused::ChainUnverified,
+            false,
+        ),
+        (
+            "Sandbox deleting",
+            edit(&sandbox, |o| {
+                o["metadata"]["deletionTimestamp"] = json!("2026-10-02T00:00:00Z")
+            }),
+            BindRefused::ChainUnverified,
+            false,
+        ),
+        (
+            "Pod deleting",
+            edit(&pod, |o| {
+                o["metadata"]["deletionTimestamp"] = json!("2026-10-02T00:00:00Z")
+            }),
+            BindRefused::ChainUnverified,
+            false,
+        ),
+        (
+            "Claim not bound to the Sandbox",
+            edit(&claim, |o| {
+                o["status"]["sandbox"]["name"] = json!("sandbox-other")
+            }),
+            BindRefused::ChainUnverified,
+            false,
+        ),
+        (
+            "Sandbox controlled by another Claim",
+            edit(&sandbox, |o| {
+                o["metadata"]["ownerReferences"][0]["uid"] =
+                    json!("3f2b1c0d-1111-4a2b-8c3d-4e5f6a7b8c9d")
+            }),
+            BindRefused::ChainUnverified,
+            false,
+        ),
+        (
+            "Pod controlled by another Sandbox",
+            edit(&pod, |o| {
+                o["metadata"]["ownerReferences"][0]["uid"] =
+                    json!("3f2b1c0d-1111-4a2b-8c3d-4e5f6a7b8c9d")
+            }),
+            BindRefused::ChainUnverified,
+            false,
+        ),
+        (
+            "Pod with a second controller",
+            edit(&pod, |o| {
+                o["metadata"]["ownerReferences"].as_array_mut().unwrap().push(json!({"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "other", "uid": "3f2b1c0d-1111-4a2b-8c3d-4e5f6a7b8c9d", "controller": true}));
+            }),
+            BindRefused::ChainUnverified,
+            false,
+        ),
+        (
+            "image digest",
+            edit(&pod, |o| {
+                o["status"]["containerStatuses"][0]["imageID"] = json!(
+                    "registry.example.test/codewire/workspace@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+                )
+            }),
+            BindRefused::Denied("images"),
+            true,
+        ),
+        (
+            "PVC not Bound",
+            edit(&pvc, |o| o["status"]["phase"] = json!("Pending")),
+            BindRefused::Denied("workspace volume"),
+            true,
+        ),
+        (
+            "ambiguous credential scope",
+            edit(
+                &pod,
+                |o| {
+                    o["spec"]["containers"][0]["env"] =
+                        json!([{"name": "CODEWIRE_DAEMON_AUTH_TOKEN", "value": "synthetic"}])
+                },
+            ),
+            BindRefused::Denied("credential scope"),
+            true,
+        ),
+    ];
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        for (label, mutate, expected, deletes) in &cases {
+            let fake = dind_starting(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+            mutate(&fake);
+            let error = enforced(&db.pool, &fake, ENV_A, POD_1, &["creating"])
+                .await
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("{label}: the bind was recorded"))?;
+            ensure!(
+                bind_refused(&error) == Some(*expected),
+                "{label}: {error:#}"
+            );
+            ensure!(
+                bindings(&db.pool).await?.is_empty(),
+                "{label}: a binding was recorded"
+            );
+            ensure!(
+                fake.deletes().is_empty() != *deletes,
+                "{label}: deletes {:?}",
+                fake.deletes()
+            );
+        }
+
+        // The environment must be authoritative: a non-bindable state.
+        set_state(&db.pool, ENV_A, "stopped").await?;
+        let fake = dind_starting(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+        let error = enforced(&db.pool, &fake, ENV_A, POD_1, &["running"])
+            .await
+            .expect_err("a stopped environment was bound");
+        ensure!(is_authority_lost(&error), "{error:#}");
+        set_state(&db.pool, ENV_A, "creating").await?;
+
+        // A changed backend row.
+        let env = load_environment(&db.pool, ENV_A).await?;
+        let mut backend = crate::worker::env_data::load_backend_row(&db.pool, ENV_A).await?;
+        backend.claim_uid = OTHER_PVC.into();
+        let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
+        let error = record_workspace_binding(
+            &fake.client(),
+            &env,
+            &backend,
+            &authority,
+            &["creating"],
+            &observed(ENV_A, POD_1),
+        )
+        .await
+        .expect_err("a changed backend row was bound");
+        ensure!(
+            error.to_string().contains("backend association changed"),
+            "{error:#}"
+        );
+
+        // Pod-scope values captured before the lock must still match the
+        // environment row the fenced transaction locked.
+        let mut stale = load_environment(&db.pool, ENV_A).await?;
+        stale.managed_credential_clients =
+            Ok(codewire_access::ManagedCredentialClients::from_profile_slots(["codex"])?);
+        let backend = crate::worker::env_data::load_backend_row(&db.pool, ENV_A).await?;
+        let error = record_workspace_binding(
+            &fake.client(),
+            &stale,
+            &backend,
+            &authority,
+            &["creating"],
+            &observed(ENV_A, POD_1),
+        )
+        .await
+        .expect_err("a stale Pod-scope capture was bound");
+        ensure!(is_authority_lost(&error), "{error:#}");
+        ensure!(bindings(&db.pool).await?.is_empty());
+
+        // With every condition present it binds.
+        ensure!(
+            enforced(&db.pool, &fake, ENV_A, POD_1, &["creating"]).await? == WriteOutcome::Recorded
         );
         Ok(())
     }

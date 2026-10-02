@@ -258,16 +258,18 @@ WORKSPACE_BINDING_INGRESS = "codewire-orchestration-workspace-binding"
 
 def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
     """TCP 8087 serves only WorkspaceBindingService, for workspace Pods. Its
-    ingress policy must admit only workspace Pods in sandbox namespaces on
-    8087 while every other port keeps accepting every source, so adding it
-    never changes what 8084, 8085 or any other orchestration port accepts."""
+    ingress policy must admit only workspace Pods in the target's sandbox
+    namespace on 8087, selected by the immutable kubernetes.io/metadata.name
+    rather than a namespace label, while every other port keeps accepting
+    every source, so adding it never changes what 8084, 8085 or any other
+    orchestration port accepts."""
     policy = exactly_one(resources, "NetworkPolicy", WORKSPACE_BINDING_INGRESS, label, output)
     if not policy:
         return
     if metadata_field(policy, "namespace") != target["subject_namespace"]:
         output.append(f"{label}: workspace binding ingress policy must live with orchestration")
     expected = compact(
-        """
+        f"""
         spec:
           ingress:
           - ports:
@@ -283,7 +285,7 @@ def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str
           - from:
             - namespaceSelector:
                 matchLabels:
-                  codewire.sh/resource-type: sandbox
+                  kubernetes.io/metadata.name: {target["role_namespace"]}
               podSelector:
                 matchLabels:
                   codewire.sh/type: workspace
@@ -300,7 +302,7 @@ def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str
     )
     if compact(top_level_block(policy, "spec")) != expected:
         output.append(
-            f"{label}: workspace binding ingress must admit only sandbox workspace Pods on 8087 "
+            f"{label}: workspace binding ingress must admit only {target['role_namespace']} workspace Pods on 8087 "
             "and leave every other orchestration port open to every source"
         )
     others = [
@@ -707,7 +709,9 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             ("8085 narrowed", "endPort: 8086", "endPort: 8084"),
             ("high ports narrowed", "port: 8088", "port: 9000"),
             ("UDP narrowed", "      port: 1\n      protocol: UDP", "      port: 53\n      protocol: UDP"),
-            ("any namespace", "    - namespaceSelector:\n        matchLabels:\n          codewire.sh/resource-type: sandbox\n", "    - namespaceSelector: {}\n"),
+            ("any namespace", "    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: prod-sandboxes\n", "    - namespaceSelector: {}\n"),
+            ("mutable namespace label", "kubernetes.io/metadata.name: prod-sandboxes", "codewire.sh/resource-type: sandbox"),
+            ("another namespace", "kubernetes.io/metadata.name: prod-sandboxes", "kubernetes.io/metadata.name: prod"),
             ("any Pod", "codewire.sh/type: workspace", "codewire.sh/type: gateway"),
             ("egress isolation", "  - Ingress", "  - Ingress\n  - Egress"),
         ]:

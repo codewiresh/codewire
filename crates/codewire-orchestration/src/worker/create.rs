@@ -14,8 +14,8 @@ use super::env_log::emit_authoritative_environment_log_for_states;
 use super::gatewayauth::{WorkspaceCredentialScope, issue_environment_tokens};
 use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
 use super::workspace_binding::{
-    EnvironmentBinding, bind_workspace_runtime, binding_bootstrap_current, credential_scope,
-    live_environment_binding,
+    EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
+    credential_scope, live_environment_binding,
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
@@ -1016,15 +1016,20 @@ async fn run_environment_create(
                     .await?;
                     return Err(e);
                 }
-                if let Err(e) = authority
-                    .run_while_authoritative_for_states(
+                if let Err(e) = wait_with_early_bind(
+                    ctx,
+                    &env,
+                    authority,
+                    CREATE_MUTATION_STATES,
+                    authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
                         client.wait_for_ready(
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
                         ),
-                    )
-                    .await
+                    ),
+                )
+                .await
                 {
                     emit_authoritative_environment_log_for_states(
                         authority,
@@ -1425,15 +1430,20 @@ async fn run_environment_create(
                     None,
                 )
                 .await?;
-                let gateway_result = authority
-                    .run_while_authoritative_for_states(
+                let gateway_result = wait_with_early_bind(
+                    ctx,
+                    &env,
+                    authority,
+                    CREATE_MUTATION_STATES,
+                    authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
                         client.wait_for_credential_gateway_ready(
                             &template_opts,
                             ready_timeout_for_isolation(&env.isolation_tier),
                         ),
-                    )
-                    .await;
+                    ),
+                )
+                .await;
                 let gateway_elapsed = gateway_started.elapsed();
                 let gateway_meta = Some(serde_json::json!({
                     "duration_ms": duration_ms(gateway_elapsed),
@@ -1956,6 +1966,45 @@ pub(super) async fn reconcile_runtime_identity(
     reconcile_runtime_identity_for_pod(ctx, env, backend, authority, states, None).await
 }
 
+/// Run `wait` (the gateway or Claim Ready wait of create and start) while
+/// [`bind_before_ready`] records an identity-free Pod's binding as soon as its
+/// chain is bind-ready (design §10, amended). The wait decides the outcome:
+/// a recorded or skipped bind lets it continue, a refused bind fails it, and
+/// the bind is dropped once the wait ends. The post-ready runtime-identity
+/// reconcile still binds, idempotently, before MarkRunning and setup.
+pub(super) async fn wait_with_early_bind<T>(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    wait: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let Some(kube) = ctx.kube.as_ref() else {
+        return wait.await;
+    };
+    let bind = bind_before_ready(kube, authority, states);
+    tokio::pin!(wait);
+    tokio::pin!(bind);
+    let mut binding = true;
+    loop {
+        tokio::select! {
+            result = &mut wait => return result,
+            result = &mut bind, if binding => {
+                binding = false;
+                if let Some(elapsed) = result?
+                    && matches!(env.state.as_str(), "creating" | "starting")
+                {
+                    observe_create_stage(
+                        StartStage::WorkspaceBind,
+                        start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+                        elapsed,
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub(super) async fn reconcile_runtime_identity_for_pod(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
@@ -2030,8 +2079,15 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
     // Design §10: Claim Ready with converged labels, then the binding, then
     // the gateway. An identity-free daemon listens only once bound and the
     // gateway reaches it only after that, so the gateway wait comes last.
-    authority
-        .run_while_authoritative_for_states(
+    // Under the amended trigger the binding usually happened during an
+    // earlier wait; this wait binds early too, for a start whose Claim showed
+    // a stale Ready and a replacement Pod that is still starting Docker.
+    wait_with_early_bind(
+        ctx,
+        env,
+        authority,
+        states,
+        authority.run_while_authoritative_for_states(
             states,
             client.wait_for_claim_runtime_identity(
                 &opts,
@@ -2040,8 +2096,9 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
                 &observation,
                 ready_timeout_for_isolation(&env.isolation_tier),
             ),
-        )
-        .await?;
+        ),
+    )
+    .await?;
     let kube = ctx
         .kube
         .as_ref()
