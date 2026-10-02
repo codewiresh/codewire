@@ -242,7 +242,8 @@ impl DaemonClient for DaemonSessionClient {
         let output = client
             .exec_session(request)
             .await
-            .map_err(|status| self.refused(status))?
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?
             .into_inner();
         Ok(ExecDaemonSession { input, output })
     }
@@ -260,7 +261,8 @@ impl DaemonClient for DaemonSessionClient {
         let output = client
             .pty_session(request)
             .await
-            .map_err(|status| self.refused(status))?
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?
             .into_inner();
         Ok(PtyDaemonSession { input, output })
     }
@@ -272,7 +274,8 @@ impl DaemonClient for DaemonSessionClient {
         let response = client
             .list(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(response.into_inner().entries)
     }
 
@@ -289,9 +292,13 @@ impl DaemonClient for DaemonSessionClient {
         self.authorize(&mut request);
         let response = match client.stat(request).await {
             Ok(response) => response,
-            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                self.credential.report_authenticated();
+                return Ok(None);
+            }
             Err(status) => return Err(self.refused(status)),
         };
+        self.credential.report_authenticated();
         Ok(response.into_inner().entry)
     }
 
@@ -311,7 +318,8 @@ impl DaemonClient for DaemonSessionClient {
         client
             .open_file(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(())
     }
 
@@ -331,7 +339,8 @@ impl DaemonClient for DaemonSessionClient {
         let response = client
             .read(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(response.into_inner().data)
     }
 
@@ -351,7 +360,8 @@ impl DaemonClient for DaemonSessionClient {
         let response = client
             .write(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(response.into_inner().bytes_written)
     }
 
@@ -365,7 +375,8 @@ impl DaemonClient for DaemonSessionClient {
         client
             .mkdir(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(())
     }
 
@@ -379,7 +390,8 @@ impl DaemonClient for DaemonSessionClient {
         client
             .remove(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(())
     }
 
@@ -393,7 +405,8 @@ impl DaemonClient for DaemonSessionClient {
         client
             .rename(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(())
     }
 
@@ -404,7 +417,8 @@ impl DaemonClient for DaemonSessionClient {
         client
             .set_stat(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(())
     }
 
@@ -415,7 +429,8 @@ impl DaemonClient for DaemonSessionClient {
         let response = client
             .readlink(request)
             .await
-            .map_err(|status| self.refused(status))?;
+            .map_err(|status| self.refused(status))
+            .inspect(|_| self.credential.report_authenticated())?;
         Ok(response.into_inner().target)
     }
 }

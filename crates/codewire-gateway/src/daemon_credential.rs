@@ -8,7 +8,15 @@
 //! the current value, so after a refresh the next call authenticates to the
 //! replacement Pod behind the same daemon Service. The value never appears in
 //! `Debug` output or logs.
+//!
+//! An issued credential is derived from the session secret and the bound Pod
+//! UID. A bound daemon never re-binds, so rotating the session secret takes
+//! effect for a workspace only when its Pod is restarted: until then the
+//! gateway keeps fetching a credential the running daemon refuses, and the
+//! refresher backs off (`codewire_gateway_daemon_credential_refreshes_total`
+//! counts it as `changed`, then `unchanged`).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use codewire_gateway_proto::DaemonAuthToken;
@@ -24,6 +32,8 @@ struct Inner {
     /// Only an issued credential can be refreshed; a rendered token is fixed.
     refreshable: bool,
     refresh: Notify,
+    /// Set by an accepted daemon call since the refresher last looked.
+    authenticated: AtomicBool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -64,6 +74,7 @@ impl DaemonCredential {
                 }),
                 refreshable,
                 refresh: Notify::new(),
+                authenticated: AtomicBool::new(false),
             }),
         }
     }
@@ -96,6 +107,19 @@ impl DaemonCredential {
         if self.inner.refreshable {
             self.inner.refresh.notify_one();
         }
+    }
+
+    /// The daemon accepted a call with this credential. It resets the
+    /// refresher's backoff, so the next refusal is followed at once.
+    pub fn report_authenticated(&self) {
+        if self.inner.refreshable && !self.inner.authenticated.load(Ordering::Relaxed) {
+            self.inner.authenticated.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether a daemon call was accepted since the last look, clearing it.
+    pub(crate) fn take_authenticated(&self) -> bool {
+        self.inner.authenticated.swap(false, Ordering::AcqRel)
     }
 
     /// Wait for the next refusal report.
@@ -189,6 +213,20 @@ mod tests {
             credential.token().expose_secret(),
             "synthetic-rendered-token"
         );
+    }
+
+    #[test]
+    fn an_accepted_call_is_reported_once_and_only_for_an_issued_credential() {
+        let issued = DaemonCredential::issued(token("synthetic-issued-credential"), POD.into());
+        assert!(!issued.take_authenticated());
+        issued.report_authenticated();
+        issued.clone().report_authenticated();
+        assert!(issued.take_authenticated());
+        assert!(!issued.take_authenticated());
+
+        let rendered = DaemonCredential::rendered(token("synthetic-rendered-token"));
+        rendered.report_authenticated();
+        assert!(!rendered.take_authenticated());
     }
 
     #[test]
