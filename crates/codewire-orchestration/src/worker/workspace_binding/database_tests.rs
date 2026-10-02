@@ -1079,9 +1079,10 @@ async fn db_a_pod_bound_elsewhere_or_not_converged_is_never_bound_or_deleted() -
     db.finish(result).await
 }
 
-/// Stop, a restart before resume and destroy release the binding and clear
-/// the pointer; the lookups the listener, gateway and daemon credential use
-/// then find nothing live. Release is idempotent and fenced.
+/// Stop, a restart before resume and destroy release the binding only once
+/// its Pod is observed absent, and clear the pointer; the lookups the
+/// listener, gateway and daemon credential use then find nothing live.
+/// Release is idempotent and fenced.
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
@@ -1101,8 +1102,26 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
 
         set_state(&db.pool, ENV_A, "stopping").await?;
         let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
-        ensure!(release_workspace_binding(&authority, &["stopping"]).await?);
-        ensure!(!release_workspace_binding(&authority, &["stopping"]).await?);
+        // Design §10: never while the bound Pod is present, even terminating.
+        let present = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+        present.update(&pod_path(ENV_A), |pod| {
+            pod["metadata"]["deletionTimestamp"] = json!("2026-10-02T00:00:00Z");
+        });
+        let error = release_workspace_binding(&present.client(), &authority, &["stopping"])
+            .await
+            .expect_err("a binding was released while its Pod was present");
+        ensure!(
+            error.downcast_ref::<BoundPodPresent>().is_some(),
+            "{error:#}"
+        );
+        ensure!(pointer(&db.pool, ENV_A).await?.0.as_deref() == Some(POD_1));
+        ensure!(live_environment_binding(&db.pool, ENV_A).await?.is_some());
+        // The same name on another Pod UID means the bound Pod is gone.
+        let replaced = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Pod);
+        ensure!(release_workspace_binding(&replaced.client(), &authority, &["stopping"]).await?);
+        let absent = FakeKube::default().client();
+        ensure!(!release_workspace_binding(&absent, &authority, &["stopping"]).await?);
+        ensure!(present.deletes().is_empty() && replaced.deletes().is_empty());
         ensure!(pointer(&db.pool, ENV_A).await? == (None, false, Some(PVC.into())));
         ensure!(bindings(&db.pool).await? == vec![(POD_1.into(), ENV_A.into(), true)]);
         ensure!(live_environment_binding(&db.pool, ENV_A).await?.is_none());
@@ -1132,7 +1151,7 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
             .bind(GENERATION + 1)
             .execute(&db.pool)
             .await?;
-        let error = release_workspace_binding(&stale, &RUNNING)
+        let error = release_workspace_binding(&absent, &stale, &RUNNING)
             .await
             .expect_err("a stale authority released a binding");
         ensure!(is_authority_lost(&error));
@@ -1198,7 +1217,9 @@ async fn db_a_restore_adoption_moves_the_pvc_uid_only_when_unbound_and_resolvabl
             .await
             .expect_err("a bound environment adopted a PVC");
         ensure!(error.downcast_ref::<AdoptionRefused>() == Some(&AdoptionRefused::Bound));
-        ensure!(release_workspace_binding(&authority, &["starting"]).await?);
+        // Stopped: the Pod is gone, so its binding is released.
+        fake.objects.lock().unwrap().remove(&pod_path(ENV_A));
+        ensure!(release_workspace_binding(&fake.client(), &authority, &["starting"]).await?);
         adopt_restored_workspace_pvc(&fake.client(), &authority, &["starting"], &backend, OTHER_PVC).await?;
         ensure!(pointer(&db.pool, ENV_A).await? == (None, false, Some(OTHER_PVC.into())));
         // The resolver now accepts the restored PVC by its adopted UID.
@@ -1221,6 +1242,116 @@ async fn db_a_restore_adoption_moves_the_pvc_uid_only_when_unbound_and_resolvabl
             .expect_err("a stale authority adopted a PVC");
         ensure!(is_authority_lost(&error));
         ensure!(pointer(&db.pool, ENV_A).await?.2.as_deref() == Some(OTHER_PVC));
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Design §10's release rule in the backfill: a live binding whose
+/// environment is not stably running (destroyed, stopped) is released once
+/// its Pod is observed absent, which also frees bindings an earlier binary
+/// left live. A present or terminating Pod keeps its binding, a running
+/// environment is left to its liveness rebind, and nothing is ever deleted.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_the_release_sweep_frees_only_bindings_whose_pod_is_absent() -> Result<()> {
+    const ENV_C: &str = "0f1e2d3c-4b5a-4968-8776-655443322110";
+    const POD_3: &str = "2b3c4d5e-6f70-4182-93a4-b5c6d7e8f901";
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        sqlx::query(
+            "INSERT INTO environments \
+             (id,org_id,created_by,preset_id,type,state,desired_state,project_spec, \
+              environment_operation_generation) \
+             VALUES ($1,$2,$3,$4,'sandbox','running','started', \
+             '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb,$5)",
+        )
+        .bind(ENV_C)
+        .bind(ORGANIZATION)
+        .bind(CREATOR)
+        .bind(PRESET)
+        .bind(GENERATION)
+        .execute(&db.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO sandbox_environment_backend \
+             (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(ENV_C)
+        .bind(NAMESPACE)
+        .bind(format!("sandbox-{ENV_C}"))
+        .bind(claim_uid(ENV_C))
+        .execute(&db.pool)
+        .await?;
+        for (environment, pod) in [(ENV_A, POD_1), (ENV_B, POD_2), (ENV_C, POD_3)] {
+            fenced_write(&db.pool, &record(environment, pod)).await?;
+        }
+        // A destroyed environment whose cleanup removed its backend row, as
+        // on Dev before B2, and a stopped one whose Pod is still present.
+        sqlx::query(
+            "UPDATE environments SET state='destroyed', desired_state='destroyed' WHERE id=$1",
+        )
+        .bind(ENV_A)
+        .execute(&db.pool)
+        .await?;
+        sqlx::query("DELETE FROM sandbox_environment_backend WHERE environment_id = $1")
+            .bind(ENV_A)
+            .execute(&db.pool)
+            .await?;
+        sqlx::query("UPDATE environments SET state='stopped', desired_state='stopped' WHERE id=$1")
+            .bind(ENV_B)
+            .execute(&db.pool)
+            .await?;
+
+        // The running environment is not a sweep candidate even with no Pod.
+        let mut cursor = None;
+        let candidates = rotate(&db.pool, UNRELEASED_INACTIVE, &mut cursor, 64).await?;
+        let mut expected = vec![POD_1.to_owned(), POD_2.to_owned()];
+        expected.sort();
+        ensure!(candidates == expected, "{candidates:?}");
+
+        let kube = FakeKube::runtime(ENV_B, POD_2, WorkspaceCredentialScope::Pod);
+        kube.update(&pod_path(ENV_B), |pod| {
+            pod["metadata"]["deletionTimestamp"] = json!("2026-10-02T00:00:00Z");
+        });
+        let client = kube.client();
+        ensure!(
+            release_binding_if_pod_absent(&db.pool, &client, POD_1).await?
+                == RecordResult::Recorded
+        );
+        ensure!(
+            release_binding_if_pod_absent(&db.pool, &client, POD_2).await?
+                == RecordResult::Unchanged
+        );
+        ensure!(
+            release_binding_if_pod_absent(&db.pool, &client, POD_1).await?
+                == RecordResult::Unchanged
+        );
+        ensure!(live_environment_binding(&db.pool, ENV_A).await?.is_none());
+        ensure!(pointer(&db.pool, ENV_B).await?.0.as_deref() == Some(POD_2));
+
+        // The stopped environment's Pod is replaced under the same name.
+        let replaced = FakeKube::runtime(ENV_B, POD_3, WorkspaceCredentialScope::Pod);
+        ensure!(
+            release_binding_if_pod_absent(&db.pool, &replaced.client(), POD_2).await?
+                == RecordResult::Recorded
+        );
+        ensure!(pointer(&db.pool, ENV_B).await? == (None, false, Some(PVC.into())));
+
+        let rows = bindings(&db.pool).await?;
+        ensure!(rows.len() == 3, "a binding row was deleted: {rows:?}");
+        ensure!(rows.contains(&(POD_1.into(), ENV_A.into(), true)));
+        ensure!(rows.contains(&(POD_2.into(), ENV_B.into(), true)));
+        ensure!(rows.contains(&(POD_3.into(), ENV_C.into(), false)));
+        ensure!(kube.deletes().is_empty() && replaced.deletes().is_empty());
+        let mut cursor = None;
+        ensure!(
+            rotate(&db.pool, UNRELEASED_INACTIVE, &mut cursor, 64)
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
     .await;

@@ -341,7 +341,7 @@ pub async fn handle_environment_stop(
         .await?;
     // Design §10: the Pod is observed absent, so its binding is released. A
     // later start binds the new Pod UID.
-    release_workspace_binding(authority, STOP_MUTATION_STATES).await?;
+    release_workspace_binding(&client.client, authority, STOP_MUTATION_STATES).await?;
     if let Err(e) = authority
         .run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(env_id))
         .await
@@ -658,7 +658,7 @@ pub(super) async fn restart_workspace_bootstrap(
     .await?;
     // Every previous Pod is gone: release its binding before the resumed Pod
     // gets a new UID and its own binding.
-    release_workspace_binding(authority, states).await?;
+    release_workspace_binding(&client.client, authority, states).await?;
     refresh_workspace_bootstrap(ctx, env, backend, opts, &suspended, authority, states).await?;
     run_template_mutation(
         authority,
@@ -1058,9 +1058,8 @@ pub async fn handle_environment_destroy(
 
     let per_environment_template =
         destroy_template_hint(&ctx.pool, env.preset_id.as_deref(), env_id).await?;
-    // Design §10: destroy releases the binding before its storage proof; the
-    // proof also counts the recorded workspace PVC UID (design §12).
-    release_workspace_binding(authority, DESTROY_CLEANUP_MUTATION_STATES).await?;
+    // The storage proof also counts the recorded workspace PVC UID (design
+    // §12).
     let recorded_pvc_uid = backend
         .as_ref()
         .and_then(|row| row.workspace_pvc_uid.clone());
@@ -1089,6 +1088,19 @@ pub async fn handle_environment_destroy(
                 "delete environment resources in {namespace}: {error:#}"
             ));
         }
+    }
+
+    // Design §10: release the binding only after its Pod is observed absent,
+    // which the deletion above waited for and the release re-reads by UID.
+    // Destroying is not a bindable state and neither the environment ID nor
+    // a Pod UID is ever reused, so a recreated environment or Pod cannot meet
+    // this binding; the cleanup marker below refuses while it is still live.
+    if let Some(kube) = ctx.kube.as_ref()
+        && let Err(error) =
+            release_workspace_binding(kube, authority, DESTROY_CLEANUP_MUTATION_STATES).await
+    {
+        record_environment_error(&svc, authority, env_id, &format!("{error:#}")).await?;
+        return Err(anyhow::anyhow!("release workspace binding: {error:#}"));
     }
 
     if env.isolation_tier == "confidential" {
