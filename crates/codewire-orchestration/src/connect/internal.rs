@@ -16,7 +16,9 @@ use codewire_server_core::connect::rpc_app_error;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
-use crate::api::internal::{GatewayBinding, issue_gateway_binding_core};
+use crate::api::internal::{
+    GatewayBinding, issue_gateway_binding_core, issue_gateway_daemon_credential_core,
+};
 use crate::gateway_binding_identity::{
     GatewayBindingAuthenticator, GatewayBindingIdentityError, KubernetesGatewayBindingAuthenticator,
 };
@@ -58,18 +60,27 @@ impl GatewayBindingService for GatewayBindingConnectService {
         connectrpc::Response::ok(proto_gateway_binding(binding))
     }
 
-    /// The claim-time binding contract (Program #2238 B1) declares this RPC
-    /// before its authority is served: the gateway ownership-chain check and
-    /// the binding lookup land with the workspace-binding listener. Until
-    /// then every caller gets `unimplemented` and nothing is looked up.
+    /// The daemon credential for the environment's bound workspace Pod. The
+    /// projected identity is reviewed first; the ownership-chain check and
+    /// binding lookup live in the shared service layer.
     async fn issue_gateway_daemon_credential(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         _request: ServiceRequest<'_, IssueGatewayDaemonCredentialRequest>,
     ) -> ServiceResult<IssueGatewayDaemonCredentialResponse> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "gateway daemon credentials are not served yet",
-        ))
+        let identity = self
+            .authenticator
+            .authenticate(ctx.headers())
+            .await
+            .map_err(|error| gateway_binding_identity_rpc_error(error, &ctx))?;
+        let credential = issue_gateway_daemon_credential_core(&self.state, &identity)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(IssueGatewayDaemonCredentialResponse {
+            daemon_credential: credential.daemon_credential,
+            workspace_pod_uid: credential.workspace_pod_uid,
+            ..Default::default()
+        })
     }
 }
 

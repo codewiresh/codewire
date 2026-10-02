@@ -222,6 +222,27 @@ impl KubernetesPodIdentityVerifier {
     }
 }
 
+/// Discards garbage before any TokenReview capacity is spent: exactly one
+/// canonical bearer of at most 16 KiB that is a compact JWS (three non-empty
+/// base64url segments) whose unverified `exp` lies in the future. This never
+/// authenticates anything; TokenReview remains the only authentication, and
+/// [`KubernetesPodIdentityVerifier::authenticate`] repeats every check.
+pub fn pre_review_bearer_filter(headers: &HeaderMap) -> Result<(), PodIdentityError> {
+    let token = bearer(headers)?;
+    if token.split('.').count() != 3
+        || !token
+            .split('.')
+            .all(|segment| !segment.is_empty() && segment.bytes().all(is_base64url_byte))
+    {
+        return Err(PodIdentityError::Unauthenticated);
+    }
+    reviewed_expiry(&token, unix_now()?).map(|_| ())
+}
+
+fn is_base64url_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
 fn bearer(headers: &HeaderMap) -> Result<Zeroizing<String>, PodIdentityError> {
     let mut values = headers.get_all(AUTHORIZATION).iter();
     let value = values.next().ok_or(PodIdentityError::Unauthenticated)?;

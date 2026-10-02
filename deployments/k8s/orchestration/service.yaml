@@ -41,3 +41,25 @@ spec:
     - port: 8084
       targetPort: http
       name: grpc
+---
+# Identity-free workspace Pods reach WorkspaceBindingService here. This
+# Service exposes only the dedicated listener, no Ingress references it, and
+# the main Service above does not carry the port. The workspace template's
+# single egress rule to this port lands with the B2 cutover.
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-orchestration-workspace-binding
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  ports:
+    - port: 8087
+      targetPort: workspace-bind
+      name: workspace-bind

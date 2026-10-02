@@ -25,3 +25,4 @@ pub mod temporal;
 #[path = "../../codewire-platform-credentials/tests/support/mod.rs"]
 pub(crate) mod test_database_support;
 pub mod worker;
+pub mod workspace_binding;

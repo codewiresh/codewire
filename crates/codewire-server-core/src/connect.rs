@@ -293,6 +293,29 @@ pub fn connect_unary_router_with_auth(
     )
 }
 
+/// A self-authenticating all-unary mount with explicit message limits.
+///
+/// Like [`connect_router`] it carries no user-auth layer: the handler
+/// validates its own credential. It adds the unary 60-second deadline policy
+/// and the caller's [`connectrpc::Limits`], for a small closed surface such as
+/// a tenant-reachable cluster listener.
+pub fn connect_unary_router_with_limits(
+    connect: connectrpc::Router,
+    limits: connectrpc::Limits,
+) -> axum::Router {
+    let deadline_policy = connectrpc::DeadlinePolicy::new()
+        .with_default_timeout(CONNECT_UNARY_SERVER_TIMEOUT)
+        .with_max(CONNECT_UNARY_SERVER_TIMEOUT);
+    build_connect_router(
+        connect,
+        None,
+        None,
+        ProtocolPolicy::ConnectOnly,
+        Some(deadline_policy),
+        Some(limits),
+    )
+}
+
 /// Builds an all-unary private Connect mount whose outer authentication layer
 /// validates the scoped HMAC service hop and removes forwarded credential
 /// metadata before generated-service dispatch. Handlers can observe only a
