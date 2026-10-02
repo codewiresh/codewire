@@ -18,6 +18,8 @@
       value: "8084"
     - name: ORCHESTRATION_INTERNAL_CONNECT_PORT
       value: "8085"
+    - name: ORCHESTRATION_WORKSPACE_BINDING_PORT
+      value: "8087"
     - name: POD_NAMESPACE
       valueFrom:
         fieldRef:

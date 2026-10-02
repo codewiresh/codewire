@@ -1481,6 +1481,7 @@ mod tests {
                     status: "Active",
                     status_tone: "success",
                 }],
+                attention: Vec::new(),
                 codex: String::new(),
                 openai: String::new(),
                 anthropic: String::new(),

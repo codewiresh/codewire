@@ -807,6 +807,105 @@ proves the ledger and migration 32 checksum are restored, records are
 discarded, and a separate schema survives. These tests and instructions
 authorize no live reset.
 
+### Workspace claim-time binding
+
+Migration `0034_workspace_claim_time_binding.sql` is additive. It changes no
+existing row, helper or earlier migration. It implements section 6 of the
+[claim-time binding design](../plans/2026-09-30-workspace-claim-time-binding.md)
+for Program #2238 (slice B1).
+
+`sandbox_workspace_bindings` records which environment one exact workspace Pod
+serves. The Pod UID is the primary key, so a Pod is bound to at most one
+environment, ever. Each row also records the namespace and Pod name, the
+SandboxClaim and Sandbox UIDs, the workspace PVC UID (NULL for a volume-less
+workspace), the operation generation, the projection digest, the managed
+credential clients, the credential scope (`environment` or `pod`), `bound_at`
+and `released_at`. A partial unique index allows one live binding
+(`released_at IS NULL`) per environment; released history may accumulate.
+Rows cascade with their environment.
+
+`sandbox_environment_backend` gains three nullable columns: `pod_uid`,
+`bound_at` and `workspace_pvc_uid`. The composite foreign key
+`sandbox_environment_backend_binding_fkey` lets `(environment_id, pod_uid)`
+name only a binding of the same environment, and
+`chk_sandbox_backend_binding_coherent` sets `pod_uid` and `bound_at` together.
+No binding can be deleted directly (see the cascade-only trigger below).
+
+Beyond the reviewed section 6 SQL, the migration also enforces:
+
+- lowercase Kubernetes UID syntax for the claim, Sandbox and PVC UIDs in both
+  tables (the backend `pod_uid` is covered by the foreign key);
+- `released_at >= bound_at`;
+- the `codewire_workspace_binding_immutable` trigger, which makes a binding
+  insert-only except `released_at`. A release may be recorded once and never
+  cleared or moved, so Pod UID → environment is immutable in the database and
+  not only in orchestration code;
+- the `codewire_workspace_binding_cascade_only` trigger on the same function,
+  which refuses a direct `DELETE`. A row leaves only through the cascade from
+  its environment, which runs inside the foreign key's referential action and
+  so reaches the trigger at `pg_trigger_depth() > 1`.
+
+The function is a plain invoker function with a fixed search path, and
+`PUBLIC` cannot execute it.
+
+There is no backfill. Orchestration's recorder and its bounded backfill loop
+write bindings and PVC UIDs later, under the operation-generation fence.
+
+**Compatibility.** Running version-33 pods never read the new table or
+columns, and their backend writes never name them. Existing backend rows keep
+NULL pointers, which the `MATCH SIMPLE` foreign key ignores, and the existing
+backend indexes are unchanged. The projection lock in migration 25 already
+takes the backend row `FOR SHARE`, so a later pointer move is fenced against
+in-flight projection. As with every migration, a version-33 binary cannot
+restart against a version-34 ledger, so a code rollback is a forward revert
+that keeps this migration.
+
+**Fixtures.** The 33→34 fixtures pin migration 33's SHA-384 and the history
+1–33 from accepted canonical main `761f9e9bdbdc35bb2210c514fa923ad9d432aefc`.
+The version-33 fingerprint stays pinned as
+`ACCEPTED_PRE_WORKSPACE_BINDING_SCHEMA_FINGERPRINT`. Earlier fixtures that
+compare every `codewire_` helper exclude the new trigger function, which has
+its own proof and replaces no prior helper. The fixtures prove:
+
+- fresh apply, with every constraint and its SQLSTATE: 23505 for a second
+  environment on one Pod UID and for a second live binding per environment,
+  23503 for a backend pointer to another environment's binding, 23514 for the
+  UID, digest, scope, release-ordering and coherence checks, and 23502 for
+  each required column;
+- existing backend rows staying valid and writable with NULL pointers;
+- the update trigger, which rejects each in-place change and accepts one
+  release, and the delete trigger, which refuses a direct delete of a live,
+  pointed-at or released binding;
+- a restart-style pointer move inside one environment, and the cascade that
+  removes an environment's backend row and all its bindings while leaving
+  another environment intact;
+- upgrade from version 33 with rows and helpers unchanged, no binding invented,
+  and a second startup that is a no-op;
+- a forced failure on the last statement, which rolls back the table, trigger,
+  function, columns and ledger, followed by a clean retry.
+
+**Rollback.** Because 0034 only adds a table with its trigger and function,
+and three nullable backend columns with their constraints, it has an in-place
+rollback that keeps every other row:
+
+1. Stop the version-34 binaries.
+2. In one transaction, drop the three backend constraints and columns, drop
+   `sandbox_workspace_bindings` (which removes both of its triggers) and
+   `codewire_workspace_binding_immutable()`,
+   and delete ledger version 34 from `_sqlx_migrations`.
+3. Start the version-33 binaries.
+
+Recorded bindings are lost; a later roll-forward records them again. The
+fixture `workspace_binding_down_restores33_in_place_and_keeps_every_other_row`
+runs that exact statement. It proves the version-33 fingerprint, unchanged
+rows, helpers and ledger, and a clean roll-forward. The full recovery also
+remains available: replay the selected version-33 source into only an empty,
+disposable application `public` schema. Its fixture proves the ledger and
+migration 33 checksum are restored, records are discarded, and a separate
+schema survives. Other databases, schemas, cluster roles and external key
+material remain outside this boundary. These tests and instructions authorize
+no live reset.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

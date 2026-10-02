@@ -142,7 +142,7 @@ permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
 credential-free git.example.invalid/GitHub preparation, independent copy preparation,
 create/info, loopback-only host-port publication, bounded daemon diagnostics and
-repair, stock Codex 0.149.0 over the synthetic credential bridge, bare run and
+repair, stock Codex 0.157.0 over the synthetic credential bridge, bare run and
 shell, PTY behavior, saved output and nonzero status,
 cached-runtime restart after the installed artifact lock advances, offline
 disk/CPU/memory resize, supervisor crash recovery, Mesh attachment and typed
@@ -1499,7 +1499,7 @@ case "${1-}" in
     login_parent=${CODEX_HOME%/*}
     [ -f "$login_parent/.codewire-synthetic-login-root" ]
     [ "$(findmnt -nro FSTYPE -T "$CODEX_HOME")" = tmpfs ]
-    printf '\nWelcome to Codex [v\033[90m0.149.0\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n'
+    printf '\nWelcome to Codex [v\033[90m0.157.0\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n'
     printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n\n'
     printf '1. Open this link in your browser and sign in to your account\n   \033[94mhttps://auth.openai.com/codex/device\033[0m\n\n'
     printf '2. Enter this one-time code \033[90m(expires in 15 minutes)\033[0m\n   \033[94mSYNTH-ETIC\033[0m\n\n'
@@ -2733,7 +2733,7 @@ done
 [[ "$HOST_PORT_SESSION_EXITED" -eq 1 ]] ||
   die 'host-port guest session did not exit successfully'
 
-log 'checking stock Codex 0.149.0 over the synthetic guest credential bridge'
+log 'checking stock Codex 0.157.0 over the synthetic guest credential bridge'
 run_codex_credential_bridge_smoke
 
 log 'checking bounded public daemon status over the owner-only supervisor UDS'

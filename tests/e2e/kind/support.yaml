@@ -20,6 +20,11 @@ data:
   PUBLIC_OIDC_ISSUER_URL: http://127.0.0.1:8090
   PREVIEW_BASE_DOMAIN: codewire-dev.local
   SANDBOX_DIND_IMAGE: docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
+  # The image cache's tool image is a hardcoded public DinD reference, so the
+  # cache cannot satisfy this gate's sealed local-alias provenance yet; keep
+  # it out of the disposable overlay until the tool image follows the
+  # configured runtime image.
+  SANDBOX_IMAGE_CACHE: disabled
 ---
 # The non-promotable credential fixture owns this public synthetic App slug.
 # No App client material is present in the browser or in this ConfigMap.

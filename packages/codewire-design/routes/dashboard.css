@@ -96,7 +96,8 @@
   .cw-sandbox-heading dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-1-5); margin-top: var(--space-1-5); }
   .cw-sandbox-heading dl div { min-width: 0; }
   .cw-sandbox-heading dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cw-sandbox-heading .cw-sandbox-lifetime dd { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+  .cw-sandbox-heading :is(.cw-sandbox-lifetime, .cw-sandbox-attention) dd { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+  .cw-sandbox-heading dl .cw-sandbox-attention { grid-column: 1 / -1; }
   .cw-sandbox-actions { justify-content: flex-start; }
   .cw-sandbox-actions > .cw-field-help { text-align: start; }
   .cw-terminal-footer .cw-mono { flex-basis: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

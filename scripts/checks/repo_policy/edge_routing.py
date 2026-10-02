@@ -155,6 +155,21 @@ INTERNAL_CONNECT_SERVICES = {
     ),
 }
 
+# The second closed listener class: every tenant workload can open TCP to it,
+# so it carries exactly this one service and nothing else.
+WORKSPACE_BINDING_SERVICES = {
+    "codewire.internal.v1.WorkspaceBindingService": (
+        "codewire_orchestration::workspace_binding::workspace_binding_router"
+    ),
+}
+
+CLOSED_LISTENERS = {
+    "internal-connect": (8085, INTERNAL_CONNECT_SERVICES),
+    "workspace-binding": (8087, WORKSPACE_BINDING_SERVICES),
+}
+
+WORKSPACE_BINDING_SERVICE_NAME = "codewire-orchestration-workspace-binding"
+
 ISOLATED_CREDENTIAL_SERVICES = {
     "codewire.v1.CredentialMutationService",
     "codewire.v1.CredentialDelegationService",
@@ -728,28 +743,61 @@ def assert_internal_connect_listener_exemption(
     fail: Callable[[str], None],
     reader: Callable[[str], str] = read_text,
 ) -> None:
-    """Validate the closed `codewire.internal.v1` listener exception."""
+    """Validate the closed cluster-local listener exceptions.
+
+    Two listener classes exist: internal-connect (8085) for the gateway and
+    Mesh, and workspace-binding (8087), which tenant workloads can reach and
+    which therefore carries only WorkspaceBindingService.
+    """
     for service, record in unrouted.items():
-        if service not in INTERNAL_CONNECT_SERVICES:
-            fail(f"unrouted service {service} is not a declared internal-listener exception")
+        listener = next(
+            (name for name, (_, services) in CLOSED_LISTENERS.items() if service in services),
+            None,
+        )
+        if listener is None:
+            fail(f"unrouted service {service} is not a declared closed-listener exception")
         if not isinstance(record, dict):
             fail(f"unrouted service {service} must record binary, listener, and port")
             continue
         if record.get("binary") != "orchestration":
             fail(f"unrouted service {service} must be owned by orchestration")
-        if record.get("listener") != "internal-connect" or record.get("port") != 8085:
-            fail(
-                f"unrouted service {service} must use the internal-connect listener on port 8085"
-            )
+        if listener is not None:
+            port = CLOSED_LISTENERS[listener][0]
+            if record.get("listener") != listener or record.get("port") != port:
+                fail(
+                    f"unrouted service {service} must use the {listener} listener on port {port}"
+                )
         for file, data in per_file.items():
             if any(rule["service"] == service for rule in data["rules"]):
                 fail(f"{file}: unrouted {service} has a prohibited public edge matcher")
-    if set(unrouted) != set(INTERNAL_CONNECT_SERVICES):
+    expected = set().union(*(services for _, services in CLOSED_LISTENERS.values()))
+    if set(unrouted) != expected:
         fail(
-            "unrouted listener map must contain exactly GatewayBindingService "
-            "and MeshAuthorizationService"
+            "unrouted listener map must contain exactly GatewayBindingService, "
+            "MeshAuthorizationService and WorkspaceBindingService"
         )
     assert_internal_connect_listener_boundary(INTERNAL_CONNECT_SERVICES, fail, reader)
+    assert_workspace_binding_listener_boundary(fail, reader)
+
+
+def orchestration_app_sections(main: str) -> dict[str, str] | None:
+    """Split orchestration main.rs into its three application sections."""
+    markers = {
+        "workspace-binding": "let workspace_binding_app = codewire_orchestration::workspace_binding::app(",
+        "internal-connect": 'let internal_app = AppBuilder::new("codewire-orchestration-internal")',
+        "public": 'let app = AppBuilder::new("codewire-orchestration")',
+    }
+    starts = {name: main.find(marker) for name, marker in markers.items()}
+    order = ["workspace-binding", "internal-connect", "public"]
+    if any(starts[name] < 0 for name in order) or not (
+        starts["workspace-binding"] < starts["internal-connect"] < starts["public"]
+    ):
+        return None
+    return {
+        "workspace-binding": main[starts["workspace-binding"] : starts["internal-connect"]],
+        "internal-connect": main[starts["internal-connect"] : starts["public"]],
+        "public": main[starts["public"] :],
+    }
 
 
 def assert_internal_connect_listener_boundary(
@@ -765,18 +813,22 @@ def assert_internal_connect_listener_boundary(
     the Deployment/ClusterIP Service bind its exact named port.
     """
     main = reader("crates/codewire-orchestration/src/main.rs")
-    internal_start = main.find('let internal_app = AppBuilder::new("codewire-orchestration-internal")')
-    public_start = main.find('let app = AppBuilder::new("codewire-orchestration")')
-    if internal_start < 0 or public_start < 0 or internal_start >= public_start:
-        fail("orchestration must build its internal Connect app before the public app")
+    sections = orchestration_app_sections(main)
+    if sections is None:
+        fail(
+            "orchestration must build its workspace-binding app, then its internal Connect "
+            "app, then the public app"
+        )
         return
-    internal_section = main[internal_start:public_start]
-    public_section = main[public_start:]
+    internal_section = sections["internal-connect"]
+    public_section = sections["public"]
     for service, router in services.items():
         if router not in internal_section:
             fail(f"{service} is not mounted on the internal-connect app")
         if router in public_section:
             fail(f"{service} is prohibited from the public 8084 app")
+        if router in sections["workspace-binding"]:
+            fail(f"{service} is prohibited from the workspace-binding 8087 app")
 
     deployment = reader("deployments/k8s/orchestration/deployment.yaml")
     if not re.search(r"containerPort:\s*8084\s*\n\s*name:\s*http", deployment):
@@ -807,29 +859,137 @@ def assert_internal_connect_listener_boundary(
         fail("orchestration ClusterIP Service must expose named internal-api port 8085")
 
 
+def yaml_documents(source: str) -> list[str]:
+    return [document for document in re.split(r"(?m)^---\s*$", source) if document.strip()]
+
+
+def service_ports(document: str) -> list[tuple[str, str, str]]:
+    """(port, targetPort, name) triples of one Service document."""
+    return re.findall(
+        r"-\s*port:\s*(\S+)\s*\n\s*targetPort:\s*(\S+)\s*\n\s*name:\s*(\S+)",
+        document,
+    )
+
+
+def assert_workspace_binding_listener_boundary(
+    fail: Callable[[str], None],
+    reader: Callable[[str], str] = read_text,
+) -> None:
+    """Prove 8087 carries only WorkspaceBindingService and nothing else does.
+
+    Every tenant workload can open TCP to this port for the workspace Pod's
+    life, so its app mounts one router, has no AppBuilder (no health, metrics,
+    REST or CORS routes), is served by the bounded HTTP/1.1 accept loop, and
+    has its own Service that exposes only 8087 and that no Ingress names.
+    """
+    main = reader("crates/codewire-orchestration/src/main.rs")
+    sections = orchestration_app_sections(main)
+    if sections is None:
+        fail("orchestration must build a dedicated workspace-binding app first")
+        return
+    binding_section = sections["workspace-binding"]
+    for service, router in WORKSPACE_BINDING_SERVICES.items():
+        if router not in binding_section:
+            fail(f"{service} is not mounted on the workspace-binding app")
+        if router in sections["internal-connect"]:
+            fail(f"{service} is prohibited from the internal-connect 8085 app")
+        if router in sections["public"]:
+            fail(f"{service} is prohibited from the public 8084 app")
+    for router in INTERNAL_CONNECT_SERVICES.values():
+        if router in binding_section:
+            fail(f"{router} is prohibited from the workspace-binding 8087 app")
+    if "AppBuilder" in binding_section or "with_" in binding_section:
+        fail("the workspace-binding app must mount only its router, with no shared app routes")
+    if not re.search(
+        r"serve_bounded_http1\(\s*workspace_binding_app,\s*listeners\.workspace_binding,"
+        r"\s*codewire_orchestration::workspace_binding::LISTENER_LIMITS,",
+        main,
+    ):
+        fail(
+            "the workspace-binding app must be served only by the bounded HTTP/1.1 listener "
+            "with LISTENER_LIMITS"
+        )
+    if main.count("workspace_binding_app") != 2:
+        fail("the workspace-binding app must be built once and served once")
+
+    deployment = reader("deployments/k8s/orchestration/deployment.yaml")
+    if not re.search(r"containerPort:\s*8087\s*\n\s*name:\s*workspace-bind", deployment):
+        fail("orchestration Deployment must declare named workspace-bind container port 8087")
+    for patch in (
+        "deployments/k8s/orchestration/deployment.yaml",
+        "deployments/k8s/overlays/local-kind/orchestration-deployment-patch.yaml",
+        "deployments/k8s/overlays/local-kind-static/orchestration-deployment-patch.yaml",
+    ):
+        if not re.search(
+            r"name:\s*ORCHESTRATION_WORKSPACE_BINDING_PORT\s*\n\s*value:\s*['\"]8087['\"]",
+            reader(patch),
+        ):
+            fail(f"{patch}: must set ORCHESTRATION_WORKSPACE_BINDING_PORT=8087")
+
+    services = yaml_documents(reader("deployments/k8s/orchestration/service.yaml"))
+    binding = [
+        document
+        for document in services
+        if re.search(rf"name:\s*{WORKSPACE_BINDING_SERVICE_NAME}\s*$", document, re.MULTILINE)
+    ]
+    if len(binding) != 1 or service_ports(binding[0]) != [
+        ("8087", "workspace-bind", "workspace-bind")
+    ]:
+        fail(
+            f"{WORKSPACE_BINDING_SERVICE_NAME} must be one ClusterIP Service exposing only "
+            "8087 -> workspace-bind"
+        )
+    elif not re.search(r"type:\s*ClusterIP", binding[0]):
+        fail(f"{WORKSPACE_BINDING_SERVICE_NAME} must be a ClusterIP Service")
+    for document in services:
+        if document in binding:
+            continue
+        for port, target, name in service_ports(document):
+            if "8087" in (port, target) or "workspace-bind" in (target, name):
+                fail("only the workspace-binding Service may expose port 8087")
+
+    for file in (
+        "deployments/k8s/base/ingress.yaml",
+        "deployments/k8s/overlays/local-kind/ingress.yaml",
+        "deployments/k8s/overlays/local-kind-static/ingress.yaml",
+        "tests/e2e/kind/ingress.yaml",
+        "Caddyfile",
+        "Caddyfile.docker",
+    ):
+        source = reader(file)
+        if WORKSPACE_BINDING_SERVICE_NAME in source or re.search(r":8087\b", source):
+            fail(f"{file}: no edge may route to the workspace-binding listener")
+
+
 def internal_connect_listener_self_test() -> None:
     """Exercise every closed-listener failure mode without mutating the repo."""
-    source = {
-        path: read_text(path)
-        for path in [
-            "crates/codewire-orchestration/src/main.rs",
-            "deployments/k8s/orchestration/deployment.yaml",
-            "deployments/k8s/orchestration/service.yaml",
-        ]
-    }
+    paths = [
+        "crates/codewire-orchestration/src/main.rs",
+        "deployments/k8s/orchestration/deployment.yaml",
+        "deployments/k8s/orchestration/service.yaml",
+        "deployments/k8s/overlays/local-kind/orchestration-deployment-patch.yaml",
+        "deployments/k8s/overlays/local-kind-static/orchestration-deployment-patch.yaml",
+        "deployments/k8s/base/ingress.yaml",
+        "deployments/k8s/overlays/local-kind/ingress.yaml",
+        "deployments/k8s/overlays/local-kind-static/ingress.yaml",
+        "tests/e2e/kind/ingress.yaml",
+        "Caddyfile",
+        "Caddyfile.docker",
+    ]
+    source = {path: read_text(path) for path in paths}
     valid_unrouted = {
-        service: {"binary": "orchestration", "listener": "internal-connect", "port": 8085}
-        for service in INTERNAL_CONNECT_SERVICES
+        service: {"binary": "orchestration", "listener": listener, "port": port}
+        for listener, (port, services) in CLOSED_LISTENERS.items()
+        for service in services
     }
 
-    def expect_rejection(
-        label: str,
-        expected: str,
+    def failures_for(
         *,
         unrouted: dict[str, Any] | None = None,
         per_file: dict[str, dict[str, Any]] | None = None,
         replacement: tuple[str, str, str] | None = None,
-    ) -> None:
+        label: str,
+    ) -> list[str]:
         files = source.copy()
         if replacement is not None:
             path, before, after = replacement
@@ -843,6 +1003,14 @@ def internal_connect_listener_self_test() -> None:
             failures.append,
             files.__getitem__,
         )
+        return failures
+
+    baseline = failures_for(label="current tree")
+    if baseline:
+        raise RuntimeError(f"closed-listener fixtures reject the current tree: {baseline!r}")
+
+    def expect_rejection(label: str, expected: str, **kwargs: Any) -> None:
+        failures = failures_for(label=label, **kwargs)
         if not any(expected in failure for failure in failures):
             raise RuntimeError(f"{label}: expected rejection {expected!r}, got {failures!r}")
 
@@ -850,9 +1018,37 @@ def internal_connect_listener_self_test() -> None:
     missing.pop("codewire.internal.v1.GatewayBindingService")
     expect_rejection("missing exception record", "must contain exactly", unrouted=missing)
 
+    missing_binding = copy.deepcopy(valid_unrouted)
+    missing_binding.pop("codewire.internal.v1.WorkspaceBindingService")
+    expect_rejection("missing workspace-binding record", "must contain exactly", unrouted=missing_binding)
+
     wrong_port = copy.deepcopy(valid_unrouted)
     wrong_port["codewire.internal.v1.GatewayBindingService"]["port"] = 8086
     expect_rejection("wrong exception record", "must use the internal-connect listener", unrouted=wrong_port)
+
+    binding_on_8085 = copy.deepcopy(valid_unrouted)
+    binding_on_8085["codewire.internal.v1.WorkspaceBindingService"] = {
+        "binary": "orchestration",
+        "listener": "internal-connect",
+        "port": 8085,
+    }
+    expect_rejection(
+        "workspace binding recorded on 8085",
+        "must use the workspace-binding listener on port 8087",
+        unrouted=binding_on_8085,
+    )
+
+    gateway_on_8087 = copy.deepcopy(valid_unrouted)
+    gateway_on_8087["codewire.internal.v1.GatewayBindingService"] = {
+        "binary": "orchestration",
+        "listener": "workspace-binding",
+        "port": 8087,
+    }
+    expect_rejection(
+        "gateway binding recorded on 8087",
+        "must use the internal-connect listener on port 8085",
+        unrouted=gateway_on_8087,
+    )
 
     expect_rejection(
         "public edge matcher",
@@ -866,6 +1062,17 @@ def internal_connect_listener_self_test() -> None:
         },
     )
     expect_rejection(
+        "public edge matcher for workspace binding",
+        "prohibited public edge matcher",
+        per_file={
+            "fixture": {
+                "rules": [
+                    {"service": "codewire.internal.v1.WorkspaceBindingService", "backend": "orchestration"}
+                ]
+            }
+        },
+    )
+    expect_rejection(
         "public app mount",
         "prohibited from the public 8084 app",
         replacement=(
@@ -873,6 +1080,45 @@ def internal_connect_listener_self_test() -> None:
             'let app = AppBuilder::new("codewire-orchestration")',
             'let app = AppBuilder::new("codewire-orchestration")\n'
             '        .with_connect_routes(codewire_orchestration::connect::internal::gateway_binding_router(api_state.clone()))',
+        ),
+    )
+    expect_rejection(
+        "workspace binding on the internal app",
+        "WorkspaceBindingService is prohibited from the internal-connect 8085 app",
+        replacement=(
+            "crates/codewire-orchestration/src/main.rs",
+            'let internal_app = AppBuilder::new("codewire-orchestration-internal")',
+            'let internal_app = AppBuilder::new("codewire-orchestration-internal")\n'
+            "        .with_connect_routes(codewire_orchestration::workspace_binding::workspace_binding_router(state))",
+        ),
+    )
+    expect_rejection(
+        "workspace binding on the public app",
+        "WorkspaceBindingService is prohibited from the public 8084 app",
+        replacement=(
+            "crates/codewire-orchestration/src/main.rs",
+            'let app = AppBuilder::new("codewire-orchestration")',
+            'let app = AppBuilder::new("codewire-orchestration")\n'
+            "        .with_connect_routes(codewire_orchestration::workspace_binding::workspace_binding_router(state))",
+        ),
+    )
+    expect_rejection(
+        "gateway binding on the workspace-binding app",
+        "is prohibited from the workspace-binding 8087 app",
+        replacement=(
+            "crates/codewire-orchestration/src/main.rs",
+            "let workspace_binding_app = codewire_orchestration::workspace_binding::app(",
+            "let workspace_binding_app = codewire_orchestration::workspace_binding::app(\n"
+            "        codewire_orchestration::connect::internal::gateway_binding_router(api_state.clone()),",
+        ),
+    )
+    expect_rejection(
+        "unbounded workspace-binding serving",
+        "served only by the bounded HTTP/1.1 listener",
+        replacement=(
+            "crates/codewire-orchestration/src/main.rs",
+            "codewire_server_core::bounded_http1::serve_bounded_http1(",
+            "codewire_server_core::serve_with_listener(",
         ),
     )
     expect_rejection(
@@ -891,6 +1137,53 @@ def internal_connect_listener_self_test() -> None:
             "deployments/k8s/orchestration/service.yaml",
             "port: 8084\n      targetPort: 8084\n      name: http",
             "port: 8084\n      targetPort: internal-api\n      name: http",
+        ),
+    )
+    expect_rejection(
+        "workspace-binding Service carrying 8085",
+        "must be one ClusterIP Service exposing only 8087",
+        replacement=(
+            "deployments/k8s/orchestration/service.yaml",
+            "    - port: 8087\n      targetPort: workspace-bind\n      name: workspace-bind",
+            "    - port: 8087\n      targetPort: workspace-bind\n      name: workspace-bind\n"
+            "    - port: 8085\n      targetPort: internal-api\n      name: internal-api",
+        ),
+    )
+    expect_rejection(
+        "main Service carrying 8087",
+        "only the workspace-binding Service may expose port 8087",
+        replacement=(
+            "deployments/k8s/orchestration/service.yaml",
+            "    - port: 8085\n      targetPort: internal-api\n      name: internal-api",
+            "    - port: 8085\n      targetPort: internal-api\n      name: internal-api\n"
+            "    - port: 8087\n      targetPort: workspace-bind\n      name: workspace-bind",
+        ),
+    )
+    expect_rejection(
+        "missing workspace-bind container port",
+        "must declare named workspace-bind container port 8087",
+        replacement=(
+            "deployments/k8s/orchestration/deployment.yaml",
+            "containerPort: 8087",
+            "containerPort: 8088",
+        ),
+    )
+    expect_rejection(
+        "local overlay without the binding port",
+        "local-kind/orchestration-deployment-patch.yaml: must set ORCHESTRATION_WORKSPACE_BINDING_PORT=8087",
+        replacement=(
+            "deployments/k8s/overlays/local-kind/orchestration-deployment-patch.yaml",
+            "ORCHESTRATION_WORKSPACE_BINDING_PORT",
+            "ORCHESTRATION_UNUSED_PORT",
+        ),
+    )
+    expect_rejection(
+        "ingress to the workspace-binding Service",
+        "no edge may route to the workspace-binding listener",
+        replacement=(
+            "deployments/k8s/base/ingress.yaml",
+            "kind: Ingress",
+            "kind: Ingress\n# backend: codewire-orchestration-workspace-binding",
         ),
     )
 

@@ -1416,6 +1416,7 @@ grep -qF "'worker::' -- --ignored" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::create::projection_database_tests::'" <<<"$activity_fencing_block"
+grep -qF -- "--skip 'worker::workspace_binding::database_tests::'" <<<"$activity_fencing_block"
 grep -qF 'assert_passed_count "orchestration activity fencing matrix" "$logfile" 2' <<<"$activity_fencing_block"
 destroy_hint_block="$(sed -n '/logfile="$RUN_DIR\/environment-destroy-template-hint.log"/,/assert_passed_count "environment destroy template hint matrix"/p' "$integration_runner")"
 grep -qF 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' <<<"$destroy_hint_block"
@@ -1447,7 +1448,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 71' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 77' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 21' "$integration_runner"
@@ -1458,6 +1459,8 @@ grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner
 grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- "'api::admin::startup_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$integration_runner"
+grep -qF -- "'worker::workspace_binding::database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 10' "$integration_runner"
 grep -qF -- "'api::environment_resize::tests::db_'" "$integration_runner"
 grep -qF 'assert_passed_count "environment resize admission matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'api::ssh_proxy::database_tests::'" "$integration_runner"
@@ -1708,7 +1711,15 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
       "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
       "$block"
   fi
-  if grep -qF '    strategy:' "$block"; then
+  if [ "$job_id" = edge-kind ]; then
+    # The Kind gate shards its suites across one four-leg matrix (proven in
+    # detail by the executable workflow fixture below); every other capability
+    # group stays a single dispatch with no empty-matrix dependency.
+    grep -qF '    strategy:' "$block" || {
+      echo 'edge-kind: the Kind shard matrix is missing' >&2
+      exit 1
+    }
+  elif grep -qF '    strategy:' "$block"; then
     echo "${job_id}: capability dispatch retained an empty-matrix dependency" >&2
     exit 1
   fi
@@ -1768,9 +1779,10 @@ done
 # Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
 # task ceilings at 30 minutes. The selected workspace path performs two cold
 # image builds, while Rust/transport may seed the complete workspace and
-# desktop compiler cache. Those two jobs retain 55-minute ceilings. The full
-# Kind gate additionally owns real token rotation and integrated runtime tests;
-# its 85-minute ceiling leaves five minutes below the 90-minute heavy budget.
+# desktop compiler cache. Those two jobs retain 55-minute ceilings. The Kind
+# gate shards its suites across four parallel per-cluster legs; each shard's
+# 45-minute ceiling holds the longest leg (setup plus dashboard browser) far
+# below the 90-minute heavy budget.
 for job_id in cw-release-assets standard tooling rust-compile rust-packages rust-features database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
@@ -1795,16 +1807,16 @@ grep -qF '    timeout-minutes: 55' "$rust_transport_block" || {
 edge_kind_block="$TMP/edge-kind.yaml"
 edge_kind_timeout_valid() {
   # Exact equality also rejects duplicate, absent and nonnumeric declarations.
-  [ "$(sed -n 's/^    timeout-minutes: //p' "$1")" = 85 ]
+  [ "$(sed -n 's/^    timeout-minutes: //p' "$1")" = 45 ]
 }
 edge_kind_timeout_valid "$edge_kind_block" || {
-  echo 'edge-kind: complete gate must retain 85 minutes and the 90-minute worker cleanup margin' >&2
+  echo 'edge-kind: every shard must retain the 45-minute ceiling within the 90-minute worker cleanup margin' >&2
   exit 1
 }
 # Protect the observed old deadline failure and both missing/unbounded limits.
 # These are mutations of the actual job block, not a second workflow fixture.
-for invalid_timeout in 55 90 120 0 null; do
-  sed "s/^    timeout-minutes: 85$/    timeout-minutes: $invalid_timeout/" \
+for invalid_timeout in 55 85 90 120 0 null; do
+  sed "s/^    timeout-minutes: 45$/    timeout-minutes: $invalid_timeout/" \
     "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
   if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
     echo "edge-kind: timeout guard accepted $invalid_timeout" >&2
@@ -1816,7 +1828,7 @@ if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
   echo 'edge-kind: timeout guard accepted an absent deadline' >&2
   exit 1
 fi
-sed '/^    timeout-minutes: 85$/p' "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
+sed '/^    timeout-minutes: 45$/p' "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
 if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
   echo 'edge-kind: timeout guard accepted a duplicate deadline' >&2
   exit 1
@@ -2613,7 +2625,7 @@ fi
 
 edge_kind_block="$TMP/edge-kind.yaml"
 grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$edge_kind_block"
-grep -qF 'run: scripts/ci/verify/kind-e2e.sh' "$edge_kind_block"
+grep -qF 'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' "$edge_kind_block"
 
 if grep -qF '    name: Manual diagnostics' "$WORKFLOW" \
   || grep -qF '  diagnostics:' "$WORKFLOW" \

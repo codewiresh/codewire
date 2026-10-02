@@ -53,6 +53,7 @@ mod tests {
     mod ssh;
     mod two_factor_replacements;
     mod two_factor_setup_skip;
+    mod workspace_binding;
     use std::{borrow::Cow, time::Duration};
 
     use sha2::{Digest, Sha384};
@@ -64,8 +65,13 @@ mod tests {
     // environment projection, typed SSH metadata, the GitHub singleton that
     // every personal profile includes, the per-session two-factor setup skip,
     // preview browser authorization, pending authenticator replacement and
-    // the runtime-dispatch lease environment scope, through version33.
+    // the runtime-dispatch lease environment scope and claim-time workspace
+    // binding, through version34.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
+    // Accepted table schema through version33, before claim-time workspace
+    // binding.
+    const ACCEPTED_PRE_WORKSPACE_BINDING_SCHEMA_FINGERPRINT: &str =
         "9ea2293788144db31bb819299fc154b7df74519c9b5cacc966ff9ff4bdb90de0";
     // Accepted table schema through version32, before runtime-dispatch leases
     // recorded their environment.
@@ -5053,6 +5059,9 @@ mod tests {
         }
         if version > 32 {
             runtime_dispatch_scope::assert_accepted_prior32()?;
+        }
+        if version > 33 {
+            workspace_binding::assert_accepted_prior33()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR

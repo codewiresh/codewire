@@ -168,6 +168,91 @@ cleanup
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.directory / "deletion").exists())
 
+    def test_shard_suite_traps_preserve_owner_forwarding_and_context_custody(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                (self.directory / "forwarding").unlink(missing_ok=True)
+                result = self.shell(f'''
+unset CLUSTER
+source "$ROOT/scripts/ci/verify/kind-e2e.sh"
+KIND_PROFILE=1
+KIND_CREATED_BY_TRANSACTION=1
+run_kind_up() {{
+  KEEP_KIND_CLUSTER=1
+  export KUBECONFIG="$RUN_DIR/owner-context"
+  printf owner >"$KUBECONFIG"
+  trap cleanup EXIT
+}}
+run_retained_environment_session_suite() {{
+  trap retained_suite_cleanup EXIT
+  RETAINED_KUBECONFIG="$RUN_DIR/suite-context"
+  export KUBECONFIG="$RETAINED_KUBECONFIG"
+  printf suite >"$KUBECONFIG"
+  bash -c 'test -z "${{KIND_SHARD_TRANSACTION+x}}"'
+  {"return 42" if failure else ":"}
+}}
+run_retained_runtime_acceptance_suite() {{
+  [ "$KUBECONFIG" = "$RUN_DIR/owner-context" ]
+  [ ! -e "$RUN_DIR/suite-context" ]
+  trap retained_suite_cleanup EXIT
+  RETAINED_KUBECONFIG="$RUN_DIR/second-context"
+  printf second >"$RETAINED_KUBECONFIG"
+}}
+stop_gateway_port_forward() {{ :; }}
+dump_cluster_state() {{ :; }}
+stop_remote_dind_kind_forwarding() {{ printf stopped >"$RUN_DIR/forwarding"; }}
+delete_owned_kind_cluster() {{ printf deletion >"$RUN_DIR/deletion"; }}
+dispatch_kind_e2e shard environment-session runtime-acceptance
+''')
+                self.assertEqual(result.returncode, 42 if failure else 0, result.stderr)
+                self.assertEqual((self.directory / "forwarding").read_text(), "stopped")
+                self.assertTrue((self.directory / "owner-context").exists())
+                self.assertFalse((self.directory / "suite-context").exists())
+                self.assertFalse((self.directory / "second-context").exists())
+                self.assertFalse((self.directory / "deletion").exists())
+
+    def test_shard_cleanup_refuses_uncreated_and_replaced_nodes(self):
+        for created, observed in ((0, "4" * 64), (1, "5" * 64)):
+            with self.subTest(created=created):
+                (self.directory / "forwarding").unlink(missing_ok=True)
+                result = self.shell(f'''
+KIND_PROFILE=0
+KEEP_KIND_CLUSTER=0
+KIND_SHARD_TRANSACTION=1
+KIND_CREATED_BY_TRANSACTION={created}
+KIND_TRANSACTION_NODE_ID={"4" * 64}
+RETAINED_KUBECONFIG="$RUN_DIR/suite-context"
+printf suite >"$RETAINED_KUBECONFIG"
+stop_gateway_port_forward() {{ :; }}
+dump_cluster_state() {{ :; }}
+stop_remote_dind_kind_forwarding() {{ printf stopped >"$RUN_DIR/forwarding"; }}
+docker() {{ printf '%s\\n' {observed}; }}
+kind() {{ printf deletion >"$RUN_DIR/deletion"; }}
+trap retained_suite_cleanup EXIT
+exit 42
+''')
+                self.assertEqual(result.returncode, 42, result.stderr)
+                self.assertFalse((self.directory / "suite-context").exists())
+                self.assertFalse((self.directory / "deletion").exists())
+                self.assertEqual((self.directory / "forwarding").read_text(), "stopped")
+
+    def test_shard_context_removal_failure_still_stops_owner_forwarding(self):
+        result = self.shell('''
+KEEP_KIND_CLUSTER=1
+KIND_SHARD_TRANSACTION=1
+RETAINED_KUBECONFIG="$RUN_DIR/suite-context"
+printf suite >"$RETAINED_KUBECONFIG"
+rm() { return 51; }
+stop_gateway_port_forward() { :; }
+dump_cluster_state() { :; }
+stop_remote_dind_kind_forwarding() { printf stopped >"$RUN_DIR/forwarding"; }
+trap retained_suite_cleanup EXIT
+exit 42
+''')
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual((self.directory / "forwarding").read_text(), "stopped")
+        self.assertTrue((self.directory / "suite-context").exists())
+
     def test_docker_failure_cannot_start_a_create_transaction(self):
         result = self.shell('''
 KIND_PROFILE=0
@@ -478,10 +563,11 @@ kind_workspace_runtime_image() {{ echo workspace:source; }}
 docker() {{ echo {"4" * 64}; }}
 kubectl() {{
   case "$*" in
+    *'exec deploy/postgres -- psql '*UPDATE*at_kind_connect_oidc_codewire_api*) echo 1 ;;
     *'jsonpath='*compatibility_version*) echo 1 ;;
     *'jsonpath='*cluster-name*) echo synthetic-profile ;;
     *'jsonpath='*workspace-image*) echo workspace:source ;;
-    *'-o json')
+    *'configmap/codewire-kind-e2e-prepared-synthetic-profile -o json')
       jq -cn --arg nonce '{nonce}' --arg node '{node}' --arg sha "$manifest" \\
         --arg head "$KIND_PROFILE_SOURCE_HEAD" --arg tree "$KIND_PROFILE_SOURCE_TREE" \\
         '{{data: {{"profile-nonce": $nonce, "node-id": $node, "artifact-sha256": $sha,

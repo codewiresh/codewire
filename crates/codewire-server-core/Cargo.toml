@@ -34,6 +34,8 @@ tower-http = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http = { workspace = true }
+# Streaming request-body cap for the bounded tenant-reachable listener.
+http-body-util = { workspace = true }
 tokio = { workspace = true }
 
 # Connect-RPC serving (docs/plans/connect-rpc/03-connect-server-infrastructure.md

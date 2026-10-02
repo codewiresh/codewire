@@ -56,18 +56,23 @@ pub(super) async fn page(
     if let Err(error) = enforce_two_factor(&identity) {
         return error_page(error);
     }
-    let mut environment =
-        match environment_connect::environment(&state, cookie, &organization.id, &environment_id)
-            .await
-        {
-            Ok(environment) => environment,
-            Err(error) => return connect_page_error(error, &continuation, &headers),
-        };
+    let mut environment = match environment_connect::environment(
+        &state,
+        cookie.clone(),
+        &organization.id,
+        &environment_id,
+    )
+    .await
+    {
+        Ok(environment) => environment,
+        Err(error) => return connect_page_error(error, &continuation, &headers),
+    };
     super::environments::apply_confidential_visibility(
         &state,
         dashboard.is_admin,
         &mut environment,
     );
+    environment_connect::mark_bound_credential_attention(&state, cookie, &mut environment).await;
     let websocket_origin =
         match browser_websocket_origin(&state.public_origin, &state.browser_api_origin) {
             Some(origin) => origin,

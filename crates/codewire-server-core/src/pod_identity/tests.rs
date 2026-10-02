@@ -151,6 +151,37 @@ async fn duplicate_noncanonical_and_oversize_bearers_never_reach_review() {
     assert!(reviewer.requests.lock().unwrap().is_empty());
 }
 
+#[test]
+fn pre_review_filter_discards_garbage_without_authenticating() {
+    // A well-formed future-dated compact JWS passes the filter; it is still
+    // unauthenticated until TokenReview accepts it.
+    assert_eq!(pre_review_bearer_filter(&headers(&future_token())), Ok(()));
+    let now = unix_now().unwrap();
+    let mut duplicate = headers(&future_token());
+    duplicate.append(AUTHORIZATION, HeaderValue::from_static("Bearer second"));
+    for invalid in [
+        HeaderMap::new(),
+        headers(""),
+        headers("opaque-codewire-oauth-bearer"),
+        headers("a.b"),
+        headers(&format!("{}.extra", future_token())),
+        headers(&format!(".{}", future_token().split_once('.').unwrap().1)),
+        headers(&future_token().replacen('.', "*.", 1)),
+        headers(&future_token().replace(&URL_SAFE_NO_PAD.encode(CANARY), "c2l=")),
+        headers(&token(&format!(r#"{{"exp":{now}}}"#))),
+        headers(&token(r#"{"exp":1}"#)),
+        headers(&token("{}")),
+        headers(&token(CANARY)),
+        headers(&"a".repeat(MAX_TOKEN_BYTES + 1)),
+        duplicate,
+    ] {
+        assert_eq!(
+            pre_review_bearer_filter(&invalid),
+            Err(PodIdentityError::Unauthenticated)
+        );
+    }
+}
+
 #[tokio::test]
 async fn review_authentication_and_single_exact_audience_are_mandatory() {
     let purpose = PodIdentityPurpose::CredentialGateway;

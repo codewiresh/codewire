@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Read-only provenance observation while a real product workspace is running.
+# Every workspace-service fixture self-cleans, so on a freshly provisioned
+# cluster this suite has positive provenance only while a product-created
+# workspace or template is alive: CI invokes it nested inside the TTL
+# acceptance (reconciler-ttl-smoke), never as a standalone shard suite.
 set -euo pipefail
 
 if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then

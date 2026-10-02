@@ -12,7 +12,7 @@ fi
 # Only create entrypoints allocate a saved profile. Read/test/remove commands
 # require an existing profile and cannot claim a cluster merely by its name.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]] && [ -n "${CLUSTER:-}" ] \
-    && { [ "$#" -eq 0 ] || [ "${1:-}" = up ]; }; then
+    && { [ "$#" -eq 0 ] || [ "${1:-}" = up ] || [ "${1:-}" = shard ]; }; then
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     echo '::error::named Kind profiles currently require the synthetic CI product image contract' >&2
     exit 2
@@ -53,9 +53,12 @@ kind_e2e_usage() {
 usage:
   scripts/ci/verify/kind-e2e.sh
   CLUSTER=<new-profile> scripts/ci/verify/kind-e2e.sh up
+  CLUSTER=<new-profile> scripts/ci/verify/kind-e2e.sh shard <suite> [<suite>...]
   CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh down
   KIND_CLUSTER_NAME=<new-cluster> scripts/ci/verify/kind-e2e.sh up
+  KIND_CLUSTER_NAME=<new-cluster> scripts/ci/verify/kind-e2e.sh shard <suite> [<suite>...]
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite edge-contract
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite integrated
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite credentials
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite workspace-services
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
@@ -74,7 +77,41 @@ dispatch_kind_e2e() {
     return
   fi
   if [ "${1:-}" = "up" ] && [ "$#" -eq 1 ]; then
-    run_kind_up
+    run_kind_up || return $?
+    log "cluster ${KIND_CLUSTER_NAME} is up; no test suites ran"
+    return
+  fi
+  # A shard brings its cluster up and runs every mapped suite in this one
+  # process: the remote DinD network attachment and loopback forwarders are
+  # process state, so separate up/suite invocations would strand the cluster.
+  if [ "${1:-}" = "shard" ]; then
+    if [ "$#" -lt 2 ]; then
+      echo "::error::the Kind shard command requires at least one suite name"
+      kind_e2e_usage
+      return 2
+    fi
+    KIND_SHARD_TRANSACTION=1
+    run_kind_up || return $?
+    log "cluster ${KIND_CLUSTER_NAME} is up; running shard suites: ${*:2}"
+    shift
+    local suite original_kubeconfig="${KUBECONFIG-}" kubeconfig_was_set="${KUBECONFIG+x}"
+    for suite in "$@"; do
+      dispatch_kind_e2e suite "$suite" || return $?
+      # A suite replaces the EXIT trap and pins a temporary kubeconfig. Keep
+      # the creating process's network state and dispose only that suite's
+      # context before the next one. Failure uses the chained owner cleanup.
+      if [ -n "$RETAINED_KUBECONFIG" ]; then
+        rm -f "$RETAINED_KUBECONFIG" || return $?
+        RETAINED_KUBECONFIG=""
+      fi
+      if [ "$kubeconfig_was_set" = x ]; then
+        export KUBECONFIG="$original_kubeconfig"
+      else
+        unset KUBECONFIG
+      fi
+      trap cleanup EXIT
+    done
+    log "Kind shard suites green: $*"
     return
   fi
   if [ "${1:-}" = down ] && [ "$#" -eq 1 ]; then
@@ -106,6 +143,9 @@ dispatch_kind_e2e() {
   case "$2" in
     edge-contract)
       run_retained_edge_contract_suite
+      ;;
+    integrated)
+      run_retained_integrated_suite
       ;;
     credentials)
       run_retained_credentials_suite

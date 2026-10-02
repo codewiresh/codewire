@@ -77,6 +77,9 @@ REMOTE_DIND_KIND_NETWORK=""
 REMOTE_DIND_FORWARDER_PID=""
 KIND_CREATED_BY_TRANSACTION=0
 KIND_TRANSACTION_NODE_ID=""
+KIND_SHARD_TRANSACTION=0
+# Nested external observations never inherit the creating process's cleanup.
+export -n KIND_SHARD_TRANSACTION
 KIND_PROFILE_ARTIFACTS_VERIFIED=0
 if [ -z "${DEFAULT_KIND_WORKSPACE_IMAGE+x}" ]; then
   DEFAULT_KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff'
@@ -159,6 +162,14 @@ acquire_kind_host_lock() {
   if [ "${KIND_PROFILE:-0}" = 1 ]; then
     kind_profile_lock "$ROOT"
     return $?
+  fi
+  # One process owns one transaction: a suite nested under an `up` or gate
+  # invocation (e.g. `kind-e2e.sh shard ... runtime-acceptance`) must not
+  # re-flock the file this process already holds, which would deadlock
+  # against its own open description.
+  if [ -n "$KIND_HOST_LOCK_FD" ]; then
+    log "retaining the exclusive local Kind transaction lock"
+    return 0
   fi
   mkdir -p "$(dirname "$KIND_HOST_LOCK_FILE")"
   exec {KIND_HOST_LOCK_FD}>"$KIND_HOST_LOCK_FILE"
@@ -315,7 +326,7 @@ dump_cluster_state() {
 }
 
 cleanup() {
-  local status=$?
+  local status="${1:-$?}"
   stop_gateway_port_forward
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
@@ -382,6 +393,12 @@ assert_kind_idp_topology() {
 
 retained_suite_cleanup() {
   local status=$?
+  if [ "$KIND_SHARD_TRANSACTION" = 1 ]; then
+    if [ -n "$RETAINED_KUBECONFIG" ]; then
+      rm -f "$RETAINED_KUBECONFIG" || { [ "$status" -ne 0 ] || status=1; }
+    fi
+    cleanup "$status"
+  fi
   stop_gateway_port_forward
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
@@ -502,16 +519,26 @@ validate_retained_cluster_identity() {
 
 validate_retained_cluster() {
   local prepared_version prepared_cluster prepared_workspace expected_workspace
+  local marker_configmap
 
   validate_retained_cluster_identity || return $?
+  marker_configmap="$(kind_e2e_prepared_configmap)"
   if ! prepared_version="$(kubectl --request-timeout=10s -n "$NS" get \
-      "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" \
+      "configmap/${marker_configmap}" \
       -o jsonpath='{.data.compatibility_version}' 2>&1)"; then
-    echo "::error::retained Kind cluster ${KIND_CLUSTER_NAME} is unprepared: ${prepared_version}"
-    return 1
+    # A cluster prepared before the marker was cluster-scoped still carries
+    # the legacy unscoped name; the cluster-name field below remains the
+    # exact binding either way.
+    marker_configmap="$KIND_E2E_PREPARED_CONFIGMAP"
+    if ! prepared_version="$(kubectl --request-timeout=10s -n "$NS" get \
+        "configmap/${marker_configmap}" \
+        -o jsonpath='{.data.compatibility_version}' 2>&1)"; then
+      echo "::error::retained Kind cluster ${KIND_CLUSTER_NAME} is unprepared: ${prepared_version}"
+      return 1
+    fi
   fi
   prepared_cluster="$(kubectl --request-timeout=10s -n "$NS" get \
-    "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" -o jsonpath='{.data.cluster-name}')"
+    "configmap/${marker_configmap}" -o jsonpath='{.data.cluster-name}')"
   if [ "$prepared_version" != "$KIND_E2E_COMPATIBILITY_VERSION" ] \
       || [ "$prepared_cluster" != "$KIND_CLUSTER_NAME" ]; then
     echo "::error::retained Kind cluster marker is incompatible: version=${prepared_version:-missing} cluster=${prepared_cluster:-missing}; want version=${KIND_E2E_COMPATIBILITY_VERSION} cluster=${KIND_CLUSTER_NAME}"
@@ -519,7 +546,7 @@ validate_retained_cluster() {
   fi
 
   prepared_workspace="$(kubectl --request-timeout=10s -n "$NS" get \
-    "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" -o jsonpath='{.data.workspace-image}')" || return $?
+    "configmap/${marker_configmap}" -o jsonpath='{.data.workspace-image}')" || return $?
   expected_workspace="$(kind_workspace_runtime_image)" || return $?
   if [ "$prepared_workspace" != "$expected_workspace" ]; then
     echo '::error::retained Kind workspace image does not match its verified source' >&2
@@ -530,7 +557,7 @@ validate_retained_cluster() {
     node_id="$(docker container inspect --format '{{.Id}}' "${KIND_CLUSTER_NAME}-control-plane")" || return $?
     manifest_sha="$(sha256sum "$KIND_PROFILE_IMAGE_MANIFEST" | cut -d' ' -f1)" || return $?
     binding="$(kubectl --request-timeout=10s -n "$NS" get \
-      "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" -o json)" || return $?
+      "configmap/${marker_configmap}" -o json)" || return $?
     if ! jq -e --arg nonce "$KIND_PROFILE_NONCE" --arg node "$node_id" \
         --arg manifest "$manifest_sha" --arg head "$KIND_PROFILE_SOURCE_HEAD" \
         --arg tree "$KIND_PROFILE_SOURCE_TREE" '
@@ -543,6 +570,33 @@ validate_retained_cluster() {
   fi
 
   log "retained Kind cluster ${KIND_CLUSTER_NAME} accepted at compatibility version ${KIND_E2E_COMPATIBILITY_VERSION}"
+  renew_retained_synthetic_bearer
+}
+
+# A retained cluster outlives the four-hour synthetic product bearer that the
+# contract seed issues (tests/fixtures/billing/seed.sql). Renew only that seeded
+# token's lifetime, so a retained suite authenticates as on a fresh cluster.
+renew_retained_synthetic_bearer() {
+  local renewed
+  renewed="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 -qtAc \
+      "UPDATE oidc_access_tokens SET expires_at = NOW() + INTERVAL '4 hours'
+         WHERE token_hash = encode(digest('at_kind_connect_oidc_codewire_api', 'sha256'), 'hex')
+           AND client_id = 'oidc_kind_connect' RETURNING 1")" || return $?
+  if [ "$(printf '%s' "$renewed" | tr -d '[:space:]')" != 1 ]; then
+    echo '::error::retained Kind cluster lacks the seeded synthetic product bearer' >&2
+    return 1
+  fi
+  log "renewed the seeded synthetic product bearer"
+}
+
+# The prepared marker is scoped to its own cluster: parallel CI shard clusters
+# and successive local clusters on one daemon can never alias one marker name.
+# The exact cluster binding remains the marker's cluster-name data field.
+kind_e2e_prepared_configmap() {
+  local sanitized
+  sanitized="$(printf '%s' "$KIND_CLUSTER_NAME" | tr 'A-Z_' 'a-z-')"
+  printf '%s-%s\n' "$KIND_E2E_PREPARED_CONFIGMAP" "$sanitized"
 }
 
 mark_retained_cluster_prepared() {
@@ -560,7 +614,7 @@ mark_retained_cluster_prepared() {
       --from-literal="source-tree=$KIND_PROFILE_SOURCE_TREE")
   fi
   log "marking Kind cluster ${KIND_CLUSTER_NAME} prepared for retained suites"
-  kubectl -n "$NS" create configmap "$KIND_E2E_PREPARED_CONFIGMAP" \
+  kubectl -n "$NS" create configmap "$(kind_e2e_prepared_configmap)" \
     --from-literal="compatibility_version=${KIND_E2E_COMPATIBILITY_VERSION}" \
     --from-literal="cluster-name=${KIND_CLUSTER_NAME}" \
     --from-literal="workspace-image=$workspace_image" \
@@ -862,7 +916,10 @@ build_images_and_smokes() {
 }
 
 # Retained suites rerun gate steps on a kept cluster. `up` builds no smoke
-# binaries, so build them here; cargo makes repeated builds incremental.
+# binaries, so build them here; cargo makes repeated builds incremental. The CI
+# shard legs instead consumed the exact same-run smoke artifact during `up`
+# (kind-build-artifacts.py SMOKE_FILES/TEST_FILES), so rebuilding there would
+# redo the producer's work on an empty cache; verify the consumed set instead.
 build_retained_kind_smokes() {
   if [ "${KIND_PROFILE:-0}" = 1 ]; then
     if [ "$KIND_PROFILE_ARTIFACTS_VERIFIED" != 1 ]; then
@@ -872,6 +929,29 @@ build_retained_kind_smokes() {
     return $?
   fi
   mkdir -p "$RUN_DIR"
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-ci ]; then
+    local consumed missing=0
+    for consumed in \
+        crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke \
+        file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke \
+        temporal-fencing-smoke reconciler-ttl-smoke cw \
+        examples/platform-run-smoke examples/environment-session-smoke \
+        examples/coordinator-ingress-smoke; do
+      if [ ! -x "$CARGO_CI_DIR/$consumed" ]; then
+        echo "::error::consumed Kind smoke binary is missing: ${CARGO_CI_DIR}/${consumed}; rerun kind-e2e.sh up"
+        missing=1
+      fi
+    done
+    for consumed in credential-bootstrap-build.jsonl billing-contract-build.jsonl; do
+      if [ ! -f "$RUN_DIR/$consumed" ]; then
+        echo "::error::consumed Kind smoke build receipt is missing: ${RUN_DIR}/${consumed}; rerun kind-e2e.sh up"
+        missing=1
+      fi
+    done
+    [ "$missing" -eq 0 ] || return 1
+    log "consumed Kind smoke binaries verified for the retained suite"
+    return 0
+  fi
   log "building Rust kind smoke binaries for the retained suite"
   "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
     "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
@@ -1090,8 +1170,16 @@ kind_workspace_runtime_image() {
   # the cluster's recorded workspace image is authoritative; the gate and CI
   # never set this and keep the verified-source receipt below.
   if [ "${KIND_RETAINED_USE_CLUSTER_WORKSPACE:-0}" = 1 ]; then
-    kubectl --request-timeout=10s -n "$NS" get "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" \
-      -o jsonpath='{.data.workspace-image}'
+    local marker_configmap workspace_image
+    marker_configmap="$(kind_e2e_prepared_configmap)"
+    if workspace_image="$(kubectl --request-timeout=10s -n "$NS" get \
+        "configmap/${marker_configmap}" \
+        -o jsonpath='{.data.workspace-image}' 2>/dev/null)"; then
+      printf '%s' "$workspace_image"
+      return 0
+    fi
+    kubectl --request-timeout=10s -n "$NS" get \
+      "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" -o jsonpath='{.data.workspace-image}'
     return $?
   fi
   local sealed_status=0

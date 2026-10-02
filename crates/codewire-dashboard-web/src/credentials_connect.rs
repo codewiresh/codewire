@@ -14,10 +14,11 @@ use codewire_proto::codewire::v1::{
     AddSshCredentialRequest, CompleteGithubAppAuthorizationRequest, CreateAccessProfileRequest,
     Credential, CredentialAuthenticationKind, CredentialMutationServiceClient,
     CredentialServiceClient, CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest,
-    EnrollCodexRequest, EnrollCodexResponse, GenerateSshCredentialRequest, GetCredentialRequest,
-    ListAccessProfilesRequest, ListCredentialsRequest, RenameAccessProfileRequest,
-    RenameCredentialRequest, RevokeCredentialRequest, RotateApiKeyCredentialRequest,
-    UpdateAccessProfileRequest, enroll_codex_response, get_credential_request,
+    EnrollCodexRequest, EnrollCodexResponse, GenerateSshCredentialRequest, GetAccessProfileRequest,
+    GetCredentialRequest, ListAccessProfilesRequest, ListCredentialsRequest,
+    RenameAccessProfileRequest, RenameCredentialRequest, RevokeCredentialRequest,
+    RotateApiKeyCredentialRequest, UpdateAccessProfileRequest, enroll_codex_response,
+    get_access_profile_request, get_credential_request,
 };
 use connectrpc::{
     ConnectError, ErrorCode,
@@ -36,6 +37,8 @@ use crate::view::{
 const PAGE_SIZE: i32 = 100;
 const MAX_PAGES: usize = 10;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Sandbox notices are advisory: a slow read never holds the list or page.
+const ATTENTION_TIMEOUT: Duration = Duration::from_secs(3);
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(45);
 const ENROLLMENT_TIMEOUT: Duration = Duration::from_secs(16 * 60);
 const MAX_MUTATION_RESPONSE_BYTES: usize = 16 * 1024;
@@ -703,6 +706,67 @@ pub(crate) async fn settings_data(
     build_settings_data(credentials, profiles)
 }
 
+/// The viewer's own profiles at their current revisions, each with the
+/// capabilities its credentials withhold now. This is the Credentials page's
+/// one read. Any failure yields no profiles, so Sandboxes render as they would
+/// without notices; nothing about the failure is shown or logged.
+pub(crate) async fn current_profile_attention(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Vec<CredentialProfileRowView> {
+    match tokio::time::timeout(ATTENTION_TIMEOUT, settings_data(state, cookie)).await {
+        Ok(Ok(data)) => data.profiles,
+        _ => Vec::new(),
+    }
+}
+
+/// One exact revision of the viewer's own profile, with the capabilities its
+/// credentials withhold now. Another account's profile is not readable, so
+/// it yields nothing, as does any other failure.
+pub(crate) async fn bound_profile_attention(
+    state: &AppState,
+    cookie: HeaderValue,
+    profile_id: &str,
+    revision: u64,
+) -> Vec<CredentialProfileRowView> {
+    let read = async {
+        let (credentials, profile) = tokio::try_join!(
+            list_credentials(state, cookie.clone()),
+            get_profile_revision(state, cookie, profile_id, revision),
+        )?;
+        build_settings_data(credentials, vec![profile])
+    };
+    match tokio::time::timeout(ATTENTION_TIMEOUT, read).await {
+        Ok(Ok(data)) => data.profiles,
+        _ => Vec::new(),
+    }
+}
+
+async fn get_profile_revision(
+    state: &AppState,
+    cookie: HeaderValue,
+    profile_id: &str,
+    revision: u64,
+) -> Result<AccessProfile, ConnectError> {
+    let profile = profile_client(state, cookie)
+        .get_access_profile(GetAccessProfileRequest {
+            selector: Some(get_access_profile_request::Selector::AccessProfileId(
+                profile_id.into(),
+            )),
+            revision: Some(revision),
+            ..Default::default()
+        })
+        .await?
+        .into_owned()
+        .access_profile
+        .into_option()
+        .ok_or_else(invalid_metadata)?;
+    if profile.id != profile_id || profile.revision != revision {
+        return Err(invalid_metadata());
+    }
+    Ok(profile)
+}
+
 pub(crate) async fn list_credentials(
     state: &AppState,
     cookie: HeaderValue,
@@ -943,6 +1007,7 @@ fn build_settings_data(
                 slot,
                 status,
                 status_tone,
+                capability_withheld(&credential),
             ),
         );
         rows.push(CredentialRowView {
@@ -975,8 +1040,8 @@ fn build_settings_data(
     let mut seen_profiles = BTreeSet::new();
     let github_connection = credential_index
         .values()
-        .find(|(_, slot, _, _)| *slot == "github")
-        .map(|(name, _, status, tone)| (name.clone(), *status, *tone));
+        .find(|(_, slot, _, _, _)| *slot == "github")
+        .map(|(name, _, status, tone, withheld)| (name.clone(), *status, *tone, *withheld));
     let mut profile_rows = Vec::with_capacity(profiles.len());
     for profile in profiles {
         if exact_id(&profile.id).is_err()
@@ -990,8 +1055,9 @@ fn build_settings_data(
         }
         let mut selected = BTreeMap::new();
         let mut entries = Vec::with_capacity(profile.entries.len());
+        let mut attention = Vec::new();
         for entry in profile.entries {
-            let Some((credential_name, credential_slot, status, status_tone)) =
+            let Some((credential_name, credential_slot, status, status_tone, withheld)) =
                 credential_index.get(&entry.credential_id)
             else {
                 return Err(invalid_metadata());
@@ -1009,12 +1075,21 @@ fn build_settings_data(
                 status,
                 status_tone,
             });
+            if *withheld {
+                attention.push(attention_notice(credential_slot));
+            }
         }
         // Every profile includes the account's one GitHub connection. Show it,
-        // or show it as missing until the account connects GitHub.
+        // or show it as missing until the account connects GitHub. A missing
+        // connection grants nothing, so only an unusable one needs Reconnect.
         let (credential, status, status_tone) = github_connection.as_ref().map_or_else(
             || ("missing".to_owned(), "Connect GitHub", "warning"),
-            |(account, status, status_tone)| (format!("@{account}"), *status, *status_tone),
+            |(account, status, status_tone, withheld)| {
+                if *withheld {
+                    attention.push(attention_notice("github"));
+                }
+                (format!("@{account}"), *status, *status_tone)
+            },
         );
         entries.push(CredentialProfileEntryView {
             slot: "GitHub",
@@ -1023,11 +1098,14 @@ fn build_settings_data(
             status_tone,
         });
         entries.sort_by(|a, b| a.slot.cmp(b.slot));
+        // Each notice starts with its capability, so this is the entry order.
+        attention.sort_unstable();
         profile_rows.push(CredentialProfileRowView {
             id: profile.id,
             name: profile.name,
             revision: profile.revision,
             entries,
+            attention,
             codex: selected.remove("codex").unwrap_or_default(),
             openai: selected.remove("openai").unwrap_or_default(),
             anthropic: selected.remove("anthropic").unwrap_or_default(),
@@ -1249,6 +1327,26 @@ fn credential_status(
     }
 }
 
+/// The broker withholds a capability whose credential reads as anything but
+/// Active in [`credential_status`]: its refresh failed, or it was revoked or
+/// expired. Sessions and the other capabilities keep working.
+fn capability_withheld(credential: &Credential) -> bool {
+    credential.status != CredentialStatus::Active
+}
+
+/// What a withheld capability needs, in the words of the broker's 403 for the
+/// same slot: an OAuth identity is reconnected, a key is replaced.
+fn attention_notice(slot: &str) -> &'static str {
+    match slot {
+        "codex" => "Codex needs Reconnect",
+        "github" => "GitHub needs Reconnect",
+        "openai" => "OpenAI API key needs replacing",
+        "anthropic" => "Anthropic API key needs replacing",
+        "ssh" => "SSH key needs replacing",
+        _ => unreachable!("closed slot"),
+    }
+}
+
 fn provider_label(slot: &str) -> &'static str {
     match slot {
         "codex" => "OpenAI Codex",
@@ -1458,6 +1556,106 @@ mod tests {
             (entry.status, entry.status_tone),
             ("Reconnect needed", "warning")
         );
+    }
+
+    /// #2361: a Sandbox names the capabilities its bound revision withholds,
+    /// in the broker's words, from the status the Credentials page shows.
+    #[test]
+    fn withheld_capabilities_read_in_the_broker_words_per_profile_revision() {
+        let id = |n: u8| format!("00000000-0000-4000-8000-0000000000{n:02}");
+        let mut codex = credential(
+            &id(1),
+            "Work Codex",
+            "openai",
+            CredentialAuthenticationKind::Oauth,
+        );
+        codex.status = CredentialStatus::RefreshFailed.into();
+        let anthropic = credential(
+            &id(2),
+            "Work Anthropic",
+            "anthropic",
+            CredentialAuthenticationKind::ApiKey,
+        );
+        let mut openai = credential(
+            &id(3),
+            "Old OpenAI",
+            "openai",
+            CredentialAuthenticationKind::ApiKey,
+        );
+        openai.status = CredentialStatus::Revoked.into();
+        let mut expired = credential(
+            &id(4),
+            "Old Anthropic",
+            "anthropic",
+            CredentialAuthenticationKind::ApiKey,
+        );
+        expired.status = CredentialStatus::Expired.into();
+        let profile = |n: u8, entries: &[(&str, String)]| AccessProfile {
+            id: id(n),
+            name: format!("profile-{n}"),
+            revision: 7,
+            entries: entries
+                .iter()
+                .map(|(slot, credential_id)| AccessProfileEntry {
+                    capability_slot: (*slot).into(),
+                    credential_id: credential_id.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let profiles = vec![
+            profile(10, &[("codex", id(1)), ("anthropic", id(2))]),
+            profile(11, &[("anthropic", id(2))]),
+            profile(12, &[("openai", id(3)), ("anthropic", id(4))]),
+            profile(13, &[]),
+        ];
+        let attention = |data: &CredentialSettingsData, n: u8| {
+            data.profiles
+                .iter()
+                .find(|profile| profile.id == id(n))
+                .unwrap()
+                .attention
+                .clone()
+        };
+        let data = build_settings_data(
+            vec![
+                codex.clone(),
+                anthropic.clone(),
+                openai.clone(),
+                expired.clone(),
+            ],
+            profiles.clone(),
+        )
+        .unwrap();
+        assert_eq!(attention(&data, 10), ["Codex needs Reconnect"]);
+        assert!(attention(&data, 11).is_empty());
+        assert_eq!(
+            attention(&data, 12),
+            [
+                "Anthropic API key needs replacing",
+                "OpenAI API key needs replacing"
+            ]
+        );
+        // No GitHub connection grants nothing, so it needs no Reconnect.
+        assert!(attention(&data, 13).is_empty());
+
+        // The account's one GitHub connection belongs to every profile.
+        let mut github = credential(
+            &id(5),
+            "synthetic",
+            "github",
+            CredentialAuthenticationKind::Oauth,
+        );
+        github.account_hint = Some("synthetic-user".into());
+        github.status = CredentialStatus::RefreshFailed.into();
+        let data =
+            build_settings_data(vec![codex, anthropic, openai, expired, github], profiles).unwrap();
+        assert_eq!(
+            attention(&data, 10),
+            ["Codex needs Reconnect", "GitHub needs Reconnect"]
+        );
+        assert_eq!(attention(&data, 13), ["GitHub needs Reconnect"]);
     }
 
     #[test]

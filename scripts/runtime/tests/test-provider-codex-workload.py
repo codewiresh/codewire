@@ -166,7 +166,7 @@ class WorkloadContractTests(unittest.TestCase):
 
     def test_fixed_stock_command_and_prompt(self) -> None:
         self.assertIn("readonly CODEX_BIN=/opt/codewire/agents/npm/bin/codex", self.source)
-        self.assertIn("readonly EXPECTED_VERSION='codex-cli 0.149.0'", self.source)
+        self.assertIn("readonly EXPECTED_VERSION='codex-cli 0.157.0'", self.source)
         self.assertIn("readonly EXPECTED_CODEX_HOME=/run/codewire-agent/codex", self.source)
         self.assertIn("readonly SCRATCH_PARENT=/dev/shm", self.source)
         self.assertIn("exec --strict-config --ephemeral --json", self.source)
@@ -257,7 +257,7 @@ class WorkloadContractTests(unittest.TestCase):
                 """#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$#" == 1 && "$1" == --version ]]; then
-  printf 'codex-cli 0.149.0\\n'
+  printf 'codex-cli 0.157.0\\n'
   exit 0
 fi
 expected=(exec --strict-config --ephemeral --json --color never --sandbox read-only

@@ -36,6 +36,8 @@ const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 const PUBLIC_CONNECT_METHODS: [&str; 1] = ["/codewire.v1.OrganizationService/GetInvitationByToken"];
 const ORCHESTRATION_INTERNAL_CONNECT_PORT_ENV: &str = "ORCHESTRATION_INTERNAL_CONNECT_PORT";
 const DEFAULT_ORCHESTRATION_INTERNAL_CONNECT_PORT: u16 = 8085;
+const ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV: &str =
+    codewire_orchestration::workspace_binding::ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV;
 
 fn env_list(name: &str) -> Vec<String> {
     env_list_from(std::env::var(name).ok().as_deref())
@@ -86,33 +88,80 @@ fn internal_connect_bind_addr(
     public_bind_addr: SocketAddr,
     configured_port: Option<&str>,
 ) -> anyhow::Result<SocketAddr> {
+    listener_bind_addr(
+        public_bind_addr,
+        ORCHESTRATION_INTERNAL_CONNECT_PORT_ENV,
+        configured_port,
+        DEFAULT_ORCHESTRATION_INTERNAL_CONNECT_PORT,
+    )
+}
+
+fn workspace_binding_bind_addr(
+    public_bind_addr: SocketAddr,
+    configured_port: Option<&str>,
+) -> anyhow::Result<SocketAddr> {
+    listener_bind_addr(
+        public_bind_addr,
+        ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV,
+        configured_port,
+        codewire_gateway_proto::WORKSPACE_BINDING_PORT,
+    )
+}
+
+fn listener_bind_addr(
+    public_bind_addr: SocketAddr,
+    variable: &str,
+    configured_port: Option<&str>,
+    default_port: u16,
+) -> anyhow::Result<SocketAddr> {
     let port = match configured_port
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        Some(value) => value.parse::<u16>().with_context(|| {
-            format!("{ORCHESTRATION_INTERNAL_CONNECT_PORT_ENV}={value:?} must be a TCP port")
-        })?,
-        None => DEFAULT_ORCHESTRATION_INTERNAL_CONNECT_PORT,
+        Some(value) => value
+            .parse::<u16>()
+            .with_context(|| format!("{variable}={value:?} must be a TCP port"))?,
+        None => default_port,
     };
     Ok(SocketAddr::new(public_bind_addr.ip(), port))
 }
 
-/// Bind both orchestration listeners before either one serves. If the internal
-/// port cannot bind, the public listener is dropped while this error unwinds,
-/// so startup cannot leave a public-only process running.
+struct Listeners {
+    public: TcpListener,
+    internal: TcpListener,
+    workspace_binding: TcpListener,
+}
+
+/// Bind every orchestration listener before any one serves. If a later port
+/// cannot bind, the earlier listeners are dropped while this error unwinds, so
+/// startup cannot leave a partial process running.
 async fn bind_listeners(
     public_bind_addr: SocketAddr,
     internal_bind_addr: SocketAddr,
-) -> anyhow::Result<(TcpListener, TcpListener)> {
-    let public_listener = TcpListener::bind(public_bind_addr)
+    workspace_binding_bind_addr: SocketAddr,
+) -> anyhow::Result<Listeners> {
+    let public = TcpListener::bind(public_bind_addr)
         .await
         .with_context(|| format!("bind public orchestration listener {public_bind_addr}"))?;
-    let internal_listener = TcpListener::bind(internal_bind_addr)
+    let internal = TcpListener::bind(internal_bind_addr)
         .await
         .with_context(|| format!("bind internal orchestration listener {internal_bind_addr}"))?;
-    tracing::info!(%public_bind_addr, %internal_bind_addr, "orchestration listeners bound");
-    Ok((public_listener, internal_listener))
+    let workspace_binding = TcpListener::bind(workspace_binding_bind_addr)
+        .await
+        .with_context(|| {
+            format!("bind workspace-binding orchestration listener {workspace_binding_bind_addr}")
+        })?;
+    tracing::info!(
+        %public_bind_addr,
+        %internal_bind_addr,
+        %workspace_binding_bind_addr,
+        "orchestration listeners bound"
+    );
+    Ok(Listeners {
+        public,
+        internal,
+        workspace_binding,
+    })
 }
 
 #[tokio::main]
@@ -125,8 +174,18 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .as_deref(),
     )?;
-    let (public_listener, internal_listener) =
-        bind_listeners(cfg.bind_addr, internal_connect_bind_addr).await?;
+    let workspace_binding_bind_addr = workspace_binding_bind_addr(
+        cfg.bind_addr,
+        std::env::var(ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV)
+            .ok()
+            .as_deref(),
+    )?;
+    let listeners = bind_listeners(
+        cfg.bind_addr,
+        internal_connect_bind_addr,
+        workspace_binding_bind_addr,
+    )
+    .await?;
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
@@ -272,6 +331,32 @@ async fn main() -> anyhow::Result<()> {
         codewire_orchestration::connect::mesh_authorization::MESH_AUTHORIZATION_METHOD,
     );
 
+    // The workspace-binding listener is reachable from every tenant workload,
+    // so it serves only WorkspaceBindingService under its own connection,
+    // request and database limits. No health, metrics, REST, mesh or gateway
+    // route shares port 8087, and this service is mounted nowhere else.
+    let workspace_binding_notifications =
+        Arc::new(codewire_orchestration::workspace_binding::BindingNotifications::default());
+    codewire_orchestration::workspace_binding::spawn_binding_notification_listener(
+        pool.clone(),
+        workspace_binding_notifications.clone(),
+    );
+    let workspace_binding_app = codewire_orchestration::workspace_binding::app(
+        codewire_orchestration::workspace_binding::workspace_binding_router(Arc::new(
+            codewire_orchestration::workspace_binding::WorkspaceBindingState::new(
+                api_state.kube.clone(),
+                Arc::new(
+                    codewire_orchestration::workspace_binding::PgBindingStore::connect_lazy(
+                        &cfg.database_url,
+                    )?,
+                ),
+                workspace_binding_notifications,
+                &api_state.sandbox_cfg.sandbox_namespace,
+                &cfg.session_secret,
+            ),
+        )),
+    );
+
     // The internal listener is intentionally a minimal cluster-local surface:
     // no health, REST, public Connect, or edge-routed routes share port 8085.
     let internal_app = AppBuilder::new("codewire-orchestration-internal")
@@ -366,8 +451,13 @@ async fn main() -> anyhow::Result<()> {
         ));
 
     tokio::try_join!(
-        codewire_server_core::serve_with_listener(app, public_listener),
-        codewire_server_core::serve_with_listener(internal_app, internal_listener),
+        codewire_server_core::serve_with_listener(app, listeners.public),
+        codewire_server_core::serve_with_listener(internal_app, listeners.internal),
+        codewire_server_core::bounded_http1::serve_bounded_http1(
+            workspace_binding_app,
+            listeners.workspace_binding,
+            codewire_orchestration::workspace_binding::LISTENER_LIMITS,
+        ),
     )?;
     Ok(())
 }
@@ -385,31 +475,54 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn listener_setup_fails_closed_when_internal_port_is_busy() {
-        let busy_internal = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let internal_addr = busy_internal.local_addr().unwrap();
-        let public_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let public_addr = public_probe.local_addr().unwrap();
-        drop(public_probe);
+    #[test]
+    fn workspace_binding_listener_defaults_to_8087_on_the_public_bind_ip() {
+        let public = SocketAddr::from(([127, 0, 0, 1], 8084));
+        assert_eq!(
+            workspace_binding_bind_addr(public, None).unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], 8087))
+        );
+        assert_eq!(
+            workspace_binding_bind_addr(public, Some(" 18087 ")).unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], 18087))
+        );
+        assert!(workspace_binding_bind_addr(public, Some("binding")).is_err());
+    }
 
-        assert!(bind_listeners(public_addr, internal_addr).await.is_err());
-        // A failed internal bind released the pre-bound public listener.
-        let rebound_public = TcpListener::bind(public_addr).await;
-        assert!(rebound_public.is_ok());
+    async fn free_addr() -> SocketAddr {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        probe.local_addr().unwrap()
+    }
+
+    /// Every listener but `busy` binds; startup must fail and release them.
+    async fn assert_listener_setup_fails_closed(busy: usize) {
+        let blocker = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut addrs = [free_addr().await, free_addr().await, free_addr().await];
+        addrs[busy] = blocker.local_addr().unwrap();
+        assert!(bind_listeners(addrs[0], addrs[1], addrs[2]).await.is_err());
+        for (index, addr) in addrs.iter().enumerate() {
+            if index != busy {
+                assert!(
+                    TcpListener::bind(addr).await.is_ok(),
+                    "listener {index} leaked"
+                );
+            }
+        }
     }
 
     #[tokio::test]
     async fn listener_setup_fails_when_public_port_is_busy() {
-        let busy_public = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let public_addr = busy_public.local_addr().unwrap();
-        let internal_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let internal_addr = internal_probe.local_addr().unwrap();
-        drop(internal_probe);
+        assert_listener_setup_fails_closed(0).await;
+    }
 
-        assert!(bind_listeners(public_addr, internal_addr).await.is_err());
-        let rebound_internal = TcpListener::bind(internal_addr).await;
-        assert!(rebound_internal.is_ok());
+    #[tokio::test]
+    async fn listener_setup_fails_closed_when_internal_port_is_busy() {
+        assert_listener_setup_fails_closed(1).await;
+    }
+
+    #[tokio::test]
+    async fn listener_setup_fails_closed_when_workspace_binding_port_is_busy() {
+        assert_listener_setup_fails_closed(2).await;
     }
 
     #[test]

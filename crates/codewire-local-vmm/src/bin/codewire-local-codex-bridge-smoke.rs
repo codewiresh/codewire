@@ -69,7 +69,7 @@ mod linux {
     type SmokeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
     const CODEX_BIN: &str = "codex";
-    const CODEX_VERSION: &str = "codex-cli 0.149.0\n";
+    const CODEX_VERSION: &str = "codex-cli 0.157.0\n";
     const CODEX_MODEL: &str = "codewire-synthetic";
     const CODEX_PROMPT: &str = "Return the synthetic marker.";
     const CODEX_MARKER: &str = "CWCODEX149 synthetic";
@@ -308,8 +308,8 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         require(
             output
                 .stderr
-                .windows(b"OpenAI Codex v0.149.0".len())
-                .any(|window| window == b"OpenAI Codex v0.149.0"),
+                .windows(b"OpenAI Codex v0.157.0".len())
+                .any(|window| window == b"OpenAI Codex v0.157.0"),
         )?;
 
         println!("codewire-local-codex-bridge-smoke: PASS");
@@ -1416,8 +1416,8 @@ function generalEgress(){
                 && output.stdout == format!("{MANAGED_CODEX_MARKER}\n").as_bytes()
                 && output
                     .stderr
-                    .windows(b"OpenAI Codex v0.149.0".len())
-                    .any(|window| window == b"OpenAI Codex v0.149.0"),
+                    .windows(b"OpenAI Codex v0.157.0".len())
+                    .any(|window| window == b"OpenAI Codex v0.157.0"),
         )
     }
 

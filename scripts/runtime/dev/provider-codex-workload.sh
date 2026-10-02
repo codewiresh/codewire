@@ -5,7 +5,7 @@ set -euo pipefail
 umask 077
 
 readonly CODEX_BIN=/opt/codewire/agents/npm/bin/codex
-readonly EXPECTED_VERSION='codex-cli 0.149.0'
+readonly EXPECTED_VERSION='codex-cli 0.157.0'
 readonly CAPTURE_LIMIT_BYTES=1048576
 readonly EXPECTED_CODEX_HOME=/run/codewire-agent/codex
 readonly SCRATCH_PARENT=/dev/shm

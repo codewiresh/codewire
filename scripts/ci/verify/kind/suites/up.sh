@@ -40,11 +40,11 @@ run_kind_up() {
   fi
   trap cleanup EXIT
 
+  ingress_path_drift_check || return $?
   KIND_BUILD_SMOKES=0 build_images_and_smokes || return $?
   create_cluster || return $?
   load_images_into_kind || return $?
   deploy_overlay || return $?
   deploy_agent_sandbox || return $?
   mark_retained_cluster_prepared || return $?
-  log "cluster ${KIND_CLUSTER_NAME} is up; no test suites ran"
 }
