@@ -1,0 +1,26 @@
+#!/bin/sh
+# The image's pi lives outside the persistent home, where an update would be
+# lost on the next restart. Its self-update installs pi into the home's npm
+# prefix instead, which PATH prefers from then on. Everything else is pi itself.
+set -eu
+if [ "${1:-}" = update ]; then
+  self=true
+  all=false
+  shift
+  for argument do
+    case $argument in
+      self | pi | --self | --force | -a | --approve | -na | --no-approve) ;;
+      --all) all=true ;;
+      *) self=false ;;
+    esac
+  done
+  if [ "$self" = true ]; then
+    npm install --global @earendil-works/pi-coding-agent@latest
+    if [ "$all" = true ]; then
+      exec pi update --extensions
+    fi
+    exit 0
+  fi
+  set -- update "$@"
+fi
+exec /opt/codewire/agents/npm/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js "$@"

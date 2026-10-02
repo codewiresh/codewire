@@ -132,10 +132,11 @@ ENV CARGO_HOME="/home/codewire/.cargo"
 ENV RUSTUP_HOME="/home/codewire/.rustup"
 # User installations persist in the mounted home and take precedence over the
 # shipped agents. Image configuration, not a hidden ~/.npmrc, selects their
-# npm prefix and the sole admitted lifecycle-script package.
+# npm prefix and the sole admitted lifecycle-script package. The upgrade
+# commands of shipped agents that would update in place come next.
 ENV NPM_CONFIG_PREFIX="/home/codewire/.npm-global"
 ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"
-ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:${CARGO_HOME}/bin:${PATH}"
+ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/upgrade:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:${CARGO_HOME}/bin:${PATH}"
 
 # Reuse the exact toolchain and explicitly selected components from the
 # digest-pinned Rust build stage. This removes a second mutable installer
@@ -185,6 +186,12 @@ USER root
 RUN printf '\n%s\nset +h\n' \
       '# Find commands on PATH every time, so an agent CLI updated in this shell runs at once.' \
       >>/etc/bash.bashrc
+# The shipped agents are image content outside the persistent home. Keep them
+# read-only, so no self-updater writes a copy that the next restart discards.
+# Codex, Claude and Gemini update into the home's npm prefix themselves; pi,
+# Kimi Code and aider reach the home through their upgrade wrappers.
+COPY --chmod=0755 images/workspace/agent-upgrade/ /opt/codewire/agents/upgrade/
+RUN chown -R -h root:root /opt/codewire/agents && chmod -R go-w /opt/codewire/agents
 
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.

@@ -8,7 +8,8 @@ readonly CONTRACT="$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/workspace-agent-contract-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/bin" "$work/cgroup" "$work/ssh/usr/sbin" "$work/system-sbin"
+mkdir -p "$work/bin" "$work/cgroup" "$work/ssh/usr/sbin" "$work/system-sbin" \
+  "$work/agents/npm/bin" "$work/agents/upgrade"
 case "$(uname -m)" in
   x86_64) multiarch=x86_64-linux-gnu ;;
   aarch64) multiarch=aarch64-linux-gnu ;;
@@ -87,20 +88,29 @@ EOF
 cat >"$work/bin/find" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${FAIL_SSH_FIND:-false}" = false ]] || exit 42
-[[ "$1" == "$FAKE_SSH_ROOT" ]] || exit 99
+case "$1" in
+  "$FAKE_SSH_ROOT")
+    [[ "${FAIL_SSH_FIND:-false}" = false ]] || exit 42
+    expected_uid="${FAKE_SSH_EXPECTED_UID:-$FAKE_FIXTURE_UID}" ;;
+  "$FAKE_AGENTS_ROOT") expected_uid="${FAKE_AGENTS_EXPECTED_UID:-$FAKE_FIXTURE_UID}" ;;
+  *) exit 99 ;;
+esac
 # Host tests cannot chown files to root. Translate only the expected uid in the
 # real find predicate; permission, key-file and unexpected-owner checks remain.
 args=("$@")
 for ((i=0; i<${#args[@]}-1; i++)); do
   if [[ "${args[i]}" == -uid && "${args[i+1]}" == 0 ]]; then
-    args[i+1]="${FAKE_SSH_EXPECTED_UID:-$FAKE_FIXTURE_UID}"
+    args[i+1]="$expected_uid"
   fi
 done
 exec /usr/bin/find "${args[@]}"
 EOF
 chmod +x "$work/bin/find" "$work/ssh/usr/sbin/sshd"
 chmod -R go-w "$work/ssh"
+# The shipped tree: a seeded agent plus the image's actual upgrade wrappers.
+printf '#!/bin/sh\n' >"$work/agents/npm/bin/kimi"
+cp "$ROOT"/images/workspace/agent-upgrade/* "$work/agents/upgrade/"
+chmod -R go-w "$work/agents"
 for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
 done
@@ -116,6 +126,9 @@ run_contract() {
     CODEWIRE_SSH_FIXTURE_ROOT="$work/ssh" \
     CODEWIRE_SYSTEM_SBIN_ROOT="$work/system-sbin" \
     CODEWIRE_INTERACTIVE_SHELL="$work/interactive-bash" \
+    CODEWIRE_AGENTS_ROOT="$work/agents" \
+    FAKE_AGENTS_ROOT="$work/agents" \
+    FAKE_AGENTS_EXPECTED_UID="${FAKE_AGENTS_EXPECTED_UID:-$fixture_uid}" \
     FAKE_INTERACTIVE_FLAGS="${FAKE_INTERACTIVE_FLAGS:-imBHc}" \
     CODEWIRE_EXPECTED_PIDS_MAX=2048 \
     FAKE_CODEWIRE_GID="${FAKE_CODEWIRE_GID:-1000}" \
@@ -174,6 +187,30 @@ done
 if FAKE_CODEX_VERSION=0.149.0 run_contract >"$work/stale.out" 2>"$work/stale.err"; then
   fail 'stale Codex version was accepted'
 fi
+for agents_failure in writable wrong-owner; do
+  (
+    case "$agents_failure" in
+      writable) chmod g+w "$work/agents/npm/bin/kimi" ;;
+      wrong-owner) FAKE_AGENTS_EXPECTED_UID=4294967294 ;;
+    esac
+    if run_contract >"$work/agents.out" 2>"$work/agents.err"; then
+      fail "shipped agents accepted as $agents_failure"
+    fi
+    grep -Fxq 'workspace image verification: shipped agents are writable' "$work/agents.err" ||
+      fail "shipped agents $agents_failure was not reported"
+  )
+  chmod g-w "$work/agents/npm/bin/kimi"
+done
+# A wrapper that upgrades in place, not into the home, must fail the contract.
+cp "$work/agents/upgrade/kimi" "$work/kimi.saved"
+sed -i 's|exec npm install --global @moonshot-ai/kimi-code@latest|exec npm --prefix /opt/codewire/agents/npm install --global @moonshot-ai/kimi-code@latest|' \
+  "$work/agents/upgrade/kimi"
+if run_contract >"$work/route.out" 2>"$work/route.err"; then
+  fail 'an in-place agent upgrade route was accepted'
+fi
+grep -Fxq 'workspace image verification: kimi upgrade does not upgrade into the home' "$work/route.err" ||
+  fail 'in-place agent upgrade route was not reported'
+cp "$work/kimi.saved" "$work/agents/upgrade/kimi"
 for shell_case in 'himBHc:interactive bash hashes command paths' 'mBc:interactive bash did not start'; do
   flags="${shell_case%%:*}"
   if FAKE_INTERACTIVE_FLAGS="$flags" run_contract >"$work/shell.out" 2>"$work/shell.err"; then

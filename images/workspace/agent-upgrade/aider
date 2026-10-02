@@ -1,0 +1,11 @@
+#!/bin/sh
+# The image's aider lives outside the persistent home, where an upgrade would be
+# lost on the next restart. Upgrading installs it with pipx into the home, which
+# PATH prefers from then on. Everything else is aider itself.
+set -eu
+for argument do
+  case $argument in
+    --upgrade | --update) exec pipx install --force aider-chat ;;
+  esac
+done
+exec /opt/codewire/agents/pipx/venvs/aider-chat/bin/aider "$@"
