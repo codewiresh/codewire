@@ -444,6 +444,7 @@ set -euo pipefail
 NS=codewire-e2e
 ROOT=/synthetic-codewire
 KIND_INGRESS_URL=http://127.0.0.1:8090
+KIND_COORDINATOR_DIRECT_URL=http://127.0.0.1:18092
 KIND_POSTGRES_LOCAL_IMAGE=synthetic-postgres
 CARGO_CI_DIR=/synthetic-codewire/target/ci
 PROBE_HEADERS="$FIXTURE/headers"
