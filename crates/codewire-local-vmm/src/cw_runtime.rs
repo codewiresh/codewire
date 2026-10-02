@@ -140,7 +140,8 @@ impl CwRuntimeCatalogManifest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdmittedCwRuntimeDisk {
     pub generation: String,
     pub path: PathBuf,
@@ -149,7 +150,24 @@ pub struct AdmittedCwRuntimeDisk {
 }
 
 impl AdmittedCwRuntimeDisk {
+    /// Validate saved metadata without using its path as filesystem authority.
+    pub fn validate_metadata(&self) -> Result<(), CwRuntimeError> {
+        self.manifest.validate(&self.generation)?;
+        if !self.path.is_absolute()
+            || self.path.file_name() != Some(std::ffi::OsStr::new("runtime.raw"))
+            || self.path.parent().and_then(Path::file_name)
+                != Some(std::ffi::OsStr::new(&self.generation))
+            || self.identity.size != self.manifest.disk.size
+            || self.identity.mode != 0o100400
+            || self.identity.links != 1
+        {
+            return Err(CwRuntimeError::InvalidManifest);
+        }
+        Ok(())
+    }
+
     pub fn revalidate(&self) -> Result<(), CwRuntimeError> {
+        self.validate_metadata()?;
         let root = PrivateRoot::open(self.path.parent().ok_or(CwRuntimeError::InvalidManifest)?)?;
         let name = self
             .path
@@ -382,6 +400,28 @@ impl CwRuntimeStore {
 
     pub fn open_catalog(&self, generation: &str) -> Result<AdmittedCwRuntimeDisk, CwRuntimeError> {
         self.open_catalog_until(generation, Instant::now() + PREPARATION_TIMEOUT)
+    }
+
+    /// Reopen only the path derived from this authoritative private store.
+    /// Persisted paths never authorize a filesystem read or a replacement.
+    pub fn revalidate_attachment(
+        &self,
+        attachment: &AdmittedCwRuntimeDisk,
+    ) -> Result<AdmittedCwRuntimeDisk, CwRuntimeError> {
+        attachment.validate_metadata()?;
+        let path = self
+            .catalogs
+            .path()
+            .join(&attachment.generation)
+            .join("runtime.raw");
+        if attachment.path != path {
+            return Err(CwRuntimeError::InvalidManifest);
+        }
+        let admitted = self.open_catalog(&attachment.generation)?;
+        if &admitted != attachment {
+            return Err(CwRuntimeError::DiskChanged);
+        }
+        Ok(admitted)
     }
 
     fn open_catalog_until(
@@ -1263,6 +1303,26 @@ mod tests {
         let old = store.admit_source(&old_path).unwrap().provenance;
         let disk = store.prepare_catalog(&old, &BTreeMap::new()).unwrap();
         disk.revalidate().unwrap();
+        let saved: AdmittedCwRuntimeDisk =
+            serde_json::from_slice(&serde_json::to_vec(&disk).unwrap()).unwrap();
+        assert_eq!(store.revalidate_attachment(&saved).unwrap(), disk);
+        let mut foreign = saved.clone();
+        foreign.path = task
+            .path()
+            .join("foreign")
+            .join(&saved.generation)
+            .join("runtime.raw");
+        assert!(foreign.validate_metadata().is_ok());
+        assert!(matches!(
+            store.revalidate_attachment(&foreign),
+            Err(CwRuntimeError::InvalidManifest)
+        ));
+        let mut changed = saved;
+        changed.manifest.disk.sha256 = "d".repeat(64);
+        assert!(matches!(
+            store.revalidate_attachment(&changed),
+            Err(CwRuntimeError::DiskChanged)
+        ));
         assert_eq!(disk, store.prepare_catalog(&old, &BTreeMap::new()).unwrap());
         let (current_path, _) = fixture_asset(&task.path().join("current"), 2);
         let current = store.admit_source(&current_path).unwrap().provenance;

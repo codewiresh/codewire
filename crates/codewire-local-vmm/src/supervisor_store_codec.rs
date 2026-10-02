@@ -169,6 +169,8 @@ pub(crate) fn load_state(connection: &Connection) -> Result<SupervisorState, Sup
             return Err(SupervisorStoreError::InvalidState);
         }
         let record = EnvironmentRecord {
+            #[cfg(target_os = "linux")]
+            cw_runtime: None,
             id,
             name: name.clone(),
             state: StoredEnvironmentState::parse(&observed_state)

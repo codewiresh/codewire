@@ -192,17 +192,27 @@ python3 scripts/dev/cw-runtime-image.py build \
 The image contains only static Linux/amd64 `cw` and public build provenance.
 It is an OCI image with one uncompressed layer; this local producer neither
 executes the image nor publishes it. Its external `image.json` receipt pins
-the index, manifest and payload. Pass the image and index pin to
-`scripts/ci/verify/build-local-vmm-initramfs.sh --verify-root` using
-`--cw-image /absolute/fresh/owned/cw-image/cw.oci.tar` and
-`--cw-image-index-sha256 <index_sha256 from image.json>`, alongside the required
-BusyBox/runc inputs. Include the resulting initramfs's exact digest and size
-in the matching base artifact lock before installing those durable inputs.
+the index, manifest and payload. Produce the separate native runtime bundle:
+
+```sh
+python3 scripts/dev/cw-runtime-image.py pack \
+  --image /absolute/fresh/owned/cw-image/cw.oci.tar \
+  --index-sha256 <index_sha256 from image.json> \
+  --output /absolute/fresh/owned/cw-runtime
+```
+
+Install its sealed `cw-runtime.lock.json` and `runtime.pack` beside the base
+artifact lock, in the same owner-private directory. Build the initramfs with
+`scripts/ci/verify/build-local-vmm-initramfs.sh --verify-root` and the required
+BusyBox/runc inputs; `cw` is no longer embedded there. Include the initramfs's
+exact digest and size in the matching base artifact lock. Compatible startup
+admits and caches an independent read-only runtime catalog disk once, then
+persists its selected generation. Keep these durable inputs outside a worktree.
 
 Every VM boot exposes that image payload at
 `/run/codewire-runtime/cw/<cw_sha256>/cw`, on a read-only root-owned system
 mount outside HOME. Managed launches do not upload or install a helper. The
-host selects the expected image from the VM UUID's retained boot generation;
+host selects the expected payload from the VM UUID's retained runtime catalog;
 each invocation verifies and seals the selected bytes before execution. The
 workspace still needs the checked-in `/usr/bin/python3` launcher prerequisite.
 Conversation journals remain private to the workload user under HOME.
@@ -210,6 +220,10 @@ Conversation journals remain private to the workload user under HOME.
 A changed global image or artifact lock does not change an existing VM's
 retained runtime on restart. Missing retained bytes refuse recovery without
 replaying a task. Keep the durable base inputs outside disposable worktrees.
+Boot assets from the earlier seed8 format cannot start a seed9 runner. Reads
+preserve an exact incompatible runner; explicit stop/delete remain available.
+A restart must refuse unsupported boot assets before stopping the VM. Runtime
+selection does not silently replace those boot assets.
 Stop task-owned daemons and retire task-only environments before deleting their
 executable paths. Retained host managed sessions still need the original `cw`
 path after daemon shutdown; preserve that executable and their state.

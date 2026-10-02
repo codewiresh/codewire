@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
@@ -40,8 +41,8 @@ use tokio_vsock::{
 use zeroize::Zeroizing;
 
 use crate::cw_runtime::{
-    CW_RUNTIME_MAX_BYTES, CW_RUNTIME_MAX_PROVENANCE, CW_RUNTIME_ROOT, CW_RUNTIME_SOURCE,
-    CwRuntimeProvenance,
+    CW_RUNTIME_DISK_SERIAL, CW_RUNTIME_MAX_BYTES, CW_RUNTIME_MAX_CATALOG,
+    CW_RUNTIME_MAX_PROVENANCE, CW_RUNTIME_ROOT, CW_RUNTIME_SOURCE, CwRuntimeCatalog,
 };
 use crate::network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_HOST_HELLO_LEN,
@@ -282,6 +283,9 @@ struct LinuxCapabilityData {
 }
 
 pub fn run_init() -> Result<()> {
+    // Keep the startup capability in the actual sealed guest ELF. Host
+    // preflight reads it from the admitted boot image without executing it.
+    std::hint::black_box(crate::GUEST_RUNTIME_ABI_MARKER);
     ensure!(
         unsafe { libc::getpid() } == 1,
         "guest init must run as PID 1"
@@ -339,6 +343,28 @@ pub fn run_init() -> Result<()> {
     } else {
         None
     };
+    if let Some(expected) = seed.cw_runtime_catalog_sha256() {
+        let device = wait_for_disk_by_serial(
+            Path::new(SYS_BLOCK_PATH),
+            Path::new(DEV_PATH),
+            CW_RUNTIME_DISK_SERIAL,
+            DISK_DISCOVERY_TIMEOUT,
+        )?;
+        ensure!(
+            device != state_device
+                && device != root_device
+                && device != seed_device
+                && docker_device.as_ref() != Some(&device),
+            "cw runtime disk must be distinct from every existing guest disk"
+        );
+        validate_block_device(&device)?;
+        mount_cw_runtime_catalog(&device, expected)?;
+    } else {
+        ensure!(
+            !Path::new(CW_RUNTIME_SOURCE).try_exists()?,
+            "cw runtime source is not bound to this boot"
+        );
+    }
     record_boot_stage("disks-admitted")?;
     mount_root_generation(&root_device)?;
     if let Some(device) = docker_device.as_deref() {
@@ -4324,7 +4350,7 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
         "completed OCI lower directory is invalid"
     );
 
-    let runtime = validate_boot_cw_asset()?;
+    let runtime = validate_cw_runtime_catalog(None)?;
     let config = workspace_oci_config_with_cw(plan, runtime.is_some())?;
     ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
     inherit_root_directory_metadata(Path::new(ROOT_LOWER_PATH), Path::new(ROOT_UPPER_PATH))?;
@@ -4380,10 +4406,28 @@ fn ensure_exact_bytes(path: &Path, expected: &[u8], mode: u32) -> Result<()> {
     }
 }
 
-fn validate_boot_cw_asset() -> Result<Option<CwRuntimeProvenance>> {
+fn mount_cw_runtime_catalog(device: &Path, expected: Sha256Value) -> Result<()> {
+    create_dir(Path::new(CW_RUNTIME_SOURCE), 0o555)?;
+    let device = device.to_str().context("cw runtime device path")?;
+    mount_fs(
+        device,
+        CW_RUNTIME_SOURCE,
+        "ext4",
+        libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        "noload",
+    )
+    .context("mount independent readonly cw runtime disk")?;
+    ensure!(
+        validate_cw_runtime_catalog(Some(expected))?.is_some(),
+        "cw runtime catalog is missing"
+    );
+    Ok(())
+}
+
+fn validate_cw_runtime_catalog(expected: Option<Sha256Value>) -> Result<Option<CwRuntimeCatalog>> {
     match fs::symlink_metadata(CW_RUNTIME_SOURCE) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("inspect boot cw asset"),
+        Err(error) => return Err(error).context("inspect cw runtime catalog"),
         Ok(_) => {}
     }
     let directory = |path: &Path| -> Result<()> {
@@ -4394,7 +4438,7 @@ fn validate_boot_cw_asset() -> Result<Option<CwRuntimeProvenance>> {
                 && metadata.uid() == 0
                 && metadata.gid() == 0
                 && metadata.mode() & 0o7777 == 0o555,
-            "boot cw directory is not root-owned and sealed"
+            "cw runtime directory is not root-owned and sealed"
         );
         Ok(())
     };
@@ -4412,29 +4456,89 @@ fn validate_boot_cw_asset() -> Result<Option<CwRuntimeProvenance>> {
                 && metadata.mode() & 0o7777 == mode
                 && metadata.len() > 0
                 && metadata.len() <= limit as u64,
-            "invalid boot cw file"
+            "invalid cw runtime file"
         );
         let mut bytes = Vec::new();
         file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
         ensure!(
             bytes.len() as u64 == metadata.len(),
-            "boot cw input changed size"
+            "cw runtime input changed size"
         );
         Ok(bytes)
     };
     let root = Path::new(CW_RUNTIME_SOURCE);
     directory(root)?;
-    let provenance = read(
-        &root.join("provenance.json"),
-        CW_RUNTIME_MAX_PROVENANCE,
-        0o444,
-    )?;
-    let identity = CwRuntimeProvenance::decode(&provenance).map_err(anyhow::Error::msg)?;
-    let selected = root.join(&identity.payload.sha256);
-    directory(&selected)?;
-    let cw = read(&selected.join("cw"), CW_RUNTIME_MAX_BYTES, 0o555)?;
-    identity.validate_payload(&cw).map_err(anyhow::Error::msg)?;
-    Ok(Some(identity))
+    let source = CString::new(CW_RUNTIME_SOURCE)?;
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    if unsafe { libc::statvfs(source.as_ptr(), status.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error()).context("inspect cw runtime mount");
+    }
+    let status = unsafe { status.assume_init() };
+    let required = libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV;
+    ensure!(
+        status.f_flag & required == required && status.f_flag & libc::ST_NOEXEC == 0,
+        "cw runtime mount must be readonly, nosuid, nodev and executable"
+    );
+    let bytes = read(&root.join("catalog.json"), CW_RUNTIME_MAX_CATALOG, 0o444)?;
+    if let Some(expected) = expected {
+        ensure!(
+            Sha256Value::from_bytes(Sha256::digest(&bytes).into()) == expected,
+            "cw runtime catalog does not match the boot binding"
+        );
+    }
+    let catalog = CwRuntimeCatalog::decode(&bytes).map_err(anyhow::Error::msg)?;
+    ensure!(
+        catalog.encode().map_err(anyhow::Error::msg)? == bytes,
+        "noncanonical cw catalog"
+    );
+    let expected_names = std::iter::once("catalog.json".to_owned())
+        .chain(
+            catalog
+                .runtimes
+                .iter()
+                .map(|runtime| runtime.payload.sha256.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    let names = fs::read_dir(root)?
+        .take(expected_names.len() + 1)
+        .map(|entry| {
+            entry?
+                .file_name()
+                .into_string()
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+        })
+        .collect::<io::Result<BTreeSet<_>>>()?;
+    ensure!(names == expected_names, "unexpected cw catalog entry");
+    for identity in &catalog.runtimes {
+        let selected = root.join(&identity.payload.sha256);
+        directory(&selected)?;
+        let names = fs::read_dir(&selected)?
+            .take(3)
+            .map(|entry| {
+                entry?
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+            })
+            .collect::<io::Result<BTreeSet<_>>>()?;
+        ensure!(
+            names == BTreeSet::from(["cw".to_owned(), "provenance.json".to_owned()]),
+            "unexpected cw payload entry"
+        );
+        let provenance = read(
+            &selected.join("provenance.json"),
+            CW_RUNTIME_MAX_PROVENANCE,
+            0o444,
+        )?;
+        ensure!(
+            serde_json::from_slice::<crate::cw_runtime::CwRuntimeProvenance>(&provenance)?
+                == *identity,
+            "retained cw provenance changed"
+        );
+        let cw = read(&selected.join("cw"), CW_RUNTIME_MAX_BYTES, 0o555)?;
+        identity.validate_payload(&cw).map_err(anyhow::Error::msg)?;
+    }
+    Ok(Some(catalog))
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use codewire_vmm_guest_probe::canonical_guest_root_newc_with_cw;
 use codewire_vmm_guest_probe::canonical_newc;
 use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_PROVENANCE_ENTRY;
 pub use codewire_vmm_guest_probe::cw_runtime::{
-    CW_RUNTIME_ROOT, CwRuntimeProvenance, validate_static_cw,
+    CW_RUNTIME_ROOT, CwRuntimeCatalog, CwRuntimeProvenance, validate_static_cw,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -198,13 +198,35 @@ impl AdmittedArtifacts {
         read_canonical_initramfs_entry(&self.initramfs, b"bin/busybox")
     }
 
-    pub(crate) fn read_cw_runtime_provenance(&self) -> Result<Vec<u8>, ArtifactError> {
-        read_canonical_initramfs_entry(&self.initramfs, CW_RUNTIME_PROVENANCE_ENTRY)
+    pub(crate) fn require_current_guest_seed_abi(&self) -> Result<(), ArtifactError> {
+        let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
+        let marker = codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER;
+        let prefix = b"\0CWGUESTABI\0";
+        if init
+            .windows(marker.len())
+            .filter(|bytes| *bytes == marker)
+            .count()
+            != 1
+            || init
+                .windows(prefix.len())
+                .filter(|bytes| *bytes == prefix)
+                .count()
+                != 1
+        {
+            return Err(ArtifactError::GuestSeedProtocolUnsupported(
+                self.initramfs.path().to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
+    #[error(
+        "retained boot assets do not support the current startup protocol; explicitly upgrade the environment boot assets before starting or updating cw: {0}"
+    )]
+    GuestSeedProtocolUnsupported(PathBuf),
     #[error("read artifact lock {path}: {source}")]
     ReadLock { path: PathBuf, source: io::Error },
     #[error("decode artifact lock {path}: {source}")]
@@ -1065,6 +1087,56 @@ mod tests {
             canonical_newc(find_newc_init(&changed).unwrap()).unwrap(),
             changed
         );
+    }
+
+    #[test]
+    fn current_guest_capability_is_read_from_the_exact_pinned_init_and_never_guessed() {
+        let task = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(task.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(task.path()).unwrap();
+        let marker = codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER;
+        for (index, capability) in [
+            Vec::new(),
+            marker.to_vec(),
+            [marker, marker].concat(),
+            b"\0CWGUESTABI\0seed=8;cw_catalog=0\0".to_vec(),
+            [marker, b"\0CWGUESTABI\0seed=10;cw_catalog=2\0"].concat(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut init = vec![0; 64];
+            init[..4].copy_from_slice(b"\x7fELF");
+            init.extend(capability);
+            let archive = canonical_newc(&init).unwrap();
+            let name = format!("boot-{index}");
+            write_artifact(&root.path().join(&name), &archive, 0o400);
+            let admitted = admit_one(&root, &spec(&name, &archive), false).unwrap();
+            let artifacts = AdmittedArtifacts {
+                cloud_hypervisor: AdmittedArtifact::for_test("/unused/ch"),
+                virtiofsd: None,
+                kernel: AdmittedArtifact::for_test("/unused/kernel"),
+                initramfs: admitted,
+            };
+            assert_eq!(
+                artifacts.require_current_guest_seed_abi().is_ok(),
+                index == 1
+            );
+            if index == 1 {
+                let mut changed = archive;
+                *changed.last_mut().unwrap() ^= 1;
+                std::fs::set_permissions(
+                    root.path().join(&name),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+                write_artifact(&root.path().join(&name), &changed, 0o400);
+                assert!(matches!(
+                    artifacts.require_current_guest_seed_abi(),
+                    Err(ArtifactError::IdentityChanged(_))
+                ));
+            }
+        }
     }
 
     #[test]

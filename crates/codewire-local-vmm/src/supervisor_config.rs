@@ -17,7 +17,7 @@ use crate::control::v1;
 // The first Darwin stopped-state dispatcher joins version 6: there is no older
 // detached Darwin service, and Linux behavior and wire/configuration contracts
 // are unchanged. Subsequent Darwin behavior changes follow the same bump rule.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 7;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 8;
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
 
@@ -33,6 +33,10 @@ pub struct NativeRuntimeConfig {
 }
 
 impl NativeRuntimeConfig {
+    pub fn cw_runtime_lock(&self) -> PathBuf {
+        self.artifact_lock.with_file_name("cw-runtime.lock.json")
+    }
+
     pub fn supervisor_socket(&self) -> PathBuf {
         self.root.join("supervisor.sock")
     }
@@ -182,7 +186,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 7);
+        assert_eq!(info.protocol_version, 8);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

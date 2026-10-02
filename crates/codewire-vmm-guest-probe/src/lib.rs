@@ -58,8 +58,8 @@ pub use progress::{
     PROGRESS_REQUEST_LEN, ProgressError, ProgressFrame, ProgressRequest,
 };
 pub use seed::{
-    DOCKER_DISK_SERIAL, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, STATE_DISK_SERIAL, Seed,
-    SeedError, SetupBinding,
+    DOCKER_DISK_SERIAL, GUEST_RUNTIME_ABI_MARKER, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN,
+    STATE_DISK_SERIAL, Seed, SeedError, SetupBinding,
 };
 pub use setup::{
     GUEST_ABI_VERSION, LayerEncoding, MAX_SETUP_CONFIG_BYTES, MAX_SETUP_LAYER_BYTES,

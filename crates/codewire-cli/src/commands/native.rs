@@ -1061,6 +1061,16 @@ pub(crate) async fn native_environment_data_client(
 pub(crate) async fn native_environment_managed_runtime(
     environment_id: &str,
 ) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeProvenance> {
+    native_environment_managed_runtime_catalog(environment_id)
+        .await?
+        .active()
+        .cloned()
+        .map_err(anyhow::Error::msg)
+}
+
+pub(crate) async fn native_environment_managed_runtime_catalog(
+    environment_id: &str,
+) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeCatalog> {
     let mut supervisor = native_client().await?;
     let environment =
         get_native_environment_with_required_authority(&mut supervisor, environment_id).await?;
@@ -1068,11 +1078,35 @@ pub(crate) async fn native_environment_managed_runtime(
         .managed_runtime(&environment.name, &environment.id)
         .await
         .map_err(native_status)?;
-    if runtime.environment_id != environment_id || runtime.artifact_generation.len() != 64 {
+    if runtime.environment_id != environment_id
+        || !native_runtime_digest_valid(&runtime.artifact_generation)
+        || !native_runtime_digest_valid(&runtime.cw_runtime_catalog_generation)
+    {
         anyhow::bail!("managed runtime does not match the selected environment");
     }
-    codewire_local_vmm::artifact::CwRuntimeProvenance::decode(&runtime.provenance_json)
-        .map_err(anyhow::Error::msg)
+    use sha2::{Digest as _, Sha256};
+    if format!("{:x}", Sha256::digest(&runtime.catalog_json))
+        != runtime.cw_runtime_catalog_generation
+    {
+        anyhow::bail!("managed runtime catalog digest does not match the running VM");
+    }
+    let catalog = codewire_local_vmm::artifact::CwRuntimeCatalog::decode(&runtime.catalog_json)
+        .map_err(anyhow::Error::msg)?;
+    if catalog.encode().map_err(anyhow::Error::msg)? != runtime.catalog_json
+        || catalog.active().map_err(anyhow::Error::msg)?
+            != &codewire_local_vmm::artifact::CwRuntimeProvenance::decode(&runtime.provenance_json)
+                .map_err(anyhow::Error::msg)?
+    {
+        anyhow::bail!("managed runtime catalog and active provenance disagree");
+    }
+    Ok(catalog)
+}
+
+fn native_runtime_digest_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub(crate) async fn native_environment_diagnostic_client(

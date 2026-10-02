@@ -9,6 +9,7 @@ use codewire_vmm_guest_probe::{
 };
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
+use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
 
 pub const DEFAULT_VCPUS: u8 = 1;
 pub const DEFAULT_MEMORY_MIB: u32 = 512;
@@ -59,6 +60,7 @@ pub struct CloudHypervisorConfig {
     pub root_disk: PathBuf,
     pub seed_disk: PathBuf,
     pub setup_disk: Option<PathBuf>,
+    pub cw_runtime_disk: Option<PathBuf>,
     pub api_socket: PathBuf,
     pub event_monitor: PathBuf,
     pub vsock_socket: PathBuf,
@@ -88,6 +90,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("root_disk", &self.root_disk)
             .field("seed_disk", &self.seed_disk)
             .field("setup_disk", &self.setup_disk)
+            .field("cw_runtime_disk", &self.cw_runtime_disk)
             .field("api_socket", &self.api_socket)
             .field("event_monitor", &self.event_monitor)
             .field("vsock_socket", &self.vsock_socket)
@@ -192,6 +195,7 @@ impl CloudHypervisorConfig {
             root_disk,
             seed_disk,
             setup_disk,
+            cw_runtime_disk: None,
             api_socket,
             event_monitor,
             vsock_socket,
@@ -224,6 +228,15 @@ impl CloudHypervisorConfig {
         Ok(self)
     }
 
+    pub fn with_cw_runtime_disk(
+        mut self,
+        disk: Option<PathBuf>,
+    ) -> Result<Self, CloudHypervisorConfigError> {
+        self.cw_runtime_disk = disk;
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn validate(&self) -> Result<(), CloudHypervisorConfigError> {
         if self.vsock_cid < 3 || self.vsock_cid == u32::MAX {
             return Err(CloudHypervisorConfigError::InvalidVsockCid);
@@ -249,6 +262,9 @@ impl CloudHypervisorConfig {
         }
         if let Some(setup) = &self.setup_disk {
             disks.push(setup);
+        }
+        if let Some(runtime) = &self.cw_runtime_disk {
+            disks.push(runtime);
         }
         disks.sort();
         if disks.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -369,6 +385,17 @@ impl CloudHypervisorConfig {
                 ),
             );
         }
+        if let Some(runtime) = &self.cw_runtime_disk {
+            push_option(
+                &mut arguments,
+                "--disk",
+                format!(
+                    "path={},readonly=on,direct=off,id=cw-runtime,serial={},image_type=raw,backing_files=off,sparse=off,lock_granularity=full",
+                    display(runtime)?,
+                    CW_RUNTIME_DISK_SERIAL,
+                ),
+            );
+        }
         for (index, share) in self.virtiofs.iter().enumerate() {
             push_option(
                 &mut arguments,
@@ -413,7 +440,8 @@ impl CloudHypervisorConfig {
             arguments,
             expected_disk_count: 3
                 + usize::from(self.docker_disk.is_some())
-                + usize::from(self.setup_disk.is_some()),
+                + usize::from(self.setup_disk.is_some())
+                + usize::from(self.cw_runtime_disk.is_some()),
             expected_fs_count: self.virtiofs.len(),
         };
         command.validate_allowlist()?;
@@ -439,6 +467,9 @@ impl CloudHypervisorConfig {
         }
         if let Some(setup) = &self.setup_disk {
             paths.push(setup.as_path());
+        }
+        if let Some(runtime) = &self.cw_runtime_disk {
+            paths.push(runtime.as_path());
         }
         paths.extend(self.virtiofs.iter().map(|share| share.socket.as_path()));
         paths
@@ -727,6 +758,37 @@ mod tests {
                 expected: 3,
                 actual: 4
             })
+        ));
+    }
+
+    #[test]
+    fn runtime_catalog_is_an_exact_readonly_disk_and_cannot_alias_storage() {
+        let selected = config()
+            .with_cw_runtime_disk(Some("/runtime/catalog/runtime.raw".into()))
+            .unwrap();
+        let command = selected.command().unwrap();
+        command.validate_allowlist().unwrap();
+        let disks = command
+            .arguments()
+            .windows(2)
+            .filter(|pair| pair[0] == "--disk")
+            .map(|pair| pair[1].to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(disks.len(), 4);
+        assert_eq!(
+            disks
+                .iter()
+                .filter(|disk| disk.contains("id=cw-runtime,"))
+                .count(),
+            1
+        );
+        assert!(disks.iter().any(|disk| *disk == "path=/runtime/catalog/runtime.raw,readonly=on,direct=off,id=cw-runtime,serial=CWRUNTIME1,image_type=raw,backing_files=off,sparse=off,lock_granularity=full"));
+        let original = config();
+        assert!(matches!(
+            original
+                .clone()
+                .with_cw_runtime_disk(Some(original.seed_disk.clone())),
+            Err(CloudHypervisorConfigError::AliasedDiskPaths)
         ));
     }
 

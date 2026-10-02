@@ -35,7 +35,6 @@ usage() {
     '    --busybox-sha256 SHA256 --runc ABSOLUTE_PATH' \
     '    --runc-sha256 SHA256 [--target TARGET]' \
     '    [--output ABSOLUTE_PATH] [--workload-network-fixture]' \
-    '    [--cw-image ABSOLUTE_OCI_ARCHIVE --cw-image-index-sha256 SHA256]' \
     '' \
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
     'It does not prove the probe is static or came from the sealed Rust toolchain.' \
@@ -50,8 +49,7 @@ usage() {
     'lowercase SHA-256 values must be supplied; runc must match the built-in' \
     'reviewed release digest. Arm64 BusyBox must also match its built-in' \
     'reviewed Alpine package payload digest.' \
-    '--cw-image admits the pinned static Linux/amd64 cw image and seals its' \
-    'payload plus image provenance into both independent boot archives.' \
+    'cw is supplied separately through the pinned read-only runtime disk.' \
     '--workload-network-fixture is allowed only with --verify-root and adds the' \
     'fixed opt-in developer client to both independent builds. This is not a' \
     'default production guest or CLI parity claim.' \
@@ -202,6 +200,19 @@ verify_static_elf() {
   fi
 }
 
+verify_guest_runtime_abi() {
+  python3 - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open('rb') as stream:
+    data = stream.read(64 * 1024 * 1024 + 1)
+marker = b'\0CWGUESTABI\0seed=9;cw_catalog=1\0'
+if len(data) > 64 * 1024 * 1024 or data.count(marker) != 1 or data.count(b'\0CWGUESTABI\0') != 1:
+    raise SystemExit('static guest must contain exactly one current seed9/catalog1 capability marker')
+PY
+}
+
 verify_reproducible() {
   local requested_output="$1" root_busybox="$2" root_busybox_sha256="$3"
   local root_runc="$4" root_runc_sha256="$5"
@@ -241,15 +252,6 @@ verify_reproducible() {
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  if [[ -n "$cw_image" ]]; then
-    [[ "$TARGET" == "$DEFAULT_TARGET" && -n "$root_busybox" ]] ||
-      die 'cw image requires the Linux/amd64 product guest root'
-    cw_image="$(absolute_existing_file 'cw image' "$cw_image")"
-    CW_RUNTIME_INPUT_DIR="$VERIFY_WORK/cw-image"
-    python3 "$ROOT/scripts/dev/cw-runtime-image.py" unpack \
-      --image "$cw_image" --index-sha256 "$cw_image_index_sha256" \
-      --output "$CW_RUNTIME_INPUT_DIR"
-  fi
   target_a="$VERIFY_WORK/target-a"
   target_b="$VERIFY_WORK/target-b"
   archive_a="$VERIFY_WORK/initramfs-a.cpio"
@@ -262,6 +264,8 @@ verify_reproducible() {
   [[ -x "$binary_a" && -x "$binary_b" ]] || die "static guest build did not produce both binaries"
   verify_static_elf 'guest probe' "$binary_a" "$TARGET"
   verify_static_elf 'guest probe' "$binary_b" "$TARGET"
+  verify_guest_runtime_abi "$binary_a"
+  verify_guest_runtime_abi "$binary_b"
   cmp -s "$binary_a" "$binary_b" || die "independent static guest builds are not byte-identical"
 
   packer_a="$binary_a"
@@ -330,16 +334,10 @@ verify_reproducible() {
 
 pack_product_root() {
   local packer="$1" probe="$2" root_busybox="$3" root_runc="$4" archive="$5"
-  if [[ -n "$CW_RUNTIME_INPUT_DIR" ]]; then
-    "$packer" newc-root-cw "$probe" "$root_busybox" "$root_runc" \
-      "$CW_RUNTIME_INPUT_DIR/cw" "$CW_RUNTIME_INPUT_DIR/provenance.json" "$archive"
-  else
-    "$packer" newc-root "$probe" "$root_busybox" "$root_runc" "$archive"
-  fi
+  "$packer" newc-root "$probe" "$root_busybox" "$root_runc" "$archive"
 }
 
 VERIFY_WORK=''
-CW_RUNTIME_INPUT_DIR=''
 RUST_TOOLS_DIR=''
 cleanup() {
   local status=$?
@@ -356,8 +354,6 @@ busybox=''
 busybox_sha256=''
 runc=''
 runc_sha256=''
-cw_image=''
-cw_image_index_sha256=''
 output=''
 TARGET="$DEFAULT_TARGET"
 target_set=0
@@ -411,15 +407,8 @@ while [[ $# -gt 0 ]]; do
       runc_sha256="$2"
       shift 2
       ;;
-    --cw-image)
-      [[ $# -ge 2 && -z "$cw_image" ]] || { usage; exit 2; }
-      cw_image="$2"
-      shift 2
-      ;;
-    --cw-image-index-sha256)
-      [[ $# -ge 2 && -z "$cw_image_index_sha256" ]] || { usage; exit 2; }
-      cw_image_index_sha256="$2"
-      shift 2
+    --cw-image|--cw-image-index-sha256)
+      die 'embedded cw boot assets are unsupported; use cw-runtime-image.py pack and the separate runtime disk'
       ;;
     --output)
       [[ $# -ge 2 ]] || { usage; exit 2; }
@@ -448,9 +437,7 @@ if [[ "$workload_network_fixture" -eq 1 && "$mode" != verify-root ]]; then
   usage
   exit 2
 fi
-if [[ -n "$cw_image" || -n "$cw_image_index_sha256" ]]; then
-  [[ "$mode" == verify-root && -n "$cw_image" && "$cw_image_index_sha256" =~ ^[0-9a-f]{64}$ ]] || { usage; exit 2; }
-fi
+
 
 case "$mode" in
   verify)

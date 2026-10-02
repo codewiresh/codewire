@@ -52,6 +52,7 @@ use crate::control::v1;
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
+use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
 use crate::generation::{GenerationError, ensure_root_generation};
 use crate::host_port::{
     HostPortBinding, canonical_host_port_bindings, validate_canonical_host_port_bindings,
@@ -88,8 +89,8 @@ use crate::supervisor_config::{SupervisorConfigError, supervisor_info};
 #[cfg(test)]
 use crate::supervisor_metadata::oci_storage_generation;
 use crate::supervisor_metadata::{
-    environment_access_metadata_valid, host_ports_to_proto, mesh_attachment_to_proto,
-    runner_event_error_code_valid, valid_environment_name, valid_sha256,
+    CwRuntimeBinding, environment_access_metadata_valid, host_ports_to_proto,
+    mesh_attachment_to_proto, runner_event_error_code_valid, valid_environment_name, valid_sha256,
     validate_host_ports_for_project, validate_mesh_for_project, validate_project_intent,
     workspace_storage_generation,
 };
@@ -389,6 +390,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         state,
         children: HashMap::new(),
         live_runners: HashMap::new(),
+        incompatible_runners: BTreeSet::new(),
         operation_progress: operation_progress.clone(),
         _lock: lock,
     };
@@ -550,6 +552,9 @@ struct SupervisorCore {
     state: SupervisorState,
     children: HashMap<Uuid, Child>,
     live_runners: HashMap<Uuid, LiveProcess>,
+    // Observation only: an unsupported protocol never grants runner RPC or
+    // retirement authority, and does not rewrite the durable lifecycle state.
+    incompatible_runners: BTreeSet<Uuid>,
     operation_progress: broadcast::Sender<OperationProgress>,
     _lock: SupervisorLock,
 }
@@ -572,6 +577,15 @@ async fn resolve_workspace_image(
 }
 
 impl SupervisorCore {
+    fn environment_proto(&self, name: &str) -> Result<v1::Environment, SupervisorError> {
+        let environment = self.environment(name)?;
+        let mut projected = environment.proto(self.selected(name));
+        if self.incompatible_runners.contains(&environment.id) {
+            projected.error_code = "runner_protocol_unsupported".to_owned();
+        }
+        Ok(projected)
+    }
+
     fn save(&self) -> Result<(), SupervisorError> {
         self.store.replace_state(&self.state)?;
         Ok(())
@@ -840,6 +854,13 @@ impl SupervisorCore {
 
     async fn preflight(&mut self) -> Result<String, SupervisorError> {
         let artifact_generation = self.admit_current_artifact_generation().await?;
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        RuntimeArtifactStore::create(&engine)
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .open_generation(&artifact_generation)
+            .await
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .require_current_guest_seed_abi()?;
         crate::linux::preflight::preflight().map_err(RunnerError::from)?;
         Ok(artifact_generation)
     }
@@ -1414,11 +1435,21 @@ impl SupervisorCore {
                         }
                     } else {
                         let artifact_generation = self.preflight().await?;
+                        let cw_runtime =
+                            self.admit_installed_cw_runtime()
+                                .await?
+                                .map(|disk| CwRuntimeBinding {
+                                    schema_version: 1,
+                                    active_catalog_generation: disk.generation,
+                                    staging_catalog_generation: None,
+                                    rollback_catalog_generation: None,
+                                });
                         let vcpus = u8::try_from(request.vcpus)
                             .map_err(|_| SupervisorError::InvalidRequest)?;
                         next_state.environments.insert(
                             request.name.clone(),
                             EnvironmentRecord {
+                                cw_runtime,
                                 id: environment_id,
                                 name: request.name.clone(),
                                 state: StoredEnvironmentState::Starting,
@@ -1646,6 +1677,10 @@ impl SupervisorCore {
             ) {
                 let operation = match self.resize(name, &operation).await {
                     Ok(operation) => operation,
+                    Err(SupervisorError::ReplacementPreflight(_)) => {
+                        self.fail_pending_operation(&operation, "restart_preflight")?;
+                        continue;
+                    }
                     Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
                         return Err(SupervisorError::CredentialAuthorityUnavailable);
                     }
@@ -1674,6 +1709,22 @@ impl SupervisorCore {
             ) {
                 let operation = match self.workspace_transition(name, &operation).await {
                     Ok(operation) => operation,
+                    Err(SupervisorError::ReplacementPreflight(_)) => {
+                        let current = self
+                            .store
+                            .operation_by_request(operation.request_id)?
+                            .ok_or(SupervisorError::InvalidState)?;
+                        let error_code = if operation.kind == OperationKind::UpdateWorkspace {
+                            "workspace_update_preflight"
+                        } else {
+                            "workspace_rollback_preflight"
+                        };
+                        self.abort_workspace_transition_with_stop(
+                            &current, name, error_code, false,
+                        )
+                        .await?;
+                        continue;
+                    }
                     Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
                         return Err(SupervisorError::CredentialAuthorityUnavailable);
                     }
@@ -2004,6 +2055,8 @@ impl SupervisorCore {
         name: &str,
         force_direct_share_quarantine: bool,
     ) -> Result<(), SupervisorError> {
+        let environment_id = self.environment(name)?.id;
+        self.incompatible_runners.remove(&environment_id);
         let environment = self.environment(name)?;
         let Some(record) = environment.runner.clone() else {
             if environment.state == StoredEnvironmentState::Running {
@@ -2093,12 +2146,10 @@ impl SupervisorCore {
         let mut client = match RunnerClient::connect(&expected_socket).await {
             Ok(client) => client,
             Err(error) if error.incompatible_protocol() => {
-                // Process and socket identity were both revalidated above.
-                // An incompatible runner must never survive for later reuse,
-                // but transient transport failures are deliberately not a
-                // license to kill it.
-                self.terminate_recorded_runner(name).await?;
-                self.mark_runner_dead(name)?;
+                // Metadata inspection must not stop an existing VM before a
+                // replacement has been admitted. Keep its exact custody;
+                // every useful RPC still requires current protocol admission.
+                self.incompatible_runners.insert(environment_id);
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
@@ -2123,6 +2174,12 @@ impl SupervisorCore {
                 return Ok(());
             }
         };
+        let attached_runtime = (!info.cw_runtime_catalog_generation.is_empty())
+            .then_some(info.cw_runtime_catalog_generation.as_str());
+        if !runner_cw_runtime_identity_matches(self.environment(name)?, &record, &info, state) {
+            self.mark_orphaned(name)?;
+            return Ok(());
+        }
         let runner_error_code = (!info.error_code.is_empty()).then_some(info.error_code.as_str());
         let runner_error_valid = runner_error_code.is_some_and(runner_event_error_code_valid);
         if (state == StoredEnvironmentState::Error) != runner_error_valid
@@ -2132,7 +2189,26 @@ impl SupervisorCore {
             return Ok(());
         }
         let generation = self.environment(name)?.generation.max(info.generation);
-        self.record_reconcile_observation(name, state, generation, false, runner_error_code)
+        self.record_reconcile_observation(name, state, generation, false, runner_error_code)?;
+        let attached_runtime = attached_runtime.map(str::to_owned);
+        if self
+            .environment(name)?
+            .runner
+            .as_ref()
+            .is_some_and(|runner| runner.cw_runtime_catalog_generation != attached_runtime)
+        {
+            let prior = self.state.clone();
+            self.environment_mut(name)?
+                .runner
+                .as_mut()
+                .ok_or(SupervisorError::InvalidState)?
+                .cw_runtime_catalog_generation = attached_runtime;
+            if let Err(error) = self.save() {
+                self.state = prior;
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     fn apply_reconcile_operation(
@@ -2233,6 +2309,7 @@ impl SupervisorCore {
 
     fn mark_runner_dead(&mut self, name: &str) -> Result<(), SupervisorError> {
         let environment_id = self.environment(name)?.id;
+        self.incompatible_runners.remove(&environment_id);
         self.live_runners.remove(&environment_id);
         if let Some(mut child) = self.children.remove(&environment_id) {
             let _ = child.try_wait();
@@ -2259,6 +2336,12 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidState);
         }
         self.reconcile(name).await?;
+        if self
+            .incompatible_runners
+            .contains(&self.environment(name)?.id)
+        {
+            return Err(SupervisorError::RunnerProtocolUnsupported);
+        }
         if self.environment(name)?.state == StoredEnvironmentState::Orphaned {
             return Err(SupervisorError::Orphaned);
         }
@@ -2396,6 +2479,7 @@ impl SupervisorCore {
             tokio::time::sleep(Duration::from_millis(25)).await;
         };
         let runner_record = RunnerRecord {
+            cw_runtime_catalog_generation: None,
             process: live.identity().clone(),
             socket: socket_identity.clone(),
             artifact_generation: artifact_generation.to_owned(),
@@ -2438,6 +2522,104 @@ impl SupervisorCore {
         Ok(client)
     }
 
+    async fn require_environment_guest_seed_abi(
+        &mut self,
+        name: &str,
+        staging: bool,
+    ) -> Result<(), SupervisorError> {
+        let generation = artifact_generation_for_boot(self.environment(name)?, staging)?.to_owned();
+        self.require_guest_seed_abi_for_generation(&generation)
+            .await
+    }
+
+    async fn require_guest_seed_abi_for_generation(
+        &mut self,
+        generation: &str,
+    ) -> Result<(), SupervisorError> {
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        RuntimeArtifactStore::create(&engine)
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .open_generation(generation)
+            .await
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .require_current_guest_seed_abi()?;
+        Ok(())
+    }
+
+    async fn admit_start_boot_inputs(&mut self, name: &str) -> Result<(), SupervisorError> {
+        let environment = self.environment(name)?;
+        let staging = environment.staging_workspace_generation.is_some();
+        let generation = if !staging
+            && environment.active_workspace_generation.is_none()
+            && environment.staging_workspace_generation.is_none()
+            && environment.staging_artifact_generation.is_none()
+        {
+            // A first Start has retained boot assets before its workspace is
+            // staged. Admit those exact assets, never a new installed default.
+            environment
+                .active_artifact_generation
+                .as_deref()
+                .filter(|generation| valid_sha256(generation))
+                .ok_or(SupervisorError::InvalidState)?
+        } else {
+            artifact_generation_for_boot(environment, staging)?
+        }
+        .to_owned();
+        self.require_guest_seed_abi_for_generation(&generation)
+            .await?;
+        self.admit_environment_cw_runtime(name).await?;
+        Ok(())
+    }
+
+    async fn admit_installed_cw_runtime(
+        &mut self,
+    ) -> Result<Option<AdmittedCwRuntimeDisk>, SupervisorError> {
+        let engine_root = self.config.engine_root();
+        let source = self.config.cw_runtime_lock();
+        tokio::task::spawn_blocking(move || {
+            match fs::symlink_metadata(&source) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(CwRuntimeError::Io(error)),
+                Ok(_) => {}
+            }
+            let engine = PrivateRoot::open(&engine_root)?;
+            let store = CwRuntimeStore::create(&engine)?;
+            let asset = store.admit_source(&source)?;
+            store
+                .prepare_catalog(&asset.provenance, &BTreeMap::new())
+                .map(Some)
+        })
+        .await
+        .map_err(|_| SupervisorError::CwRuntimeProvisionTask)?
+        .map_err(Into::into)
+    }
+
+    async fn admit_environment_cw_runtime(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<AdmittedCwRuntimeDisk>, SupervisorError> {
+        // Unbound legacy/raw environments remain unbound across an ordinary
+        // start or restart. Only creation or explicit update selects a source.
+        let Some(binding) = self.environment(name)?.cw_runtime.clone() else {
+            return Ok(None);
+        };
+        binding.validate()?;
+        let engine_root = self.config.engine_root();
+        tokio::task::spawn_blocking(move || {
+            let engine = PrivateRoot::open(&engine_root)?;
+            let selected = binding
+                .staging_catalog_generation
+                .as_deref()
+                .unwrap_or(&binding.active_catalog_generation);
+            CwRuntimeStore::create(&engine)?
+                .open_catalog(selected)
+                .map(Some)
+        })
+        .await
+        .map_err(|_| SupervisorError::CwRuntimeProvisionTask)?
+        .map_err(Into::into)
+    }
+
     async fn ensure_vm_started(
         &mut self,
         name: &str,
@@ -2450,6 +2632,13 @@ impl SupervisorCore {
         let staging = environment.staging_workspace_generation.is_some();
         let expected_artifact_generation =
             artifact_generation_for_boot(&environment, staging)?.to_owned();
+        self.require_environment_guest_seed_abi(name, staging)
+            .await?;
+        let cw_runtime = self.admit_environment_cw_runtime(name).await?;
+        let expected_cw_runtime_generation = cw_runtime
+            .as_ref()
+            .map(|disk| disk.generation.clone())
+            .unwrap_or_default();
         validate_environment_workload_secret_delivery(&environment, staging)?;
         let mut client = self
             .runner_client_for_artifact(name, &expected_artifact_generation)
@@ -2463,7 +2652,8 @@ impl SupervisorCore {
         }
         let current_state = StoredEnvironmentState::from_proto(current.state)?;
         if current_state == StoredEnvironmentState::Running {
-            return (current.generation == generation)
+            return (current.generation == generation
+                && current.cw_runtime_catalog_generation == expected_cw_runtime_generation)
                 .then_some(())
                 .ok_or(SupervisorError::InvalidRunnerResponse);
         }
@@ -2500,6 +2690,7 @@ impl SupervisorCore {
                 String::new()
             };
         let start_request = v1::StartVmRequest {
+            cw_runtime_catalog_generation: expected_cw_runtime_generation.clone(),
             environment_id: environment.id.to_string(),
             generation,
             vsock_cid: allocate_vsock_cid(environment.id),
@@ -2609,12 +2800,18 @@ impl SupervisorCore {
         if info.environment_id != environment.id.to_string()
             || info.generation != generation
             || info.state != v1::EnvironmentState::Running as i32
+            || info.cw_runtime_catalog_generation != expected_cw_runtime_generation
             || !info.error_code.is_empty()
         {
             let _ = client.stop().await;
             return Err(SupervisorError::InvalidRunnerResponse);
         }
-        Ok(())
+        self.environment_mut(name)?
+            .runner
+            .as_mut()
+            .ok_or(SupervisorError::InvalidState)?
+            .cw_runtime_catalog_generation = cw_runtime.map(|disk| disk.generation);
+        self.save()
     }
 
     fn record_runner_start_failure(
@@ -2643,6 +2840,11 @@ impl SupervisorCore {
         let environment = self.environment(name)?.clone();
         self.stop_environment_broker_if_present(&environment)
             .await?;
+        if self.incompatible_runners.contains(&environment.id) {
+            self.terminate_recorded_runner(name).await?;
+            self.mark_runner_dead(name)?;
+            return Ok(());
+        }
         if environment.runner.is_none() {
             return Ok(());
         }
@@ -2678,11 +2880,17 @@ impl SupervisorCore {
         let target_generation = start_operation_generation(operation)?;
         self.revalidate_environment_workspace_plan_for_boot(name)
             .await?;
+        if operation.checkpoint > 0 {
+            // Recovery past authority admission must still validate retained
+            // assets before recording state or touching an existing runner.
+            self.admit_start_boot_inputs(name).await?;
+        }
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
                 LifecycleEffect::RequireEnvironmentAccess => {
                     self.require_environment_access(name).await?;
+                    self.admit_start_boot_inputs(name).await?;
                     operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStarting => {
@@ -2787,6 +2995,12 @@ impl SupervisorCore {
         let environment_id = environment.id;
         if environment.runner.is_none() {
             return Ok(());
+        }
+        if self.incompatible_runners.contains(&environment_id) {
+            self.terminate_recorded_runner(name).await?;
+            self.mark_runner_dead(name)?;
+            self.environment_mut(name)?.state = StoredEnvironmentState::Stopped;
+            return self.save();
         }
         let socket = self.config.runner_socket(environment_id);
         let mut client = RunnerClient::connect(&socket).await?;
@@ -2983,6 +3197,18 @@ impl SupervisorCore {
                     operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StopVm => {
+                    if was_running {
+                        self.require_environment_guest_seed_abi(name, false)
+                            .await
+                            .map_err(|error| {
+                                SupervisorError::ReplacementPreflight(Box::new(error))
+                            })?;
+                        self.admit_environment_cw_runtime(name)
+                            .await
+                            .map_err(|error| {
+                                SupervisorError::ReplacementPreflight(Box::new(error))
+                            })?;
+                    }
                     self.ensure_vm_stopped(name).await?;
                     operation = self.checkpoint_operation(&operation)?;
                 }
@@ -3122,6 +3348,16 @@ impl SupervisorCore {
                 }
                 LifecycleEffect::StopVm => {
                     if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
+                        self.require_environment_guest_seed_abi(name, true)
+                            .await
+                            .map_err(|error| {
+                                SupervisorError::ReplacementPreflight(Box::new(error))
+                            })?;
+                        self.admit_environment_cw_runtime(name)
+                            .await
+                            .map_err(|error| {
+                                SupervisorError::ReplacementPreflight(Box::new(error))
+                            })?;
                         self.ensure_vm_stopped(name).await?;
                     }
                     operation = self.checkpoint_operation(&operation)?;
@@ -3219,6 +3455,23 @@ impl SupervisorCore {
         name: &str,
         error_code: &str,
     ) -> Result<OperationRecord, SupervisorError> {
+        self.abort_workspace_transition_with_stop(operation, name, error_code, true)
+            .await
+    }
+
+    async fn abort_workspace_transition_with_stop(
+        &mut self,
+        operation: &OperationRecord,
+        name: &str,
+        error_code: &str,
+        may_stop: bool,
+    ) -> Result<OperationRecord, SupervisorError> {
+        if !may_stop
+            && supervisor_effect(operation.kind, operation.checkpoint)?
+                != Some(LifecycleEffect::StopVm)
+        {
+            return Err(SupervisorError::InvalidState);
+        }
         if operation.phase != OperationPhase::Intent
             && operation.phase != OperationPhase::EffectApplied
         {
@@ -3235,7 +3488,7 @@ impl SupervisorCore {
         }
 
         let requires_boot = workspace_transition_requires_boot(environment, &parameters)?;
-        if requires_boot {
+        if requires_boot && may_stop {
             self.ensure_vm_stopped(name).await?;
         }
         let mut next_state = self.state.clone();
@@ -3263,7 +3516,7 @@ impl SupervisorCore {
                 rollback_storage_generation,
             )?,
         }
-        if requires_boot {
+        if requires_boot && may_stop {
             environment.state = StoredEnvironmentState::Stopped;
         }
         let updated = self.store.replace_state_and_advance_operation(
@@ -3644,9 +3897,10 @@ impl LocalSupervisorService for SupervisorRpc {
         let environments = core
             .state
             .environments
-            .iter()
-            .map(|(name, environment)| environment.proto(core.selected(name)))
-            .collect();
+            .keys()
+            .map(|name| core.environment_proto(name))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Status::from)?;
         Ok(Response::new(v1::ListEnvironmentsResponse { environments }))
     }
 
@@ -3661,9 +3915,7 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(Status::from)?;
         core.reconcile(&name).await.map_err(Status::from)?;
         Ok(Response::new(
-            core.environment(&name)
-                .map_err(Status::from)?
-                .proto(core.selected(&name)),
+            core.environment_proto(&name).map_err(Status::from)?,
         ))
     }
 
@@ -3681,10 +3933,12 @@ impl LocalSupervisorService for SupervisorRpc {
         let environment = core.environment(&name).map_err(Status::from)?.clone();
         require_expected_environment(&environment, expected_environment_id)?;
         if core.state.current.as_deref() != Some(name.as_str()) {
-            core.state.current = Some(name);
+            core.state.current = Some(name.clone());
             core.save().map_err(Status::from)?;
         }
-        Ok(Response::new(environment.proto(true)))
+        Ok(Response::new(
+            core.environment_proto(&name).map_err(Status::from)?,
+        ))
     }
 
     async fn list_orphans(
@@ -3833,6 +4087,12 @@ impl LocalSupervisorService for SupervisorRpc {
             }
             operation
         } else {
+            core.require_environment_guest_seed_abi(&name, false)
+                .await
+                .map_err(Status::from)?;
+            core.admit_environment_cw_runtime(&name)
+                .await
+                .map_err(Status::from)?;
             let target_generation = environment
                 .generation
                 .checked_add(1)
@@ -4366,23 +4626,51 @@ impl LocalSupervisorService for SupervisorRpc {
             .await
             .map_err(Status::from)?;
         core.reconcile(&name).await.map_err(Status::from)?;
+        if core.incompatible_runners.contains(&expected) {
+            return Err(Status::from(SupervisorError::RunnerProtocolUnsupported));
+        }
         let environment = core.environment(&name).map_err(Status::from)?;
         let generation = managed_runtime_artifact_generation(environment, expected)?.to_owned();
-        let engine = PrivateRoot::open(&core.config.engine_root())
-            .map_err(SupervisorError::from)
-            .map_err(Status::from)?;
-        let artifacts = RuntimeArtifactStore::create(&engine)
-            .map_err(|_| Status::failed_precondition("retained boot assets are unavailable"))?
-            .open_generation(&generation)
-            .await
-            .map_err(|_| Status::failed_precondition("retained boot assets are unavailable"))?;
-        let provenance_json = artifacts.read_cw_runtime_provenance().map_err(|_| {
-            Status::failed_precondition("VM boot assets do not contain an admitted cw image")
-        })?;
+        let runtime_generation = environment
+            .cw_runtime
+            .as_ref()
+            .filter(|binding| binding.staging_catalog_generation.is_none())
+            .map(|binding| binding.active_catalog_generation.clone())
+            .filter(|generation| {
+                environment.runner.as_ref().is_some_and(|runner| {
+                    runner.cw_runtime_catalog_generation.as_ref() == Some(generation)
+                })
+            })
+            .ok_or_else(|| {
+                Status::failed_precondition("running VM has no admitted cw runtime catalog")
+            })?;
+        let engine_root = core.config.engine_root();
+        let open_generation = runtime_generation.clone();
+        let disk = tokio::task::spawn_blocking(move || {
+            let engine = PrivateRoot::open(&engine_root)?;
+            CwRuntimeStore::create(&engine)?.open_catalog(&open_generation)
+        })
+        .await
+        .map_err(|_| Status::internal("cw runtime admission task failed"))?
+        .map_err(|_| Status::failed_precondition("retained cw runtime catalog is unavailable"))?;
+        let provenance_json = serde_json::to_vec(
+            disk.manifest
+                .catalog
+                .active()
+                .map_err(Status::failed_precondition)?,
+        )
+        .map_err(|_| Status::internal("cw runtime provenance encoding failed"))?;
+        let catalog_json = disk
+            .manifest
+            .catalog
+            .encode()
+            .map_err(Status::failed_precondition)?;
         Ok(Response::new(v1::ManagedRuntime {
             environment_id: expected.to_string(),
             artifact_generation: generation,
             provenance_json,
+            catalog_json,
+            cw_runtime_catalog_generation: runtime_generation,
         }))
     }
 }
@@ -4783,6 +5071,42 @@ fn require_expected_environment(
         return Err(Status::not_found("local environment was not found"));
     }
     Ok(())
+}
+
+fn runner_cw_runtime_identity_matches(
+    environment: &EnvironmentRecord,
+    record: &RunnerRecord,
+    info: &v1::RunnerInfo,
+    state: StoredEnvironmentState,
+) -> bool {
+    let binding = environment.cw_runtime.as_ref();
+    let known = record.cw_runtime_catalog_generation.as_deref();
+    if known.is_some_and(|generation| {
+        !binding.is_some_and(|binding| {
+            generation == binding.active_catalog_generation
+                || binding.staging_catalog_generation.as_deref() == Some(generation)
+        })
+    }) {
+        return false;
+    }
+    let expected = known.or_else(|| {
+        binding.map(|binding| {
+            if environment.state == StoredEnvironmentState::Starting {
+                binding
+                    .staging_catalog_generation
+                    .as_deref()
+                    .unwrap_or(&binding.active_catalog_generation)
+            } else {
+                &binding.active_catalog_generation
+            }
+        })
+    });
+    let attached = (!info.cw_runtime_catalog_generation.is_empty())
+        .then_some(info.cw_runtime_catalog_generation.as_str());
+    !attached.is_some_and(|generation| !valid_sha256(generation))
+        && (attached.is_none() || attached == expected)
+        && (state != StoredEnvironmentState::Running || attached == expected)
+        && (state != StoredEnvironmentState::Stopped || attached.is_none())
 }
 
 fn managed_runtime_artifact_generation(
@@ -6514,12 +6838,14 @@ impl From<SupervisorError> for Status {
     fn from(error: SupervisorError) -> Self {
         match error {
             SupervisorError::InvalidRequest => Status::invalid_argument(error.to_string()),
+            SupervisorError::ReplacementPreflight(error) => Status::from(*error),
             SupervisorError::AlreadyExists(_) => Status::already_exists(error.to_string()),
             SupervisorError::NotFound(_) => Status::not_found(error.to_string()),
             SupervisorError::NotRunning
             | SupervisorError::Orphaned
             | SupervisorError::OperationTerminal
             | SupervisorError::ArtifactGenerationChanged
+            | SupervisorError::RunnerProtocolUnsupported
             | SupervisorError::EnvironmentAccessUnavailable
             | SupervisorError::EnvironmentAccessBindingRejected(_)
             | SupervisorError::WorkloadSecretDeliveryUnavailable => {
@@ -6539,6 +6865,10 @@ impl From<SupervisorError> for Status {
                 Status::failed_precondition(resolver.to_string())
             }
             SupervisorError::Runner(_) => Status::failed_precondition(error.to_string()),
+            SupervisorError::Artifact(
+                crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_),
+            )
+            | SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
             | SupervisorError::VmStop
             | SupervisorError::VmResize
@@ -6633,6 +6963,10 @@ pub enum SupervisorError {
     RunnerAdoption,
     #[error("native environment runner is unavailable")]
     RunnerUnavailable,
+    #[error(
+        "the retained native runner uses an unsupported protocol; inspect its boot assets before an explicit restart, or use stop/delete for cleanup"
+    )]
+    RunnerProtocolUnsupported,
     #[error("native environment runner did not exit")]
     RunnerExitTimeout,
     #[error("native environment runner retirement failed")]
@@ -6663,6 +6997,12 @@ pub enum SupervisorError {
     Artifact(#[from] crate::artifact::ArtifactError),
     #[error("runtime artifact store operation failed")]
     ArtifactStore,
+    #[error(transparent)]
+    CwRuntime(#[from] CwRuntimeError),
+    #[error("cw runtime catalog preparation task failed")]
+    CwRuntimeProvisionTask,
+    #[error("{0}")]
+    ReplacementPreflight(Box<SupervisorError>),
     #[error(transparent)]
     RunnerService(#[from] RunnerServiceError),
     #[error(transparent)]
@@ -6861,6 +7201,87 @@ mod tests {
         (generation, kernel.sha256)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn install_test_guest_generation(engine: &PrivateRoot, marker: &[u8]) -> String {
+        // A synthetic static ELF writes the exact version reply using Linux
+        // syscalls. This exercises real retained-asset admission without a VMM,
+        // a compiler dependency, or a bypass in the production preflight.
+        let reply = b"cloud-hypervisor v53.0\n";
+        let mut elf = vec![0_u8; 120];
+        elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        elf[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        elf[24..32].copy_from_slice(&(0x400000_u64 + 120).to_le_bytes());
+        elf[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        elf[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        elf[64..68].copy_from_slice(&1_u32.to_le_bytes());
+        elf[68..72].copy_from_slice(&5_u32.to_le_bytes());
+        elf[80..88].copy_from_slice(&0x400000_u64.to_le_bytes());
+        elf[88..96].copy_from_slice(&0x400000_u64.to_le_bytes());
+        elf[112..120].copy_from_slice(&4096_u64.to_le_bytes());
+        elf.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0x48, 0xbe]);
+        elf.extend_from_slice(&(0x400000_u64 + 156).to_le_bytes());
+        elf.push(0xba);
+        elf.extend_from_slice(&(reply.len() as u32).to_le_bytes());
+        elf.extend_from_slice(&[0x0f, 0x05, 0xb8, 60, 0, 0, 0, 0x31, 0xff, 0x0f, 0x05]);
+        assert_eq!(elf.len(), 156);
+        elf.extend_from_slice(reply);
+        let size = elf.len() as u64;
+        elf[96..104].copy_from_slice(&size.to_le_bytes());
+        elf[104..112].copy_from_slice(&size.to_le_bytes());
+        let mut init = elf.clone();
+        init.extend_from_slice(marker);
+        let initramfs =
+            codewire_vmm_guest_probe::canonical_guest_root_newc(&init, &elf, &elf).unwrap();
+        let mut kernel = vec![0_u8; 0x240];
+        kernel[510..512].copy_from_slice(&[0x55, 0xaa]);
+        kernel[0x202..0x206].copy_from_slice(b"HdrS");
+        let spec = |path: &str, bytes: &[u8]| ArtifactSpec {
+            path: path.into(),
+            size: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            architecture: ArtifactArchitecture::X86_64,
+        };
+        let cloud_hypervisor = spec("bin/cloud-hypervisor", &elf);
+        let kernel_spec = spec("boot/kernel", &kernel);
+        let initramfs_spec = spec("boot/initramfs", &initramfs);
+        let lock = ArtifactLock {
+            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
+            cloud_hypervisor: ExecutableArtifactSpec {
+                artifact: cloud_hypervisor.clone(),
+                version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
+            },
+            virtiofsd: None,
+            kernel: kernel_spec.clone(),
+            initramfs: initramfs_spec.clone(),
+        };
+        RuntimeArtifactStore::create(engine).unwrap();
+        let store = engine.path().join("runtime-artifacts");
+        for (prefix, spec, bytes, mode) in [
+            ("x", &cloud_hypervisor, elf.as_slice(), 0o500),
+            ("r", &kernel_spec, kernel.as_slice(), 0o400),
+            ("r", &initramfs_spec, initramfs.as_slice(), 0o400),
+        ] {
+            let path = store
+                .join("blobs")
+                .join(format!("{prefix}-{}", spec.sha256));
+            if path.exists() {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            } else {
+                fs::write(&path, bytes).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            }
+        }
+        let generation = lock.generation().unwrap();
+        let path = store.join("generations").join(format!("{generation}.json"));
+        fs::write(&path, lock.canonical_json().unwrap()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o400)).unwrap();
+        generation
+    }
+
     pub(super) fn test_workspace_generation(
         project_spec_json: &[u8],
         project_sha256: &str,
@@ -6951,6 +7372,7 @@ mod tests {
     pub(super) fn project_environment() -> EnvironmentRecord {
         let (project_spec_json, project_spec_sha256) = project_intent(2, 16 * 1024, 20);
         EnvironmentRecord {
+            cw_runtime: None,
             id: Uuid::new_v4(),
             name: "dev".to_owned(),
             state: StoredEnvironmentState::Stopped,
@@ -7229,6 +7651,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
@@ -7450,7 +7873,7 @@ mod tests {
             .unwrap();
         let live = LiveProcess::capture_child(child.id(), &executable).unwrap();
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(3),
+            reply: TestRunnerProtocolReply::Version(4),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.stdin.take()))),
         };
@@ -7488,7 +7911,7 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(4));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let mut child = Command::new(&executable).arg("60").spawn().unwrap();
         let live = LiveProcess::capture_child(child.id(), &executable).unwrap();
@@ -7532,6 +7955,7 @@ mod tests {
         let live = LiveProcess::capture_child(child.id(), &executable).unwrap();
         let process_identity = live.identity().clone();
         let runner = RunnerRecord {
+            cw_runtime_catalog_generation: None,
             process: process_identity.clone(),
             socket: socket_identity,
             artifact_generation: core
@@ -7609,6 +8033,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
@@ -9276,6 +9701,7 @@ mod tests {
             b"rollback",
         ));
         environment.runner = Some(RunnerRecord {
+            cw_runtime_catalog_generation: None,
             process: ProcessIdentity {
                 pid: 42,
                 boot_id: "boot".to_owned(),
@@ -10959,6 +11385,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
@@ -11335,6 +11762,7 @@ mod tests {
     #[test]
     fn stale_reconcile_observation_is_checkpointed_without_overwriting_newer_state() {
         let runner_record = |pid, inode| RunnerRecord {
+            cw_runtime_catalog_generation: None,
             process: ProcessIdentity {
                 pid,
                 boot_id: "synthetic-boot".to_owned(),
@@ -12388,36 +12816,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_kills_and_clears_an_exact_incompatible_runner() {
+    async fn incompatible_runner_inspection_preserves_custody_and_explicit_cleanup_works() {
         for reply in [
-            TestRunnerProtocolReply::Version(0),
+            TestRunnerProtocolReply::Version(3),
             TestRunnerProtocolReply::Failure(tonic::Code::Unimplemented),
         ] {
-            let (_parent, mut core) = test_supervisor_core(project_environment());
-            let socket = core
-                .config
-                .runner_socket(core.environment("dev").unwrap().id);
-            let (socket_identity, useful_calls, shutdown_tx, server) =
-                spawn_test_runner_protocol_server(&socket, reply);
-            let (environment_id, process_identity) =
-                attach_test_runner_process(&mut core, socket_identity);
+            for delete in [false, true] {
+                let (_parent, mut core) = test_supervisor_core(project_environment());
+                let socket = core
+                    .config
+                    .runner_socket(core.environment("dev").unwrap().id);
+                let (socket_identity, useful_calls, shutdown_tx, server) =
+                    spawn_test_runner_protocol_server(&socket, reply);
+                let (environment_id, process_identity) =
+                    attach_test_runner_process(&mut core, socket_identity);
+                let before = core.environment("dev").unwrap().clone();
 
-            core.reconcile("dev").await.unwrap();
+                core.reconcile_exposing_runners_for_startup().await.unwrap();
+                let service = test_supervisor_service(core);
+                let listed = service
+                    .list_environments(Request::new(v1::ListEnvironmentsRequest {}))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                assert_eq!(listed.environments.len(), 1);
+                assert_eq!(
+                    listed.environments[0].error_code,
+                    "runner_protocol_unsupported"
+                );
+                let inspected = service
+                    .get_environment(Request::new(read_selector("dev")))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                assert_eq!(inspected.state, v1::EnvironmentState::Running as i32);
+                assert_eq!(inspected.error_code, "runner_protocol_unsupported");
+                let mut core = service.core.lock().await;
+                assert_eq!(core.environment("dev").unwrap(), &before);
+                assert_eq!(
+                    SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
+                    before
+                );
+                assert!(core.live_runners.contains_key(&environment_id));
+                assert!(
+                    core.children
+                        .get_mut(&environment_id)
+                        .unwrap()
+                        .try_wait()
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(socket.exists());
+                assert!(matches!(
+                    core.runner_client_for_artifact(
+                        "dev",
+                        &before.runner.as_ref().unwrap().artifact_generation
+                    )
+                    .await,
+                    Err(SupervisorError::RunnerProtocolUnsupported)
+                ));
+                assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
 
-            let environment = core.environment("dev").unwrap();
-            assert_eq!(environment.state, StoredEnvironmentState::Error);
-            assert!(environment.runner.is_none());
-            assert!(!core.live_runners.contains_key(&environment_id));
-            assert!(!core.children.contains_key(&environment_id));
-            assert!(!socket.exists());
-            assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
-            assert!(matches!(
-                LiveProcess::recover(&process_identity),
-                Err(RecoveryError::ProcessExited | RecoveryError::ReadProcess(_))
-            ));
-
-            shutdown_tx.send(()).unwrap();
-            server.await.unwrap();
+                if delete {
+                    core.prepare_environment_for_delete("dev").await.unwrap();
+                } else {
+                    core.ensure_vm_stopped("dev").await.unwrap();
+                }
+                assert!(core.environment("dev").unwrap().runner.is_none());
+                assert!(!core.live_runners.contains_key(&environment_id));
+                assert!(!core.children.contains_key(&environment_id));
+                assert!(!socket.exists());
+                assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
+                assert!(matches!(
+                    LiveProcess::recover(&process_identity),
+                    Err(RecoveryError::ProcessExited | RecoveryError::ReadProcess(_))
+                ));
+                drop(core);
+                shutdown_tx.send(()).unwrap();
+                server.await.unwrap();
+            }
         }
     }
 
@@ -12459,6 +12936,439 @@ mod tests {
         core.mark_runner_dead("dev").unwrap();
         shutdown_tx.send(()).unwrap();
         server.await.unwrap();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[tokio::test]
+    async fn old_guest_start_refuses_before_checkpoint_or_runner_effects() {
+        for (checkpoint, staged) in [(0, false), (1, false), (0, true), (3, true)] {
+            let (_parent, mut core) = test_supervisor_core(project_environment());
+            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+            let generation =
+                install_test_guest_generation(&engine, b"\0CWGUESTABI\0seed=8;cw_catalog=0\0");
+            let environment = core.environment_mut("dev").unwrap();
+            if staged {
+                environment.active_workspace_generation =
+                    Some(test_workspace_generation_with_artifact(
+                        environment.project_spec_json.as_deref().unwrap(),
+                        environment.project_spec_sha256.as_deref().unwrap(),
+                        &generation,
+                        b"old-start-guest",
+                    ));
+            }
+            environment.active_artifact_generation = Some(generation);
+            core.save().unwrap();
+            let socket = core
+                .config
+                .runner_socket(core.environment("dev").unwrap().id);
+            let (socket_identity, useful_calls, shutdown_tx, server) =
+                spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
+            let (environment_id, _) = attach_test_runner_process(&mut core, socket_identity);
+            let before = core.environment("dev").unwrap().clone();
+            let operation = begin_and_advance_test_operation(
+                &core.store,
+                environment_id,
+                OperationKind::Start,
+                &serde_json::json!({"name": "dev", "generation": before.generation + 1}),
+                checkpoint,
+            );
+
+            let error = core.start("dev", &operation).await.unwrap_err();
+            assert!(matches!(
+                error,
+                SupervisorError::Artifact(
+                    crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_)
+                )
+            ));
+            assert_eq!(core.environment("dev").unwrap(), &before);
+            assert_eq!(
+                SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
+                before
+            );
+            assert_eq!(
+                core.store
+                    .operation_by_request(operation.request_id)
+                    .unwrap()
+                    .unwrap(),
+                operation
+            );
+            assert!(
+                core.children
+                    .get_mut(&environment_id)
+                    .unwrap()
+                    .try_wait()
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(socket.exists());
+            assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
+
+            core.terminate_recorded_runner("dev").await.unwrap();
+            core.mark_runner_dead("dev").unwrap();
+            shutdown_tx.send(()).unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[tokio::test]
+    async fn first_start_admits_only_its_retained_boot_assets() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let generation = install_test_guest_generation(
+            &engine,
+            codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER,
+        );
+        core.environment_mut("dev")
+            .unwrap()
+            .active_artifact_generation = Some(generation.clone());
+        core.save().unwrap();
+        // First staging must use retained assets, even when installed defaults
+        // changed or are invalid. It must not implicitly select a cw runtime.
+        fs::write(
+            &core.config.artifact_lock,
+            b"invalid installed boot default",
+        )
+        .unwrap();
+        fs::write(
+            core.config.cw_runtime_lock(),
+            b"invalid installed cw default",
+        )
+        .unwrap();
+        let before = core.environment("dev").unwrap().clone();
+        core.admit_start_boot_inputs("dev").await.unwrap();
+        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert!(!core.config.engine_root().join("cw-runtimes").exists());
+
+        for retained in [None, Some("B".repeat(64))] {
+            core.environment_mut("dev")
+                .unwrap()
+                .active_artifact_generation = retained;
+            assert!(matches!(
+                core.admit_start_boot_inputs("dev").await,
+                Err(SupervisorError::InvalidState)
+            ));
+        }
+        core.environment_mut("dev")
+            .unwrap()
+            .active_artifact_generation = Some(generation.clone());
+        core.environment_mut("dev")
+            .unwrap()
+            .staging_artifact_generation = Some(generation);
+        assert!(matches!(
+            core.admit_start_boot_inputs("dev").await,
+            Err(SupervisorError::InvalidState)
+        ));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[tokio::test]
+    async fn restart_without_a_workspace_refuses_before_retiring_a_live_runner() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let generation = install_test_guest_generation(
+            &engine,
+            codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER,
+        );
+        core.environment_mut("dev")
+            .unwrap()
+            .active_artifact_generation = Some(generation);
+        core.save().unwrap();
+        let socket = core
+            .config
+            .runner_socket(core.environment("dev").unwrap().id);
+        let (socket_identity, useful_calls, shutdown_tx, server) =
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
+        let (environment_id, _) = attach_test_runner_process(&mut core, socket_identity);
+        let before = core.environment("dev").unwrap().clone();
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Restart,
+                &serde_json::json!({"name": "dev", "vcpus": before.vcpus,
+                "memory_mib": before.memory_mib, "disk_bytes": before.disk_bytes,
+                "was_running": true, "target_generation": before.generation + 1}),
+            )
+            .unwrap();
+        core.reconcile("dev").await.unwrap();
+        assert!(matches!(
+            core.require_environment_guest_seed_abi("dev", false).await,
+            Err(SupervisorError::InvalidState)
+        ));
+        assert!(matches!(
+            core.resize("dev", &operation).await,
+            Err(SupervisorError::ReplacementPreflight(inner))
+            if matches!(inner.as_ref(), SupervisorError::InvalidState)
+        ));
+        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(
+            SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
+            before
+        );
+        assert!(
+            core.children
+                .get_mut(&environment_id)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        assert!(socket.exists());
+        assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
+        core.ensure_vm_stopped("dev").await.unwrap();
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[tokio::test]
+    async fn old_guest_restart_refuses_before_retiring_an_incompatible_runner() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let generation =
+            install_test_guest_generation(&engine, b"\0CWGUESTABI\0seed=8;cw_catalog=0\0");
+        let environment = core.environment_mut("dev").unwrap();
+        environment.active_workspace_generation = Some(test_workspace_generation_with_artifact(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            &generation,
+            b"old-guest",
+        ));
+        environment.active_artifact_generation = Some(generation);
+        core.save().unwrap();
+        let socket = core
+            .config
+            .runner_socket(core.environment("dev").unwrap().id);
+        let (socket_identity, useful_calls, shutdown_tx, server) =
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
+        let (environment_id, _) = attach_test_runner_process(&mut core, socket_identity);
+        let before = core.environment("dev").unwrap().clone();
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Restart,
+                &serde_json::json!({"name": "dev", "vcpus": before.vcpus,
+                "memory_mib": before.memory_mib, "disk_bytes": before.disk_bytes,
+                "was_running": true, "target_generation": before.generation + 1}),
+            )
+            .unwrap();
+        core.reconcile("dev").await.unwrap();
+        let error = core.resize("dev", &operation).await.unwrap_err();
+        assert!(
+            matches!(&error, SupervisorError::ReplacementPreflight(inner)
+            if matches!(inner.as_ref(), SupervisorError::Artifact(
+                crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_))))
+        );
+        let status = Status::from(error);
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(status.message().contains("boot assets"));
+        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(
+            SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
+            before
+        );
+        assert!(
+            core.children
+                .get_mut(&environment_id)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        assert!(socket.exists());
+        assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
+        assert!(core.environment("dev").unwrap().cw_runtime.is_none());
+        core.ensure_vm_stopped("dev").await.unwrap();
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_boot_keeps_an_unbound_environment_unbound() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Running;
+        core.save().unwrap();
+        // A newly installed, even invalid, default is outside this environment's
+        // retained selection. Ordinary start/restart must not read or bind it.
+        fs::write(core.config.cw_runtime_lock(), b"invalid installed default").unwrap();
+        let before = core.environment("dev").unwrap().clone();
+        assert!(
+            core.admit_environment_cw_runtime("dev")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(
+            SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
+            before
+        );
+        assert!(!core.config.engine_root().join("cw-runtimes").exists());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[tokio::test]
+    async fn workspace_rollback_preflight_restores_metadata_without_stopping_the_vm() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let active = install_test_guest_generation(
+            &engine,
+            codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER,
+        );
+        let old = install_test_guest_generation(&engine, b"\0CWGUESTABI\0seed=8;cw_catalog=0\0");
+        let environment = core.environment_mut("dev").unwrap();
+        let json = environment.project_spec_json.as_deref().unwrap();
+        let sha = environment.project_spec_sha256.as_deref().unwrap();
+        environment.active_workspace_generation = Some(test_workspace_generation_with_artifact(
+            json, sha, &active, b"active",
+        ));
+        environment.rollback_workspace_generation = Some(test_workspace_generation_with_artifact(
+            json,
+            sha,
+            &old,
+            b"rollback",
+        ));
+        environment.active_artifact_generation = Some(active);
+        core.save().unwrap();
+        let socket = core
+            .config
+            .runner_socket(core.environment("dev").unwrap().id);
+        let (identity, useful_calls, shutdown_tx, server) =
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
+        let (environment_id, _) = attach_test_runner_process(&mut core, identity);
+        let before = core.environment("dev").unwrap().clone();
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::RollbackWorkspace,
+                &workspace_rollback_payload(&before, true),
+            )
+            .unwrap();
+
+        core.execute_pending_operations().await.unwrap();
+
+        let failed = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.phase, OperationPhase::Failed);
+        // The StopVm preflight fails at checkpoint 2; recording its terminal
+        // failure advances the journal without performing the stop effect.
+        assert_eq!(failed.checkpoint, 3);
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("workspace_rollback_preflight")
+        );
+        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(
+            SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
+            before
+        );
+        assert!(core.store.pending_operations().unwrap().is_empty());
+        assert!(
+            core.children
+                .get_mut(&environment_id)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        assert!(socket.exists());
+        assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
+        core.ensure_vm_stopped("dev").await.unwrap();
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn staging_a_runtime_preserves_the_active_runner_attachment() {
+        let mut environment = project_environment();
+        environment.state = StoredEnvironmentState::Running;
+        environment.cw_runtime = Some(CwRuntimeBinding {
+            schema_version: 1,
+            active_catalog_generation: "a".repeat(64),
+            staging_catalog_generation: Some("b".repeat(64)),
+            rollback_catalog_generation: None,
+        });
+        let record = RunnerRecord {
+            process: ProcessIdentity {
+                pid: 42,
+                boot_id: "boot".to_owned(),
+                start_time_ticks: 1,
+                executable: PathBuf::from("/bin/cw"),
+                executable_file: crate::linux::path::FileIdentity {
+                    device: 1,
+                    inode: 1,
+                    size: 1,
+                    uid: unsafe { libc::getuid() },
+                    mode: 0o100500,
+                    links: 1,
+                },
+                executable_sha256: "d".repeat(64),
+            },
+            socket: SocketIdentity {
+                uid: unsafe { libc::getuid() },
+                device: 1,
+                inode: 2,
+                mode: 0o140600,
+            },
+            artifact_generation: environment.active_artifact_generation.clone().unwrap(),
+            cw_runtime_catalog_generation: Some("a".repeat(64)),
+            error_code: None,
+        };
+        let mut info = v1::RunnerInfo {
+            cw_runtime_catalog_generation: "a".repeat(64),
+            ..Default::default()
+        };
+        assert!(runner_cw_runtime_identity_matches(
+            &environment,
+            &record,
+            &info,
+            StoredEnvironmentState::Running
+        ));
+        info.cw_runtime_catalog_generation = "b".repeat(64);
+        assert!(!runner_cw_runtime_identity_matches(
+            &environment,
+            &record,
+            &info,
+            StoredEnvironmentState::Running
+        ));
+        let mut next_record = record.clone();
+        next_record.cw_runtime_catalog_generation = None;
+        environment.state = StoredEnvironmentState::Starting;
+        assert!(runner_cw_runtime_identity_matches(
+            &environment,
+            &next_record,
+            &info,
+            StoredEnvironmentState::Running
+        ));
+        info.cw_runtime_catalog_generation = "c".repeat(64);
+        assert!(!runner_cw_runtime_identity_matches(
+            &environment,
+            &next_record,
+            &info,
+            StoredEnvironmentState::Running
+        ));
+        info.cw_runtime_catalog_generation.clear();
+        assert!(runner_cw_runtime_identity_matches(
+            &environment,
+            &next_record,
+            &info,
+            StoredEnvironmentState::Stopped
+        ));
+        assert!(!runner_cw_runtime_identity_matches(
+            &environment,
+            &next_record,
+            &info,
+            StoredEnvironmentState::Running
+        ));
     }
 
     #[test]
@@ -12591,6 +13501,7 @@ mod tests {
                     event: v1::RunnerEvent {
                         sequence: 4,
                         runner: Some(v1::RunnerInfo {
+                            cw_runtime_catalog_generation: String::new(),
                             environment_id: operation.environment_id.unwrap().to_string(),
                             state: v1::EnvironmentState::Starting as i32,
                             generation: 1,
@@ -13187,6 +14098,7 @@ mod tests {
         let existing_id = Uuid::new_v4();
         let (project_spec_json, project_spec_sha256) = project_intent(2, 16 * 1024, 20);
         let existing = EnvironmentRecord {
+            cw_runtime: None,
             id: existing_id,
             name: "dev".to_owned(),
             state: StoredEnvironmentState::Running,
@@ -13244,6 +14156,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
@@ -13310,6 +14223,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
         };
@@ -13349,6 +14263,7 @@ mod tests {
         let generation = environment.active_artifact_generation.clone().unwrap();
         environment.state = StoredEnvironmentState::Running;
         environment.runner = Some(RunnerRecord {
+            cw_runtime_catalog_generation: None,
             process: ProcessIdentity {
                 pid: 42,
                 boot_id: "synthetic".to_owned(),

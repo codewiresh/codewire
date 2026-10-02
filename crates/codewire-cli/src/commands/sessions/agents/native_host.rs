@@ -108,10 +108,17 @@ impl Guest {
         executable: String,
     ) -> anyhow::Result<Self> {
         let guest = Self::new(target, executable)?;
-        let runtime =
-            super::super::super::native::native_environment_managed_runtime(&guest.id).await?;
-        if guest.executable != runtime.executable() {
-            anyhow::bail!("retained managed session does not match its VM boot cw image");
+        let catalog =
+            super::super::super::native::native_environment_managed_runtime_catalog(&guest.id)
+                .await?;
+        if !catalog
+            .runtimes
+            .iter()
+            .any(|runtime| guest.executable == runtime.executable())
+        {
+            anyhow::bail!(
+                "retained managed session helper is absent from the running VM runtime catalog"
+            );
         }
         Ok(guest)
     }
