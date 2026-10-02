@@ -858,10 +858,18 @@ if [ "$event_selected" = false ]; then
         select_token ios
         recognized=true
         ;;
-      apps/cli/Makefile)
+      apps/cli/Makefile|scripts/dev/test-cli-host.py|scripts/dev/test-native-managed-startup.py|scripts/dev/fixtures/agent-peer.py)
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_cli_bin
+        recognized=true
+        ;;
+      scripts/dev/test-cli-native-managed.py|scripts/dev/build-native-managed-agent.py)
+        select_token rust
+        select_token rust_pkg_codewire_cli
+        select_token rust_pkg_codewire_cli_bin
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
         recognized=true
         ;;
       packages/codewire-proto-ts/*)
@@ -1101,6 +1109,7 @@ if [ "$event_selected" = false ]; then
         select_token database
         select_token rust_pkg_codewire_credential_broker
         ;;
+      crates/codewire-credential-service/src/runtime/kind.rs|\
       crates/codewire-credential-service/src/runtime/kind/*)
         # This is the real in-cluster credential-service fixture, rather than
         # a unit-only helper. Like the direct Kind smoke owners, its changes
@@ -1444,7 +1453,9 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
-      scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-credentials.py)
+      scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-credentials.py|\
+      scripts/ci/tests/test-kind-cluster-profiles.py|scripts/ci/tests/test-kind-dev-profile.py|\
+      scripts/ci/tests/test-kind-profile-artifacts.py|scripts/ci/tests/test-kind-profile-gate.py)
         # These hermetic fixtures exercise the dispatcher and cleanup contract
         # without provisioning a cluster. A real harness/runtime path in the
         # same change still marks the selection Kind-relevant above.

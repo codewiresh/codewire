@@ -157,6 +157,38 @@ enum Command {
     Shell(EnvironmentShellArgs),
     #[command(about = "Run a durable session in the selected or named environment")]
     Run(EnvironmentRunArgs),
+    #[cfg(unix)]
+    #[command(name = "_host-daemon", hide = true)]
+    HostDaemon(HostDaemonArgs),
+    #[command(about = "Write acknowledged input to a terminal or command session")]
+    Send(SendArgs),
+    #[command(about = "Wait for a session or managed message to finish")]
+    Wait(WaitArgs),
+    #[command(about = "Stop an owned session")]
+    Stop(SessionTargetArgs),
+    #[command(about = "Restart a retained session with its canonical identity")]
+    Restart(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(about = "Send a task or follow-up to a managed agent conversation")]
+    Msg(AgentMessageArgs),
+    #[cfg(unix)]
+    #[command(about = "Steer the current turn of a managed agent")]
+    Steer(AgentMessageArgs),
+    #[cfg(unix)]
+    #[command(about = "Interrupt the current managed agent turn")]
+    Interrupt(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(about = "Show managed messages and their results")]
+    Inbox(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(name = "_agent-driver", hide = true)]
+    AgentDriver(AgentDriverArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_agent-control", hide = true)]
+    AgentControl(AgentControlArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_agent-peer", hide = true)]
+    AgentPeer(AgentPeerArgs),
     #[command(about = "Manage environments")]
     Env(EnvArgs),
     #[command(about = "Show usage and billing overview")]
@@ -355,6 +387,26 @@ where
         Command::Vscode(args) => handle_vscode_command(&globals, args).await,
         Command::Shell(args) => handle_environment_shell_command(&globals, args).await,
         Command::Run(args) => handle_environment_run_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::HostDaemon(args) => run_host_daemon(args).await,
+        Command::Send(args) => handle_send_command(&globals, args).await,
+        Command::Wait(args) => handle_wait_command(&globals, args).await,
+        Command::Stop(args) => handle_stop_command(&globals, args).await,
+        Command::Restart(args) => handle_restart_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::Msg(args) => handle_agent_message_command(&globals, args, false).await,
+        #[cfg(unix)]
+        Command::Steer(args) => handle_agent_message_command(&globals, args, true).await,
+        #[cfg(unix)]
+        Command::Interrupt(args) => handle_agent_interrupt_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::Inbox(args) => handle_agent_inbox_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::AgentDriver(args) => run_agent_driver(args).await,
+        #[cfg(target_os = "linux")]
+        Command::AgentControl(args) => run_agent_control(args).await,
+        #[cfg(target_os = "linux")]
+        Command::AgentPeer(args) => run_agent_peer(args).await,
         Command::Env(args) => handle_env_command(&globals, args).await,
         Command::Cost(args) => handle_cost_command(&globals, args).await,
         Command::Org { command } => handle_org_command(&globals, command).await,

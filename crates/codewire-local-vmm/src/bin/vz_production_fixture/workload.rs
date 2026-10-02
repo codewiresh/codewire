@@ -31,6 +31,8 @@ fn transient_request(working_dir: &str) -> v1::ExecStartRequest {
 
 fn session_request(working_dir: &str) -> v1::LaunchSessionRequest {
     v1::LaunchSessionRequest {
+        name: String::new(),
+        parent_session_id: None,
         command: vec![
             "/bin/sh".to_owned(),
             "-c".to_owned(),

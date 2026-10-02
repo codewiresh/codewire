@@ -268,6 +268,31 @@ impl DaemonClient {
         }
     }
 
+    /// Acknowledged input; deliberately no retry after an ambiguous deadline.
+    pub async fn send_session_input(
+        &self,
+        request: v1::SendSessionInputRequest,
+    ) -> Result<(), DaemonClientError> {
+        use codewire_gateway_proto::{
+            DAEMON_CAPABILITY_SESSION_INPUT, SESSION_INPUT_MAX_BYTES, SESSION_INPUT_TIMEOUT,
+        };
+        if request.data.is_empty() || request.data.len() > SESSION_INPUT_MAX_BYTES {
+            return Err(tonic::Status::invalid_argument(
+                "session input must contain 1..65536 bytes",
+            )
+            .into());
+        }
+        tokio::time::timeout(SESSION_INPUT_TIMEOUT, async {
+            self.require_ready(&[DAEMON_CAPABILITY_SESSION_INPUT]).await?;
+            let mut client = self.inner.clone();
+            let mut request = self.authorized(request);
+            request.set_timeout(SESSION_INPUT_TIMEOUT);
+            client.send_session_input(request).await?;
+            Ok(())
+        }).await.map_err(|_| DaemonClientError::Status(tonic::Status::deadline_exceeded(
+            "session input acknowledgement timed out; input may have been written; do not retry automatically")))?
+    }
+
     pub async fn list_files(
         &self,
         path: impl Into<String>,

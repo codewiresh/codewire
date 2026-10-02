@@ -27,6 +27,7 @@ fn config(directory: &Path) -> Config {
             ingress_gid: unsafe { libc::getegid() },
         }),
         managed_credential_clients: Default::default(),
+        host: None,
         launch_projection: Some(LaunchProjectionConfig {
             selection_sha256: [3; 32],
             native: None,

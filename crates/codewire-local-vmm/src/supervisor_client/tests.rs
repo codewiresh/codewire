@@ -184,6 +184,13 @@ impl LocalSupervisorService for ProtocolPeer {
     ) -> Result<Response<v1::DaemonAccess>, Status> {
         Err(Status::unimplemented("unused synthetic method"))
     }
+
+    async fn get_managed_runtime(
+        &self,
+        _: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::ManagedRuntime>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
 }
 
 struct TestServer {

@@ -4,7 +4,6 @@
 //! but WAL and explicit replay
 //! records keep every lifecycle transition recoverable across process death.
 
-#[cfg(test)]
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -30,6 +29,7 @@ use crate::mesh_ingress::MeshAttachment;
 #[cfg(test)]
 use crate::supervisor::RunnerRecord;
 use crate::supervisor::{EnvironmentRecord, StoredEnvironmentState, SupervisorState};
+use crate::supervisor_metadata::CwRuntimeBinding;
 use crate::supervisor_store_codec::{parse_uuid, require_persistent_wal};
 use crate::workspace_generation::WorkspaceGenerationRecord;
 #[cfg(test)]
@@ -40,7 +40,11 @@ const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
-const DATABASE_SCHEMA_VERSION: i64 = 11;
+const LEGACY_DATABASE_SCHEMA_VERSION: i64 = 11;
+const DATABASE_SCHEMA_VERSION: i64 = 12;
+const LINUX_PLATFORM: &str = "linux-v1";
+const RUNTIME_BINDING_COLUMN_SQL: &str = "cw_runtime_binding_json BLOB NULL";
+const MAXIMUM_RUNTIME_BINDING_BYTES: usize = 512;
 // A create journal entry contains the exact canonical project JSON so replay
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
@@ -194,7 +198,7 @@ impl SupervisorStore {
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "trusted_schema", false)?;
         require_persistent_wal(&connection)?;
-        validate_schema(&connection)?;
+        validate_readable_schema(&connection)?;
         validate_database(&connection)?;
         let reopened = root.open_regular(relative, false, None, false, Some(0o600))?;
         if reopened.identity() != &identity {
@@ -220,7 +224,7 @@ impl SupervisorStore {
         if initialize {
             initialize_schema(&connection)?;
         } else {
-            validate_schema(&connection)?;
+            upgrade_schema(&connection)?;
         }
         validate_database(&connection)?;
 
@@ -449,7 +453,7 @@ impl SupervisorStore {
     }
 
     fn load_state(&self) -> Result<SupervisorState, SupervisorStoreError> {
-        crate::supervisor_store_codec::load_state(&self.connection)
+        load_state(&self.connection)
     }
 
     fn ensure_metadata(&self, boot_id: &str) -> Result<(), SupervisorStoreError> {
@@ -589,7 +593,7 @@ impl SupervisorOperationReader {
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "trusted_schema", false)?;
         require_persistent_wal(&connection)?;
-        validate_schema(&connection)?;
+        validate_readable_schema(&connection)?;
         validate_database(&connection)?;
         let reopened = root.open_regular(relative, false, None, false, Some(0o600))?;
         if reopened.identity() != &identity {
@@ -670,69 +674,303 @@ fn configure_connection(connection: &Connection) -> Result<(), SupervisorStoreEr
 }
 
 fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
-    connection.execute_batch(&format!(
-        "BEGIN IMMEDIATE;\n{}\nPRAGMA application_id = 1129797197;\nPRAGMA user_version = 11;\nCOMMIT;",
-        crate::supervisor_store_codec::SCHEMA_SQL,
-    ))?;
-    validate_schema(connection)
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    transaction.execute_batch(crate::supervisor_store_codec::SCHEMA_SQL)?;
+    add_runtime_binding_column(&transaction)?;
+    transaction.pragma_update(None, "application_id", DATABASE_APPLICATION_ID)?;
+    transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+    validate_schema(&transaction)?;
+    validate_database(&transaction)?;
+    validate_authority_rows(&transaction)?;
+    load_state(&transaction)?;
+    transaction.commit()?;
+    Ok(())
 }
 
-fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationCheckpoint {
+    AfterAlter,
+    BeforeCommit,
+}
+
+fn upgrade_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
+    upgrade_schema_with_checkpoint(connection, |_, _| Ok(()))
+}
+
+fn upgrade_schema_with_checkpoint(
+    connection: &Connection,
+    checkpoint: impl Fn(MigrationCheckpoint, &Connection) -> Result<(), SupervisorStoreError>,
+) -> Result<(), SupervisorStoreError> {
+    // The writer lock fences the version, prior schema and prior state together.
+    // No authority metadata or boot reconciliation runs before this commits.
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let version = readable_schema_version(&transaction)?;
+    if version == LEGACY_DATABASE_SCHEMA_VERSION {
+        validate_legacy_schema(&transaction)?;
+        validate_database(&transaction)?;
+        validate_authority_rows(&transaction)?;
+        load_state(&transaction)?;
+        add_runtime_binding_column(&transaction)?;
+        checkpoint(MigrationCheckpoint::AfterAlter, &transaction)?;
+        transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+    }
+    validate_schema(&transaction)?;
+    validate_database(&transaction)?;
+    validate_authority_rows(&transaction)?;
+    load_state(&transaction)?;
+    if version == LEGACY_DATABASE_SCHEMA_VERSION {
+        checkpoint(MigrationCheckpoint::BeforeCommit, &transaction)?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn add_runtime_binding_column(connection: &Connection) -> Result<(), SupervisorStoreError> {
+    connection.execute_batch(&format!(
+        "ALTER TABLE environments ADD COLUMN {RUNTIME_BINDING_COLUMN_SQL};"
+    ))?;
+    connection.execute(
+        "INSERT OR IGNORE INTO supervisor_metadata(key, value) VALUES ('platform', ?1)",
+        [LINUX_PLATFORM],
+    )?;
+    Ok(())
+}
+
+fn readable_schema_version(connection: &Connection) -> Result<i64, SupervisorStoreError> {
     let application_id: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     let schema_version: i64 =
         connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if application_id != DATABASE_APPLICATION_ID || schema_version != DATABASE_SCHEMA_VERSION {
+    if application_id != DATABASE_APPLICATION_ID
+        || ![LEGACY_DATABASE_SCHEMA_VERSION, DATABASE_SCHEMA_VERSION].contains(&schema_version)
+    {
         return Err(SupervisorStoreError::UnsupportedSchema {
             application_id,
             schema_version,
         });
     }
-    for table in [
-        "supervisor_metadata",
-        "supervisor_settings",
-        "environments",
-        "owned_objects",
-        "operations",
-    ] {
-        let present = connection
-            .query_row(
-                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                [table],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !present {
+    Ok(schema_version)
+}
+
+fn validate_readable_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
+    match readable_schema_version(connection)? {
+        LEGACY_DATABASE_SCHEMA_VERSION => validate_legacy_schema(connection),
+        DATABASE_SCHEMA_VERSION => validate_schema(connection),
+        _ => unreachable!("readable_schema_version admits only closed versions"),
+    }
+}
+
+fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
+    let schema_version = readable_schema_version(connection)?;
+    if schema_version != DATABASE_SCHEMA_VERSION {
+        return Err(SupervisorStoreError::UnsupportedSchema {
+            application_id: DATABASE_APPLICATION_ID,
+            schema_version,
+        });
+    }
+    validate_schema_shape(connection, true)?;
+    if metadata_value(connection, "platform")?.as_deref() != Some(LINUX_PLATFORM) {
+        return Err(SupervisorStoreError::InvalidDatabase);
+    }
+    Ok(())
+}
+
+fn validate_legacy_schema(connection: &Connection) -> Result<(), SupervisorStoreError> {
+    let schema_version = readable_schema_version(connection)?;
+    if schema_version != LEGACY_DATABASE_SCHEMA_VERSION {
+        return Err(SupervisorStoreError::UnsupportedSchema {
+            application_id: DATABASE_APPLICATION_ID,
+            schema_version,
+        });
+    }
+    validate_schema_shape(connection, false)?;
+    if metadata_value(connection, "platform")?
+        .as_deref()
+        .is_some_and(|platform| platform != LINUX_PLATFORM)
+    {
+        return Err(SupervisorStoreError::InvalidDatabase);
+    }
+    Ok(())
+}
+
+fn validate_schema_shape(
+    connection: &Connection,
+    with_runtime_binding: bool,
+) -> Result<(), SupervisorStoreError> {
+    // Admission pins every old column, CHECK, foreign key and STRICT table. The
+    // only Linux12 schema delta is the explicit nullable runtime binding column.
+    let mut expected: BTreeMap<_, _> = crate::supervisor_store_codec::SCHEMA_SQL
+        .split(';')
+        .map(str::trim)
+        .filter_map(|sql| {
+            let tail = sql.strip_prefix("CREATE TABLE ")?;
+            Some((tail.split_whitespace().next()?, sql))
+        })
+        .collect();
+    let mut statement = connection
+        .prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (kind, name, sql) = row?;
+        let Some(expected_sql) = expected.remove(name.as_str()) else {
+            return Err(SupervisorStoreError::InvalidDatabase);
+        };
+        let mut sql = sql.ok_or(SupervisorStoreError::InvalidDatabase)?;
+        if kind != "table" {
+            return Err(SupervisorStoreError::InvalidDatabase);
+        }
+        if with_runtime_binding && name == "environments" {
+            let addition = format!(", {RUNTIME_BINDING_COLUMN_SQL}");
+            if sql.matches(addition.as_str()).count() != 1 {
+                return Err(SupervisorStoreError::InvalidDatabase);
+            }
+            sql = sql.replacen(addition.as_str(), "", 1);
+        }
+        if sql != expected_sql {
             return Err(SupervisorStoreError::InvalidDatabase);
         }
     }
-    for column in [
-        "workspace_plan_json",
-        "host_ports_json",
-        "mesh_attachment_json",
-        "project_spec_json",
-        "project_spec_sha256",
-        "docker_disk_bytes",
-        "access_profile_reference",
-        "access_profile_id",
-        "access_profile_revision",
-        "platform_source_authority_json",
-        "active_workspace_generation_json",
-        "staging_workspace_generation_json",
-        "rollback_workspace_generation_json",
-    ] {
-        let present = connection
+    if !expected.is_empty() {
+        return Err(SupervisorStoreError::InvalidDatabase);
+    }
+    if with_runtime_binding {
+        let column = connection
             .query_row(
-                "SELECT 1 FROM pragma_table_info('environments') WHERE name = ?1",
-                [column],
-                |_| Ok(()),
+                "SELECT type, \"notnull\", dflt_value, pk, hidden
+                 FROM pragma_table_xinfo('environments') WHERE name = 'cw_runtime_binding_json'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
             )
-            .optional()?
-            .is_some();
-        if !present {
+            .optional()?;
+        if column != Some(("BLOB".to_owned(), 0, None, 0, 0)) {
             return Err(SupervisorStoreError::InvalidDatabase);
         }
+    }
+    Ok(())
+}
+
+fn load_state(connection: &Connection) -> Result<SupervisorState, SupervisorStoreError> {
+    // Readers must observe the legacy columns and independent binding from the
+    // same SQLite view, including a read-only reader racing a schema upgrade.
+    if connection.is_autocommit() {
+        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Deferred)?;
+        let state = load_state_in_transaction(&transaction)?;
+        transaction.commit()?;
+        Ok(state)
+    } else {
+        load_state_in_transaction(connection)
+    }
+}
+
+fn load_state_in_transaction(
+    connection: &Connection,
+) -> Result<SupervisorState, SupervisorStoreError> {
+    validate_readable_schema(connection)?;
+    let mut state = crate::supervisor_store_codec::load_state(connection)?;
+    if readable_schema_version(connection)? == LEGACY_DATABASE_SCHEMA_VERSION {
+        // The old codec denied this newly introduced runner field, even null.
+        // Never reinterpret a relabeled new record as admitted old-writer state.
+        let mut statement = connection.prepare("SELECT runner_json FROM environments")?;
+        let rows = statement.query_map([], |row| row.get::<_, Option<Vec<u8>>>(0))?;
+        for row in rows {
+            if let Some(bytes) = row? {
+                let value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| SupervisorStoreError::InvalidState)?;
+                if value.get("cw_runtime_catalog_generation").is_some() {
+                    return Err(SupervisorStoreError::InvalidState);
+                }
+            }
+        }
+        return Ok(state);
+    }
+    let mut statement = connection.prepare(
+        "SELECT id, name, typeof(cw_runtime_binding_json), length(cw_runtime_binding_json),
+                CASE WHEN typeof(cw_runtime_binding_json) = 'blob'
+                       AND length(cw_runtime_binding_json) BETWEEN 1 AND ?1
+                     THEN cw_runtime_binding_json ELSE NULL END
+         FROM environments ORDER BY name",
+    )?;
+    let rows = statement.query_map([MAXIMUM_RUNTIME_BINDING_BYTES as i64], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<Vec<u8>>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, name, kind, length, bytes) = row?;
+        let binding = match (kind.as_str(), length, bytes) {
+            ("null", None, None) => None,
+            ("blob", Some(length), Some(bytes))
+                if (1..=MAXIMUM_RUNTIME_BINDING_BYTES as i64).contains(&length) =>
+            {
+                let binding: CwRuntimeBinding = serde_json::from_slice(&bytes)
+                    .map_err(|_| SupervisorStoreError::InvalidState)?;
+                binding
+                    .validate()
+                    .map_err(|_| SupervisorStoreError::InvalidState)?;
+                Some(binding)
+            }
+            _ => return Err(SupervisorStoreError::InvalidState),
+        };
+        let environment = state
+            .environments
+            .get_mut(&name)
+            .filter(|environment| environment.id.to_string() == id)
+            .ok_or(SupervisorStoreError::InvalidState)?;
+        environment.cw_runtime = binding;
+    }
+    state
+        .validate()
+        .map_err(|_| SupervisorStoreError::InvalidState)?;
+    Ok(state)
+}
+
+fn validate_authority_rows(connection: &Connection) -> Result<(), SupervisorStoreError> {
+    if let Some(namespace) = metadata_value(connection, "namespace_id")? {
+        parse_uuid(&namespace)?;
+    }
+    if let Some(boot_id) = metadata_value(connection, "host_boot_id")? {
+        validate_boot_id(&boot_id)?;
+    }
+    if let Some(encoded) = metadata_value(connection, HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY)? {
+        if encoded.len() > MAXIMUM_OPERATION_BYTES {
+            return Err(SupervisorStoreError::InvalidOperation);
+        }
+        let ids: Vec<String> =
+            serde_json::from_str(&encoded).map_err(|_| SupervisorStoreError::InvalidOperation)?;
+        for id in ids {
+            parse_uuid(&id)?;
+        }
+    }
+    let mut statement = connection.prepare(
+        "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
+                payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
+         FROM operations",
+    )?;
+    let rows = statement.query_map([], decode_operation_row)?;
+    for row in rows {
+        row?;
+    }
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    if statement.query([])?.next()?.is_some() {
+        return Err(SupervisorStoreError::InvalidDatabase);
     }
     Ok(())
 }
@@ -784,6 +1022,21 @@ fn write_state(
             encode_workspace_generation(environment.staging_workspace_generation.as_ref())?;
         let rollback_workspace_generation_json =
             encode_workspace_generation(environment.rollback_workspace_generation.as_ref())?;
+        let cw_runtime_binding_json = environment
+            .cw_runtime
+            .as_ref()
+            .map(|binding| {
+                binding
+                    .validate()
+                    .map_err(|_| SupervisorStoreError::InvalidState)?;
+                let bytes =
+                    serde_json::to_vec(binding).map_err(|_| SupervisorStoreError::InvalidState)?;
+                if bytes.len() > MAXIMUM_RUNTIME_BINDING_BYTES {
+                    return Err(SupervisorStoreError::InvalidState);
+                }
+                Ok(bytes)
+            })
+            .transpose()?;
         let encoded_access = encode_access_binding(environment)?;
         let platform_source_authority_json = environment
             .platform_source_authority
@@ -867,6 +1120,13 @@ fn write_state(
                 platform_source_authority_json,
             ],
         )?;
+        if transaction.execute(
+            "UPDATE environments SET cw_runtime_binding_json = ?1 WHERE id = ?2",
+            params![cw_runtime_binding_json, environment.id.to_string()],
+        )? != 1
+        {
+            return Err(SupervisorStoreError::InvalidState);
+        }
         transaction.execute(
             "DELETE FROM owned_objects WHERE environment_id = ?1",
             [environment.id.to_string()],
@@ -1452,6 +1712,7 @@ mod tests {
                 mode: 0o140600,
             },
             artifact_generation: "c".repeat(64),
+            cw_runtime_catalog_generation: None,
             error_code: None,
         });
         EnvironmentRecord {
@@ -1476,6 +1737,7 @@ mod tests {
             access_profile: None,
             access_binding: None,
             platform_source_authority: None,
+            cw_runtime: None,
             runner,
             active_artifact_generation: Some("c".repeat(64)),
             staging_artifact_generation: None,
@@ -1504,12 +1766,676 @@ mod tests {
         }
     }
 
+    // These statements are extracted from the accepted schema11 source, rather
+    // than invoking the schema12 writer and relabeling its database as old.
+    const FROZEN_SCHEMA_11: &str = include_str!("supervisor_store/testdata/schema-11.sql");
+    const FROZEN_ENVIRONMENT_11: &str =
+        include_str!("supervisor_store/testdata/schema-11-environment.sql");
+    const FROZEN_OPERATION_11: &str =
+        include_str!("supervisor_store/testdata/schema-11-operation.sql");
+
+    fn legacy_database(root: &PrivateRoot) -> Connection {
+        let (connection, initialize) = open_database(root).unwrap();
+        assert!(initialize);
+        configure_connection(&connection).unwrap();
+        connection.execute_batch(FROZEN_SCHEMA_11).unwrap();
+        connection
+            .pragma_update(None, "application_id", DATABASE_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", LEGACY_DATABASE_SCHEMA_VERSION)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO supervisor_metadata(key, value) VALUES ('namespace_id', ?1)",
+                ["11111111-1111-4111-8111-111111111111"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO supervisor_metadata(key, value) VALUES ('host_boot_id', 'boot-a')",
+                [],
+            )
+            .unwrap();
+        connection.execute(
+            "INSERT INTO supervisor_metadata(key, value) VALUES ('retained_fixture', 'opaque-prior-value')",
+            [],
+        ).unwrap();
+        validate_legacy_schema(&connection).unwrap();
+        connection
+    }
+
+    fn write_frozen_legacy_state(connection: &Connection, state: &SupervisorState) {
+        state.validate().unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        for environment in state.environments.values() {
+            assert!(environment.cw_runtime.is_none());
+            assert!(
+                environment
+                    .runner
+                    .as_ref()
+                    .is_none_or(|runner| runner.cw_runtime_catalog_generation.is_none())
+            );
+            let access = environment.access_binding.as_ref();
+            transaction
+                .execute(
+                    FROZEN_ENVIRONMENT_11,
+                    params![
+                        environment.id.to_string(),
+                        &environment.name,
+                        desired_state(environment.state),
+                        environment.state.as_str(),
+                        i64::from(environment.vcpus),
+                        i64::from(environment.memory_mib),
+                        i64::try_from(environment.disk_bytes).unwrap(),
+                        i64::try_from(environment.docker_disk_bytes).unwrap(),
+                        i64::try_from(environment.generation).unwrap(),
+                        serde_json::to_vec(&environment.host_ports).unwrap(),
+                        environment
+                            .mesh
+                            .as_ref()
+                            .map(serde_json::to_vec)
+                            .transpose()
+                            .unwrap(),
+                        environment.workspace_plan.encode_canonical().unwrap(),
+                        environment
+                            .runner
+                            .as_ref()
+                            .map(serde_json::to_vec)
+                            .transpose()
+                            .unwrap(),
+                        &environment.active_artifact_generation,
+                        &environment.staging_artifact_generation,
+                        &environment.project_spec_json,
+                        &environment.project_spec_sha256,
+                        environment.access_profile.as_ref().map(ToString::to_string),
+                        access.map(|binding| binding.profile_id.to_string()),
+                        access.map(|binding| i64::try_from(binding.profile_revision).unwrap()),
+                        environment
+                            .active_workspace_generation
+                            .as_ref()
+                            .map(WorkspaceGenerationRecord::encode_canonical)
+                            .transpose()
+                            .unwrap(),
+                        environment
+                            .staging_workspace_generation
+                            .as_ref()
+                            .map(WorkspaceGenerationRecord::encode_canonical)
+                            .transpose()
+                            .unwrap(),
+                        environment
+                            .rollback_workspace_generation
+                            .as_ref()
+                            .map(WorkspaceGenerationRecord::encode_canonical)
+                            .transpose()
+                            .unwrap(),
+                        environment
+                            .platform_source_authority
+                            .as_ref()
+                            .map(serde_json::to_vec)
+                            .transpose()
+                            .unwrap(),
+                    ],
+                )
+                .unwrap();
+            for lifecycle in ["active", "staging", "trash"] {
+                transaction.execute(
+                    "INSERT INTO owned_objects(environment_id, kind, relative_path, identity_json, lifecycle)
+                     VALUES (?1, 'prior_fixture', ?2, ?3, ?4)",
+                    params![environment.id.to_string(), format!("retained/{lifecycle}").as_bytes(), b"{\"prior\":true}".as_slice(), lifecycle],
+                ).unwrap();
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE supervisor_settings SET current_environment_id = ?1 WHERE singleton = 1",
+                [state
+                    .current
+                    .as_ref()
+                    .map(|name| state.environments[name].id.to_string())],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    fn legacy_pending_operation(
+        connection: &Connection,
+        environment: &EnvironmentRecord,
+    ) -> OperationRecord {
+        let operation_id = Uuid::new_v4();
+        connection.execute(FROZEN_OPERATION_11, params![
+            operation_id.to_string(), Uuid::new_v4().to_string(), environment.id.to_string(),
+            "update_workspace", serde_json::to_vec(&serde_json::json!({"name": environment.name, "generation": environment.generation})).unwrap(), 17_i64,
+        ]).unwrap();
+        connection.execute(
+            "UPDATE operations SET phase = 'effect_applied', checkpoint = 2, updated_unix_ms = 19 WHERE operation_id = ?1",
+            [operation_id.to_string()],
+        ).unwrap();
+        operation_for_id(connection, operation_id).unwrap().unwrap()
+    }
+
+    fn runtime_column_present(connection: &Connection) -> bool {
+        connection.query_row(
+            "SELECT 1 FROM pragma_table_info('environments') WHERE name = 'cw_runtime_binding_json'",
+            [], |_| Ok(()),
+        ).optional().unwrap().is_some()
+    }
+
+    fn schema_version(connection: &Connection) -> i64 {
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    type RetainedRows = Vec<Vec<Vec<rusqlite::types::Value>>>;
+
+    fn query_retained_rows(connection: &Connection, queries: &[&str]) -> RetainedRows {
+        queries
+            .iter()
+            .map(|sql| {
+                let mut statement = connection.prepare(sql).unwrap();
+                let columns = statement.column_count();
+                statement
+                    .query_map([], |row| {
+                        (0..columns).map(|column| row.get(column)).collect()
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    fn legacy_retained_rows(connection: &Connection) -> RetainedRows {
+        query_retained_rows(
+            connection,
+            &[
+                "SELECT * FROM supervisor_metadata WHERE key != 'platform' ORDER BY key",
+                "SELECT * FROM supervisor_settings ORDER BY singleton",
+                "SELECT id, name, desired_state, observed_state, vcpus, memory_mib, disk_bytes,
+                    docker_disk_bytes, generation, host_ports_json, mesh_attachment_json,
+                    workspace_plan_json, project_spec_json, project_spec_sha256,
+                    access_profile_reference, access_profile_id, access_profile_revision,
+                    runner_json, active_artifact_generation, staging_artifact_generation,
+                    active_workspace_generation_json, staging_workspace_generation_json,
+                    rollback_workspace_generation_json, platform_source_authority_json
+             FROM environments ORDER BY id",
+                "SELECT * FROM owned_objects ORDER BY environment_id, kind, relative_path",
+                "SELECT * FROM operations ORDER BY operation_id",
+            ],
+        )
+    }
+
+    fn all_retained_rows(connection: &Connection) -> RetainedRows {
+        query_retained_rows(
+            connection,
+            &[
+                "SELECT * FROM supervisor_metadata ORDER BY key",
+                "SELECT * FROM supervisor_settings ORDER BY singleton",
+                "SELECT * FROM environments ORDER BY id",
+                "SELECT * FROM owned_objects ORDER BY environment_id, kind, relative_path",
+                "SELECT * FROM operations ORDER BY operation_id",
+                "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name",
+            ],
+        )
+    }
+
+    fn rich_legacy_state() -> SupervisorState {
+        let mut running = environment(StoredEnvironmentState::Running, Some("boot-a"));
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(running.project_spec_json.as_deref().unwrap()).unwrap();
+        project.credentials = Some(codewire_project::CredentialBinding {
+            profile: "platform:id:11111111-1111-4111-8111-111111111111".into(),
+        });
+        let project_json = project.canonical_json().unwrap();
+        let project_sha256 = format!("{:x}", Sha256::digest(&project_json));
+        running.project_spec_json = Some(project_json.clone());
+        running.project_spec_sha256 = Some(project_sha256.clone());
+        running.access_profile = Some("user/work".parse().unwrap());
+        running.access_binding = Some(EnvironmentAccessBinding {
+            environment_id: EnvironmentId::parse(running.id.to_string()).unwrap(),
+            profile_id: AccessProfileId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+            profile_revision: 7,
+        });
+        running.platform_source_authority = Some(
+            crate::supervisor_metadata::PlatformSourceAuthority::from_proto(
+                &crate::control::v1::PlatformSourceAuthority {
+                    server_url: "https://synthetic.invalid".to_owned(),
+                    organization_id: "synthetic-org".to_owned(),
+                    user_id: "synthetic-owner".to_owned(),
+                    profile_slots: vec!["codex".to_owned()],
+                },
+            )
+            .unwrap(),
+        );
+        running.mesh = Some(
+            MeshAttachment::new(
+                "https://mesh.example.test",
+                "org-test",
+                "network-test",
+                "dev",
+                [3_000],
+            )
+            .unwrap(),
+        );
+        running.docker_disk_bytes = 4 * 1024 * 1024 * 1024;
+        running.active_workspace_generation = Some(workspace_generation(
+            &project_json,
+            &project_sha256,
+            b"active",
+        ));
+        let mut staging = workspace_generation(&project_json, &project_sha256, b"staging");
+        staging.artifact_generation = "b".repeat(64);
+        running.staging_artifact_generation = Some(staging.artifact_generation.clone());
+        running.staging_workspace_generation = Some(staging);
+        let mut rollback = workspace_generation(&project_json, &project_sha256, b"rollback");
+        rollback.artifact_generation = "a".repeat(64);
+        running.rollback_workspace_generation = Some(rollback);
+        let mut stopped = environment(StoredEnvironmentState::Stopped, None);
+        stopped.name = "parked".to_owned();
+        let mut state = state(running);
+        state.environments.insert(stopped.name.clone(), stopped);
+        state.validate().unwrap();
+        state
+    }
+
+    #[test]
+    fn schema11_fixtures_are_bound_to_the_accepted_prior_source_bytes() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "supervisor_store/testdata/schema-11-source.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            manifest["source_commit"],
+            "0588c11efc32902bd1baa0a54351cf5fc57b8579"
+        );
+        for (name, bytes, digest) in [
+            (
+                "schema-11.sql",
+                FROZEN_SCHEMA_11,
+                "59b3a93d1560788f8f60fbee86e00dcd864d7f9bcb58b6a1d5efb21ee126b37b",
+            ),
+            (
+                "schema-11-environment.sql",
+                FROZEN_ENVIRONMENT_11,
+                "f59b91888de4055768b5a30a89ec27c6dfe2f90d53e905b352d44d184dbb8455",
+            ),
+            (
+                "schema-11-operation.sql",
+                FROZEN_OPERATION_11,
+                "c8bccf954346969a2f176d2dfee333115c83f1a893c0a012b65e93c65925b153",
+            ),
+        ] {
+            assert_eq!(format!("{:x}", Sha256::digest(bytes.as_bytes())), digest);
+            assert_eq!(manifest["fixtures"][name]["sha256"], digest);
+        }
+        assert_eq!(crate::supervisor_store_codec::SCHEMA_SQL, FROZEN_SCHEMA_11);
+    }
+
+    #[test]
+    fn schema11_readers_do_not_migrate_and_upgrade_preserves_all_prior_rows() {
+        let (_parent, root) = root();
+        let connection = legacy_database(&root);
+        let expected = rich_legacy_state();
+        write_frozen_legacy_state(&connection, &expected);
+        let operation = legacy_pending_operation(&connection, &expected.environments["dev"]);
+        let before = legacy_retained_rows(&connection);
+        let (reader, inspected) = SupervisorStore::inspect(&root).unwrap();
+        assert_eq!(inspected, expected);
+        assert_eq!(
+            schema_version(&reader.unwrap().connection),
+            LEGACY_DATABASE_SCHEMA_VERSION
+        );
+        let operation_reader = SupervisorOperationReader::open(&root).unwrap();
+        assert_eq!(
+            operation_reader
+                .operation_by_id(operation.operation_id)
+                .unwrap(),
+            Some(operation.clone())
+        );
+        assert_eq!(schema_version(&connection), LEGACY_DATABASE_SCHEMA_VERSION);
+        assert!(!runtime_column_present(&connection));
+        assert_eq!(legacy_retained_rows(&connection), before);
+        drop(operation_reader);
+        drop(connection);
+
+        let (store, admitted) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert_eq!(admitted, expected);
+        assert_eq!(schema_version(&store.connection), DATABASE_SCHEMA_VERSION);
+        assert!(runtime_column_present(&store.connection));
+        assert_eq!(store.metadata("platform").as_deref(), Some(LINUX_PLATFORM));
+        assert_eq!(legacy_retained_rows(&store.connection), before);
+        assert_eq!(store.pending_operations().unwrap(), vec![operation]);
+        assert!(
+            admitted
+                .environments
+                .values()
+                .all(|environment| environment.cw_runtime.is_none())
+        );
+        let after = all_retained_rows(&store.connection);
+        drop(store);
+        let (reopened, admitted) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert_eq!(admitted, expected);
+        assert_eq!(all_retained_rows(&reopened.connection), after);
+    }
+
+    #[test]
+    fn schema11_upgrade_rolls_back_after_alter_and_before_version_commit() {
+        for fault in [
+            MigrationCheckpoint::AfterAlter,
+            MigrationCheckpoint::BeforeCommit,
+        ] {
+            let (_parent, root) = root();
+            let connection = legacy_database(&root);
+            let expected = rich_legacy_state();
+            write_frozen_legacy_state(&connection, &expected);
+            legacy_pending_operation(&connection, &expected.environments["dev"]);
+            let before = all_retained_rows(&connection);
+            let result = upgrade_schema_with_checkpoint(&connection, |point, transaction| {
+                assert!(runtime_column_present(transaction));
+                assert_eq!(
+                    schema_version(transaction),
+                    if point == MigrationCheckpoint::AfterAlter {
+                        LEGACY_DATABASE_SCHEMA_VERSION
+                    } else {
+                        DATABASE_SCHEMA_VERSION
+                    }
+                );
+                if point == fault {
+                    Err(SupervisorStoreError::InvalidDatabase)
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(SupervisorStoreError::InvalidDatabase)));
+            assert_eq!(schema_version(&connection), LEGACY_DATABASE_SCHEMA_VERSION);
+            assert!(!runtime_column_present(&connection));
+            assert!(metadata_value(&connection, "platform").unwrap().is_none());
+            assert_eq!(all_retained_rows(&connection), before);
+            assert_eq!(load_state(&connection).unwrap(), expected);
+            drop(connection);
+            let (recovered, admitted) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+            assert_eq!(admitted, expected);
+            assert_eq!(
+                schema_version(&recovered.connection),
+                DATABASE_SCHEMA_VERSION
+            );
+        }
+    }
+
+    #[test]
+    fn schema11_upgrade_refuses_invalid_prior_state_and_unknown_schema_effects() {
+        for corruption in [
+            "UPDATE environments SET project_spec_json = X'7b7d'",
+            "UPDATE operations SET payload_json = X'6e756c6c'",
+            "UPDATE supervisor_metadata SET value = 'bad' WHERE key = 'namespace_id'",
+            "INSERT INTO supervisor_metadata(key, value) VALUES ('platform', 'darwin-v1')",
+            "ALTER TABLE environments ADD COLUMN unexpected BLOB NULL",
+            "CREATE TRIGGER sqliteXunrecognized AFTER UPDATE ON environments BEGIN DELETE FROM operations; END",
+        ] {
+            let (_parent, root) = root();
+            let connection = legacy_database(&root);
+            let expected = state(environment(StoredEnvironmentState::Running, Some("boot-a")));
+            write_frozen_legacy_state(&connection, &expected);
+            legacy_pending_operation(&connection, &expected.environments["dev"]);
+            connection.execute_batch(corruption).unwrap();
+            let before = all_retained_rows(&connection);
+            assert!(
+                upgrade_schema(&connection).is_err(),
+                "admitted {corruption}"
+            );
+            assert_eq!(schema_version(&connection), LEGACY_DATABASE_SCHEMA_VERSION);
+            assert!(!runtime_column_present(&connection));
+            assert_eq!(all_retained_rows(&connection), before);
+        }
+    }
+
+    #[test]
+    fn schema11_upgrade_refuses_new_runner_metadata_even_when_null() {
+        let (_parent, root) = root();
+        let connection = legacy_database(&root);
+        let expected = state(environment(StoredEnvironmentState::Running, Some("boot-a")));
+        write_frozen_legacy_state(&connection, &expected);
+        let mut runner =
+            serde_json::to_value(expected.environments["dev"].runner.as_ref().unwrap()).unwrap();
+        runner.as_object_mut().unwrap().insert(
+            "cw_runtime_catalog_generation".to_owned(),
+            serde_json::Value::Null,
+        );
+        connection
+            .execute(
+                "UPDATE environments SET runner_json = ?1",
+                [serde_json::to_vec(&runner).unwrap()],
+            )
+            .unwrap();
+        let before = all_retained_rows(&connection);
+        assert!(matches!(
+            upgrade_schema(&connection),
+            Err(SupervisorStoreError::InvalidState)
+        ));
+        assert_eq!(schema_version(&connection), LEGACY_DATABASE_SCHEMA_VERSION);
+        assert!(!runtime_column_present(&connection));
+        assert_eq!(all_retained_rows(&connection), before);
+    }
+
+    #[test]
+    fn runtime_binding_and_runner_generation_round_trip_without_changing_boot_identity() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let mut environment = environment(StoredEnvironmentState::Running, Some("boot-a"));
+        environment.cw_runtime = Some(CwRuntimeBinding {
+            schema_version: 1,
+            active_catalog_generation: "1".repeat(64),
+            staging_catalog_generation: Some("2".repeat(64)),
+            rollback_catalog_generation: Some("3".repeat(64)),
+        });
+        environment
+            .runner
+            .as_mut()
+            .unwrap()
+            .cw_runtime_catalog_generation = Some("1".repeat(64));
+        let expected = state(environment);
+        store.replace_state(&expected).unwrap();
+        let (kind, length): (String, i64) = store.connection.query_row(
+            "SELECT typeof(cw_runtime_binding_json), length(cw_runtime_binding_json) FROM environments",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(kind, "blob");
+        assert!((1..=MAXIMUM_RUNTIME_BINDING_BYTES as i64).contains(&length));
+        drop(store);
+        let (store, mut restored) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert_eq!(restored, expected);
+        let environment = restored.environments.get_mut("dev").unwrap();
+        // A binding rollback is state in schema12, never an old database image.
+        environment.state = StoredEnvironmentState::Stopped;
+        environment.runner = None;
+        let binding = environment.cw_runtime.as_mut().unwrap();
+        let prior = binding.active_catalog_generation.clone();
+        binding.active_catalog_generation = binding.rollback_catalog_generation.take().unwrap();
+        binding.rollback_catalog_generation = Some(prior);
+        binding.staging_catalog_generation = None;
+        assert_eq!(
+            environment.active_artifact_generation,
+            expected.environments["dev"].active_artifact_generation
+        );
+        assert_eq!(
+            environment.workspace_plan,
+            expected.environments["dev"].workspace_plan
+        );
+        store.replace_state(&restored).unwrap();
+        assert_eq!(schema_version(&store.connection), DATABASE_SCHEMA_VERSION);
+        drop(store);
+        let (store, admitted) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert_eq!(admitted, restored);
+        assert_eq!(schema_version(&store.connection), DATABASE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn malformed_runtime_bindings_refuse_read_and_boot_before_authority_changes() {
+        let valid = CwRuntimeBinding {
+            schema_version: 1,
+            active_catalog_generation: "1".repeat(64),
+            staging_catalog_generation: None,
+            rollback_catalog_generation: None,
+        };
+        let mut unknown = serde_json::to_value(&valid).unwrap();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("future".to_owned(), serde_json::Value::Null);
+        let mut invalid_generation = valid.clone();
+        invalid_generation.active_catalog_generation = "A".repeat(64);
+        let mut invalid_schema = valid.clone();
+        invalid_schema.schema_version = 2;
+        let mut oversized = serde_json::to_vec(&valid).unwrap();
+        oversized.resize(MAXIMUM_RUNTIME_BINDING_BYTES + 1, b' ');
+        for bytes in [
+            Vec::new(), vec![0xff], b"{}".to_vec(), b"null".to_vec(),
+            serde_json::to_vec(&unknown).unwrap(),
+            serde_json::to_vec(&invalid_generation).unwrap(),
+            serde_json::to_vec(&invalid_schema).unwrap(), oversized,
+            format!("{{\"schema_version\":1,\"schema_version\":1,\"active_catalog_generation\":\"{}\"}}", valid.active_catalog_generation).into_bytes(),
+        ] {
+            let (_parent, root) = root();
+            let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+            let expected = state(environment(StoredEnvironmentState::Running, Some("boot-a")));
+            store.replace_state(&expected).unwrap();
+            store.begin_operation(Uuid::new_v4(), Some(expected.environments["dev"].id), OperationKind::Start, &serde_json::json!({"name":"dev"})).unwrap();
+            store.connection.execute("UPDATE environments SET cw_runtime_binding_json = ?1", [bytes]).unwrap();
+            let before = all_retained_rows(&store.connection);
+            drop(store);
+            assert!(matches!(SupervisorStore::inspect(&root), Err(SupervisorStoreError::InvalidState)));
+            assert!(matches!(SupervisorStore::open_for_boot(&root, "boot-b"), Err(SupervisorStoreError::InvalidState)));
+            let connection = Connection::open_with_flags(root.path().join(DATABASE_FILE), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert_eq!(schema_version(&connection), DATABASE_SCHEMA_VERSION);
+            assert_eq!(metadata_value(&connection, "host_boot_id").unwrap().as_deref(), Some("boot-a"));
+            assert_eq!(all_retained_rows(&connection), before);
+        }
+    }
+
+    #[test]
+    fn schema12_requires_the_runtime_column_and_closed_linux_platform() {
+        let (_parent, root) = root();
+        let connection = legacy_database(&root);
+        let expected = state(environment(StoredEnvironmentState::Running, Some("boot-a")));
+        write_frozen_legacy_state(&connection, &expected);
+        connection
+            .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO supervisor_metadata(key, value) VALUES ('platform', ?1)",
+                [LINUX_PLATFORM],
+            )
+            .unwrap();
+        let before = all_retained_rows(&connection);
+        drop(connection);
+        assert!(matches!(
+            SupervisorStore::inspect(&root),
+            Err(SupervisorStoreError::InvalidDatabase)
+        ));
+        assert!(matches!(
+            SupervisorStore::open_for_boot(&root, "boot-b"),
+            Err(SupervisorStoreError::InvalidDatabase)
+        ));
+        let connection = Connection::open_with_flags(
+            root.path().join(DATABASE_FILE),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(all_retained_rows(&connection), before);
+
+        for platform in [None, Some("unknown-linux"), Some("darwin-v1")] {
+            let (_parent, root) = self::root();
+            let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+            match platform {
+                Some(platform) => {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE supervisor_metadata SET value = ?1 WHERE key = 'platform'",
+                            [platform],
+                        )
+                        .unwrap();
+                }
+                None => {
+                    store
+                        .connection
+                        .execute("DELETE FROM supervisor_metadata WHERE key = 'platform'", [])
+                        .unwrap();
+                }
+            }
+            let before = all_retained_rows(&store.connection);
+            drop(store);
+            assert!(matches!(
+                SupervisorStore::open_for_boot(&root, "boot-b"),
+                Err(SupervisorStoreError::InvalidDatabase)
+            ));
+            let connection = Connection::open_with_flags(
+                root.path().join(DATABASE_FILE),
+                OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            assert_eq!(all_retained_rows(&connection), before);
+        }
+    }
+
+    #[test]
+    fn unsupported_application_or_schema_never_migrates_or_reconciles() {
+        for (application_id, version) in [
+            (0_i64, LEGACY_DATABASE_SCHEMA_VERSION),
+            (DATABASE_APPLICATION_ID + 1, LEGACY_DATABASE_SCHEMA_VERSION),
+            (DATABASE_APPLICATION_ID, 0),
+            (DATABASE_APPLICATION_ID, 10),
+            (DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION + 1),
+        ] {
+            let (_parent, root) = root();
+            let connection = legacy_database(&root);
+            let expected = state(environment(StoredEnvironmentState::Running, Some("boot-a")));
+            write_frozen_legacy_state(&connection, &expected);
+            legacy_pending_operation(&connection, &expected.environments["dev"]);
+            connection
+                .pragma_update(None, "application_id", application_id)
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            let before = all_retained_rows(&connection);
+            drop(connection);
+            assert!(matches!(
+                SupervisorStore::inspect(&root),
+                Err(SupervisorStoreError::UnsupportedSchema { .. })
+            ));
+            assert!(matches!(
+                SupervisorStore::open_for_boot(&root, "boot-b"),
+                Err(SupervisorStoreError::UnsupportedSchema { .. })
+            ));
+            let connection = Connection::open_with_flags(
+                root.path().join(DATABASE_FILE),
+                OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            assert_eq!(schema_version(&connection), version);
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "application_id", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                application_id
+            );
+            assert!(!runtime_column_present(&connection));
+            assert_eq!(all_retained_rows(&connection), before);
+        }
+    }
+
     #[test]
     fn new_database_is_owner_only_wal_and_stable() {
         let (_parent, root) = root();
         let (store, state) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
         assert_eq!(state, SupervisorState::default());
         assert_eq!(store.metadata("host_boot_id").as_deref(), Some("boot-a"));
+        assert_eq!(schema_version(&store.connection), DATABASE_SCHEMA_VERSION);
+        assert!(runtime_column_present(&store.connection));
+        assert_eq!(store.metadata("platform").as_deref(), Some(LINUX_PLATFORM));
         let namespace = store.metadata("namespace_id").unwrap();
         assert!(!Uuid::parse_str(&namespace).unwrap().is_nil());
         let metadata = fs::symlink_metadata(root.path().join(DATABASE_FILE)).unwrap();
@@ -1565,16 +2491,13 @@ mod tests {
             )
             .unwrap();
         store.connection.execute_batch(
-            "PRAGMA user_version = 12; INSERT INTO supervisor_metadata(key,value) VALUES ('platform','darwin-v1');",
+            "PRAGMA user_version = 12; UPDATE supervisor_metadata SET value = 'darwin-v1' WHERE key = 'platform';",
         ).unwrap();
         let before = retained_rows(&store.connection);
         drop(store);
         assert!(matches!(
             SupervisorStore::open_for_boot(&root, "boot-b"),
-            Err(SupervisorStoreError::UnsupportedSchema {
-                application_id: DATABASE_APPLICATION_ID,
-                schema_version: 12
-            })
+            Err(SupervisorStoreError::InvalidDatabase)
         ));
         let connection = Connection::open_with_flags(
             root.path().join(DATABASE_FILE),

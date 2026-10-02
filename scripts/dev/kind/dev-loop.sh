@@ -13,6 +13,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=scripts/dev/kind/profile.sh
+source "$ROOT/scripts/dev/kind/profile.sh"
+kind_profile_load "$ROOT" || exit $?
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-8090}"
 KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
@@ -20,7 +23,7 @@ KIND_PUBLIC_ORIGIN="${KIND_PUBLIC_ORIGIN:-}"
 WATCH_ADDR="${KIND_WATCH_ADDR:-127.0.0.1:5182}"
 # Dashboard source to serve; set to another worktree to review stacked UI work.
 SOURCE_ROOT="${KIND_WATCH_SOURCE_ROOT:-$ROOT}"
-INGRESS="http://127.0.0.1:${KIND_INGRESS_HOST_PORT}"
+INGRESS="${KIND_INGRESS_URL:-http://127.0.0.1:${KIND_INGRESS_HOST_PORT}}"
 # Where the browser reaches the cluster API (terminals, streams). It must share
 # KIND_PUBLIC_ORIGIN's host; expose the ingress there over the Tailnet with
 # `sudo tailscale serve --bg --http=8090 http://127.0.0.1:8090`.
@@ -33,6 +36,7 @@ die() { printf '[kind-dev] error: %s\n' "$*" >&2; exit 1; }
 kube() { kubectl --context "$CONTEXT" --request-timeout=30s -n "$NAMESPACE" "$@"; }
 
 require_cluster() {
+  kind_profile_verify_node "$ROOT" || exit $?
   kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME" \
     || die "cluster ${KIND_CLUSTER_NAME} does not exist; create it with KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME} KEEP_KIND_CLUSTER=1 make e2e-kind"
   kube get deployment codewire-credential-service >/dev/null \
@@ -70,6 +74,7 @@ app_public_value() {
 }
 
 cmd_seed_login() {
+  kind_profile_lock "$ROOT" || exit $?
   require_cluster
   [ -d "$ROOT/apps/dashboard/node_modules/postgres" ] \
     || die "install the dashboard dependencies first: (cd apps/dashboard && bun install --frozen-lockfile --ignore-scripts)"
@@ -179,6 +184,7 @@ cmd_runtime_images() {
     done <<<"$resolved"
     return 0
   fi
+  kind_profile_lock "$ROOT" || exit $?
   require_cluster
   for node in $(kind get nodes --name "$KIND_CLUSTER_NAME"); do
     while read -r name reference source; do
@@ -206,25 +212,19 @@ cmd_runtime_images() {
 }
 
 release_watch_port() {
-  # A dashboard left behind by an earlier session holds the watcher's port.
-  # Stop only a codewire-dashboard-web listener on exactly this address.
-  local port="${WATCH_ADDR##*:}" pid
-  # An unused port is the normal case: no match must not end the script.
-  pid="$(ss -Hltnp "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2 || true)"
-  [ -n "$pid" ] || return 0
-  if [ "$(cat "/proc/${pid}/comm" 2>/dev/null)" = "codewire-dashbo" ]; then
-    log "stopping stale dashboard (pid ${pid}) on ${WATCH_ADDR}"
-    kill "$pid"
-    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.5; done
-    die "stale dashboard pid ${pid} did not stop"
-  fi
-  die "${WATCH_ADDR} is held by another process (pid ${pid}); stop it or set KIND_WATCH_ADDR"
+  # A process name and a listening port do not establish ownership. A retained
+  # review watcher may belong to another session; leave every listener intact.
+  local port="${WATCH_ADDR##*:}" listeners
+  command -v ss >/dev/null || die 'ss is required to inspect the watcher port'
+  listeners="$(ss -Hltn "sport = :${port}")" || die 'could not inspect the watcher port'
+  [ -z "$listeners" ] || die "${WATCH_ADDR} is already listening; stop its owning watcher before starting another"
 }
 
 cmd_watch() {
   [ -f "${SOURCE_ROOT}/scripts/dev/dashboard-watch.py" ] \
     || die "KIND_WATCH_SOURCE_ROOT ${SOURCE_ROOT} is not a Codewire checkout"
   require_origin
+  kind_profile_lock "$ROOT" || exit $?
   require_cluster
   release_watch_port
   [ "$(http_status "${INGRESS}/login")" = 200 ] || die "the cluster ingress ${INGRESS} is not serving"
@@ -245,14 +245,23 @@ cmd_watch() {
   export CODEWIRE_IDENTITY_ORIGIN="$INGRESS"
   export CODEWIRE_BILLING_ORIGIN="$INGRESS"
   export CODEWIRE_BROWSER_API_ORIGIN="$BROWSER_API"
+  if [ "$KIND_PROFILE" = 1 ]; then
+    # The watcher builds mutable current source; keep that build cache separate
+    # from the sealed executables that a concurrent retained suite consumes.
+    CARGO_TARGET_DIR="$(dirname "$KIND_PROFILE_PATH")/watch-target"
+    kind_profile_private_dir "$CARGO_TARGET_DIR" || exit $?
+    export CARGO_TARGET_DIR
+  fi
   GITHUB_APP_CLIENT_ID="$(app_public_value client-id)"
   GITHUB_APP_SLUG="$(app_public_value slug)"
   export GITHUB_APP_CLIENT_ID GITHUB_APP_SLUG
+  kind_profile_unlock
   # exec so HUP/INT/TERM reach the watcher, which owns and stops its dashboard.
   exec python3 "${SOURCE_ROOT}/scripts/dev/dashboard-watch.py"
 }
 
 cmd_status() {
+  kind_profile_verify_node "$ROOT" || return $?
   if ! kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME"; then
     echo "cluster ${KIND_CLUSTER_NAME}: absent"
     return 1

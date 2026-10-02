@@ -216,6 +216,22 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    pub async fn managed_runtime(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+    ) -> Result<v1::ManagedRuntime, Status> {
+        Ok(self
+            .inner
+            .get_managed_runtime(v1::EnvironmentSelector {
+                name: name.to_owned(),
+                environment_id: environment_id.to_owned(),
+                request_id: String::new(),
+            })
+            .await?
+            .into_inner())
+    }
+
     pub async fn ensure_credential_broker(
         &mut self,
         name: &str,

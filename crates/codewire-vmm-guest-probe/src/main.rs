@@ -143,6 +143,9 @@ fn entrypoint() -> anyhow::Result<()> {
         Some("docker-fixture") => guest::run_docker_fixture(arguments.collect()),
         Some("newc") => build_newc(arguments),
         Some("newc-root") => build_guest_root_newc(arguments),
+        Some("newc-root-cw") => bail!(
+            "embedded cw boot assets are unsupported; supply the separate read-only cw runtime disk"
+        ),
         Some(_) => {
             let _ = executable;
             bail!("unknown guest probe command")

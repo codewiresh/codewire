@@ -40,6 +40,10 @@ pub(crate) async fn resolve_named_execution_target(
     placement: Option<EnvironmentPlacement>,
 ) -> anyhow::Result<config::CurrentTargetConfig> {
     let target_ref = trimmed_required(target_ref, "target")?;
+    #[cfg(unix)]
+    if let Some(host) = resolve_host_reference(globals, target_ref, placement).await? {
+        return Ok(host.current_target());
+    }
     #[cfg(target_os = "linux")]
     let local = if placement != Some(EnvironmentPlacement::Platform) {
         native_environment(target_ref).await?

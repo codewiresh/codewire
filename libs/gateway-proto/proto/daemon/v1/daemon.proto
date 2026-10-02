@@ -26,6 +26,8 @@ service DaemonService {
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
   rpc RestartSession(RestartSessionRequest) returns (RestartSessionResponse);
+  // Requires session_input.v1; timeout is ambiguous and must not be retried.
+  rpc SendSessionInput(SendSessionInputRequest) returns (SendSessionInputResponse);
   rpc ReadSessionOutput(ReadSessionOutputRequest) returns (ReadSessionOutputResponse);
   rpc AttachSession(stream SessionAttachMessage) returns (stream SessionAttachMessage);
 
@@ -119,6 +121,11 @@ message SessionRecord {
   string status_message = 11;
   // Absolute byte cursor of the oldest retained output. Earlier output is unavailable.
   uint64 output_start_offset = 12;
+  string name = 13;
+  optional string parent_session_id = 14;
+  bool cleanup_unknown = 15;
+  // Durable per-session launch admission generation; zero means unavailable.
+  uint64 launch_generation = 16;
 }
 
 message LaunchSessionRequest {
@@ -129,6 +136,8 @@ message LaunchSessionRequest {
   string term = 5;
   int32 width = 6;
   int32 height = 7;
+  string name = 8;
+  optional string parent_session_id = 9;
 }
 
 message LaunchSessionResponse {
@@ -159,11 +168,21 @@ message StopSessionResponse {
 
 message RestartSessionRequest {
   string session_id = 1;
+  // Compare before cancellation/Stop; requires a known terminal generation.
+  optional uint64 expected_launch_generation = 2;
 }
 
 message RestartSessionResponse {
   SessionRecord session = 1;
 }
+
+message SendSessionInputRequest {
+  string session_id = 1;
+  // Nonempty and at most 64KiB; success acknowledges write/flush or PTY write.
+  bytes data = 2;
+}
+
+message SendSessionInputResponse {}
 
 message ReadSessionOutputRequest {
   string session_id = 1;

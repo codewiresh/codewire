@@ -26,6 +26,18 @@ service LocalSupervisorService {
   // environment generation. The response and request are material-free.
   rpc EnsureCredentialBroker(EnvironmentSelector) returns (CredentialBrokerRuntime);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
+  // Public runtime identity from this immutable UUID's retained native binding.
+  // Never consults the current global artifact source or a guest manifest.
+  rpc GetManagedRuntime(EnvironmentSelector) returns (ManagedRuntime);
+}
+
+message ManagedRuntime {
+  string environment_id = 1;
+  string artifact_generation = 2;
+  bytes provenance_json = 3;
+  // Canonical bounded catalog admitted independently of the boot bundle.
+  bytes catalog_json = 4;
+  string cw_runtime_catalog_generation = 5;
 }
 
 message GetSupervisorInfoRequest {}
@@ -423,6 +435,8 @@ message RunnerInfo {
   // Bounded machine-readable cause for an error state. Empty for every
   // non-error state.
   string error_code = 5;
+  // Actual owned VMM attachment. Empty when no catalog disk is running.
+  string cw_runtime_catalog_generation = 6;
 }
 
 enum RunnerStage {
@@ -521,6 +535,9 @@ message StartVmRequest {
   // Closed material-free client selection from the exact pinned profile.
   // Explicit v1:none is required when no managed credential client is selected.
   string managed_credential_clients = 22;
+  // Lowercase SHA-256 of the independently admitted private runtime catalog.
+  // The runner derives its fixed disk path; empty is allowed for raw fixtures.
+  string cw_runtime_catalog_generation = 23;
 }
 
 message DirectShareAttachment {

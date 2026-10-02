@@ -37,6 +37,16 @@ pub struct Config {
     pub managed_credential_clients: ManagedCredentialClients,
     /// Exact source selection for one-launch application values, never values.
     pub launch_projection: Option<LaunchProjectionConfig>,
+    /// Explicit trusted-host placement. Guest defaults always leave this None.
+    pub host: Option<HostConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostConfig {
+    /// Dedicated state for one host environment. Session records live under
+    /// `state_root/sessions`, saved environment under `state_root/environment.json`.
+    /// This is independent of home_root, which remains the child's real HOME.
+    pub state_root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +83,40 @@ pub enum CredentialBridgeTransport {
 }
 
 impl Config {
+    pub fn validate_host(&self) -> Result<(), ConfigError> {
+        let Some(host) = &self.host else {
+            return Ok(());
+        };
+        if !cfg!(target_os = "linux") {
+            // A process-group-only fallback cannot truthfully clean ordinary
+            // PTY job-control groups. Admit no host placement until that
+            // platform has an equivalent owned-identity implementation.
+            return Err(ConfigError::HostUnsupportedPlatform);
+        }
+        let root = clean_path(&host.state_root);
+        if !host.state_root.is_absolute()
+            || root != host.state_root
+            || root == Path::new("/")
+            || root == clean_path(&self.home_root)
+            || root.starts_with(clean_path(&self.home_root).join(".codewire"))
+            || self.process_execution != ProcessExecution::Native
+            || self.credential_bridge.is_some()
+            || self.launch_projection.is_some()
+            || self.managed_credential_clients != Default::default()
+        {
+            return Err(ConfigError::InvalidHost);
+        }
+        // Trusted host state must not resolve through links into HOME state.
+        for path in root.ancestors() {
+            if let Ok(metadata) = std::fs::symlink_metadata(path)
+                && metadata.file_type().is_symlink()
+            {
+                return Err(ConfigError::InvalidHost);
+            }
+        }
+        Ok(())
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
         let auth_token = match env::var(DAEMON_AUTH_TOKEN_ENV) {
             Ok(value) => {
@@ -90,6 +134,7 @@ impl Config {
             credential_bridge: None,
             managed_credential_clients: ManagedCredentialClients::default(),
             launch_projection: None,
+            host: None,
         };
         config.configure_hosted_projection(|name| env::var_os(name))?;
         Ok(config)
@@ -180,6 +225,12 @@ impl Config {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ConfigError {
+    #[error("trusted host session ownership currently requires Linux")]
+    HostUnsupportedPlatform,
+    #[error(
+        "host requires a dedicated absolute state root, Native execution and no managed credential or projection configuration"
+    )]
+    InvalidHost,
     #[error("{DAEMON_AUTH_TOKEN_ENV} is required")]
     MissingDaemonAuthToken,
     #[error("{DAEMON_AUTH_TOKEN_ENV} must be nonblank canonical ASCII metadata")]
@@ -248,8 +299,59 @@ mod tests {
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: ManagedCredentialClients::default(),
+            host: None,
             launch_projection: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_configuration_requires_dedicated_state_and_excludes_guest_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = fixture();
+        config.home_root = temp.path().join("home");
+        config.host = Some(HostConfig {
+            state_root: temp.path().join("state"),
+        });
+        config.validate_host().unwrap();
+        for root in [
+            PathBuf::from("relative"),
+            PathBuf::from("/"),
+            config.home_root.clone(),
+            config.home_root.join(".codewire/state"),
+        ] {
+            let mut invalid = config.clone();
+            invalid.host.as_mut().unwrap().state_root = root;
+            assert_eq!(invalid.validate_host(), Err(ConfigError::InvalidHost));
+        }
+        let mut invalid = config.clone();
+        invalid.managed_credential_clients =
+            ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+        assert_eq!(invalid.validate_host(), Err(ConfigError::InvalidHost));
+        let mut invalid = config.clone();
+        invalid.launch_projection = Some(LaunchProjectionConfig {
+            selection_sha256: [1; 32],
+            native: None,
+        });
+        assert_eq!(invalid.validate_host(), Err(ConfigError::InvalidHost));
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(temp.path(), &link).unwrap();
+        config.host.as_mut().unwrap().state_root = link.join("state");
+        assert_eq!(config.validate_host(), Err(ConfigError::InvalidHost));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_host_ownership_is_rejected_before_effects_without_affecting_guests() {
+        let mut config = fixture();
+        config.validate_host().unwrap();
+        config.host = Some(HostConfig {
+            state_root: "/dedicated-host-state".into(),
+        });
+        assert_eq!(
+            config.validate_host(),
+            Err(ConfigError::HostUnsupportedPlatform)
+        );
     }
 
     #[test]
@@ -472,6 +574,7 @@ mod tests {
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: ManagedCredentialClients::default(),
+            host: None,
             launch_projection: None,
         };
 

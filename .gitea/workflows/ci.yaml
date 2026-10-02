@@ -1837,6 +1837,8 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         env:
           KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
+          CLUSTER: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
+          CODEWIRE_KIND_PROFILE_ROOT: ${{ runner.temp }}/kind-profiles
           KIND_SHARD_SUITES: ${{ matrix.shard.suites }}
         run: |
           set -euo pipefail
@@ -1856,12 +1858,15 @@ jobs:
           retention-days: 5
 
       - name: Delete the shard Kind cluster
-        # Teardown is best-effort, like the old in-process cleanup: a green
-        # leg must not fail on a transient DinD hiccup while deleting.
+        # The saved profile proves nonce and node identity before deletion;
+        # startup refusal never grants authority over a same-named cluster.
+        # Keep teardown best-effort on a transient DinD failure.
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         env:
           KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
-        run: kind delete cluster --name "$KIND_CLUSTER_NAME" || true
+          CLUSTER: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
+          CODEWIRE_KIND_PROFILE_ROOT: ${{ runner.temp }}/kind-profiles
+        run: scripts/ci/verify/kind-e2e.sh down || true
 
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run

@@ -61,6 +61,19 @@ pub(crate) async fn handle_use_command(
     } else {
         None
     };
+    #[cfg(unix)]
+    let host = if placement != Some(EnvironmentPlacement::Platform) {
+        resolve_host_reference(globals, &args.target, placement).await?
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let target = if let Some(host) = host {
+        host.current_target()
+    } else {
+        resolve_named_execution_target(globals, &paths, &env, &args.target, placement).await?
+    };
+    #[cfg(not(unix))]
     let target =
         resolve_named_execution_target(globals, &paths, &env, &args.target, placement).await?;
     #[cfg(target_os = "linux")]
@@ -337,6 +350,7 @@ pub(crate) fn env_create_request_from_init_args(
         anyhow::bail!("--branch requires a repo URL");
     }
     let env_args = EnvCreateArgs {
+        environment_type: EnvironmentTypeArg::Sandbox,
         repo_urls: args.repo_urls.clone(),
         preset_slug: args.preset_slug.clone(),
         preset_id: args.preset_id.clone(),

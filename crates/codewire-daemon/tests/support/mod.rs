@@ -165,6 +165,7 @@ impl DaemonHarness {
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
                     managed_credential_clients: Default::default(),
+                    host: None,
                     launch_projection: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -202,6 +203,7 @@ impl DaemonHarness {
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
                     managed_credential_clients: Default::default(),
+                    host: None,
                     launch_projection: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -237,6 +239,7 @@ impl DaemonHarness {
                 process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 credential_bridge: None,
                 managed_credential_clients: Default::default(),
+                host: None,
                 launch_projection: None,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
