@@ -28,13 +28,16 @@ fn session_mutation_upgrade_retains_accepted_staged27() -> anyhow::Result<()> {
     assert_accepted_staged27()
 }
 
+/// Helpers other than this migration's two and migration33's workspace-binding
+/// trigger function, which has its own proof and replaces no prior helper.
 async fn prior_helper_definitions(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT pg_catalog.pg_get_functiondef(p.oid) FROM pg_catalog.pg_proc p \
          JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
          WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
          AND p.proname NOT IN ('codewire_authenticate_credential_session', \
-         'codewire_lock_credential_session_authority') ORDER BY p.proname,p.oid",
+         'codewire_lock_credential_session_authority','codewire_workspace_binding_immutable') \
+         ORDER BY p.proname,p.oid",
     )
     .fetch_all(pool)
     .await?)

@@ -75,14 +75,16 @@ async fn definition(pool: &PgPool) -> anyhow::Result<String> {
 
 async fn old_functions(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     // Compare every pre-27 helper byte-for-byte. Migration28's two new
-    // session helpers have their own inventory/authority proof; neither was
-    // present in the staged26 baseline and neither replaces a prior helper.
+    // session helpers and migration34's workspace-binding trigger function
+    // have their own inventory/authority proof; none was present in the
+    // staged26 baseline and none replaces a prior helper.
     Ok(sqlx::query_scalar(
         "SELECT pg_catalog.pg_get_functiondef(p.oid) FROM pg_catalog.pg_proc p \
          JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
          WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
          AND p.proname NOT IN ('codewire_platform_lock_owner_source_authority', \
-         'codewire_authenticate_credential_session','codewire_lock_credential_session_authority') \
+         'codewire_authenticate_credential_session','codewire_lock_credential_session_authority', \
+         'codewire_workspace_binding_immutable') \
          ORDER BY p.proname,p.oid",
     )
     .fetch_all(pool)
