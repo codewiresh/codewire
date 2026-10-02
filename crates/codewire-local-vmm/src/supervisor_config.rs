@@ -33,6 +33,19 @@ pub struct NativeRuntimeConfig {
 }
 
 impl NativeRuntimeConfig {
+    /// Bind a retained supervisor without changing any other configuration input.
+    /// The caller admits this executable from the live kernel peer first.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_supervisor_executable(
+        &self,
+        executable: PathBuf,
+    ) -> Result<Self, SupervisorConfigError> {
+        let mut retained = self.clone();
+        retained.executable = executable;
+        retained.validate()?;
+        Ok(retained)
+    }
+
     pub fn cw_runtime_lock(&self) -> PathBuf {
         self.artifact_lock.with_file_name("cw-runtime.lock.json")
     }

@@ -1298,10 +1298,10 @@ async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
     connect_native_after_authority_admission(
         || async {
             // Admit an authority visible at the current credential root before
-            // an existing supervisor can be reused. A live v6 authority is
-            // replaced with v7, an unconnectable existing endpoint fails
-            // closed, and only an absent endpoint avoids starting an authority
-            // for credential-free native operations.
+            // an existing supervisor can be reused. An incompatible or
+            // unconnectable endpoint fails without replacing its authority.
+            // Only an absent endpoint permits credential-free native
+            // operations to continue without starting an authority.
             admit_existing_local_credential_authority().await
         },
         || async {

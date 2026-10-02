@@ -1592,10 +1592,10 @@ mod tests {
         let mut producer = OwnedToolChild(command.spawn().unwrap());
         let deadline = Instant::now() + Duration::from_secs(5);
         let leaf = loop {
-            if let Ok(value) = fs::read_to_string(task.path().join("leaf.pid")) {
-                if let Ok(pid) = value.parse::<u32>() {
-                    break pid;
-                }
+            if let Ok(value) = fs::read_to_string(task.path().join("leaf.pid"))
+                && let Ok(pid) = value.parse::<u32>()
+            {
+                break pid;
             }
             assert!(Instant::now() < deadline, "leaf fixture did not start");
             assert!(producer.0.try_wait().unwrap().is_none());

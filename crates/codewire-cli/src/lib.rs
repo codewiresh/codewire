@@ -124,8 +124,10 @@ enum Command {
     ConfigSsh(ConfigSshArgs),
     #[command(about = "Check Codewire CLI and environment setup")]
     Doctor(DoctorArgs),
-    #[command(about = "Show how to update cw during the private preview")]
-    Update,
+    #[command(about = "Update, inspect or roll back the managed cw installation")]
+    Update(update::UpdateArgs),
+    #[command(about = "Install this cw as a managed, versioned installation")]
+    Install(update::InstallArgs),
     #[command(about = "Sign in to Codewire")]
     Login(LoginArgs),
     #[command(
@@ -373,7 +375,8 @@ where
         Command::Completion(args) => handle_completion_command(args),
         Command::ConfigSsh(args) => handle_config_ssh_command(args),
         Command::Doctor(args) => handle_doctor_command(&globals, args).await,
-        Command::Update => update::run_current().await,
+        Command::Update(args) => update::run(args),
+        Command::Install(args) => update::install(args),
         Command::Login(args) => handle_login_command(&globals, args).await,
         Command::Setup(args) => handle_setup_command(&globals, args).await,
         Command::Logout => handle_logout_command(&globals).await,

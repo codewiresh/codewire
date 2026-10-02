@@ -61,8 +61,11 @@ class Journey:
         self.checks.append(label)
         print(f"cli-host: {label} PASS", flush=True)
 
-    def launch(self, name, command=None, agent=None, parent=None, prompt=None, model=None, ok=True):
-        args = ["run", self.environment, "--name", name, "--detach", "--output", "json"]
+    def launch(self, name, command=None, agent=None, parent=None, prompt=None, model=None, ok=True, detach=True):
+        args = ["run", self.environment, "--name", name]
+        if detach:
+            args += ["--detach"]
+        args += ["--output", "json"]
         if agent:
             args += ["--agent", agent]
             if agent == "claude":
@@ -329,8 +332,16 @@ class Journey:
         self.check("stopped-parent/outbox-cut-point/restart/wake-once/no-task-replay")
 
         failed = self.launch("startup-failure", agent="codex", parent="lead", prompt="never issued",
-                             model="fixture-startup-failure", ok=False)
-        assert self.wait_message(failed["message"]["id"], ok=False)["state"] == "error"
+                             model="fixture-startup-failure", ok=False, detach=False)
+        failed_message = self.wait_message(failed["message"]["id"], ok=False)
+        assert failed_message["state"] == "error", failed_message
+        assert not failed_message["native_acknowledged"], failed_message
+        assert failed_message["started_at"] is None and failed_message["turn_id"] is None, failed_message
+        assert "native agent startup failed before issuing this task" in failed_message["error"], failed_message
+        failed_driver = self.inbox("startup-failure")["driver"]
+        assert failed_driver["native_thread_id"] is None, failed_driver
+        assert not failed_driver["native_thread_established"], failed_driver
+        assert failed_driver["current_turn_id"] is None and failed_driver["active_message_id"] is None, failed_driver
         failure_notification = self.until(lambda: self.inbox("lead"), lambda v: any(
             m["source"] and m["source"]["message_id"] == failed["message"]["id"] and m["state"] == "completed"
             for m in v["messages"]))

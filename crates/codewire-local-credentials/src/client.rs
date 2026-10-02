@@ -148,12 +148,12 @@ impl std::fmt::Debug for LocalCredentialClient {
 
 impl LocalCredentialClient {
     /// Admit a currently running authority without starting one when its
-    /// endpoint is absent. An unconnectable existing endpoint fails closed;
-    /// an incompatible live authority is shut down and replaced through
-    /// `spawn` before this returns.
+    /// endpoint is absent. An incompatible or unconnectable existing endpoint
+    /// fails closed without shutdown, replacement or request replay.
+    /// The legacy method signature is retained; its spawner is never invoked.
     pub async fn admit_existing_or_replace_with<F>(
         config: &AuthorityRuntimeConfig,
-        spawn: F,
+        _spawn: F,
     ) -> Result<Option<Self>, AuthorityRuntimeError>
     where
         F: FnOnce(&AuthorityRuntimeConfig) -> Result<Child, AuthorityRuntimeError>,
@@ -169,16 +169,12 @@ impl LocalCredentialClient {
         if !socket_exists(config)? {
             return Ok(None);
         }
-        match Self::connect(config).await {
-            Ok(client) => Ok(Some(client)),
-            Err(AuthorityRuntimeError::ProtocolMismatch) => {
-                shutdown_incompatible_authority(config).await?;
-                Self::connect_or_start_with(config, spawn).await.map(Some)
-            }
-            Err(error) => Err(error),
-        }
+        Self::connect(config).await.map(Some)
     }
 
+    /// Reuse a compatible authority, or start an owned child only when the
+    /// endpoint is absent. A present endpoint's admission error never grants
+    /// permission to shut it down, unlink it or launch a replacement.
     pub async fn connect_or_start_with<F>(
         config: &AuthorityRuntimeConfig,
         spawn: F,
@@ -188,14 +184,7 @@ impl LocalCredentialClient {
     {
         config.prepare_root()?;
         if socket_exists(config)? {
-            match Self::connect(config).await {
-                Ok(client) => return Ok(client),
-                Err(AuthorityRuntimeError::ProtocolMismatch) => {
-                    shutdown_incompatible_authority(config).await?;
-                }
-                Err(AuthorityRuntimeError::Connect) => {}
-                Err(error) => return Err(error),
-            }
+            return Self::connect(config).await;
         }
 
         let mut child = spawn(config)?;
@@ -1302,27 +1291,6 @@ fn terminate_unadmitted_child(child: &mut Child) {
         let _ = child.kill();
         let _ = child.wait();
     }
-}
-
-async fn shutdown_incompatible_authority(
-    config: &AuthorityRuntimeConfig,
-) -> Result<(), AuthorityRuntimeError> {
-    let channel = connect_owner_only(config).await?;
-    let mut client = LocalCredentialAuthorityServiceClient::new(channel)
-        .max_decoding_message_size(MAX_RPC_MESSAGE_BYTES)
-        .max_encoding_message_size(MAX_RPC_MESSAGE_BYTES);
-    client
-        .shutdown_authority(v1::ShutdownAuthorityRequest {})
-        .await
-        .map_err(|_| AuthorityRuntimeError::ProtocolMismatch)?;
-    let deadline = tokio::time::Instant::now() + AUTHORITY_START_TIMEOUT;
-    while socket_exists(config)? {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(AuthorityRuntimeError::StartTimeout);
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    Ok(())
 }
 
 fn socket_exists(config: &AuthorityRuntimeConfig) -> Result<bool, AuthorityRuntimeError> {

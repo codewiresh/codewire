@@ -276,24 +276,26 @@ fn resolve_forbidden_root(path: &Path) -> Result<PathBuf, SupervisorError> {
 impl NativeSupervisorClient {
     pub async fn connect_or_start(config: &NativeRuntimeConfig) -> Result<Self, SupervisorError> {
         config.validate()?;
-        prepare_runtime_root(&config.root)?;
         let socket = config.supervisor_socket();
-        if fs::symlink_metadata(&socket).is_ok() {
-            // A killed supervisor leaves a mode-0600 socket name behind. A
-            // replacement singleton owns the lock and performs the exact
-            // nofollow removal; the CLI never unlinks a control endpoint.
-            match Self::connect_for_config(&socket, config).await {
-                Ok(client) => return Ok(client.with_restart_config(config)),
-                Err(error) if error.incompatible_supervisor() => return Err(error),
-                Err(_) => {}
+        match fs::symlink_metadata(&socket) {
+            // Existing endpoints are connect-only. Missing/dead/unsupported
+            // peer admission never authorizes a replacement or stale unlink.
+            Ok(_) => return Self::connect_for_config(&socket, config).await,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(SupervisorError::Io {
+                    path: socket,
+                    source,
+                });
             }
         }
+        prepare_runtime_root(&config.root)?;
         let mut child = spawn_supervisor(config)?;
         let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
         loop {
             if fs::symlink_metadata(&socket).is_ok() {
                 match Self::connect_for_config(&socket, config).await {
-                    Ok(client) => return Ok(client.with_restart_config(config)),
+                    Ok(client) => return Ok(client),
                     Err(error) if error.incompatible_supervisor() => {
                         terminate_unadmitted_child(&mut child);
                         return Err(error);
@@ -333,28 +335,30 @@ impl NativeSupervisorClient {
         socket: &Path,
         config: &NativeRuntimeConfig,
     ) -> Result<Self, SupervisorError> {
-        Self::connect_admitted(socket, Some(config.configuration_digest()))
-            .await
-            .map_err(Into::into)
-    }
-
-    fn with_restart_config(mut self, config: &NativeRuntimeConfig) -> Self {
-        self.restart_config = Some(config.clone());
-        self
+        if socket != config.supervisor_socket() {
+            return Err(SupervisorError::InvalidConfiguration);
+        }
+        Self::connect_configured(config).await.map_err(Into::into)
     }
 
     pub(crate) async fn reconnect_after_watch_failure(
         &mut self,
         operation_id: &str,
     ) -> Result<(), Status> {
-        let config = self.restart_config.clone().ok_or_else(|| {
-            operation_watch_failure(
+        if !self.reconnect_enabled {
+            return Err(operation_watch_failure(
                 operation_id,
                 Status::unavailable("local supervisor reconnect is unavailable"),
-            )
-        })?;
+            ));
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let replacement = Self::connect_or_start(&config).await.map_err(|_| {
+        let replacement = Self::connect_pinned(
+            self.peer_pin.clone(),
+            Some(self.expected_configuration_digest),
+            true,
+        )
+        .await
+        .map_err(|_| {
             operation_watch_failure(
                 operation_id,
                 Status::unavailable("reconnect to local supervisor failed"),
@@ -5103,7 +5107,7 @@ fn runner_cw_runtime_identity_matches(
     });
     let attached = (!info.cw_runtime_catalog_generation.is_empty())
         .then_some(info.cw_runtime_catalog_generation.as_str());
-    !attached.is_some_and(|generation| !valid_sha256(generation))
+    attached.is_none_or(valid_sha256)
         && (attached.is_none() || attached == expected)
         && (state != StoredEnvironmentState::Running || attached == expected)
         && (state != StoredEnvironmentState::Stopped || attached.is_none())
@@ -7103,6 +7107,7 @@ impl SupervisorError {
                 | Self::InvalidSupervisorInfo
                 | Self::SupervisorInfoUnavailable
                 | Self::SupervisorConfigurationMismatch
+                | Self::Uds(UdsError::SupervisorPeerAdmission(_))
         )
     }
 }
@@ -12670,9 +12675,12 @@ mod tests {
         let service = test_supervisor_service(core);
         let (socket_identity, shutdown_tx, server) = spawn_test_supervisor_server(&socket, service);
 
-        let mut client = NativeSupervisorClient::connect_for_config(&socket, &config)
-            .await
-            .unwrap();
+        // The in-process RPC fixture has no native-supervisor role argv.
+        // Keep full-digest/protocol proof on the generic pinned API.
+        let mut client =
+            NativeSupervisorClient::connect_admitted(&socket, Some(config.configuration_digest()))
+                .await
+                .unwrap();
         assert_eq!(client.list().await.unwrap().len(), 1);
 
         drop(client);
@@ -12745,7 +12753,13 @@ mod tests {
             .credential_authority_root
             .with_file_name("different-credentials");
 
-        let error = match NativeSupervisorClient::connect_or_start(&wrong_config).await {
+        let error = match NativeSupervisorClient::connect_admitted(
+            &socket,
+            Some(wrong_config.configuration_digest()),
+        )
+        .await
+        .map_err(SupervisorError::from)
+        {
             Ok(_) => panic!("differently configured supervisor was admitted"),
             Err(error) => error,
         };
@@ -12757,6 +12771,12 @@ mod tests {
             error.to_string(),
             "the running native supervisor uses a different runtime configuration"
         );
+        // The production entry additionally refuses this non-role process,
+        // before any startup fallback or metadata effects.
+        assert!(matches!(
+            NativeSupervisorClient::connect_or_start(&wrong_config).await,
+            Err(SupervisorError::Uds(UdsError::SupervisorPeerAdmission(_)))
+        ));
         // The incompatible live process remains available; only this reuse
         // attempt failed, and no replacement was started over its socket.
         assert!(NativeSupervisorClient::connect(&socket).await.is_ok());
