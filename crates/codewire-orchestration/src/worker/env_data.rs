@@ -117,6 +117,21 @@ pub struct BackendRow {
     pub setup_phase: i32,
     pub setup_complete: bool,
     pub setup_error: String,
+    /// The bound workspace Pod UID, set only by the generation-fenced binding
+    /// writer (Program #2238 design §5.5) and cleared on release.
+    pub pod_uid: Option<String>,
+    /// The workspace PVC UID recorded by its first resolution or a restore
+    /// adoption (design §6, §12). The name is only a lookup key; this decides.
+    pub workspace_pvc_uid: Option<String>,
+}
+
+/// The resolver anchor the backend row records for workspace storage.
+pub fn workspace_pvc_anchor(backend: &BackendRow) -> crate::sandbox::client::WorkspacePvcAnchor {
+    crate::sandbox::client::WorkspacePvcAnchor {
+        claim_name: backend.claim_name.clone(),
+        claim_uid: backend.claim_uid.clone(),
+        recorded_pvc_uid: backend.workspace_pvc_uid.clone(),
+    }
 }
 
 pub async fn load_backend_row(pool: &PgPool, env_id: &str) -> anyhow::Result<BackendRow> {
@@ -126,7 +141,8 @@ pub async fn load_backend_row(pool: &PgPool, env_id: &str) -> anyhow::Result<Bac
                   COALESCE(pod_ip, '') AS pod_ip, COALESCE(pod_name, '') AS pod_name,
                   COALESCE(setup_phase, 0) AS setup_phase,
                   COALESCE(setup_complete, false) AS setup_complete,
-                  COALESCE(setup_error, '') AS setup_error
+                  COALESCE(setup_error, '') AS setup_error,
+                  pod_uid, workspace_pvc_uid
            FROM sandbox_environment_backend WHERE environment_id = $1"#,
     )
     .bind(env_id)
@@ -141,6 +157,8 @@ pub async fn load_backend_row(pool: &PgPool, env_id: &str) -> anyhow::Result<Bac
         setup_phase: row.try_get("setup_phase")?,
         setup_complete: row.try_get("setup_complete")?,
         setup_error: row.try_get("setup_error")?,
+        pod_uid: row.try_get("pod_uid")?,
+        workspace_pvc_uid: row.try_get("workspace_pvc_uid")?,
     })
 }
 

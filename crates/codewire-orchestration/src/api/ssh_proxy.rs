@@ -30,7 +30,7 @@ use super::proxy::{resolve_running_sandbox_target, resolve_running_sandbox_targe
 use super::terminal::{authenticate_socket_request, require_sandbox_claim_ready};
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::sidecar::{DEFAULT_GATEWAY_SSH_PORT, PortForwardedStream};
-use crate::worker::gatewayauth::{SCOPE_DAEMON, issue_token};
+use crate::worker::workspace_binding::environment_daemon_credential;
 
 const DEFAULT_SHIM_PORT: u16 = 7777;
 const DAEMON_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -194,8 +194,13 @@ pub async fn ssh_proxy_check(
         return check_response(false, false, "");
     }
 
-    let (shim_healthy, shim_error) =
-        probe_shim_health(&sb, &target.environment_id, &state.session_secret).await;
+    let (shim_healthy, shim_error) = probe_shim_health(
+        &sb,
+        &state.pool,
+        &target.environment_id,
+        &state.session_secret,
+    )
+    .await;
     if !shim_error.is_empty() {
         tracing::warn!(env = %target.environment_id, error = %shim_error, "ssh-proxy-check: shim probe failed");
     }
@@ -314,6 +319,7 @@ where
 
 async fn probe_shim_health(
     sb: &SandboxClient,
+    pool: &sqlx::PgPool,
     env_id: &str,
     session_secret: &str,
 ) -> (bool, String) {
@@ -321,10 +327,12 @@ async fn probe_shim_health(
         Ok(stream) => stream,
         Err(err) => return (false, format!("port-forward: {err}")),
     };
-    let token = match issue_token(session_secret, env_id, SCOPE_DAEMON) {
-        Ok(token) => token,
-        Err(_) => return (false, "authorize daemon health probe".into()),
-    };
+    // The live binding decides the credential (design §7), never a name.
+    let token =
+        match environment_daemon_credential(pool, Some(&sb.client), session_secret, env_id).await {
+            Ok(token) => token,
+            Err(_) => return (false, "authorize daemon health probe".into()),
+        };
     let channel = match daemon_channel_from_port_forward(stream).await {
         Ok(channel) => channel,
         Err(error) => return (false, format!("daemon transport: {error}")),

@@ -144,6 +144,20 @@ transformers:
     apiVersion: builtin
     kind: PatchTransformer
     metadata:
+      name: codewire-orchestration-workspace-binding-peers
+    patch: |-
+      - op: replace
+        path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: dev-sandboxes
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: codewire-orchestration-workspace-binding
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
       name: codewire-credential-service-peers
     patch: |-
       - op: replace

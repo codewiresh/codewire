@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::WorkerContext;
 use super::activity_authority::ActivityAuthority;
-use super::env_data::{load_backend_row, load_environment};
+use super::env_data::{load_backend_row, load_environment, workspace_pvc_anchor};
 use crate::api::environment_daemon::{
     list_environment_daemon_sessions_for_worker, stop_environment_daemon_session_for_worker,
 };
@@ -144,6 +144,8 @@ async fn enforce_session_policy(
         return Ok(());
     }
     let sessions = list_environment_daemon_sessions_for_worker(
+        &ctx.pool,
+        ctx.kube.as_ref(),
         &ctx.sandbox_cfg.session_secret,
         namespace,
         &operation.environment_id,
@@ -168,6 +170,8 @@ async fn enforce_session_policy(
         authority
             .run_external_mutation(RESIZE_MUTATION_STATES, async {
                 stop_environment_daemon_session_for_worker(
+                    &ctx.pool,
+                    ctx.kube.as_ref(),
                     &ctx.sandbox_cfg.session_secret,
                     namespace,
                     &operation.environment_id,
@@ -355,7 +359,7 @@ pub async fn handle_environment_resize(
             .run_external_mutation(
                 RESIZE_MUTATION_STATES,
                 client.apply_workspace_storage_resize(
-                    environment_id,
+                    &workspace_pvc_anchor(&backend),
                     operation.desired_resources.disk_gb,
                 ),
             )
@@ -365,7 +369,7 @@ pub async fn handle_environment_resize(
                 .run_while_authoritative_for_states(
                     RESIZE_MUTATION_STATES,
                     client.wait_for_workspace_storage_resize(
-                        environment_id,
+                        &workspace_pvc_anchor(&backend),
                         operation.desired_resources.disk_gb,
                         STORAGE_RESIZE_TIMEOUT,
                     ),
@@ -458,7 +462,7 @@ pub async fn handle_environment_resize(
             .run_while_authoritative_for_states(
                 RESIZE_MUTATION_STATES,
                 client.wait_for_workspace_storage_capacity(
-                    environment_id,
+                    &workspace_pvc_anchor(&backend),
                     operation.desired_resources.disk_gb,
                     STORAGE_RESIZE_TIMEOUT,
                 ),

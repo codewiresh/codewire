@@ -194,6 +194,7 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
         seed_environment(pool, "other", "running", "started", 5).await?;
 
         log(pool, "timed", "create_claim", "completed", Some(1_000), 200).await?;
+        log(pool, "timed", "workspace_bind", "completed", Some(150), 190).await?;
         log(
             pool,
             "timed",
@@ -273,6 +274,7 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
                 == [
                     ("create_claim", 1, Some(1_000), Some(1_000)),
                     ("wait_for_ready", 0, None, None),
+                    ("workspace_bind", 1, Some(150), Some(150)),
                     ("gateway_ready", 1, Some(20_000), Some(20_000)),
                     ("pod_scheduled", 2, Some(4_000), Some(4_900)),
                     ("pod_initialized", 1, Some(33_000), Some(33_000)),
@@ -295,6 +297,7 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
             timed
                 == [
                     ("create_claim", Some(1_000)),
+                    ("workspace_bind", Some(150)),
                     ("gateway_ready", Some(20_000)),
                     ("pod_scheduled", Some(3_000)),
                     ("pod_initialized", Some(33_000)),

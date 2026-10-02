@@ -35,7 +35,7 @@ pub mod setup;
 pub mod setup_lease;
 mod start_timing;
 pub mod tenant_secret_teardown;
-pub(crate) mod workspace_binding;
+pub mod workspace_binding;
 
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;

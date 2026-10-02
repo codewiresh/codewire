@@ -18,7 +18,7 @@ use crate::sandbox::{EXTENSIONS_API_VERSION, LABEL_ENV_ID, LABEL_TYPE};
 const SANDBOX_API_VERSION: &str = "agents.x-k8s.io/v1beta1";
 
 /// A canonical, lowercase, non-nil Kubernetes UID.
-pub(super) fn canonical_uid(value: &str) -> bool {
+pub(crate) fn canonical_uid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uid| !uid.is_nil() && uid.to_string() == value)
 }
 

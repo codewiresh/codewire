@@ -385,3 +385,84 @@ fn the_backoff_table_stays_bounded() {
     backoffs.observe("late", RecordResult::Denied, start + BACKOFF_MAX);
     assert!(backoffs.0.len() <= MAX_BACKOFF_ENTRIES && backoffs.0.contains_key("late"));
 }
+
+fn environment_binding(generation: i64, digest: Option<&str>, clients: &str) -> EnvironmentBinding {
+    EnvironmentBinding {
+        pod_uid: POD_UID.into(),
+        operation_generation: generation,
+        projection_selection_sha256: digest.map(str::to_owned),
+        managed_credential_clients: clients.into(),
+        credential_scope: WorkspaceCredentialScope::Pod,
+    }
+}
+
+/// Design §12: a bound identity-free runtime is stale when its binding row,
+/// not its (absent) Pod environment, differs from the current template
+/// options. The generation matters only while a projection is selected,
+/// exactly as for the rendered check.
+#[test]
+fn a_bound_runtime_is_stale_only_when_its_captured_bootstrap_differs() {
+    let none = codewire_access::ManagedCredentialClients::default();
+    let github = codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
+    let mut opts = crate::sandbox::template::TemplateOpts {
+        operation_generation: 7,
+        managed_credential_clients: none,
+        ..Default::default()
+    };
+    // No projection: a relabelled generation is still current.
+    assert!(binding_bootstrap_current(
+        &environment_binding(3, None, none.encode()),
+        &opts
+    ));
+    assert!(!binding_bootstrap_current(
+        &environment_binding(7, None, github.encode()),
+        &opts
+    ));
+    assert!(!binding_bootstrap_current(
+        &environment_binding(7, Some(DIGEST), none.encode()),
+        &opts
+    ));
+    // A selected projection binds digest, clients and generation.
+    let digest = [0x33; 32];
+    opts.projection_selection_sha256 = Some(digest);
+    opts.managed_credential_clients = github;
+    assert!(binding_bootstrap_current(
+        &environment_binding(7, Some(DIGEST), github.encode()),
+        &opts
+    ));
+    assert!(!binding_bootstrap_current(
+        &environment_binding(6, Some(DIGEST), github.encode()),
+        &opts
+    ));
+    assert!(!binding_bootstrap_current(
+        &environment_binding(7, None, github.encode()),
+        &opts
+    ));
+    assert!(!binding_bootstrap_current(
+        &environment_binding(7, Some(&"44".repeat(32)), github.encode()),
+        &opts
+    ));
+    assert!(!binding_bootstrap_current(
+        &environment_binding(7, Some(DIGEST), none.encode()),
+        &opts
+    ));
+}
+
+#[test]
+fn enforced_refusals_are_value_blind_closed_categories() {
+    for refused in [
+        BindRefused::Denied("images"),
+        BindRefused::BoundElsewhere,
+        BindRefused::NotConverged,
+        BindRefused::PodChanged,
+        BindRefused::ChainUnverified,
+    ] {
+        let text = refused.to_string();
+        assert!(
+            !text.contains(POD_UID) && !text.contains(SANDBOX_UID),
+            "{text}"
+        );
+    }
+    let debug = format!("{:?}", environment_binding(7, Some(DIGEST), "v2:0"));
+    assert!(!debug.contains(DIGEST));
+}

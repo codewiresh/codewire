@@ -190,6 +190,8 @@ pub struct WorkspacePodResizeState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceStorage {
     pub pvc_name: String,
+    /// The resolved PVC's UID. Every later write is preconditioned on it.
+    pub pvc_uid: String,
     pub storage_class_name: String,
     pub requested_disk_gb: i32,
     pub applied_disk_gb: Option<i32>,
@@ -256,7 +258,9 @@ mod credentials;
 
 #[path = "client/workspace_binding.rs"]
 mod workspace_binding;
-pub use workspace_binding::{BindableRuntime, WorkspacePvc};
+#[cfg(test)]
+pub(crate) use workspace_binding::sandbox_name_hash;
+pub use workspace_binding::{BindableRuntime, WorkspacePvc, WorkspacePvcAnchor};
 
 #[cfg(test)]
 #[path = "client_runtime_identity_tests.rs"]
@@ -742,6 +746,27 @@ fn sandbox_suspension_observed(sandbox: &DynamicObject) -> bool {
                 && condition.get("observedGeneration").and_then(Value::as_i64) == Some(generation))
 }
 
+/// The Sandbox a Claim's status names, if it names one.
+fn claim_bound_sandbox_name(claim: &DynamicObject) -> Option<&str> {
+    claim
+        .data
+        .pointer("/status/sandbox/name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+}
+
+/// The Pod a Sandbox's controller published, or the Sandbox's own name.
+fn sandbox_pod_name<'a>(sandbox: &'a DynamicObject, sandbox_name: &'a str) -> &'a str {
+    sandbox
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get("agents.x-k8s.io/pod-name"))
+        .map(String::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(sandbox_name)
+}
+
 fn runtime_object_uid<'a>(
     metadata: &'a ObjectMeta,
     namespace: &str,
@@ -940,6 +965,109 @@ fn runtime_identity_converged(
         && matches!((ready.next(), ready.next()), (Some(condition), None) if condition.status == "True")
 }
 
+/// The Sandbox's single `Ready` condition reports the current spec: its
+/// `observedGeneration` equals `metadata.generation`, whatever its status. A
+/// stale status could describe a Pod rendered from an older spec, which a
+/// binding check would misread as an image mismatch.
+fn sandbox_status_current(sandbox: &DynamicObject) -> bool {
+    let Some(generation) = sandbox
+        .metadata
+        .generation
+        .filter(|generation| *generation > 0)
+    else {
+        return false;
+    };
+    let Some(conditions) = sandbox
+        .data
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let mut ready = conditions
+        .iter()
+        .filter(|condition| condition.get("type").and_then(Value::as_str) == Some("Ready"));
+    matches!((ready.next(), ready.next()), (Some(condition), None)
+        if condition.get("observedGeneration").and_then(Value::as_i64) == Some(generation))
+}
+
+/// Every container the Pod spec declares has started from a resolved image:
+/// each regular container reports `started` with a non-empty `imageID`, and
+/// each init container has a non-empty `imageID` and either completed
+/// successfully or, as a restartable sidecar, started. Readiness is not
+/// required, so a DinD container whose Docker daemon is still starting
+/// counts.
+pub(crate) fn pod_containers_started(pod: &Pod) -> bool {
+    let (Some(spec), Some(status)) = (pod.spec.as_ref(), pod.status.as_ref()) else {
+        return false;
+    };
+    let statuses = status.container_statuses.as_deref().unwrap_or_default();
+    let init_statuses = status
+        .init_container_statuses
+        .as_deref()
+        .unwrap_or_default();
+    let resolved = |status: &ContainerStatus| !status.image_id.trim().is_empty();
+    statuses.len() == spec.containers.len()
+        && spec.containers.iter().all(|container| {
+            statuses.iter().any(|status| {
+                status.name == container.name && status.started == Some(true) && resolved(status)
+            })
+        })
+        && init_statuses.len() == spec.init_containers.as_deref().unwrap_or_default().len()
+        && spec.init_containers.iter().flatten().all(|container| {
+            init_statuses.iter().any(|status| {
+                status.name == container.name
+                    && resolved(status)
+                    && (status.started == Some(true)
+                        || status
+                            .state
+                            .as_ref()
+                            .and_then(|state| state.terminated.as_ref())
+                            .is_some_and(|terminated| terminated.exit_code == 0))
+            })
+        })
+}
+
+/// Design §10 (amended): the record step's trigger, checked while the caller
+/// still waits for Claim Ready. Claim Ready adds no security property beyond
+/// label convergence, so it is not required here; it still gates MarkRunning
+/// and setup. The exact UID chain and the absence of `deletionTimestamp` are
+/// checked when the chain is read; images, the PVC, the credential scope and
+/// the captured values by the recorder.
+pub(crate) fn runtime_bind_ready(
+    claim: &DynamicObject,
+    sandbox: &DynamicObject,
+    pod: &Pod,
+    opts: &ClaimOpts,
+) -> bool {
+    let labels = runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "workspace",
+    );
+    runtime_claim_labels_match(claim, opts)
+        && json_labels_match(
+            sandbox.data.pointer("/spec/podTemplate/metadata/labels"),
+            &labels,
+        )
+        && pod.metadata.labels.as_ref().is_some_and(|current| {
+            labels
+                .iter()
+                .all(|(key, value)| current.get(key) == Some(value))
+        })
+        && claim.metadata.deletion_timestamp.is_none()
+        && sandbox.metadata.deletion_timestamp.is_none()
+        && pod.metadata.deletion_timestamp.is_none()
+        && sandbox_status_current(sandbox)
+        && pod
+            .status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref())
+            == Some("Running")
+        && pod_containers_started(pod)
+}
+
 /// Namespaced client for SandboxClaim operations.
 #[derive(Clone)]
 pub struct SandboxClient {
@@ -1022,10 +1150,11 @@ impl SandboxClient {
         }
     }
 
-    /// Mirrors `GetPodName` → `resolveSandboxName`: the sandbox name in
-    /// the claim status doubles as the pod name; an empty status falls
-    /// back to the deterministic claim name.
-    pub async fn get_pod_name(&self, env_id: &str) -> anyhow::Result<String> {
+    /// The Sandbox the environment's Claim is bound to, by the Claim's
+    /// `status.sandbox.name`. There is no name fallback: a Claim that names
+    /// no Sandbox has no runtime, and adoption makes the Sandbox name a pool
+    /// member's rather than `sandbox-<env>` (Program #2238 design §12).
+    pub async fn bound_sandbox_name(&self, env_id: &str) -> anyhow::Result<String> {
         let claim = self
             .get_sandbox_claim(env_id)
             .await
@@ -1033,15 +1162,23 @@ impl SandboxClient {
         let Some(claim) = claim else {
             anyhow::bail!("resolve sandbox name: SandboxClaim not found for env {env_id}");
         };
-        let name = claim
-            .data
-            .pointer("/status/sandbox/name")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if name.is_empty() {
-            return Ok(claim_name(env_id));
-        }
-        Ok(name.to_string())
+        claim_bound_sandbox_name(&claim)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("resolve sandbox name: SandboxClaim is not bound"))
+    }
+
+    /// The current workspace Pod's name: the bound Sandbox's
+    /// controller-published `agents.x-k8s.io/pod-name`, else the Sandbox
+    /// name, exactly as the runtime identity chain resolves it. Never the
+    /// Claim's name.
+    pub async fn get_pod_name(&self, env_id: &str) -> anyhow::Result<String> {
+        let sandbox_name = self.bound_sandbox_name(env_id).await?;
+        let sandbox = self
+            .sandboxes()
+            .get(&sandbox_name)
+            .await
+            .map_err(|e| anyhow::anyhow!("resolve workspace Pod name: get Sandbox: {e}"))?;
+        Ok(sandbox_pod_name(&sandbox, &sandbox_name).to_owned())
     }
 
     /// Resolve the exact workspace Pod incarnation. Pod names are reused when
@@ -1052,6 +1189,55 @@ impl SandboxClient {
     ) -> anyhow::Result<Option<WorkspacePodIdentity>> {
         let pod_name = self.get_pod_name(env_id).await?;
         self.get_workspace_pod_identity_by_name(&pod_name).await
+    }
+
+    /// The exact current workspace Pod: Claim → bound Sandbox → its Pod name
+    /// → a Pod that Sandbox controls. Once the environment is bound
+    /// (`bound_pod_uid`), the Pod must be that exact incarnation; a replaced
+    /// Pod under the same name is refused until its own binding is recorded.
+    pub async fn current_workspace_pod(
+        &self,
+        env_id: &str,
+        bound_pod_uid: Option<&str>,
+    ) -> anyhow::Result<WorkspacePodIdentity> {
+        let pod = self.current_workspace_pod_object(env_id).await?;
+        let pod_name = pod.metadata.name.clone().unwrap_or_default();
+        let pod_uid = pod.metadata.uid.clone().unwrap_or_default();
+        anyhow::ensure!(
+            bound_pod_uid.is_none_or(|bound| bound == pod_uid),
+            "workspace Pod is not the bound incarnation"
+        );
+        Ok(WorkspacePodIdentity {
+            name: pod_name,
+            uid: pod_uid,
+        })
+    }
+
+    /// The current workspace Pod object through the same exact chain as
+    /// [`Self::current_workspace_pod`], for callers that inspect its spec.
+    pub async fn current_workspace_pod_object(&self, env_id: &str) -> anyhow::Result<Pod> {
+        let sandbox_name = self.bound_sandbox_name(env_id).await?;
+        let sandbox = self
+            .sandboxes()
+            .get(&sandbox_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace Sandbox is unavailable"))?;
+        let sandbox_uid = runtime_object_uid(&sandbox.metadata, &self.namespace, &sandbox_name)?;
+        let pod_name = sandbox_pod_name(&sandbox, &sandbox_name);
+        let pod = self
+            .pods()
+            .get(pod_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace Pod is unavailable"))?;
+        runtime_object_uid(&pod.metadata, &self.namespace, pod_name)?;
+        require_runtime_controller(
+            &pod.metadata,
+            "agents.x-k8s.io/v1beta1",
+            "Sandbox",
+            &sandbox_name,
+            sandbox_uid,
+        )?;
+        Ok(pod)
     }
 
     pub async fn get_workspace_pod_identity_by_name(
@@ -2132,34 +2318,25 @@ impl SandboxClient {
     }
 
     /// Resolve the per-environment workspace PVC and the expansion capability
-    /// advertised by its StorageClass. The Sandbox owns the volume template;
-    /// Codewire never guesses a PVC from a user-supplied name.
-    pub async fn workspace_storage(&self, env_id: &str) -> anyhow::Result<WorkspaceStorage> {
-        let sandbox_name = self.get_pod_name(env_id).await?;
-        let sandbox = self
-            .sandboxes()
-            .get(&sandbox_name)
-            .await
-            .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
-        let has_workspace_claim = sandbox
-            .data
-            .pointer("/spec/volumeClaimTemplates")
-            .and_then(Value::as_array)
-            .is_some_and(|templates| {
-                templates.iter().any(|template| {
-                    template.pointer("/metadata/name").and_then(Value::as_str) == Some("workspace")
-                })
-            });
-        if !has_workspace_claim {
-            anyhow::bail!("environment {env_id} has no persistent workspace volume");
-        }
-
-        let pvc_name = format!("workspace-{sandbox_name}");
-        let pvc = self
-            .persistent_volume_claims()
-            .get(&pvc_name)
-            .await
-            .map_err(|error| anyhow::anyhow!("get workspace PVC {pvc_name}: {error}"))?;
+    /// advertised by its StorageClass. The shared Pod-less resolver walks the
+    /// recorded Claim UID to its Sandbox's `workspace` volume claim template
+    /// and accepts only the recorded PVC UID (or, on first resolution, the
+    /// Sandbox-controlled PVC). Codewire never trusts a computed name.
+    pub async fn workspace_storage(
+        &self,
+        anchor: &WorkspacePvcAnchor,
+    ) -> anyhow::Result<WorkspaceStorage> {
+        let Some((
+            pvc,
+            WorkspacePvc::Claim {
+                name: pvc_name,
+                uid: pvc_uid,
+                ..
+            },
+        )) = self.resolve_anchored_workspace_pvc(anchor).await?
+        else {
+            anyhow::bail!("environment has no persistent workspace volume");
+        };
         let spec = pvc
             .spec
             .ok_or_else(|| anyhow::anyhow!("workspace PVC {pvc_name} has no spec"))?;
@@ -2199,6 +2376,7 @@ impl SandboxClient {
 
         Ok(WorkspaceStorage {
             pvc_name,
+            pvc_uid,
             storage_class_name,
             requested_disk_gb,
             applied_disk_gb,
@@ -2210,10 +2388,10 @@ impl SandboxClient {
     /// Verify a requested disk size before the resize operation is admitted.
     pub async fn require_workspace_storage_resize(
         &self,
-        env_id: &str,
+        anchor: &WorkspacePvcAnchor,
         desired_disk_gb: i32,
     ) -> anyhow::Result<WorkspaceStorage> {
-        let storage = self.workspace_storage(env_id).await?;
+        let storage = self.workspace_storage(anchor).await?;
         if desired_disk_gb < storage.requested_disk_gb {
             anyhow::bail!(
                 "persistent storage cannot shrink from {} Gi to {} Gi",
@@ -2275,7 +2453,7 @@ impl SandboxClient {
             .await
             .map_err(|error| anyhow::anyhow!("patch SandboxClaim {claim}: {error}"))?;
 
-        let sandbox_name = self.get_pod_name(env_id).await?;
+        let sandbox_name = self.bound_sandbox_name(env_id).await?;
         let sandboxes = self.sandboxes();
         let mut sandbox = sandboxes
             .get(&sandbox_name)
@@ -2335,16 +2513,19 @@ impl SandboxClient {
     /// admission and is rechecked here so a changed class fails closed.
     pub async fn apply_workspace_storage_resize(
         &self,
-        env_id: &str,
+        anchor: &WorkspacePvcAnchor,
         desired_disk_gb: i32,
     ) -> anyhow::Result<WorkspaceStorage> {
         let storage = self
-            .require_workspace_storage_resize(env_id, desired_disk_gb)
+            .require_workspace_storage_resize(anchor, desired_disk_gb)
             .await?;
         if desired_disk_gb == storage.requested_disk_gb {
             return Ok(storage);
         }
+        // The UID in the patch is a precondition: a same-name substitute
+        // created after resolution is refused, never resized.
         let patch = serde_json::json!({
+            "metadata": { "uid": storage.pvc_uid },
             "spec": {
                 "resources": {
                     "requests": { "storage": format!("{desired_disk_gb}Gi") },
@@ -2372,13 +2553,13 @@ impl SandboxClient {
     /// returned to the workflow; this method never replaces the Pod itself.
     pub async fn wait_for_workspace_storage_resize(
         &self,
-        env_id: &str,
+        anchor: &WorkspacePvcAnchor,
         desired_disk_gb: i32,
         timeout: Duration,
     ) -> anyhow::Result<WorkspaceStorageResizeOutcome> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let storage = self.workspace_storage(env_id).await?;
+            let storage = self.workspace_storage(anchor).await?;
             if storage
                 .applied_disk_gb
                 .is_some_and(|size| size >= desired_disk_gb)
@@ -2403,13 +2584,13 @@ impl SandboxClient {
     /// FileSystemResizePending condition which is expected to clear on mount.
     pub async fn wait_for_workspace_storage_capacity(
         &self,
-        env_id: &str,
+        anchor: &WorkspacePvcAnchor,
         desired_disk_gb: i32,
         timeout: Duration,
     ) -> anyhow::Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let storage = self.workspace_storage(env_id).await?;
+            let storage = self.workspace_storage(anchor).await?;
             if storage
                 .applied_disk_gb
                 .is_some_and(|size| size >= desired_disk_gb)
@@ -2455,7 +2636,7 @@ impl SandboxClient {
     /// status, then update spec.operatingMode (Running/Suspended).
     pub async fn set_replicas(&self, env_id: &str, replicas: i64) -> anyhow::Result<()> {
         let name = self
-            .get_pod_name(env_id)
+            .bound_sandbox_name(env_id)
             .await
             .map_err(|e| anyhow::anyhow!("set replicas: {e}"))?;
         let sandboxes = self.sandboxes();
@@ -2805,6 +2986,31 @@ impl SandboxClient {
         prove_confidential_storage_absent: bool,
         timeout: Duration,
     ) -> anyhow::Result<()> {
+        self.delete_environment_resources_with_recorded_storage(
+            env_id,
+            known_sandbox_name,
+            per_environment_template,
+            prove_confidential_storage_absent,
+            None,
+            timeout,
+        )
+        .await
+    }
+
+    /// Destroy every environment-owned object. The storage-removal proof
+    /// keeps its label and owner scan, which finds orphans, and also counts a
+    /// PVC carrying the recorded workspace PVC UID, so a restore-born PVC
+    /// that the fork has not adopted yet (no owner, no environment label) is
+    /// deleted and proven absent too.
+    pub async fn delete_environment_resources_with_recorded_storage(
+        &self,
+        env_id: &str,
+        known_sandbox_name: &str,
+        per_environment_template: Option<&str>,
+        prove_confidential_storage_absent: bool,
+        recorded_pvc_uid: Option<&str>,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
         self.delete_gateway_stack(env_id).await?;
         self.delete_credential_bootstrap(env_id, timeout).await?;
         delete_dynamic_until_absent(
@@ -2876,7 +3082,7 @@ impl SandboxClient {
         }
 
         for pvc in self
-            .environment_persistent_volume_claims(env_id, &sandbox_names)
+            .environment_persistent_volume_claims(env_id, &sandbox_names, recorded_pvc_uid)
             .await?
         {
             match self
@@ -2920,11 +3126,12 @@ impl SandboxClient {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let residue = self
-                .environment_residue(
+                .environment_residue_with_recorded_storage(
                     env_id,
                     known_sandbox_name,
                     per_environment_template,
                     prove_confidential_storage_absent,
+                    recorded_pvc_uid,
                 )
                 .await?;
             if residue.is_empty() {
@@ -2946,6 +3153,24 @@ impl SandboxClient {
         known_sandbox_name: &str,
         per_environment_template: Option<&str>,
         prove_confidential_storage_absent: bool,
+    ) -> anyhow::Result<EnvironmentResidue> {
+        self.environment_residue_with_recorded_storage(
+            env_id,
+            known_sandbox_name,
+            per_environment_template,
+            prove_confidential_storage_absent,
+            None,
+        )
+        .await
+    }
+
+    pub async fn environment_residue_with_recorded_storage(
+        &self,
+        env_id: &str,
+        known_sandbox_name: &str,
+        per_environment_template: Option<&str>,
+        prove_confidential_storage_absent: bool,
+        recorded_pvc_uid: Option<&str>,
     ) -> anyhow::Result<EnvironmentResidue> {
         let mut resources = Vec::new();
         if self.get_sandbox_claim(env_id).await?.is_some() {
@@ -3006,7 +3231,7 @@ impl SandboxClient {
         }
 
         for pvc in self
-            .environment_persistent_volume_claims(env_id, &sandbox_names)
+            .environment_persistent_volume_claims(env_id, &sandbox_names, recorded_pvc_uid)
             .await?
         {
             resources.push(format!("PersistentVolumeClaim/{pvc}"));
@@ -3153,6 +3378,7 @@ impl SandboxClient {
         &self,
         env_id: &str,
         sandbox_names: &BTreeSet<String>,
+        recorded_pvc_uid: Option<&str>,
     ) -> anyhow::Result<Vec<String>> {
         let pvcs = self
             .persistent_volume_claims()
@@ -3178,7 +3404,9 @@ impl SandboxClient {
                             .iter()
                             .any(|owner| sandbox_names.contains(&owner.name))
                     });
-                environment_matches || owner_matches
+                let recorded_matches = recorded_pvc_uid
+                    .is_some_and(|recorded| pvc.metadata.uid.as_deref() == Some(recorded));
+                environment_matches || owner_matches || recorded_matches
             })
             .filter_map(|pvc| pvc.metadata.name)
             .collect())
@@ -3362,29 +3590,23 @@ impl SandboxClient {
     /// Mirrors `pollPodFailures`' per-tick check: resolve the pod
     /// behind the claim, then look for terminal waiting reasons.
     async fn pod_terminal_failure(&self, claim: &str) -> Option<anyhow::Error> {
+        // No Claim-name fallback: an unbound Claim has no Pod to inspect yet.
         let sandbox_name = match self.claims.get(claim).await {
-            Ok(c) => {
-                let n = c
-                    .data
-                    .pointer("/status/sandbox/name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if n.is_empty() {
-                    claim.to_string()
-                } else {
-                    n.to_string()
-                }
-            }
+            Ok(c) => claim_bound_sandbox_name(&c)?.to_string(),
             Err(_) => return None,
         };
-        let pod = match self.pods().get(&sandbox_name).await {
+        let pod_name = match self.sandboxes().get(&sandbox_name).await {
+            Ok(sandbox) => sandbox_pod_name(&sandbox, &sandbox_name).to_owned(),
+            Err(_) => sandbox_name.clone(),
+        };
+        let pod = match self.pods().get(&pod_name).await {
             Ok(p) => p,
             Err(_) => return None, // pod not scheduled yet
         };
         let (reason, message) = terminal_pod_failure_reason(&pod)?;
         Some(anyhow::anyhow!(
             "pod {}: {reason}: {message}",
-            pod.metadata.name.as_deref().unwrap_or(&sandbox_name)
+            pod.metadata.name.as_deref().unwrap_or(&pod_name)
         ))
     }
 }
@@ -3805,14 +4027,11 @@ impl SandboxClient {
 
         let claim = claim_name(env_id);
         let sandbox_name = match self.claims.get(&claim).await {
-            Ok(c) => c
-                .data
-                .pointer("/status/sandbox/name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            Ok(c) => claim_bound_sandbox_name(&c).unwrap_or_default().to_string(),
             Err(_) => String::new(),
         };
+        // No Claim-name fallback: a Claim that names no Sandbox has no Pod.
+        let mut pod_lookup = sandbox_name.clone();
         if !sandbox_name.is_empty()
             && let Ok(sb) = self.sandboxes().get(&sandbox_name).await
         {
@@ -3824,14 +4043,12 @@ impl SandboxClient {
                 .and_then(Value::as_str)
                 == Some("Suspended");
             result.replicas = if result.sandbox_suspended { 0 } else { 1 };
+            pod_lookup = sandbox_pod_name(&sb, &sandbox_name).to_owned();
         }
 
-        let pod_lookup = if sandbox_name.is_empty() {
-            claim.clone()
-        } else {
-            sandbox_name
-        };
-        if let Ok(pod) = self.pods().get(&pod_lookup).await {
+        if !pod_lookup.is_empty()
+            && let Ok(pod) = self.pods().get(&pod_lookup).await
+        {
             result.pod_exists = true;
             result.pod_timeline = PodStartTimeline::from_pod(&pod);
             result.pod_uid = pod.metadata.uid.clone().unwrap_or_default();
@@ -3843,19 +4060,6 @@ impl SandboxClient {
                 result.node_name = spec.node_name.clone().unwrap_or_default();
             }
             result.pod_name = pod.metadata.name.clone().unwrap_or_default();
-        }
-
-        if ready {
-            if result.pod_ip.is_empty()
-                && let Ok(ip) = self.get_pod_ip(env_id).await
-            {
-                result.pod_ip = ip;
-            }
-            if result.pod_name.is_empty()
-                && let Ok(name) = self.get_pod_name(env_id).await
-            {
-                result.pod_name = name;
-            }
         }
 
         Ok(result)
@@ -5045,7 +5249,7 @@ mod tests {
     async fn workspace_storage_growth_requires_storage_class_expansion_and_never_shrinks() {
         let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses(true));
         let supported = client
-            .require_workspace_storage_resize("env-test", 20)
+            .require_workspace_storage_resize(&storage_anchor(Some(STORAGE_PVC_UID)), 20)
             .await
             .unwrap();
         assert_eq!(supported.requested_disk_gb, 10);
@@ -5056,7 +5260,7 @@ mod tests {
         let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses(false));
         assert!(
             client
-                .require_workspace_storage_resize("env-test", 20)
+                .require_workspace_storage_resize(&storage_anchor(Some(STORAGE_PVC_UID)), 20)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -5066,11 +5270,45 @@ mod tests {
         let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses(true));
         assert!(
             client
-                .require_workspace_storage_resize("env-test", 5)
+                .require_workspace_storage_resize(&storage_anchor(None), 5)
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("cannot shrink")
+        );
+    }
+
+    /// Resize resolves the PVC through the recorded Claim and PVC UIDs, never
+    /// a computed name: a same-name substitute with another UID is refused
+    /// before any write.
+    #[tokio::test]
+    async fn workspace_storage_refuses_a_same_name_pvc_with_another_uid() {
+        let (client, requests) =
+            sandbox_client_with_secret_responses(storage_lookup_responses(true));
+        let error = client
+            .require_workspace_storage_resize(
+                &storage_anchor(Some("a1560db3-8899-40c9-b521-500f223b04fb")),
+                20,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("recorded UID"), "{error:#}");
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(method, _)| *method == Method::GET)
+        );
+        // A replaced Claim under the same name never resolves either.
+        let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses(true));
+        let mut replaced = storage_anchor(Some(STORAGE_PVC_UID));
+        replaced.claim_uid = "a1560db3-8899-40c9-b521-500f223b04fb".into();
+        assert!(
+            client
+                .require_workspace_storage_resize(&replaced, 20)
+                .await
+                .is_err()
         );
     }
 
@@ -5081,7 +5319,7 @@ mod tests {
             true,
         ));
         let unchanged = client
-            .require_workspace_storage_resize("env-test", 10)
+            .require_workspace_storage_resize(&storage_anchor(Some(STORAGE_PVC_UID)), 10)
             .await
             .unwrap();
         assert_eq!(
@@ -5094,7 +5332,7 @@ mod tests {
         );
 
         let error = client
-            .require_workspace_storage_resize("env-test", 20)
+            .require_workspace_storage_resize(&storage_anchor(Some(STORAGE_PVC_UID)), 20)
             .await
             .unwrap_err();
 
@@ -5717,18 +5955,23 @@ mod tests {
             (
                 StatusCode::OK,
                 json!({
-                    "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
                     "kind": "SandboxClaim",
-                    "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                    "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes",
+                        "uid": STORAGE_CLAIM_UID},
                     "status": {"sandbox": {"name": "workspace-env-test"}}
                 }),
             ),
             (
                 StatusCode::OK,
                 json!({
-                    "apiVersion": "agents.x-k8s.io/v1alpha1",
+                    "apiVersion": "agents.x-k8s.io/v1beta1",
                     "kind": "Sandbox",
-                    "metadata": {"name": "workspace-env-test", "namespace": "dev-sandboxes"},
+                    "metadata": {"name": "workspace-env-test", "namespace": "dev-sandboxes",
+                        "uid": STORAGE_SANDBOX_UID,
+                        "ownerReferences": [{"apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                            "kind": "SandboxClaim", "name": "sandbox-env-test",
+                            "uid": STORAGE_CLAIM_UID, "controller": true}]},
                     "spec": {"volumeClaimTemplates": [{"metadata": {"name": "workspace"}}]}
                 }),
             ),
@@ -5737,7 +5980,11 @@ mod tests {
                 json!({
                     "apiVersion": "v1",
                     "kind": "PersistentVolumeClaim",
-                    "metadata": {"name": "workspace-workspace-env-test", "namespace": "dev-sandboxes"},
+                    "metadata": {"name": "workspace-workspace-env-test", "namespace": "dev-sandboxes",
+                        "uid": STORAGE_PVC_UID,
+                        "ownerReferences": [{"apiVersion": "agents.x-k8s.io/v1beta1",
+                            "kind": "Sandbox", "name": "workspace-env-test",
+                            "uid": STORAGE_SANDBOX_UID, "controller": true}]},
                     "spec": {
                         "storageClassName": storage_class_name,
                         "accessModes": ["ReadWriteOnce"],
@@ -5761,6 +6008,18 @@ mod tests {
 
     fn storage_lookup_responses(expansion_allowed: bool) -> Vec<(StatusCode, Value)> {
         storage_lookup_responses_for_class("expandable", expansion_allowed)
+    }
+
+    const STORAGE_CLAIM_UID: &str = "c0ffee00-1d2e-4f3a-8b4c-5d6e7f8a9b0c";
+    const STORAGE_SANDBOX_UID: &str = "5a4db0c5-6d1e-4b0f-9b3c-2f0e7c1d9a11";
+    const STORAGE_PVC_UID: &str = "9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c";
+
+    fn storage_anchor(recorded: Option<&str>) -> WorkspacePvcAnchor {
+        WorkspacePvcAnchor {
+            claim_name: "sandbox-env-test".into(),
+            claim_uid: STORAGE_CLAIM_UID.into(),
+            recorded_pvc_uid: recorded.map(str::to_owned),
+        }
     }
 
     fn sandbox_client_with_secret_responses(
