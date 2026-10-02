@@ -59,14 +59,15 @@ impl DaemonConnectBackoff {
     }
 }
 
-/// Until the workspace Pod is Ready its daemon Service has no endpoint and
-/// the cluster refuses each attempt at once, so an attempt costs one DNS
-/// lookup and one refused connection. Retrying every 250 ms through an
-/// ordinary cold start lets the gateway reach the daemon within a quarter
-/// second of its Service gaining the endpoint, since this wait sits on every
-/// create's critical path. Starts slower than the window (image pulls,
-/// confidential storage) retry every 2 s. One attempt is an in-cluster TCP and
-/// HTTP/2 handshake; its timeout only bounds a dropped connection.
+/// Until its daemon Service has an endpoint (a commodity workspace Pod once it
+/// has an IP, a confidential one once it is Ready) the cluster refuses each
+/// attempt at once, so an attempt costs one DNS lookup and one refused
+/// connection. Retrying every 250 ms through an ordinary cold start lets the
+/// gateway reach the daemon within a quarter second of its Service gaining
+/// the endpoint, since this wait sits on every create. Starts slower than the
+/// window (image pulls, confidential storage) retry every 2 s. One attempt is
+/// an in-cluster TCP and HTTP/2 handshake; its timeout only bounds a dropped
+/// connection.
 const DAEMON_CONNECT_BACKOFF: DaemonConnectBackoff = DaemonConnectBackoff {
     fast_delay: Duration::from_millis(250),
     fast_window: Duration::from_secs(60),

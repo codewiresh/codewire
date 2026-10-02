@@ -666,7 +666,15 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// The gateway and orchestration reach the workspace daemon through this
+/// Service. The daemon listens as soon as the workspace container starts, but
+/// the Pod turns Ready only after its Docker socket probe. A commodity Service
+/// therefore publishes the Pod before it is Ready, so the gateway connects
+/// while Docker starts instead of after it. Create and start still wait for
+/// the Pod to be Ready through the SandboxClaim. Confidential keeps Ready-only
+/// endpoints; its start path is not part of this change.
 pub fn render_workspace_daemon_service(namespace: &str, opts: &TemplateOpts) -> Value {
+    let publish_not_ready = opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL;
     json!({
         "apiVersion": "v1",
         "kind": "Service",
@@ -684,6 +692,7 @@ pub fn render_workspace_daemon_service(namespace: &str, opts: &TemplateOpts) -> 
         "spec": {
             "type": "ClusterIP",
             "selector": workspace_selector(opts),
+            "publishNotReadyAddresses": publish_not_ready,
             "ports": [
                 { "name": "daemon", "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT, "targetPort": WORKSPACE_DAEMON_PORT },
             ],
