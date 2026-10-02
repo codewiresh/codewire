@@ -43,7 +43,7 @@ if [ "${FAIL_AGENT:-}" = "$(basename "$0")" ]; then
   exit 42
 fi
 if [ "$(basename "$0")" = codex ]; then
-  printf 'codex-cli %s\n' "${FAKE_CODEX_VERSION:-0.149.0}"
+  printf 'codex-cli %s\n' "${FAKE_CODEX_VERSION:-0.157.0}"
 else
   printf '%s test-version\n' "$(basename "$0")"
 fi
@@ -56,7 +56,7 @@ if [ "$*" = "config get allow-scripts" ]; then
 fi
 case "$*" in
   'config get prefix') printf '/home/codewire/.npm-global\n' ;;
-  'install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0')
+  'install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.157.0')
     [ -f "$FAKE_PREFIX_STATE" ] || exit 254
     printf 'npm dry-run OK\n' ;;
   '--version') printf 'npm test-version\n' ;;
@@ -69,7 +69,14 @@ cat >"$work/bin/mkdir" <<'EOF'
 [ "$*" = '-p /home/codewire/.npm-global/lib' ] || exit 99
 printf 'lib-prepared\n' >"$FAKE_PREFIX_STATE"
 EOF
-chmod +x "$work/bin/id" "$work/bin/getent" "$work/bin/agent" "$work/bin/npm" "$work/bin/mkdir"
+# Not on PATH: the contract itself runs under the host's bash.
+cat >"$work/interactive-bash" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = -ic ] && [ "$2" = 'printf %s "$-"' ] || exit 99
+printf '%s' "$FAKE_INTERACTIVE_FLAGS"
+EOF
+chmod +x "$work/bin/id" "$work/bin/getent" "$work/bin/agent" "$work/bin/npm" "$work/bin/mkdir" \
+  "$work/interactive-bash"
 cat >"$work/ssh/usr/sbin/sshd" <<'EOF'
 #!/bin/sh
 [ "$*" = -V ] || exit 99
@@ -108,11 +115,13 @@ run_contract() {
     CODEWIRE_BIN_ROOT="$work/bin" \
     CODEWIRE_SSH_FIXTURE_ROOT="$work/ssh" \
     CODEWIRE_SYSTEM_SBIN_ROOT="$work/system-sbin" \
+    CODEWIRE_INTERACTIVE_SHELL="$work/interactive-bash" \
+    FAKE_INTERACTIVE_FLAGS="${FAKE_INTERACTIVE_FLAGS:-imBHc}" \
     CODEWIRE_EXPECTED_PIDS_MAX=2048 \
     FAKE_CODEWIRE_GID="${FAKE_CODEWIRE_GID:-1000}" \
     FAKE_CODEWIRE_PASSWD_GID="${FAKE_CODEWIRE_PASSWD_GID:-1000}" \
     FAIL_AGENT="${FAIL_AGENT:-}" \
-    FAKE_CODEX_VERSION="${FAKE_CODEX_VERSION:-0.149.0}" \
+    FAKE_CODEX_VERSION="${FAKE_CODEX_VERSION:-0.157.0}" \
     FAKE_PREFIX_STATE="$work/prefix-state" \
     FAKE_FIXTURE_UID="$fixture_uid" \
     FAKE_SSH_EXPECTED_UID="${FAKE_SSH_EXPECTED_UID:-$fixture_uid}" \
@@ -127,7 +136,7 @@ printf '2048\n' >"$work/cgroup/pids.max"
 printf 'max 0\n' >"$work/cgroup/pids.events"
 run_contract >"$work/success.out" 2>"$work/success.err"
 [[ ! -s "$work/success.err" ]] || fail 'successful contract emitted failure evidence'
-grep -Fxq 'codex-cli 0.149.0' "$work/success.out" || fail 'agent checks did not run'
+grep -Fxq 'codex-cli 0.157.0' "$work/success.out" || fail 'agent checks did not run'
 grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex install-plan check did not run'
 grep -Fxq 'workspace image verification: inert SSH fixture contract passed' "$work/success.out" ||
   fail 'prepared SSH fixture was not checked'
@@ -162,9 +171,17 @@ for ssh_failure in missing-server writable-server wrong-owner host-key system-se
   fi
 done
 
-if FAKE_CODEX_VERSION=0.145.0 run_contract >"$work/stale.out" 2>"$work/stale.err"; then
+if FAKE_CODEX_VERSION=0.149.0 run_contract >"$work/stale.out" 2>"$work/stale.err"; then
   fail 'stale Codex version was accepted'
 fi
+for shell_case in 'himBHc:interactive bash hashes command paths' 'mBc:interactive bash did not start'; do
+  flags="${shell_case%%:*}"
+  if FAKE_INTERACTIVE_FLAGS="$flags" run_contract >"$work/shell.out" 2>"$work/shell.err"; then
+    fail "interactive shell flags $flags were accepted"
+  fi
+  grep -Fxq "workspace image verification: ${shell_case#*:}" "$work/shell.err" ||
+    fail "interactive shell flags $flags were not reported"
+done
 for argument in --unknown '--mounted-home-agents extra'; do
   set +e
   # shellcheck disable=SC2086 # Deliberately exercise both one and two arguments.

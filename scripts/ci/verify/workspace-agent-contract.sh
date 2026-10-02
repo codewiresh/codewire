@@ -17,6 +17,7 @@ expected_pids_max="${CODEWIRE_EXPECTED_PIDS_MAX:-2048}"
 bin_root="${CODEWIRE_BIN_ROOT:-/usr/local/bin}"
 ssh_fixture_root="${CODEWIRE_SSH_FIXTURE_ROOT:-/opt/codewire/fixtures/openssh}"
 system_sbin_root="${CODEWIRE_SYSTEM_SBIN_ROOT:-/usr/sbin}"
+interactive_shell="${CODEWIRE_INTERACTIVE_SHELL:-/bin/bash}"
 
 emit_pid_evidence_on_failure() {
   status=$?
@@ -93,7 +94,7 @@ for agent in codex claude gemini kimi pi aider; do
   if [ "$agent" = codex ]; then
     version="$("$agent" --version)"
     printf '%s\n' "$version"
-    test "$version" = 'codex-cli 0.149.0'
+    test "$version" = 'codex-cli 0.157.0'
   else
     "$agent" --version
   fi
@@ -108,7 +109,16 @@ test "$(npm config get allow-scripts)" = @anthropic-ai/claude-code
 # creates automatically. Establish that dry-run-only precondition as the same
 # unprivileged user; do not seed an agent or change any runtime startup path.
 mkdir -p /home/codewire/.npm-global/lib
-npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0
+npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.157.0
+
+# A user-prefix agent update must take effect in an already-open terminal.
+# Interactive bash therefore resolves PATH on every command instead of hashing.
+interactive_flags="$("$interactive_shell" -ic 'printf %s "$-"' </dev/null 2>/dev/null)"
+case "$interactive_flags" in
+  *h*) printf 'workspace image verification: interactive bash hashes command paths\n' >&2; exit 1 ;;
+  *i*) ;;
+  *) printf 'workspace image verification: interactive bash did not start\n' >&2; exit 1 ;;
+esac
 
 if [ "$mode" = mounted-home-agents ]; then
   printf 'workspace image verification: fresh-home six-agent contract passed\n'

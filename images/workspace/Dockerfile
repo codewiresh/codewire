@@ -174,15 +174,20 @@ FROM workspace-floating-tools AS workspace
 # Lifecycle scripts stay disabled except for Claude's official package, whose
 # native binary is installed by its required postinstall hook.
 RUN npm install --prefix /opt/codewire/agents/npm -g --ignore-scripts \
-      @openai/codex@0.149.0 \
+      @openai/codex@0.157.0 \
       @google/gemini-cli@0.56.0 \
       @moonshot-ai/kimi-code@0.38.0 \
       @earendil-works/pi-coding-agent@0.84.2 && \
     npm install --prefix /opt/codewire/agents/npm -g @anthropic-ai/claude-code@2.1.238
 
+USER root
+# The home is a persistent mount, so interactive shell settings live in the image.
+RUN printf '\n%s\nset +h\n' \
+      '# Find commands on PATH every time, so an agent CLI updated in this shell runs at once.' \
+      >>/etc/bash.bashrc
+
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.
-USER root
 COPY --from=stock-ssh-fixture /out/ /opt/codewire/fixtures/openssh/
 COPY --from=cw-builder /out/cw /usr/local/bin/cw
 RUN /usr/local/bin/cw --version
