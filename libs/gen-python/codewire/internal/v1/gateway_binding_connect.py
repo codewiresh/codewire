@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .gateway_binding_pb2 import IssueGatewayBindingRequest, IssueGatewayBindingResponse
+from .gateway_binding_pb2 import IssueGatewayBindingRequest, IssueGatewayBindingResponse, IssueGatewayDaemonCredentialRequest, IssueGatewayDaemonCredentialResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -36,6 +36,9 @@ _GZIP_COMPRESSION = GzipCompression()
 
 class GatewayBindingService(Protocol):
     async def issue_gateway_binding(self, request: IssueGatewayBindingRequest, ctx: RequestContext[IssueGatewayBindingRequest, IssueGatewayBindingResponse]) -> IssueGatewayBindingResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def issue_gateway_daemon_credential(self, request: IssueGatewayDaemonCredentialRequest, ctx: RequestContext[IssueGatewayDaemonCredentialRequest, IssueGatewayDaemonCredentialResponse]) -> IssueGatewayDaemonCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -61,6 +64,16 @@ class GatewayBindingServiceASGIApplication(ConnectASGIApplication[GatewayBinding
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.issue_gateway_binding,
+                ),
+                "/codewire.internal.v1.GatewayBindingService/IssueGatewayDaemonCredential": Endpoint.unary(
+                    method=MethodInfo(
+                        name="IssueGatewayDaemonCredential",
+                        service_name="codewire.internal.v1.GatewayBindingService",
+                        input=IssueGatewayDaemonCredentialRequest,
+                        output=IssueGatewayDaemonCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.issue_gateway_daemon_credential,
                 ),
             },
             interceptors=interceptors,
@@ -120,8 +133,31 @@ class GatewayBindingServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def issue_gateway_daemon_credential(
+        self,
+        request: IssueGatewayDaemonCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> IssueGatewayDaemonCredentialResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="IssueGatewayDaemonCredential",
+                service_name="codewire.internal.v1.GatewayBindingService",
+                input=IssueGatewayDaemonCredentialRequest,
+                output=IssueGatewayDaemonCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class GatewayBindingServiceSync(Protocol):
     def issue_gateway_binding(self, request: IssueGatewayBindingRequest, ctx: RequestContext[IssueGatewayBindingRequest, IssueGatewayBindingResponse]) -> IssueGatewayBindingResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def issue_gateway_daemon_credential(self, request: IssueGatewayDaemonCredentialRequest, ctx: RequestContext[IssueGatewayDaemonCredentialRequest, IssueGatewayDaemonCredentialResponse]) -> IssueGatewayDaemonCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -145,6 +181,16 @@ class GatewayBindingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.issue_gateway_binding,
+                ),
+                "/codewire.internal.v1.GatewayBindingService/IssueGatewayDaemonCredential": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="IssueGatewayDaemonCredential",
+                        service_name="codewire.internal.v1.GatewayBindingService",
+                        input=IssueGatewayDaemonCredentialRequest,
+                        output=IssueGatewayDaemonCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.issue_gateway_daemon_credential,
                 ),
             },
             interceptors=interceptors,
@@ -198,6 +244,25 @@ class GatewayBindingServiceClientSync(ConnectClientSync):
                 service_name="codewire.internal.v1.GatewayBindingService",
                 input=IssueGatewayBindingRequest,
                 output=IssueGatewayBindingResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def issue_gateway_daemon_credential(
+        self,
+        request: IssueGatewayDaemonCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> IssueGatewayDaemonCredentialResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="IssueGatewayDaemonCredential",
+                service_name="codewire.internal.v1.GatewayBindingService",
+                input=IssueGatewayDaemonCredentialRequest,
+                output=IssueGatewayDaemonCredentialResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

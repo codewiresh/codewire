@@ -24,6 +24,18 @@ class IssueGatewayBindingResponse(_message.Message):
     runtime_transport: RuntimeTransport
     def __init__(self, environment_id: _Optional[str] = ..., sidecar_token: _Optional[str] = ..., workspace_pod_ip: _Optional[str] = ..., app_ports: _Optional[_Iterable[int]] = ..., runtime_transport: _Optional[_Union[RuntimeTransport, _Mapping]] = ...) -> None: ...
 
+class IssueGatewayDaemonCredentialRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class IssueGatewayDaemonCredentialResponse(_message.Message):
+    __slots__ = ("daemon_credential", "workspace_pod_uid")
+    DAEMON_CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    WORKSPACE_POD_UID_FIELD_NUMBER: _ClassVar[int]
+    daemon_credential: str
+    workspace_pod_uid: str
+    def __init__(self, daemon_credential: _Optional[str] = ..., workspace_pod_uid: _Optional[str] = ...) -> None: ...
+
 class RuntimeTransport(_message.Message):
     __slots__ = ("runtime_region", "transport_zone", "peer_relay", "direct_udp", "stun", "derp")
     RUNTIME_REGION_FIELD_NUMBER: _ClassVar[int]

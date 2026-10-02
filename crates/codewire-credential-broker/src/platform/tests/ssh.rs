@@ -401,10 +401,12 @@ async fn completed_signature_is_drained_then_revalidated_before_release() -> Res
             .revoke(&f.f.owner, &f.record.metadata.id, f.record.version)
             .await?;
         f.f.authority.gate.release();
+        // Revocation withholds the selected key: the final recheck names the
+        // Reconnect it needs and the completed signature is never released.
         ensure!(
             matches!(
                 tokio::time::timeout(TIMEOUT, operation).await??,
-                Err(BrokerLeaseError::Denied)
+                Err(BrokerLeaseError::ReconnectRequired)
             ),
             "signature escaped a revoked post-sign binding"
         );

@@ -59,11 +59,13 @@ mod tests {
         GetEnvironmentUsageResponse, ResourcePlan, UpdateGitIdentityRequest,
     };
     use super::codewire::internal::v1::{
-        COORDINATOR_SERVICE_SERVICE_NAME, CoordinateNode, IssueGatewayBindingResponse,
-        MESH_AUTHORIZATION_SERVICE_SERVICE_NAME, MESH_COORDINATOR_SERVICE_SERVICE_NAME,
-        MeshAuthorizationContext, MeshAuthorizationCredentialKind, MeshAuthorizationPrincipalKind,
-        MeshCoordinateHello, MeshCoordinateRole, MeshCoordinatorServiceCoordinateRequest,
-        ResolveMeshAuthorizationResponse,
+        BindWorkspaceResponse, COORDINATOR_SERVICE_SERVICE_NAME, CoordinateNode,
+        GATEWAY_BINDING_SERVICE_SERVICE_NAME, IssueGatewayBindingResponse,
+        IssueGatewayDaemonCredentialResponse, MESH_AUTHORIZATION_SERVICE_SERVICE_NAME,
+        MESH_COORDINATOR_SERVICE_SERVICE_NAME, MeshAuthorizationContext,
+        MeshAuthorizationCredentialKind, MeshAuthorizationPrincipalKind, MeshCoordinateHello,
+        MeshCoordinateRole, MeshCoordinatorServiceCoordinateRequest,
+        ResolveMeshAuthorizationResponse, WORKSPACE_BINDING_SERVICE_SERVICE_NAME,
     };
     use super::codewire::v1::{
         AcceptInvitationRequest, ApiKey, ApplicationPort, CreateApiKeyResponse,
@@ -118,6 +120,14 @@ mod tests {
             (
                 MESH_COORDINATOR_SERVICE_SERVICE_NAME,
                 "codewire.internal.v1.MeshCoordinatorService",
+            ),
+            (
+                GATEWAY_BINDING_SERVICE_SERVICE_NAME,
+                "codewire.internal.v1.GatewayBindingService",
+            ),
+            (
+                WORKSPACE_BINDING_SERVICE_SERVICE_NAME,
+                "codewire.internal.v1.WorkspaceBindingService",
             ),
         ] {
             assert_eq!(actual, expected);
@@ -969,6 +979,22 @@ mod tests {
                 "{:?}",
                 IssueGatewayBindingResponse {
                     sidecar_token: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                BindWorkspaceResponse {
+                    environment_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                    daemon_credential: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                IssueGatewayDaemonCredentialResponse {
+                    daemon_credential: MARKER.into(),
+                    workspace_pod_uid: "7e7b20f6-0bd2-4f11-8b16-9c239851eb52".into(),
                     ..Default::default()
                 }
             ),

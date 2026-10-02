@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/internal/v1/gateway_binding.proto.
  */
 export const file_codewire_internal_v1_gateway_binding: GenFile = /*@__PURE__*/
-  fileDesc("Cipjb2Rld2lyZS9pbnRlcm5hbC92MS9nYXRld2F5X2JpbmRpbmcucHJvdG8SFGNvZGV3aXJlLmludGVybmFsLnYxIjgKGklzc3VlR2F0ZXdheUJpbmRpbmdSZXF1ZXN0SgQIARACSgQIAhADUgNwb2RSCW5hbWVzcGFjZSLBAQobSXNzdWVHYXRld2F5QmluZGluZ1Jlc3BvbnNlEhYKDmVudmlyb25tZW50X2lkGAEgASgJEhoKDXNpZGVjYXJfdG9rZW4YAiABKAlCA4ABARIYChB3b3Jrc3BhY2VfcG9kX2lwGAMgASgJEhEKCWFwcF9wb3J0cxgEIAMoBRJBChFydW50aW1lX3RyYW5zcG9ydBgFIAEoCzImLmNvZGV3aXJlLmludGVybmFsLnYxLlJ1bnRpbWVUcmFuc3BvcnQiogIKEFJ1bnRpbWVUcmFuc3BvcnQSFgoOcnVudGltZV9yZWdpb24YASABKAkSFgoOdHJhbnNwb3J0X3pvbmUYAiABKAkSPAoKcGVlcl9yZWxheRgDIAEoCzIoLmNvZGV3aXJlLmludGVybmFsLnYxLlBlZXJSZWxheVRyYW5zcG9ydBI8CgpkaXJlY3RfdWRwGAQgASgLMiguY29kZXdpcmUuaW50ZXJuYWwudjEuRGlyZWN0VWRwVHJhbnNwb3J0EjAKBHN0dW4YBSABKAsyIi5jb2Rld2lyZS5pbnRlcm5hbC52MS5FbmRwb2ludExpc3QSMAoEZGVycBgGIAEoCzIiLmNvZGV3aXJlLmludGVybmFsLnYxLkVuZHBvaW50TGlzdCJzChJQZWVyUmVsYXlUcmFuc3BvcnQSGAoQcHVibGljX2VuZHBvaW50cxgBIAMoCRIQCgNkbnMYAiABKAlIAIgBARIVCg1hbGxvY2F0b3JfdXJsGAMgASgJEhIKCmJpbmRfYWRkcnMYBCADKAlCBgoEX2RucyJ6ChJEaXJlY3RVZHBUcmFuc3BvcnQSEAoDdmlwGAEgASgJSACIAQESFwoKcG9ydF9zdGFydBgCIAEoBUgBiAEBEhUKCHBvcnRfZW5kGAMgASgFSAKIAQFCBgoEX3ZpcEINCgtfcG9ydF9zdGFydEILCglfcG9ydF9lbmQiIQoMRW5kcG9pbnRMaXN0EhEKCWVuZHBvaW50cxgBIAMoCTKTAQoVR2F0ZXdheUJpbmRpbmdTZXJ2aWNlEnoKE0lzc3VlR2F0ZXdheUJpbmRpbmcSMC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Jc3N1ZUdhdGV3YXlCaW5kaW5nUmVxdWVzdBoxLmNvZGV3aXJlLmludGVybmFsLnYxLklzc3VlR2F0ZXdheUJpbmRpbmdSZXNwb25zZULtAQoYY29tLmNvZGV3aXJlLmludGVybmFsLnYxQhNHYXRld2F5QmluZGluZ1Byb3RvUAFaSmdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9pbnRlcm5hbC92MTtpbnRlcm5hbHYxogIDQ0lYqgIUQ29kZXdpcmUuSW50ZXJuYWwuVjHKAhRDb2Rld2lyZVxJbnRlcm5hbFxWMeICIENvZGV3aXJlXEludGVybmFsXFYxXEdQQk1ldGFkYXRh6gIWQ29kZXdpcmU6OkludGVybmFsOjpWMWIGcHJvdG8z");
+  fileDesc("Cipjb2Rld2lyZS9pbnRlcm5hbC92MS9nYXRld2F5X2JpbmRpbmcucHJvdG8SFGNvZGV3aXJlLmludGVybmFsLnYxIjgKGklzc3VlR2F0ZXdheUJpbmRpbmdSZXF1ZXN0SgQIARACSgQIAhADUgNwb2RSCW5hbWVzcGFjZSLBAQobSXNzdWVHYXRld2F5QmluZGluZ1Jlc3BvbnNlEhYKDmVudmlyb25tZW50X2lkGAEgASgJEhoKDXNpZGVjYXJfdG9rZW4YAiABKAlCA4ABARIYChB3b3Jrc3BhY2VfcG9kX2lwGAMgASgJEhEKCWFwcF9wb3J0cxgEIAMoBRJBChFydW50aW1lX3RyYW5zcG9ydBgFIAEoCzImLmNvZGV3aXJlLmludGVybmFsLnYxLlJ1bnRpbWVUcmFuc3BvcnQiJQojSXNzdWVHYXRld2F5RGFlbW9uQ3JlZGVudGlhbFJlcXVlc3QiYQokSXNzdWVHYXRld2F5RGFlbW9uQ3JlZGVudGlhbFJlc3BvbnNlEh4KEWRhZW1vbl9jcmVkZW50aWFsGAEgASgJQgOAAQESGQoRd29ya3NwYWNlX3BvZF91aWQYAiABKAkiogIKEFJ1bnRpbWVUcmFuc3BvcnQSFgoOcnVudGltZV9yZWdpb24YASABKAkSFgoOdHJhbnNwb3J0X3pvbmUYAiABKAkSPAoKcGVlcl9yZWxheRgDIAEoCzIoLmNvZGV3aXJlLmludGVybmFsLnYxLlBlZXJSZWxheVRyYW5zcG9ydBI8CgpkaXJlY3RfdWRwGAQgASgLMiguY29kZXdpcmUuaW50ZXJuYWwudjEuRGlyZWN0VWRwVHJhbnNwb3J0EjAKBHN0dW4YBSABKAsyIi5jb2Rld2lyZS5pbnRlcm5hbC52MS5FbmRwb2ludExpc3QSMAoEZGVycBgGIAEoCzIiLmNvZGV3aXJlLmludGVybmFsLnYxLkVuZHBvaW50TGlzdCJzChJQZWVyUmVsYXlUcmFuc3BvcnQSGAoQcHVibGljX2VuZHBvaW50cxgBIAMoCRIQCgNkbnMYAiABKAlIAIgBARIVCg1hbGxvY2F0b3JfdXJsGAMgASgJEhIKCmJpbmRfYWRkcnMYBCADKAlCBgoEX2RucyJ6ChJEaXJlY3RVZHBUcmFuc3BvcnQSEAoDdmlwGAEgASgJSACIAQESFwoKcG9ydF9zdGFydBgCIAEoBUgBiAEBEhUKCHBvcnRfZW5kGAMgASgFSAKIAQFCBgoEX3ZpcEINCgtfcG9ydF9zdGFydEILCglfcG9ydF9lbmQiIQoMRW5kcG9pbnRMaXN0EhEKCWVuZHBvaW50cxgBIAMoCTKrAgoVR2F0ZXdheUJpbmRpbmdTZXJ2aWNlEnoKE0lzc3VlR2F0ZXdheUJpbmRpbmcSMC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Jc3N1ZUdhdGV3YXlCaW5kaW5nUmVxdWVzdBoxLmNvZGV3aXJlLmludGVybmFsLnYxLklzc3VlR2F0ZXdheUJpbmRpbmdSZXNwb25zZRKVAQocSXNzdWVHYXRld2F5RGFlbW9uQ3JlZGVudGlhbBI5LmNvZGV3aXJlLmludGVybmFsLnYxLklzc3VlR2F0ZXdheURhZW1vbkNyZWRlbnRpYWxSZXF1ZXN0GjouY29kZXdpcmUuaW50ZXJuYWwudjEuSXNzdWVHYXRld2F5RGFlbW9uQ3JlZGVudGlhbFJlc3BvbnNlQu0BChhjb20uY29kZXdpcmUuaW50ZXJuYWwudjFCE0dhdGV3YXlCaW5kaW5nUHJvdG9QAVpKZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2ludGVybmFsL3YxO2ludGVybmFsdjGiAgNDSViqAhRDb2Rld2lyZS5JbnRlcm5hbC5WMcoCFENvZGV3aXJlXEludGVybmFsXFYx4gIgQ29kZXdpcmVcSW50ZXJuYWxcVjFcR1BCTWV0YWRhdGHqAhZDb2Rld2lyZTo6SW50ZXJuYWw6OlYxYgZwcm90bzM");
 
 /**
  * @generated from message codewire.internal.v1.IssueGatewayBindingRequest
@@ -67,6 +67,43 @@ export const IssueGatewayBindingResponseSchema: GenMessage<IssueGatewayBindingRe
   messageDesc(file_codewire_internal_v1_gateway_binding, 1);
 
 /**
+ * @generated from message codewire.internal.v1.IssueGatewayDaemonCredentialRequest
+ */
+export type IssueGatewayDaemonCredentialRequest = Message<"codewire.internal.v1.IssueGatewayDaemonCredentialRequest"> & {
+};
+
+/**
+ * Describes the message codewire.internal.v1.IssueGatewayDaemonCredentialRequest.
+ * Use `create(IssueGatewayDaemonCredentialRequestSchema)` to create a new message.
+ */
+export const IssueGatewayDaemonCredentialRequestSchema: GenMessage<IssueGatewayDaemonCredentialRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_gateway_binding, 2);
+
+/**
+ * @generated from message codewire.internal.v1.IssueGatewayDaemonCredentialResponse
+ */
+export type IssueGatewayDaemonCredentialResponse = Message<"codewire.internal.v1.IssueGatewayDaemonCredentialResponse"> & {
+  /**
+   * @generated from field: string daemon_credential = 1;
+   */
+  daemonCredential: string;
+
+  /**
+   * Lets the gateway notice a replaced workspace Pod.
+   *
+   * @generated from field: string workspace_pod_uid = 2;
+   */
+  workspacePodUid: string;
+};
+
+/**
+ * Describes the message codewire.internal.v1.IssueGatewayDaemonCredentialResponse.
+ * Use `create(IssueGatewayDaemonCredentialResponseSchema)` to create a new message.
+ */
+export const IssueGatewayDaemonCredentialResponseSchema: GenMessage<IssueGatewayDaemonCredentialResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_gateway_binding, 3);
+
+/**
  * RuntimeTransport is the complete current gateway binding surface. Presence
  * of each nested value is significant and is preserved by the generated
  * client conversion in WS09 WI-5.
@@ -110,7 +147,7 @@ export type RuntimeTransport = Message<"codewire.internal.v1.RuntimeTransport"> 
  * Use `create(RuntimeTransportSchema)` to create a new message.
  */
 export const RuntimeTransportSchema: GenMessage<RuntimeTransport> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_gateway_binding, 2);
+  messageDesc(file_codewire_internal_v1_gateway_binding, 4);
 
 /**
  * @generated from message codewire.internal.v1.PeerRelayTransport
@@ -142,7 +179,7 @@ export type PeerRelayTransport = Message<"codewire.internal.v1.PeerRelayTranspor
  * Use `create(PeerRelayTransportSchema)` to create a new message.
  */
 export const PeerRelayTransportSchema: GenMessage<PeerRelayTransport> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_gateway_binding, 3);
+  messageDesc(file_codewire_internal_v1_gateway_binding, 5);
 
 /**
  * @generated from message codewire.internal.v1.DirectUdpTransport
@@ -169,7 +206,7 @@ export type DirectUdpTransport = Message<"codewire.internal.v1.DirectUdpTranspor
  * Use `create(DirectUdpTransportSchema)` to create a new message.
  */
 export const DirectUdpTransportSchema: GenMessage<DirectUdpTransport> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_gateway_binding, 4);
+  messageDesc(file_codewire_internal_v1_gateway_binding, 6);
 
 /**
  * @generated from message codewire.internal.v1.EndpointList
@@ -186,7 +223,7 @@ export type EndpointList = Message<"codewire.internal.v1.EndpointList"> & {
  * Use `create(EndpointListSchema)` to create a new message.
  */
 export const EndpointListSchema: GenMessage<EndpointList> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_gateway_binding, 5);
+  messageDesc(file_codewire_internal_v1_gateway_binding, 7);
 
 /**
  * GatewayBindingService accepts only a short-lived, exact-audience Kubernetes
@@ -207,6 +244,18 @@ export const GatewayBindingService: GenService<{
     methodKind: "unary";
     input: typeof IssueGatewayBindingRequestSchema;
     output: typeof IssueGatewayBindingResponseSchema;
+  },
+  /**
+   * Returns the daemon credential for the environment's currently bound
+   * workspace Pod. Unlike IssueGatewayBinding it does not require
+   * state=running. It returns not_found until a binding is recorded.
+   *
+   * @generated from rpc codewire.internal.v1.GatewayBindingService.IssueGatewayDaemonCredential
+   */
+  issueGatewayDaemonCredential: {
+    methodKind: "unary";
+    input: typeof IssueGatewayDaemonCredentialRequestSchema;
+    output: typeof IssueGatewayDaemonCredentialResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_internal_v1_gateway_binding, 0);

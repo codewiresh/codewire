@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n*codewire/internal/v1/gateway_binding.proto\x12\x14\x63odewire.internal.v1\"8\n\x1aIssueGatewayBindingRequestJ\x04\x08\x01\x10\x02J\x04\x08\x02\x10\x03R\x03podR\tnamespace\"\x8a\x02\n\x1bIssueGatewayBindingResponse\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\x12(\n\rsidecar_token\x18\x02 \x01(\tB\x03\x80\x01\x01R\x0csidecarToken\x12(\n\x10workspace_pod_ip\x18\x03 \x01(\tR\x0eworkspacePodIp\x12\x1b\n\tapp_ports\x18\x04 \x03(\x05R\x08\x61ppPorts\x12S\n\x11runtime_transport\x18\x05 \x01(\x0b\x32&.codewire.internal.v1.RuntimeTransportR\x10runtimeTransport\"\xe2\x02\n\x10RuntimeTransport\x12%\n\x0eruntime_region\x18\x01 \x01(\tR\rruntimeRegion\x12%\n\x0etransport_zone\x18\x02 \x01(\tR\rtransportZone\x12G\n\npeer_relay\x18\x03 \x01(\x0b\x32(.codewire.internal.v1.PeerRelayTransportR\tpeerRelay\x12G\n\ndirect_udp\x18\x04 \x01(\x0b\x32(.codewire.internal.v1.DirectUdpTransportR\tdirectUdp\x12\x36\n\x04stun\x18\x05 \x01(\x0b\x32\".codewire.internal.v1.EndpointListR\x04stun\x12\x36\n\x04\x64\x65rp\x18\x06 \x01(\x0b\x32\".codewire.internal.v1.EndpointListR\x04\x64\x65rp\"\xa2\x01\n\x12PeerRelayTransport\x12)\n\x10public_endpoints\x18\x01 \x03(\tR\x0fpublicEndpoints\x12\x15\n\x03\x64ns\x18\x02 \x01(\tH\x00R\x03\x64ns\x88\x01\x01\x12#\n\rallocator_url\x18\x03 \x01(\tR\x0c\x61llocatorUrl\x12\x1d\n\nbind_addrs\x18\x04 \x03(\tR\tbindAddrsB\x06\n\x04_dns\"\x93\x01\n\x12\x44irectUdpTransport\x12\x15\n\x03vip\x18\x01 \x01(\tH\x00R\x03vip\x88\x01\x01\x12\"\n\nport_start\x18\x02 \x01(\x05H\x01R\tportStart\x88\x01\x01\x12\x1e\n\x08port_end\x18\x03 \x01(\x05H\x02R\x07portEnd\x88\x01\x01\x42\x06\n\x04_vipB\r\n\x0b_port_startB\x0b\n\t_port_end\",\n\x0c\x45ndpointList\x12\x1c\n\tendpoints\x18\x01 \x03(\tR\tendpoints2\x93\x01\n\x15GatewayBindingService\x12z\n\x13IssueGatewayBinding\x12\x30.codewire.internal.v1.IssueGatewayBindingRequest\x1a\x31.codewire.internal.v1.IssueGatewayBindingResponseB\xed\x01\n\x18\x63om.codewire.internal.v1B\x13GatewayBindingProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n*codewire/internal/v1/gateway_binding.proto\x12\x14\x63odewire.internal.v1\"8\n\x1aIssueGatewayBindingRequestJ\x04\x08\x01\x10\x02J\x04\x08\x02\x10\x03R\x03podR\tnamespace\"\x8a\x02\n\x1bIssueGatewayBindingResponse\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\x12(\n\rsidecar_token\x18\x02 \x01(\tB\x03\x80\x01\x01R\x0csidecarToken\x12(\n\x10workspace_pod_ip\x18\x03 \x01(\tR\x0eworkspacePodIp\x12\x1b\n\tapp_ports\x18\x04 \x03(\x05R\x08\x61ppPorts\x12S\n\x11runtime_transport\x18\x05 \x01(\x0b\x32&.codewire.internal.v1.RuntimeTransportR\x10runtimeTransport\"%\n#IssueGatewayDaemonCredentialRequest\"\x84\x01\n$IssueGatewayDaemonCredentialResponse\x12\x30\n\x11\x64\x61\x65mon_credential\x18\x01 \x01(\tB\x03\x80\x01\x01R\x10\x64\x61\x65monCredential\x12*\n\x11workspace_pod_uid\x18\x02 \x01(\tR\x0fworkspacePodUid\"\xe2\x02\n\x10RuntimeTransport\x12%\n\x0eruntime_region\x18\x01 \x01(\tR\rruntimeRegion\x12%\n\x0etransport_zone\x18\x02 \x01(\tR\rtransportZone\x12G\n\npeer_relay\x18\x03 \x01(\x0b\x32(.codewire.internal.v1.PeerRelayTransportR\tpeerRelay\x12G\n\ndirect_udp\x18\x04 \x01(\x0b\x32(.codewire.internal.v1.DirectUdpTransportR\tdirectUdp\x12\x36\n\x04stun\x18\x05 \x01(\x0b\x32\".codewire.internal.v1.EndpointListR\x04stun\x12\x36\n\x04\x64\x65rp\x18\x06 \x01(\x0b\x32\".codewire.internal.v1.EndpointListR\x04\x64\x65rp\"\xa2\x01\n\x12PeerRelayTransport\x12)\n\x10public_endpoints\x18\x01 \x03(\tR\x0fpublicEndpoints\x12\x15\n\x03\x64ns\x18\x02 \x01(\tH\x00R\x03\x64ns\x88\x01\x01\x12#\n\rallocator_url\x18\x03 \x01(\tR\x0c\x61llocatorUrl\x12\x1d\n\nbind_addrs\x18\x04 \x03(\tR\tbindAddrsB\x06\n\x04_dns\"\x93\x01\n\x12\x44irectUdpTransport\x12\x15\n\x03vip\x18\x01 \x01(\tH\x00R\x03vip\x88\x01\x01\x12\"\n\nport_start\x18\x02 \x01(\x05H\x01R\tportStart\x88\x01\x01\x12\x1e\n\x08port_end\x18\x03 \x01(\x05H\x02R\x07portEnd\x88\x01\x01\x42\x06\n\x04_vipB\r\n\x0b_port_startB\x0b\n\t_port_end\",\n\x0c\x45ndpointList\x12\x1c\n\tendpoints\x18\x01 \x03(\tR\tendpoints2\xab\x02\n\x15GatewayBindingService\x12z\n\x13IssueGatewayBinding\x12\x30.codewire.internal.v1.IssueGatewayBindingRequest\x1a\x31.codewire.internal.v1.IssueGatewayBindingResponse\x12\x95\x01\n\x1cIssueGatewayDaemonCredential\x12\x39.codewire.internal.v1.IssueGatewayDaemonCredentialRequest\x1a:.codewire.internal.v1.IssueGatewayDaemonCredentialResponseB\xed\x01\n\x18\x63om.codewire.internal.v1B\x13GatewayBindingProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,18 +34,24 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\030com.codewire.internal.v1B\023GatewayBindingProtoP\001ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\242\002\003CIX\252\002\024Codewire.Internal.V1\312\002\024Codewire\\Internal\\V1\342\002 Codewire\\Internal\\V1\\GPBMetadata\352\002\026Codewire::Internal::V1'
   _globals['_ISSUEGATEWAYBINDINGRESPONSE'].fields_by_name['sidecar_token']._loaded_options = None
   _globals['_ISSUEGATEWAYBINDINGRESPONSE'].fields_by_name['sidecar_token']._serialized_options = b'\200\001\001'
+  _globals['_ISSUEGATEWAYDAEMONCREDENTIALRESPONSE'].fields_by_name['daemon_credential']._loaded_options = None
+  _globals['_ISSUEGATEWAYDAEMONCREDENTIALRESPONSE'].fields_by_name['daemon_credential']._serialized_options = b'\200\001\001'
   _globals['_ISSUEGATEWAYBINDINGREQUEST']._serialized_start=68
   _globals['_ISSUEGATEWAYBINDINGREQUEST']._serialized_end=124
   _globals['_ISSUEGATEWAYBINDINGRESPONSE']._serialized_start=127
   _globals['_ISSUEGATEWAYBINDINGRESPONSE']._serialized_end=393
-  _globals['_RUNTIMETRANSPORT']._serialized_start=396
-  _globals['_RUNTIMETRANSPORT']._serialized_end=750
-  _globals['_PEERRELAYTRANSPORT']._serialized_start=753
-  _globals['_PEERRELAYTRANSPORT']._serialized_end=915
-  _globals['_DIRECTUDPTRANSPORT']._serialized_start=918
-  _globals['_DIRECTUDPTRANSPORT']._serialized_end=1065
-  _globals['_ENDPOINTLIST']._serialized_start=1067
-  _globals['_ENDPOINTLIST']._serialized_end=1111
-  _globals['_GATEWAYBINDINGSERVICE']._serialized_start=1114
-  _globals['_GATEWAYBINDINGSERVICE']._serialized_end=1261
+  _globals['_ISSUEGATEWAYDAEMONCREDENTIALREQUEST']._serialized_start=395
+  _globals['_ISSUEGATEWAYDAEMONCREDENTIALREQUEST']._serialized_end=432
+  _globals['_ISSUEGATEWAYDAEMONCREDENTIALRESPONSE']._serialized_start=435
+  _globals['_ISSUEGATEWAYDAEMONCREDENTIALRESPONSE']._serialized_end=567
+  _globals['_RUNTIMETRANSPORT']._serialized_start=570
+  _globals['_RUNTIMETRANSPORT']._serialized_end=924
+  _globals['_PEERRELAYTRANSPORT']._serialized_start=927
+  _globals['_PEERRELAYTRANSPORT']._serialized_end=1089
+  _globals['_DIRECTUDPTRANSPORT']._serialized_start=1092
+  _globals['_DIRECTUDPTRANSPORT']._serialized_end=1239
+  _globals['_ENDPOINTLIST']._serialized_start=1241
+  _globals['_ENDPOINTLIST']._serialized_end=1285
+  _globals['_GATEWAYBINDINGSERVICE']._serialized_start=1288
+  _globals['_GATEWAYBINDINGSERVICE']._serialized_end=1587
 # @@protoc_insertion_point(module_scope)

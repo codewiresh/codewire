@@ -10,6 +10,12 @@ service GatewayBindingService {
   // IssueGatewayBinding resolves a pod binding and issues a fresh sidecar
   // token. A not-yet-bound pod receives not_found so the gateway can retry.
   rpc IssueGatewayBinding(IssueGatewayBindingRequest) returns (IssueGatewayBindingResponse);
+
+  // Returns the daemon credential for the environment's currently bound
+  // workspace Pod. Unlike IssueGatewayBinding it does not require
+  // state=running. It returns not_found until a binding is recorded.
+  rpc IssueGatewayDaemonCredential(IssueGatewayDaemonCredentialRequest)
+      returns (IssueGatewayDaemonCredentialResponse);
 }
 
 message IssueGatewayBindingRequest {
@@ -27,6 +33,14 @@ message IssueGatewayBindingResponse {
   repeated int32 app_ports = 4;
   // Unset when no enabled transport zone is resolved for the runtime node.
   RuntimeTransport runtime_transport = 5;
+}
+
+message IssueGatewayDaemonCredentialRequest {}
+
+message IssueGatewayDaemonCredentialResponse {
+  string daemon_credential = 1 [debug_redact = true];
+  // Lets the gateway notice a replaced workspace Pod.
+  string workspace_pod_uid = 2;
 }
 
 // RuntimeTransport is the complete current gateway binding surface. Presence

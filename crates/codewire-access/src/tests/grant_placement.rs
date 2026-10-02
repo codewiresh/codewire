@@ -311,3 +311,93 @@ fn platform_to_local_retains_personal_confirmation_and_exact_organization_owner(
         })
     );
 }
+
+#[test]
+fn hosted_admission_withholds_only_the_capability_whose_credential_needs_reconnect() {
+    let owner = Owner::User(owner_id("user-one"));
+    let mut codex = credential("codex-work", owner.clone());
+    codex.placement = Placement::Platform;
+    let mut anthropic = credential("anthropic-work", owner.clone());
+    anthropic.placement = Placement::Platform;
+    anthropic.provider = provider_id("anthropic");
+    anthropic.authentication_kind = CredentialAuthKind::ApiKey;
+    let mut profile = profile("work", owner, "codex-work");
+    profile.placement = Placement::Platform;
+    profile
+        .entries
+        .insert(slot("anthropic"), anthropic.id.clone());
+    let mut context = context([codex.id.clone(), anthropic.id.clone()]);
+    context.placement = GrantPlacement::Platform;
+    let catalog = builtin_provider_catalog();
+    let both = |codex: &CredentialMetadata| {
+        BTreeMap::from([
+            (codex.id.clone(), codex.clone()),
+            (anthropic.id.clone(), anthropic.clone()),
+        ])
+    };
+    let available = |context: &GrantContext, codex: &CredentialMetadata| {
+        derive_available_grants(
+            context,
+            &binding(&profile),
+            &profile,
+            &both(codex),
+            &catalog,
+            NOW,
+        )
+    };
+    let healthy = available(&context, &codex).unwrap();
+    assert!(healthy.reconnect_required.is_empty());
+    assert_eq!(healthy.grants.len(), 2);
+
+    let mut refresh_failed = codex.clone();
+    refresh_failed.status = CredentialStatus::RefreshFailed;
+    let mut revoked = codex.clone();
+    revoked.status = CredentialStatus::Revoked;
+    let mut expired = codex.clone();
+    expired.status = CredentialStatus::Expired;
+    let mut past_deadline = codex.clone();
+    past_deadline.expires_at_unix = Some(NOW);
+    for unusable in [refresh_failed, revoked, expired, past_deadline] {
+        let admitted = available(&context, &unusable).unwrap();
+        assert_eq!(admitted.reconnect_required, BTreeSet::from([slot("codex")]));
+        // The other capability keeps its exact grant; the withheld one has none.
+        assert_eq!(
+            admitted.grants,
+            healthy
+                .grants
+                .iter()
+                .filter(|grant| grant.capability_slot == slot("anthropic"))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        // Native and owner-local admission still refuse the whole selection.
+        assert!(matches!(
+            derive_grants(
+                &context,
+                &binding(&profile),
+                &profile,
+                &both(&unusable),
+                &catalog,
+                NOW,
+            ),
+            Err(AccessError::CredentialInactive { .. } | AccessError::CredentialExpired { .. })
+        ));
+    }
+
+    // Only lifecycle is per capability: authorization and ownership still
+    // reject the whole selection rather than silently dropping a slot.
+    let mut unauthorized = context.clone();
+    unauthorized.authorized_credentials.remove(&codex.id);
+    assert_eq!(
+        available(&unauthorized, &codex),
+        Err(AccessError::CredentialNotAuthorized {
+            credential: codex.id.clone()
+        })
+    );
+    let mut foreign = codex.clone();
+    foreign.owner = Owner::User(owner_id("user-other"));
+    assert!(matches!(
+        available(&context, &foreign),
+        Err(AccessError::CredentialOwnerMismatch { .. })
+    ));
+}

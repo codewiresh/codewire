@@ -13,6 +13,8 @@ use zeroize::Zeroizing;
 struct Authority {
     slot: &'static str,
     wrong_slot: bool,
+    /// The selected slot's credential needs Reconnect: admission withholds it.
+    reconnect_required: bool,
     calls: Arc<Mutex<Vec<(String, String, String)>>>,
     reads: Arc<AtomicUsize>,
 }
@@ -36,6 +38,9 @@ impl BrokerLeaseProvider for Authority {
         ));
         if slot.as_str() != self.slot {
             return Err(BrokerLeaseError::Denied);
+        }
+        if self.reconnect_required {
+            return Err(BrokerLeaseError::ReconnectRequired);
         }
         let (provider, kind) = match self.slot {
             "codex" | "openai" => ("openai", CredentialAuthKind::ApiKey),
@@ -150,6 +155,7 @@ fn broker(
         Authority {
             slot,
             wrong_slot,
+            reconnect_required: false,
             calls: Arc::new(Mutex::new(Vec::new())),
             reads: Arc::new(AtomicUsize::new(0)),
         },
@@ -355,6 +361,58 @@ async fn wrong_slot_leases_and_unselected_routes_fail_before_material_or_upstrea
             Some(BrokerRequestError::InvalidRequest)
         );
         assert!(broker.leases.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_capability_needing_reconnect_answers_with_a_fixed_explanation_and_no_material() {
+    for (slot, route, operation, method, path, body, media, _) in cases() {
+        let mut broker = broker(slot, false, false);
+        Arc::get_mut(&mut broker.leases).unwrap().reconnect_required = true;
+        let response = broker
+            .execute(request(slot, route, method, path, body, media))
+            .await
+            .expect("a withheld capability still answers its route");
+        // Admission was asked exactly once; no material was read and no
+        // provider was contacted for the withheld capability.
+        assert_eq!(
+            *broker.leases.calls.lock().unwrap(),
+            vec![(slot.into(), operation.into(), route.into())]
+        );
+        assert_eq!(broker.leases.reads.load(Ordering::Relaxed), 0);
+        assert!(broker.upstream.calls.lock().unwrap().is_empty());
+        let (status, headers, mut body) = response.into_parts();
+        assert_eq!(status, StatusCode::FORBIDDEN, "{slot}");
+        assert_eq!(headers["content-type"], "application/json");
+        assert_eq!(headers["cache-control"], "no-store");
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next().await {
+            bytes.extend(chunk.unwrap());
+        }
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let message = match slot {
+            "codex" | "openai" => {
+                assert_eq!(json["error"]["code"], "credential_reconnect_required");
+                json["error"]["message"].as_str()
+            }
+            "anthropic" => {
+                assert_eq!(json["type"], "error");
+                assert_eq!(json["error"]["type"], "permission_error");
+                json["error"]["message"].as_str()
+            }
+            _ => json["message"].as_str(),
+        }
+        .unwrap();
+        assert!(
+            message.contains("Codewire Settings → Credentials"),
+            "{message}"
+        );
+        if slot == "codex" {
+            assert_eq!(
+                message,
+                "Codex needs Reconnect in Codewire Settings → Credentials."
+            );
+        }
     }
 }
 
