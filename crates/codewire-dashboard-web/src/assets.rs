@@ -36,8 +36,8 @@ pub(crate) const ENVIRONMENTS_SCRIPT_PATH: &str = "/assets/codewire/environments
 pub(crate) const TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/terminal-v1.js";
 pub(crate) const DURABLE_TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/durable-terminal-v1.js";
 pub(crate) const TERMINAL_PROTOCOL_SCRIPT_PATH: &str = "/assets/codewire/terminal-protocol-v1.js";
-pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v1.js";
-pub(crate) const SANDBOX_RESIZE_SCRIPT_PATH: &str = "/assets/codewire/sandbox-resize-v2.js";
+pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v2.js";
+pub(crate) const SANDBOX_RESIZE_SCRIPT_PATH: &str = "/assets/codewire/sandbox-resize-v3.js";
 pub(crate) const TERMINAL_RENDERER_SCRIPT_PATH: &str = "/assets/codewire/terminal-renderer-v1.js";
 pub(crate) const TERMINAL_PRESENTATION_SCRIPT_PATH: &str =
     "/assets/codewire/terminal-presentation-v1.js";
@@ -541,6 +541,8 @@ mod tests {
                 "data-terminal-panels",
                 "data-terminal-history-gap",
                 "data-terminal-close-dialog",
+                "id=\"sandbox-resize-setup-note\" data-resize-setup-note",
+                "Resize is available when setup finishes.",
             ] {
                 assert!(html.contains(marker), "missing {marker}");
             }

@@ -16,6 +16,7 @@ fn main() {
         "codewire/internal/v1/coordinate.proto",
         "codewire/internal/v1/gateway_binding.proto",
         "codewire/internal/v1/mesh_authorization.proto",
+        "codewire/internal/v1/workspace_binding.proto",
         "codewire/v1/access_profile.proto",
         "codewire/v1/api_key.proto",
         "codewire/v1/common.proto",

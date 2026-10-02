@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use codewire_credential_broker::platform::keepalive::OAuthKeepAliveConfig;
 use codewire_tls::ServerTlsFiles;
 use sqlx::PgPool;
 use zeroize::Zeroizing;
@@ -17,6 +18,7 @@ pub(super) struct Config {
     pub(super) database_url: Zeroizing<String>,
     pub(super) listeners: Listeners,
     pub(super) runtime_directory: PathBuf,
+    pub(super) oauth_keepalive: Option<OAuthKeepAliveConfig>,
 }
 
 impl Config {
@@ -90,6 +92,9 @@ impl Config {
                 tls,
             },
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
+            oauth_keepalive: super::super::config::oauth_keepalive_config(&|name| {
+                std::env::var_os(name)
+            })?,
         })
     }
 }

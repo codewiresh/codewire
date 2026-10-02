@@ -73,6 +73,8 @@
 .cw-sandbox-heading dl .cw-sandbox-lifetime { flex-direction: column; gap: var(--space-1); }
 .cw-sandbox-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1-5); }
 .cw-sandbox-actions form { display: contents; }
+/* A reason for an unavailable action takes its own line under the actions. */
+.cw-sandbox-actions > .cw-field-help { flex-basis: 100%; text-align: end; }
 .cw-action-menu > form label { display: grid; gap: var(--space-1); color: var(--fg-secondary); font-size: var(--text-small); }
 .cw-action-menu > form p { margin: 0; color: var(--fg-secondary); font-size: var(--text-small); }
 .cw-action-menu--danger > form { border-color: var(--destructive-border); }
@@ -96,6 +98,7 @@
   .cw-sandbox-heading dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cw-sandbox-heading .cw-sandbox-lifetime dd { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
   .cw-sandbox-actions { justify-content: flex-start; }
+  .cw-sandbox-actions > .cw-field-help { text-align: start; }
   .cw-terminal-footer .cw-mono { flex-basis: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cw-action-menu > form { right: auto; left: 0; }
 }

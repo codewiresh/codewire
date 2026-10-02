@@ -447,7 +447,8 @@
             finalStatus = !["starting", "running", "stopping"].includes(frame.state);
             tab.state = frame.state;
             if (!live(tab.state)) { discardInput(tab); watchSendQueue(tab, socket); }
-            const text = stateLabel(frame.state, frame.exitCode);
+            // A live session on an open socket reads Connected, as on open.
+            const text = live(frame.state) ? "Connected" : stateLabel(frame.state, frame.exitCode);
             if (finalStatus) {
               finalText = text;
               finalAfterRender(tab, text);

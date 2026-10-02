@@ -19,6 +19,20 @@ fn unused_heredoc_delimiter(prefix: &str, content: &str) -> String {
     unreachable!("one more delimiter candidate exists than occupied lines")
 }
 
+/// Set the global Git author in one workspace exec: the email, then the name
+/// only if the email succeeded. Both values travel as positional arguments,
+/// never as shell source.
+pub fn build_git_identity_command(email: &str, name: &str) -> Vec<String> {
+    vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        r#"git config --global user.email "$1" && git config --global user.name "$2""#.to_string(),
+        "codewire-git-identity".to_string(),
+        email.to_string(),
+        name.to_string(),
+    ]
+}
+
 /// Publish ordinary defaults for the daemon, never resolved application values.
 /// The daemon home is fixed, independent of a projected or overridden HOME.
 /// Shell startup files must not reapply defaults above a launch projection.
@@ -150,6 +164,79 @@ mod tests {
             assert!(!decoy.exists());
         }
         assert!(!build_workspace_env_script(&BTreeMap::new()).contains("$HOME"));
+    }
+
+    /// Run the Git identity command against a recording `git` that fails
+    /// only for `fail_key`. Returns its exit status, the recorded calls, and
+    /// whether any shell syntax in a value ran.
+    fn run_git_identity(
+        email: &str,
+        name: &str,
+        fail_key: &str,
+    ) -> (std::process::ExitStatus, Vec<String>, bool) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let git = root.path().join("git");
+        fs::write(
+            &git,
+            concat!(
+                "#!/bin/sh\n",
+                "printf '[%s]' \"$@\" >> \"$GIT_LOG\"\n",
+                "printf '\\n' >> \"$GIT_LOG\"\n",
+                "[ \"$3\" != \"$FAIL_KEY\" ]\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+        let log = root.path().join("calls");
+        let command = build_git_identity_command(email, name);
+        let status = Command::new(&command[0])
+            .args(&command[1..])
+            .current_dir(root.path())
+            .env_clear()
+            // The recording `git` shadows any real one; `touch` stays
+            // reachable so injected shell syntax would leave a marker.
+            .env("PATH", format!("{}:/usr/bin:/bin", root.path().display()))
+            .env("HOME", root.path())
+            .env("GIT_LOG", &log)
+            .env("FAIL_KEY", fail_key)
+            .status()
+            .unwrap();
+        let calls = fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        (status, calls, root.path().join("injected").exists())
+    }
+
+    #[test]
+    fn git_identity_sets_email_then_name_from_literal_arguments() {
+        let email = "o'brien+$(touch injected)@example.test";
+        let name = "Ann `touch injected` \"Q\" O'Brien";
+        let (status, calls, injected) = run_git_identity(email, name, "");
+        assert!(status.success());
+        assert!(!injected);
+        assert_eq!(
+            calls,
+            [
+                format!("[config][--global][user.email][{email}]"),
+                format!("[config][--global][user.name][{name}]"),
+            ]
+        );
+    }
+
+    #[test]
+    fn git_identity_failure_is_not_success_and_stops_after_email() {
+        let (status, calls, _) = run_git_identity("a@example.test", "A", "user.email");
+        assert!(!status.success());
+        assert_eq!(
+            calls,
+            ["[config][--global][user.email][a@example.test]".to_string()]
+        );
+        let (status, calls, _) = run_git_identity("a@example.test", "A", "user.name");
+        assert!(!status.success());
+        assert_eq!(calls.len(), 2);
     }
 
     #[test]

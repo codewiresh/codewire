@@ -571,31 +571,40 @@ fn workspace_client_changes(
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("workspace containers are unavailable"))?;
     let (workspace_index, _) = workspace_container(containers)?;
-    let init_containers = spec
-        .get("initContainers")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap init is unavailable"))?;
-    let mut init = init_containers
-        .iter()
-        .enumerate()
-        .filter(|(_, container)| container["name"] == "codewire-daemon-init");
-    let (init_index, current_init) = init
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap init is unavailable"))?;
-    anyhow::ensure!(
-        init.next().is_none(),
-        "workspace bootstrap init is duplicated"
-    );
+    let init_containers = match spec.get("initContainers") {
+        None => &[][..],
+        Some(Value::Array(values)) => values.as_slice(),
+        _ => anyhow::bail!("workspace bootstrap init is malformed"),
+    };
+    let named_init = |name: &str| -> anyhow::Result<Option<(usize, &Value)>> {
+        let mut found = init_containers
+            .iter()
+            .enumerate()
+            .filter(|(_, container)| container["name"] == name);
+        let first = found.next();
+        anyhow::ensure!(
+            found.next().is_none(),
+            "workspace bootstrap init is duplicated"
+        );
+        Ok(first)
+    };
+    let daemon_init = named_init(super::template::DAEMON_INIT_CONTAINER)?;
+    let client_init = named_init(super::template::CLIENT_BOOTSTRAP_CONTAINER)?;
+    // The daemon reaches `/codewire/bin` by exactly one route, fixed when the
+    // object was created: copied by its init container into an emptyDir, or
+    // mounted from the support image. Older objects keep the copy.
+    let daemon_image = match (daemon_init, workspace_daemon_image(spec)?) {
+        (Some(_), None) if client_init.is_none() => None,
+        (None, Some(image)) => Some(image),
+        (None, None) => anyhow::bail!("workspace bootstrap init is unavailable"),
+        _ => anyhow::bail!("workspace daemon delivery is ambiguous"),
+    };
     let mut changes = Vec::new();
     for (path, expected) in [
         (format!("{spec_path}/volumes"), &clients["volumes"]),
         (
             format!("{spec_path}/containers/{workspace_index}/volumeMounts"),
             &clients["volumeMounts"],
-        ),
-        (
-            format!("{spec_path}/initContainers/{init_index}/volumeMounts"),
-            &clients["init"]["volumeMounts"],
         ),
     ] {
         workspace_client_named_changes(
@@ -605,10 +614,70 @@ fn workspace_client_changes(
             &mut changes,
         )?;
     }
-    if current_init.get("command") != Some(&clients["init"]["command"]) {
-        changes.push(serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/{init_index}/command"),"value":clients["init"]["command"]}));
+    let (current, expected) = match daemon_image {
+        None => (daemon_init, &clients["init"]),
+        Some(image) => {
+            let expected = &clients["clientInit"];
+            match (client_init, expected.is_null()) {
+                (None, true) => return Ok(changes),
+                (Some((index, _)), true) => {
+                    changes.push(serde_json::json!({"op":"remove","path":format!("{spec_path}/initContainers/{index}")}));
+                    return Ok(changes);
+                }
+                (None, false) => {
+                    let mut init = expected.clone();
+                    init["image"] = image.into();
+                    changes.push(if spec.get("initContainers").is_none() {
+                        serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers"),"value":[init]})
+                    } else {
+                        serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/-"),"value":init})
+                    });
+                    return Ok(changes);
+                }
+                (Some(_), false) => (client_init, expected),
+            }
+        }
+    };
+    let (init_index, current_init) = current.expect("selected bootstrap init");
+    workspace_client_named_changes(
+        data,
+        &format!("{spec_path}/initContainers/{init_index}/volumeMounts"),
+        expected["volumeMounts"]
+            .as_array()
+            .expect("rendered client array"),
+        &mut changes,
+    )?;
+    if current_init.get("command") != Some(&expected["command"]) {
+        changes.push(serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/{init_index}/command"),"value":expected["command"]}));
     }
     Ok(changes)
+}
+
+/// The support image a Pod mounts its daemon from, or `None` when its
+/// `codewire-bin` is an emptyDir filled by the daemon init container.
+fn workspace_daemon_image(spec: &Value) -> anyhow::Result<Option<&str>> {
+    let volumes = spec
+        .get("volumes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut daemon = volumes
+        .iter()
+        .filter(|volume| volume["name"] == super::template::DAEMON_VOLUME);
+    let volume = daemon.next();
+    anyhow::ensure!(
+        daemon.next().is_none(),
+        "workspace daemon volume is duplicated"
+    );
+    let Some(image) = volume.and_then(|volume| volume.get("image")) else {
+        return Ok(None);
+    };
+    image
+        .get("reference")
+        .and_then(Value::as_str)
+        .filter(|reference| !reference.is_empty())
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("workspace daemon image is malformed"))
 }
 
 fn require_bootstrap_object(

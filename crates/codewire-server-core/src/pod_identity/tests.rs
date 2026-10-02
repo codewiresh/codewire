@@ -9,10 +9,11 @@ use tokio::sync::Notify;
 
 use super::*;
 
-const PURPOSES: [PodIdentityPurpose; 3] = [
+const PURPOSES: [PodIdentityPurpose; 4] = [
     PodIdentityPurpose::GatewayBinding,
     PodIdentityPurpose::CredentialGateway,
     PodIdentityPurpose::CredentialWorkspace,
+    PodIdentityPurpose::WorkspaceBinding,
 ];
 const CANARY: &str = "synthetic-sensitive-pod-token-canary";
 

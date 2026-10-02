@@ -11,9 +11,13 @@ const desired = { cpuMillicores: 2000, memoryMib: 4096, diskGib: 20 };
 async function transport(page: Page) {
   const state = { plans: 0, applies: 0, observations: 0, lost: false, restart: false, foreign: false,
     oversized: false, operationState: "applying", observationUnavailable: false,
-    planGate: Promise.resolve(), applyGate: Promise.resolve() };
-  await page.route("**/_fragments/terminal-readiness", (route) => route.fulfill({ json: {
-    environmentId: environment, running: true, setupComplete: true,
+    // undefined answers like a server from before setupRunning existed.
+    setupRunning: false as boolean | undefined,
+    planRefusal: null as Record<string, unknown> | null, planGate: Promise.resolve(), applyGate: Promise.resolve() };
+  // Only the opted-in readiness request is answered.
+  await page.route("**/_fragments/terminal-readiness?fields=setup", (route) => route.fulfill({ json: {
+    environmentId: environment, running: true, setupComplete: state.setupRunning !== true,
+    ...(state.setupRunning === undefined ? {} : { setupRunning: state.setupRunning }),
     detail: { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
       resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
       startEligible: false, stopEligible: true, deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false },
@@ -24,6 +28,7 @@ async function transport(page: Page) {
     expect([...form.keys()].sort()).toEqual(["_csrf", "account_id", "cpu_millicores", "disk_gb", "memory_mb"]);
     expect(form.get("account_id")).toBe("account-a");
     await state.planGate;
+    if (state.planRefusal) { await route.fulfill({ status: 409, json: state.planRefusal }); return; }
     await route.fulfill({ json: { accountId: state.foreign ? "account-b" : "account-a", environmentId: environment,
       requestId, previousResources: { cpuMillicores: 1000, memoryMib: 2048, diskGib: 10 }, desiredResources: desired,
       mode: state.restart ? "restart" : "in-place", restartRequired: state.restart,
@@ -145,6 +150,60 @@ test("reviews consequences and resolves only a matching operation observation", 
   await expect(footer(dialog)).toHaveText(["Cancel", "Review resize"]);
   await expect(dialog.locator("[data-resize-status]")).toBeEmpty();
   expect(state.applies).toBe(1);
+});
+
+// #2333: the server refuses Resize while setup owns the running Sandbox.
+test("Resize waits for setup with a visible reason and returns when setup finishes", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN");
+  const state = await transport(page);
+  state.setupRunning = true;
+  await page.goto(`${origin}/reference/fixtures/sandbox-resize.html`);
+  const opener = page.getByRole("button", { name: "Resize", exact: true });
+  const reason = page.getByText("Resize is available when setup finishes.", { exact: true });
+  await expect(reason).toBeVisible({ timeout: 15_000 });
+  await expect(opener).toBeVisible();
+  await expect(opener).toBeDisabled();
+  await expect(opener).toHaveAccessibleDescription("Resize is available when setup finishes.");
+  const bounds = (await reason.boundingBox())!;
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  state.setupRunning = false;
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(opener).toBeEnabled();
+  await expect(reason).toBeHidden();
+  await expect(opener).toHaveAccessibleDescription("");
+  // A server from before setupRunning omits it: Resize works as it did.
+  state.setupRunning = true;
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(opener).toBeDisabled();
+  state.setupRunning = undefined;
+  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await expect(opener).toBeEnabled();
+  await expect(reason).toBeHidden();
+  await expect(page.locator("[data-sandbox-observation-status]")).toBeHidden();
+  expect(state.plans).toBe(0);
+});
+
+test("a Review that races setup says setup is still running, never server text", async ({ page }) => {
+  const state = await transport(page);
+  const dialog = await open(page);
+  await dialog.getByLabel("CPU", { exact: true }).selectOption("2000");
+  const status = dialog.locator("[data-resize-status]");
+  state.planRefusal = { error: "setup-in-progress" };
+  await dialog.getByRole("button", { name: "Review resize", exact: true }).click();
+  await expect(status).toHaveText("Setup is still running. Nothing was applied. You can resize when it finishes.");
+  await expect(dialog.locator("[data-resize-plan]")).toBeHidden();
+  await expect(footer(dialog)).toHaveText(["Cancel", "Review resize"]);
+  // Only the closed code is trusted: other refusals stay generic.
+  for (const [index, refusal] of [{ error: "setup-in-progress", detail: "private server text" }, { error: "account-changed" }].entries()) {
+    state.planRefusal = refusal;
+    await dialog.getByRole("button", { name: "Review resize", exact: true }).click();
+    await expect.poll(() => state.plans).toBe(index + 2);
+    await expect(status).toHaveText("The resize could not be reviewed. Nothing was applied. Check current status before reviewing again.");
+  }
+  await expect(dialog).not.toContainText("private server text");
+  expect(state.plans).toBe(3);
+  expect(state.applies).toBe(0);
 });
 
 test("Back keeps the chosen values and Cancel closes without a request", async ({ page }) => {
@@ -318,10 +377,10 @@ test("a current value outside the fixed choices stays selected as its own choice
   let release = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
   const live = { cpuMillicores: 1500, memoryMib: 3072 };
-  await page.route("**/_fragments/terminal-readiness", async (route) => {
+  await page.route("**/_fragments/terminal-readiness?fields=setup", async (route) => {
     await held;
     await route.fulfill({ json: {
-      environmentId: environment, running: true, setupComplete: true,
+      environmentId: environment, running: true, setupComplete: true, setupRunning: false,
       detail: { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
         resources: "live", ...live, diskGib: 10, startEligible: false, stopEligible: true, deleteEligible: true,
         deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false },

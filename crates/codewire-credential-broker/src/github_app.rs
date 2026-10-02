@@ -107,6 +107,17 @@ impl GitHubAppUserOAuthBundle {
             <= now_unix.saturating_add(ACCESS_TOKEN_RENEWAL_SKEW_SECONDS))
     }
 
+    /// Access- and refresh-token expiry, in Unix seconds, from the validated
+    /// bundle. Neither value is material; both were derived at rotation time.
+    #[cfg(feature = "platform")]
+    pub(crate) fn expiry_times(&self) -> Result<(u64, u64), GitHubAppAuthorizationError> {
+        let payload = parse_bundle_payload(&self.bytes)?;
+        Ok((
+            payload.access_expires_at_unix,
+            payload.refresh_expires_at_unix,
+        ))
+    }
+
     pub(crate) fn redaction_components(
         &self,
     ) -> Result<Vec<Zeroizing<Vec<u8>>>, GitHubAppAuthorizationError> {

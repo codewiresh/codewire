@@ -176,7 +176,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 66
+  assert_passed_count "server-core migration matrix" "$logfile" 71
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
@@ -252,7 +252,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test refresh \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential refresh matrix" "$logfile" 13
+  assert_passed_count "platform credential refresh matrix" "$logfile" 14
 
   logfile="$RUN_DIR/platform-credential-authority.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -264,7 +264,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib platform::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker admission matrix" "$logfile" 14
+  assert_passed_count "platform broker admission matrix" "$logfile" 18
 
   logfile="$RUN_DIR/platform-broker-ssh.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -324,7 +324,7 @@ run_database() {
     echo "::error::organization deletion lifecycle matrix skipped"
     return 1
   fi
-  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 18
+  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 20
 
   logfile="$RUN_DIR/organization-billing-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -351,7 +351,7 @@ run_database() {
     echo "::error::environment external cleanup matrix skipped"
     return 1
   fi
-  assert_passed_count "environment external cleanup matrix" "$logfile" 3
+  assert_passed_count "environment external cleanup matrix" "$logfile" 8
 
   logfile="$RUN_DIR/environment-session-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -417,6 +417,20 @@ run_database() {
       'api::environment_resize::tests::db_' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "environment resize admission matrix" "$logfile" 2
+
+  logfile="$RUN_DIR/ssh-proxy-runtime-lease.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::ssh_proxy::database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "SSH proxy runtime lease matrix" "$logfile" 2
+
+  logfile="$RUN_DIR/environment-daemon-repair-lease.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_daemon::repair_database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment daemon repair lease matrix" "$logfile" 2
 
 }
 

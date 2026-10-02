@@ -34,6 +34,31 @@ pub enum Action {
 /// lost CAS as a warning.
 pub const STATE_NOT_TRANSITIONED: &str = "environment state did not transition";
 
+/// The instant one destroy attempt began proving that an environment's
+/// runtime is gone, read from the database clock that also stamps lease
+/// transitions.
+///
+/// A runtime dispatch that settled as ambiguous before this instant had
+/// already stopped acting, so every runtime effect it could have left on the
+/// environment is removed or proven absent by the cleanup steps that follow.
+/// One that settled later may have acted while the proof ran, so it needs a
+/// new attempt. Lease expiry is never part of this decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeAbsenceProof {
+    started_at: chrono::NaiveDateTime,
+}
+
+impl RuntimeAbsenceProof {
+    /// Call before the first cleanup step of a destroy attempt.
+    pub async fn begin(pool: &PgPool) -> anyhow::Result<Self> {
+        let started_at = sqlx::query_scalar("SELECT LOCALTIMESTAMP")
+            .fetch_one(pool)
+            .await
+            .map_err(|error| anyhow::anyhow!("read runtime absence proof start: {error}"))?;
+        Ok(Self { started_at })
+    }
+}
+
 /// Mirrors `environmentlifecycle.Store` (the slice the worker needs).
 pub trait LifecycleStore {
     fn reset_for_retry(
@@ -69,6 +94,7 @@ pub trait LifecycleStore {
         &self,
         env_id: &str,
         already_destroyed: bool,
+        proof: RuntimeAbsenceProof,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
     fn schedule_shutdown_after_ttl(
         &self,
@@ -337,13 +363,16 @@ impl<S: LifecycleStore> Service<S> {
             .map_err(|e| anyhow::anyhow!("mark stopped: {e:#}"))
     }
 
+    /// Write the durable cleanup marker after `proof`'s attempt removed the
+    /// environment's runtime.
     pub async fn complete_external_cleanup(
         &self,
         env_id: &str,
         already_destroyed: bool,
+        proof: RuntimeAbsenceProof,
     ) -> anyhow::Result<()> {
         self.store
-            .complete_external_cleanup(env_id, already_destroyed)
+            .complete_external_cleanup(env_id, already_destroyed, proof)
             .await
             .map_err(|e| anyhow::anyhow!("complete external cleanup: {e:#}"))
     }
@@ -470,8 +499,12 @@ impl<S: LifecycleStore> Service<S> {
         }
     }
 
-    pub async fn complete_destroy(&self, env_id: &str) -> anyhow::Result<()> {
-        self.complete_external_cleanup(env_id, false).await
+    pub async fn complete_destroy(
+        &self,
+        env_id: &str,
+        proof: RuntimeAbsenceProof,
+    ) -> anyhow::Result<()> {
+        self.complete_external_cleanup(env_id, false, proof).await
     }
 
     /// Mirrors `Reconcile`: next action from the snapshot; the
@@ -760,6 +793,7 @@ impl LifecycleStore for PgLifecycleStore {
         &self,
         env_id: &str,
         already_destroyed: bool,
+        proof: RuntimeAbsenceProof,
     ) -> anyhow::Result<()> {
         let (phase, message, metadata) = if already_destroyed {
             (
@@ -799,6 +833,20 @@ impl LifecycleStore for PgLifecycleStore {
         if let Some(authority) = &self.authority {
             authority.lock_transaction(&mut tx).await?;
         }
+        // The organization row lock above orders this statement after every
+        // committed runtime admission; a later admission sees the marker and
+        // releases itself. Only dispatches that may target this environment
+        // (its own, and organization-wide ones such as creation or leases
+        // admitted before leases recorded their environment) can block it:
+        // - an active one may still be acting;
+        // - an ambiguous one that settled after `proof` began may have acted
+        //   while the proof ran, so the next attempt must prove absence again.
+        // This environment's ambiguous dispatches that settled before `proof`
+        // began are resolved here, in the same statement as the marker: the
+        // proof covers every runtime effect they could have left. An
+        // organization-wide one may concern another environment, so it stays
+        // for organization deletion to resolve after every environment's
+        // proof.
         let tag = sqlx::query(
             r#"WITH target AS (
                        SELECT id, org_id
@@ -812,7 +860,11 @@ impl LifecycleStore for PgLifecycleStore {
                              FROM organization_mutation_leases lease
                              WHERE lease.organization_id = environments.org_id
                                AND lease.mutation_class = 'environment_runtime_dispatch'
-                               AND lease.state IN ('active', 'resolution_required')
+                               AND (lease.environment_id = environments.id
+                                    OR lease.environment_id IS NULL)
+                               AND (lease.state = 'active'
+                                    OR (lease.state = 'resolution_required'
+                                        AND lease.resolution_required_at >= $3))
                          )
                          AND NOT EXISTS (
                              SELECT 1
@@ -820,6 +872,16 @@ impl LifecycleStore for PgLifecycleStore {
                              WHERE port.environment_id = environments.id
                          )
                        FOR UPDATE
+                   ), resolved_dispatches AS (
+                       UPDATE organization_mutation_leases lease
+                       SET state = 'resolved', resolved_at = NOW(), updated_at = NOW()
+                       FROM target
+                       WHERE lease.organization_id = target.org_id
+                         AND lease.mutation_class = 'environment_runtime_dispatch'
+                         AND lease.environment_id = target.id
+                         AND lease.state = 'resolution_required'
+                         AND lease.resolution_required_at < $3
+                       RETURNING lease.id
                    ), closed_sessions AS (
                        UPDATE sandbox_running_sessions session
                        SET ended_at = COALESCE(session.ended_at, NOW()),
@@ -856,6 +918,7 @@ impl LifecycleStore for PgLifecycleStore {
         )
         .bind(env_id)
         .bind(already_destroyed)
+        .bind(proof.started_at)
         .execute(&mut *tx)
         .await?;
         if tag.rows_affected() == 1 {
@@ -1149,7 +1212,12 @@ mod tests {
         async fn mark_stopped(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn complete_external_cleanup(&self, _: &str, _: bool) -> anyhow::Result<()> {
+        async fn complete_external_cleanup(
+            &self,
+            _: &str,
+            _: bool,
+            _: RuntimeAbsenceProof,
+        ) -> anyhow::Result<()> {
             self.0
                 .lock()
                 .unwrap()

@@ -31,8 +31,12 @@
   const memory = (mib) => mib % 1024 === 0 ? `${mib / 1024} GiB` : `${mib} MiB`;
   const describe = (value) => `${value.cpuMillicores / 1000} vCPU · ${memory(value.memoryMib)} memory · ${value.diskGib} GiB disk`;
 
+  // The one refusal Review explains: setup still owns the running Sandbox.
+  // Only its closed code is read; server text is never shown.
+  class SetupInProgress extends Error {}
   async function boundedJson(response) {
-    if (!response.ok || response.headers.get("content-type")?.split(";", 1)[0].trim() !== "application/json") {
+    const refusal = response.status === 409;
+    if ((!response.ok && !refusal) || response.headers.get("content-type")?.split(";", 1)[0].trim() !== "application/json") {
       await response.body?.cancel();
       throw new Error("Resize response unavailable");
     }
@@ -48,7 +52,10 @@
       if (size > 2048) { await reader.cancel(); throw new Error("Resize response unavailable"); }
       text += decoder.decode(part.value, { stream: true });
     }
-    return JSON.parse(text + decoder.decode());
+    const value = JSON.parse(text + decoder.decode());
+    if (response.ok) return value;
+    throw P.closed(value, ["error"]) && value.error === "setup-in-progress"
+      ? new SetupInProgress("Setup is still running") : new Error("Resize response unavailable");
   }
 
   function mount(dialog) {
@@ -163,8 +170,8 @@
           redirect: "error", signal: controller.signal });
         const value = await boundedJson(response);
         if (version === epoch && dialog.open && !document.hidden && dialog.isConnected) accept(value);
-      } catch {
-        if (version === epoch && dialog.open && dialog.isConnected) unavailable();
+      } catch (error) {
+        if (version === epoch && dialog.open && dialog.isConnected) unavailable(error);
       } finally {
         clearTimeout(timeout);
         if (busy === controller) busy = null;
@@ -233,7 +240,12 @@
         status.textContent = "Review complete. Nothing has been applied. The server will recheck this change and its required consent.";
         controls();
         back.focus();
-      }, () => { plan = null; status.textContent = "The resize could not be reviewed. Nothing was applied. Check current status before reviewing again."; });
+      }, (error) => {
+        plan = null;
+        status.textContent = error instanceof SetupInProgress
+          ? "Setup is still running. Nothing was applied. You can resize when it finishes."
+          : "The resize could not be reviewed. Nothing was applied. Check current status before reviewing again.";
+      });
     });
     // Back returns to the chosen values without a request.
     function chooseAgain(message) {
@@ -287,7 +299,8 @@
     document.addEventListener("visibilitychange", () => { if (document.hidden) invalidate(); else if (attempt?.operationId) void poll(); });
     document.addEventListener("codewire:sandbox-status", (event) => {
       if (event.detail?.environmentId !== environment) return;
-      eligible = event.detail.available === true && event.detail.actionsAllowed === true && event.detail.pending === false;
+      eligible = event.detail.available === true && event.detail.actionsAllowed === true && event.detail.pending === false
+        && event.detail.setupRunning !== true;
       controls();
     });
   }

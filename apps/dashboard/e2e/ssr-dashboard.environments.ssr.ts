@@ -96,10 +96,19 @@ async function assertExplicitCreateRecovery(page: Page) {
     await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
     const requestedDraft = await form.getAttribute("data-create-draft-id");
     expect(requestedDraft).toMatch(/^[0-9a-f-]{36}$/);
-    // A second real Create draft is newer. Returning must not offer it in
-    // place of the original, or interpret discarded inventory selectors.
+    // Reopening Create brings this tab's newest draft back by itself.
     await page.goto(`/${slug}/new/`);
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
+    await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+    // A second real Create draft is newer. A return to an unavailable draft
+    // opens a fresh form without substituting one, and editing it saves that
+    // newer draft. Returning must not offer it in place of the original, or
+    // interpret discarded inventory selectors.
+    await page.goto(`/${slug}/new/?creation_draft=unavailable`);
+    await expect(form).toHaveAttribute("data-create-draft-exact", "true");
     await expect(form).not.toHaveAttribute("data-create-draft-id", requestedDraft!);
+    await expect(page.locator("[data-create-draft-status]")).toContainText("The requested draft is unavailable in this tab.");
     await page.locator("#environment-create-card").getByLabel("CPU", { exact: true }).selectOption("4000");
     await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
     for (const suffix of [
@@ -116,21 +125,36 @@ async function assertExplicitCreateRecovery(page: Page) {
     }
     await page.goto(`/${slug}/new/?destroyed=bogus&sources=first&sources=second&creation_draft=${requestedDraft}`);
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    // The page is served as an exact return of this draft. The automatic
+    // restore then swaps in the server's restored card, which carries the
+    // draft but not the page's return marker, so read that from the drawer.
+    await expect(page.locator("[data-drawer]")).toHaveAttribute("data-create-url", `/${slug}/new/?creation_draft=${requestedDraft}`);
     await expect(form).toHaveAttribute("data-create-draft-id", requestedDraft!);
-    await expect(form).toHaveAttribute("data-create-draft-exact", "true");
     await expect(form).toHaveAttribute("data-create-draft-actor", ownerId);
     await expect(form).toHaveAttribute("data-create-draft-organization", orgId);
+    // The exact older draft comes back by itself, never the newer one.
+    await expect(form).toHaveAttribute("data-create-draft-restored", "true");
+    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("draft-name-restored");
     // The unchanged drawer controller must keep the explicit query open
-    // through ordinary inventory polling, Back, and a closed/reopened view.
+    // through ordinary inventory polling, Back, and a reopened view.
     await page.waitForResponse((response) => response.url().includes(`/${slug}/_fragments/sandboxes`) && response.ok());
     await expect(page.locator("[data-drawer]")).toBeVisible();
     await page.goto(`/${slug}/`);
     await page.goBack();
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
     await expect(page.locator("[data-drawer]")).toBeVisible();
+    // Restored authored fields stay until Create or an explicit Discard:
+    // closing asks first, and Keep editing keeps the drawer and its query.
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("draft-name-restored");
     await page.locator("[data-drawer-panel]").getByRole("link", { name: "Close Create Sandbox" }).click();
-    await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
-    await expect(page.locator("[data-drawer]")).toBeHidden();
+    const discardRestored = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+    await expect(discardRestored.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
+    await discardRestored.getByRole("button", { name: "Keep editing", exact: true }).click();
+    await expect(discardRestored).toBeHidden();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
+    await expect(page.locator("[data-drawer]")).toBeVisible();
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("draft-name-restored");
     await page.goto(`/${slug}/new/?creation_draft=${requestedDraft}`);
     await expect(page.locator("[data-drawer]")).toBeVisible();
     await page.reload();
@@ -139,7 +163,10 @@ async function assertExplicitCreateRecovery(page: Page) {
     // Exercise the actual native Settings detour, not a direct fabricated
     // return URL: validation, mutation, and explicit Return retain this exact
     // older draft while the new source remains available but unattached.
+    // Leaving restored authored fields asks first; saving keeps the handle.
     await page.getByRole("link", { name: "Manage secret projects", exact: true }).click();
+    await page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true })
+      .getByRole("button", { name: "Save draft and leave", exact: true }).click();
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/secrets/?creation_draft=${requestedDraft}`);
     const returnLink = page.getByRole("link", { name: "Return to Sandbox creation", exact: true });
     await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
@@ -176,6 +203,8 @@ async function assertExplicitCreateRecovery(page: Page) {
     // Owning tests disable trace/video/failure screenshots around these inputs.
     const personalPath = `/settings/secrets/?creation_draft=${requestedDraft}`;
     await page.getByRole("link", { name: "Manage personal secrets", exact: true }).click();
+    await page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true })
+      .getByRole("button", { name: "Save draft and leave", exact: true }).click();
     await expect(page).toHaveURL(`${ssrUrl}${personalPath}`);
     const personalReturn = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
     await expect(personalReturn).toHaveAttribute("href", `/${slug}/new/?creation_draft=${requestedDraft}`);
@@ -1290,13 +1319,13 @@ test.describe.serial("server-rendered environments", () => {
     await expect(deleteDialog).toBeVisible();
     await expect(deleteDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await deleteDialog.getByRole("button", { name: "Delete Sandbox", exact: true }).click();
-    await expect(page).toHaveURL(`${ssrUrl}${filteredListPath}&message=environment-destroying`);
+    await expect(page).toHaveURL(`${ssrUrl}${filteredListPath}&message=environment-destroying&environment=${environmentId}`);
     await waitForEnvironmentState(environmentId, ["destroyed"], 120_000);
     const [destroyed] = await sql`SELECT external_cleanup_completed_at FROM environments WHERE id = ${environmentId}`;
     expect(destroyed.external_cleanup_completed_at).not.toBeNull();
     await page.goto(`/${slug}/?state=destroyed`);
     row = page.locator("tr", { hasText: environmentName }).first();
-    await expect(row.locator(".cw-status")).toContainText("destroyed");
+    await expect(row.locator(".cw-status")).toContainText("deleted");
     expect(disallowedBrowserCalls).toEqual([]);
   });
 });

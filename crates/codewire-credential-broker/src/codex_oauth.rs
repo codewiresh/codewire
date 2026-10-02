@@ -148,6 +148,13 @@ impl CodexOAuthCredential {
         self.fedramp
     }
 
+    /// When this material was imported or last rotated: the same signal Codex
+    /// CLI keeps as `last_refresh`. It is not an access-token expiry.
+    #[cfg(feature = "platform")]
+    pub(crate) fn refreshed_at_unix(&self) -> u64 {
+        self.refreshed_at_unix
+    }
+
     pub(crate) fn should_refresh(&self, now_unix: u64) -> bool {
         match jwt_expiration(&self.access_token) {
             Ok(Some(expires_at)) => {

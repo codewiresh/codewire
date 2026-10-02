@@ -2305,7 +2305,8 @@ assert_pod_shape() {
   local runtime_class gateway_runtime_class node gateway_node node_label gateway_node_label
   local gateway_image gateway_status_image gateway_image_id containers gateway_containers
   local gateway_host_key_env gateway_daemon_timeout gateway_startup_failure_threshold
-  local gateway_progress_deadline gateway_restart_count
+  local gateway_startup_period gateway_startup_budget gateway_progress_deadline
+  local gateway_restart_count
 
   kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$POD_NAME" -o json >"$pod_json"
   kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$GATEWAY_POD_NAME" -o json >"$gateway_pod_json"
@@ -2327,6 +2328,7 @@ assert_pod_shape() {
   gateway_host_key_env="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_SSH_HOST_KEY_PATH") | .value // ""' "$gateway_pod_json")"
   gateway_daemon_timeout="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS") | .value // ""' "$gateway_pod_json")"
   gateway_startup_failure_threshold="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .startupProbe.failureThreshold // 0' "$gateway_pod_json")"
+  gateway_startup_period="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .startupProbe.periodSeconds // 0' "$gateway_pod_json")"
   gateway_progress_deadline="$(jq -r '.items[0].spec.progressDeadlineSeconds // 0' "$gateway_deploy_json")"
   gateway_restart_count="$(jq -r '.status.containerStatuses[]? | select(.name=="codewire-gateway") | .restartCount // 0' "$gateway_pod_json")"
   assert_pod_coco_kernel_params "$pod_json" "workspace pod"
@@ -2357,18 +2359,19 @@ assert_pod_shape() {
   [[ "$gateway_host_key_env" == "/codewire/gateway/ssh/host_ed25519" ]] || \
     die "gateway CODEWIRE_SSH_HOST_KEY_PATH=$gateway_host_key_env, want /codewire/gateway/ssh/host_ed25519"
   # The gateway waits for its daemon without a deadline. Its startup probe
-  # (2s period) and rollout deadline match the tier's workspace ready timeout.
-  local want_startup_failure_threshold=300 want_progress_deadline=600
+  # budget (failureThreshold x periodSeconds) and rollout deadline match the
+  # tier's workspace ready timeout.
+  local want_ready_timeout=600
   if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
-    want_startup_failure_threshold=900
-    want_progress_deadline=1800
+    want_ready_timeout=1800
   fi
   [[ -z "$gateway_daemon_timeout" ]] || \
     die "gateway has a daemon-connect deadline=$gateway_daemon_timeout, want none"
-  [[ "$gateway_startup_failure_threshold" == "$want_startup_failure_threshold" ]] || \
-    die "gateway startup failureThreshold=$gateway_startup_failure_threshold, want $want_startup_failure_threshold"
-  [[ "$gateway_progress_deadline" == "$want_progress_deadline" ]] || \
-    die "gateway progressDeadlineSeconds=$gateway_progress_deadline, want $want_progress_deadline"
+  gateway_startup_budget=$((gateway_startup_failure_threshold * gateway_startup_period))
+  [[ "$gateway_startup_budget" == "$want_ready_timeout" ]] || \
+    die "gateway startup probe budget=${gateway_startup_budget}s (failureThreshold=$gateway_startup_failure_threshold, periodSeconds=$gateway_startup_period), want ${want_ready_timeout}s"
+  [[ "$gateway_progress_deadline" == "$want_ready_timeout" ]] || \
+    die "gateway progressDeadlineSeconds=$gateway_progress_deadline, want $want_ready_timeout"
   [[ "$gateway_restart_count" == "0" ]] || \
     die "gateway restarted $gateway_restart_count time(s) during startup"
   # Bind readiness and the exact host-key projection/copy shape to this one

@@ -36,6 +36,9 @@ const (
 	// GatewayBindingServiceIssueGatewayBindingProcedure is the fully-qualified name of the
 	// GatewayBindingService's IssueGatewayBinding RPC.
 	GatewayBindingServiceIssueGatewayBindingProcedure = "/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+	// GatewayBindingServiceIssueGatewayDaemonCredentialProcedure is the fully-qualified name of the
+	// GatewayBindingService's IssueGatewayDaemonCredential RPC.
+	GatewayBindingServiceIssueGatewayDaemonCredentialProcedure = "/codewire.internal.v1.GatewayBindingService/IssueGatewayDaemonCredential"
 )
 
 // GatewayBindingServiceClient is a client for the codewire.internal.v1.GatewayBindingService
@@ -44,6 +47,10 @@ type GatewayBindingServiceClient interface {
 	// IssueGatewayBinding resolves a pod binding and issues a fresh sidecar
 	// token. A not-yet-bound pod receives not_found so the gateway can retry.
 	IssueGatewayBinding(context.Context, *connect.Request[v1.IssueGatewayBindingRequest]) (*connect.Response[v1.IssueGatewayBindingResponse], error)
+	// Returns the daemon credential for the environment's currently bound
+	// workspace Pod. Unlike IssueGatewayBinding it does not require
+	// state=running. It returns not_found until a binding is recorded.
+	IssueGatewayDaemonCredential(context.Context, *connect.Request[v1.IssueGatewayDaemonCredentialRequest]) (*connect.Response[v1.IssueGatewayDaemonCredentialResponse], error)
 }
 
 // NewGatewayBindingServiceClient constructs a client for the
@@ -63,17 +70,30 @@ func NewGatewayBindingServiceClient(httpClient connect.HTTPClient, baseURL strin
 			connect.WithSchema(gatewayBindingServiceMethods.ByName("IssueGatewayBinding")),
 			connect.WithClientOptions(opts...),
 		),
+		issueGatewayDaemonCredential: connect.NewClient[v1.IssueGatewayDaemonCredentialRequest, v1.IssueGatewayDaemonCredentialResponse](
+			httpClient,
+			baseURL+GatewayBindingServiceIssueGatewayDaemonCredentialProcedure,
+			connect.WithSchema(gatewayBindingServiceMethods.ByName("IssueGatewayDaemonCredential")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // gatewayBindingServiceClient implements GatewayBindingServiceClient.
 type gatewayBindingServiceClient struct {
-	issueGatewayBinding *connect.Client[v1.IssueGatewayBindingRequest, v1.IssueGatewayBindingResponse]
+	issueGatewayBinding          *connect.Client[v1.IssueGatewayBindingRequest, v1.IssueGatewayBindingResponse]
+	issueGatewayDaemonCredential *connect.Client[v1.IssueGatewayDaemonCredentialRequest, v1.IssueGatewayDaemonCredentialResponse]
 }
 
 // IssueGatewayBinding calls codewire.internal.v1.GatewayBindingService.IssueGatewayBinding.
 func (c *gatewayBindingServiceClient) IssueGatewayBinding(ctx context.Context, req *connect.Request[v1.IssueGatewayBindingRequest]) (*connect.Response[v1.IssueGatewayBindingResponse], error) {
 	return c.issueGatewayBinding.CallUnary(ctx, req)
+}
+
+// IssueGatewayDaemonCredential calls
+// codewire.internal.v1.GatewayBindingService.IssueGatewayDaemonCredential.
+func (c *gatewayBindingServiceClient) IssueGatewayDaemonCredential(ctx context.Context, req *connect.Request[v1.IssueGatewayDaemonCredentialRequest]) (*connect.Response[v1.IssueGatewayDaemonCredentialResponse], error) {
+	return c.issueGatewayDaemonCredential.CallUnary(ctx, req)
 }
 
 // GatewayBindingServiceHandler is an implementation of the
@@ -82,6 +102,10 @@ type GatewayBindingServiceHandler interface {
 	// IssueGatewayBinding resolves a pod binding and issues a fresh sidecar
 	// token. A not-yet-bound pod receives not_found so the gateway can retry.
 	IssueGatewayBinding(context.Context, *connect.Request[v1.IssueGatewayBindingRequest]) (*connect.Response[v1.IssueGatewayBindingResponse], error)
+	// Returns the daemon credential for the environment's currently bound
+	// workspace Pod. Unlike IssueGatewayBinding it does not require
+	// state=running. It returns not_found until a binding is recorded.
+	IssueGatewayDaemonCredential(context.Context, *connect.Request[v1.IssueGatewayDaemonCredentialRequest]) (*connect.Response[v1.IssueGatewayDaemonCredentialResponse], error)
 }
 
 // NewGatewayBindingServiceHandler builds an HTTP handler from the service implementation. It
@@ -97,10 +121,18 @@ func NewGatewayBindingServiceHandler(svc GatewayBindingServiceHandler, opts ...c
 		connect.WithSchema(gatewayBindingServiceMethods.ByName("IssueGatewayBinding")),
 		connect.WithHandlerOptions(opts...),
 	)
+	gatewayBindingServiceIssueGatewayDaemonCredentialHandler := connect.NewUnaryHandler(
+		GatewayBindingServiceIssueGatewayDaemonCredentialProcedure,
+		svc.IssueGatewayDaemonCredential,
+		connect.WithSchema(gatewayBindingServiceMethods.ByName("IssueGatewayDaemonCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.internal.v1.GatewayBindingService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case GatewayBindingServiceIssueGatewayBindingProcedure:
 			gatewayBindingServiceIssueGatewayBindingHandler.ServeHTTP(w, r)
+		case GatewayBindingServiceIssueGatewayDaemonCredentialProcedure:
+			gatewayBindingServiceIssueGatewayDaemonCredentialHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -112,4 +144,8 @@ type UnimplementedGatewayBindingServiceHandler struct{}
 
 func (UnimplementedGatewayBindingServiceHandler) IssueGatewayBinding(context.Context, *connect.Request[v1.IssueGatewayBindingRequest]) (*connect.Response[v1.IssueGatewayBindingResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.GatewayBindingService.IssueGatewayBinding is not implemented"))
+}
+
+func (UnimplementedGatewayBindingServiceHandler) IssueGatewayDaemonCredential(context.Context, *connect.Request[v1.IssueGatewayDaemonCredentialRequest]) (*connect.Response[v1.IssueGatewayDaemonCredentialResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.GatewayBindingService.IssueGatewayDaemonCredential is not implemented"))
 }

@@ -2,6 +2,9 @@
   "use strict";
   const P = globalThis.CodewireTerminalProtocol;
   const states = ["pending", "pending build", "building", "build failed", "pulling snapshot", "creating", "starting", "running", "stopping", "stopped", "archiving", "archived", "restoring", "resizing", "destroying", "destroyed", "error", "unknown"];
+  // Deletion reads in the product's Delete language; other states as named.
+  const stateLabels = { destroying: "deleting…", destroyed: "deleted" };
+  const deletionStates = ["destroying", "destroyed"];
   const detailFields = ["state", "desiredState", "tone", "lastEvent", "resources", "deletionState", "shutdownAt", "cpuMillicores", "memoryMib", "diskGib", "startEligible", "stopEligible", "deleteEligible", "actionsAllowed", "pending"];
 
   function validDeadline(value) {
@@ -66,7 +69,9 @@
     const environmentId = root.dataset.terminalEnvironmentId;
     const slug = root.dataset.terminalOrgSlug;
     if (!P.uuid.test(environmentId || "") || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug || "") || slug.length < 3 || slug.length > 48) return;
-    const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness`;
+    // Ask for setupRunning explicitly: the server omits it for pages that
+    // predate it, whose closed-shape check would otherwise reject the response.
+    const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=setup`;
     const button = root.querySelector("[data-terminal-readiness-refresh]");
     const heading = document.querySelector("[data-sandbox-observation]");
     const observesDetail = heading?.dataset.sandboxEnvironmentId === environmentId;
@@ -77,6 +82,9 @@
     // Until the first readiness response settles, keep the rendered values and
     // controls (disabled) instead of calling status unavailable.
     let settled = false;
+    let everSettled = false;
+    // Deletion is final: once observed, the page stops asking for status.
+    let deleted = false;
     function observe(available, value) {
       if (!observesDetail) return;
       const detail = value?.detail;
@@ -85,8 +93,18 @@
       heading.dataset.observationAvailable = String(available);
       if (available) {
         const state = heading.querySelector("[data-sandbox-state]");
-        state.textContent = detail.state;
+        state.textContent = stateLabels[detail.state] || detail.state;
         state.dataset.tone = detail.tone;
+        // A Sandbox being deleted has no actions and no terminal; a deleted
+        // one says so and links back. A failed deletion (error) restores
+        // the actions that recover it.
+        const ending = deletionStates.includes(detail.state);
+        deleted = detail.state === "destroyed";
+        const actions = heading.querySelector("[data-sandbox-actions]");
+        if (actions) actions.hidden = ending;
+        const back = heading.querySelector("[data-sandbox-deleted]");
+        if (back) back.hidden = !deleted;
+        root.hidden = ending;
         heading.querySelector("[data-sandbox-last-event]").textContent = detail.lastEvent;
         document.querySelectorAll("[data-sandbox-resources]").forEach((node) => { node.textContent = detail.resources; });
         heading.querySelectorAll("[data-sandbox-lifetime]").forEach((node) => { showDeadline(node, detail); });
@@ -105,15 +123,23 @@
           if (fallback && document.querySelector('dialog[data-resize-enhanced="true"]')) fallback.hidden = true;
         }
       }
-      status.textContent = !available ? !settled ? ""
+      // Before any response the page keeps its rendered status (a deletion
+      // message, or nothing) rather than calling the Sandbox unavailable.
+      status.textContent = !available ? !settled ? everSettled ? "" : status.textContent
           : "Sandbox status is unavailable. Last known values are shown; actions are paused."
         : submissionPending ? returnedAfterSubmission
           ? "The submitted action's outcome is not confirmed. Reload this page to reconcile it before taking another action. No action was retried."
           : "Action submitted. Waiting for its response; no action will be retried automatically."
+        : detail.state === "destroyed" ? "This Sandbox was deleted."
+        : detail.state === "destroying" ? "This Sandbox is being deleted."
         : detail.pending ? "A Sandbox operation is pending. Waiting for the observed state to match its requested state."
-        : ["error", "build failed"].includes(detail.state) ? detail.startEligible
-          ? "The Sandbox operation failed. Choose Start to try again."
-          : "The Sandbox operation failed. Refresh status to check its current state; no action was retried."
+        : ["error", "build failed"].includes(detail.state) ? detail.desiredState === "destroyed"
+          ? detail.deleteEligible
+            ? "This Sandbox could not be deleted. Choose Delete to try again."
+            : "This Sandbox could not be deleted. Refresh status to check its current state; no action was retried."
+          : detail.startEligible
+            ? "The Sandbox operation failed. Choose Start to try again."
+            : "The Sandbox operation failed. Refresh status to check its current state; no action was retried."
         : "";
       status.hidden = status.textContent.length === 0;
       if (reload) reload.hidden = !returnedAfterSubmission;
@@ -121,7 +147,7 @@
         const action = control.dataset.sandboxAction;
         const eligible = available && !submissionPending && !(resizeLocked && ["start", "stop", "delete", "resize"].includes(action))
           && ({ start: detail.startEligible, stop: detail.stopEligible,
-          delete: detail.deleteEligible, resize: detail.actionsAllowed && !detail.pending,
+          delete: detail.deleteEligible, resize: detail.actionsAllowed && !detail.pending && value.setupRunning !== true,
           ports: detail.actionsAllowed, connect: value.running && value.setupComplete })[action] === true;
         if (control instanceof HTMLButtonElement) control.disabled = !eligible;
         if (control instanceof HTMLAnchorElement) {
@@ -135,6 +161,18 @@
           control.hidden = !eligible && available && !submissionPending;
         }
       }
+      // Resize waits while setup owns the running Sandbox, as New terminal
+      // does, and says why. The rendered reason stands until status settles.
+      const setupNote = document.querySelector("[data-resize-setup-note]");
+      if (setupNote && settled) {
+        const waiting = available && !submissionPending && !resizeLocked && value.setupRunning === true
+          && detail.actionsAllowed && !detail.pending;
+        setupNote.hidden = !waiting;
+        for (const control of document.querySelectorAll('[data-resize-open], [data-sandbox-action="resize"]')) {
+          if (waiting) control.setAttribute("aria-describedby", setupNote.id);
+          else control.removeAttribute("aria-describedby");
+        }
+      }
     }
     let epoch = 0;
     let pending = null;
@@ -146,7 +184,8 @@
       observe(available, value);
       document.dispatchEvent(new CustomEvent("codewire:sandbox-status", {
         detail: { environmentId, available, running: value?.running === true,
-          setupComplete: value?.setupComplete === true, actionsAllowed: value?.detail?.actionsAllowed === true,
+          setupComplete: value?.setupComplete === true, setupRunning: value?.setupRunning === true,
+          actionsAllowed: value?.detail?.actionsAllowed === true,
           pending: value?.detail?.pending !== false, checking: !settled },
       }));
     };
@@ -197,18 +236,22 @@
         }
         text += decoder.decode();
         const value = JSON.parse(text);
-        if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"])
+        // A server from before setupRunning omits it; that reads as false, so
+        // Resize behaves as before and the server's refusal covers setup.
+        if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"], ["setupRunning"])
           || value.environmentId !== environmentId || typeof value.running !== "boolean"
-          || typeof value.setupComplete !== "boolean" || !validDetail(value.detail)) throw new Error("Invalid readiness");
-        if (version === epoch && !paused && !document.hidden && root.isConnected) { settled = true; report(true, value); }
+          || typeof value.setupComplete !== "boolean"
+          || (Object.hasOwn(value, "setupRunning") && typeof value.setupRunning !== "boolean")
+          || !validDetail(value.detail)) throw new Error("Invalid readiness");
+        if (version === epoch && !paused && !document.hidden && root.isConnected) { settled = everSettled = true; report(true, value); }
       } catch {
-        if (version === epoch && !paused && root.isConnected) { settled = true; report(false); }
+        if (version === epoch && !paused && root.isConnected) { settled = everSettled = true; report(false); }
       } finally {
         clearTimeout(timeout);
         if (pending === controller) pending = null;
         if (version === epoch) {
           controls();
-          if (!paused && !document.hidden && root.isConnected) timer = setTimeout(refresh, 5000);
+          if (!paused && !document.hidden && root.isConnected && !deleted) timer = setTimeout(refresh, 5000);
         }
       }
     }

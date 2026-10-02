@@ -1467,6 +1467,7 @@ mod tests {
                 public_key_id: "public-key-1".into(),
                 api_key: false,
                 oauth: true,
+                reconnect_needed: false,
                 revoked: false,
                 oauth_provider: "github",
             }],
@@ -1631,6 +1632,45 @@ mod tests {
         }
         assert!(!html.contains("type=\"button\" data-dialog-open"));
         assert!(!html.contains("type=\"button\" data-dialog-close"));
+    }
+
+    #[test]
+    fn reconnect_needed_rows_offer_reconnect_on_the_row_itself() {
+        let mut data = dialog_data();
+        let mut codex = dialog_data().credentials.remove(0);
+        codex.id = "00000000-0000-4000-8000-000000000005".into();
+        codex.name = "Work Codex".into();
+        codex.provider = "OpenAI Codex";
+        codex.account_hint = "owner@example.test".into();
+        codex.oauth_provider = "codex";
+        codex.status = "Reconnect needed";
+        codex.status_tone = "warning";
+        codex.reconnect_needed = true;
+        data.credentials.push(codex);
+        let html = rendered_dialogs_with_data("", "", data);
+        let row = |id: &str| {
+            html.split("<li class=\"cw-credential-row\">")
+                .find(|row| row.contains(&format!("credential-{id}-reconnect")))
+                .unwrap()
+                .split("<dialog")
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let failed = row("00000000-0000-4000-8000-000000000005");
+        assert!(failed.contains(
+            "<span class=\"cw-status cw-status--pill cw-credential-status\" data-tone=\"warning\">Reconnect needed</span>"
+        ));
+        // Outside the ⋯ menu, opening the existing exact Reconnect dialog.
+        let action = failed.split("</details>").nth(1).unwrap();
+        assert!(action.contains(
+            "<button class=\"cw-button cw-credential-reconnect\" type=\"submit\" data-dialog-open=\"credential-00000000-0000-4000-8000-000000000005-reconnect\" aria-haspopup=\"dialog\" aria-controls=\"credential-00000000-0000-4000-8000-000000000005-reconnect\">Reconnect<span class=\"cw-sr-only\"> Work Codex</span></button>"
+        ));
+        assert!(html.contains("id=\"credential-00000000-0000-4000-8000-000000000005-reconnect\""));
+        let active = row("00000000-0000-4000-8000-000000000001");
+        assert!(active.contains(">Active</span>"));
+        assert!(!active.contains("cw-credential-reconnect"));
+        assert_eq!(html.matches("cw-credential-reconnect").count(), 1);
     }
 
     #[test]

@@ -27,7 +27,14 @@ use super::{
     WORKSPACE_READY_TIMEOUT,
 };
 
-const GATEWAY_STARTUP_PROBE_PERIOD_SECONDS: i64 = 2;
+// Create and start wait for the gateway rollout, and the gateway reports
+// ready only once it reaches the workspace daemon, so the startup probe
+// period is how late a create can notice the daemon. The startup probe stops
+// after its first success, when the kubelet runs the readiness probe at once;
+// the steady-state readiness probe keeps its 2-second period.
+const GATEWAY_STARTUP_PROBE_PERIOD_SECONDS: i64 = 1;
+const GATEWAY_READINESS_PROBE_PERIOD_SECONDS: i64 = 2;
+const GATEWAY_READINESS_FAILURE_THRESHOLD: i64 = 3;
 pub(super) const GATEWAY_BINDING_TOKEN_VOLUME: &str = "gateway-binding-identity";
 // The gateway waits for its workspace daemon without exiting and reports not
 // ready meanwhile, so a slow start is bounded only by the tier's workspace
@@ -64,10 +71,10 @@ pub(super) fn gateway_direct_udp_endpoint(opts: &TemplateOpts) -> Option<String>
     Some(format!("{ip}:{}", opts.direct_udp_lb_port))
 }
 
-fn gateway_http_probe(failure_threshold: i64) -> Value {
+fn gateway_http_probe(period_seconds: i64, failure_threshold: i64) -> Value {
     json!({
         "httpGet": { "path": "/readyz", "port": DEFAULT_GATEWAY_READYZ_PORT },
-        "periodSeconds": GATEWAY_STARTUP_PROBE_PERIOD_SECONDS,
+        "periodSeconds": period_seconds,
         "timeoutSeconds": 2,
         "failureThreshold": failure_threshold,
     })
@@ -79,8 +86,12 @@ fn apply_sidecar_probes(gateway: &mut Value, confidential: bool) {
     } else {
         COMMODITY_GATEWAY_STARTUP_FAILURE_THRESHOLD
     };
-    gateway["startupProbe"] = gateway_http_probe(failure_threshold);
-    gateway["readinessProbe"] = gateway_http_probe(3);
+    gateway["startupProbe"] =
+        gateway_http_probe(GATEWAY_STARTUP_PROBE_PERIOD_SECONDS, failure_threshold);
+    gateway["readinessProbe"] = gateway_http_probe(
+        GATEWAY_READINESS_PROBE_PERIOD_SECONDS,
+        GATEWAY_READINESS_FAILURE_THRESHOLD,
+    );
 }
 
 pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {

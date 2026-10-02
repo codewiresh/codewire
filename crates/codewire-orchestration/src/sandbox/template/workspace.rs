@@ -7,17 +7,40 @@ use super::encoding::kata_policy_init_data_annotation;
 use super::naming::{workspace_daemon_service_name, workspace_selector, workspace_template_labels};
 use super::network::workspace_egress_rules;
 use super::runtime_policy::{
-    DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_CONFIDENTIAL,
-    RuntimeProfileSpec, dind_image, dind_memory_limit_gib, docker_data_size_gib,
-    kata_coco_kernel_params_annotation, uses_kata_policy_init_data, workspace_storage_class,
+    DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_COMMODITY,
+    RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, dind_image, dind_memory_limit_gib,
+    docker_data_size_gib, kata_coco_kernel_params_annotation, uses_kata_policy_init_data,
+    workspace_storage_class,
 };
 use super::{
-    DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, DIND_SOCKET_PATH, EXTENSIONS_API_VERSION,
-    HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
-    KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR,
-    WORKSPACE_DAEMON_PORT, WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
+    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE,
+    DIND_SOCKET_PATH, EXTENSIONS_API_VERSION, HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+    KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
+    WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
+    WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI, WORKSPACE_READY_TIMEOUT,
 };
+
+/// Copies the daemon from the support image into `codewire-bin` where the
+/// daemon cannot be mounted from the image itself.
+pub(crate) const DAEMON_INIT_CONTAINER: &str = "codewire-daemon-init";
+/// Installs selected stock-client configuration when the daemon comes from an
+/// image volume. Rendered only when a selected client needs it.
+pub(crate) const CLIENT_BOOTSTRAP_CONTAINER: &str = "codewire-client-bootstrap";
+/// The volume that holds `/codewire/bin/cw` in the workspace container.
+pub(crate) const DAEMON_VOLUME: &str = "codewire-bin";
+/// The directory of the support image that holds `cw`.
+const SUPPORT_IMAGE_DAEMON_SUBPATH: &str = "usr/local/bin";
+
+/// Commodity Kata pods mount the daemon read-only from the support image, so
+/// the workspace starts without an init container. The kubelet pulls the
+/// image volume with the Pod's credentials, and Kata shares it into the guest
+/// through virtiofs (proven on Dev, Program #2238 A8c). Confidential guests
+/// pull images inside the guest, where image volumes do not apply, and Kind
+/// and diagnostic profiles keep the copy, so they keep the init container.
+fn daemon_from_image_volume(runtime_spec: &RuntimeProfileSpec) -> bool {
+    runtime_spec.profile == RUNTIME_PROFILE_COMMODITY
+}
 
 /// Mirrors `sandbox.RenderSandboxTemplate`.
 pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
@@ -110,7 +133,7 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
         "volumeMounts": [
             { "name": "workspace", "mountPath": "/home/codewire" },
             { "name": "workspace", "mountPath": "/workspace" },
-            { "name": "codewire-bin", "mountPath": "/codewire/bin" },
+            daemon_mount(&opts.runtime_profile_spec()),
             { "name": "codewire-run", "mountPath": "/codewire/run" },
         ],
     });
@@ -299,8 +322,17 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     if confidential_block {
         configure_confidential_workspace_device(ws);
     }
+    let daemon_image_volume = daemon_from_image_volume(&runtime_spec);
+    let daemon_volume = if daemon_image_volume {
+        json!({
+            "name": DAEMON_VOLUME,
+            "image": { "reference": support_image, "pullPolicy": "IfNotPresent" },
+        })
+    } else {
+        json!({ "name": DAEMON_VOLUME, "emptyDir": {} })
+    };
     let mut volumes = vec![
-        json!({ "name": "codewire-bin", "emptyDir": {} }),
+        daemon_volume,
         json!({ "name": "codewire-run", "emptyDir": {} }),
     ];
     if opts.disk_gib == 0 {
@@ -362,7 +394,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
-        ws["readinessProbe"] = docker_socket_readiness_probe();
+        apply_docker_socket_probes(ws, &runtime_spec);
 
         containers.push(ws.clone());
         let mut dind = dind_container(opts, &runtime_spec, false);
@@ -379,7 +411,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
-        ws["readinessProbe"] = docker_socket_readiness_probe();
+        apply_docker_socket_probes(ws, &runtime_spec);
 
         containers.push(ws.clone());
         let mut dind = dind_container(opts, &runtime_spec, true);
@@ -391,11 +423,19 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         containers.push(ws.clone());
     }
 
-    let mut init = daemon_init_container(support_image);
-    if opts.credential_runtime.is_some() {
-        credentials::configure_bootstrap(&mut init, opts);
+    if daemon_image_volume {
+        if opts.credential_runtime.is_some()
+            && let Some(init) = client_bootstrap_container(support_image, opts)
+        {
+            spec.insert("initContainers".into(), json!([init]));
+        }
+    } else {
+        let mut init = daemon_init_container(support_image);
+        if opts.credential_runtime.is_some() {
+            credentials::configure_bootstrap(&mut init, opts);
+        }
+        spec.insert("initContainers".into(), json!([init]));
     }
-    spec.insert("initContainers".into(), json!([init]));
     spec.insert("containers".into(), Value::Array(containers));
     spec.insert("volumes".into(), Value::Array(volumes));
     Value::Object(spec)
@@ -412,7 +452,24 @@ fn configure_confidential_workspace_device(container: &mut Value) {
     }]);
 }
 
-fn docker_socket_readiness_probe() -> Value {
+/// Workspace readiness proves the cross-container Docker socket, and create
+/// and start wait for that readiness. The kubelet runs readiness only after
+/// the startup probe succeeds, and then at once, so the 1-second startup probe
+/// bounds how late a start notices Docker while the steady-state readiness
+/// probe keeps its 2-second period. The startup budget is the tier's ready
+/// timeout: create or start has already failed before the kubelet would stop
+/// a slow Docker start.
+fn apply_docker_socket_probes(ws: &mut Value, runtime_spec: &RuntimeProfileSpec) {
+    let ready_timeout = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        CONFIDENTIAL_WORKSPACE_READY_TIMEOUT
+    } else {
+        WORKSPACE_READY_TIMEOUT
+    };
+    ws["startupProbe"] = docker_socket_probe(1, ready_timeout.as_secs());
+    ws["readinessProbe"] = docker_socket_probe(2, 3);
+}
+
+fn docker_socket_probe(period_seconds: u64, failure_threshold: u64) -> Value {
     json!({
         "exec": {
             "command": [
@@ -421,35 +478,76 @@ fn docker_socket_readiness_probe() -> Value {
                 "docker version --format '{{.Server.Version}}' >/dev/null",
             ],
         },
-        "periodSeconds": 2,
+        "periodSeconds": period_seconds,
         "timeoutSeconds": 2,
-        "failureThreshold": 3,
+        "failureThreshold": failure_threshold,
         "successThreshold": 1,
+    })
+}
+
+/// The workspace container's `/codewire/bin`. An image volume exposes only the
+/// support image's `usr/local/bin`, read-only; the copy is a private emptyDir.
+fn daemon_mount(runtime_spec: &RuntimeProfileSpec) -> Value {
+    if daemon_from_image_volume(runtime_spec) {
+        json!({
+            "name": DAEMON_VOLUME,
+            "mountPath": "/codewire/bin",
+            "subPath": SUPPORT_IMAGE_DAEMON_SUBPATH,
+            "readOnly": true,
+        })
+    } else {
+        json!({ "name": DAEMON_VOLUME, "mountPath": "/codewire/bin" })
+    }
+}
+
+fn bootstrap_resources() -> Value {
+    json!({
+        "requests": { "cpu": "25m", "memory": "32Mi" },
+        "limits": { "cpu": "100m", "memory": "128Mi" },
     })
 }
 
 fn daemon_init_container(support_image: &str) -> Value {
     json!({
-        "name": "codewire-daemon-init",
+        "name": DAEMON_INIT_CONTAINER,
         "image": support_image,
         "command": [
             "sh", "-c",
             "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw",
         ],
         "volumeMounts": [
-            { "name": "codewire-bin", "mountPath": "/codewire/bin" },
+            { "name": DAEMON_VOLUME, "mountPath": "/codewire/bin" },
             { "name": "codewire-run", "mountPath": "/codewire/run" },
         ],
-        "resources": {
-            "requests": { "cpu": "25m", "memory": "32Mi" },
-            "limits": { "cpu": "100m", "memory": "128Mi" },
-        },
+        "resources": bootstrap_resources(),
     })
+}
+
+/// The stock-client bootstrap of an image-volume Pod, or `None` when no
+/// selected client needs one. The daemon creates its own process directory.
+fn client_bootstrap_container(support_image: &str, opts: &TemplateOpts) -> Option<Value> {
+    let mut init = json!({
+        "name": CLIENT_BOOTSTRAP_CONTAINER,
+        "image": support_image,
+        "command": ["sh", "-c", "umask 077"],
+        "volumeMounts": [],
+        "resources": bootstrap_resources(),
+    });
+    credentials::configure_bootstrap(&mut init, opts);
+    (!init["volumeMounts"]
+        .as_array()
+        .expect("client bootstrap mounts")
+        .is_empty())
+    .then_some(init)
 }
 
 /// Only machine-owned stock-client fields, without rendering confidential
 /// init-data or resolving public trust. Used by suspended recipe refresh and
 /// exact immutable Pod verification; it contains no provider material.
+///
+/// `init` is the daemon-copy init of a Pod whose `codewire-bin` is an
+/// emptyDir. `clientInit` is the whole client bootstrap of an image-volume
+/// Pod, or null when none is needed; its image is the Pod's own daemon image.
 pub(crate) fn render_workspace_client_bootstrap(opts: &TemplateOpts) -> Value {
     let mut init = daemon_init_container("");
     credentials::configure_bootstrap(&mut init, opts);
@@ -458,6 +556,7 @@ pub(crate) fn render_workspace_client_bootstrap(opts: &TemplateOpts) -> Value {
         "volumes": credentials::workspace_client_volumes(opts),
         "volumeMounts": credentials::workspace_client_mounts(opts),
         "init": init,
+        "clientInit": client_bootstrap_container("", opts),
     })
 }
 

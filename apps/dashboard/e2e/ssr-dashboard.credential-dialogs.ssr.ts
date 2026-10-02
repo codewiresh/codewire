@@ -204,14 +204,40 @@ test("rows keep status and expiry visible and open focused editors straight from
   await fits(page, page.locator("#credential-fixture-openai-rename"));
 });
 
+test("a credential whose refresh failed says Reconnect needed and reconnects from its row", async ({ page }) => {
+  let posts = 0;
+  page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
+  const row = page.locator(".cw-credential-row").filter({ has: page.locator('summary[aria-label="Actions for Work Codex"]') });
+  await expect(row.locator(".cw-credential-status")).toHaveText("Reconnect needed");
+  await expect(row.locator(".cw-credential-status")).toHaveAttribute("data-tone", "warning");
+  // The action is on the row itself, not only inside the ⋯ menu.
+  const reconnect = row.locator(":scope > form > .cw-credential-reconnect");
+  await expect(reconnect).toBeVisible();
+  await expect(reconnect).toHaveAccessibleName("Reconnect Work Codex");
+  // Active rows keep their actions in the menu alone.
+  await expect(page.locator(".cw-credential-reconnect")).toHaveCount(1);
+  await fits(page, row);
+  await page.screenshot({ path: test.info().outputPath("credential-reconnect-needed.png") });
+  await reconnect.click();
+  const editor = dialog(page, "Reconnect Work Codex");
+  await expect(editor).toBeVisible();
+  await expect(page.locator("dialog[open]")).toHaveCount(1);
+  await expect(editor.locator('[name="credential_id"]')).toHaveValue("fixture-codex");
+  await action(editor, "Cancel").click();
+  await expect(editor).not.toBeVisible();
+  await expect(reconnect).toBeFocused();
+  expect(posts).toBe(0);
+});
+
 test("profile rows open exact-revision editors from their menu with native validation", async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
   const create = action(page, "Create profile");
   const row = page.locator(".cw-profile-row");
-  await expect(row.locator(":scope > header")).toContainText("Codex: Work Codex, GitHub: @verified-user, SSH: Work SSH");
+  await expect(row.locator(":scope > header")).toContainText("Codex: Work Codex Reconnect needed, GitHub: @verified-user, SSH: Work SSH");
   await expect(row.locator(":scope > header")).not.toContainText("Revision");
-  await expect(row.locator(":scope > header .cw-credential-status")).toHaveText("Revoked");
+  // Only identities that are not active carry a status in the summary.
+  await expect(row.locator(":scope > header .cw-credential-status")).toHaveText(["Reconnect needed", "Revoked"]);
   await create.click();
   const editor = dialog(page, "Create profile");
   await footer(editor, "Create profile");

@@ -27,6 +27,7 @@ pub mod platform;
 mod process_test_support;
 #[cfg(any(feature = "codex-enrollment", feature = "ssh-agent"))]
 pub mod provider_enrollment;
+mod refresh_failure;
 mod runtime;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 pub mod ssh_agent;

@@ -28,6 +28,8 @@
 .cw-environment-table .cw-status > span { width: var(--icon-size-sm); text-align: center; }
 .cw-row-menu { display: inline-block; }
 .cw-row-menu-meta { padding: var(--space-1) var(--space-2) var(--space-1-5); border-bottom: var(--border-width) solid var(--border-subtle); color: var(--fg-tertiary); font-size: var(--text-small); }
+/* Why an action is not offered, on the menu items' inset. */
+.cw-row-menu-note { margin: 0; padding: var(--space-1-5) var(--space-2); color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-body); }
 .cw-menu-resize form,
 .cw-menu-confirm form { display: grid; gap: var(--space-2); padding: var(--space-2); border-top: var(--border-width) solid var(--border-subtle); }
 .cw-menu-resize label { display: grid; gap: var(--space-1); color: var(--fg-secondary); font-size: var(--text-small); }

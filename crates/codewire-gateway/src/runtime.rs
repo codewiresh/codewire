@@ -37,28 +37,40 @@ use crate::tailnet;
 /// never comes up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DaemonConnectBackoff {
-    initial_delay: Duration,
-    max_delay: Duration,
+    /// The retry interval while an ordinary cold start can still bring the
+    /// daemon up.
+    fast_delay: Duration,
+    /// How long after the first attempt retries stay at `fast_delay`.
+    fast_window: Duration,
+    /// The retry interval once the start has outlasted `fast_window`.
+    slow_delay: Duration,
     attempt_timeout: Duration,
 }
 
 impl DaemonConnectBackoff {
-    /// Doubles from `initial_delay` after each consecutive failure and holds
-    /// at `max_delay`.
-    fn delay_after(&self, failures: u32) -> Duration {
-        let doublings = failures.saturating_sub(1).min(16);
-        self.initial_delay
-            .saturating_mul(1 << doublings)
-            .min(self.max_delay)
+    /// The pause before the next attempt, given how long the gateway has
+    /// already waited for the daemon.
+    fn delay_after(&self, waited: Duration) -> Duration {
+        if waited < self.fast_window {
+            self.fast_delay
+        } else {
+            self.slow_delay
+        }
     }
 }
 
-/// The cap equals the 2-second startup probe period orchestration renders, so
-/// retrying delays readiness by at most one probe. One attempt is an in-cluster
-/// TCP and HTTP/2 handshake; its timeout only bounds a dropped connection.
+/// Until the workspace Pod is Ready its daemon Service has no endpoint and
+/// the cluster refuses each attempt at once, so an attempt costs one DNS
+/// lookup and one refused connection. Retrying every 250 ms through an
+/// ordinary cold start lets the gateway reach the daemon within a quarter
+/// second of its Service gaining the endpoint, since this wait sits on every
+/// create's critical path. Starts slower than the window (image pulls,
+/// confidential storage) retry every 2 s. One attempt is an in-cluster TCP and
+/// HTTP/2 handshake; its timeout only bounds a dropped connection.
 const DAEMON_CONNECT_BACKOFF: DaemonConnectBackoff = DaemonConnectBackoff {
-    initial_delay: Duration::from_millis(250),
-    max_delay: Duration::from_secs(2),
+    fast_delay: Duration::from_millis(250),
+    fast_window: Duration::from_secs(60),
+    slow_delay: Duration::from_secs(2),
     attempt_timeout: Duration::from_secs(5),
 };
 /// Failed attempts are logged at debug; this interval bounds the warnings.
@@ -655,7 +667,7 @@ async fn connect_daemon_with_retry(
                 backoff.attempt_timeout.as_millis()
             ),
         };
-        let next_retry = backoff.delay_after(attempts);
+        let next_retry = backoff.delay_after(started.elapsed());
         let now = Instant::now();
         if last_warning.is_none_or(|warned| now.duration_since(warned) >= DAEMON_WAIT_WARN_INTERVAL)
         {
@@ -972,16 +984,20 @@ mod tests {
     }
 
     #[test]
-    fn daemon_connect_backoff_doubles_to_its_cap() {
-        let delays: Vec<_> = (1..=6)
-            .map(|failures| DAEMON_CONNECT_BACKOFF.delay_after(failures))
-            .collect();
+    fn daemon_connect_retries_fast_through_a_cold_start_then_slows() {
+        let delays: Vec<_> = [0, 1, 13, 59]
+            .map(Duration::from_secs)
+            .map(|waited| DAEMON_CONNECT_BACKOFF.delay_after(waited))
+            .to_vec();
+        assert_eq!(delays, [Duration::from_millis(250); 4]);
+        for waited in [60, 600, 1_800].map(Duration::from_secs) {
+            assert_eq!(
+                DAEMON_CONNECT_BACKOFF.delay_after(waited),
+                Duration::from_secs(2)
+            );
+        }
         assert_eq!(
-            delays,
-            [250, 500, 1_000, 2_000, 2_000, 2_000].map(Duration::from_millis)
-        );
-        assert_eq!(
-            DAEMON_CONNECT_BACKOFF.delay_after(u32::MAX),
+            DAEMON_CONNECT_BACKOFF.delay_after(Duration::MAX),
             Duration::from_secs(2)
         );
     }
@@ -998,8 +1014,9 @@ mod tests {
             spawn_minimal_daemon_at(&delayed_daemon_addr).await;
         });
         let backoff = DaemonConnectBackoff {
-            initial_delay: Duration::from_millis(5),
-            max_delay: Duration::from_millis(20),
+            fast_delay: Duration::from_millis(5),
+            fast_window: Duration::from_millis(100),
+            slow_delay: Duration::from_millis(20),
             attempt_timeout: Duration::from_secs(1),
         };
         timeout(
@@ -1013,6 +1030,39 @@ mod tests {
         .await
         .expect("daemon connection did not follow the listening daemon")
         .expect("daemon retry gave up");
+    }
+
+    #[tokio::test]
+    async fn daemon_connect_follows_a_cold_start_daemon_within_the_fast_interval() {
+        // A cold create's daemon comes up seconds after the gateway starts
+        // waiting, and every create waits on this connection. The shipped
+        // schedule must reach it within one fast interval plus the
+        // handshake, not after a multi-second backoff step.
+        let daemon_addr = reserve_local_addr().await;
+        let delayed_daemon_addr = daemon_addr.clone();
+        let listening = tokio::spawn(async move {
+            sleep(Duration::from_millis(1_800)).await;
+            spawn_minimal_daemon_at(&delayed_daemon_addr).await;
+            Instant::now()
+        });
+        timeout(
+            Duration::from_secs(5),
+            connect_daemon_with_retry(
+                &daemon_addr,
+                DaemonAuthToken::new("gateway-runtime-fast-retry-test-token").unwrap(),
+                DAEMON_CONNECT_BACKOFF,
+            ),
+        )
+        .await
+        .expect("daemon connection did not follow the listening daemon")
+        .expect("daemon retry gave up");
+        let connected = Instant::now();
+        let listening = listening.await.expect("daemon fixture task");
+        let lag = connected.saturating_duration_since(listening);
+        assert!(
+            lag < Duration::from_secs(1),
+            "gateway reached the daemon {lag:?} after it listened"
+        );
     }
 
     #[tokio::test]

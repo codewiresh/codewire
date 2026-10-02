@@ -7,13 +7,15 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use codewire_daemon_bridge::client::DaemonClient;
 use codewire_gateway_proto::daemon::v1::DaemonState;
+use codewire_server_core::AppError;
 use codewire_server_core::org_deletion::{
-    acquire_environment_runtime_mutation_lease, mark_organization_mutation_resolution_required,
-    release_organization_mutation_lease,
+    RuntimeMutationOutcome, run_environment_runtime_mutation_with_outcome,
 };
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -82,42 +84,26 @@ pub async fn ssh_proxy_websocket(
         return ssh_error(StatusCode::SERVICE_UNAVAILABLE, &msg);
     }
 
-    let lease = match acquire_environment_runtime_mutation_lease(
-        &state.pool,
-        &org_id,
-        &target.environment_id,
-    )
-    .await
-    {
-        Ok(lease) => lease,
-        Err(error) => return error.into_response(),
+    let connect = {
+        let environment_id = target.environment_id.clone();
+        async move {
+            sb.gateway_port_forward_stream(&environment_id, DEFAULT_GATEWAY_SSH_PORT)
+                .await
+        }
     };
-
-    let stream = match sb
-        .gateway_port_forward_stream(&target.environment_id, DEFAULT_GATEWAY_SSH_PORT)
+    let stream = match open_fenced_ssh_stream(&state.pool, &org_id, &target.environment_id, connect)
         .await
     {
-        Ok(stream) => stream,
-        Err(err) => {
-            if let Err(error) = mark_organization_mutation_resolution_required(
-                &state.pool,
-                &lease.id,
-                "environment_runtime_dispatch_ambiguous",
-            )
-            .await
-            {
-                return error.into_response();
-            }
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => {
             tracing::info!(error = %err, env = %target.environment_id, namespace = %target.namespace, "ssh-proxy: sidecar port-forward failed");
             return ssh_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 r#"{"error":"sshd not available","tier":"fallback"}"#,
             );
         }
+        Err(error) => return error.into_response(),
     };
-    if let Err(error) = release_organization_mutation_lease(&state.pool, &lease.id).await {
-        return error.into_response();
-    }
 
     let attempt_id = Uuid::new_v4().to_string();
     tracing::info!(
@@ -131,6 +117,37 @@ pub async fn ssh_proxy_websocket(
     ws.protocols(["ssh"]).on_upgrade(move |socket| {
         ssh_proxy_session(socket, stream, attempt_id, target.environment_id)
     })
+}
+
+/// Open the gateway SSH stream behind the environment runtime fence.
+///
+/// The port-forward runs in the shared runtime-mutation owner task, so a
+/// client that leaves mid-connect cannot strand the lease. An opened stream
+/// releases it; a failed port-forward retains
+/// `environment_runtime_dispatch_ambiguous` evidence. A stream opened after the
+/// client left still releases the lease and is then dropped, which closes it.
+async fn open_fenced_ssh_stream<S, F>(
+    pool: &PgPool,
+    org_id: &str,
+    environment_id: &str,
+    connect: F,
+) -> Result<anyhow::Result<S>, AppError>
+where
+    F: Future<Output = anyhow::Result<S>> + Send + 'static,
+    S: Send + 'static,
+{
+    run_environment_runtime_mutation_with_outcome(pool, org_id, environment_id, async move {
+        let stream = connect.await;
+        if stream.is_ok() {
+            RuntimeMutationOutcome::release(stream)
+        } else {
+            RuntimeMutationOutcome::resolution_required(
+                "environment_runtime_dispatch_ambiguous",
+                stream,
+            )
+        }
+    })
+    .await
 }
 
 /// `GET /api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy/check`
@@ -367,6 +384,9 @@ fn check_response(available: bool, shim_healthy: bool, shim_error: &str) -> Resp
 fn ssh_error(status: StatusCode, body: &str) -> Response {
     plain_error(status, body)
 }
+
+#[cfg(test)]
+mod database_tests;
 
 #[cfg(test)]
 mod tests {
