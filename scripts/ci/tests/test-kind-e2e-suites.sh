@@ -3,6 +3,15 @@ set -euo pipefail
 
 # Synthetic ownership fixtures must not inherit the caller's live CI cluster.
 export KIND_CLUSTER_NAME=codewire-e2e-ci
+# The fixture requests the default host topology even when the caller exports
+# a shifted harness port set; behavior cases that assert shifted renderings or
+# shifted preflights set their own assignment explicitly in a subshell.
+export KIND_INGRESS_HOST_PORT=8090
+export KIND_INGRESS_TLS_HOST_PORT=10443
+export KIND_TEMPORAL_HOST_PORT=7233
+export KIND_ORCHESTRATION_HOST_PORT=8084
+export KIND_COORDINATOR_DIRECT_HOST_PORT=18092
+export KIND_POSTGRES_HOST_PORT=25432
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT/scripts/ci/verify/kind-e2e.sh"
