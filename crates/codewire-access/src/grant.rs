@@ -102,6 +102,8 @@ pub struct DerivedGrant {
 /// This is the shared edit-time policy used by local and platform authorities.
 /// Environment-specific authorization, expiry, and personal-credential policy
 /// are deliberately rechecked by [`derive_grants`] when the profile is bound.
+/// No profile, personal or organizational, may select an organization's OAuth
+/// credential: OAuth logins are personal ([`Owner::may_hold`]).
 pub fn validate_profile_entries(
     profile: &AccessProfile,
     credentials: &BTreeMap<CredentialId, CredentialMetadata>,
@@ -131,6 +133,9 @@ pub fn validate_profile_entries(
             });
         }
         validate_profile_entry_owner(profile, credential)?;
+        if !credential.owner.may_hold(credential.authentication_kind) {
+            return Err(AccessError::OrganizationOAuthUnsupported);
+        }
 
         let provider =
             catalog

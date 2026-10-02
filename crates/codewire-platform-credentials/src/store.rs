@@ -492,6 +492,11 @@ impl PlatformCredentialStore {
         if original.metadata.owner != *owner || next.metadata.owner != *owner {
             return Err(Error::InvalidInput);
         }
+        // Reconnecting or replacing is enrollment: an organization never holds
+        // an OAuth login. Refreshing an existing one is not enrollment.
+        if !refresh && !owner.may_hold(next.metadata.authentication_kind) {
+            return Err(Error::UnsupportedCredential);
+        }
         original.validate(&self.reader.catalog)?;
         next.validate(&self.reader.catalog)?;
         validate_wrapper(&material.wrapped, self.provider.kind())?;
