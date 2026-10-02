@@ -724,6 +724,15 @@ class CommonConsumerContractTests(unittest.TestCase):
                 export KIND_INGRESS_CERTGEN_IMAGE=''
                 export KIND_AGENT_SANDBOX_IMAGE=''
                 export KIND_DIND_IMAGE=sealed-dind:fixture
+                # The harness inherits the caller's environment; request the
+                # default host topology so a shifted caller's port set cannot
+                # leak into the sourced production defaults.
+                export KIND_INGRESS_HOST_PORT=8090
+                export KIND_INGRESS_TLS_HOST_PORT=10443
+                export KIND_TEMPORAL_HOST_PORT=7233
+                export KIND_ORCHESTRATION_HOST_PORT=8084
+                export KIND_COORDINATOR_DIRECT_HOST_PORT=18092
+                export KIND_POSTGRES_HOST_PORT=25432
                 mkdir -p "$RUN_DIR" "$FIXTURE_ROOT/artifacts"
                 source "$ROOT/scripts/ci/verify/kind/common.sh"
 
