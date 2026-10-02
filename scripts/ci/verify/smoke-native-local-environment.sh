@@ -1208,9 +1208,9 @@ run_application_secret_smoke() {
     jq -e --argjson generation "$generation" --arg id "$ENVIRONMENT_ID" --arg project "$project_id" \
       --arg skills "$INITIAL_SKILL_SNAPSHOT" '
       .id == $id and .generation == $generation and .state == "running" and
-      .access_profile == "user/native-broker" and .access_profile_revision == 5 and
+      .access_profile == "user/native-broker" and .access_profile_revision == 4 and
       .source_selection.credentials.reference == "user/native-broker" and
-      .source_selection.credentials.revision == 5 and
+      .source_selection.credentials.revision == 4 and
       (.source_selection.secrets.project // "") == (if $project == "" then "" else "local:id:" + $project end) and
       (if $project == "" then .source_selection.secrets.user == null
        else .source_selection.secrets.user == "local" end) and
@@ -2192,6 +2192,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw credentials --local list --output json
   jq -e '
     length == 5 and
+    ([.[] | select(.provider == "github")] | length) == 1 and
     any(.[];
       .placement == "local" and
       .owner == "user/local-user" and
@@ -2275,48 +2276,69 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   chmod 0600 "$MOUNT_SOURCE/native-ssh-public-key.pub"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set codex "id:$CREDENTIAL_ID"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e 'length == 1 and .[0].revision == 1 and (.[0].entries | length) == 1' "$LAST_STDOUT" >/dev/null ||
+  jq -e --arg credential "$CREDENTIAL_ID" '
+    length == 1 and .[0].revision == 1 and
+    (.[0].entries | keys) == ["codex"] and .[0].entries.codex == $credential
+  ' "$LAST_STDOUT" >/dev/null ||
     die 'first profile set did not create exactly revision one'
-  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set github "id:$GITHUB_CREDENTIAL_ID"
+  # GitHub is the one account connection, automatically included in grants;
+  # it cannot be selected or stored as a profile entry.
+  run_cw_expect_failure credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set github "id:$GITHUB_CREDENTIAL_ID"
+  rg -qF 'every profile includes your one GitHub connection' "$LAST_STDERR" ||
+    die 'profile GitHub selection did not refuse with singleton connection guidance'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e 'length == 1 and .[0].revision == 2 and (.[0].entries | length) == 2' "$LAST_STDOUT" >/dev/null ||
-    die 'second profile set did not create exactly revision two'
+  jq -e --arg credential "$CREDENTIAL_ID" '
+    length == 1 and .[0].revision == 1 and
+    (.[0].entries | keys) == ["codex"] and .[0].entries.codex == $credential
+  ' "$LAST_STDOUT" >/dev/null ||
+    die 'refused GitHub profile selection changed profile revision or entries'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set openai "id:$OPENAI_CREDENTIAL_ID"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e 'length == 1 and .[0].revision == 3 and (.[0].entries | length) == 3' "$LAST_STDOUT" >/dev/null ||
-    die 'third profile set did not create exactly revision three'
+  jq -e --arg credential "$CREDENTIAL_ID" --arg openai "$OPENAI_CREDENTIAL_ID" '
+    length == 1 and .[0].revision == 2 and
+    (.[0].entries | keys) == ["codex", "openai"] and
+    .[0].entries.codex == $credential and .[0].entries.openai == $openai
+  ' "$LAST_STDOUT" >/dev/null ||
+    die 'second profile set did not create exactly revision two'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set anthropic "id:$ANTHROPIC_CREDENTIAL_ID"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" \
+  jq -e --arg credential "$CREDENTIAL_ID" \
     --arg openai "$OPENAI_CREDENTIAL_ID" --arg anthropic "$ANTHROPIC_CREDENTIAL_ID" '
     length == 1 and
     .[0].placement == "local" and
     .[0].owner == "user/local-user" and
     .[0].name == "native-broker" and
-    .[0].revision == 4 and
-    (.[0].entries | length) == 4 and
+    .[0].revision == 3 and
+    (.[0].entries | keys) == ["anthropic", "codex", "openai"] and
     .[0].entries.codex == $credential and
-    .[0].entries.github == $github and
     .[0].entries.openai == $openai and
     .[0].entries.anthropic == $anthropic
-  ' "$LAST_STDOUT" >/dev/null || die 'fourth profile set did not create exact revision four'
+  ' "$LAST_STDOUT" >/dev/null || die 'third profile set did not create exact revision three'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set ssh "id:$SSH_CREDENTIAL_ID"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" \
+  jq -e --arg credential "$CREDENTIAL_ID" \
     --arg openai "$OPENAI_CREDENTIAL_ID" --arg anthropic "$ANTHROPIC_CREDENTIAL_ID" \
     --arg ssh "$SSH_CREDENTIAL_ID" '
     length == 1 and
     .[0].placement == "local" and
     .[0].owner == "user/local-user" and
     .[0].name == "native-broker" and
-    .[0].revision == 5 and
-    (.[0].entries | length) == 5 and
+    .[0].revision == 4 and
+    (.[0].entries | keys) == ["anthropic", "codex", "openai", "ssh"] and
     .[0].entries.codex == $credential and
-    .[0].entries.github == $github and
     .[0].entries.openai == $openai and
     .[0].entries.anthropic == $anthropic and
     .[0].entries.ssh == $ssh
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic access profile metadata drifted'
+  run_cw credentials --local list --output json
+  jq -e --arg github "$GITHUB_CREDENTIAL_ID" '
+    [.[] | select(.provider == "github")] |
+    length == 1 and .[0].id == $github and
+    .[0].authentication_kind == "oauth" and .[0].status == "active" and
+    .[0].revocation_generation == 1 and
+    .[0].protected_store_persistence == "operating_system" and
+    .[0].cleanup_pending == false
+  ' "$LAST_STDOUT" >/dev/null || die 'profile selection changed the account GitHub connection'
   prepare_application_secret_fixture
   CREATE_ACCESS_ARGS=(--profile "local:user/$CREDENTIAL_PROFILE_NAME" \
     --secrets "local:$APP_SECRET_PROJECT_A" --user-secrets local --yes)
@@ -2371,7 +2393,7 @@ rg -qF 'Read-write grants let guest root modify or delete that host content' "$L
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   jq -e '
     .access_profile == "user/native-broker" and
-    .access_profile_revision == 5
+    .access_profile_revision == 4
   ' "$LAST_STDOUT" >/dev/null || die 'created native environment access profile drifted'
 fi
 [[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'

@@ -84,7 +84,7 @@ mod linux {
         "/opt/codewire/agents/npm/bin/claude",
         "/home/codewire/.npm-global/bin/claude",
     ];
-    const MANAGED_PROFILE_REVISION: u64 = 5;
+    const MANAGED_PROFILE_REVISION: u64 = 4;
     const MAX_AUDIT_EVENTS: usize = 32;
     const GUEST_CALLER_BEARER: &str = "guest-supplied-bearer-must-not-pass";
     const EXEC_TIMEOUT: Duration = Duration::from_secs(90);
