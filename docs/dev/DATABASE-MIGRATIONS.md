@@ -829,7 +829,7 @@ Rows cascade with their environment.
 `sandbox_environment_backend_binding_fkey` lets `(environment_id, pod_uid)`
 name only a binding of the same environment, and
 `chk_sandbox_backend_binding_coherent` sets `pod_uid` and `bound_at` together.
-A binding the backend points at cannot be deleted directly.
+No binding can be deleted directly (see the cascade-only trigger below).
 
 Beyond the reviewed section 6 SQL, the migration also enforces:
 
@@ -839,8 +839,14 @@ Beyond the reviewed section 6 SQL, the migration also enforces:
 - the `codewire_workspace_binding_immutable` trigger, which makes a binding
   insert-only except `released_at`. A release may be recorded once and never
   cleared or moved, so Pod UID → environment is immutable in the database and
-  not only in orchestration code. The function is a plain invoker function
-  with a fixed search path, and `PUBLIC` cannot execute it.
+  not only in orchestration code;
+- the `codewire_workspace_binding_cascade_only` trigger on the same function,
+  which refuses a direct `DELETE`. A row leaves only through the cascade from
+  its environment, which runs inside the foreign key's referential action and
+  so reaches the trigger at `pg_trigger_depth() > 1`.
+
+The function is a plain invoker function with a fixed search path, and
+`PUBLIC` cannot execute it.
 
 There is no backfill. Orchestration's recorder and its bounded backfill loop
 write bindings and PVC UIDs later, under the operation-generation fence.
@@ -867,7 +873,9 @@ its own proof and replaces no prior helper. The fixtures prove:
   UID, digest, scope, release-ordering and coherence checks, and 23502 for
   each required column;
 - existing backend rows staying valid and writable with NULL pointers;
-- the trigger, which rejects each in-place change and accepts one release;
+- the update trigger, which rejects each in-place change and accepts one
+  release, and the delete trigger, which refuses a direct delete of a live,
+  pointed-at or released binding;
 - a restart-style pointer move inside one environment, and the cascade that
   removes an environment's backend row and all its bindings while leaving
   another environment intact;
@@ -882,7 +890,8 @@ rollback that keeps every other row:
 
 1. Stop the version-34 binaries.
 2. In one transaction, drop the three backend constraints and columns, drop
-   `sandbox_workspace_bindings` and `codewire_workspace_binding_immutable()`,
+   `sandbox_workspace_bindings` (which removes both of its triggers) and
+   `codewire_workspace_binding_immutable()`,
    and delete ledger version 34 from `_sqlx_migrations`.
 3. Start the version-33 binaries.
 

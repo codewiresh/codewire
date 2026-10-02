@@ -1,6 +1,6 @@
 //! Claim-time workspace binding: accepted prior history and disposable
 //! database proof for the binding table, the backend pointer and the
-//! insert-only trigger.
+//! insert-only, cascade-only triggers.
 
 use super::*;
 
@@ -415,17 +415,37 @@ async fn workspace_binding_fresh_schema_constrains_rows_pointer_trigger_and_inde
             tx.rollback().await?;
         }
 
-        let trigger: String = sqlx::query_scalar(
+        // Rows leave only with their environment: a direct DELETE of a live,
+        // pointed-at or released binding is refused before any foreign key.
+        for pod in [POD_A, POD_A2] {
+            let mut tx = pool.begin().await?;
+            let error = sqlx::query("DELETE FROM sandbox_workspace_bindings WHERE pod_uid=$1")
+                .bind(pod)
+                .execute(&mut *tx)
+                .await
+                .expect_err("workspace binding deleted directly");
+            anyhow::ensure!(
+                sqlstate(&error).as_deref() == Some("23514")
+                    && error.to_string().contains("removed only with its environment"),
+                "{pod}: {error}"
+            );
+            tx.rollback().await?;
+        }
+
+        let triggers: Vec<String> = sqlx::query_scalar(
             "SELECT pg_get_triggerdef(oid) FROM pg_trigger \
-             WHERE tgrelid='public.sandbox_workspace_bindings'::regclass AND NOT tgisinternal",
+             WHERE tgrelid='public.sandbox_workspace_bindings'::regclass AND NOT tgisinternal \
+             ORDER BY tgname",
         )
-        .fetch_one(&pool)
+        .fetch_all(&pool)
         .await?;
         anyhow::ensure!(
-            trigger.contains("BEFORE UPDATE")
-                && trigger.contains("FOR EACH ROW")
-                && trigger.contains("codewire_workspace_binding_immutable()"),
-            "{trigger}"
+            matches!(triggers.as_slice(), [delete, update]
+                if delete.contains("codewire_workspace_binding_cascade_only BEFORE DELETE")
+                    && update.contains("codewire_workspace_binding_immutable BEFORE UPDATE")
+                    && triggers.iter().all(|trigger| trigger.contains("FOR EACH ROW")
+                        && trigger.contains("EXECUTE FUNCTION codewire_workspace_binding_immutable()"))),
+            "{triggers:?}"
         );
         // A plain invoker trigger function: not SECURITY DEFINER, a fixed
         // search path, owned by the migration role and executable by no one
@@ -478,13 +498,14 @@ async fn workspace_binding_pointer_moves_within_one_environment_and_cascades_wit
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         seed(&pool).await?;
         seed_binding(&pool).await?;
-        // A pointed-to binding cannot be removed out from under its backend.
+        // A pointed-to binding cannot be removed out from under its backend:
+        // the cascade-only guard refuses the direct DELETE first.
         let error = sqlx::query("DELETE FROM sandbox_workspace_bindings WHERE pod_uid=$1")
             .bind(POD_A)
             .execute(&pool)
             .await
             .expect_err("live pointer target deleted");
-        anyhow::ensure!(sqlstate(&error).as_deref() == Some("23503"), "{error}");
+        anyhow::ensure!(sqlstate(&error).as_deref() == Some("23514"), "{error}");
 
         // A restart: release the old Pod, record the new one, then move the
         // pointer, in one transaction as the recorder does.

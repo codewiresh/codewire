@@ -42,14 +42,25 @@ CREATE UNIQUE INDEX sandbox_workspace_bindings_live_environment
     ON public.sandbox_workspace_bindings (environment_id) WHERE released_at IS NULL;
 
 -- Hardening beyond the reviewed section 6 SQL: a binding is insert-only except
--- its release, which may be recorded once and never cleared or moved. This
--- makes Pod UID -> environment immutable in the database, not only in code.
+-- its release, which may be recorded once and never cleared or moved, and a row
+-- is removed only by the cascade from its environment. This makes Pod UID ->
+-- environment immutable in the database, not only in code. A cascaded delete
+-- runs inside the foreign key's referential action, a trigger itself, so it
+-- arrives here at a nesting depth above one; a direct DELETE does not.
 CREATE FUNCTION public.codewire_workspace_binding_immutable()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF pg_trigger_depth() <= 1 THEN
+            RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = 'workspace binding is removed only with its environment';
+        END IF;
+        RETURN OLD;
+    END IF;
     IF ROW(
            NEW.pod_uid,
            NEW.environment_id,
@@ -94,6 +105,10 @@ REVOKE ALL ON FUNCTION public.codewire_workspace_binding_immutable() FROM PUBLIC
 
 CREATE TRIGGER codewire_workspace_binding_immutable
 BEFORE UPDATE ON public.sandbox_workspace_bindings
+FOR EACH ROW EXECUTE FUNCTION public.codewire_workspace_binding_immutable();
+
+CREATE TRIGGER codewire_workspace_binding_cascade_only
+BEFORE DELETE ON public.sandbox_workspace_bindings
 FOR EACH ROW EXECUTE FUNCTION public.codewire_workspace_binding_immutable();
 
 ALTER TABLE public.sandbox_environment_backend
