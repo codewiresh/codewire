@@ -274,6 +274,10 @@ mod cleanup_tests;
 #[path = "client/workspace_bootstrap_tests.rs"]
 mod workspace_bootstrap_tests;
 
+#[cfg(test)]
+#[path = "client/claim_ready_tests.rs"]
+mod claim_ready_tests;
+
 const WORKSPACE_BOOTSTRAP_KEYS: [&str; 4] = [
     "CODEWIRE_ENVIRONMENT_ID",
     "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
@@ -3406,16 +3410,29 @@ impl SandboxClient {
             .collect())
     }
 
-    /// Mirrors `WaitForReady` semantics with a poll loop instead of a
-    /// watch: the claim's Ready condition ends the wait; a terminal
-    /// container failure on the backing pod (ImagePullBackOff & co —
+    /// Mirrors `WaitForReady`: the claim's Ready condition ends the wait; a
+    /// terminal container failure on the backing pod (ImagePullBackOff & co —
     /// which the claim watcher never surfaces) fails it early with the
     /// same `pod <name>: <reason>: <message>` error the Go poller
     /// produces, so permanent-failure detection matches.
+    ///
+    /// Create and start block on this wait, so it wakes on the claim's next
+    /// change rather than a fixed poll. Every wake re-reads the claim, and a
+    /// missed or failed watch only falls back to the old 2-second re-read.
     pub async fn wait_for_ready(&self, env_id: &str, timeout: Duration) -> anyhow::Result<()> {
+        self.wait_for_ready_with_fallback(env_id, timeout, CLAIM_READY_FALLBACK_POLL)
+            .await
+    }
+
+    async fn wait_for_ready_with_fallback(
+        &self,
+        env_id: &str,
+        timeout: Duration,
+        fallback_poll: Duration,
+    ) -> anyhow::Result<()> {
         let name = claim_name(env_id);
-        let deadline = tokio::time::Instant::now() + timeout;
         let started = tokio::time::Instant::now();
+        let deadline = started + timeout;
         loop {
             let claim = self
                 .claims
@@ -3433,10 +3450,11 @@ impl SandboxClient {
                 tracing::warn!(claim = name, error = %err, "pod terminal failure detected");
                 return Err(err);
             }
-            if tokio::time::Instant::now() + Duration::from_secs(2) >= deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
                 anyhow::bail!("timeout waiting for SandboxClaim {name} to become Ready");
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            wait_for_object_change(&self.claims, &name, &claim, fallback_poll.min(remaining)).await;
         }
     }
 
@@ -4014,6 +4032,48 @@ pub fn claim_ready_status(claim: &DynamicObject) -> (bool, String) {
         return (status == "True", reason);
     }
     (false, "no Ready condition".to_string())
+}
+
+/// The claim readiness wait re-reads at least this often, covering a watch
+/// that cannot be opened and the Pod failure check.
+const CLAIM_READY_FALLBACK_POLL: Duration = Duration::from_secs(2);
+
+/// Returns on the first change to `name` after the observed revision, or
+/// once `fallback_poll` elapses. A watch that cannot open, reports an error,
+/// or ends early waits out the fallback, so a broken watch never turns into
+/// a tight read loop.
+async fn wait_for_object_change(
+    api: &Api<DynamicObject>,
+    name: &str,
+    observed: &DynamicObject,
+    fallback_poll: Duration,
+) {
+    use futures::StreamExt;
+    use kube::api::{WatchEvent, WatchParams};
+
+    let changed = async {
+        let Some(version) = observed.metadata.resource_version.as_deref() else {
+            return std::future::pending::<()>().await;
+        };
+        let params = WatchParams::default()
+            .fields(&format!("metadata.name={name}"))
+            .timeout(fallback_poll.as_secs().clamp(1, 290) as u32)
+            .disable_bookmarks();
+        let Ok(events) = api.watch(&params, version).await else {
+            return std::future::pending::<()>().await;
+        };
+        let mut events = std::pin::pin!(events);
+        while let Some(event) = events.next().await {
+            if matches!(
+                event,
+                Ok(WatchEvent::Added(_) | WatchEvent::Modified(_) | WatchEvent::Deleted(_))
+            ) {
+                return;
+            }
+        }
+        std::future::pending::<()>().await
+    };
+    let _ = tokio::time::timeout(fallback_poll, changed).await;
 }
 
 fn parse_gib_quantity(value: &str) -> anyhow::Result<i32> {

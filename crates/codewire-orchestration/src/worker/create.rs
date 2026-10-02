@@ -1411,8 +1411,11 @@ async fn run_environment_create(
 
                 // The gateway serves readiness only after it reaches the
                 // workspace daemon, so this wait covers the workspace cold
-                // start. Same metadata shape as the restart path, less the
-                // Pod IP, which the backend row records once a probe sees it.
+                // start up to the daemon listening. A commodity daemon is
+                // reachable before Docker is ready, so the next pass may still
+                // wait for the claim (`wait_for_ready`). Same metadata shape as
+                // the restart path, less the Pod IP, which the backend row
+                // records once a probe sees it.
                 let gateway_started = std::time::Instant::now();
                 emit_create_log(
                     authority,
