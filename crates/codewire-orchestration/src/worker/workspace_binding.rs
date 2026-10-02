@@ -615,7 +615,15 @@ pub(crate) async fn record_workspace_binding_shadow(
     ctx: &WorkerContext,
     environment_id: &str,
 ) -> RecordResult {
-    let attempt = tokio::time::timeout(RECORD_ATTEMPT_TIMEOUT, record(ctx, environment_id)).await;
+    let Some(kube) = ctx.kube.as_ref() else {
+        observe_record(RecordResult::Unavailable);
+        return RecordResult::Unavailable;
+    };
+    let attempt = tokio::time::timeout(
+        RECORD_ATTEMPT_TIMEOUT,
+        record_backfill(&ctx.pool, kube, environment_id),
+    )
+    .await;
     let result = match attempt.unwrap_or_else(|_| Err(anyhow::anyhow!("binding attempt timed out")))
     {
         Ok(result) => result,
@@ -636,11 +644,18 @@ pub(crate) async fn record_workspace_binding_shadow(
     result
 }
 
-async fn record(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<RecordResult> {
-    let Some(kube) = ctx.kube.as_ref() else {
-        return Ok(RecordResult::Unavailable);
-    };
-    let env = load_environment(&ctx.pool, environment_id).await?;
+/// The backfill's recording of a running environment. It records only a
+/// legacy Pod's environment scope: a Pod-scope binding is served by the 8087
+/// listener and the gateway RPC, so it is recorded only by the enforced
+/// lifecycle path ([`record_workspace_binding`]), which re-checks the captured
+/// projection under the lock and deletes a Pod that fails (review M1). An
+/// identity-free Pod is left `NotReady` here, never bound or deleted.
+async fn record_backfill(
+    pool: &PgPool,
+    kube: &kube::Client,
+    environment_id: &str,
+) -> anyhow::Result<RecordResult> {
+    let env = load_environment(pool, environment_id).await?;
     if env.env_type != "sandbox"
         || env.state != "running"
         || env.desired_state != "started"
@@ -648,11 +663,11 @@ async fn record(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<Rec
     {
         return Ok(RecordResult::NotReady);
     }
-    let Some(backend) = load_backend_facts(&ctx.pool, environment_id).await? else {
+    let Some(backend) = load_backend_facts(pool, environment_id).await? else {
         return Ok(RecordResult::NotReady);
     };
     let authority =
-        ActivityAuthority::capture(&ctx.pool, environment_id, env.operation_generation).await?;
+        ActivityAuthority::capture(pool, environment_id, env.operation_generation).await?;
     let client = SandboxClient::new(kube.clone(), &backend.namespace);
     let opts = ClaimOpts {
         environment_id: env.id.clone(),
@@ -685,6 +700,10 @@ async fn record(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<Rec
             environment_id,
             "workspace Pod changed after observation",
         ));
+    }
+    // M1: only the enforced lifecycle path records a Pod-scope binding.
+    if credential_scope(&pod) == Some(WorkspaceCredentialScope::Pod) {
+        return Ok(RecordResult::NotReady);
     }
     // §5.3: images.
     if !images_match(&runtime.sandbox, &pod) {
@@ -719,7 +738,7 @@ async fn record(ctx: &WorkerContext, environment_id: &str) -> anyhow::Result<Rec
         ));
     };
     let captured = match scope {
-        WorkspaceCredentialScope::Pod => pod_scope_capture(&env),
+        WorkspaceCredentialScope::Pod => return Ok(RecordResult::NotReady),
         WorkspaceCredentialScope::Environment => environment_scope_capture(&pod),
     };
     let Some(captured) = captured else {
@@ -892,7 +911,8 @@ async fn check_bindable_runtime(
         ..Default::default()
     };
     let refuse = |reason, scope, definitive| Ok(Err((reason, scope, definitive)));
-    // §5.1: the converged chain; Claim Ready alone never suffices.
+    // §5.1 and §10 (amended): the exact chain, bind-ready. Claim Ready is not
+    // required and never suffices.
     let runtime = match client
         .read_bindable_runtime(&opts, &backend.claim_name, &backend.claim_uid)
         .await
@@ -903,7 +923,7 @@ async fn check_bindable_runtime(
     if runtime.observation != *observation {
         return refuse(BindRefused::PodChanged, None, false);
     }
-    if !runtime.converged {
+    if !runtime.bind_ready {
         return refuse(BindRefused::NotConverged, None, false);
     }
     let pod_identity = runtime.observation.pod().clone();
@@ -1144,6 +1164,78 @@ pub(crate) async fn bind_workspace_runtime(
             .await?;
             Err(error)
         }
+    }
+}
+
+/// How often [`bind_before_ready`] re-reads the chain while the caller waits.
+const EARLY_BIND_POLL: Duration = Duration::from_millis(500);
+
+/// Design §10 (amended): while the caller waits for the gateway or for Claim
+/// Ready, record an identity-free Pod's binding as soon as the exact chain is
+/// bind-ready ([`BindableRuntime::bind_ready`]), so its daemon listens and the
+/// gateway connects while DinD's Docker daemon is still starting. It records
+/// through the enforced [`bind_workspace_runtime`], with every §5 check and
+/// the locked re-check of the captured values.
+///
+/// Returns the record time when this call recorded the binding, or `None`
+/// when the Pod was already bound or is a legacy Pod, which keeps the
+/// post-ready order unchanged. A refusal that can clear (labels not yet
+/// converged, a replaced Pod, an unreadable chain) is retried; any other
+/// refusal fails exactly as the post-ready bind does. The caller drops this
+/// future once its own wait ends.
+pub(crate) async fn bind_before_ready(
+    kube: &kube::Client,
+    authority: &ActivityAuthority,
+    states: &[&str],
+) -> anyhow::Result<Option<Duration>> {
+    let pool = authority.pool();
+    loop {
+        let env = load_environment(pool, authority.environment_id()).await?;
+        let backend = super::env_data::load_backend_row(pool, authority.environment_id())
+            .await
+            .ok()
+            .filter(|backend| !backend.namespace.is_empty() && !backend.claim_uid.is_empty());
+        if let Some(backend) = backend {
+            let client = SandboxClient::new(kube.clone(), &backend.namespace);
+            let opts = ClaimOpts {
+                environment_id: env.id.clone(),
+                org_id: env.org_id.clone(),
+                operation_generation: authority.operation_generation(),
+                ..Default::default()
+            };
+            if let Ok(runtime) = client
+                .read_bindable_runtime(&opts, &backend.claim_name, &backend.claim_uid)
+                .await
+                && runtime.bind_ready
+            {
+                if credential_scope(&runtime.pod) != Some(WorkspaceCredentialScope::Pod) {
+                    return Ok(None);
+                }
+                match bind_workspace_runtime(
+                    kube,
+                    &env,
+                    &backend,
+                    authority,
+                    states,
+                    &runtime.observation,
+                )
+                .await
+                {
+                    Ok(elapsed) => return Ok(elapsed),
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<BindRefused>(),
+                            Some(
+                                BindRefused::NotConverged
+                                    | BindRefused::PodChanged
+                                    | BindRefused::ChainUnverified
+                            )
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        tokio::time::sleep(EARLY_BIND_POLL).await;
     }
 }
 
@@ -1461,31 +1553,54 @@ pub(crate) async fn live_environment_binding(
         .transpose()
 }
 
-/// The daemon credential for the environment's live binding (design §7):
-/// scope `pod` derives the per-Pod credential, `environment` the legacy
-/// environment token. An environment with no live binding (a legacy Pod the
-/// backfill has not bound yet) keeps the environment token, which only a
-/// legacy daemon accepts; an identity-free daemon is unbound and unreachable
-/// until its binding exists. None computes it from a name.
+/// The current workspace Pod is not bound yet and is not a legacy Pod, so
+/// no daemon credential is issued for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the workspace daemon is not bound yet")]
+pub(crate) struct DaemonNotBound;
+
+/// The credential orchestration presents to the environment's daemon
+/// (design §7). A live binding decides it. Without one, only a legacy Pod,
+/// which renders the environment token itself, receives that token: an
+/// identity-free Pod that is not bound yet, or a Pod whose scope cannot be
+/// read, gets nothing, so the environment token never reaches a Pod that was
+/// not rendered with it.
 pub(crate) async fn environment_daemon_credential(
     pool: &PgPool,
+    kube: Option<&kube::Client>,
     session_secret: &str,
     environment_id: &str,
 ) -> anyhow::Result<String> {
-    let binding = live_environment_binding(pool, environment_id).await?;
-    match binding {
-        Some(binding) => daemon_credential_for(
+    if let Some(binding) = live_environment_binding(pool, environment_id).await? {
+        return daemon_credential_for(
             session_secret,
             environment_id,
             &binding.pod_uid,
             binding.credential_scope,
-        ),
-        None => super::gatewayauth::issue_token(
-            session_secret,
-            environment_id,
-            super::gatewayauth::SCOPE_DAEMON,
-        ),
+        );
     }
+    let namespace: Option<String> = sqlx::query_scalar(
+        "SELECT namespace FROM sandbox_environment_backend WHERE environment_id = $1",
+    )
+    .bind(environment_id)
+    .fetch_optional(pool)
+    .await?;
+    let (Some(namespace), Some(kube)) = (namespace.filter(|namespace| !namespace.is_empty()), kube)
+    else {
+        return Err(DaemonNotBound.into());
+    };
+    let pod = SandboxClient::new(kube.clone(), &namespace)
+        .current_workspace_pod_object(environment_id)
+        .await
+        .map_err(|_| DaemonNotBound)?;
+    if credential_scope(&pod) != Some(WorkspaceCredentialScope::Environment) {
+        return Err(DaemonNotBound.into());
+    }
+    super::gatewayauth::issue_token(
+        session_secret,
+        environment_id,
+        super::gatewayauth::SCOPE_DAEMON,
+    )
 }
 
 /// Stale-bootstrap comparison for a bound Pod-scope runtime (design §12): the

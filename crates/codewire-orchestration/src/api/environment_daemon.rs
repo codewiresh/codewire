@@ -39,7 +39,9 @@ use crate::sandbox::template::{WORKSPACE_DAEMON_PORT, workspace_daemon_service_n
 use crate::worker::activity_authority::{
     ActivityAuthority, await_external_mutation, is_authority_lost,
 };
-use crate::worker::workspace_binding::{bind_replacement_runtime, environment_daemon_credential};
+use crate::worker::workspace_binding::{
+    DaemonNotBound, bind_replacement_runtime, environment_daemon_credential,
+};
 
 #[cfg(test)]
 mod repair_database_tests;
@@ -248,12 +250,13 @@ pub async fn list_environment_daemon_sessions_core(
 /// service without manufacturing a public user identity.
 pub(crate) async fn list_environment_daemon_sessions_for_worker(
     pool: &PgPool,
+    kube: Option<&kube::Client>,
     session_secret: &str,
     namespace: &str,
     environment_id: &str,
 ) -> AppResult<Vec<v1::SessionRecord>> {
     let (channel, token) =
-        daemon_channel_for_runtime(pool, session_secret, namespace, environment_id).await?;
+        daemon_channel_for_runtime(pool, kube, session_secret, namespace, environment_id).await?;
     let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
     require_ready_daemon(&mut client, &token, &[DAEMON_CAPABILITY_SESSIONS]).await?;
     Ok(client
@@ -266,13 +269,14 @@ pub(crate) async fn list_environment_daemon_sessions_for_worker(
 
 pub(crate) async fn stop_environment_daemon_session_for_worker(
     pool: &PgPool,
+    kube: Option<&kube::Client>,
     session_secret: &str,
     namespace: &str,
     environment_id: &str,
     session_id: &str,
 ) -> AppResult<v1::SessionRecord> {
     let (channel, token) =
-        daemon_channel_for_runtime(pool, session_secret, namespace, environment_id).await?;
+        daemon_channel_for_runtime(pool, kube, session_secret, namespace, environment_id).await?;
     let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
     require_ready_daemon(&mut client, &token, &[DAEMON_CAPABILITY_SESSIONS]).await?;
     client
@@ -863,6 +867,7 @@ impl DaemonRepair {
     async fn daemon_status(&self, known_pod_name: &str) -> AppResult<EnvironmentDaemonStatus> {
         let (channel, token) = daemon_channel_for_endpoint(
             &self.pool,
+            Some(&self.kube),
             &self.session_secret,
             &self.environment_id,
             self.daemon_endpoints
@@ -965,6 +970,7 @@ async fn session_client_for_target(
     let target = resolve_target(state, user, org_id, environment_id).await?;
     let (channel, token) = daemon_channel_for_endpoint(
         &state.pool,
+        state.kube.as_ref(),
         &state.session_secret,
         &target.environment_id,
         state
@@ -1011,6 +1017,7 @@ async fn daemon_channel_for_target(
 ) -> AppResult<(Channel, String)> {
     daemon_channel_for_endpoint(
         &state.pool,
+        state.kube.as_ref(),
         &state.session_secret,
         environment_id,
         state
@@ -1023,12 +1030,14 @@ async fn daemon_channel_for_target(
 
 async fn daemon_channel_for_runtime(
     pool: &PgPool,
+    kube: Option<&kube::Client>,
     session_secret: &str,
     namespace: &str,
     environment_id: &str,
 ) -> AppResult<(Channel, String)> {
     daemon_channel_for_endpoint(
         pool,
+        kube,
         session_secret,
         environment_id,
         cluster_daemon_endpoint(namespace, environment_id),
@@ -1048,15 +1057,20 @@ fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> String {
 
 async fn daemon_channel_for_endpoint(
     pool: &PgPool,
+    kube: Option<&kube::Client>,
     session_secret: &str,
     environment_id: &str,
     endpoint: String,
     budget: DaemonRequestBudget,
 ) -> AppResult<(Channel, String)> {
-    // The live binding decides the credential (design §7); never a name.
-    let token = environment_daemon_credential(pool, session_secret, environment_id)
+    // The live binding decides the credential (design §7); never a name. An
+    // unbound Pod gets the environment token only when it is a legacy Pod.
+    let token = environment_daemon_credential(pool, kube, session_secret, environment_id)
         .await
         .map_err(|error| {
+            if error.downcast_ref::<DaemonNotBound>().is_some() {
+                return AppError::Upstream("environment daemon is not ready".into());
+            }
             tracing::error!(environment_id, %error, "issue environment daemon credential failed");
             AppError::InternalMsg("failed to authorize environment daemon".into())
         })?;
