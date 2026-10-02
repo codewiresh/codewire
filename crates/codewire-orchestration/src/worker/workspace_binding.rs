@@ -1195,31 +1195,125 @@ pub(crate) async fn bind_replacement_runtime(
     Ok(())
 }
 
-/// Release the environment's live binding once its Pod is gone (stop,
-/// restart before resume, destroy), and clear the backend pointer, inside the
-/// caller's generation fence. Idempotent.
-pub(crate) async fn release_workspace_binding(
-    authority: &ActivityAuthority,
-    states: &[&str],
+/// The live binding's Pod is still present, so it is not released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the bound workspace Pod is still present")]
+pub(crate) struct BoundPodPresent;
+
+/// Whether the Pod a binding recorded is absent: its name no longer exists,
+/// or now names a Pod with another UID. A terminating Pod is still present.
+/// Pod UIDs are never reused, so an observed absence is final.
+pub(crate) async fn bound_pod_absent(
+    kube: &kube::Client,
+    namespace: &str,
+    pod_name: &str,
+    pod_uid: &str,
 ) -> anyhow::Result<bool> {
-    let mut guard = authority.begin_external_mutation(states).await?;
+    let pod = SandboxClient::new(kube.clone(), namespace)
+        .get_workspace_pod(pod_name)
+        .await?;
+    Ok(pod.is_none_or(|pod| pod.metadata.uid.as_deref() != Some(pod_uid)))
+}
+
+/// Release exactly `pod_uid`'s live binding and clear a backend pointer to
+/// it, inside a transaction that already holds the environment row lock.
+async fn release_absent_binding(
+    tx: &mut PgConnection,
+    environment_id: &str,
+    pod_uid: &str,
+) -> anyhow::Result<bool> {
     let released = sqlx::query(
         "UPDATE sandbox_workspace_bindings SET released_at = GREATEST(now(), bound_at)
-          WHERE environment_id = $1 AND released_at IS NULL",
+          WHERE environment_id = $1 AND pod_uid = $2 AND released_at IS NULL",
     )
-    .bind(authority.environment_id())
-    .execute(&mut **guard.transaction())
+    .bind(environment_id)
+    .bind(pod_uid)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
     sqlx::query(
         "UPDATE sandbox_environment_backend SET pod_uid = NULL, bound_at = NULL
-          WHERE environment_id = $1 AND pod_uid IS NOT NULL",
+          WHERE environment_id = $1 AND pod_uid = $2",
+    )
+    .bind(environment_id)
+    .bind(pod_uid)
+    .execute(&mut *tx)
+    .await?;
+    Ok(released > 0)
+}
+
+/// Release the environment's live binding once its Pod is observed absent
+/// (design §10: stop, restart before resume, destroy), and clear the backend
+/// pointer, inside the caller's generation fence. A present Pod refuses with
+/// [`BoundPodPresent`] and changes nothing, so the caller retries after its
+/// deletion. Idempotent: no live binding releases nothing.
+pub(crate) async fn release_workspace_binding(
+    kube: &kube::Client,
+    authority: &ActivityAuthority,
+    states: &[&str],
+) -> anyhow::Result<bool> {
+    let live: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT pod_uid, namespace, pod_name FROM sandbox_workspace_bindings
+          WHERE environment_id = $1 AND released_at IS NULL",
     )
     .bind(authority.environment_id())
-    .execute(&mut **guard.transaction())
+    .fetch_optional(authority.pool())
     .await?;
+    let Some((pod_uid, namespace, pod_name)) = live else {
+        return Ok(false);
+    };
+    if !bound_pod_absent(kube, &namespace, &pod_name, &pod_uid).await? {
+        return Err(BoundPodPresent.into());
+    }
+    let mut guard = authority.begin_external_mutation(states).await?;
+    let released =
+        release_absent_binding(guard.transaction(), authority.environment_id(), &pod_uid).await?;
     guard.commit().await?;
-    Ok(released > 0)
+    Ok(released)
+}
+
+/// The backfill's release of one live binding whose Pod is observed absent
+/// (design §10's rule). It needs no generation: the absence of a Pod UID is
+/// final, and it changes only that UID's row and a pointer to it, under the
+/// environment row lock every binding writer takes first. A present Pod, or a
+/// binding already released, is `Unchanged`.
+pub(crate) async fn release_binding_if_pod_absent(
+    pool: &PgPool,
+    kube: &kube::Client,
+    pod_uid: &str,
+) -> anyhow::Result<RecordResult> {
+    let live: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT environment_id, namespace, pod_name FROM sandbox_workspace_bindings
+          WHERE pod_uid = $1 AND released_at IS NULL",
+    )
+    .bind(pod_uid)
+    .fetch_optional(pool)
+    .await?;
+    let Some((environment_id, namespace, pod_name)) = live else {
+        return Ok(RecordResult::Unchanged);
+    };
+    if !bound_pod_absent(kube, &namespace, &pod_name, pod_uid).await? {
+        return Ok(RecordResult::Unchanged);
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT 1 FROM environments WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(&environment_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let released = release_absent_binding(&mut tx, &environment_id, pod_uid).await?;
+    tx.commit().await?;
+    if !released {
+        return Ok(RecordResult::Unchanged);
+    }
+    tracing::info!(
+        env = %environment_id,
+        pod_uid,
+        "workspace binding released after its Pod was observed absent"
+    );
+    Ok(RecordResult::Recorded)
 }
 
 /// Why a restore adoption was refused.
@@ -1486,8 +1580,10 @@ pub(crate) struct BackfillState {
     unbound: Option<String>,
     bound: Option<String>,
     pvcs: Option<String>,
+    releases: Option<String>,
     binding_backoff: Backoffs,
     pvc_backoff: Backoffs,
+    release_backoff: Backoffs,
 }
 
 /// Running environments without a binding, then a rotation over the bound
@@ -1512,6 +1608,19 @@ const UNRESOLVED_PVC: &str = "SELECT e.id FROM environments e
        AND e.deletion_requested_at IS NULL AND b.sandbox_claim_uid IS NOT NULL
        AND b.workspace_pvc_uid IS NULL AND e.id > $1
      ORDER BY e.id LIMIT $2";
+
+/// Live bindings of environments that are not stably running, by Pod UID:
+/// destroyed, stopped, failed or still changing. Each is released once its
+/// Pod is observed absent, which also reaches bindings an earlier binary left
+/// live. A running environment's replaced Pod is not swept here: the rebind
+/// its liveness trigger enqueues releases it atomically with the new binding.
+const UNRELEASED_INACTIVE: &str = "SELECT w.pod_uid FROM sandbox_workspace_bindings w
+      JOIN environments e ON e.id = w.environment_id
+     WHERE w.released_at IS NULL
+       AND NOT (e.state = 'running' AND e.desired_state = 'started'
+                AND e.deletion_requested_at IS NULL)
+       AND w.pod_uid > $1
+     ORDER BY w.pod_uid LIMIT $2";
 
 async fn next_batch(
     pool: &PgPool,
@@ -1595,6 +1704,36 @@ pub(crate) async fn backfill_pass(ctx: &WorkerContext, state: &mut BackfillState
             if state.pvc_backoff.ready(&id, Instant::now()) {
                 let result = record_first_workspace_pvc(ctx, &id).await;
                 state.pvc_backoff.observe(&id, result, Instant::now());
+            }
+        }
+        if let Some(kube) = ctx.kube.as_ref() {
+            for pod_uid in rotate(
+                &ctx.pool,
+                UNRELEASED_INACTIVE,
+                &mut state.releases,
+                BACKFILL_BATCH,
+            )
+            .await?
+            {
+                if Instant::now() >= deadline {
+                    return Ok(());
+                }
+                state.releases = Some(pod_uid.clone());
+                if state.release_backoff.ready(&pod_uid, Instant::now()) {
+                    let result = tokio::time::timeout(
+                        RECORD_ATTEMPT_TIMEOUT,
+                        release_binding_if_pod_absent(&ctx.pool, kube, &pod_uid),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("binding release timed out")))
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(pod_uid, error = %error, "workspace binding release failed");
+                        RecordResult::Unavailable
+                    });
+                    state
+                        .release_backoff
+                        .observe(&pod_uid, result, Instant::now());
+                }
             }
         }
         Ok(())

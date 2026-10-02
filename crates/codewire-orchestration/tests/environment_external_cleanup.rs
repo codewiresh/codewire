@@ -379,6 +379,69 @@ async fn runtime_lease_and_port_discovery_each_block_the_marker() {
     cleanup(&pool, &fixture).await;
 }
 
+/// A live workspace binding of `env_id` for the Pod `pod_uid`.
+async fn insert_live_binding(pool: &PgPool, env_id: &str, pod_uid: &str) {
+    sqlx::query(
+        r#"INSERT INTO sandbox_workspace_bindings
+               (pod_uid, environment_id, namespace, pod_name, claim_uid, sandbox_uid,
+                operation_generation, managed_credential_clients, credential_scope)
+           VALUES ($1, $2, 'test-sandboxes', $3, $4, $5, 1, '', 'pod')"#,
+    )
+    .bind(pod_uid)
+    .bind(env_id)
+    .bind(format!("sandbox-{env_id}"))
+    .bind(Uuid::new_v4().to_string())
+    .bind(Uuid::new_v4().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Design §10: destroy releases the workspace binding once its Pod is observed
+/// absent, so the marker refuses while any binding of the environment is
+/// still live. Another environment's live binding never blocks it, and the
+/// released row is kept, never deleted.
+#[tokio::test]
+async fn a_live_workspace_binding_blocks_the_marker() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroying").await;
+    let other = seed_running_environment(&pool, &fixture, "other").await;
+    let pod = Uuid::new_v4().to_string();
+    let other_pod = Uuid::new_v4().to_string();
+    insert_live_binding(&pool, &fixture.env_id, &pod).await;
+    insert_live_binding(&pool, &other, &other_pod).await;
+
+    assert_cleanup_refused(&pool, &fixture.env_id, proof(&pool).await).await;
+
+    sqlx::query(
+        "UPDATE sandbox_workspace_bindings SET released_at = GREATEST(now(), bound_at) \
+          WHERE pod_uid = $1",
+    )
+    .bind(&pod)
+    .execute(&pool)
+    .await
+    .unwrap();
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
+        .await
+        .expect("a released binding and another environment's live one must not block");
+    assert!(cleanup_marked(&pool, &fixture.env_id).await);
+    let mut rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT pod_uid, released_at IS NULL FROM sandbox_workspace_bindings \
+          WHERE environment_id = ANY($1)",
+    )
+    .bind(vec![fixture.env_id.clone(), other.clone()])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    rows.sort();
+    let mut expected = vec![(pod, false), (other_pod, true)];
+    expected.sort();
+    assert_eq!(rows, expected);
+
+    cleanup(&pool, &fixture).await;
+}
+
 #[tokio::test]
 async fn ambiguous_dispatch_on_another_environment_does_not_block_cleanup() {
     let Some(pool) = pool().await else { return };
