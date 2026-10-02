@@ -167,7 +167,7 @@ through confirmed source updates; and proves installed-root, workspace, and
 skill preservation.
 Application values are intentionally child-visible, unlike provider credentials.
 
-With --managed-agent-sessions and a source-bound static boot cw image receipt,
+With --managed-agent-sessions and a source-bound readonly cw runtime image receipt,
 the same protected-broker environment additionally runs actual pinned guest
 Codex and Claude managed conversations before the existing revocation proof.
 It requires native acknowledgement, follow-up/resume, held-turn controls,
@@ -309,10 +309,10 @@ fi
 if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
   [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]] ||
     die 'managed agent sessions require protected-broker mode and a boot cw image receipt'
-  require_absolute_canonical_file 'managed boot cw image receipt' "$MANAGED_AGENT_CW_IMAGE_RECEIPT"
+  require_absolute_canonical_file 'managed cw runtime image receipt' "$MANAGED_AGENT_CW_IMAGE_RECEIPT"
   require_absolute_canonical_file 'managed native journey' "$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py"
 elif [[ -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]]; then
-  die 'boot cw image receipt requires --managed-agent-sessions'
+  die 'cw runtime image receipt requires --managed-agent-sessions'
 fi
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
 [[ "$(uname -m)" == x86_64 ]] || die 'the current native artifact set requires x86_64'

@@ -365,12 +365,21 @@ def read(directory_fd, name, mode, bound):
     finally:
         os.close(fd)
 directory(root)
-provenance = json.loads(read(root, "provenance.json", 0o444, 16384))
+catalog = json.loads(read(root, "catalog.json", 0o444, 16 * 16384))
+assert set(catalog) == {"schema_version", "active_sha256", "runtimes"}
+assert catalog["schema_version"] == 1 and catalog["active_sha256"] == expected_cw
+assert 1 <= len(catalog["runtimes"]) <= 16
+digests = [runtime["payload"]["sha256"] for runtime in catalog["runtimes"]]
+assert digests == sorted(set(digests)) and expected_cw in digests
+assert set(os.listdir(root)) == {"catalog.json", *digests}
+selected = os.open(expected_cw, directory_flags, dir_fd=root)
+directory(selected)
+assert set(os.listdir(selected)) == {"cw", "provenance.json"}
+provenance = json.loads(read(selected, "provenance.json", 0o444, 16384))
+assert provenance == catalog["runtimes"][digests.index(expected_cw)]
 assert provenance["image_index_sha256"] == expected_index
 assert provenance["image_manifest"]["sha256"] == expected_manifest
 assert provenance["payload"]["sha256"] == expected_cw
-selected = os.open(expected_cw, directory_flags, dir_fd=root)
-directory(selected)
 cw = read(selected, "cw", 0o555, 256 * 1024 * 1024)
 assert len(cw) == provenance["payload"]["size"] and hashlib.sha256(cw).hexdigest() == expected_cw
 print(json.dumps({"cw_sha256": expected_cw, "image_manifest_sha256": expected_manifest, "read_only": True}))
@@ -1703,7 +1712,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cw", help="absolute built host cw")
     parser.add_argument("--environment", help="immutable native environment UUID")
-    parser.add_argument("--cw-image-receipt", help="external public receipt for the image sealed into this VM boot bundle")
+    parser.add_argument("--cw-image-receipt", help="external public receipt for the image supplied on this VM's readonly runtime disk")
     parser.add_argument("--self-test", action="store_true", help="source-only contract tests; launch no cw or VM")
     parser.add_argument("--codex-model")
     parser.add_argument("--claude-model")
