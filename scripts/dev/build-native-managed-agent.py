@@ -117,7 +117,9 @@ def main():
     shutil.copyfile(binary, destination)
     destination.chmod(0o500)
     descriptor = {
-        "schema_version": 1, "protocol_version": 1, "target": TARGET,
+        "schema_version": 2, "protocol_version": 1, "record_version": 1,
+        "package_version": tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"],
+        "target": TARGET,
         "source_revision": revision, "source_tree_sha256": after, "rustc": rustc,
         "path": str(destination), "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
     }

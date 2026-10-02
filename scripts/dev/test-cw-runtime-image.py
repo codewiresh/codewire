@@ -25,7 +25,8 @@ class Admission(unittest.TestCase):
         struct.pack_into("<Q", self.cw, 32, 64)
         struct.pack_into("<HH", self.cw, 54, 56, 1)
         struct.pack_into("<I", self.cw, 64, 1)
-        self.metadata = {"schema_version": 1, "protocol_version": 1, "target": image.TARGET,
+        self.metadata = {"schema_version": 2, "protocol_version": 1, "record_version": 1,
+                         "package_version": "0.1.0", "target": image.TARGET,
                          "source_revision": "a" * 40, "source_tree_sha256": "b" * 64,
                          "rustc": "rustc 1.93.0 (synthetic fixture)", "sha256": image.sha(self.cw),
                          "size": len(self.cw)}
@@ -94,6 +95,28 @@ class Admission(unittest.TestCase):
         corrupted[position + len(self.cw) - 1] = 1
         self.refuses(bytes(corrupted), pin)
 
+    def test_pack_preserves_the_admitted_image_and_uses_no_host_paths(self):
+        archive, pin = self.package()
+        with tempfile.TemporaryDirectory() as task:
+            task = Path(task)
+            source = task / "cw.oci.tar"
+            source.write_bytes(archive)
+            source.chmod(0o400)
+            with contextlib.redirect_stdout(io.StringIO()):
+                image.pack(source, pin, task / "runtime")
+            lock = json.loads((task / "runtime/cw-runtime.lock.json").read_bytes())
+            self.assertEqual(lock["image_index_sha256"], pin)
+            self.assertEqual(lock["pack"]["path"], "runtime.pack")
+            data = (task / "runtime/runtime.pack").read_bytes()
+            self.assertEqual(lock["pack"]["size"], len(data))
+            self.assertEqual(lock["pack"]["sha256"], image.sha(data))
+            self.assertEqual(data[:8], b"CWRPACK1")
+            provenance_len, payload_len = struct.unpack_from("<QQ", data, 8)
+            self.assertEqual(payload_len, len(self.cw))
+            self.assertEqual(data[24 + provenance_len:], self.cw)
+            self.assertEqual(image.decode(data[24:24 + provenance_len])["payload"], self.metadata)
+            self.assertNotIn(str(task), json.dumps(lock))
+
     def test_platform_selection_shape_and_integer_schema(self):
         edits = [lambda value: value["manifests"][0]["platform"].update(architecture="arm64"),
                  lambda value: value["manifests"].append(copy.deepcopy(value["manifests"][0])),
@@ -124,10 +147,20 @@ class Admission(unittest.TestCase):
             self.refuses(*self.package(layer=self.layer(extra=[(name, 0o555, b"extra")])))
 
     def test_duplicate_json_keys(self):
-        metadata = image.encode(self.metadata).replace(b'"schema_version":1', b'"schema_version":1,"schema_version":1')
+        token = f'"schema_version":{self.metadata["schema_version"]}'.encode()
+        original = image.encode(self.metadata)
+        self.assertEqual(original.count(token), 1)
+        metadata = original.replace(token, token + b"," + token)
         layer = image.tar_bytes([(name, 0o555, None) for name in image.DIRECTORIES]
                                 + [(image.CW_PATH, 0o555, bytes(self.cw)), (image.META_PATH, 0o444, metadata)])
         self.refuses(*self.package(layer=layer))
+
+    def test_incompatible_record_schema_and_invalid_release_version(self):
+        for changes in ({"schema_version": 1}, {"record_version": 2}, {"record_version": True},
+                        {"package_version": ""}, {"package_version": "../runtime"},
+                        {"package_version": "\u00e9"}, {"package_version": "x" * 65}):
+            with self.subTest(changes=changes):
+                self.refuses(*self.package(layer=self.layer(metadata=self.metadata | changes)))
 
     def test_links_extensions_and_special_files_fail_before_resolution(self):
         for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE, tarfile.XHDTYPE, tarfile.GNUTYPE_LONGNAME):

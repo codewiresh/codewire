@@ -1153,8 +1153,10 @@ mod tests {
             image_layer: descriptor,
             layer_diff_id: "c".repeat(64),
             payload: CwImagePayload {
-                schema_version: 1,
+                schema_version: 2,
                 protocol_version: 1,
+                record_version: 1,
+                package_version: "0.1.0".to_owned(),
                 target: "x86_64-unknown-linux-musl".into(),
                 source_revision: "a".repeat(40),
                 source_tree_sha256: "b".repeat(64),

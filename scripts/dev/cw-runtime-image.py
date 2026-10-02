@@ -99,10 +99,13 @@ def static_elf(data):
 
 
 def validate_payload(metadata, cw):
-    require(set(metadata) == {"schema_version", "protocol_version", "target", "source_revision",
+    require(set(metadata) == {"schema_version", "protocol_version", "record_version", "package_version", "target", "source_revision",
                               "source_tree_sha256", "rustc", "sha256", "size"}, "unknown cw provenance fields")
-    require(type(metadata["schema_version"]) is int and metadata["schema_version"] == 1
+    require(type(metadata["schema_version"]) is int and metadata["schema_version"] == 2
             and type(metadata["protocol_version"]) is int and metadata["protocol_version"] == 1
+            and type(metadata["record_version"]) is int and metadata["record_version"] == 1
+            and isinstance(metadata["package_version"], str) and 0 < len(metadata["package_version"]) <= 64
+            and all(c.isascii() and (c.isalnum() or c in ".-+") for c in metadata["package_version"])
             and metadata["target"] == TARGET
             and hex_value(metadata["source_revision"], 40)
             and hex_value(metadata["source_tree_sha256"])
@@ -253,7 +256,7 @@ def write(path, data, mode):
 
 def build(artifact_path, output):
     artifact = decode(read_regular(artifact_path, MAX_JSON, private=True))
-    require(set(artifact) == {"schema_version", "protocol_version", "target", "source_revision",
+    require(set(artifact) == {"schema_version", "protocol_version", "record_version", "package_version", "target", "source_revision",
                              "source_tree_sha256", "rustc", "path", "sha256"}, "unknown build descriptor fields")
     cw_path = Path(artifact.pop("path"))
     require(cw_path.is_absolute(), "cw build input path must be absolute")
@@ -283,6 +286,17 @@ def build(artifact_path, output):
     print(json.dumps(receipt))
 
 
+def pack(image_path, index_sha256, output):
+    cw, provenance = admit(read_regular(image_path, MAX_ARCHIVE, private=True), index_sha256)
+    data = b"CWRPACK1" + struct.pack("<QQ", len(provenance), len(cw)) + provenance + cw
+    fresh_output(output)
+    write(output / "runtime.pack", data, 0o400)
+    lock = {"schema_version": 1, "image_index_sha256": index_sha256,
+            "pack": {"path": "runtime.pack", "size": len(data), "sha256": sha(data)}}
+    write(output / "cw-runtime.lock.json", encode(lock), 0o400)
+    print(json.dumps(lock))
+
+
 def main():
     def expired(_signum, _frame):
         raise TimeoutError("cw image preparation exceeded its 60 second bound")
@@ -297,9 +311,15 @@ def main():
     consume.add_argument("--image", type=Path, required=True)
     consume.add_argument("--index-sha256", required=True)
     consume.add_argument("--output", type=Path, required=True)
+    transport = sub.add_parser("pack")
+    transport.add_argument("--image", type=Path, required=True)
+    transport.add_argument("--index-sha256", required=True)
+    transport.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "build":
         build(args.artifact, args.output)
+    elif args.command == "pack":
+        pack(args.image, args.index_sha256, args.output)
     else:
         cw, provenance = admit(read_regular(args.image, MAX_ARCHIVE, private=True), args.index_sha256)
         fresh_output(args.output)
