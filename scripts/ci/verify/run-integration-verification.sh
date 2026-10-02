@@ -411,6 +411,13 @@ run_database() {
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "admin startup summary matrix" "$logfile" 2
 
+  logfile="$RUN_DIR/workspace-binding-recorder.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::workspace_binding::database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "workspace binding recorder matrix" "$logfile" 10
+
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib \
@@ -1039,6 +1046,7 @@ run_orchestration() {
       --skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
       --skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' \
       --skip 'worker::create::projection_database_tests::' \
+      --skip 'worker::workspace_binding::database_tests::' \
       --nocapture | tee "$logfile"
   assert_passed_count "orchestration activity fencing matrix" "$logfile" 2
 

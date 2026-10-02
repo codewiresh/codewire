@@ -89,6 +89,11 @@ impl PgBindingStore {
             .connect_lazy(database_url)?;
         Ok(Self { pool })
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
 }
 
 type LiveBindingRow = (

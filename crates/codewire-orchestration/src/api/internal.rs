@@ -159,18 +159,18 @@ impl std::fmt::Debug for GatewayDaemonCredential {
 /// The environment facts a gateway's ownership chain is checked against,
 /// with its live workspace binding when one is recorded.
 #[derive(Debug, PartialEq, Eq)]
-struct GatewayDaemonAuthority {
-    environment_id: String,
-    organization_id: String,
-    operation_generation: i64,
-    namespace: String,
-    binding: Option<GatewayDaemonBinding>,
+pub(crate) struct GatewayDaemonAuthority {
+    pub(crate) environment_id: String,
+    pub(crate) organization_id: String,
+    pub(crate) operation_generation: i64,
+    pub(crate) namespace: String,
+    pub(crate) binding: Option<GatewayDaemonBinding>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct GatewayDaemonBinding {
-    pod_uid: String,
-    credential_scope: WorkspaceCredentialScope,
+pub(crate) struct GatewayDaemonBinding {
+    pub(crate) pod_uid: String,
+    pub(crate) credential_scope: WorkspaceCredentialScope,
 }
 
 type GatewayDaemonAuthorityRow = (String, String, i64, String, Option<String>, Option<String>);
@@ -208,7 +208,7 @@ pub(crate) async fn issue_gateway_daemon_credential_core(
         .ok_or_else(gateway_daemon_not_ready)?;
     let environment_id =
         authenticated_gateway_environment(&pod, identity).ok_or(AppError::Forbidden)?;
-    let authority = gateway_daemon_authority(state, &environment_id)
+    let authority = gateway_daemon_authority(&state.pool, &environment_id)
         .await?
         .ok_or_else(gateway_daemon_not_ready)?;
     if authority.namespace != namespace {
@@ -243,8 +243,8 @@ pub(crate) async fn issue_gateway_daemon_credential_core(
     })
 }
 
-async fn gateway_daemon_authority(
-    state: &ApiState,
+pub(crate) async fn gateway_daemon_authority(
+    pool: &sqlx::PgPool,
     environment_id: &str,
 ) -> AppResult<Option<GatewayDaemonAuthority>> {
     let row: Option<GatewayDaemonAuthorityRow> = sqlx::query_as(
@@ -267,7 +267,7 @@ async fn gateway_daemon_authority(
               AND e.deletion_requested_at IS NULL"#,
     )
     .bind(environment_id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(pool)
     .await
     .map_err(|error| {
         tracing::warn!(env = %environment_id, error = %error, "gateway daemon credential lookup failed");

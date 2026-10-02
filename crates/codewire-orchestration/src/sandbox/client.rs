@@ -254,6 +254,10 @@ fn legacy_shared_warm_pool_name_matches(name: &str, template_name: &str) -> bool
 #[path = "client_credentials.rs"]
 mod credentials;
 
+#[path = "client/workspace_binding.rs"]
+mod workspace_binding;
+pub use workspace_binding::{BindableRuntime, WorkspacePvc};
+
 #[cfg(test)]
 #[path = "client_runtime_identity_tests.rs"]
 mod runtime_identity_tests;
