@@ -4,7 +4,10 @@
 use super::*;
 
 use async_trait::async_trait;
-use codewire_credential_broker::{BrokerLeaseProvider, platform::PlatformBrokerLeaseProvider};
+use codewire_credential_broker::{
+    BrokerCredentialLease, BrokerLeaseError, BrokerLeaseProvider,
+    platform::PlatformBrokerLeaseProvider,
+};
 use codewire_gateway_proto::codewire::bridge::v1;
 use codewire_platform_credentials::PlatformCredentialStore;
 use codewire_protected_store::secret_envelope::{
@@ -244,9 +247,12 @@ async fn provider_only_projection_is_authenticated_empty_and_performs_no_app_rea
         let sealed = authority.project_environment(message).await?;
         ensure!(recipient.open(&sealed,&context,now_ms())?.entries().len()==0);
         ensure!(provider.calls.load(Ordering::SeqCst)==0);
+        // Revoking the profile's credential withholds only its capability; the
+        // launch projection is not a credential fence and still seals.
         sqlx::query("UPDATE platform_credentials SET status='revoked'").execute(&f.db.pool).await?;
-        let (message,_,_) = request(&authority)?;
-        ensure!(authority.project_environment(message).await.is_err());
+        let (message,recipient,context) = request(&authority)?;
+        let sealed = authority.project_environment(message).await?;
+        ensure!(recipient.open(&sealed,&context,now_ms())?.entries().len()==0);
         Ok(())
     }.await;
     f.finish(result).await
@@ -588,6 +594,161 @@ async fn projection_share_helper_fences_each_exact_authority_row_without_dml_gra
                 "authority mutation did not wait for SHARE fence: {statement}"
             );
         }
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
+async fn bind_two_capabilities(
+    f: &Fixture,
+    kek: Arc<support::SyntheticKek>,
+) -> Result<(CredentialId, CredentialId)> {
+    use codewire_access::{CredentialAuthKind, ProviderId};
+    use codewire_platform_credentials::CredentialRegistration;
+    let store = PlatformCredentialStore::new(f.db.pool.clone(), kek, builtin_provider_catalog());
+    let registration = |provider: &str, kind, name: &str| CredentialRegistration {
+        provider: ProviderId::parse(provider).unwrap(),
+        authentication_kind: kind,
+        display_name: name.into(),
+        account_hint: None,
+        expires_at_unix: None,
+    };
+    let codex = store
+        .create(
+            &f.owner,
+            registration("openai", CredentialAuthKind::OAuth, "Synthetic Codex"),
+            &support::value(b"synthetic-codex-bundle-never-projected"),
+        )
+        .await?
+        .metadata
+        .id;
+    let anthropic = store
+        .create(
+            &f.owner,
+            registration(
+                "anthropic",
+                CredentialAuthKind::ApiKey,
+                "Synthetic Anthropic",
+            ),
+            &support::value(b"synthetic-anthropic-key-never-projected"),
+        )
+        .await?
+        .metadata
+        .id;
+    let manager = PlatformAccessProfileStore::new(f.db.pool.clone(), builtin_provider_catalog());
+    let revised = manager
+        .update(
+            &f.owner,
+            &f.profile.id,
+            f.profile.revision,
+            BTreeMap::from([
+                (CapabilitySlot::codex(), codex.clone()),
+                (CapabilitySlot::anthropic(), anthropic.clone()),
+            ]),
+        )
+        .await?;
+    let mut context = f.context.clone();
+    context.authorized_credentials = [codex.clone(), anthropic.clone()].into_iter().collect();
+    manager
+        .replace_binding(
+            &context,
+            &EnvironmentAccessBinding {
+                environment_id: context.environment_id.clone(),
+                profile_id: f.profile.id.clone(),
+                profile_revision: f.profile.revision,
+            },
+            EnvironmentAccessBinding {
+                environment_id: context.environment_id.clone(),
+                profile_id: revised.id.clone(),
+                profile_revision: revised.revision,
+            },
+            Some(&context.user_id),
+        )
+        .await?;
+    Ok((codex, anthropic))
+}
+
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn credential_needing_reconnect_withholds_only_its_capability_and_launches_still_project()
+-> Result<()> {
+    let f = Fixture::create().await?;
+    let result = async {
+        grant_projection(&f).await?;
+        sources(&f, json!({"user":"platform"}), json!({}), true).await?;
+        put(&f, &format!("/users/{}", f.scope.creator), "APP_VALUE", b"launch-value").await?;
+        let kek = Arc::new(support::SyntheticKek::default());
+        let (codex, _) = bind_two_capabilities(&f, kek.clone()).await?;
+        let (broker_pool, _) = f.db.broker_pool().await?;
+        let admin = PlatformCredentialStore::new(f.db.pool.clone(), kek.clone(), builtin_provider_catalog());
+        let lease = async |authority: Arc<crate::KubernetesPlatformRuntimeAuthority>, slot: CapabilitySlot, operation: &str, route: &str| {
+            let broker = PlatformBrokerLeaseProvider::connect(
+                authority,
+                Arc::new(PlatformCredentialStore::new(broker_pool.clone(), kek.clone(), builtin_provider_catalog())),
+                PlatformAccessProfileStore::new(broker_pool.clone(), builtin_provider_catalog()),
+            ).await?;
+            anyhow::Ok(broker.lease_operation(
+                Uuid::new_v4(), slot,
+                codewire_access::BrokerOperationId::parse(operation)?,
+                codewire_access::BrokerRouteId::parse(route)?,
+            ).await)
+        };
+        let codex_lease = |authority| lease(authority, CapabilitySlot::codex(), "responses", "openai-api");
+        let anthropic_lease = |authority| lease(authority, CapabilitySlot::anthropic(), "messages", "anthropic-api");
+
+        // The refresh failure path: status refresh_failed at a new revocation generation.
+        sqlx::query("UPDATE platform_credentials SET status='refresh_failed',revocation_generation=revocation_generation+1 WHERE id=$1")
+            .bind(codex.as_str()).execute(&f.db.pool).await?;
+        for state in ["refresh_failed", "revoked", "expired", "past-deadline"] {
+            match state {
+                "revoked" => {
+                    let current = admin.record(&f.owner, &codex).await?;
+                    admin.revoke(&f.owner, &codex, current.version).await?;
+                }
+                "expired" => { sqlx::query("UPDATE platform_credentials SET status='expired' WHERE id=$1").bind(codex.as_str()).execute(&f.db.pool).await?; }
+                "past-deadline" => { sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=1 WHERE id=$1").bind(codex.as_str()).execute(&f.db.pool).await?; }
+                _ => {}
+            }
+            // A new gateway/workspace bridge is still admitted, and every launch
+            // still receives its environment projection.
+            let authority = admitted(&f, Arc::new(ObservedProvider::default())).await
+                .with_context(|| format!("{state}: bridge admission was refused"))?;
+            let (message, recipient, context) = request(&authority)?;
+            let sealed = authority.project_environment(message).await
+                .with_context(|| format!("{state}: launch projection was refused"))?;
+            ensure!(recipient.open(&sealed, &context, now_ms())?.entries().collect::<Vec<_>>() == [("APP_VALUE", "launch-value")]);
+            // The other capability keeps working with its own material.
+            let unwraps = kek.unwrap_calls.load(Ordering::SeqCst);
+            let anthropic = anthropic_lease(authority.clone()).await?
+                .map_err(|error| anyhow::anyhow!("{state}: healthy capability withheld: {error}"))?;
+            ensure!(anthropic.with_material(|material| material == b"synthetic-anthropic-key-never-projected"));
+            ensure!(kek.unwrap_calls.load(Ordering::SeqCst) == unwraps + 1);
+            // The withheld capability names its Reconnect and reads no material.
+            // (Its HTTP route turns this into the fixed 403 explanation; see the
+            // broker's runtime HTTP tests.)
+            ensure!(
+                matches!(codex_lease(authority.clone()).await?, Err(BrokerLeaseError::ReconnectRequired)),
+                "{state}: withheld capability did not report Reconnect"
+            );
+            ensure!(kek.unwrap_calls.load(Ordering::SeqCst) == unwraps + 1, "{state}: withheld capability read material");
+        }
+
+        // Reconnect republishes the same identity: the capability returns on
+        // the very next admission, with no new Sandbox, binding or bridge.
+        let authority = admitted(&f, Arc::new(ObservedProvider::default())).await?;
+        let current = admin.record(&f.owner, &codex).await?;
+        admin.replace(&f.owner, &codex, current.version, &support::value(b"synthetic-codex-reconnected"), None).await?;
+        let reconnected = codex_lease(authority.clone()).await?
+            .map_err(|error| anyhow::anyhow!("reconnected capability withheld: {error}"))?;
+        ensure!(reconnected.with_material(|material| material == b"synthetic-codex-reconnected"));
+
+        // A selected credential that no longer exists is integrity damage the
+        // product cannot create (bound credentials cannot be deleted): it still
+        // refuses the whole runtime, as before.
+        sqlx::query("DELETE FROM platform_credentials WHERE id=$1").bind(codex.as_str()).execute(&f.db.pool).await?;
+        ensure!(authority.current_session().await.is_err());
+        ensure!(admitted(&f, Arc::new(ObservedProvider::default())).await.is_err());
         Ok(())
     }
     .await;

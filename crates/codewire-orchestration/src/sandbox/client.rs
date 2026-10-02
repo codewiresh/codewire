@@ -370,14 +370,23 @@ fn bootstrap_environment_matches(env: &[Value], expected: &BTreeMap<String, Stri
         if owned.contains(name)
             && (!seen.insert(name)
                 || !entry.get("valueFrom").is_none_or(Value::is_null)
-                || entry.get("value").and_then(Value::as_str)
-                    != expected.get(name).map(String::as_str)
+                || environment_value(entry) != expected.get(name).map(String::as_str)
                 || !expected.contains_key(name))
         {
             return false;
         }
     }
     seen.len() == expected.len()
+}
+
+/// The Pod API omits an empty `value`, so a stored Pod never repeats the
+/// blank placeholders a selected client renders (for example
+/// `ANTHROPIC_API_KEY`). An absent value is the empty string.
+fn environment_value(entry: &Value) -> Option<&str> {
+    match entry.get("value") {
+        None | Some(Value::Null) => Some(""),
+        Some(value) => value.as_str(),
+    }
 }
 
 fn bootstrap_template_matches(
