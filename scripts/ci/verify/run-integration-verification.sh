@@ -816,6 +816,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "/api/v1/namespaces/" + namespace
                 + "/pods/" + runtime["pod_name"]
             ):
+                # A legacy (environment-token) workspace Pod controlled by its
+                # Sandbox: with no live binding, orchestration presents the
+                # environment daemon token only to a Pod rendered with it.
                 self.json_response({
                     "apiVersion": "v1",
                     "kind": "Pod",
@@ -823,9 +826,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "name": runtime["pod_name"],
                         "namespace": namespace,
                         "uid": runtime["pod_uid"],
+                        "ownerReferences": [{
+                            "apiVersion": "agents.x-k8s.io/v1beta1",
+                            "kind": "Sandbox",
+                            "name": runtime["pod_name"],
+                            "uid": runtime["pod_uid"] + "-sandbox",
+                            "controller": True,
+                        }],
                     },
                     "spec": {
-                        "containers": [],
+                        "containers": [{
+                            "name": "workspace",
+                            "image": "exec-contract-workspace",
+                            "env": [{
+                                "name": "CODEWIRE_DAEMON_AUTH_TOKEN",
+                                "value": "exec-contract-fixture",
+                            }],
+                        }],
                         "nodeName": "exec-contract-node",
                     },
                     "status": {
