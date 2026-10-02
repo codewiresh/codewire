@@ -2,8 +2,8 @@
 """Managed Kind only: one stock Codex process, three successes and one denial.
 
 The caller pipes this file into the actual workspace's python3. There are no
-provider/token/config overrides. Protocol is pinned to Codex 0.149.0 commit
-758ef40f50c1a458425c7cfbf1eb12cbc07af0b0. Never print raw RPC, stderr, trace,
+provider/token/config overrides. Protocol is pinned to Codex 0.157.0 commit
+00c972ed5d6ff6499317fd41b7f23605b8e6850d. Never print raw RPC, stderr, trace,
 token bytes or fingerprints: stdout is the closed acceptance event stream.
 
 The harness runs the tracer and Codex in one fresh user namespace, mapping only
