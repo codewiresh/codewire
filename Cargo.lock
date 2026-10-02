@@ -1424,6 +1424,7 @@ dependencies = [
  "codewire-access",
  "codewire-client",
  "codewire-credential-broker",
+ "codewire-cw-release",
  "codewire-daemon",
  "codewire-gateway-proto",
  "codewire-local-credentials",
@@ -1651,6 +1652,19 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "codewire-cw-release"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

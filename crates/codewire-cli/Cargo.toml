@@ -25,6 +25,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 codewire-access = { workspace = true }
 codewire-client = { workspace = true }
+codewire-cw-release = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
