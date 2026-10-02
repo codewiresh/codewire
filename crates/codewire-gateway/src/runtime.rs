@@ -797,8 +797,10 @@ async fn refresh_daemon_credential(
     .await
 }
 
-/// One fetch per refusal, spaced by `backoff`. Each fetch is a single
-/// attempt; a failed one waits for the next refusal after its pause.
+/// One fetch per refusal, spaced by `backoff`. A fetch that issues nothing
+/// (a replacement Pod not bound yet, or orchestration unreachable) is retried
+/// on the same schedule without waiting for another refusal, so the gateway
+/// still follows a replaced Pod when no call is pending.
 async fn refresh_daemon_credential_with(
     credential: DaemonCredential,
     binding: BindingPollConfig,
@@ -810,10 +812,13 @@ async fn refresh_daemon_credential_with(
         .client()
         .context("build gateway binding client for the daemon credential refresh")?;
     let mut schedule = RefreshSchedule::default();
+    let mut retry = false;
     loop {
-        tokio::select! {
-            _ = wait_for_shutdown(shutdown_rx.clone()) => return Ok(()),
-            _ = credential.refresh_requested() => {}
+        if !retry {
+            tokio::select! {
+                _ = wait_for_shutdown(shutdown_rx.clone()) => return Ok(()),
+                _ = credential.refresh_requested() => {}
+            }
         }
         if credential.take_authenticated() {
             schedule.authenticated();
@@ -844,6 +849,7 @@ async fn refresh_daemon_credential_with(
             }
         };
         observe(outcome);
+        retry = outcome == RefreshOutcome::Failed;
         let pause = schedule.after(outcome, backoff);
         if outcome != RefreshOutcome::Changed {
             tracing::debug!(

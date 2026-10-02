@@ -323,6 +323,49 @@ async fn a_refusal_loop_is_throttled_and_every_outcome_is_observed() {
     );
 }
 
+/// One refusal is enough: a replacement Pod that is not bound yet is retried
+/// on the backoff schedule until its credential is issued.
+#[tokio::test]
+async fn a_failed_refresh_retries_without_another_refusal() {
+    let (config, calls, _directory) = binding(vec![
+        Err(ErrorCode::NotFound),
+        Err(ErrorCode::Unavailable),
+        Ok((REPLACEMENT_CREDENTIAL, REPLACEMENT_POD)),
+        Ok((REPLACEMENT_CREDENTIAL, REPLACEMENT_POD)),
+    ])
+    .await;
+    let credential = DaemonCredential::issued(token(FIRST_CREDENTIAL), FIRST_POD.into());
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let refresher = tokio::spawn(refresh_daemon_credential_with(
+        credential.clone(),
+        config,
+        shutdown_rx,
+        RefreshBackoff {
+            base: Duration::from_millis(10),
+            cap: Duration::from_millis(40),
+        },
+        |_| {},
+    ));
+    credential.report_unauthenticated();
+    timeout(Duration::from_secs(5), async {
+        while credential.workspace_pod_uid().as_deref() != Some(REPLACEMENT_POD) {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("refresher retried until the replacement was bound");
+    // Once issued, it waits for the next refusal instead of polling.
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(*calls.lock().unwrap(), 3);
+
+    shutdown_tx.send(true).unwrap();
+    timeout(Duration::from_secs(3), refresher)
+        .await
+        .expect("refresher stopped")
+        .expect("refresher task")
+        .expect("refresher result");
+}
+
 #[tokio::test]
 async fn the_daemon_client_follows_a_replaced_pod_behind_the_same_service() {
     // The daemon Service now reaches a replacement Pod, which accepts only its
