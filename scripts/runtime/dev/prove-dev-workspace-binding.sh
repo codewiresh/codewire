@@ -27,6 +27,7 @@ LEGACY_ENV_ID="${LEGACY_ENV_ID:-}"
 ALLOW_POD_DELETE=0
 KEEP=0
 JOURNEYS=(create negatives stop-start repair resize destroy-stopped)
+JOURNEYS_GIVEN=0
 
 BINDING_PORT=8087
 BINDING_HOST="codewire-orchestration-workspace-binding.${SERVER_NAMESPACE}.svc.cluster.local"
@@ -46,7 +47,8 @@ Usage:
   scripts/runtime/dev/with-dev-smoke-auth.sh -- \
     scripts/runtime/dev/prove-dev-workspace-binding.sh [options]
 
-Journeys (default: create negatives stop-start repair resize destroy-stopped):
+Journeys (default: create negatives stop-start repair resize destroy-stopped,
+then invariants when --sql-cmd is given):
   create            N timed cold creates; identity-free Pod, daemon reachable,
                     workspace_bind before gateway_ready, wall and stage times
   negatives         section 14 checks from inside a workspace: own token binds,
@@ -64,6 +66,10 @@ Journeys (default: create negatives stop-start repair resize destroy-stopped):
   pod-replace       with --allow-pod-delete: a Pod deleted out of band is
                     replaced under the same name and bound by the liveness
                     loop (the one mutating kubectl call, UID-preconditioned)
+  invariants        with --sql-cmd, fleet-wide: no destroyed environment has
+                    a live binding; every running environment has exactly one
+                    live binding, the backend points at it, and its recorded
+                    Pod exists in Kubernetes with that UID (L1)
 
 Options:
   --journeys LIST         Comma-separated journeys to run
@@ -71,8 +77,8 @@ Options:
   --legacy-env ID         Existing pre-B2 environment for legacy-upgrade
   --allow-pod-delete      Permit the pod-replace journey
   --sql-cmd PATH          Read-only SQL runner (SQL on stdin), e.g. the
-                          coordinator's roq.sh wrapper; adds binding-row and
-                          stage-duration checks
+                          coordinator's roq.sh wrapper; adds binding-row,
+                          release-after-destroy and stage-duration checks
   --cw-bin PATH           Prebuilt cw binary (default: build one)
   --keep                  Keep created environments
   -h, --help              Show this help
@@ -135,7 +141,7 @@ cleanup() {
 
 while (($# > 0)); do
   case "$1" in
-    --journeys) [[ $# -ge 2 ]] || die "--journeys requires a value"; IFS=, read -r -a JOURNEYS <<<"$2"; shift 2 ;;
+    --journeys) [[ $# -ge 2 ]] || die "--journeys requires a value"; IFS=, read -r -a JOURNEYS <<<"$2"; JOURNEYS_GIVEN=1; shift 2 ;;
     --creates) [[ $# -ge 2 ]] || die "--creates requires a value"; PROOF_CREATES="$2"; shift 2 ;;
     --legacy-env) [[ $# -ge 2 ]] || die "--legacy-env requires a value"; LEGACY_ENV_ID="$2"; shift 2 ;;
     --allow-pod-delete) ALLOW_POD_DELETE=1; shift ;;
@@ -152,9 +158,13 @@ case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
 [[ "$PROOF_CREATES" =~ ^[1-9][0-9]?$ ]] || die "--creates must be 1-99"
 [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]] ||
   die "CODEWIRE_DEV_SMOKE_API_KEY is required; run through scripts/runtime/dev/with-dev-smoke-auth.sh"
+if [[ "$JOURNEYS_GIVEN" == 0 && -n "$SQL_CMD" ]]; then
+  JOURNEYS+=(invariants)
+fi
 for journey in "${JOURNEYS[@]}"; do
   case "$journey" in
     create|negatives|stop-start|repair|resize|destroy-stopped|replay) ;;
+    invariants) [[ -n "$SQL_CMD" ]] || die "invariants requires --sql-cmd" ;;
     legacy-upgrade) [[ -n "$LEGACY_ENV_ID" ]] || die "legacy-upgrade requires --legacy-env" ;;
     pod-replace) [[ "$ALLOW_POD_DELETE" == 1 ]] || die "pod-replace requires --allow-pod-delete" ;;
     *) die "unknown journey: $journey" ;;
@@ -174,14 +184,18 @@ export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"
 export CW_CONFIG_DIR="$TMPDIR_PROOF/cw-config"
 mkdir -p "$CW_CONFIG_DIR"
 
-if [[ -z "$CW_BIN" ]]; then
+NEEDS_CW=0
+for journey in "${JOURNEYS[@]}"; do
+  [[ "$journey" == invariants ]] || NEEDS_CW=1
+done
+if [[ "$NEEDS_CW" == 1 && -z "$CW_BIN" ]]; then
   require_cmd cargo
   log "building cw"
   (cd "$ROOT" && timeout 900 cargo build --locked --profile ci -p codewire-cli-bin --bin cw) \
     >"$TMPDIR_PROOF/build.log" 2>&1 || die "cw build failed (see $TMPDIR_PROOF/build.log)"
   CW_BIN="$ROOT/target/ci/cw"
 fi
-[[ -x "$CW_BIN" ]] || die "cw binary is not executable: $CW_BIN"
+[[ "$NEEDS_CW" == 0 || -x "$CW_BIN" ]] || die "cw binary is not executable: $CW_BIN"
 
 now_ms() { date +%s%3N; }
 
@@ -327,6 +341,28 @@ sql_binding_released() {
   [[ "$out" == *released=true,pointer=none* ]]
 }
 
+sql_rows() {
+  # Unaligned, '|'-separated rows without headers.
+  { printf '\\pset tuples_only on\n\\pset format unaligned\n'; cat; } | sql
+}
+
+sql_released_after_destroy() {
+  # Design §10: once destroyed, the environment has no live binding. Waits for
+  # the destroy to finish, then counts live bindings (rows are kept, released).
+  local id="$1" deadline=$(( $(date +%s) + 300 )) state live
+  [[ -n "$SQL_CMD" ]] || return 0
+  while (( $(date +%s) < deadline )); do
+    state="$(printf "SELECT state FROM environments WHERE id = '%s';\n" "$id" | sql_rows | tr -d '[:space:]')" ||
+      return 1
+    [[ "$state" == destroyed || -z "$state" ]] && break
+    sleep 3
+  done
+  [[ "$state" == destroyed || -z "$state" ]] || return 1
+  live="$(printf "SELECT count(*) FROM sandbox_workspace_bindings WHERE environment_id = '%s' AND released_at IS NULL;\n" "$id" |
+    sql_rows | tr -d '[:space:]')" || return 1
+  [[ "$live" == 0 ]]
+}
+
 sql_stage_ms() {
   local id="$1" phase="$2"
   [[ -n "$SQL_CMD" ]] || return 0
@@ -364,7 +400,11 @@ journey_create() {
       gateways+=("$(sql_stage_ms "$id" gateway_ready)")
       log "create $n: workspace_bind=${binds[-1]:-?} ms gateway_ready=${gateways[-1]:-?} ms complete=$(sql_stage_ms "$id" complete) ms"
     fi
-    remove_env "$id" || log "create $n: remove failed"
+    if remove_env "$id"; then
+      [[ -z "$SQL_CMD" ]] || check "create $n: no live binding once destroyed" sql_released_after_destroy "$id"
+    else
+      log "create $n: remove failed"
+    fi
   done
   if ((${#times[@]})); then
     log "client-side create ms (sorted): $(printf '%s\n' "${times[@]}" | sort -n | tr '\n' ' ')"
@@ -499,6 +539,7 @@ journey_destroy_stopped() {
     return
   fi
   remove_env "$id" || { fail "destroy-stopped: rm"; return; }
+  [[ -z "$SQL_CMD" ]] || check "destroy-stopped: no live binding once destroyed" sql_released_after_destroy "$id"
   deadline=$(( $(date +%s) + 180 ))
   while (( $(date +%s) < deadline )); do
     kubectl_ro get pvc -n "$SANDBOX_NAMESPACE" -o json |
@@ -529,6 +570,7 @@ journey_replay() {
     IFS= read -r -t 10 line <&3; printf '%s\n' \"\$line\" | awk '{print \$2}'" 2>/dev/null)"
   unset token
   check "replay: a destroyed Pod's token is refused (401/403/404)" one_of "$status" 401 403 404
+  [[ -z "$SQL_CMD" ]] || check "replay: no live binding once destroyed" sql_released_after_destroy "$victim"
   remove_env "$witness" || true
 }
 
@@ -566,6 +608,68 @@ journey_pod_replace() {
   remove_env "$id" || true
 }
 
+# Fleet-wide binding invariants (design §16's B1 Dev query, corrected): it
+# excludes destroyed environments, and L1 compares each live binding's Pod UID
+# with the Pod Kubernetes serves under the recorded name now.
+running_binding_rows() {
+  sql_rows <<'SQL'
+SELECT e.id, e.isolation_tier, COALESCE(w.namespace, ''), COALESCE(w.pod_name, ''),
+       COALESCE(w.pod_uid, ''), COALESCE(b.pod_uid, '')
+  FROM environments e
+  JOIN sandbox_environment_backend b ON b.environment_id = e.id
+  LEFT JOIN sandbox_workspace_bindings w
+    ON w.environment_id = e.id AND w.released_at IS NULL
+ WHERE e.type = 'sandbox' AND e.state = 'running' AND e.desired_state = 'started'
+   AND e.deletion_requested_at IS NULL
+ ORDER BY e.id;
+SQL
+}
+
+live_pod_uid() {
+  kubectl_ro get pod -n "$1" "$2" -o json 2>/dev/null | jq -r '.metadata.uid // ""'
+}
+
+# Prints "<env> <tier> <reason>" for each running environment that breaks an
+# invariant; prints nothing when all hold.
+running_binding_violations() {
+  local rows env tier namespace pod_name bound pointer live
+  rows="$(running_binding_rows)" || { echo "query failed"; return; }
+  while IFS='|' read -r env tier namespace pod_name bound pointer; do
+    [[ -n "$env" ]] || continue
+    if [[ -z "$bound" ]]; then echo "$env $tier no-live-binding"; continue; fi
+    if [[ "$pointer" != "$bound" ]]; then echo "$env $tier backend-pointer-differs"; continue; fi
+    live="$(live_pod_uid "$namespace" "$pod_name")"
+    if [[ "$live" != "$bound" ]]; then echo "$env $tier live-pod-uid-differs"; fi
+  done <<<"$rows"
+}
+
+destroyed_live_bindings() {
+  printf '%s\n' "SELECT count(*) FROM sandbox_workspace_bindings w JOIN environments e ON e.id = w.environment_id WHERE w.released_at IS NULL AND e.state = 'destroyed';" |
+    sql_rows | tr -d '[:space:]'
+}
+
+journey_invariants() {
+  local first second running
+  check "invariants: no destroyed environment has a live binding" \
+    test "$(destroyed_live_bindings)" = 0
+  running="$(running_binding_rows | grep -c . || true)"
+  log "invariants: $running running Sandbox environments"
+  first="$(running_binding_violations)"
+  if [[ -n "$first" ]]; then
+    # A Pod replaced between the two reads is re-read once before failing.
+    sleep 10
+    second="$(running_binding_violations)"
+  else
+    second=""
+  fi
+  if [[ -n "$second" ]]; then
+    log "invariants: violations (environment tier reason):"
+    printf '%s\n' "$second" | sed 's/^/[binding-proof]   /' >&2
+  fi
+  check "invariants: every running environment has one live binding, pointed at by the backend, whose Pod UID is the live Pod's (L1)" \
+    test -z "$second"
+}
+
 for journey in "${JOURNEYS[@]}"; do
   log "journey: $journey"
   case "$journey" in
@@ -578,6 +682,7 @@ for journey in "${JOURNEYS[@]}"; do
     replay) journey_replay ;;
     legacy-upgrade) journey_legacy_upgrade ;;
     pod-replace) journey_pod_replace ;;
+    invariants) journey_invariants ;;
   esac
 done
 
