@@ -239,7 +239,7 @@ impl Fixture {
         (
             cancellation,
             tokio::spawn(async move {
-                run_epoch_with_lifetime(&config, &daemon, child, lifetime).await
+                run_epoch_with_lifetime(&config, &daemon, &|| {}, child, lifetime).await
             }),
         )
     }
@@ -544,4 +544,60 @@ async fn epoch_expiry_drains_both_producers_and_only_fresh_requests_reach_replac
     ));
     drop((input, output, daemon));
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn a_daemon_refusing_the_credential_asks_for_a_refresh() {
+    let (calls, _unused_calls) = mpsc::channel(1);
+    let refusing = SyntheticDaemon {
+        environment: Uuid::new_v4(),
+        workspace_token: Arc::new(Mutex::new(WORKSPACE_TOKEN.into())),
+        calls,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(DaemonServiceServer::with_interceptor(
+                refusing,
+                |_request: Request<()>| Err(Status::unauthenticated("credential refused")),
+            ))
+            .serve_with_incoming_shutdown(
+                TcpListenerStream::new(listener),
+                server_shutdown.cancelled(),
+            )
+            .await
+            .unwrap();
+    });
+    let daemon = SessionClient::connect(&endpoint, "synthetic.stale.capability")
+        .await
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let gateway_token = temp.path().join("gateway-token");
+    std::fs::write(&gateway_token, "synthetic.gateway.one").unwrap();
+    let broker = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+    let config = HostedBridgeConfig {
+        environment_id: Uuid::new_v4(),
+        generation: 7,
+        gateway_token,
+        broker: BrokerEndpoint::Preconfigured(broker),
+    };
+    let refreshes = std::sync::atomic::AtomicUsize::new(0);
+    let report = || {
+        refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    };
+    bounded(run_epoch_with_lifetime(
+        &config,
+        &daemon,
+        &report,
+        CancellationToken::new(),
+        EPOCH_MAX_LIFETIME,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    shutdown.cancel();
+    bounded(server).await.unwrap();
 }

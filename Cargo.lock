@@ -1416,6 +1416,7 @@ name = "codewire-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.9",
  "base64",
  "buffa",
  "chrono",
@@ -1431,8 +1432,11 @@ dependencies = [
  "codewire-project",
  "codewire-project-proto",
  "codewire-protected-store",
+ "codewire-proto",
  "codewire-workload-secrets",
+ "connectrpc",
  "futures",
+ "http 1.4.1",
  "libc",
  "portable-pty",
  "prost 0.14.4",
@@ -1825,6 +1829,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "prometheus",
  "prost-types",
  "rand 0.8.6",
  "rcgen",

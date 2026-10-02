@@ -1052,6 +1052,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "prometheus",
  "prost-types",
  "rand 0.8.6",
  "rcgen",

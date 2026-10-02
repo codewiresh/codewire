@@ -191,24 +191,35 @@ fn hosted_exec_parser_rejects_non_utf8_arguments_without_printing_them() {
     );
 }
 
+fn no_credential_file() -> Result<Zeroizing<String>, HostedExecFailure> {
+    panic!("a legacy Pod's exec must not read the bound credential file")
+}
+
 #[test]
 fn hosted_exec_reads_only_the_fixed_daemon_capability() {
     let mut requested = Vec::new();
-    let token = read_daemon_token(|name| {
-        requested.push(name.to_owned());
-        Ok("synthetic-daemon-capability".into())
-    })
+    let token = read_daemon_token(
+        |name| {
+            requested.push(name.to_owned());
+            Ok(Some("synthetic-daemon-capability".into()))
+        },
+        no_credential_file,
+    )
     .unwrap();
     assert_eq!(requested, ["CODEWIRE_DAEMON_AUTH_TOKEN"]);
     assert_eq!(token.as_str(), "synthetic-daemon-capability");
     assert_eq!(DAEMON_ENDPOINT, "http://127.0.0.1:7777");
     assert_eq!(HOSTED_EXEC_AMBIGUOUS_EXIT_CODE, 125);
+    assert_eq!(
+        HOSTED_DAEMON_CREDENTIAL_FILE,
+        "/codewire/run/daemon/credential"
+    );
 }
 
 #[test]
 fn hosted_exec_rejects_missing_or_noncanonical_capability() {
     assert_eq!(
-        read_daemon_token(|_| Err(HostedExecFailure)).unwrap_err(),
+        read_daemon_token(|_| Err(HostedExecFailure), no_credential_file).unwrap_err(),
         HostedExecFailure
     );
     for invalid in [
@@ -221,12 +232,58 @@ fn hosted_exec_rejects_missing_or_noncanonical_capability() {
         "nul\0byte",
     ] {
         assert_eq!(
-            read_daemon_token(|_| Ok(invalid.into())).unwrap_err(),
+            read_daemon_token(|_| Ok(Some(invalid.into())), no_credential_file).unwrap_err(),
+            HostedExecFailure
+        );
+        // The same canonical rule applies to the bound credential file.
+        assert_eq!(
+            read_daemon_token(|_| Ok(None), || Ok(Zeroizing::new(invalid.into()))).unwrap_err(),
             HostedExecFailure
         );
     }
     assert_eq!(format!("{:?}", HostedExecFailure), "HostedExecFailure");
     assert_eq!(FAILURE_DIAGNOSTIC, "hosted exec failed");
+}
+
+#[test]
+fn an_identity_free_pods_exec_reads_the_bound_credential_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("credential");
+    std::fs::write(&path, "synthetic-workspace-daemon-credential").unwrap();
+    let token = read_daemon_token(|_| Ok(None), || read_credential_file(&path)).unwrap();
+    assert_eq!(token.as_str(), "synthetic-workspace-daemon-credential");
+
+    // Absent before the daemon binds: the exec fails closed.
+    let missing = directory.path().join("missing");
+    assert_eq!(
+        read_daemon_token(|_| Ok(None), || read_credential_file(&missing)).unwrap_err(),
+        HostedExecFailure
+    );
+    // Oversized, non-UTF-8, a trailing newline or a directory: refused.
+    for (name, contents) in [
+        ("oversized", vec![b'a'; MAX_CREDENTIAL_BYTES + 1]),
+        ("binary", vec![0xff, 0xfe]),
+        (
+            "newline",
+            b"synthetic-workspace-daemon-credential\n".to_vec(),
+        ),
+    ] {
+        let path = directory.path().join(name);
+        std::fs::write(&path, contents).unwrap();
+        assert_eq!(
+            read_daemon_token(|_| Ok(None), || read_credential_file(&path)).unwrap_err(),
+            HostedExecFailure,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        read_credential_file(directory.path()).unwrap_err(),
+        HostedExecFailure
+    );
+    // A symlink is not the daemon's own regular file.
+    let link = directory.path().join("link");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    assert_eq!(read_credential_file(&link).unwrap_err(), HostedExecFailure);
 }
 
 fn frame(payload: Payload) -> Result<v1::ExecMessage, tonic::Status> {
