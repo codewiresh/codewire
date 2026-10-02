@@ -13,8 +13,13 @@ GRANT SELECT (id,deletion_state) ON public.organizations TO codewire_credential_
 GRANT SELECT (id,org_id,user_id,role) ON public.org_members TO codewire_credential_broker;
 GRANT SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_at,environment_operation_generation)
     ON public.environments TO codewire_credential_broker;
-GRANT SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name)
+GRANT SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name,pod_uid,bound_at)
     ON public.sandbox_environment_backend TO codewire_credential_broker;
+-- Claim-time workspace binding (Codewire migration 34): the broker authorizes
+-- by the recorded Pod UID and reads managed clients from the live binding.
+-- Only the columns it reads; never the PVC UID, generation or projection.
+GRANT SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,credential_scope,released_at)
+    ON public.sandbox_workspace_bindings TO codewire_credential_broker;
 GRANT SELECT (id,user_id,organization_id,name,current_revision)
     ON public.platform_access_profiles TO codewire_credential_broker;
 GRANT SELECT (profile_id,revision) ON public.platform_access_profile_revisions TO codewire_credential_broker;
