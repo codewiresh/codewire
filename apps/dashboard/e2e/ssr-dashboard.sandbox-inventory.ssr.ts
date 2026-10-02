@@ -67,6 +67,19 @@ test("a Sandbox being deleted stays listed as Deleting with only its detail page
   await expect(page.getByRole("status")).toHaveClass(/cw-toast/);
 });
 
+// #2361: a bound capability whose credential needs the owner is named in
+// the broker's words, with a link to the page that fixes it.
+test("a Sandbox names the bound capability that needs Reconnect and links to Credentials", async ({ page }) => {
+  await openInventory(page);
+  const row = page.locator(`tr[data-environment-id="${quietMesa}"]`);
+  await row.getByLabel("Actions for quiet-mesa", { exact: true }).click();
+  const sources = row.locator("details.cw-disclosure", { hasText: "Secrets and credentials" });
+  await sources.locator(":scope > summary").click();
+  await expect(sources.locator(".cw-credential-attention > li")).toHaveCount(1);
+  await expect(sources.getByRole("link", { name: "Codex needs Reconnect", exact: true }))
+    .toHaveAttribute("href", "settings-credentials.html");
+});
+
 test("a deleted Sandbox is announced once and leaves the list", async ({ page }) => {
   await openInventory(page);
   const status = page.locator("[data-inventory-status]");

@@ -129,6 +129,8 @@ test("detail layout keeps usable output and compact footer with alerts and short
     await page.setViewportSize(viewport);
     for (const showAlert of [false, true]) {
       await page.locator("#fixture-lifecycle-message").evaluate((node, visible) => { (node as HTMLElement).hidden = !visible; }, showAlert);
+      // A capability that needs Reconnect stays readable without costing the terminal.
+      await expect(page.getByRole("link", { name: "Codex needs Reconnect", exact: true })).toBeInViewport();
       await expect.poll(async () => (await terminal.boundingBox())!.height).toBeGreaterThanOrEqual(180);
       expect((await page.locator(".cw-terminal-footer").boundingBox())!.height).toBeLessThan(100);
       const bounds = await page.locator(".cw-sandbox-detail-main").evaluate((main) => {
@@ -1890,7 +1892,7 @@ test("inventory Resize dismisses innermost menus with focus return and retains e
   await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
   const row = page.locator("#quiet-mesa");
   const actions = row.locator(".cw-row-menu");
-  const resize = row.locator(".cw-menu-resize");
+  const resize = row.locator(".cw-menu-resize", { hasText: "Review resize" });
   await actions.locator(":scope > summary").click();
   await resize.locator(":scope > summary").click();
   await resize.getByLabel("CPU", { exact: true }).selectOption("8000");

@@ -882,7 +882,72 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         ),
         ports: environment.ports.into_iter().map(port_row).collect(),
         sources,
+        credential_attention: Vec::new(),
     }
+}
+
+/// Mark each Sandbox's bound capabilities whose credential needs the viewer.
+/// Only the viewer's own profiles are given, so another member's Sandbox, a
+/// bound revision other than the one read, or a failed read marks nothing.
+pub(crate) fn apply_credential_attention(
+    rows: &mut [EnvironmentRow],
+    profiles: &[crate::view::CredentialProfileRowView],
+) {
+    for row in rows {
+        // A profile's name belongs to the profile, not one revision.
+        let name = row.bound_profile().and_then(|(id, _)| {
+            profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .map(|profile| profile.name.clone())
+        });
+        row.credential_attention = row
+            .bound_profile()
+            .and_then(|(id, revision)| {
+                profiles
+                    .iter()
+                    .find(|profile| profile.id == id && profile.revision == revision)
+            })
+            .map(|profile| profile.attention.clone())
+            .unwrap_or_default();
+        if let (Some(name), Some(sources)) = (name, row.sources.as_mut()) {
+            sources.profile_name = name;
+        }
+    }
+}
+
+/// The Sandbox list's notices: one read of the viewer's current profiles, made
+/// only when a listed Sandbox that is not being deleted is bound to a profile.
+pub(crate) async fn mark_credential_attention(
+    state: &AppState,
+    cookie: HeaderValue,
+    rows: &mut [EnvironmentRow],
+) {
+    if rows
+        .iter()
+        .any(|row| !row.deletion_started() && row.bound_profile().is_some())
+    {
+        let profiles = crate::credentials_connect::current_profile_attention(state, cookie).await;
+        apply_credential_attention(rows, &profiles);
+    }
+}
+
+/// The Sandbox page's notices, read for its exact bound profile revision.
+pub(crate) async fn mark_bound_credential_attention(
+    state: &AppState,
+    cookie: HeaderValue,
+    row: &mut EnvironmentRow,
+) {
+    let Some((id, revision)) = row
+        .bound_profile()
+        .filter(|_| !row.deletion_started())
+        .map(|(id, revision)| (id.to_owned(), revision))
+    else {
+        return;
+    };
+    let profiles =
+        crate::credentials_connect::bound_profile_attention(state, cookie, &id, revision).await;
+    apply_credential_attention(std::slice::from_mut(row), &profiles);
 }
 
 fn source_summary(environment: &Environment) -> Option<crate::view::EnvironmentSourcesSummaryView> {
@@ -931,6 +996,7 @@ fn source_summary(environment: &Environment) -> Option<crate::view::EnvironmentS
             .profile_revision
             .map(|revision| revision.to_string())
             .unwrap_or_default(),
+        profile_name: String::new(),
     })
 }
 

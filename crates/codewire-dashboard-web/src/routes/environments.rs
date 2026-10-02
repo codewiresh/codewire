@@ -815,13 +815,14 @@ pub(super) async fn list_fragment(
             Err(response) => return response,
         };
     let mut environments =
-        match filtered_environments(&state, cookie, &organization.id, &query).await {
+        match filtered_environments(&state, cookie.clone(), &organization.id, &query).await {
             Ok(environments) => environments,
             Err(error) => return connect_page_error(error, &continuation, &headers),
         };
     for environment in &mut environments {
         apply_confidential_visibility(&state, dashboard.is_admin, environment);
     }
+    environment_connect::mark_credential_attention(&state, cookie, &mut environments).await;
     let token = csrf_cookie_value(&headers).unwrap_or_default().to_owned();
     let page = EnvironmentsPageView {
         environments,
@@ -1866,10 +1867,11 @@ async fn build_page(
     for environment in &mut environments {
         apply_confidential_visibility(state, is_admin, environment);
     }
-    hydrate_options(
-        &mut form,
-        environment_connect::create_options(state, cookie.clone(), &organization.id).await?,
+    let (options, ()) = tokio::join!(
+        environment_connect::create_options(state, cookie.clone(), &organization.id),
+        environment_connect::mark_credential_attention(state, cookie.clone(), &mut environments),
     );
+    hydrate_options(&mut form, options?);
     let source_editor = if valid_identifier(&query.sources) {
         environments
             .iter()
@@ -2659,6 +2661,7 @@ mod tests {
                     personal: false,
                     profile: String::new(),
                     profile_revision: String::new(),
+                    profile_name: String::new(),
                 },
             }),
             port_panel: None,
@@ -3239,6 +3242,7 @@ mod tests {
                 vscode_url: "https://vscode.invalid".into(),
                 ports: Vec::new(),
                 sources: None,
+                credential_attention: Vec::new(),
             }],
             environments_loading: false,
             create_form: default_create_form("csrf".into(), false),
@@ -3319,6 +3323,7 @@ mod tests {
             vscode_url: "https://vscode.invalid".into(),
             ports: Vec::new(),
             sources: None,
+            credential_attention: Vec::new(),
         }
     }
 
@@ -4062,6 +4067,7 @@ mod tests {
                     personal: true,
                     profile: String::new(),
                     profile_revision: String::new(),
+                    profile_name: String::new(),
                 },
             }),
             port_panel: None,
@@ -4690,3 +4696,7 @@ mod tests {
         assert!(!valid_port_label("Web UI"));
     }
 }
+
+#[cfg(test)]
+#[path = "sandbox_credential_attention_tests.rs"]
+mod sandbox_credential_attention_tests;
