@@ -420,6 +420,9 @@ pub(crate) struct CredentialProfileRowView {
     pub(crate) name: String,
     pub(crate) revision: u64,
     pub(crate) entries: Vec<CredentialProfileEntryView>,
+    /// This revision's capabilities that the broker withholds now, in its
+    /// words: "Codex needs Reconnect", "OpenAI API key needs replacing".
+    pub(crate) attention: Vec<&'static str>,
     pub(crate) codex: String,
     pub(crate) openai: String,
     pub(crate) anthropic: String,
@@ -837,9 +840,21 @@ pub(crate) struct EnvironmentRow {
     pub(crate) vscode_url: String,
     pub(crate) ports: Vec<EnvironmentPortRow>,
     pub(crate) sources: Option<EnvironmentSourcesSummaryView>,
+    /// Capabilities of the bound profile revision whose credential needs the
+    /// viewer now, in the broker's words. Empty unless the viewer owns that
+    /// profile and its credential metadata could be read for this render.
+    pub(crate) credential_attention: Vec<&'static str>,
 }
 
 impl EnvironmentRow {
+    /// The exact credential profile revision this Sandbox is bound to.
+    pub(crate) fn bound_profile(&self) -> Option<(&str, u64)> {
+        let sources = self.sources.as_ref()?;
+        let revision = sources.selection.profile_revision?;
+        let id = sources.profile_id();
+        (!id.is_empty()).then_some((id, revision))
+    }
+
     /// The lifecycle state as people read it. Deletion uses the product's
     /// Delete language; every other state reads as its name.
     pub(crate) fn state_label(&self) -> &'static str {
@@ -879,6 +894,8 @@ pub(crate) struct EnvironmentSourcesSummaryView {
     pub(crate) personal: bool,
     pub(crate) profile: String,
     pub(crate) profile_revision: String,
+    /// The viewer's own name for the bound profile, when they can read it.
+    pub(crate) profile_name: String,
 }
 
 impl EnvironmentSourcesSummaryView {

@@ -113,6 +113,8 @@
 .cw-source-summary { margin: 0; }
 .cw-source-summary dt { color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-source-summary dd { margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
+/* Capabilities a Sandbox's bound profile withholds now, each a link to Credentials. */
+.cw-credential-attention { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 
 /* GitHub repository browser: results are .cw-row-button rows in a scroll box. */
 .cw-github-browser { display: grid; gap: var(--space-2); min-width: 0; padding: var(--space-3); border: var(--border-width) solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); }
