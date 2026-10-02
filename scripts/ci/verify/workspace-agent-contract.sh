@@ -18,6 +18,8 @@ bin_root="${CODEWIRE_BIN_ROOT:-/usr/local/bin}"
 ssh_fixture_root="${CODEWIRE_SSH_FIXTURE_ROOT:-/opt/codewire/fixtures/openssh}"
 system_sbin_root="${CODEWIRE_SYSTEM_SBIN_ROOT:-/usr/sbin}"
 interactive_shell="${CODEWIRE_INTERACTIVE_SHELL:-/bin/bash}"
+agents_root="${CODEWIRE_AGENTS_ROOT:-/opt/codewire/agents}"
+upgrade_root="${CODEWIRE_AGENT_UPGRADE_ROOT:-$agents_root/upgrade}"
 
 emit_pid_evidence_on_failure() {
   status=$?
@@ -70,7 +72,7 @@ if [ "$mode" = mounted-home-agents ]; then
   test ! -e /home/codewire/.local
   test ! -e /home/codewire/.npmrc
   case "$PATH" in
-    /home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:*) ;;
+    /home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/upgrade:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:*) ;;
     *) printf 'workspace image verification: agent PATH precedence differs\n' >&2; exit 1 ;;
   esac
 fi
@@ -79,15 +81,14 @@ for agent in codex claude gemini kimi pi aider; do
   executable="$(command -v "$agent")"
   test -n "$executable"
   resolved="$(readlink -f "$executable")"
-  test -O "$resolved"
   if [ "$mode" = mounted-home-agents ]; then
     case "$agent:$executable:$resolved" in
-      aider:/opt/codewire/agents/bin/aider:/opt/codewire/agents/pipx/venvs/aider-chat/bin/aider) ;;
+      aider:/opt/codewire/agents/upgrade/aider:/opt/codewire/agents/upgrade/aider) ;;
       codex:/opt/codewire/agents/npm/bin/codex:/opt/codewire/agents/npm/lib/node_modules/*) ;;
       claude:/opt/codewire/agents/npm/bin/claude:/opt/codewire/agents/npm/lib/node_modules/*) ;;
       gemini:/opt/codewire/agents/npm/bin/gemini:/opt/codewire/agents/npm/lib/node_modules/*) ;;
-      kimi:/opt/codewire/agents/npm/bin/kimi:/opt/codewire/agents/npm/lib/node_modules/*) ;;
-      pi:/opt/codewire/agents/npm/bin/pi:/opt/codewire/agents/npm/lib/node_modules/*) ;;
+      kimi:/opt/codewire/agents/upgrade/kimi:/opt/codewire/agents/upgrade/kimi) ;;
+      pi:/opt/codewire/agents/upgrade/pi:/opt/codewire/agents/upgrade/pi) ;;
       *) printf 'workspace image verification: bundled agent resolved outside its image prefix\n' >&2; exit 1 ;;
     esac
   fi
@@ -110,6 +111,40 @@ test "$(npm config get allow-scripts)" = @anthropic-ai/claude-code
 # unprivileged user; do not seed an agent or change any runtime startup path.
 mkdir -p /home/codewire/.npm-global/lib
 npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.157.0
+
+# The shipped agents live outside the persistent home. A self-updater that
+# wrote there would appear to succeed and then revert on the next restart, so
+# the whole tree is root-owned and unwritable by the user.
+invalid_agent="$(find "$agents_root" -xdev \( ! -uid 0 -o \( \( -type f -o -type d \) -perm /022 \) \) -print -quit)"
+if [ -n "$invalid_agent" ]; then
+  printf 'workspace image verification: shipped agents are writable\n' >&2
+  exit 1
+fi
+# pi, Kimi Code and aider would update in place or refuse; their upgrade
+# commands install into the persistent home instead. Recording stubs prove the
+# routing without contacting a registry.
+upgrade_stubs="$(mktemp -d)"
+for tool in npm pipx; do
+  printf '#!/bin/sh\nprintf "%%s %%s\\n" %s "$*"\n' "$tool" >"$upgrade_stubs/$tool"
+  chmod +x "$upgrade_stubs/$tool"
+done
+for route in \
+  'pi update self=npm install --global @earendil-works/pi-coding-agent@latest' \
+  'pi update=npm install --global @earendil-works/pi-coding-agent@latest' \
+  'kimi upgrade=npm install --global @moonshot-ai/kimi-code@latest' \
+  'aider --upgrade=pipx install --force aider-chat'; do
+  command_line="${route%%=*}"
+  # shellcheck disable=SC2086 # Each route is a fixed, space-separated command line.
+  set -- $command_line
+  agent="$1"
+  shift
+  routed="$(PATH="$upgrade_stubs:$PATH" "$upgrade_root/$agent" "$@" </dev/null)"
+  if [ "$routed" != "${route#*=}" ]; then
+    printf 'workspace image verification: %s does not upgrade into the home\n' "$command_line" >&2
+    exit 1
+  fi
+done
+rm -rf "$upgrade_stubs"
 
 # A user-prefix agent update must take effect in an already-open terminal.
 # Interactive bash therefore resolves PATH on every command instead of hashing.
