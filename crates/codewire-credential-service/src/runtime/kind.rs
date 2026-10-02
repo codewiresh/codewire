@@ -19,6 +19,14 @@ use codewire_protected_store::secret_envelope::TestKekProvider;
 use zeroize::Zeroizing;
 
 const TARGET: &str = "codewire_kind_credential_fixture";
+/// No inherited RUST_LOG can expose SQL, requests, provider material or
+/// projected tokens. These targets emit only closed runtime events and the
+/// broker's secret-free per-phase timing lines.
+const LOG_FILTER: &str = "off,codewire_kind_credential_fixture=info,\
+     codewire_credential_service::runtime=info,\
+     codewire_credential_broker::platform::keepalive=info,\
+     codewire_credential_broker::refresh_failure=warn,\
+     codewire_credential_broker::timing=info";
 
 /// Long-lived services-ci-only listener. The image harness must select this
 /// exact ignored test with --nocapture; ordinary crate tests never start it.
@@ -26,15 +34,9 @@ const TARGET: &str = "codewire_kind_credential_fixture";
 #[ignore = "requires the managed codewire-e2e Kind fixture Deployment and synthetic restricted DB"]
 async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
     let config = config::Config::from_env()?;
-    // No inherited RUST_LOG can expose SQL, requests, provider material or
-    // projected tokens. These targets emit only closed runtime events.
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(
-            "off,codewire_kind_credential_fixture=info,codewire_credential_service::runtime=info,\
-             codewire_credential_broker::platform::keepalive=info,\
-             codewire_credential_broker::refresh_failure=warn",
-        ))
+        .with_env_filter(tracing_subscriber::EnvFilter::new(LOG_FILTER))
         .with_current_span(false)
         .try_init()
         .map_err(|_| RuntimeError::Configuration("Kind fixture diagnostics"))?;
@@ -79,7 +81,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         let (fixture, enrollment, github) = enrollment::Fixture::create(&config.runtime_directory)?;
         let store = Arc::new(PlatformCredentialStore::new(
             pool.clone(),
-            Arc::new(TestKekProvider),
+            crate::authority::TimedKekProvider::wrap(Arc::new(TestKekProvider)),
             builtin_provider_catalog(),
         ));
         let authenticator = KubernetesPlatformBridgeAuthenticator::new(
@@ -164,4 +166,27 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
     pool.close().await;
     tracing::info!(target: TARGET, event = "fixture_stopped", success = result.is_ok(), "fixture_stopped");
     result
+}
+
+/// Both production and Kind fixture subscribers emit the timing target, and
+/// the fixture's allow-list still silences every other broker and SQL target.
+#[test]
+fn service_and_fixture_filters_emit_secret_free_timing_lines() {
+    use codewire_credential_broker::timing::TARGET as TIMING;
+    fn enabled(filter: &str) -> (bool, bool, bool) {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            (
+                tracing::enabled!(target: TIMING, tracing::Level::INFO),
+                tracing::enabled!(target: "codewire_credential_broker::runtime", tracing::Level::INFO),
+                tracing::enabled!(target: "sqlx::query", tracing::Level::INFO),
+            )
+        })
+    }
+    assert_eq!(enabled(DEFAULT_LOG_FILTER), (true, true, true));
+    assert_eq!(enabled(LOG_FILTER), (true, false, false));
 }

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestError, BrokerUpstreamTransport,
-    OpenAiBroker,
+    OpenAiBroker, timing,
 };
 
 mod relay;
@@ -396,6 +396,7 @@ where
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
                         if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
+                            timing::capacity_rejected("bridge_in_flight", "ssh", CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, active.len());
                             if ssh::send_failure(&sender, request_id, BrokerRequestError::AuthorityUnavailable).await.is_err() {
                                 tasks.shutdown().await;
                                 return Err(BrokerBridgeError::Unavailable);
@@ -430,6 +431,7 @@ where
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
                         if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
+                            timing::capacity_rejected("bridge_in_flight", "projection", CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, active.len());
                             if send_projection_response(&sender, request_id, Err(BrokerRequestError::AuthorityUnavailable)).await.is_err() {
                                 tasks.shutdown().await;
                                 return Err(BrokerBridgeError::Unavailable);
@@ -466,6 +468,7 @@ where
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
                         if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
+                            timing::capacity_rejected("bridge_in_flight", "http", CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, active.len());
                             if send_failure(
                                 &sender,
                                 request_id,
@@ -614,7 +617,11 @@ where
     E: BrokerRequestExecutor,
     S: CredentialBridgeResponseSink,
 {
-    let response = match broker.execute_request(request).await {
+    let slot = timing::slot_label(&request.capability_slot);
+    let route = timing::route_label(&request.route);
+    let (response, timings) = timing::measure(broker.execute_request(request)).await;
+    timing::proxied_request(request_id, slot, route, &response, &timings);
+    let response = match response {
         Ok(response) => response,
         Err(error) => return finish_with_failure(sender, request_id.to_owned(), error).await,
     };

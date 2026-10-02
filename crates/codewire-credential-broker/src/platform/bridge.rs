@@ -32,6 +32,7 @@ use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 use uuid::Uuid;
 
 use super::{PlatformBrokerLeaseProvider, PlatformRuntimeAuthority, PlatformRuntimeError};
+use crate::timing::{self, Phase};
 use crate::{
     AdmittedCredentialBridge, BrokerBridgeError, BrokerLeaseError, BrokerUpstreamTransport,
     CredentialBridgeResponseSink, CredentialBridgeTransport, GitHubAppAuthorizationOwner,
@@ -207,23 +208,31 @@ where
     {
         let deadline = Instant::now() + ADMISSION_TIMEOUT;
         let permit = self.acquire()?;
-        let admission = tokio::select! {
-            biased;
-            _ = self.state.shutdown.cancelled() => return Err(unavailable()),
-            result = tokio::time::timeout_at(deadline, async {
-                let (authority, input) = admission.await
-                    .map_err(PlatformBridgeAuthenticationError::status)?;
-                self.admit(authority, input.boxed()).await
-            }) => {
-                result.map_err(|_| Status::deadline_exceeded("platform credential bridge admission timed out"))??
+        // The TokenReviews and resolves of authentication, the Ready wait and
+        // the recheck after it are all recorded into this one admission line.
+        let (admission, timings) = timing::measure(async {
+            tokio::select! {
+                biased;
+                _ = self.state.shutdown.cancelled() => Err(unavailable()),
+                result = tokio::time::timeout_at(deadline, async {
+                    let (authority, input) = admission.await
+                        .map_err(PlatformBridgeAuthenticationError::status)?;
+                    self.admit(authority, input.boxed()).await
+                }) => {
+                    result
+                        .map_err(|_| Status::deadline_exceeded("platform credential bridge admission timed out"))
+                        .and_then(|admission| admission)
+                }
             }
-        };
+        })
+        .await;
+        timing::epoch_admission(admission_outcome(&admission), &timings);
         let Admission {
             broker,
             admitted,
             sink,
             receiver,
-        } = admission;
+        } = admission?;
         sink.epoch.ensure_live().map_err(bridge_status)?;
         self.spawn_worker(permit, async move {
             // Never select cancellation against or abort this future. Transport
@@ -272,7 +281,16 @@ where
         }
         Arc::clone(&self.state.permits)
             .try_acquire_owned()
-            .map_err(|_| Status::resource_exhausted("platform credential bridge capacity reached"))
+            .map_err(|_| {
+                timing::capacity_rejected(
+                    "bridge_streams",
+                    "epoch",
+                    PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS,
+                    PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS
+                        .saturating_sub(self.state.permits.available_permits()),
+                );
+                Status::resource_exhausted("platform credential bridge capacity reached")
+            })
     }
 
     fn spawn_worker(
@@ -331,9 +349,12 @@ where
             sink: sink.clone(),
         };
         let admitted = tokio::time::timeout_at(epoch.deadline, async {
-            let admitted = admit_credential_bridge(transport, environment_id, generation)
-                .await
-                .map_err(bridge_status)?;
+            let admitted = timing::timed(
+                Phase::Ready,
+                admit_credential_bridge(transport, environment_id, generation),
+            )
+            .await
+            .map_err(bridge_status)?;
             // Waiting for Ready cannot substitute another session or carry
             // revoked/stale authority through admission. This reread does not
             // unwrap or lease credential material.
@@ -481,6 +502,21 @@ fn expiry_deadline(expires_at_unix: u64) -> Result<Instant, Status> {
         .checked_sub(now)
         .ok_or_else(denied)?;
     Instant::now().checked_add(remaining).ok_or_else(denied)
+}
+
+/// A closed label for one admission's result; status messages are not logged.
+fn admission_outcome<T>(result: &Result<T, Status>) -> &'static str {
+    match result {
+        Ok(_) => "admitted",
+        Err(status) => match status.code() {
+            tonic::Code::Unauthenticated => "unauthenticated",
+            tonic::Code::PermissionDenied => "denied",
+            tonic::Code::Unavailable => "unavailable",
+            tonic::Code::DeadlineExceeded => "timed_out",
+            tonic::Code::InvalidArgument => "invalid_protocol",
+            _ => "failed",
+        },
+    }
 }
 
 fn denied() -> Status {
