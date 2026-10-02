@@ -159,6 +159,45 @@ The next member-control design is in
 [CLI delivery backlog](plans/2026-09-29-cli-delivery-backlog.md).
 Proposed member selectors and remote grants there are future UX.
 
+## Install local execution
+
+Install the production host CLI before creating environments or sessions that
+you intend to retain:
+
+```sh
+make cli-install-user
+```
+
+Trusted hosts use that installed executable and the user's ordinary agent
+tools. Native Linux VMs also need durable base artifacts, their matching lock
+file, and the static managed guest runtime. Keep those inputs outside a
+disposable worktree. The base defaults are
+`$HOME/.cache/codewire/local-vmm-v1/artifacts` and the adjacent
+`artifacts.lock.json`; `CODEWIRE_NATIVE_ARTIFACT_ROOT` and
+`CODEWIRE_NATIVE_ARTIFACT_LOCK` select absolute alternatives that share one
+parent directory.
+
+Build the managed runtime directly into a fresh, versioned durable directory:
+
+```sh
+codewire_managed_runtime="${XDG_CACHE_HOME:-$HOME/.cache}/codewire/local-vmm-v1/managed-$(git rev-parse HEAD)"
+scripts/dev/build-native-managed-agent.py \
+  --rust-tools /absolute/path/to/rust/toolchain/bin \
+  --protoc /absolute/path/to/protoc \
+  --output "$codewire_managed_runtime"
+export CODEWIRE_NATIVE_MANAGED_AGENT_ARTIFACT="$codewire_managed_runtime/managed-agent-cw.json"
+```
+
+Retain this selection for subsequent `cw` invocations. Its descriptor contains
+an absolute binary path and binds the actual source, protocol and digest. If
+moving an already verified runtime, update only that path and verify the copied
+binary still matches the descriptor digest. A descriptor pointing into a
+removed worktree cannot launch another managed conversation. Stop task-owned
+daemons and retire task-only environments before deleting their executable
+paths. Retained host managed sessions still need the original `cw` path after
+daemon shutdown. Preserve that executable, the state and the runtime inputs of
+any environment you keep.
+
 ## Verification
 
 ```sh

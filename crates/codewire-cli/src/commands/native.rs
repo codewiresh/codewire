@@ -771,23 +771,33 @@ async fn get_native_environment_with_required_authority(
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
     let expected_id = uuid::Uuid::parse_str(name).ok().map(|id| id.to_string());
-    if let Some(expected_id) = &expected_id {
+    let lookup_name = if let Some(expected_id) = &expected_id {
         let listed = client.list().await.map_err(native_status)?;
-        if !listed
-            .iter()
-            .any(|environment| environment.id == *expected_id)
-        {
-            anyhow::bail!(
-                "native environment {expected_id} no longer exists; a reused name cannot replace it"
-            );
-        }
-    }
-    let environment = get_native_environment_with_authority_recovery(client, name).await?;
+        native_environment_name_for_id(&listed, expected_id)?.to_owned()
+    } else {
+        name.to_owned()
+    };
+    let environment = get_native_environment_with_authority_recovery(client, &lookup_name).await?;
     if expected_id.as_ref().is_some_and(|id| environment.id != *id) {
         anyhow::bail!("native environment identity changed before the operation");
     }
     ensure_native_credential_authority(&environment).await?;
     Ok(environment)
+}
+
+fn native_environment_name_for_id<'a>(
+    environments: &'a [v1::Environment],
+    expected_id: &str,
+) -> anyhow::Result<&'a str> {
+    environments
+        .iter()
+        .find(|environment| environment.id == expected_id)
+        .map(|environment| environment.name.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "native environment {expected_id} no longer exists; a reused name cannot replace it"
+            )
+        })
 }
 
 /// Managed guests use a selected typed proxy, never the host agent's login.
@@ -1678,6 +1688,33 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_id_lookup_resolves_the_private_name_without_following_a_uuid_shaped_name() {
+        let expected_id = "8fc6e44a-047a-4e65-8e56-26df709fee44";
+        let environments = [
+            v1::Environment {
+                id: "d52a6f57-0f19-4b8c-b89b-b941abfc90b3".to_owned(),
+                name: expected_id.to_owned(),
+                ..Default::default()
+            },
+            v1::Environment {
+                id: expected_id.to_owned(),
+                name: "native-team".to_owned(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            native_environment_name_for_id(&environments, expected_id).unwrap(),
+            "native-team"
+        );
+        let error = native_environment_name_for_id(&environments[..1], expected_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("a reused name cannot replace it")
+        );
+    }
 
     #[tokio::test]
     async fn native_rpc_authority_recovery_is_exact_and_bounded() {
