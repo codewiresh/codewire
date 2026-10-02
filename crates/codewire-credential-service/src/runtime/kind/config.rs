@@ -139,7 +139,8 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
          AND NOT EXISTS ( \
              SELECT 1 FROM unnest(ARRAY[ \
                  'users','organizations','org_members','environments','environment_presets', \
-                 'sandbox_environment_backend','oidc_access_tokens','oidc_clients', \
+                 'sandbox_environment_backend','sandbox_workspace_bindings', \
+                 'oidc_access_tokens','oidc_clients', \
                  'platform_access_profiles','platform_access_profile_revisions', \
                  'platform_access_profile_entries','platform_environment_access_bindings', \
                  'tenant_secrets','tenant_secret_deks','secret_projects' \
@@ -231,6 +232,9 @@ mod tests {
                     "UPDATE (ciphertext) ON public.tenant_secrets",
                     "SELECT (email) ON public.users",
                     "SELECT (secret) ON public.oidc_clients",
+                    "UPDATE (released_at) ON public.sandbox_workspace_bindings",
+                    "INSERT ON public.sandbox_workspace_bindings",
+                    "UPDATE (pod_uid) ON public.sandbox_environment_backend",
                 ] {
                     execute(
                         &database.pool,

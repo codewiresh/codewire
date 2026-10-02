@@ -30,10 +30,38 @@ pub(crate) struct Lineage {
 }
 
 impl Lineage {
-    /// Whether orchestration rendered the verified workspace with the managed
-    /// GitHub client: the creator's recorded choice, fixed for this Pod.
+    /// Whether orchestration bound the verified workspace with the managed
+    /// GitHub client: the creator's recorded choice, fixed for this Pod by its
+    /// binding.
     pub(crate) fn managed_github(&self) -> bool {
         self.managed_github
+    }
+}
+
+/// Credential scope of a claim-time binding (Program #2238 B2): the Pod
+/// fetched its daemon credential from its binding.
+const BINDING_SCOPE_POD: &str = "pod";
+/// Credential scope of a pre-binding Pod, which still carries the environment
+/// token and its rendered managed clients until it restarts.
+const BINDING_SCOPE_ENVIRONMENT: &str = "environment";
+
+/// The managed clients fixed for the bound workspace Pod: the canonical
+/// selection orchestration recorded with its binding. A malformed value or an
+/// unknown scope is denied. A pre-binding (`environment`) Pod must still carry
+/// the same selection in its rendered environment, so both sources agree; a
+/// claim-time (`pod`) Pod carries none, and its environment is not consulted.
+pub(crate) fn binding_managed_clients(
+    scope: &Scope,
+    workspace: &Pod,
+) -> Result<ManagedCredentialClients, Error> {
+    let recorded = ManagedCredentialClients::decode(&scope.managed_credential_clients)
+        .map_err(|_| Error::Denied)?;
+    match scope.credential_scope.as_str() {
+        BINDING_SCOPE_POD => Ok(recorded),
+        BINDING_SCOPE_ENVIRONMENT if rendered_managed_clients(workspace)? == recorded => {
+            Ok(recorded)
+        }
+        _ => Err(Error::Denied),
     }
 }
 
@@ -362,10 +390,17 @@ pub(crate) async fn validate_lineage(
     gateway: &Pod,
     workspace_identity: &VerifiedPodIdentity,
 ) -> Result<Lineage, Error> {
+    // The reviewed workspace Pod must be the one orchestration bound, by UID,
+    // and the live binding must name the backend's Claim. Checked before any
+    // Kubernetes read.
     if !valid_name(&scope.claim_name, false)
         || !valid_uid(&scope.claim_uid)
         || scope.pod_name != workspace_identity.pod_name()
         || scope.namespace != workspace_identity.namespace()
+        || !valid_uid(&scope.pod_uid)
+        || scope.pod_uid != workspace_identity.pod_uid()
+        || scope.binding_claim_uid != scope.claim_uid
+        || !valid_uid(&scope.binding_sandbox_uid)
     {
         return Err(Error::Denied);
     }
@@ -412,8 +447,13 @@ pub(crate) async fn validate_lineage(
         .map_err(kube_error)?;
     live_pod(&workspace, workspace_identity)?;
     let (claim_uid, sandbox_uid) = workspace_chain(scope, &claim, &sandbox, &workspace)?;
+    // The live Claim → Sandbox → Pod chain is the recorded one, by UID. A
+    // re-owned or replaced Sandbox under the same names is denied.
+    if claim_uid != scope.binding_claim_uid || sandbox_uid != scope.binding_sandbox_uid {
+        return Err(Error::Denied);
+    }
     let managed_github =
-        rendered_managed_clients(&workspace)?.contains(ManagedCredentialClient::GitHub);
+        binding_managed_clients(scope, &workspace)?.contains(ManagedCredentialClient::GitHub);
     Ok(Lineage {
         replica_set_uid,
         deployment_uid,

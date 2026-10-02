@@ -36,6 +36,15 @@ impl Fixture {
                 VALUES ($1,$2,$3,$4,$5,true)")
                 .bind(&selected.environment_id).bind(&selected.namespace).bind(&selected.claim_name)
                 .bind(&selected.claim_uid).bind(&selected.pod_name).execute(&db.pool).await?;
+            // Orchestration's claim-time binding of the reviewed workspace Pod.
+            sqlx::query("INSERT INTO sandbox_workspace_bindings(pod_uid,environment_id,namespace,pod_name,claim_uid,sandbox_uid,operation_generation,managed_credential_clients,credential_scope) \
+                VALUES ($1,$2,$3,$4,$5,$6,7,$7,$8)")
+                .bind(&selected.pod_uid).bind(&selected.environment_id).bind(&selected.namespace)
+                .bind(&selected.pod_name).bind(&selected.binding_claim_uid).bind(&selected.binding_sandbox_uid)
+                .bind(&selected.managed_credential_clients).bind(&selected.credential_scope)
+                .execute(&db.pool).await?;
+            sqlx::query("UPDATE sandbox_environment_backend SET pod_uid=$2,bound_at=now() WHERE environment_id=$1")
+                .bind(&selected.environment_id).bind(&selected.pod_uid).execute(&db.pool).await?;
             let credential=CredentialId::parse(Uuid::new_v4().to_string())?;
             // Only synthetic metadata is necessary. There is intentionally no
             // envelope, KEK, credential material or OAuth attempt in this DB.
@@ -66,7 +75,8 @@ impl Fixture {
                 "SELECT (id,user_id,organization_id,provider,authentication_kind,status,expires_at_unix) ON public.platform_credentials",
                 "SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_at,environment_operation_generation) ON public.environments",
                 "SELECT (id,org_id,user_id,role) ON public.org_members",
-                "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name) ON public.sandbox_environment_backend",
+                "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name,pod_uid,bound_at) ON public.sandbox_environment_backend",
+                "SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,credential_scope,released_at) ON public.sandbox_workspace_bindings",
                 "SELECT (id,user_id,organization_id) ON public.platform_access_profiles",
                 "SELECT (profile_id,revision) ON public.platform_access_profile_revisions",
                 "SELECT (profile_id,revision,capability_slot,credential_id) ON public.platform_access_profile_entries",
@@ -179,6 +189,11 @@ async fn restricted_metadata_login_admits_personal_scope_and_pins_exact_binding(
             "UPDATE public.platform_access_profiles SET name=name",
             "SELECT id FROM public.users FOR SHARE",
             "SELECT setup_owner_pod_uid FROM public.sandbox_environment_backend",
+            "SELECT workspace_pvc_uid FROM public.sandbox_environment_backend",
+            "SELECT operation_generation FROM public.sandbox_workspace_bindings",
+            "SELECT workspace_pvc_uid FROM public.sandbox_workspace_bindings",
+            "UPDATE public.sandbox_workspace_bindings SET released_at=released_at",
+            "UPDATE public.sandbox_environment_backend SET pod_uid=pod_uid",
             "SELECT display_name FROM public.platform_credentials",
             "SELECT * FROM public.platform_credential_material",
             "SELECT * FROM public.platform_credential_refresh_attempts",
@@ -224,6 +239,10 @@ async fn live_revalidation_denies_membership_consent_backend_lifecycle_and_pod_c
             ("UPDATE environments SET environment_operation_generation=8","UPDATE environments SET environment_operation_generation=7"),
             ("UPDATE sandbox_environment_backend SET sandbox_claim_uid='fcb6ac9e-65c3-4d61-9bac-11d55dfd70dc'",
              "UPDATE sandbox_environment_backend SET sandbox_claim_uid='e78d4729-6710-4ad9-8b05-ecad87013e33'"),
+            // An unbound runtime never scopes: the pointer is cleared, as it is
+            // before orchestration records a binding.
+            ("UPDATE sandbox_environment_backend SET pod_uid=NULL,bound_at=NULL",
+             "UPDATE sandbox_environment_backend SET pod_uid='5334599b-3b66-4363-92b3-bd1cb230d95e',bound_at=now()"),
             ("UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by=NULL",
              "UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by='synthetic-creator'"),
             ("UPDATE organizations SET deletion_state='deleting',deletion_generation=1,deletion_operation_id='synthetic-delete',deletion_workflow_id='synthetic-delete',deletion_requested_at=now(),deletion_phase='queued' WHERE id='synthetic-org'",
@@ -253,6 +272,23 @@ async fn live_revalidation_denies_membership_consent_backend_lifecycle_and_pod_c
             *fixture.kube.objects.lock().unwrap()=original.clone();
             authority.current_session().await?;
         }
+        // A released binding never scopes again (a release is final), and a
+        // pointer moved to the next Pod's binding does not admit this Pod.
+        sqlx::query("UPDATE sandbox_workspace_bindings SET released_at=now() WHERE pod_uid=$1")
+            .bind(WORKSPACE_UID).execute(&fixture.db.pool).await?;
+        ensure!(matches!(authority.current_session().await,Err(PlatformRuntimeError::Denied)));
+        ensure!(matches!(fixture.authenticator().authenticate(&headers(unix_now()?+600)).await,
+            Err(PlatformBridgeAuthenticationError::Denied)));
+        let next=Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO sandbox_workspace_bindings(pod_uid,environment_id,namespace,pod_name,claim_uid,sandbox_uid,operation_generation,managed_credential_clients,credential_scope) \
+            SELECT $1,environment_id,namespace,pod_name,claim_uid,sandbox_uid,operation_generation,managed_credential_clients,credential_scope \
+            FROM sandbox_workspace_bindings WHERE pod_uid=$2")
+            .bind(&next).bind(WORKSPACE_UID).execute(&fixture.db.pool).await?;
+        sqlx::query("UPDATE sandbox_environment_backend SET pod_uid=$1,bound_at=now()")
+            .bind(&next).execute(&fixture.db.pool).await?;
+        ensure!(matches!(authority.current_session().await,Err(PlatformRuntimeError::Denied)));
+        ensure!(matches!(fixture.authenticator().authenticate(&headers(unix_now()?+600)).await,
+            Err(PlatformBridgeAuthenticationError::Denied)));
         Ok(())
     }.await;
     fixture.finish(result).await
