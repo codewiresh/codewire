@@ -253,6 +253,68 @@ def assert_gateway_replicaset(resources: list[str], target: dict[str, str], labe
             output.append(f"{label}: gateway ReplicaSet binding escaped its namespace or identity")
 
 
+WORKSPACE_BINDING_INGRESS = "codewire-orchestration-workspace-binding"
+
+
+def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+    """TCP 8087 serves only WorkspaceBindingService, for workspace Pods. Its
+    ingress policy must admit only workspace Pods in sandbox namespaces on
+    8087 while every other port keeps accepting every source, so adding it
+    never changes what 8084, 8085 or any other orchestration port accepts."""
+    policy = exactly_one(resources, "NetworkPolicy", WORKSPACE_BINDING_INGRESS, label, output)
+    if not policy:
+        return
+    if metadata_field(policy, "namespace") != target["subject_namespace"]:
+        output.append(f"{label}: workspace binding ingress policy must live with orchestration")
+    expected = compact(
+        """
+        spec:
+          ingress:
+          - ports:
+            - endPort: 8086
+              port: 1
+              protocol: TCP
+            - endPort: 65535
+              port: 8088
+              protocol: TCP
+            - endPort: 65535
+              port: 1
+              protocol: UDP
+          - from:
+            - namespaceSelector:
+                matchLabels:
+                  codewire.sh/resource-type: sandbox
+              podSelector:
+                matchLabels:
+                  codewire.sh/type: workspace
+            ports:
+            - port: 8087
+              protocol: TCP
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: orchestration
+              app.kubernetes.io/name: codewire
+          policyTypes:
+          - Ingress
+        """
+    )
+    if compact(top_level_block(policy, "spec")) != expected:
+        output.append(
+            f"{label}: workspace binding ingress must admit only sandbox workspace Pods on 8087 "
+            "and leave every other orchestration port open to every source"
+        )
+    others = [
+        resource
+        for resource in resources
+        if top_level_field(resource, "kind") == "NetworkPolicy"
+        and metadata_field(resource, "namespace") == target["subject_namespace"]
+        and metadata_field(resource, "name") != WORKSPACE_BINDING_INGRESS
+        and "component: orchestration" in top_level_block(resource, "spec")
+    ]
+    if others:
+        output.append(f"{label}: another NetworkPolicy also selects orchestration Pods")
+
+
 def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
     name = "codewire-orchestration-gateway-host-key"
     orchestration = "codewire-orchestration"
@@ -463,6 +525,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         assert_credential_bootstrap(resources, target, label, output)
         assert_image_cache(resources, target, label, output)
         assert_gateway_replicaset(resources, target, label, output)
+        assert_workspace_binding_ingress(resources, target, label, output)
         if target["path"] != "deployments/k8s/orchestration":
             assert_credential_service(resources, target, label, output)
         return output
@@ -634,6 +697,36 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         image_cache_rejected("gateway ReplicaSet other identity", "RoleBinding",
                              "kind: ServiceAccount\n  name: codewire-orchestration", "kind: ServiceAccount\n  name: default",
                              GATEWAY_REPLICASET_ROLE)
+        expect_rejected("missing workspace binding ingress", lambda resources: [
+            resource for resource in resources
+            if not (top_level_field(resource, "kind") == "NetworkPolicy"
+                    and metadata_field(resource, "name") == WORKSPACE_BINDING_INGRESS)
+        ])
+        for binding_label, before, after in [
+            ("8087 open to every source", "endPort: 8086", "endPort: 8087"),
+            ("8085 narrowed", "endPort: 8086", "endPort: 8084"),
+            ("high ports narrowed", "port: 8088", "port: 9000"),
+            ("UDP narrowed", "      port: 1\n      protocol: UDP", "      port: 53\n      protocol: UDP"),
+            ("any namespace", "    - namespaceSelector:\n        matchLabels:\n          codewire.sh/resource-type: sandbox\n", "    - namespaceSelector: {}\n"),
+            ("any Pod", "codewire.sh/type: workspace", "codewire.sh/type: gateway"),
+            ("egress isolation", "  - Ingress", "  - Ingress\n  - Egress"),
+        ]:
+            def mutate(resources: list[str], before: str = before, after: str = after) -> list[str]:
+                changed = [
+                    resource.replace(before, after, 1)
+                    if top_level_field(resource, "kind") == "NetworkPolicy"
+                    and metadata_field(resource, "name") == WORKSPACE_BINDING_INGRESS
+                    else resource
+                    for resource in resources
+                ]
+                if changed == resources:
+                    raise RuntimeError(f"workspace binding negative fixture {binding_label} did not change the render")
+                return changed
+            expect_rejected(f"workspace binding ingress {binding_label}", mutate)
+        expect_rejected("second orchestration ingress policy", lambda resources: resources + [
+            resources_by_kind_and_name(resources, "NetworkPolicy", WORKSPACE_BINDING_INGRESS)[0]
+            .replace(f"name: {WORKSPACE_BINDING_INGRESS}", "name: codewire-orchestration-extra")
+        ])
         expect_rejected("image cache cluster-wide DaemonSets", lambda resources: [
             resource.replace("  - deployments\n", "  - deployments\n  - daemonsets\n", 1)
             if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration

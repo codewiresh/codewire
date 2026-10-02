@@ -139,8 +139,9 @@ fn first_resolution_requires_the_sandbox_controller_and_records_the_uid() {
             bound: true,
         }
     );
-    // An unowned same-name PVC, even one carrying the fork's tracking label,
-    // is not accepted on first resolution or afterwards in B1.
+    // An unowned same-name PVC, even one carrying a tracking label, is not
+    // accepted on first resolution, nor afterwards unless the label is this
+    // Sandbox's own name hash (the restore adoption window below).
     let mut unowned = pvc();
     unowned.metadata.owner_references = None;
     unowned.metadata.labels = Some(BTreeMap::from([(
@@ -211,4 +212,63 @@ fn the_pvc_shape_the_pinned_fork_creates_resolves_on_first_resolution() {
     // The fork's adoption path patches the same controller reference onto an
     // unowned PVC, so an adopted PVC also resolves, by its recorded UID.
     assert!(identity(&fork_created, Some(PVC_UID)).is_ok());
+}
+
+#[test]
+fn the_name_hash_matches_the_fork() {
+    // Independently computed with Go's hash/fnv New32a, which the fork's
+    // NameHash wraps.
+    assert_eq!(sandbox_name_hash(SANDBOX_NAME), "d0258436");
+    assert_eq!(sandbox_name_hash("my-warm-pool"), "034dafb4");
+    assert_eq!(sandbox_name_hash(""), "811c9dc5");
+}
+
+fn restored(labels: Option<&str>) -> PersistentVolumeClaim {
+    let mut restored = pvc();
+    restored.metadata.uid = Some(OTHER_UID.into());
+    restored.metadata.owner_references = None;
+    restored.metadata.labels =
+        labels.map(|hash| BTreeMap::from([(SANDBOX_NAME_HASH_LABEL.to_owned(), hash.to_owned())]));
+    restored
+}
+
+/// Design §12: between `adopt_restored_workspace_pvc` and the fork's adoption,
+/// an unowned restore-born PVC resolves only with the recorded UID and this
+/// Sandbox's tracking label. Every other unowned same-name PVC fails.
+#[test]
+fn a_restore_born_pvc_resolves_only_by_its_adopted_uid_and_tracking_label() {
+    let hash = sandbox_name_hash(SANDBOX_NAME);
+    assert_eq!(
+        identity(&restored(Some(&hash)), Some(OTHER_UID)).unwrap(),
+        WorkspacePvc::Claim {
+            name: pvc_name(),
+            uid: OTHER_UID.into(),
+            bound: true,
+        }
+    );
+    // Not adopted: the recorded UID is still the old PVC's.
+    assert!(identity(&restored(Some(&hash)), Some(PVC_UID)).is_err());
+    // First resolution never accepts an unowned PVC.
+    assert!(identity(&restored(Some(&hash)), None).is_err());
+    // Another Sandbox's tracking label, or none at all.
+    assert!(identity(&restored(Some("0123abcd")), Some(OTHER_UID)).is_err());
+    assert!(identity(&restored(None), Some(OTHER_UID)).is_err());
+    // Controlled by something else: never the adoption window.
+    let mut foreign = restored(Some(&hash));
+    foreign.metadata.owner_references = Some(vec![OwnerReference {
+        api_version: "apps/v1".into(),
+        kind: "StatefulSet".into(),
+        name: "other".into(),
+        uid: PVC_UID.into(),
+        controller: Some(true),
+        ..Default::default()
+    }]);
+    assert!(identity(&foreign, Some(OTHER_UID)).is_err());
+    // Once the fork adopts it, the controller reference and the UID decide.
+    let mut adopted = restored(Some(&hash));
+    adopted.metadata.owner_references = pvc().metadata.owner_references;
+    assert!(identity(&adopted, Some(OTHER_UID)).is_ok());
+    let mut terminating = restored(Some(&hash));
+    terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+    assert!(identity(&terminating, Some(OTHER_UID)).is_err());
 }

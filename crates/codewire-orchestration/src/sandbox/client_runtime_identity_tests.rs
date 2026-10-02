@@ -397,3 +397,122 @@ async fn partial_propagation_wait_is_bounded_and_does_not_mutate() {
             .all(|(method, _, _)| method == Method::GET)
     );
 }
+
+fn unbound_claim() -> Value {
+    let mut claim = claim(7);
+    claim["status"] = json!({ "conditions": [] });
+    claim
+}
+
+/// Design §12: the Pod name comes from the bound Sandbox's controller-
+/// published annotation, never the Claim's own name.
+#[tokio::test]
+async fn the_pod_name_follows_the_bound_sandbox_and_never_the_claim_name() {
+    let (sandboxes, requests) = client(vec![
+        (StatusCode::OK, claim(7)),
+        (StatusCode::OK, sandbox(7)),
+    ]);
+    assert_eq!(sandboxes.get_pod_name("env-test").await.unwrap(), POD);
+    assert!(
+        requests.lock().unwrap()[1]
+            .1
+            .ends_with(&format!("/sandboxes/{SANDBOX}"))
+    );
+
+    // An unbound Claim has no runtime: no fallback to `sandbox-<env>`.
+    let (sandboxes, requests) = client(vec![(StatusCode::OK, unbound_claim())]);
+    assert!(sandboxes.get_pod_name("env-test").await.is_err());
+    assert!(client_requests_end(&requests, 1));
+    let (sandboxes, _) = client(vec![(StatusCode::OK, unbound_claim())]);
+    assert!(sandboxes.bound_sandbox_name("env-test").await.is_err());
+}
+
+fn client_requests_end(requests: &Recorded, count: usize) -> bool {
+    requests.lock().unwrap().len() == count
+}
+
+/// Once bound, the current workspace Pod must be the bound incarnation; a
+/// replacement under the same name is refused until its own binding exists.
+#[tokio::test]
+async fn the_current_workspace_pod_is_the_bound_incarnation() {
+    let responses = || {
+        vec![
+            (StatusCode::OK, claim(7)),
+            (StatusCode::OK, sandbox(7)),
+            (StatusCode::OK, pod(7)),
+        ]
+    };
+    let (sandboxes, _) = client(responses());
+    assert_eq!(
+        sandboxes
+            .current_workspace_pod("env-test", None)
+            .await
+            .unwrap(),
+        WorkspacePodIdentity {
+            name: POD.into(),
+            uid: POD_UID.into(),
+        }
+    );
+    let (sandboxes, _) = client(responses());
+    assert!(
+        sandboxes
+            .current_workspace_pod("env-test", Some(POD_UID))
+            .await
+            .is_ok()
+    );
+    let (sandboxes, _) = client(responses());
+    assert!(
+        sandboxes
+            .current_workspace_pod("env-test", Some("replacement-uid"))
+            .await
+            .is_err()
+    );
+    // A Pod the Sandbox does not control is not the workspace.
+    let mut foreign = pod(7);
+    foreign["metadata"]["ownerReferences"][0]["uid"] = json!("other-sandbox");
+    let (sandboxes, _) = client(vec![
+        (StatusCode::OK, claim(7)),
+        (StatusCode::OK, sandbox(7)),
+        (StatusCode::OK, foreign),
+    ]);
+    assert!(
+        sandboxes
+            .current_workspace_pod("env-test", None)
+            .await
+            .is_err()
+    );
+}
+
+/// The liveness and create probes find the Pod through the bound Sandbox,
+/// and report none for an unbound Claim instead of guessing its name.
+#[tokio::test]
+async fn the_probe_resolves_the_pod_through_the_sandbox_without_a_name_fallback() {
+    let (sandboxes, requests) = client(vec![
+        (StatusCode::OK, claim(7)),
+        (StatusCode::OK, claim(7)),
+        (StatusCode::OK, sandbox(7)),
+        (StatusCode::OK, pod(7)),
+    ]);
+    let probe = sandboxes.probe_environment("env-test").await.unwrap();
+    assert!(probe.claim_ready && probe.pod_exists);
+    assert_eq!(
+        (probe.pod_name.as_str(), probe.pod_uid.as_str()),
+        (POD, POD_UID)
+    );
+    assert!(
+        requests.lock().unwrap()[3]
+            .1
+            .ends_with(&format!("/pods/{POD}"))
+    );
+
+    let (sandboxes, requests) = client(vec![
+        (StatusCode::OK, unbound_claim()),
+        (StatusCode::OK, unbound_claim()),
+    ]);
+    let probe = sandboxes.probe_environment("env-test").await.unwrap();
+    assert!(probe.claim_exists && !probe.pod_exists && probe.pod_name.is_empty());
+    assert!(
+        client_requests_end(&requests, 2),
+        "the probe guessed a Pod name"
+    );
+}

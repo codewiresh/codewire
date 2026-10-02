@@ -707,6 +707,7 @@ async fn enqueue_environment_reconcile(
 
 // ── Sandbox liveness (port of sandbox_liveness.go) ─────────────────────
 
+#[derive(Clone)]
 struct LivenessRow {
     id: String,
     state: String,
@@ -716,6 +717,8 @@ struct LivenessRow {
     namespace: String,
     pod_name: String,
     pod_ip: String,
+    /// The bound workspace Pod UID (Program #2238 design §10).
+    bound_pod_uid: Option<String>,
     setup_owner_generation: Option<i64>,
     setup_owner_status: String,
 }
@@ -743,6 +746,7 @@ async fn reconcile_sandbox_liveness(ctx: &WorkerContext) {
                   COALESCE(b.namespace, '') AS namespace,
                   COALESCE(b.pod_name, '') AS pod_name,
                   COALESCE(b.pod_ip, '') AS pod_ip,
+                  b.pod_uid AS bound_pod_uid,
                   b.setup_owner_generation,
                   COALESCE(b.setup_owner_status, '') AS setup_owner_status
              FROM environments e
@@ -783,6 +787,7 @@ async fn reconcile_sandbox_liveness(ctx: &WorkerContext) {
             namespace: row.try_get("namespace").unwrap_or_default(),
             pod_name: row.try_get("pod_name").unwrap_or_default(),
             pod_ip: row.try_get("pod_ip").unwrap_or_default(),
+            bound_pod_uid: row.try_get("bound_pod_uid").unwrap_or(None),
             setup_owner_generation: row.try_get("setup_owner_generation").unwrap_or(None),
             setup_owner_status: row.try_get("setup_owner_status").unwrap_or_default(),
         };
@@ -869,6 +874,10 @@ fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> 
     {
         return false;
     }
+    // A Pod replaced under the same name, and possibly the same IP, keeps
+    // both. Its UID differs from the bound one, so the reconcile records the
+    // replacement's binding before any gateway wait; until then its daemon
+    // stays unbound and unreachable, never serving the old binding.
     !probe.claim_ready
         || !probe.pod_exists
         || probe.pod_name.is_empty()
@@ -876,6 +885,10 @@ fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> 
         || probe.pod_ip.is_empty()
         || probe.pod_name != row.pod_name
         || probe.pod_ip != row.pod_ip
+        || row
+            .bound_pod_uid
+            .as_deref()
+            .is_some_and(|bound| bound != probe.pod_uid)
 }
 
 fn setup_activity_active(row: &LivenessRow) -> bool {
@@ -1076,6 +1089,7 @@ mod tests {
             namespace: "ns".into(),
             pod_name: "p".into(),
             pod_ip: "10.0.0.1".into(),
+            bound_pod_uid: None,
             setup_owner_generation: None,
             setup_owner_status: String::new(),
         }
@@ -1131,6 +1145,30 @@ mod tests {
 
         let terminal = probe(true, false, "PodFailed", false, "", "");
         assert!(!running_runtime_recovery_required(&running, &terminal));
+    }
+
+    /// Design §10: a Pod replaced under the same name and IP is found by its
+    /// UID, and only once the environment is bound.
+    #[test]
+    fn a_replacement_under_the_same_name_and_ip_is_found_by_pod_uid() {
+        let mut running = row("running", 300);
+        let mut same = probe(true, true, "", true, "Running", "10.0.0.1");
+        same.pod_name = "p".into();
+        same.pod_uid = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52".into();
+        // Unbound (a legacy Pod the backfill has not bound): name and IP only.
+        assert!(!running_runtime_recovery_required(&running, &same));
+        running.bound_pod_uid = Some(same.pod_uid.clone());
+        assert!(!running_runtime_recovery_required(&running, &same));
+        let mut replaced = same.clone();
+        replaced.pod_uid = "a1560db3-8899-40c9-b521-500f223b04fb".into();
+        assert!(running_runtime_recovery_required(&running, &replaced));
+        // Never for a non-running or terminal runtime.
+        let mut starting = running.clone();
+        starting.state = "starting".into();
+        assert!(!running_runtime_recovery_required(&starting, &replaced));
+        let mut failed = replaced.clone();
+        failed.pod_phase = "Failed".into();
+        assert!(!running_runtime_recovery_required(&running, &failed));
     }
 
     #[test]

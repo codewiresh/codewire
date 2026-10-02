@@ -12,6 +12,7 @@ pub fn env_phase_label(phase: &str) -> &str {
         "wait_for_ready" => "Waiting for sandbox ready",
         "resume_workspace" => "Resuming suspended sandbox",
         "store_backend" => "Storing backend info",
+        "workspace_bind" => "Binding workspace",
         "gateway_ready" => "Gateway ready",
         "pod_scheduled" => "Workspace pod scheduled",
         "pod_initialized" => "Workspace pod initialized",
@@ -46,6 +47,7 @@ pub fn should_record_worker_checkpoint(phase: &str, status: &str) -> bool {
             | "create_claim"
             | "wait_for_ready"
             | "store_backend"
+            | "workspace_bind"
             | "gateway_ready"
             | "mark_running"
             | "publish_setup"

@@ -49,6 +49,8 @@ async fn admitted_repair(fixture: &LeaseFixture, sandbox: SandboxClient) -> Daem
         .await
         .expect("seeded environment carries started authority");
     DaemonRepair {
+        pool: fixture.pool.clone(),
+        kube: sandbox.client.clone(),
         session_secret: "synthetic-daemon-repair-session-secret".into(),
         daemon_endpoints: EnvironmentDaemonEndpointOverrides::default(),
         namespace: NAMESPACE.into(),
