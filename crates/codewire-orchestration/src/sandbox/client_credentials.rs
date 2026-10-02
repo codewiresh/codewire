@@ -5,8 +5,6 @@ use crate::sandbox::template::{
     credential_codex_config_name, credential_gateway_certificate_name,
     render_credential_codex_config, render_credential_gateway_certificate,
 };
-use futures::StreamExt;
-use kube::api::{WatchEvent, WatchParams};
 
 impl SandboxClient {
     pub(super) fn credential_certificates(&self) -> Api<DynamicObject> {
@@ -228,6 +226,7 @@ impl SandboxClient {
         let desired: DynamicObject = serde_json::from_value(rendered)?;
         let certificate_name = credential_gateway_certificate_name(&opts.environment_id);
         let gateway_name = gateway_workload_name(&opts.environment_id);
+        let deployments = self.deployments();
         tokio::time::timeout(timeout, async {
             loop {
                 let certificate = self
@@ -239,51 +238,15 @@ impl SandboxClient {
                     certificate.data["spec"] == desired.data["spec"],
                     "credential Certificate intent changed during readiness"
                 );
-                let gateway = self.deployments().get(&gateway_name).await?;
+                let gateway = deployments.get(&gateway_name).await?;
                 if certificate_ready(&certificate) && gateway_ready(&gateway, opts) {
                     return Ok::<_, anyhow::Error>(());
                 }
-                self.wait_for_deployment_change(&gateway_name, &gateway, fallback_poll)
-                    .await;
+                wait_for_object_change(&deployments, &gateway_name, &gateway, fallback_poll).await;
             }
         })
         .await
         .map_err(|_| anyhow::anyhow!("credential gateway readiness timed out"))?
-    }
-
-    /// Returns on the first change to `name` after the observed revision, or
-    /// once `fallback_poll` elapses. A watch that cannot open, reports an
-    /// error, or ends early waits out the fallback, so a broken watch never
-    /// turns into a tight read loop.
-    async fn wait_for_deployment_change(
-        &self,
-        name: &str,
-        observed: &DynamicObject,
-        fallback_poll: Duration,
-    ) {
-        let changed = async {
-            let Some(version) = observed.metadata.resource_version.as_deref() else {
-                return std::future::pending::<()>().await;
-            };
-            let params = WatchParams::default()
-                .fields(&format!("metadata.name={name}"))
-                .timeout(fallback_poll.as_secs().clamp(1, 290) as u32)
-                .disable_bookmarks();
-            let Ok(events) = self.deployments().watch(&params, version).await else {
-                return std::future::pending::<()>().await;
-            };
-            let mut events = std::pin::pin!(events);
-            while let Some(event) = events.next().await {
-                if matches!(
-                    event,
-                    Ok(WatchEvent::Added(_) | WatchEvent::Modified(_) | WatchEvent::Deleted(_))
-                ) {
-                    return;
-                }
-            }
-            std::future::pending::<()>().await
-        };
-        let _ = tokio::time::timeout(fallback_poll, changed).await;
     }
 }
 
