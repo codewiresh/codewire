@@ -39,6 +39,10 @@ use tokio_vsock::{
 };
 use zeroize::Zeroizing;
 
+use crate::cw_runtime::{
+    CW_RUNTIME_MAX_BYTES, CW_RUNTIME_MAX_PROVENANCE, CW_RUNTIME_ROOT, CW_RUNTIME_SOURCE,
+    CwRuntimeProvenance,
+};
 use crate::network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_HOST_HELLO_LEN,
     NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS, NETWORK_MAX_PACKET_BYTES,
@@ -4320,7 +4324,8 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
         "completed OCI lower directory is invalid"
     );
 
-    let config = workspace_oci_config(plan)?;
+    let runtime = validate_boot_cw_asset()?;
+    let config = workspace_oci_config_with_cw(plan, runtime.is_some())?;
     ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
     inherit_root_directory_metadata(Path::new(ROOT_LOWER_PATH), Path::new(ROOT_UPPER_PATH))?;
 
@@ -4375,7 +4380,69 @@ fn ensure_exact_bytes(path: &Path, expected: &[u8], mode: u32) -> Result<()> {
     }
 }
 
+fn validate_boot_cw_asset() -> Result<Option<CwRuntimeProvenance>> {
+    match fs::symlink_metadata(CW_RUNTIME_SOURCE) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect boot cw asset"),
+        Ok(_) => {}
+    }
+    let directory = |path: &Path| -> Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        ensure!(
+            metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.uid() == 0
+                && metadata.gid() == 0
+                && metadata.mode() & 0o7777 == 0o555,
+            "boot cw directory is not root-owned and sealed"
+        );
+        Ok(())
+    };
+    let read = |path: &Path, limit: usize, mode: u32| -> Result<Vec<u8>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file()
+                && metadata.uid() == 0
+                && metadata.gid() == 0
+                && metadata.nlink() == 1
+                && metadata.mode() & 0o7777 == mode
+                && metadata.len() > 0
+                && metadata.len() <= limit as u64,
+            "invalid boot cw file"
+        );
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 == metadata.len(),
+            "boot cw input changed size"
+        );
+        Ok(bytes)
+    };
+    let root = Path::new(CW_RUNTIME_SOURCE);
+    directory(root)?;
+    let provenance = read(
+        &root.join("provenance.json"),
+        CW_RUNTIME_MAX_PROVENANCE,
+        0o444,
+    )?;
+    let identity = CwRuntimeProvenance::decode(&provenance).map_err(anyhow::Error::msg)?;
+    let selected = root.join(&identity.payload.sha256);
+    directory(&selected)?;
+    let cw = read(&selected.join("cw"), CW_RUNTIME_MAX_BYTES, 0o555)?;
+    identity.validate_payload(&cw).map_err(anyhow::Error::msg)?;
+    Ok(Some(identity))
+}
+
+#[cfg(test)]
 fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
+    workspace_oci_config_with_cw(plan, false)
+}
+
+fn workspace_oci_config_with_cw(plan: &WorkspacePlan, cw_asset: bool) -> Result<Vec<u8>> {
     let standard_devices = [
         ("/dev/null", 1, 3, 0o666),
         ("/dev/zero", 1, 5, 0o666),
@@ -4410,7 +4477,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::to_vec(&serde_json::json!({
+    let mut configuration = serde_json::json!({
         "ociVersion": "1.2.0",
         "process": {
             "terminal": false,
@@ -4483,8 +4550,17 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
                 "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"
             ]
         }
-    }))
-    .context("encode workspace OCI configuration")
+    });
+    if cw_asset {
+        configuration["mounts"]
+            .as_array_mut()
+            .context("workspace mounts")?
+            .push(serde_json::json!({
+                "destination": CW_RUNTIME_ROOT, "type": "none", "source": CW_RUNTIME_SOURCE,
+                "options": ["bind", "ro", "nosuid", "nodev", "exec"]
+            }));
+    }
+    serde_json::to_vec(&configuration).context("encode workspace OCI configuration")
 }
 
 fn bind_mount(source: &str, target: &str) -> Result<()> {
@@ -6128,6 +6204,35 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|device| device["path"] != "/dev/net/tun")
+        );
+    }
+
+    #[test]
+    fn cw_image_mount_is_read_only_outside_workspace_and_home() {
+        let plan = test_workspace_plan();
+        let config: serde_json::Value =
+            serde_json::from_slice(&workspace_oci_config_with_cw(&plan, true).unwrap()).unwrap();
+        let mounts = config["mounts"].as_array().unwrap();
+        let selected = mounts
+            .iter()
+            .filter(|mount| mount["destination"] == CW_RUNTIME_ROOT)
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]["source"], CW_RUNTIME_SOURCE);
+        assert_eq!(
+            selected[0]["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "exec"])
+        );
+        assert!(!CW_RUNTIME_ROOT.starts_with(&plan.identity.home));
+        assert!(!CW_RUNTIME_ROOT.starts_with(WORKSPACE_PATH));
+        let legacy: serde_json::Value =
+            serde_json::from_slice(&workspace_oci_config_with_cw(&plan, false).unwrap()).unwrap();
+        assert!(
+            legacy["mounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|mount| mount["destination"] != CW_RUNTIME_ROOT)
         );
     }
 

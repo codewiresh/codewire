@@ -143,11 +143,25 @@ fn entrypoint() -> anyhow::Result<()> {
         Some("docker-fixture") => guest::run_docker_fixture(arguments.collect()),
         Some("newc") => build_newc(arguments),
         Some("newc-root") => build_guest_root_newc(arguments),
+        Some("newc-root-cw") => build_guest_root_newc_with_cw(arguments),
         Some(_) => {
             let _ = executable;
             bail!("unknown guest probe command")
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn build_guest_root_newc_with_cw(arguments: impl Iterator<Item = OsString>) -> anyhow::Result<()> {
+    let paths = arguments.map(std::path::PathBuf::from).collect::<Vec<_>>();
+    anyhow::ensure!(
+        paths.len() == 6 && paths.iter().all(|path| path.is_absolute()),
+        "newc-root-cw accepts six absolute paths: probe busybox runc cw provenance output"
+    );
+    codewire_vmm_guest_probe::write_canonical_guest_root_initramfs_with_cw(
+        &paths[0], &paths[1], &paths[2], &paths[3], &paths[4], &paths[5],
+    )?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

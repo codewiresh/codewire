@@ -634,6 +634,10 @@ run_transport() {
     run_rust_packages transport_pkg_
   fi
   rust_shard local-vmm || return 0
+  if selected transport_pkg_codewire_local_vmm || selected transport_pkg_codewire_vmm_guest_probe; then
+    python3 -B scripts/dev/test-cw-runtime-image.py
+    python3 -B scripts/dev/test-cli-native-managed.py --self-test
+  fi
   if selected transport_pkg_codewire_local_vmm; then
     crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
     python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py

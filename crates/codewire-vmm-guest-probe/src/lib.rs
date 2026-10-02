@@ -14,6 +14,7 @@ mod direct_share;
 /// Provider credentials are never stored here. The directory contains only
 /// guest-visible configuration and Codex's own workspace-local state.
 pub const CODEX_GUEST_HOME_PATH: &str = codewire_access::CODEX_NATIVE_HOME;
+pub mod cw_runtime;
 mod newc;
 mod progress;
 mod seed;
@@ -46,9 +47,11 @@ pub use network::{
     NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
     encoded_network_frame_len,
 };
+#[cfg(target_os = "linux")]
+pub use newc::write_canonical_guest_root_initramfs_with_cw;
 pub use newc::{
-    NewcError, canonical_guest_root_newc, canonical_newc, write_canonical_guest_root_initramfs,
-    write_canonical_initramfs,
+    NewcError, canonical_guest_root_newc, canonical_guest_root_newc_with_cw, canonical_newc,
+    write_canonical_guest_root_initramfs, write_canonical_initramfs,
 };
 pub use progress::{
     GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN,

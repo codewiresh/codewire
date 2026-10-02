@@ -4349,6 +4349,42 @@ impl LocalSupervisorService for SupervisorRpc {
             .map(Response::new)
             .map_err(Status::from)
     }
+
+    async fn get_managed_runtime(
+        &self,
+        request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::ManagedRuntime>, Status> {
+        let request = request.into_inner();
+        let expected = parse_optional_environment_id(&request.environment_id)
+            .map_err(Status::from)?
+            .ok_or_else(|| {
+                Status::invalid_argument("managed runtime requires an environment UUID")
+            })?;
+        let name = selected_name(request)?;
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
+        core.reconcile(&name).await.map_err(Status::from)?;
+        let environment = core.environment(&name).map_err(Status::from)?;
+        let generation = managed_runtime_artifact_generation(environment, expected)?.to_owned();
+        let engine = PrivateRoot::open(&core.config.engine_root())
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?;
+        let artifacts = RuntimeArtifactStore::create(&engine)
+            .map_err(|_| Status::failed_precondition("retained boot assets are unavailable"))?
+            .open_generation(&generation)
+            .await
+            .map_err(|_| Status::failed_precondition("retained boot assets are unavailable"))?;
+        let provenance_json = artifacts.read_cw_runtime_provenance().map_err(|_| {
+            Status::failed_precondition("VM boot assets do not contain an admitted cw image")
+        })?;
+        Ok(Response::new(v1::ManagedRuntime {
+            environment_id: expected.to_string(),
+            artifact_generation: generation,
+            provenance_json,
+        }))
+    }
 }
 
 fn parse_operation_id(value: &str) -> Result<Uuid, Status> {
@@ -4747,6 +4783,27 @@ fn require_expected_environment(
         return Err(Status::not_found("local environment was not found"));
     }
     Ok(())
+}
+
+fn managed_runtime_artifact_generation(
+    environment: &EnvironmentRecord,
+    expected: Uuid,
+) -> Result<&str, Status> {
+    require_expected_environment(environment, Some(expected))?;
+    let generation = environment
+        .active_artifact_generation
+        .as_deref()
+        .ok_or_else(|| Status::failed_precondition("environment has no retained boot assets"))?;
+    if environment.state != StoredEnvironmentState::Running
+        || environment.runner.as_ref().is_none_or(|runner| {
+            !runner_artifact_identity_matches(&runner.artifact_generation, generation)
+        })
+    {
+        return Err(Status::failed_precondition(
+            "managed runtime requires the running retained VM generation",
+        ));
+    }
+    Ok(generation)
 }
 
 fn canonicalize_host_ports_proto(
@@ -13284,6 +13341,56 @@ mod tests {
         ));
         assert!(!runner_artifact_identity_matches("invalid", "invalid"));
         assert!(!runner_artifact_identity_matches("", ""));
+    }
+
+    #[test]
+    fn managed_cw_runtime_binds_selected_uuid_and_active_runner_artifacts() {
+        let mut environment = project_environment();
+        let generation = environment.active_artifact_generation.clone().unwrap();
+        environment.state = StoredEnvironmentState::Running;
+        environment.runner = Some(RunnerRecord {
+            process: ProcessIdentity {
+                pid: 42,
+                boot_id: "synthetic".to_owned(),
+                start_time_ticks: 7,
+                executable: PathBuf::from("/proc/self/exe"),
+                executable_file: crate::linux::path::FileIdentity {
+                    device: 1,
+                    inode: 2,
+                    size: 3,
+                    uid: 1000,
+                    mode: 0o100500,
+                    links: 1,
+                },
+                executable_sha256: "f".repeat(64),
+            },
+            socket: SocketIdentity {
+                device: 1,
+                inode: 2,
+                uid: 1000,
+                mode: 0o140600,
+            },
+            artifact_generation: generation.clone(),
+            error_code: None,
+        });
+        assert_eq!(
+            managed_runtime_artifact_generation(&environment, environment.id).unwrap(),
+            generation
+        );
+        assert_eq!(
+            managed_runtime_artifact_generation(&environment, Uuid::new_v4())
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+        environment.runner.as_mut().unwrap().artifact_generation = "c".repeat(64);
+        assert!(managed_runtime_artifact_generation(&environment, environment.id).is_err());
+        environment.runner.as_mut().unwrap().artifact_generation = generation;
+        environment.state = StoredEnvironmentState::Stopped;
+        assert!(managed_runtime_artifact_generation(&environment, environment.id).is_err());
+        environment.state = StoredEnvironmentState::Running;
+        environment.active_artifact_generation = None;
+        assert!(managed_runtime_artifact_generation(&environment, environment.id).is_err());
     }
 
     #[test]

@@ -1,29 +1,13 @@
 //! Host-side native guest control. Only transient public Run calls cross the
 //! boundary; durable records and provider protocols remain inside the guest.
 use super::*;
-use sha2::{Digest as _, Sha256};
 mod verified_runtime;
 
-const ARTIFACT_ENV: &str = "CODEWIRE_NATIVE_MANAGED_AGENT_ARTIFACT";
-const RUNTIME_ROOT: &str = "/home/codewire/.local/state/codewire/managed-agent-runtime-v1";
+const RUNTIME_ROOT: &str = codewire_local_vmm::artifact::CW_RUNTIME_ROOT;
 const STATE_ROOT: &str = "/home/codewire/.local/state/codewire/managed-agents-v1";
-const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_INTERVAL: Duration = Duration::from_millis(500);
 const MANAGED_STOP_TIMEOUT: Duration = Duration::from_secs(30);
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GuestArtifact {
-    schema_version: u32,
-    protocol_version: u32,
-    target: String,
-    source_revision: String,
-    source_tree_sha256: String,
-    rustc: String,
-    path: PathBuf,
-    sha256: String,
-}
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +103,19 @@ impl Guest {
         })
     }
 
+    async fn admit_retained(
+        target: EnvironmentSessionTarget,
+        executable: String,
+    ) -> anyhow::Result<Self> {
+        let guest = Self::new(target, executable)?;
+        let runtime =
+            super::super::super::native::native_environment_managed_runtime(&guest.id).await?;
+        if guest.executable != runtime.executable() {
+            anyhow::bail!("retained managed session does not match its VM boot cw image");
+        }
+        Ok(guest)
+    }
+
     async fn control(&self, request: Value) -> anyhow::Result<Value> {
         let request = serde_json::to_vec(&request)?;
         let data = native_environment_data_client(&self.id).await?;
@@ -194,7 +191,7 @@ async fn resolve(
     let (environment_id, driver_id) =
         driver_identity(&view.command).context("session is not a managed agent conversation")?;
     let executable = retained_runtime(&view.command)?;
-    let guest = Guest::new(target, executable)?;
+    let guest = Guest::admit_retained(target, executable).await?;
     if environment_id != guest.id
         || !view
             .command
@@ -423,178 +420,19 @@ pub(super) async fn restart(
     Ok(platform_environment_session_view(restarted))
 }
 
-fn read_artifact() -> anyhow::Result<(GuestArtifact, Vec<u8>)> {
-    let path = match env::var_os(ARTIFACT_ENV) {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from(env::var_os("XDG_CACHE_HOME").unwrap_or_else(|| {
-            PathBuf::from(env::var_os("HOME").unwrap_or_default())
-                .join(".cache")
-                .into_os_string()
-        }))
-        .join("codewire/local-vmm-v1/managed-agent-cw.json"),
-    };
-    if !path.is_absolute() {
-        anyhow::bail!("{ARTIFACT_ENV} must name an absolute private artifact descriptor");
-    }
-    let artifact: GuestArtifact = read_record(&path).with_context(|| format!("matching managed guest cw artifact is not installed; build it with scripts/dev/build-native-managed-agent.py and select its descriptor through {ARTIFACT_ENV}"))?;
-    if artifact.schema_version != 1
-        || artifact.protocol_version != GUEST_AGENT_PROTOCOL_VERSION
-        || artifact.target != "x86_64-unknown-linux-musl"
-        || !hex_identity(&artifact.source_revision, 40)
-        || !hex_identity(&artifact.source_tree_sha256, 64)
-        || !hex_identity(&artifact.sha256, 64)
-        || !artifact.rustc.starts_with("rustc ")
-        || !artifact.path.is_absolute()
-    {
-        anyhow::bail!("managed guest cw artifact descriptor is invalid");
-    }
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(&artifact.path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o022 != 0
-        || metadata.len() == 0
-        || metadata.len() > MAX_ARTIFACT_BYTES
-    {
-        anyhow::bail!("managed guest cw artifact must be a bounded owner-controlled regular file");
-    }
-    let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut file)
-        .take(MAX_ARTIFACT_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_ARTIFACT_BYTES
-        || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256
-    {
-        anyhow::bail!("managed guest cw artifact digest changed");
-    }
-    validate_guest_elf(&bytes)?;
-    Ok((artifact, bytes))
-}
-
-fn validate_guest_elf(bytes: &[u8]) -> anyhow::Result<()> {
-    let invalid = || anyhow::anyhow!("managed guest cw must be a static x86_64 Linux ELF");
-    if bytes.len() < 64
-        || &bytes[..7] != b"\x7fELF\x02\x01\x01"
-        || !matches!(u16::from_le_bytes(bytes[16..18].try_into()?), 2 | 3)
-        || u16::from_le_bytes(bytes[18..20].try_into()?) != 62
-    {
-        return Err(invalid());
-    }
-    let offset = usize::try_from(u64::from_le_bytes(bytes[32..40].try_into()?))?;
-    let size = usize::from(u16::from_le_bytes(bytes[54..56].try_into()?));
-    let count = usize::from(u16::from_le_bytes(bytes[56..58].try_into()?));
-    if size != 56 || count == 0 || count > 128 || offset < 64 {
-        return Err(invalid());
-    }
-    let end = offset
-        .checked_add(size.checked_mul(count).ok_or_else(invalid)?)
-        .ok_or_else(invalid)?;
-    let headers = bytes.get(offset..end).ok_or_else(invalid)?;
-    for header in headers.chunks_exact(size) {
-        match u32::from_le_bytes(header[..4].try_into()?) {
-            3 => return Err(invalid()), // PT_INTERP requires a guest loader.
-            2 => {
-                // Static PIE may have PT_DYNAMIC, but no dependencies.
-                let start = usize::try_from(u64::from_le_bytes(header[8..16].try_into()?))?;
-                let length = usize::try_from(u64::from_le_bytes(header[32..40].try_into()?))?;
-                let end = start.checked_add(length).ok_or_else(invalid)?;
-                let dynamic = bytes.get(start..end).ok_or_else(invalid)?;
-                if length % 16 != 0 {
-                    return Err(invalid());
-                }
-                for entry in dynamic.chunks_exact(16) {
-                    let tag = i64::from_le_bytes(entry[..8].try_into()?);
-                    if tag == 0 {
-                        break;
-                    }
-                    if tag == 1 {
-                        return Err(invalid());
-                    } // DT_NEEDED
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-// Only admitted, nonsecret binary bytes are uploaded. Journals are created by
-// the guest helper with private permissions and atomic record operations.
-const INSTALL: &str = r#"set -eu
-umask 077
-stage=$1
-runtime=$2
-digest=$3
-base=/home/codewire/.local/state/codewire/managed-agent-runtime-v1
-case "$digest" in *[!0-9a-f]*|'') exit 64 ;; esac
-test "${#digest}" -eq 64
-test "$runtime" = "$base/$digest/cw"
-case "$stage" in "$base/$digest/.cw-"*) ;; *) exit 64 ;; esac
-stage_id=${stage##*/.cw-}
-case "$stage_id" in *[!0-9a-f-]*|'') exit 64 ;; esac
-test "${#stage_id}" -eq 36
-trap 'rm -f -- "$stage"' EXIT
-for path in /home/codewire /home/codewire/.local /home/codewire/.local/state /home/codewire/.local/state/codewire "$base" "$base/$digest"; do
-  test ! -L "$path"
-  test -d "$path"
-done
-test "$(stat -c %u "$base")" = "$(id -u)"
-test "$(stat -c %u "$base/$digest")" = "$(id -u)"
-chmod 0700 "$base" "$base/$digest"
-if test -e "$runtime" || test -L "$runtime"; then
-  test ! -L "$runtime"
-  test -f "$runtime"
-  test "$(stat -c %u:%a "$runtime")" = "$(id -u):500"
-  printf '%s  %s\n' "$digest" "$runtime" | sha256sum --check --strict - >/dev/null
-  test ! -L "$stage"
-  rm -- "$stage"
-else
-  test ! -L "$stage"
-  test -f "$stage"
-  printf '%s  %s\n' "$digest" "$stage" | sha256sum --check --strict - >/dev/null
-  chmod 0500 "$stage"
-  mv -T -- "$stage" "$runtime"
-fi
-"#;
-
 async fn provision(target: EnvironmentSessionTarget) -> anyhow::Result<Guest> {
-    let (artifact, bytes) = read_artifact()?;
-    let guest = Guest::new(target, format!("{RUNTIME_ROOT}/{}/cw", artifact.sha256))?;
-    let data = native_environment_data_client(&guest.id).await?;
-    let stage = format!(
-        "{RUNTIME_ROOT}/{}/.cw-{}",
-        artifact.sha256,
-        uuid::Uuid::new_v4()
-    );
-    data.upload_file(&stage, &bytes).await?;
-    let installed = data
-        .exec_with_stdin(
-            vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                INSTALL.into(),
-                "cw-managed-install".into(),
-                stage,
-                guest.executable.clone(),
-                artifact.sha256,
-            ],
-            "/workspace",
-            Vec::<(String, String)>::new(),
-            Vec::new(),
-            HELPER_TIMEOUT,
-        )
-        .await?;
-    if installed.exit_code != 0 || !installed.stderr.is_empty() {
-        anyhow::bail!("verified managed guest runtime installation failed");
-    }
+    let EnvironmentSessionTarget::NativeLocal { environment_id, .. } = &target else {
+        anyhow::bail!("managed native control requires a Linux VM");
+    };
+    let runtime = super::super::super::native::native_environment_managed_runtime(environment_id)
+        .await
+        .context("VM requires an image-derived cw asset supplied in its boot bundle")?;
+    let guest = Guest::new(target, runtime.executable())?;
     let info = guest.control(json!({"op":"protocol_info"})).await?;
     if info.get("protocol_version").and_then(Value::as_u64)
         != Some(u64::from(GUEST_AGENT_PROTOCOL_VERSION))
     {
-        anyhow::bail!("installed managed guest runtime has an incompatible control protocol");
+        anyhow::bail!("boot cw image has an incompatible control protocol");
     }
     Ok(guest)
 }
@@ -985,7 +823,7 @@ pub(super) async fn wait(
     canonical_uuid(&location.driver_id)?;
     let target =
         resolve_environment_session_target(globals, Some(&location.environment_id)).await?;
-    let guest = Guest::new(target, location.executable)?;
+    let guest = Guest::admit_retained(target, location.executable).await?;
     if guest.id != location.environment_id {
         anyhow::bail!("the managed message environment was replaced");
     }
@@ -1036,7 +874,7 @@ pub(super) async fn recover_and_wait(
             continue;
         };
         let executable = retained_runtime(&view.command)?;
-        let guest = Guest::new(target.clone(), executable.clone())?;
+        let guest = Guest::admit_retained(target.clone(), executable.clone()).await?;
         if environment_id != guest.id
             || !view
                 .command
@@ -1207,21 +1045,21 @@ mod tests {
         elf[54..56].copy_from_slice(&56_u16.to_le_bytes());
         elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
         elf[64..68].copy_from_slice(&1_u32.to_le_bytes());
-        assert!(validate_guest_elf(&elf).is_ok());
+        assert!(codewire_local_vmm::artifact::validate_static_cw(&elf).is_ok());
         let mut other = elf.clone();
         other[18..20].copy_from_slice(&183_u16.to_le_bytes());
-        assert!(validate_guest_elf(&other).is_err());
+        assert!(codewire_local_vmm::artifact::validate_static_cw(&other).is_err());
         let mut loader = elf.clone();
         loader[64..68].copy_from_slice(&3_u32.to_le_bytes());
-        assert!(validate_guest_elf(&loader).is_err());
+        assert!(codewire_local_vmm::artifact::validate_static_cw(&loader).is_err());
         let mut needed = elf.clone();
         needed[64..68].copy_from_slice(&2_u32.to_le_bytes());
         needed[72..80].copy_from_slice(&120_u64.to_le_bytes());
         needed[96..104].copy_from_slice(&16_u64.to_le_bytes());
         needed[120..128].copy_from_slice(&1_i64.to_le_bytes());
-        assert!(validate_guest_elf(&needed).is_err());
+        assert!(codewire_local_vmm::artifact::validate_static_cw(&needed).is_err());
         elf[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert!(validate_guest_elf(&elf).is_err());
-        assert!(validate_guest_elf(b"#!/bin/sh\n").is_err());
+        assert!(codewire_local_vmm::artifact::validate_static_cw(&elf).is_err());
+        assert!(codewire_local_vmm::artifact::validate_static_cw(b"#!/bin/sh\n").is_err());
     }
 }

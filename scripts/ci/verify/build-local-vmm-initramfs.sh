@@ -35,6 +35,7 @@ usage() {
     '    --busybox-sha256 SHA256 --runc ABSOLUTE_PATH' \
     '    --runc-sha256 SHA256 [--target TARGET]' \
     '    [--output ABSOLUTE_PATH] [--workload-network-fixture]' \
+    '    [--cw-image ABSOLUTE_OCI_ARCHIVE --cw-image-index-sha256 SHA256]' \
     '' \
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
     'It does not prove the probe is static or came from the sealed Rust toolchain.' \
@@ -49,6 +50,8 @@ usage() {
     'lowercase SHA-256 values must be supplied; runc must match the built-in' \
     'reviewed release digest. Arm64 BusyBox must also match its built-in' \
     'reviewed Alpine package payload digest.' \
+    '--cw-image admits the pinned static Linux/amd64 cw image and seals its' \
+    'payload plus image provenance into both independent boot archives.' \
     '--workload-network-fixture is allowed only with --verify-root and adds the' \
     'fixed opt-in developer client to both independent builds. This is not a' \
     'default production guest or CLI parity claim.' \
@@ -238,6 +241,15 @@ verify_reproducible() {
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  if [[ -n "$cw_image" ]]; then
+    [[ "$TARGET" == "$DEFAULT_TARGET" && -n "$root_busybox" ]] ||
+      die 'cw image requires the Linux/amd64 product guest root'
+    cw_image="$(absolute_existing_file 'cw image' "$cw_image")"
+    CW_RUNTIME_INPUT_DIR="$VERIFY_WORK/cw-image"
+    python3 "$ROOT/scripts/dev/cw-runtime-image.py" unpack \
+      --image "$cw_image" --index-sha256 "$cw_image_index_sha256" \
+      --output "$CW_RUNTIME_INPUT_DIR"
+  fi
   target_a="$VERIFY_WORK/target-a"
   target_b="$VERIFY_WORK/target-b"
   archive_a="$VERIFY_WORK/initramfs-a.cpio"
@@ -270,8 +282,8 @@ verify_reproducible() {
   fi
 
   if [[ -n "$root_busybox" ]]; then
-    "$packer_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$archive_a"
-    "$packer_b" newc-root "$binary_b" "$root_busybox" "$root_runc" "$archive_b"
+    pack_product_root "$packer_a" "$binary_a" "$root_busybox" "$root_runc" "$archive_a"
+    pack_product_root "$packer_b" "$binary_b" "$root_busybox" "$root_runc" "$archive_b"
   else
     "$packer_a" newc "$binary_a" "$archive_a"
     "$packer_b" newc "$binary_b" "$archive_b"
@@ -284,7 +296,7 @@ verify_reproducible() {
     # rename, and parent-directory fsync; the comparison proves the published
     # bytes are archive A rather than a third unverified build.
     if [[ -n "$root_busybox" ]]; then
-      "$packer_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$requested_output"
+      pack_product_root "$packer_a" "$binary_a" "$root_busybox" "$root_runc" "$requested_output"
     else
       "$packer_a" newc "$binary_a" "$requested_output"
     fi
@@ -316,7 +328,18 @@ verify_reproducible() {
   fi
 }
 
+pack_product_root() {
+  local packer="$1" probe="$2" root_busybox="$3" root_runc="$4" archive="$5"
+  if [[ -n "$CW_RUNTIME_INPUT_DIR" ]]; then
+    "$packer" newc-root-cw "$probe" "$root_busybox" "$root_runc" \
+      "$CW_RUNTIME_INPUT_DIR/cw" "$CW_RUNTIME_INPUT_DIR/provenance.json" "$archive"
+  else
+    "$packer" newc-root "$probe" "$root_busybox" "$root_runc" "$archive"
+  fi
+}
+
 VERIFY_WORK=''
+CW_RUNTIME_INPUT_DIR=''
 RUST_TOOLS_DIR=''
 cleanup() {
   local status=$?
@@ -333,6 +356,8 @@ busybox=''
 busybox_sha256=''
 runc=''
 runc_sha256=''
+cw_image=''
+cw_image_index_sha256=''
 output=''
 TARGET="$DEFAULT_TARGET"
 target_set=0
@@ -386,6 +411,16 @@ while [[ $# -gt 0 ]]; do
       runc_sha256="$2"
       shift 2
       ;;
+    --cw-image)
+      [[ $# -ge 2 && -z "$cw_image" ]] || { usage; exit 2; }
+      cw_image="$2"
+      shift 2
+      ;;
+    --cw-image-index-sha256)
+      [[ $# -ge 2 && -z "$cw_image_index_sha256" ]] || { usage; exit 2; }
+      cw_image_index_sha256="$2"
+      shift 2
+      ;;
     --output)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       [[ -z "$output" ]] || { usage; exit 2; }
@@ -412,6 +447,9 @@ done
 if [[ "$workload_network_fixture" -eq 1 && "$mode" != verify-root ]]; then
   usage
   exit 2
+fi
+if [[ -n "$cw_image" || -n "$cw_image_index_sha256" ]]; then
+  [[ "$mode" == verify-root && -n "$cw_image" && "$cw_image_index_sha256" =~ ^[0-9a-f]{64}$ ]] || { usage; exit 2; }
 fi
 
 case "$mode" in

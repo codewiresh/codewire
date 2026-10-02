@@ -177,26 +177,42 @@ disposable worktree. The base defaults are
 `CODEWIRE_NATIVE_ARTIFACT_LOCK` select absolute alternatives that share one
 parent directory.
 
-Build the managed runtime directly into a fresh, versioned durable directory:
+Build the static runtime, then its minimal OCI image, in fresh owned directories:
 
 ```sh
-codewire_managed_runtime="${XDG_CACHE_HOME:-$HOME/.cache}/codewire/local-vmm-v1/managed-$(git rev-parse HEAD)"
 scripts/dev/build-native-managed-agent.py \
   --rust-tools /absolute/path/to/rust/toolchain/bin \
   --protoc /absolute/path/to/protoc \
-  --output "$codewire_managed_runtime"
-export CODEWIRE_NATIVE_MANAGED_AGENT_ARTIFACT="$codewire_managed_runtime/managed-agent-cw.json"
+  --output /absolute/fresh/owned/cw-build
+python3 scripts/dev/cw-runtime-image.py build \
+  --artifact /absolute/fresh/owned/cw-build/managed-agent-cw.json \
+  --output /absolute/fresh/owned/cw-image
 ```
 
-Retain this selection for subsequent `cw` invocations. Its descriptor contains
-an absolute binary path and binds the actual source, protocol and digest. If
-moving an already verified runtime, update only that path and verify the copied
-binary still matches the descriptor digest. A descriptor pointing into a
-removed worktree cannot launch another managed conversation. Stop task-owned
-daemons and retire task-only environments before deleting their executable
-paths. Retained host managed sessions still need the original `cw` path after
-daemon shutdown. Preserve that executable, the state and the runtime inputs of
-any environment you keep.
+The image contains only static Linux/amd64 `cw` and public build provenance.
+It is an OCI image with one uncompressed layer; this local producer neither
+executes the image nor publishes it. Its external `image.json` receipt pins
+the index, manifest and payload. Pass the image and index pin to
+`scripts/ci/verify/build-local-vmm-initramfs.sh --verify-root` using
+`--cw-image /absolute/fresh/owned/cw-image/cw.oci.tar` and
+`--cw-image-index-sha256 <index_sha256 from image.json>`, alongside the required
+BusyBox/runc inputs. Include the resulting initramfs's exact digest and size
+in the matching base artifact lock before installing those durable inputs.
+
+Every VM boot exposes that image payload at
+`/run/codewire-runtime/cw/<cw_sha256>/cw`, on a read-only root-owned system
+mount outside HOME. Managed launches do not upload or install a helper. The
+host selects the expected image from the VM UUID's retained boot generation;
+each invocation verifies and seals the selected bytes before execution. The
+workspace still needs the checked-in `/usr/bin/python3` launcher prerequisite.
+Conversation journals remain private to the workload user under HOME.
+
+A changed global image or artifact lock does not change an existing VM's
+retained runtime on restart. Missing retained bytes refuse recovery without
+replaying a task. Keep the durable base inputs outside disposable worktrees.
+Stop task-owned daemons and retire task-only environments before deleting their
+executable paths. Retained host managed sessions still need the original `cw`
+path after daemon shutdown; preserve that executable and their state.
 
 ## Verification
 
@@ -214,31 +230,18 @@ Neither replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.
 
 The managed VM journey runs the actual pinned guest agents through the
-synthetic protected broker. Prepare the guest control binary with the actual
-checked-in Rust toolchain:
-
-```sh
-scripts/dev/build-native-managed-agent.py \
-  --rust-tools /absolute/path/to/rust/toolchain/bin \
-  --protoc /absolute/path/to/protoc \
-  --output /absolute/fresh/owned/guest-cw-artifacts
-```
-
-Select its private `managed-agent-cw.json` descriptor with
-`CODEWIRE_NATIVE_MANAGED_AGENT_ARTIFACT`. The host verifies the binary digest,
-static x86_64 format and control protocol before launching it in the VM.
-The installed runtime is private and addressed by its digest; message records
-bind permanent environment, driver and session IDs.
-
-Add `--managed-agent-sessions --managed-agent-cw-artifact /absolute/descriptor`
-to the existing `smoke-native-local-environment.sh --managed-credential-broker`
-command. Its verified workspace OCI receipt and all existing broker assertions
-remain required. The additional journey checks native acknowledgement, two
-turns, resume, guest tool execution, held-turn controls, parent continuation,
-history and cleanup. Custody cases exercise detached and TERM-resistant tools,
-a cancelled stop caller, driver death, safe generation admission, missing/stale
-receipt refusal and an unrelated sentinel. It proves the transport with synthetic provider responses;
-live provider enrollment has separate acceptance under #1902.
+synthetic protected broker. Supply the image-derived initramfs described above,
+then add `--managed-agent-sessions --managed-agent-cw-image-receipt
+/absolute/cw-image/image.json` to the existing
+`smoke-native-local-environment.sh --managed-credential-broker` command. Its
+verified workspace OCI receipt and existing broker assertions remain required.
+Before the first conversation, the journey observes root ownership, read-only
+mount flags, image identity and payload digest. It then checks native
+acknowledgement, two turns, resume, guest tool execution, held-turn controls,
+parent continuation, history and cleanup. Custody cases exercise detached and
+TERM-resistant tools, a cancelled stop caller, driver death, safe generation
+admission, missing/stale receipt refusal and an unrelated sentinel. Provider
+responses are synthetic; live provider enrollment remains under #1902.
 
 Stalled provider initialization has a separate bounded isolated check:
 

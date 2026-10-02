@@ -49,7 +49,7 @@ def source_identity():
     names = subprocess.check_output(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
          "--", "*.rs", "*.toml", "*.lock", "*.proto",
-         "scripts/dev/build-native-managed-agent.py"], cwd=ROOT).split(b"\0")
+         "scripts/dev/build-native-managed-agent.py", "scripts/dev/cw-runtime-image.py"], cwd=ROOT).split(b"\0")
     digest = hashlib.sha256()
     for raw in sorted(set(name for name in names if name)):
         path = ROOT / os.fsdecode(raw)

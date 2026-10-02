@@ -1058,6 +1058,23 @@ pub(crate) async fn native_environment_data_client(
     .map_err(anyhow::Error::from)
 }
 
+pub(crate) async fn native_environment_managed_runtime(
+    environment_id: &str,
+) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeProvenance> {
+    let mut supervisor = native_client().await?;
+    let environment =
+        get_native_environment_with_required_authority(&mut supervisor, environment_id).await?;
+    let runtime = supervisor
+        .managed_runtime(&environment.name, &environment.id)
+        .await
+        .map_err(native_status)?;
+    if runtime.environment_id != environment_id || runtime.artifact_generation.len() != 64 {
+        anyhow::bail!("managed runtime does not match the selected environment");
+    }
+    codewire_local_vmm::artifact::CwRuntimeProvenance::decode(&runtime.provenance_json)
+        .map_err(anyhow::Error::msg)
+}
+
 pub(crate) async fn native_environment_diagnostic_client(
     name: &str,
 ) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicEnvironmentClient> {

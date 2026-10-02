@@ -9,7 +9,7 @@
 //! The guest driver must use `/proc/self/exe` for subsequent self-spawns: a
 //! sealed executable has no retained pathname that `current_exe()` can reopen.
 
-const RUNTIME_ROOT: &str = "/home/codewire/.local/state/codewire/managed-agent-runtime-v1";
+const RUNTIME_ROOT: &str = "/run/codewire-runtime/cw";
 const MAX_ARGUMENTS: usize = 64;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 
@@ -55,7 +55,7 @@ import os
 import stat
 import sys
 
-RUNTIME_ROOT = "/home/codewire/.local/state/codewire/managed-agent-runtime-v1"
+RUNTIME_ROOT = "/run/codewire-runtime/cw"
 MAX_BYTES = 256 * 1024 * 1024
 MAX_ARGUMENTS = 64
 MAX_ARGUMENT_BYTES = 64 * 1024
@@ -67,19 +67,27 @@ def require(condition, reason):
     if not condition:
         raise Rejected(reason)
 
+SYSTEM_UID = 0
+SYSTEM_GID = 0
+
+def read_only(fd):
+    return os.fstatvfs(fd).f_flag & os.ST_RDONLY
+
 def private_directory(fd):
     metadata = os.fstat(fd)
     require(stat.S_ISDIR(metadata.st_mode)
-            and metadata.st_uid == os.geteuid()
-            and stat.S_IMODE(metadata.st_mode) == 0o700, "directory")
+            and metadata.st_uid == SYSTEM_UID and metadata.st_gid == SYSTEM_GID
+            and stat.S_IMODE(metadata.st_mode) == 0o555, "directory")
+    require(read_only(fd), "readonly")
 
 def selected_file(fd):
     metadata = os.fstat(fd)
     require(stat.S_ISREG(metadata.st_mode)
-            and metadata.st_uid == os.geteuid()
-            and stat.S_IMODE(metadata.st_mode) == 0o500
+            and metadata.st_uid == SYSTEM_UID and metadata.st_gid == SYSTEM_GID
+            and stat.S_IMODE(metadata.st_mode) == 0o555
             and metadata.st_nlink == 1
             and 4 <= metadata.st_size <= MAX_BYTES, "file")
+    require(read_only(fd), "readonly")
     return metadata
 
 def executable_copy():
@@ -116,7 +124,7 @@ def main():
             child = os.open(component, directory_flags, dir_fd=directory)
             os.close(directory)
             directory = child
-            # Global ancestors need not be private (for example /home), but
+            # Global ancestors need not be read-only (for example /run), but
             # every component is opened without following a symlink.
             if index >= len(components) - 3:
                 private_directory(directory)
@@ -280,7 +288,9 @@ int main(int argc, char **argv) {
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
             let executable = directory.join("cw");
             fs::write(&executable, &bytes).unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o500)).unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
             Self {
                 temporary,
                 root,
@@ -303,6 +313,22 @@ int main(int argc, char **argv) {
                     serde_json::to_string(root.to_str().unwrap()).unwrap()
                 ),
             );
+            // Only this unit fixture substitutes the two admission properties
+            // unavailable without root/mount privileges. Actual VM acceptance
+            // exercises production UID/GID 0 and real ST_RDONLY together.
+            argv[4] = argv[4]
+                .replace(
+                    "SYSTEM_UID = 0",
+                    &format!("SYSTEM_UID = {}", unsafe { libc::geteuid() }),
+                )
+                .replace(
+                    "SYSTEM_GID = 0",
+                    &format!("SYSTEM_GID = {}", unsafe { libc::getegid() }),
+                )
+                .replace(
+                    "return os.fstatvfs(fd).f_flag & os.ST_RDONLY",
+                    "return True",
+                );
             argv[5] = root
                 .join(&self.digest)
                 .join("cw")
@@ -326,8 +352,33 @@ int main(int argc, char **argv) {
         fn replace_bytes(&self, bytes: &[u8]) {
             fs::set_permissions(&self.executable, fs::Permissions::from_mode(0o700)).unwrap();
             fs::write(&self.executable, bytes).unwrap();
-            fs::set_permissions(&self.executable, fs::Permissions::from_mode(0o500)).unwrap();
+            fs::set_permissions(&self.executable, fs::Permissions::from_mode(0o555)).unwrap();
         }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700));
+            let _ = fs::set_permissions(
+                self.executable.parent().unwrap(),
+                fs::Permissions::from_mode(0o700),
+            );
+        }
+    }
+
+    #[test]
+    fn system_owner_and_real_writable_mount_are_rejected() {
+        let fixture = Fixture::new();
+        let mut argv = fixture.argv(&fixture.root);
+        argv[4] = argv[4].replace(
+            "return True",
+            "return os.fstatvfs(fd).f_flag & os.ST_RDONLY",
+        );
+        rejected(run(&argv, b""));
+        argv = fixture.argv(&fixture.root);
+        let declaration = format!("SYSTEM_UID = {}", unsafe { libc::geteuid() });
+        argv[4] = argv[4].replace(&declaration, "SYSTEM_UID = 4294967294");
+        rejected(run(&argv, b""));
     }
 
     fn run(argv: &[String], input: &[u8]) -> Output {
@@ -413,12 +464,22 @@ int main(int argc, char **argv) {
     #[test]
     fn pathname_replacement_before_copy_is_rejected_without_execution() {
         let fixture = Fixture::new();
+        fs::set_permissions(
+            fixture.executable.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         let replaced = fixture.temporary.path().join("replaced");
         fs::rename(&fixture.executable, replaced).unwrap();
         let mut changed = fixture.bytes.clone();
         changed.push(0);
         fs::write(&fixture.executable, changed).unwrap();
-        fs::set_permissions(&fixture.executable, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&fixture.executable, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(
+            fixture.executable.parent().unwrap(),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
         rejected(fixture.run("", None, b""));
     }
 
@@ -433,7 +494,7 @@ int main(int argc, char **argv) {
                 .unwrap()
                 .set_len(size)
                 .unwrap();
-            fs::set_permissions(&fixture.executable, fs::Permissions::from_mode(0o500)).unwrap();
+            fs::set_permissions(&fixture.executable, fs::Permissions::from_mode(0o555)).unwrap();
             rejected(fixture.run("", None, b""));
         }
     }
@@ -442,19 +503,47 @@ int main(int argc, char **argv) {
     fn symlink_file_directory_and_ancestor_are_rejected() {
         let fixture = Fixture::new();
         let held = fixture.temporary.path().join("held");
+        fs::set_permissions(
+            fixture.executable.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         fs::rename(&fixture.executable, &held).unwrap();
         symlink(&held, &fixture.executable).unwrap();
+        fs::set_permissions(
+            fixture.executable.parent().unwrap(),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
         rejected(fixture.run("", None, b""));
+        fs::set_permissions(
+            fixture.executable.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         fs::remove_file(&fixture.executable).unwrap();
         fs::rename(&held, &fixture.executable).unwrap();
+        fs::set_permissions(
+            fixture.executable.parent().unwrap(),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
 
         let directory = fixture.executable.parent().unwrap();
         let held_directory = fixture.temporary.path().join("held-directory");
+        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
         fs::rename(directory, &held_directory).unwrap();
+        fs::set_permissions(&held_directory, fs::Permissions::from_mode(0o555)).unwrap();
         symlink(&held_directory, directory).unwrap();
+        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o555)).unwrap();
         rejected(fixture.run("", None, b""));
+        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700)).unwrap();
         fs::remove_file(directory).unwrap();
+        fs::set_permissions(&held_directory, fs::Permissions::from_mode(0o700)).unwrap();
         fs::rename(&held_directory, directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o555)).unwrap();
 
         let ancestor = fixture.temporary.path().join("ancestor");
         symlink(&fixture.root, &ancestor).unwrap();
@@ -462,18 +551,18 @@ int main(int argc, char **argv) {
     }
 
     #[test]
-    fn nonprivate_modes_and_hardlink_alias_are_rejected() {
+    fn writable_system_modes_and_hardlink_alias_are_rejected() {
         let fixture = Fixture::new();
         for directory in [&fixture.root, fixture.executable.parent().unwrap()] {
             fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
             rejected(fixture.run("", None, b""));
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).unwrap();
         }
-        for mode in [0o700, 0o555, 0o400, 0o4500] {
+        for mode in [0o700, 0o500, 0o400, 0o4555] {
             fs::set_permissions(&fixture.executable, fs::Permissions::from_mode(mode)).unwrap();
             rejected(fixture.run("", None, b""));
         }
-        fs::set_permissions(&fixture.executable, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&fixture.executable, fs::Permissions::from_mode(0o555)).unwrap();
         let alias = fixture.temporary.path().join("alias");
         fs::hard_link(&fixture.executable, alias).unwrap();
         rejected(fixture.run("", None, b""));
@@ -504,7 +593,7 @@ os.supports_fd.add(execute_verified)
     fn pathname_replacement_after_copy_executes_the_selected_sealed_bytes() {
         let fixture = Fixture::new();
         let hook = format!(
-            "{EXEC_HOOK}\ndef mutate_retained(path):\n    os.rename(path, path + '.old')\n    with open(path, 'wb') as replacement:\n        replacement.write(b'not the selected executable')\n    os.chmod(path, 0o500)\n"
+            "{EXEC_HOOK}\ndef mutate_retained(path):\n    os.chmod(os.path.dirname(path), 0o700)\n    os.rename(path, path + '.old')\n    with open(path, 'wb') as replacement:\n        replacement.write(b'not the selected executable')\n    os.chmod(path, 0o555)\n    os.chmod(os.path.dirname(path), 0o555)\n"
         );
         let output = fixture.run(&hook, None, b"after replacement\n");
         assert!(
@@ -521,7 +610,7 @@ os.supports_fd.add(execute_verified)
     fn in_place_mutation_after_copy_executes_the_selected_sealed_bytes() {
         let fixture = Fixture::new();
         let hook = format!(
-            "{EXEC_HOOK}\ndef mutate_retained(path):\n    os.chmod(path, 0o700)\n    with open(path, 'r+b') as source:\n        source.write(b'changed in place')\n    os.chmod(path, 0o500)\n"
+            "{EXEC_HOOK}\ndef mutate_retained(path):\n    os.chmod(path, 0o700)\n    with open(path, 'r+b') as source:\n        source.write(b'changed in place')\n    os.chmod(path, 0o555)\n    os.chmod(os.path.dirname(path), 0o555)\n"
         );
         let output = fixture.run(&hook, None, b"after mutation\n");
         assert!(

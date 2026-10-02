@@ -69,7 +69,7 @@ ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 MANAGED_CREDENTIAL_BROKER=0
 MANAGED_AGENT_SESSIONS=0
-MANAGED_AGENT_CW_ARTIFACT=''
+MANAGED_AGENT_CW_IMAGE_RECEIPT=''
 CREDENTIAL_ROOT=''
 CREDENTIAL_PROFILE_NAME='native-broker'
 CREDENTIAL_ID=''
@@ -124,7 +124,7 @@ usage: smoke-native-local-environment.sh \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
   [--managed-credential-broker] \
-  [--managed-agent-sessions --managed-agent-cw-artifact ABSOLUTE_DESCRIPTOR] \
+  [--managed-agent-sessions --managed-agent-cw-image-receipt ABSOLUTE_IMAGE_RECEIPT] \
   [--workspace-image-import-bin ABSOLUTE_PATH] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
@@ -167,7 +167,7 @@ through confirmed source updates; and proves installed-root, workspace, and
 skill preservation.
 Application values are intentionally child-visible, unlike provider credentials.
 
-With --managed-agent-sessions and a source-bound static guest cw descriptor,
+With --managed-agent-sessions and a source-bound static boot cw image receipt,
 the same protected-broker environment additionally runs actual pinned guest
 Codex and Claude managed conversations before the existing revocation proof.
 It requires native acknowledgement, follow-up/resume, held-turn controls,
@@ -271,9 +271,9 @@ while [[ $# -gt 0 ]]; do
       MANAGED_AGENT_SESSIONS=1
       shift
       ;;
-    --managed-agent-cw-artifact)
-      [[ $# -ge 2 && -z "$MANAGED_AGENT_CW_ARTIFACT" ]] || { usage; exit 2; }
-      MANAGED_AGENT_CW_ARTIFACT="$2"
+    --managed-agent-cw-image-receipt)
+      [[ $# -ge 2 && -z "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]] || { usage; exit 2; }
+      MANAGED_AGENT_CW_IMAGE_RECEIPT="$2"
       shift 2
       ;;
     -h|--help)
@@ -307,12 +307,12 @@ elif [[ -n "$WORKSPACE_IMAGE_IMPORT_BIN" ]]; then
   die 'workspace image importer is only available in managed synthetic mode'
 fi
 if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
-  [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && -n "$MANAGED_AGENT_CW_ARTIFACT" ]] ||
-    die 'managed agent sessions require protected-broker mode and a guest cw descriptor'
-  require_absolute_canonical_file 'managed guest cw descriptor' "$MANAGED_AGENT_CW_ARTIFACT"
+  [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]] ||
+    die 'managed agent sessions require protected-broker mode and a boot cw image receipt'
+  require_absolute_canonical_file 'managed boot cw image receipt' "$MANAGED_AGENT_CW_IMAGE_RECEIPT"
   require_absolute_canonical_file 'managed native journey' "$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py"
-elif [[ -n "$MANAGED_AGENT_CW_ARTIFACT" ]]; then
-  die 'guest cw descriptor requires --managed-agent-sessions'
+elif [[ -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]]; then
+  die 'boot cw image receipt requires --managed-agent-sessions'
 fi
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
 [[ "$(uname -m)" == x86_64 ]] || die 'the current native artifact set requires x86_64'
@@ -1302,7 +1302,6 @@ run_native_managed_agent_smoke() {
     CODEWIRE_NATIVE_STATE_ROOT="$STATE_ROOT" \
     CODEWIRE_NATIVE_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
     CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
-    CODEWIRE_NATIVE_MANAGED_AGENT_ARTIFACT="$MANAGED_AGENT_CW_ARTIFACT" \
     CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT" \
     XDG_RUNTIME_DIR="$KEYRING_RUNTIME" DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
     CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
@@ -1313,6 +1312,7 @@ run_native_managed_agent_smoke() {
     /usr/bin/timeout --foreground --signal=TERM --kill-after=10s 1220s \
     python3 "$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py" \
       --cw "$CW_BIN" --environment "$ENVIRONMENT_ID" \
+      --cw-image-receipt "$MANAGED_AGENT_CW_IMAGE_RECEIPT" \
       --codex-model codewire-synthetic --claude-model claude-sonnet-4-6 \
       >"$stdout_file" 2>"$stderr_file"; then
     cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"

@@ -52,6 +52,7 @@ LONG_TOKEN = re.compile(r"[A-Za-z0-9_+=.\-]{24,}")
 
 COMMON_REQUIRED = (
     "preflight/environment-running/preexisting-sessions-recorded",
+    "preflight/image-derived-cw/root-owned/read-only/digest-pinned/before-first-agent",
     "sentinel/durable-terminal-running",
     "refusal/unmanaged-parent/missing-parent/unqualified-agent/no-session",
     "codex-lead/two-turns/native-ack/same-conversation",
@@ -336,6 +337,46 @@ print(json.dumps({"peer":value, "current":current, "receipt_sha256":hashlib.sha2
 '''
 
 
+BOOT_ASSET_PROBE = r'''import hashlib, json, os, stat, sys
+expected_index, expected_manifest, expected_cw = sys.argv[1:]
+flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+directory_flags = flags | os.O_DIRECTORY
+root = os.open("/", directory_flags)
+for component in ("run", "codewire-runtime", "cw"):
+    child = os.open(component, directory_flags, dir_fd=root)
+    os.close(root)
+    root = child
+def directory(fd):
+    metadata = os.fstat(fd)
+    assert stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == metadata.st_gid == 0
+    assert stat.S_IMODE(metadata.st_mode) == 0o555
+    assert os.fstatvfs(fd).f_flag & os.ST_RDONLY
+def read(directory_fd, name, mode, bound):
+    fd = os.open(name, flags | os.O_NONBLOCK, dir_fd=directory_fd)
+    try:
+        metadata = os.fstat(fd)
+        assert stat.S_ISREG(metadata.st_mode) and metadata.st_uid == metadata.st_gid == 0
+        assert stat.S_IMODE(metadata.st_mode) == mode and metadata.st_nlink == 1
+        assert 0 < metadata.st_size <= bound and os.fstatvfs(fd).f_flag & os.ST_RDONLY
+        with os.fdopen(fd, "rb", closefd=False) as source:
+            data = source.read(bound + 1)
+        assert len(data) == metadata.st_size
+        return data
+    finally:
+        os.close(fd)
+directory(root)
+provenance = json.loads(read(root, "provenance.json", 0o444, 16384))
+assert provenance["image_index_sha256"] == expected_index
+assert provenance["image_manifest"]["sha256"] == expected_manifest
+assert provenance["payload"]["sha256"] == expected_cw
+selected = os.open(expected_cw, directory_flags, dir_fd=root)
+directory(selected)
+cw = read(selected, "cw", 0o555, 256 * 1024 * 1024)
+assert len(cw) == provenance["payload"]["size"] and hashlib.sha256(cw).hexdigest() == expected_cw
+print(json.dumps({"cw_sha256": expected_cw, "image_manifest_sha256": expected_manifest, "read_only": True}))
+'''
+
+
 class Failure(Exception):
     pass
 
@@ -439,13 +480,14 @@ def require_clean_custody(proof, expected, original_family):
 
 
 class Journey:
-    def __init__(self, cw, environment, synthetic, codex_model, claude_model):
+    def __init__(self, cw, environment, synthetic, codex_model, claude_model, image_receipt=None):
         self.cw = cw
         self.environment = environment
         self.synthetic = synthetic
         self.codex_model = codex_model
         self.claude_model = claude_model
         self.env = dict(os.environ)
+        self.image_receipt = image_receipt
         self.prefix = "cwnm-" + secrets.token_hex(4)
         self.started = time.monotonic()
         self.deadline = self.started + OVERALL_SECONDS - CLEANUP_RESERVE_SECONDS
@@ -809,6 +851,17 @@ class Journey:
         require(not any(view.get("name", "").startswith(self.prefix) for view in views.values()),
                 "the random session prefix already exists")
         self.check("preflight/environment-running/preexisting-sessions-recorded")
+        require(isinstance(self.image_receipt, dict), "VM journey requires the externally pinned cw image receipt")
+        pins = [self.image_receipt.get(field) for field in ("index_sha256", "manifest_sha256", "cw_sha256")]
+        require(all(isinstance(pin, str) and re.fullmatch("[0-9a-f]{64}", pin) for pin in pins), "invalid cw image receipt")
+        sid = self.launch_command("boot-cw", ["/usr/bin/python3", "-I", "-B", "-c", BOOT_ASSET_PROBE, *pins])
+        _, waited = self.data("wait", self.environment, sid, "--timeout", "30s", "--output", "json", timeout=45)
+        require(waited.get("eof") and (waited.get("session") or {}).get("exit_code") == 0,
+                "startup cw asset is not the root-owned read-only image payload")
+        proof = json.loads(waited.get("output", ""))
+        require(proof == {"cw_sha256": pins[2], "image_manifest_sha256": pins[1], "read_only": True},
+                "VM boot cw image identity changed")
+        self.check("preflight/image-derived-cw/root-owned/read-only/digest-pinned/before-first-agent")
         if self.synthetic:
             code, output = self.guest("agents", (
                 'for name in codex claude; do path=$(command -v "$name") || '
@@ -1650,6 +1703,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cw", help="absolute built host cw")
     parser.add_argument("--environment", help="immutable native environment UUID")
+    parser.add_argument("--cw-image-receipt", help="external public receipt for the image sealed into this VM boot bundle")
     parser.add_argument("--self-test", action="store_true", help="source-only contract tests; launch no cw or VM")
     parser.add_argument("--codex-model")
     parser.add_argument("--claude-model")
@@ -1659,15 +1713,17 @@ def main():
     args = parser.parse_args()
     if args.self_test:
         parser.exit(0 if contract_tests() else 1)
-    if not args.cw or not args.environment:
-        parser.error("--cw and --environment are required for the native VM journey")
+    if not args.cw or not args.environment or not args.cw_image_receipt:
+        parser.error("--cw, --environment and --cw-image-receipt are required for the native VM journey")
     if not sys.platform.startswith("linux"):
         parser.error("native Linux VM managed acceptance requires Linux")
     if not (os.path.isabs(args.cw) and os.path.isfile(args.cw) and os.access(args.cw, os.X_OK)):
         parser.error("--cw must be an absolute executable file")
     if not is_uuid(args.environment):
         parser.error("--environment must be a canonical lowercase UUID")
-    journey = Journey(args.cw, args.environment, args.synthetic_peers, args.codex_model, args.claude_model)
+    with open(args.cw_image_receipt, "rb") as source:
+        image_receipt = json.loads(source.read(16385))
+    journey = Journey(args.cw, args.environment, args.synthetic_peers, args.codex_model, args.claude_model, image_receipt)
     failure = None
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
