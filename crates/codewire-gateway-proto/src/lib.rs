@@ -23,6 +23,16 @@ pub const GATEWAY_BINDING_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/ga
 pub const GATEWAY_BINDING_TOKEN_PATH: &str = "/var/run/secrets/codewire/gateway-binding/token";
 pub const GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS: i64 = 600;
 pub const GATEWAY_BINDING_SERVICE_ACCOUNT: &str = "codewire-sandbox";
+/// Exact projected-token purpose for an identity-free workspace Pod fetching
+/// its own binding from the dedicated workspace-binding listener. It is
+/// distinct from the gateway-binding and credential audiences, so a token
+/// projected for this purpose cannot be replayed against any other exchange.
+pub const WORKSPACE_BINDING_TOKEN_AUDIENCE: &str = "codewire.internal.workspace-binding.v1";
+pub const WORKSPACE_BINDING_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/workspace-binding";
+pub const WORKSPACE_BINDING_TOKEN_PATH: &str = "/var/run/secrets/codewire/workspace-binding/token";
+pub const WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS: i64 = 600;
+/// Dedicated orchestration listener that serves only `WorkspaceBindingService`.
+pub const WORKSPACE_BINDING_PORT: u16 = 8087;
 pub const DAEMON_PROTOCOL_VERSION: u32 = 1;
 pub const DAEMON_MINIMUM_PROTOCOL_VERSION: u32 = 1;
 pub const DAEMON_CAPABILITY_EXEC: &str = "exec.v1";
@@ -159,6 +169,33 @@ pub mod broker {
 mod tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn projected_token_audiences_are_pairwise_distinct_and_mounts_do_not_overlap() {
+        let audiences = [
+            GATEWAY_BINDING_TOKEN_AUDIENCE,
+            CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
+            CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
+            WORKSPACE_BINDING_TOKEN_AUDIENCE,
+        ];
+        for (index, audience) in audiences.iter().enumerate() {
+            assert!(audience.starts_with("codewire.internal.") && audience.ends_with(".v1"));
+            for other in &audiences[index + 1..] {
+                assert_ne!(audience, other);
+            }
+        }
+        assert_eq!(
+            WORKSPACE_BINDING_TOKEN_PATH,
+            format!("{WORKSPACE_BINDING_TOKEN_MOUNT_PATH}/token")
+        );
+        assert!(!WORKSPACE_BINDING_TOKEN_MOUNT_PATH.starts_with(GATEWAY_BINDING_TOKEN_MOUNT_PATH));
+        assert!(!GATEWAY_BINDING_TOKEN_MOUNT_PATH.starts_with(WORKSPACE_BINDING_TOKEN_MOUNT_PATH));
+        assert_eq!(
+            WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS,
+            GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS
+        );
+        assert_eq!(WORKSPACE_BINDING_PORT, 8087);
+    }
 
     #[test]
     fn daemon_auth_token_is_mandatory_canonical_and_redacted() {

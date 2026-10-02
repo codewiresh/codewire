@@ -12,7 +12,7 @@ ADD --checksum=sha256:821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae8419
   https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-aarch64-unknown-linux-musl.tar.gz /sccache.tar.gz
 FROM sccache-${TARGETARCH} AS sccache-archive
 
-FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS cw-toolchain
+FROM rust:1.93.0-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57 AS cw-toolchain
 ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 \
   https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
   /tmp/protoc.zip
@@ -29,7 +29,7 @@ RUN rm -f /etc/apt/sources.list && \
     rm /tmp/protoc.zip && \
     test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1'
 ENV PROTOC=/opt/protoc/bin/protoc
-RUN rustup component add --toolchain 1.91.1 rustfmt clippy
+RUN rustup component add --toolchain 1.93.0 rustfmt clippy
 COPY --from=sccache-archive /sccache.tar.gz /tmp/sccache.tar.gz
 RUN mkdir /tmp/sccache && \
     tar -xzf /tmp/sccache.tar.gz --strip-components=1 -C /tmp/sccache && \

@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly PACKAGE='codewire-vmm-guest-probe'
 readonly BINARY='codewire-vmm-guest-probe'
-readonly REQUIRED_RUST='1.91.1'
+readonly REQUIRED_RUST='1.93.0'
 readonly REQUIRED_PROTOC='libprotoc 35.1'
 readonly DEFAULT_TARGET='x86_64-unknown-linux-musl'
 readonly ARM64_TARGET='aarch64-unknown-linux-musl'
@@ -39,7 +39,7 @@ usage() {
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
     'It does not prove the probe is static or came from the sealed Rust toolchain.' \
     '--verify accepts only x86_64-unknown-linux-musl (the default) or' \
-    'aarch64-unknown-linux-musl. It requires exact Rust 1.91.1, libprotoc' \
+    'aarch64-unknown-linux-musl. It requires exact Rust 1.93.0, libprotoc' \
     '35.1, the selected installed musl standard library, and readelf. It builds' \
     'each required binary twice and fails closed on any drift. With --output,' \
     'the verified archive' \
