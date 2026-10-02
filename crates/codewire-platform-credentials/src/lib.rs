@@ -8,6 +8,8 @@
 //! Enrollment adapters validate the provider payload before storage; this
 //! layer validates the explicit provider/authentication-kind catalog and keeps
 //! material opaque rather than guessing its type from a value or key name.
+//! OAuth logins are personal: an organization may hold API keys and SSH keys,
+//! but registering or reconnecting an organization OAuth credential fails.
 //! Provider material has no public read/response representation. Only a trusted broker
 //! or enrollment authority may hold [`PlatformCredentialStore`]. A control
 //! service can instead hold [`CredentialMetadataReader`] with a SELECT-only

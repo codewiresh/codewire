@@ -108,6 +108,10 @@ impl CredentialRecord {
         ssh_public_key: Option<SshPublicKeyMetadata>,
         catalog: &ProviderCatalog,
     ) -> Result<Self, Error> {
+        // OAuth logins are personal; an organization never holds one.
+        if !owner.may_hold(registration.authentication_kind) {
+            return Err(Error::UnsupportedCredential);
+        }
         let version = CredentialVersion {
             revocation_generation: 1,
             material_generation: 1,
@@ -295,6 +299,56 @@ mod tests {
             &builtin_provider_catalog(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn organizations_register_api_keys_and_ssh_but_never_oauth() {
+        let catalog = builtin_provider_catalog();
+        let org = Owner::Organization(OwnerId::parse("synthetic-org").unwrap());
+        let registration = |provider: &str, kind| CredentialRegistration {
+            provider: ProviderId::parse(provider).unwrap(),
+            authentication_kind: kind,
+            display_name: "Shared".into(),
+            account_hint: None,
+            expires_at_unix: None,
+        };
+        let person = Owner::User(OwnerId::parse("synthetic-owner").unwrap());
+        // Codex (ChatGPT) and GitHub logins are personal.
+        for provider in ["openai", "github"] {
+            assert_eq!(
+                CredentialRecord::registered(
+                    &org,
+                    registration(provider, CredentialAuthKind::OAuth),
+                    &catalog
+                ),
+                Err(Error::UnsupportedCredential)
+            );
+            CredentialRecord::registered(
+                &person,
+                registration(provider, CredentialAuthKind::OAuth),
+                &catalog,
+            )
+            .unwrap();
+        }
+        for provider in ["openai", "anthropic"] {
+            let api_key = CredentialRecord::registered(
+                &org,
+                registration(provider, CredentialAuthKind::ApiKey),
+                &catalog,
+            )
+            .unwrap();
+            assert_eq!(api_key.metadata.owner, org);
+        }
+        let key = codewire_protected_store::ssh_material::generate_ed25519().unwrap();
+        let ssh = CredentialRecord::registered_ssh(
+            &org,
+            "Shared SSH".into(),
+            None,
+            key.public_key(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(ssh.metadata.owner, org);
     }
 
     #[test]
