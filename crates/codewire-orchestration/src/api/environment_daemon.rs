@@ -1069,7 +1069,9 @@ async fn daemon_channel_for_endpoint(
         .await
         .map_err(|error| {
             if error.downcast_ref::<DaemonNotBound>().is_some() {
-                return AppError::Upstream("environment daemon is not ready".into());
+                // Retryable, with the same public message as an unreachable
+                // daemon: the Pod is not bound yet, or not a legacy Pod.
+                return AppError::Upstream("environment daemon is unavailable".into());
             }
             tracing::error!(environment_id, %error, "issue environment daemon credential failed");
             AppError::InternalMsg("failed to authorize environment daemon".into())
