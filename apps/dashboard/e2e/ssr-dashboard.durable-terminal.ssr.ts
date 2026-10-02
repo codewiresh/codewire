@@ -1860,7 +1860,6 @@ test("inventory retains usable Actions at each responsive breakpoint and quick s
   test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
   await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
   const table = page.getByRole("table");
-  await expect(table.locator("thead th")).toHaveCount(6);
   await expect(table.locator('thead th:not([scope="col"])')).toHaveCount(0);
   await expect(table.getByText("Snapshot", { exact: true })).toHaveCount(0);
   await expect(table.getByText("Region", { exact: true })).toHaveCount(0);

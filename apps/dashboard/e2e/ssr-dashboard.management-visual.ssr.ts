@@ -15,8 +15,13 @@ import { addOrgMember, cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { TEST_PASSWORD, USERS } from "./helpers/seed";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
-const slug = "e2e-management-visual";
+// Per-project-run slug: desktop and mobile workers may run this file at the
+// same time, and each must own the organization it creates and deletes.
+const slug = `e2e-management-visual-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const accountVisualEmail = `e2e-account-visual-${crypto.randomUUID()}@codewire.sh`;
+// Suite-scoped administrator: the shared seeded admin stays untouched so
+// sibling specs may enroll, bypass, or sign in with their own identities.
+const adminEmail = `e2e-admin-visual-${crypto.randomUUID().slice(0, 8)}@codewire.sh`;
 let accountVisualSession = { id: "", token: "" };
 let managementOrgId = "";
 
@@ -32,14 +37,14 @@ async function expectNoPageOverflow(page: Page) {
 
 async function loginAsAdmin(page: Page) {
   await clearRateLimits();
-  await disableTwoFactor(USERS.admin.email);
+  await disableTwoFactor(adminEmail);
   await page.context().clearCookies();
   await page.goto("/login");
-  await fillField(page, "#email", USERS.admin.email);
+  await fillField(page, "#email", adminEmail);
   await fillField(page, "#password", TEST_PASSWORD);
   await page.getByRole("button", { name: /sign in/i }).click();
   await page.waitForURL(/\/(dashboard|setup-2fa)/, { timeout: 15_000 });
-  await bypassTwoFactor(USERS.admin.email);
+  await bypassTwoFactor(adminEmail);
 }
 
 test.describe.serial("rounded management interface", () => {
@@ -48,15 +53,16 @@ test.describe.serial("rounded management interface", () => {
     if (!ownerId) throw new Error("E2E master user was not seeded");
     const orgId = await ensureTestOrg("Management Visual", slug, ownerId);
     managementOrgId = orgId;
-    const adminId = await getUserId(USERS.admin.email);
-    if (!adminId) throw new Error("E2E admin user was not seeded");
+    await seedSyntheticUser(adminEmail, "E2E Admin", true);
+    const adminId = await getUserId(adminEmail);
+    if (!adminId) throw new Error("Suite-scoped admin user was not seeded");
     await addOrgMember(orgId, adminId, "admin");
     await ensureTestSandboxPreset(orgId, "visual-default");
   });
 
   test.afterAll(async () => {
     try { await cleanupTestOrg(slug); }
-    finally { await cleanupUser(accountVisualEmail); }
+    finally { await Promise.all([cleanupUser(accountVisualEmail), cleanupUser(adminEmail)]); }
   });
 
   test("renders every organization management surface without page overflow", async ({

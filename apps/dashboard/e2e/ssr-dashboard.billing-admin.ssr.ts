@@ -2,28 +2,33 @@ import { expect, test, type Page } from "@playwright/test";
 import { fillField } from "./helpers/auth-flow";
 import {
   bypassTwoFactor,
+  cleanupUser,
   clearRateLimits,
   disableTwoFactor,
   getUserId,
+  seedSyntheticUser,
 } from "./helpers/db";
 import { ACCOUNT_HOME, cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { TEST_PASSWORD, USERS } from "./helpers/seed";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slug = `ssr-billing-${Date.now()}`;
+// Suite-scoped administrator: the shared seeded admin stays untouched so
+// sibling specs may enroll, bypass, or sign in with their own identities.
+const adminEmail = `e2e-admin-billing-${Date.now()}-${crypto.randomUUID().slice(0, 8)}@codewire.sh`;
 
 async function loginAsAdmin(page: Page) {
   await clearRateLimits();
-  await disableTwoFactor(USERS.admin.email);
+  await disableTwoFactor(adminEmail);
   await page.context().clearCookies();
   await page.goto("/login");
-  await fillField(page, "#email", USERS.admin.email);
+  await fillField(page, "#email", adminEmail);
   await fillField(page, "#password", TEST_PASSWORD);
   await page.getByRole("button", { name: /sign in/i }).click();
   await page.waitForURL((url) => url.pathname.startsWith("/setup-2fa") || ACCOUNT_HOME.test(url.pathname), { timeout: 15_000 });
   // This suite verifies admin authorization, not enrollment. Keep setup
   // material out of traces and let the seeded identity satisfy the 2FA gate.
-  await bypassTwoFactor(USERS.admin.email);
+  await bypassTwoFactor(adminEmail);
 }
 
 async function followAdminNavigation(page: Page, isMobile: boolean | undefined, name: string) {
@@ -42,10 +47,12 @@ test.describe.serial("server-rendered billing and administration", () => {
     const ownerId = await getUserId(USERS.master.email);
     if (!ownerId) throw new Error("E2E master user was not seeded");
     await ensureTestOrg("SSR Billing", slug, ownerId);
+    await seedSyntheticUser(adminEmail, "E2E Admin", true);
   });
 
   test.afterAll(async () => {
     await cleanupTestOrg(slug);
+    await cleanupUser(adminEmail);
   });
 
   test("renders organization billing without browser-side service calls", async ({ page, isMobile }) => {

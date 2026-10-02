@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import * as OTPAuth from "otpauth";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { clearRateLimits, disableTwoFactor, getUserId } from "./helpers/db";
+import { cleanupUser, clearRateLimits, disableTwoFactor, getUserId, seedSyntheticUser } from "./helpers/db";
 import { fillField } from "./helpers/auth-flow";
 import {
   addOrgMember,
@@ -16,6 +16,9 @@ const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slug = `ssr-governance-${Date.now()}`;
 const invitationEmail = `invited-${Date.now()}@example.com`;
+// Suite-scoped invitee: the shared seeded outsider stays untouched so sibling
+// specs may hold sessions, bypass, or disable two-factor on their own users.
+const outsiderEmail = `e2e-governance-outsider-${Date.now()}-${crypto.randomUUID().slice(0, 8)}@codewire.sh`;
 
 // This file reaches the one-time API-key reveal. Capturing a screenshot or
 // trace here would turn a test artifact into a secret store.
@@ -40,10 +43,12 @@ test.describe.serial("server-rendered organization governance", () => {
     if (!ownerId || !memberId) throw new Error("E2E users were not seeded");
     const orgId = await ensureTestOrg("SSR Governance", slug, ownerId);
     await addOrgMember(orgId, memberId, "member");
+    await seedSyntheticUser(outsiderEmail, "E2E Governance Outsider");
   });
 
   test.afterAll(async () => {
     await cleanupTestOrg(slug);
+    await cleanupUser(outsiderEmail);
   });
 
   test("manages members and invitations through server-side Connect clients", async ({ page, isMobile }) => {
@@ -145,12 +150,12 @@ test.describe.serial("server-rendered organization governance", () => {
     test.skip(!!isMobile, "desktop invitation acceptance contract");
     test.setTimeout(90_000);
     await clearRateLimits();
-    await disableTwoFactor(USERS.outsider.email);
+    await disableTwoFactor(outsiderEmail);
 
     try {
       await page.goto(`/${slug}/members/`);
       await page.getByText("Invite Member", { exact: true }).first().click();
-      await page.getByLabel("Email").fill(USERS.outsider.email);
+      await page.getByLabel("Email").fill(outsiderEmail);
       await page.getByRole("button", { name: "Send Invite" }).click();
 
       const invitationUrl = await oneTimeInvitationUrl(page);
@@ -164,7 +169,7 @@ test.describe.serial("server-rendered organization governance", () => {
         `/accept-invite?token=${token}`,
       );
 
-      await fillField(page, "#email", USERS.outsider.email);
+      await fillField(page, "#email", outsiderEmail);
       await fillField(page, "#password", TEST_PASSWORD);
       await page.getByRole("button", { name: /sign in/i }).click();
       await expect(page).toHaveURL(/\/setup-2fa\?return_to=/);
@@ -187,7 +192,7 @@ test.describe.serial("server-rendered organization governance", () => {
         page.locator(`.cw-sidebar-slot .cw-org-menu a[href="?org=${slug}"]`),
       ).toBeVisible();
     } finally {
-      await disableTwoFactor(USERS.outsider.email);
+      await disableTwoFactor(outsiderEmail);
     }
   });
 
