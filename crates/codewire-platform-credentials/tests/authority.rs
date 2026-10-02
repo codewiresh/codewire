@@ -5,7 +5,7 @@
 #[allow(dead_code)]
 mod support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -188,7 +188,7 @@ async fn restricted_broker_enrolls_refreshes_and_uses_exact_bound_grants() -> Re
             .await?;
         let runtime = profiles(&pool);
         let unwrap_before = provider.unwrap_calls.load(Ordering::SeqCst);
-        let grants = runtime.evaluate_grants(&context).await?;
+        let grants = runtime.evaluate_grants(&context).await?.grants;
         ensure!(
             grants.len() == 1
                 && grants[0]
@@ -259,7 +259,10 @@ async fn restricted_broker_enrolls_refreshes_and_uses_exact_bound_grants() -> Re
         let revoked = broker
             .revoke(&user, &initial.metadata.id, replaced.version)
             .await?;
-        ensure!(runtime.evaluate_grants(&context).await == Err(ProfileError::InactiveCredential));
+        // Revocation withholds this capability (and only it); nothing is granted.
+        let admitted = runtime.evaluate_grants(&context).await?;
+        ensure!(admitted.grants.is_empty());
+        ensure!(admitted.reconnect_required == BTreeSet::from([CapabilitySlot::codex()]));
         ensure!(
             broker
                 .delete_revoked(&user, &initial.metadata.id, revoked.version)
@@ -438,7 +441,7 @@ async fn lock_helpers_preserve_exact_owner_and_environment_scope() -> Result<()>
                     Some(&context.user_id),
                 )
                 .await?;
-            ensure!(runtime.evaluate_grants(&context).await?.len() == 1);
+            ensure!(runtime.evaluate_grants(&context).await?.grants.len() == 1);
             let mut wrong = context.clone();
             wrong.user_id = stranger.id().clone();
             ensure!(runtime.evaluate_grants(&wrong).await == Err(ProfileError::NotFound));
@@ -696,13 +699,13 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
                 sqlx::query("UPDATE public.environments SET desired_state='started' WHERE id=$1")
                     .bind(context.environment_id.as_str()).execute(&db.pool).await?;
             } else if change == "binding" {
-                ensure!(profiles(&pool).evaluate_grants(&context).await?.is_empty());
+                ensure!(profiles(&pool).evaluate_grants(&context).await?.grants.is_empty());
                 manager.replace_binding(&context, &binding(&context, &alternate), binding(&context, &profile), Some(&context.user_id)).await?;
             }
         }
         // The still-pinned revision is not replaced by a metadata edit.
         ensure!(manager.get(&user, &profile.id).await?.revision == 2);
-        let grants = profiles(&pool).evaluate_grants(&context).await?;
+        let grants = profiles(&pool).evaluate_grants(&context).await?.grants;
         ensure!(grants.len() == 1 && grants[0].profile.as_ref().is_some_and(|profile| profile.revision == 1));
         pool.close().await;
         Ok(())
@@ -756,7 +759,7 @@ async fn restricted_binding_metadata_waits_for_atomic_rebind_and_clear() -> Resu
                 let observed = observed?;
                 ensure!(observed.binding == binding(&context, &shared));
                 ensure!(observed.personal_owner_confirmed_by.is_none());
-                ensure!(profiles(&reader).evaluate_grants(&context).await?.is_empty());
+                ensure!(profiles(&reader).evaluate_grants(&context).await?.grants.is_empty());
             }
         }
         reader.close().await;
@@ -850,14 +853,14 @@ async fn an_environment_without_a_profile_is_granted_only_the_creators_authorize
             .authorized_credentials
             .insert(other.metadata.id.clone());
         let runtime = profiles(&pool);
-        let grants = runtime.evaluate_grants(&context).await?;
+        let grants = runtime.evaluate_grants(&context).await?.grants;
         ensure!(grants.len() == 1, "only the GitHub connection is granted");
         ensure!(grants[0].capability_slot == CapabilitySlot::github());
         ensure!(grants[0].credential_id == connection.metadata.id);
         ensure!(grants[0].profile.is_none());
         // Not authorized by launch authority: GitHub is omitted, not denied.
         context.authorized_credentials.clear();
-        ensure!(runtime.evaluate_grants(&context).await?.is_empty());
+        ensure!(runtime.evaluate_grants(&context).await?.grants.is_empty());
         pool.close().await;
         Ok(())
     }

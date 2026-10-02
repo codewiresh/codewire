@@ -194,6 +194,10 @@ pub enum BrokerLeaseError {
     Unavailable,
     #[error("credential broker lease authority returned invalid metadata")]
     InvalidResponse,
+    /// The selected capability's credential needs Reconnect (its refresh
+    /// failed, or it was revoked or expired). Only this capability is withheld.
+    #[error("credential broker lease needs the selected credential reconnected")]
+    ReconnectRequired,
 }
 
 /// Stable refresh failures that never retain provider or protected-store
@@ -810,6 +814,10 @@ pub enum BrokerRequestError {
     UpstreamFailed,
     #[error("credential broker response exceeded a resource limit")]
     ResponseTooLarge,
+    /// The selected capability's credential needs Reconnect. HTTP routes answer
+    /// with a fixed explanation; other operations are simply denied.
+    #[error("credential broker request needs the selected credential reconnected")]
+    ReconnectRequired,
 }
 
 /// Provider broker shared by local and platform placements. Placement-specific
@@ -1000,11 +1008,26 @@ where
 
     /// Dispatch a credential-free request to its explicitly selected HTTP slot.
     /// The request carries no upstream URL, credential ID or owner authority.
+    /// A selected capability whose credential needs Reconnect answers with a
+    /// fixed, material-free explanation instead of contacting its provider.
     pub async fn execute(
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let request = ValidatedGuestRequest::parse(request)?;
+        let slot = request.slot.clone();
+        match self.execute_validated(request).await {
+            Err(BrokerRequestError::ReconnectRequired) => {
+                Ok(crate::reconnect::reconnect_required_response(&slot))
+            }
+            result => result,
+        }
+    }
+
+    async fn execute_validated(
+        &self,
+        request: ValidatedGuestRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         match request.slot.as_str() {
             "anthropic" => return self.execute_anthropic(request).await,
             "github" => return self.execute_github(request).await,
@@ -2000,6 +2023,7 @@ impl Stream for BrokerRedactedBody {
 fn map_lease_error(error: BrokerLeaseError) -> BrokerRequestError {
     match error {
         BrokerLeaseError::InvalidRequest | BrokerLeaseError::Denied => BrokerRequestError::Denied,
+        BrokerLeaseError::ReconnectRequired => BrokerRequestError::ReconnectRequired,
         BrokerLeaseError::Unavailable | BrokerLeaseError::InvalidResponse => {
             BrokerRequestError::AuthorityUnavailable
         }

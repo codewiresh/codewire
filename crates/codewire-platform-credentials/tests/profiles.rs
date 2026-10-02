@@ -84,7 +84,7 @@ async fn pending_binding_admission_is_metadata_only_atomic_and_cannot_derive_run
         ensure!(profiles.evaluate_grants(&future).await == Err(Error::StaleEnvironment));
         sqlx::query("UPDATE environments SET state='running' WHERE id=$1")
             .bind(context.environment_id.as_str()).execute(&db.pool).await?;
-        ensure!(profiles.evaluate_grants(&future).await?.len() == 1);
+        ensure!(profiles.evaluate_grants(&future).await?.grants.len() == 1);
         ensure!(provider.unwrap_calls.load(Ordering::SeqCst) == 0, "metadata admission unwrapped protected material");
         Ok(())
     }.await;
@@ -93,8 +93,7 @@ async fn pending_binding_admission_is_metadata_only_atomic_and_cannot_derive_run
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn pending_binding_rechecks_credential_policy_expiry_owner_and_exact_pending_state()
--> Result<()> {
+async fn pending_binding_rechecks_credential_policy_owner_and_exact_pending_state() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         let user = db.user("pending-policy-user").await?;
@@ -108,16 +107,15 @@ async fn pending_binding_rechecks_credential_policy_expiry_owner_and_exact_pendi
         let profiles = profiles(&db);
         let profile = profiles.create(&user, name("policy"), entries(&record.metadata.id)).await?;
         let selected = binding(&context, &profile);
-        for (status, expires, expected) in [
-            ("revoked", None, Error::InactiveCredential),
-            ("refresh_failed", None, Error::InactiveCredential),
-            ("expired", None, Error::ExpiredCredential),
-            ("active", Some(0_i64), Error::ExpiredCredential),
+        // A selected credential that needs Reconnect does not block creation:
+        // only its capability is unavailable until the owner reconnects it.
+        for (status, expires) in [
+            ("revoked", None), ("refresh_failed", None), ("expired", None), ("active", Some(0_i64)),
         ] {
             sqlx::query("UPDATE platform_credentials SET status=$2,expires_at_unix=$3 WHERE id=$1")
                 .bind(record.metadata.id.as_str()).bind(status).bind(expires).execute(&db.pool).await?;
             let mut tx = profiles.begin_transaction().await?;
-            ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await == Err(expected));
+            ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await? == selected);
             tx.rollback().await?;
         }
         sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=NULL WHERE id=$1")
@@ -362,7 +360,7 @@ async fn concurrent_profile_cas_preserves_immutable_bound_revision_until_explici
         ensure!(profiles.get_revision(&user, &original.id, 1).await? == original);
         ensure!(profiles.get_revision(&user, &original.id, 3).await == Err(Error::NotFound));
         ensure!(profiles.get_binding(&context).await? == selected);
-        let old_grants = profiles.evaluate_grants(&context).await?;
+        let old_grants = profiles.evaluate_grants(&context).await?.grants;
         ensure!(
             old_grants.len() == 1
                 && old_grants[0].credential_id == first.metadata.id
@@ -381,7 +379,7 @@ async fn concurrent_profile_cas_preserves_immutable_bound_revision_until_explici
             )
             .await?;
         ensure!(profiles.get_binding(&context).await? == replacement);
-        let new_grants = profiles.evaluate_grants(&context).await?;
+        let new_grants = profiles.evaluate_grants(&context).await?.grants;
         ensure!(new_grants.len() == updated.entries.len());
         ensure!(new_grants.iter().all(|grant| {
             grant
@@ -407,7 +405,7 @@ async fn concurrent_profile_cas_preserves_immutable_bound_revision_until_explici
         profiles
             .create_binding(&context, selected.clone(), Some(&context.user_id))
             .await?;
-        ensure!(profiles.evaluate_grants(&context).await? == old_grants);
+        ensure!(profiles.evaluate_grants(&context).await?.grants == old_grants);
         let generations: (i64, i64) = sqlx::query_as(
             "SELECT environment_operation_generation, \
              (SELECT count(*) FROM platform_access_profile_revisions WHERE profile_id=$2) \
@@ -471,7 +469,7 @@ async fn binding_requires_exact_authorized_scope_operation_and_running_runtime()
         ensure!(profiles.evaluate_grants(&context).await == Err(Error::StaleEnvironment));
         ensure!(profiles.delete_binding(&context, &selected).await == Err(Error::StaleEnvironment));
         let mut current = context.clone(); current.environment_generation = 8;
-        ensure!(profiles.evaluate_grants(&current).await?[0].environment_generation == 8);
+        ensure!(profiles.evaluate_grants(&current).await?.grants[0].environment_generation == 8);
         sqlx::query("UPDATE environments SET desired_state='destroyed' WHERE id=$1")
             .bind(context.environment_id.as_str()).execute(&db.pool).await?;
         ensure!(profiles.evaluate_grants(&current).await == Err(Error::StaleEnvironment));
@@ -499,7 +497,7 @@ async fn binding_cas_and_each_runtime_admission_recheck_credentials_and_catalog(
         let empty_b = profiles.create(&org, name("empty-b"), BTreeMap::new()).await?;
         let selected = profiles.create_binding(&context, binding(&context, &profile), None).await?;
         ensure!(profiles.create_binding(&context, selected.clone(), None).await == Err(Error::AlreadyExists));
-        let initial = profiles.evaluate_grants(&context).await?;
+        let initial = profiles.evaluate_grants(&context).await?.grants;
         ensure!(initial.len() == 1 && initial[0].credential_revocation_generation == 1);
         let (left, right) = tokio::join!(
             profiles.replace_binding(&context, &selected, binding(&context, &empty_a), None),
@@ -514,20 +512,22 @@ async fn binding_cas_and_each_runtime_admission_recheck_credentials_and_catalog(
         ensure!(no_catalog.evaluate_grants(&context).await == Err(Error::UnsupportedEntry));
         let mut unauthorized = context.clone(); unauthorized.authorized_credentials = BTreeSet::new();
         ensure!(profiles.evaluate_grants(&unauthorized).await == Err(Error::UnsupportedEntry));
-        for (status, expires, expected) in [
-            ("revoked", None, Error::InactiveCredential),
-            ("refresh_failed", None, Error::InactiveCredential),
-            ("expired", None, Error::ExpiredCredential),
-            ("active", Some(0_i64), Error::ExpiredCredential),
+        // A credential needing Reconnect withholds only its own capability: the
+        // admission names that slot, grants nothing for it, and rebinding the
+        // same selection stays possible. No lifecycle state reaches a grant.
+        for (status, expires) in [
+            ("revoked", None), ("refresh_failed", None), ("expired", None), ("active", Some(0_i64)),
         ] {
             sqlx::query("UPDATE platform_credentials SET status=$2,expires_at_unix=$3 WHERE id=$1")
                 .bind(credential.metadata.id.as_str()).bind(status).bind(expires).execute(&db.pool).await?;
-            ensure!(profiles.evaluate_grants(&context).await == Err(expected));
-            ensure!(profiles.replace_binding(&context, &selected, selected.clone(), None).await == Err(expected));
+            let admitted = profiles.evaluate_grants(&context).await?;
+            ensure!(admitted.grants.is_empty());
+            ensure!(admitted.reconnect_required == BTreeSet::from([CapabilitySlot::codex()]));
+            ensure!(profiles.replace_binding(&context, &selected, selected.clone(), None).await? == selected);
         }
         sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=NULL,revocation_generation=2 WHERE id=$1")
             .bind(credential.metadata.id.as_str()).execute(&db.pool).await?;
-        ensure!(profiles.evaluate_grants(&context).await?[0].credential_revocation_generation == 2);
+        ensure!(profiles.evaluate_grants(&context).await?.grants[0].credential_revocation_generation == 2);
         // Simulate corruption outside the authority API: reads still fail closed.
         sqlx::query("DELETE FROM platform_credentials WHERE id=$1")
             .bind(credential.metadata.id.as_str()).execute(&db.pool).await?;
@@ -607,7 +607,7 @@ async fn credential_deletion_fences_current_and_bound_revisions_but_not_unused_h
         profiles
             .create_binding(&context, binding(&context, &empty), Some(&context.user_id))
             .await?;
-        ensure!(profiles.evaluate_grants(&context).await?.is_empty());
+        ensure!(profiles.evaluate_grants(&context).await?.grants.is_empty());
         profiles
             .delete_binding(&context, &binding(&context, &empty))
             .await?;
@@ -707,7 +707,7 @@ async fn profile_authority_role_cannot_read_material_or_call_a_provider() -> Res
         ensure!(!can_edit_owners);
         let original = authority.create(&user, name("work"), entries(&credential.metadata.id)).await?;
         let selected = authority.create_binding(&context, binding(&context, &original), Some(&context.user_id)).await?;
-        ensure!(authority.evaluate_grants(&context).await?.len() == 1);
+        ensure!(authority.evaluate_grants(&context).await?.grants.len() == 1);
         ensure!(authority.get(&user, &original.id).await? == original);
         let empty = authority.update(&user, &original.id, 1, BTreeMap::new()).await?;
         ensure!(authority.get_revision(&user, &original.id, 1).await? == original);
@@ -852,7 +852,7 @@ async fn personal_binding_requires_explicit_owner_confirmation_and_current_polic
         profiles.replace_binding(&context, &selected, selected.clone(), Some(user.id())).await?;
         let metadata = profiles.get_binding_metadata(&context).await?;
         ensure!(metadata.personal_owner_confirmed_by.as_ref() == Some(user.id()));
-        ensure!(profiles.evaluate_grants(&context).await?.len() == 1);
+        ensure!(profiles.evaluate_grants(&context).await?.grants.len() == 1);
         let mut denied = context.clone();
         denied.allow_personal_credentials = false;
         ensure!(profiles.evaluate_grants(&denied).await == Err(Error::UnsupportedEntry));
@@ -1068,7 +1068,7 @@ async fn rename_relabels_the_profile_without_a_revision_or_rebinding() -> Result
                 Some(&context.user_id),
             )
             .await?;
-        let grants = profiles.evaluate_grants(&context).await?;
+        let grants = profiles.evaluate_grants(&context).await?.grants;
 
         let work = name("work");
         // A name the owner already uses conflicts exactly as on create.
@@ -1138,7 +1138,7 @@ async fn rename_relabels_the_profile_without_a_revision_or_rebinding() -> Result
         // and the bound revision, its binding and its grants are unchanged.
         ensure!(profiles.get_revision(&user, &original.id, 1).await? == renamed);
         ensure!(profiles.get_binding(&context).await? == selected);
-        ensure!(profiles.evaluate_grants(&context).await? == grants);
+        ensure!(profiles.evaluate_grants(&context).await?.grants == grants);
         let revisions: (i64, i64) = sqlx::query_as(
             "SELECT (SELECT count(*) FROM platform_access_profile_revisions WHERE profile_id=$1), \
              (SELECT current_revision FROM platform_access_profiles WHERE id=$1)",

@@ -156,6 +156,18 @@ async fn pending_create_publishes_canonical_sources_profile_and_creator_acl_atom
             .fetch_one(&h.db).await?;
         ensure!(counts == (0,0));
 
+        // A selected credential that needs Reconnect does not block Create:
+        // the Sandbox is created with only that capability unavailable.
+        sqlx::query("UPDATE platform_credentials SET status='refresh_failed' WHERE id=$1")
+            .bind(CREDENTIAL).execute(&h.db).await?;
+        let mut tx = profiles.begin_transaction().await?;
+        let mut selected = body.clone();
+        admit_create_sources_in(&mut tx, &profiles, &alice(), ORG, ENV, &mut selected).await?;
+        ensure!(selected.project_spec.credentials.as_ref().unwrap().profile == format!("platform:id:{profile_id}"));
+        tx.rollback().await?;
+        sqlx::query("UPDATE platform_credentials SET status='active' WHERE id=$1")
+            .bind(CREDENTIAL).execute(&h.db).await?;
+
         // Failure at the final ACL INSERT must undo the earlier source and
         // binding writes too. A duplicate is a real SQL error, not a mocked path.
         sqlx::query("INSERT INTO environment_access(environment_id,user_id,permission,granted_by) VALUES ($1,$2,'owner',$2)")
@@ -418,11 +430,14 @@ async fn source_replacement_revalidates_owner_membership_credential_and_pinned_r
             .bind(CREDENTIAL)
             .execute(&h.db)
             .await?;
+        // A revoked selected credential no longer blocks editing the Sandbox's
+        // sources: only its own capability is unavailable until reconnected.
         let mut tx = profiles.begin_transaction().await?;
         ensure!(
             replace_environment_sources_in(&mut tx, &profiles, &alice(), ORG, ENV, &request)
-                .await
-                .is_err()
+                .await?
+                .outcome
+                == Outcome::Stored
         );
         tx.rollback().await?;
         // Revocation does not prevent explicitly clearing the old reference.

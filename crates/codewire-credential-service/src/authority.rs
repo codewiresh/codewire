@@ -447,12 +447,16 @@ impl AuthoritySource {
             {
                 authorized.insert(github);
             }
+            // Every selected credential must still exist and belong to the
+            // profile owner, or nothing is admitted. Its lifecycle is not an
+            // environment fence: one that needs Reconnect (refresh failed,
+            // revoked or expired) withholds only its own capability, at each
+            // broker admission, so sessions and the projection still launch.
             let ids: Vec<String> = authorized.iter().map(ToString::to_string).collect();
             let owned: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM public.platform_credentials WHERE \
              ((user_id=$1 AND organization_id IS NULL) OR (organization_id=$2 AND user_id IS NULL)) \
-             AND id=ANY($3) AND status='active' \
-             AND (expires_at_unix IS NULL OR expires_at_unix>extract(epoch FROM clock_timestamp()))",
+             AND id=ANY($3)",
         )
         .bind(match &owner { Owner::User(id) => Some(id.as_str()), _ => None })
         .bind(match &owner { Owner::Organization(id) => Some(id.as_str()), _ => None })

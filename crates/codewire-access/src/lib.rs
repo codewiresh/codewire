@@ -14,8 +14,8 @@ mod projection;
 
 pub use catalog::builtin_provider_catalog;
 pub use grant::{
-    DerivedGrant, GrantContext, GrantPlacement, GrantProfile, derive_account_github_grant,
-    derive_grants, validate_profile_entries,
+    AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile,
+    derive_account_github_grant, derive_available_grants, derive_grants, validate_profile_entries,
 };
 pub use id::{
     AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
