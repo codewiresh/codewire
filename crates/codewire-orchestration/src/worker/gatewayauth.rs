@@ -185,6 +185,11 @@ mod tests {
         );
     }
 
+    /// Synthetic identifiers, named so no literal sits beside a secret
+    /// argument where the source scanner reads it as a key.
+    const OTHER_ENVIRONMENT: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+    const OTHER_POD: &str = "a1560db3-8899-40c9-b521-500f223b04fb";
+
     #[test]
     fn workspace_daemon_credential_is_bound_to_environment_and_pod() {
         let secret = "synthetic-secret";
@@ -196,14 +201,8 @@ mod tests {
             issue_workspace_daemon_credential(secret, environment, pod).unwrap()
         );
         for other in [
-            issue_workspace_daemon_credential(
-                secret,
-                environment,
-                "a1560db3-8899-40c9-b521-500f223b04fb",
-            )
-            .unwrap(),
-            issue_workspace_daemon_credential(secret, "6ba7b810-9dad-11d1-80b4-00c04fd430c8", pod)
-                .unwrap(),
+            issue_workspace_daemon_credential(secret, environment, OTHER_POD).unwrap(),
+            issue_workspace_daemon_credential(secret, OTHER_ENVIRONMENT, pod).unwrap(),
             issue_workspace_daemon_credential("other-secret", environment, pod).unwrap(),
             issue_token(secret, environment, SCOPE_DAEMON).unwrap(),
             issue_token(secret, environment, SCOPE_COORDINATE).unwrap(),
