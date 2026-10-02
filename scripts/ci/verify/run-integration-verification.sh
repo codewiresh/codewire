@@ -351,7 +351,7 @@ run_database() {
     echo "::error::environment external cleanup matrix skipped"
     return 1
   fi
-  assert_passed_count "environment external cleanup matrix" "$logfile" 8
+  assert_passed_count "environment external cleanup matrix" "$logfile" 9
 
   logfile="$RUN_DIR/environment-session-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -416,7 +416,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'worker::workspace_binding::database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "workspace binding recorder matrix" "$logfile" 15
+  assert_passed_count "workspace binding recorder matrix" "$logfile" 16
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
