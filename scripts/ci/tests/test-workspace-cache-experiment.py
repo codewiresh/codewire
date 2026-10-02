@@ -387,7 +387,9 @@ else:
                 pid, start = json.loads(path.read_text())
                 try:
                     fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
+                    # The process can exit between opening and reading its
+                    # stat file; the read then fails with ESRCH.
                     return None
                 return pid if fields[19] == start and fields[0] != "Z" else None
 
