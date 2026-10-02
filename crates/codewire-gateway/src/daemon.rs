@@ -1,11 +1,13 @@
 use async_trait::async_trait;
+use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
 use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{DAEMON_AUTH_TOKEN_HEADER, DaemonAuthToken};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::Channel;
+
+use crate::daemon_credential::DaemonCredential;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStart {
@@ -126,11 +128,15 @@ pub trait DaemonClient: Send + Sync {
     async fn readlink(&self, path: &str) -> Result<String, DaemonClientError>;
 }
 
+/// The gateway's client for its workspace daemon. Each call presents the
+/// current [`DaemonCredential`]; a call the daemon refuses as unauthenticated
+/// asks an issued credential to refresh, so a replaced workspace Pod behind
+/// the same daemon Service is followed without reconnecting by hand.
 #[derive(Clone)]
 pub struct DaemonSessionClient {
     inner: v1::daemon_service_client::DaemonServiceClient<Channel>,
-    auth_token: MetadataValue<Ascii>,
-    credential_client: codewire_daemon::client::SessionClient,
+    channel: Channel,
+    credential: DaemonCredential,
 }
 
 pub struct ExecDaemonSession {
@@ -156,15 +162,16 @@ pub struct PtyDaemonSessionInput {
 impl DaemonSessionClient {
     pub async fn connect_shim(
         shim_addr: impl AsRef<str>,
-        auth_token: DaemonAuthToken,
+        credential: impl Into<DaemonCredential>,
     ) -> Result<Self, DaemonClientError> {
-        Self::connect_endpoint(daemon_endpoint_for_shim(shim_addr.as_ref()), auth_token).await
+        Self::connect_endpoint(daemon_endpoint_for_shim(shim_addr.as_ref()), credential).await
     }
 
     pub async fn connect_endpoint(
         endpoint: String,
-        auth_token: DaemonAuthToken,
+        credential: impl Into<DaemonCredential>,
     ) -> Result<Self, DaemonClientError> {
+        let credential = credential.into();
         let channel = Channel::from_shared(endpoint.clone())
             .map_err(|source| DaemonClientError::InvalidEndpoint {
                 endpoint: endpoint.clone(),
@@ -176,31 +183,44 @@ impl DaemonSessionClient {
                 endpoint: endpoint.clone(),
                 source,
             })?;
-        let credential_client = codewire_daemon::client::SessionClient::from_channel(
-            channel.clone(),
-            auth_token.expose_secret(),
-        )
-        .map_err(|_| {
-            DaemonClientError::Unsupported("invalid daemon credential bridge configuration")
-        })?;
-        let mut auth_token = MetadataValue::try_from(auth_token.expose_secret())
-            .expect("DaemonAuthToken guarantees valid ASCII metadata");
-        auth_token.set_sensitive(true);
         Ok(Self {
-            inner: v1::daemon_service_client::DaemonServiceClient::new(channel),
-            auth_token,
-            credential_client,
+            inner: v1::daemon_service_client::DaemonServiceClient::new(channel.clone()),
+            channel,
+            credential,
         })
     }
 
+    /// A credential-bridge client presenting the credential current now. The
+    /// hosted relay takes a fresh one for every epoch.
     pub(crate) fn credential_client(&self) -> codewire_daemon::client::SessionClient {
-        self.credential_client.clone()
+        codewire_daemon::client::SessionClient::from_channel(
+            self.channel.clone(),
+            self.credential.token().expose_secret(),
+        )
+        .expect("DaemonAuthToken guarantees valid ASCII metadata")
+    }
+
+    pub(crate) fn credential(&self) -> &DaemonCredential {
+        &self.credential
     }
 
     fn authorize<T>(&self, request: &mut Request<T>) {
+        let token = self.credential.token();
+        let mut value = MetadataValue::<Ascii>::try_from(token.expose_secret())
+            .expect("DaemonAuthToken guarantees valid ASCII metadata");
+        value.set_sensitive(true);
         request
             .metadata_mut()
-            .insert(DAEMON_AUTH_TOKEN_HEADER, self.auth_token.clone());
+            .insert(DAEMON_AUTH_TOKEN_HEADER, value);
+    }
+
+    /// Map a refused call, reporting an unauthenticated refusal so an issued
+    /// credential is fetched again for the next call.
+    fn refused(&self, status: tonic::Status) -> DaemonClientError {
+        if status.code() == tonic::Code::Unauthenticated {
+            self.credential.report_unauthenticated();
+        }
+        DaemonClientError::Status(status)
     }
 }
 
@@ -219,7 +239,11 @@ impl DaemonClient for DaemonSessionClient {
         let mut client = self.inner.clone();
         let mut request = Request::new(ReceiverStream::new(rx));
         self.authorize(&mut request);
-        let output = client.exec_session(request).await?.into_inner();
+        let output = client
+            .exec_session(request)
+            .await
+            .map_err(|status| self.refused(status))?
+            .into_inner();
         Ok(ExecDaemonSession { input, output })
     }
 
@@ -233,7 +257,11 @@ impl DaemonClient for DaemonSessionClient {
         let mut client = self.inner.clone();
         let mut request = Request::new(ReceiverStream::new(rx));
         self.authorize(&mut request);
-        let output = client.pty_session(request).await?.into_inner();
+        let output = client
+            .pty_session(request)
+            .await
+            .map_err(|status| self.refused(status))?
+            .into_inner();
         Ok(PtyDaemonSession { input, output })
     }
 
@@ -241,7 +269,10 @@ impl DaemonClient for DaemonSessionClient {
         let mut client = self.inner.clone();
         let mut request = Request::new(v1::ListRequest { path: path.into() });
         self.authorize(&mut request);
-        let response = client.list(request).await?;
+        let response = client
+            .list(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(response.into_inner().entries)
     }
 
@@ -259,7 +290,7 @@ impl DaemonClient for DaemonSessionClient {
         let response = match client.stat(request).await {
             Ok(response) => response,
             Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
-            Err(status) => return Err(status.into()),
+            Err(status) => return Err(self.refused(status)),
         };
         Ok(response.into_inner().entry)
     }
@@ -277,7 +308,10 @@ impl DaemonClient for DaemonSessionClient {
             perm,
         });
         self.authorize(&mut request);
-        client.open_file(request).await?;
+        client
+            .open_file(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -294,7 +328,10 @@ impl DaemonClient for DaemonSessionClient {
             length,
         });
         self.authorize(&mut request);
-        let response = client.read(request).await?;
+        let response = client
+            .read(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(response.into_inner().data)
     }
 
@@ -311,7 +348,10 @@ impl DaemonClient for DaemonSessionClient {
             data,
         });
         self.authorize(&mut request);
-        let response = client.write(request).await?;
+        let response = client
+            .write(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(response.into_inner().bytes_written)
     }
 
@@ -322,7 +362,10 @@ impl DaemonClient for DaemonSessionClient {
             perm,
         });
         self.authorize(&mut request);
-        client.mkdir(request).await?;
+        client
+            .mkdir(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -333,7 +376,10 @@ impl DaemonClient for DaemonSessionClient {
             dir,
         });
         self.authorize(&mut request);
-        client.remove(request).await?;
+        client
+            .remove(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -344,7 +390,10 @@ impl DaemonClient for DaemonSessionClient {
             new_path: new_path.into(),
         });
         self.authorize(&mut request);
-        client.rename(request).await?;
+        client
+            .rename(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -352,7 +401,10 @@ impl DaemonClient for DaemonSessionClient {
         let mut client = self.inner.clone();
         let mut request = Request::new(file_set_stat_request(request));
         self.authorize(&mut request);
-        client.set_stat(request).await?;
+        client
+            .set_stat(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -360,7 +412,10 @@ impl DaemonClient for DaemonSessionClient {
         let mut client = self.inner.clone();
         let mut request = Request::new(v1::ReadlinkRequest { path: path.into() });
         self.authorize(&mut request);
-        let response = client.readlink(request).await?;
+        let response = client
+            .readlink(request)
+            .await
+            .map_err(|status| self.refused(status))?;
         Ok(response.into_inner().target)
     }
 }
@@ -544,6 +599,7 @@ pub fn file_set_stat_request(request: FileSetStatRequest) -> v1::SetStatRequest 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codewire_gateway_proto::DaemonAuthToken;
     use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
     use codewire_gateway_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,

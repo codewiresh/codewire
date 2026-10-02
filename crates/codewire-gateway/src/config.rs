@@ -219,7 +219,10 @@ impl CredentialRuntimeConfig {
 #[derive(Clone, PartialEq, Eq)]
 pub struct GatewayConfig {
     pub shim_addr: String,
-    pub daemon_auth_token: DaemonAuthToken,
+    /// The rendered environment-wide daemon token of a legacy workspace.
+    /// `None` only in binding mode, where the gateway fetches the bound Pod's
+    /// credential through `IssueGatewayDaemonCredential` instead.
+    pub daemon_auth_token: Option<DaemonAuthToken>,
     pub ssh_listen_addr: String,
     pub readyz_listen_addr: String,
     pub host_key_path: String,
@@ -262,7 +265,7 @@ pub struct DockerProxyConfig {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
-    #[error("{DAEMON_AUTH_TOKEN_ENV} is required")]
+    #[error("{DAEMON_AUTH_TOKEN_ENV} is required without a gateway binding")]
     MissingDaemonAuthToken,
     #[error("{DAEMON_AUTH_TOKEN_ENV} must be nonblank canonical ASCII metadata")]
     InvalidDaemonAuthToken,
@@ -292,13 +295,13 @@ impl GatewayConfig {
             }
         }
         let daemon_auth_token = match env::var(DAEMON_AUTH_TOKEN_ENV) {
-            Ok(value) => value,
-            Err(env::VarError::NotPresent) => return Err(ConfigError::MissingDaemonAuthToken),
+            Ok(value) => Some(value),
+            Err(env::VarError::NotPresent) => None,
             Err(env::VarError::NotUnicode(_)) => return Err(ConfigError::InvalidDaemonAuthToken),
         };
         Self::from_getenv(|key| {
             if key == DAEMON_AUTH_TOKEN_ENV {
-                Some(daemon_auth_token.clone())
+                daemon_auth_token.clone()
             } else {
                 env::var(key).ok()
             }
@@ -312,10 +315,10 @@ impl GatewayConfig {
         let credentials = CredentialRuntimeConfig::from_getenv(&getenv)?;
         let shim_addr = env_or(&getenv, SHIM_ADDR_ENV, DEFAULT_SHIM_ADDR);
         let daemon_auth_token = getenv(DAEMON_AUTH_TOKEN_ENV)
-            .ok_or(ConfigError::MissingDaemonAuthToken)
-            .and_then(|value| {
+            .map(|value| {
                 DaemonAuthToken::new(value).map_err(|_| ConfigError::InvalidDaemonAuthToken)
-            })?;
+            })
+            .transpose()?;
         let ssh_listen_addr = resolve_ssh_listen_addr(&getenv);
         let readyz_listen_addr =
             env_or(&getenv, READYZ_LISTEN_ADDR_ENV, DEFAULT_READYZ_LISTEN_ADDR);
@@ -340,6 +343,11 @@ impl GatewayConfig {
         let udp_relay_bind_addrs = parse_csv_env(&getenv, UDP_RELAY_BIND_ADDRS_ENV);
         let tailnet = resolve_tailnet(&getenv, coordinator_url.as_deref())?;
         let docker_proxy = resolve_docker_proxy(&getenv)?;
+        // Without a rendered token the daemon credential can come only from
+        // the authenticated gateway binding (Program #2238 B2).
+        if daemon_auth_token.is_none() && (binding_url.is_none() || coordinator_url.is_none()) {
+            return Err(ConfigError::MissingDaemonAuthToken);
+        }
 
         Ok(Self {
             shim_addr,
@@ -692,6 +700,50 @@ mod tests {
         assert_eq!(cfg.udp_relay_allocator_token, None);
         assert!(cfg.udp_relay_bind_addrs.is_empty());
         assert!(cfg.docker_proxy.is_none());
+    }
+
+    #[test]
+    fn daemon_auth_token_is_optional_only_with_a_gateway_binding() {
+        let binding = [
+            (
+                BINDING_URL_ENV,
+                "http://codewire-orchestration.dev.svc.cluster.local:8085",
+            ),
+            (COORDINATOR_URL_ENV, "http://coordinator:8080"),
+        ];
+        let without_token = |vars: &[(&str, &str)]| {
+            let vars: HashMap<String, String> = vars
+                .iter()
+                .map(|(key, value)| ((*key).into(), (*value).into()))
+                .collect();
+            GatewayConfig::from_getenv(|key| vars.get(key).cloned())
+        };
+        let bound = without_token(&binding).unwrap();
+        assert_eq!(bound.daemon_auth_token, None);
+        // The API URL also resolves the coordinator, as for tailnet.
+        assert!(
+            without_token(&[binding[0], (API_URL_ENV, "https://codewire.example")])
+                .unwrap()
+                .daemon_auth_token
+                .is_none()
+        );
+        for partial in [&binding[..1], &binding[1..], &[]] {
+            assert_eq!(
+                without_token(partial),
+                Err(ConfigError::MissingDaemonAuthToken)
+            );
+        }
+        for blank in ["", "  "] {
+            assert_eq!(
+                without_token(&[(BINDING_URL_ENV, blank), binding[1]]),
+                Err(ConfigError::MissingDaemonAuthToken)
+            );
+        }
+        // A rendered token still wins, even beside a binding.
+        assert_eq!(
+            config(&binding).unwrap().daemon_auth_token,
+            Some(DaemonAuthToken::new("gateway-daemon-test-token").unwrap())
+        );
     }
 
     #[test]
