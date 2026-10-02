@@ -511,6 +511,7 @@ fn platform_user_profile_can_select_an_authorized_matching_org_credential() {
     let user = Owner::User(owner_id("user-one"));
     let mut selected = credential("codex-org", Owner::Organization(owner_id("org-one")));
     selected.placement = Placement::Platform;
+    selected.authentication_kind = CredentialAuthKind::ApiKey;
     let mut selected_profile = profile("work", user, "codex-org");
     selected_profile.placement = Placement::Platform;
     let mut grant_context = context([selected.id.clone()]);
@@ -524,7 +525,7 @@ fn platform_user_profile_can_select_an_authorized_matching_org_credential() {
         &[(selected.id.clone(), selected.clone())]
             .into_iter()
             .collect(),
-        &catalog([CredentialAuthKind::OAuth]),
+        &catalog([CredentialAuthKind::ApiKey]),
         1_800_000_000,
     )
     .expect("authorized organization credential");
@@ -536,7 +537,7 @@ fn platform_user_profile_can_select_an_authorized_matching_org_credential() {
             &binding(&selected_profile),
             &selected_profile,
             &[(selected.id.clone(), selected)].into_iter().collect(),
-            &catalog([CredentialAuthKind::OAuth]),
+            &catalog([CredentialAuthKind::ApiKey]),
             1_800_000_000,
         ),
         Err(AccessError::CredentialOwnerMismatch { .. })
@@ -568,6 +569,95 @@ fn organization_profile_cannot_select_a_personal_credential() {
     )
     .expect_err("organization profile with personal credential");
     assert!(matches!(error, AccessError::CredentialOwnerMismatch { .. }));
+}
+
+#[test]
+fn organizations_hold_api_keys_and_ssh_but_no_profile_selects_their_oauth() {
+    let user = Owner::User(owner_id("user-one"));
+    let org = Owner::Organization(owner_id("org-one"));
+    for kind in [
+        CredentialAuthKind::OAuth,
+        CredentialAuthKind::ApiKey,
+        CredentialAuthKind::AccessToken,
+        CredentialAuthKind::GitHubApp,
+        CredentialAuthKind::SshKey,
+    ] {
+        assert!(user.may_hold(kind));
+        assert_eq!(org.may_hold(kind), kind != CredentialAuthKind::OAuth);
+    }
+
+    let catalog = builtin_provider_catalog();
+    let platform = |id: &str, kind: CredentialAuthKind| CredentialMetadata {
+        placement: Placement::Platform,
+        authentication_kind: kind,
+        ..credential(id, org.clone())
+    };
+    let codex = platform("codex-org", CredentialAuthKind::OAuth);
+    let api_key = platform("openai-org", CredentialAuthKind::ApiKey);
+    let ssh = CredentialMetadata {
+        provider: provider_id("ssh"),
+        account_hint: None,
+        ssh_public_key: Some(SshPublicKeyMetadata {
+            openssh: format!("ssh-ed25519 {}", "A".repeat(68)),
+            fingerprint: format!("SHA256:{}", "A".repeat(43)),
+        }),
+        ..platform("ssh-org", CredentialAuthKind::SshKey)
+    };
+    let credentials: BTreeMap<_, _> = [&codex, &api_key, &ssh]
+        .into_iter()
+        .map(|credential| (credential.id.clone(), credential.clone()))
+        .collect();
+    let mut grant_context = context(credentials.keys().cloned());
+    grant_context.placement = GrantPlacement::Platform;
+    grant_context.organization_id = Some(owner_id("org-one"));
+    let platform_profile = |owner: &Owner, entries: &[(&str, &CredentialMetadata)]| AccessProfile {
+        placement: Placement::Platform,
+        entries: entries
+            .iter()
+            .map(|(slot_name, credential)| (slot(slot_name), credential.id.clone()))
+            .collect(),
+        ..profile("work", owner.clone(), "unused")
+    };
+
+    // An organization's API key and SSH key remain selectable.
+    let allowed = platform_profile(&org, &[("codex", &api_key), ("ssh", &ssh)]);
+    validate_profile_entries(&allowed, &credentials, &catalog).unwrap();
+    let grants = derive_available_grants(
+        &grant_context,
+        &binding(&allowed),
+        &allowed,
+        &credentials,
+        &catalog,
+        1_800_000_000,
+    )
+    .unwrap();
+    assert_eq!(grants.grants.len(), 2);
+    assert!(grants.reconnect_required.is_empty());
+
+    // Neither an organization profile nor the creator's own profile may
+    // select an organization's OAuth login, even when launch authority
+    // authorized it. Hosted admission rejects the whole selection; it is not
+    // a per-capability Reconnect.
+    for owner in [&org, &user] {
+        let selected = platform_profile(owner, &[("codex", &codex), ("ssh", &ssh)]);
+        assert_eq!(
+            validate_profile_entries(&selected, &credentials, &catalog),
+            Err(AccessError::OrganizationOAuthUnsupported)
+        );
+        let mut personal_context = grant_context.clone();
+        personal_context.allow_personal_credentials = !owner.is_organization();
+        assert_eq!(
+            derive_available_grants(
+                &personal_context,
+                &binding(&selected),
+                &selected,
+                &credentials,
+                &catalog,
+                1_800_000_000,
+            ),
+            Err(AccessError::OrganizationOAuthUnsupported)
+        );
+    }
 }
 
 #[test]

@@ -186,13 +186,13 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential storage matrix" "$logfile" 21
+  assert_passed_count "platform credential storage matrix" "$logfile" 22
 
   logfile="$RUN_DIR/platform-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 14
+  assert_passed_count "platform access profile matrix" "$logfile" 15
 
   logfile="$RUN_DIR/platform-owner-source-authority.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

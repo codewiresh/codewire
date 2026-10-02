@@ -300,7 +300,7 @@ async fn metadata_reader_works_with_select_only_role_without_material_access() -
         let org_record = store
             .create(
                 &org,
-                registration("Organization", Kind::OAuth),
+                registration("Organization", Kind::ApiKey),
                 &value(OLD_VALUE),
             )
             .await?;
@@ -423,7 +423,7 @@ async fn owner_isolation_includes_equal_text_user_and_organization_ids() -> Resu
         let organizational = store
             .create(
                 &organization,
-                registration("Same name", Kind::OAuth),
+                registration("Same name", Kind::ApiKey),
                 &value(NEW_VALUE),
             )
             .await?;
@@ -1111,7 +1111,7 @@ async fn paused_preparation_cannot_resurrect_after_revoke_or_organization_deleti
                 store
                     .create(
                         &org,
-                        registration("Never published", Kind::OAuth),
+                        registration("Never published", Kind::ApiKey),
                         &value(OLD_VALUE),
                     )
                     .await
@@ -1163,7 +1163,7 @@ async fn publication_holds_owner_share_fence_until_commit_then_deletion_wins() -
         sqlx::query("SELECT pg_advisory_xact_lock($1::bigint)").bind(i64::from(BARRIER)).execute(&mut *blocker).await?;
         let task = {
             let store = store.clone(); let org = org.clone();
-            tokio::spawn(async move { store.create(&org, registration("Published first", Kind::OAuth), &value(OLD_VALUE)).await })
+            tokio::spawn(async move { store.create(&org, registration("Published first", Kind::ApiKey), &value(OLD_VALUE)).await })
         };
         wait_for_advisory_waiter(&db.pool, BARRIER).await?;
         // A non-key UPDATE conflicts with SHARE, but would incorrectly pass
@@ -1181,7 +1181,7 @@ async fn publication_holds_owner_share_fence_until_commit_then_deletion_wins() -
         begin_organization_deletion(&db.pool, &admin_user(), org.id().as_str()).await?;
         ensure!(store.record(&org, &published.metadata.id).await == Err(Error::NotFound));
         ensure!(store.read_for_broker(&org, &published.metadata.id, published.version).await.err() == Some(Error::NotFound));
-        ensure!(store.create(&org, registration("Too late", Kind::OAuth), &value(NEW_VALUE)).await == Err(Error::NotFound));
+        ensure!(store.create(&org, registration("Too late", Kind::ApiKey), &value(NEW_VALUE)).await == Err(Error::NotFound));
         Ok(())
     }.await;
     db.finish(result).await
@@ -1197,7 +1197,7 @@ async fn exact_tombstone_deletion_and_owner_cascades_preserve_unrelated_storage(
         let retained = db.user("retained-owner").await?;
         let store = db.store(Arc::new(SyntheticKek::default()));
         let personal = store.create(&user, registration("Personal", Kind::OAuth), &value(OLD_VALUE)).await?;
-        let organizational = store.create(&org, registration("Organization", Kind::OAuth), &value(OLD_VALUE)).await?;
+        let organizational = store.create(&org, registration("Organization", Kind::ApiKey), &value(OLD_VALUE)).await?;
         let survivor = store.create(&retained, registration("Retained", Kind::OAuth), &value(NEW_VALUE)).await?;
         let removable = store.create(&retained, registration("Exact deletion", Kind::OAuth), &value(OLD_VALUE)).await?;
         // Existing generic workload-secret storage is a separate lifecycle.
@@ -1347,6 +1347,126 @@ async fn invalid_registration_versions_and_database_inputs_are_value_blind() -> 
                 .context("missing credential was found")?,
             &[missing.as_str()],
         )?;
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn organizations_hold_api_keys_and_ssh_but_never_register_or_reconnect_oauth() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("oauth-person").await?;
+        let org = db.organization("oauth-free-org").await?;
+        let provider = Arc::new(SyntheticKek::default());
+        let (pool, _) = db.broker_pool().await?;
+        let store = codewire_platform_credentials::PlatformCredentialStore::new(
+            pool.clone(),
+            provider.clone(),
+            builtin_provider_catalog(),
+        );
+        let oauth = |provider: &str| codewire_platform_credentials::CredentialRegistration {
+            provider: ProviderId::parse(provider).expect("built-in provider"),
+            ..registration("Shared login", Kind::OAuth)
+        };
+        // Codex (ChatGPT) and GitHub logins are refused before any KEK work.
+        for name in ["openai", "github"] {
+            ensure!(
+                store.create(&org, oauth(name), &value(OLD_VALUE)).await
+                    == Err(Error::UnsupportedCredential)
+            );
+            ensure!(
+                store
+                    .prepare_creation(&org, oauth(name), &value(OLD_VALUE))
+                    .await
+                    .err()
+                    == Some(Error::UnsupportedCredential)
+            );
+        }
+        ensure!(provider.generate_calls.load(Ordering::SeqCst) == 0);
+        let count = |owner: &Owner| {
+            let id = owner.id().as_str().to_owned();
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM platform_credentials WHERE organization_id=$1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+            }
+        };
+        ensure!(count(&org).await? == 0);
+        // The same login remains a person's to connect.
+        store
+            .create(&user, oauth("openai"), &value(OLD_VALUE))
+            .await?;
+
+        // API keys and SSH keys are unchanged for organizations.
+        let api_key = store
+            .create(
+                &org,
+                registration("Shared key", Kind::ApiKey),
+                &value(OLD_VALUE),
+            )
+            .await?;
+        let prepared = store
+            .prepare_ssh_creation(
+                &org,
+                "Shared SSH".into(),
+                None,
+                codewire_protected_store::ssh_material::generate_ed25519()?,
+            )
+            .await?;
+        let mut tx = pool.begin().await?;
+        let ssh = store.create_prepared_in(&mut tx, &org, prepared).await?;
+        tx.commit().await?;
+        ensure!(api_key.metadata.owner == org && ssh.metadata.owner == org);
+        ensure!(count(&org).await? == 2);
+
+        // A row written before this rule cannot be reconnected or replaced,
+        // but its owner can still revoke and delete it.
+        sqlx::query("UPDATE platform_credentials SET authentication_kind='oauth' WHERE id=$1")
+            .bind(api_key.metadata.id.as_str())
+            .execute(&db.pool)
+            .await?;
+        let legacy = store.record(&org, &api_key.metadata.id).await?;
+        ensure!(legacy.metadata.authentication_kind == Kind::OAuth);
+        let prepared = store
+            .prepare_replacement(&org, &legacy, &value(NEW_VALUE), None)
+            .await?;
+        let mut tx = pool.begin().await?;
+        ensure!(
+            store
+                .replace_prepared_in(&mut tx, &org, prepared)
+                .await
+                .err()
+                == Some(Error::UnsupportedCredential)
+        );
+        tx.rollback().await?;
+        ensure!(
+            store
+                .replace(
+                    &org,
+                    &legacy.metadata.id,
+                    legacy.version,
+                    &value(NEW_VALUE),
+                    None
+                )
+                .await
+                == Err(Error::UnsupportedCredential)
+        );
+        ensure!(store.record(&org, &legacy.metadata.id).await? == legacy);
+        let revoked = store
+            .revoke(&org, &legacy.metadata.id, legacy.version)
+            .await?;
+        store
+            .delete_revoked(&org, &legacy.metadata.id, revoked.version)
+            .await?;
+        ensure!(count(&org).await? == 1);
+        pool.close().await;
         Ok(())
     }
     .await;
