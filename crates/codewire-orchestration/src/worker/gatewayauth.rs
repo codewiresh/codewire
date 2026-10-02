@@ -189,6 +189,7 @@ mod tests {
     fn workspace_daemon_credential_is_bound_to_environment_and_pod() {
         let secret = "synthetic-secret";
         let environment = "550e8400-e29b-41d4-a716-446655440000";
+        let other_environment = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
         let pod = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
         let credential = issue_workspace_daemon_credential(secret, environment, pod).unwrap();
         assert_eq!(
@@ -202,8 +203,7 @@ mod tests {
                 "a1560db3-8899-40c9-b521-500f223b04fb",
             )
             .unwrap(),
-            issue_workspace_daemon_credential(secret, "6ba7b810-9dad-11d1-80b4-00c04fd430c8", pod)
-                .unwrap(),
+            issue_workspace_daemon_credential(secret, other_environment, pod).unwrap(),
             issue_workspace_daemon_credential("other-secret", environment, pod).unwrap(),
             issue_token(secret, environment, SCOPE_DAEMON).unwrap(),
             issue_token(secret, environment, SCOPE_COORDINATE).unwrap(),
