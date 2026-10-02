@@ -784,7 +784,7 @@ mod tests {
             api_url: api_url.map(str::to_string),
             binding_url: None,
             coordinator_url: Some(coordinator_url.into()),
-            daemon_auth_token: DaemonAuthToken::new("gateway-tailnet-test-token").unwrap(),
+            daemon_auth_token: Some(DaemonAuthToken::new("gateway-tailnet-test-token").unwrap()),
             derp_url: derp_url.map(str::to_string),
             stun: None,
             stun_servers: Vec::new(),

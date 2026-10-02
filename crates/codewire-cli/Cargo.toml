@@ -29,7 +29,10 @@ codewire-daemon = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
 codewire-protected-store = { workspace = true }
+codewire-proto = { workspace = true, features = ["client"] }
 codewire-workload-secrets = { workspace = true }
+connectrpc = { workspace = true, features = ["client"] }
+http = { workspace = true }
 libc = "0.2"
 portable-pty = { workspace = true }
 rand = { workspace = true }
@@ -64,6 +67,8 @@ tempfile = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
 
 [dev-dependencies]
+axum = { workspace = true }
 buffa = { workspace = true }
+connectrpc = { workspace = true, features = ["axum", "client"] }
 tempfile = { workspace = true }
 wiremock = { workspace = true }

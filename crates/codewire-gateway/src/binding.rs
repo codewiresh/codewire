@@ -2,10 +2,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use codewire_gateway_proto::GATEWAY_BINDING_TOKEN_PATH;
+use codewire_gateway_proto::{DaemonAuthToken, GATEWAY_BINDING_TOKEN_PATH};
 use codewire_proto::codewire::internal::v1::{
     DirectUdpTransport as ProtoDirectUdpTransport, EndpointList as ProtoEndpointList,
-    GatewayBindingServiceClient, IssueGatewayBindingRequest,
+    GatewayBindingServiceClient, IssueGatewayBindingRequest, IssueGatewayDaemonCredentialRequest,
     PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
 };
 use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
@@ -81,6 +81,27 @@ pub enum BindingError {
     IdentityUnavailable,
     #[error("gateway binding identity is invalid")]
     InvalidIdentity,
+    #[error("issued workspace daemon credential is invalid")]
+    InvalidDaemonCredential,
+}
+
+/// The daemon credential of the environment's currently bound workspace Pod,
+/// issued to this gateway through its own authenticated binding. `Debug`
+/// never shows the credential.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IssuedDaemonCredential {
+    pub token: DaemonAuthToken,
+    pub workspace_pod_uid: String,
+}
+
+impl std::fmt::Debug for IssuedDaemonCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IssuedDaemonCredential")
+            .field("token", &self.token)
+            .field("workspace_pod_uid", &self.workspace_pod_uid)
+            .finish()
+    }
 }
 
 impl BindingPollConfig {
@@ -104,6 +125,16 @@ impl BindingPollConfig {
             coordinator_url: coordinator_url.into(),
             binding_token_path: PathBuf::from(GATEWAY_BINDING_TOKEN_PATH),
         })
+    }
+
+    /// A binding configuration whose projected token lives at `token_path`.
+    #[cfg(test)]
+    pub(crate) fn for_test(binding_url: String, token_path: PathBuf) -> Self {
+        Self {
+            binding_url,
+            coordinator_url: "http://coordinator:8080".into(),
+            binding_token_path: token_path,
+        }
     }
 
     pub(crate) fn client(&self) -> Result<GatewayBindingServiceClient<HttpClient>, BindingError> {
@@ -177,6 +208,42 @@ pub async fn poll_binding_once(
             .filter(|port| *port != 0)
             .collect(),
         runtime_transport: binding.runtime_transport.into_option().map(Into::into),
+    }))
+}
+
+/// One `IssueGatewayDaemonCredential` call. `Ok(None)` means not issued yet:
+/// no workspace binding is recorded (`not_found`) or the listener is
+/// unavailable. The projected token is reread on every call.
+pub async fn fetch_daemon_credential_once(
+    client: &GatewayBindingServiceClient<HttpClient>,
+    config: &BindingPollConfig,
+) -> Result<Option<IssuedDaemonCredential>, BindingError> {
+    let token = read_binding_token(&config.binding_token_path).await?;
+    let options = binding_call_options(&token)?;
+    drop(token);
+    let mut response = match client
+        .issue_gateway_daemon_credential_with_options(
+            IssueGatewayDaemonCredentialRequest::default(),
+            options,
+        )
+        .await
+    {
+        Ok(response) => response.into_owned(),
+        Err(error) if binding_not_ready(&error) => return Ok(None),
+        Err(error) => return Err(BindingError::Connect(error)),
+    };
+    let credential = Zeroizing::new(std::mem::take(&mut response.daemon_credential));
+    let token = DaemonAuthToken::new(credential.as_str())
+        .map_err(|_| BindingError::InvalidDaemonCredential)?;
+    let workspace_pod_uid = response.workspace_pod_uid;
+    if !Uuid::parse_str(&workspace_pod_uid)
+        .is_ok_and(|uid| !uid.is_nil() && uid.to_string() == workspace_pod_uid)
+    {
+        return Err(BindingError::InvalidDaemonCredential);
+    }
+    Ok(Some(IssuedDaemonCredential {
+        token,
+        workspace_pod_uid,
     }))
 }
 
@@ -314,7 +381,7 @@ mod tests {
             api_url: api_url.map(str::to_string),
             binding_url: binding_url.map(str::to_string),
             coordinator_url: Some("http://coordinator:8080".into()),
-            daemon_auth_token: DaemonAuthToken::new("gateway-binding-test-token").unwrap(),
+            daemon_auth_token: Some(DaemonAuthToken::new("gateway-binding-test-token").unwrap()),
             derp_url: None,
             stun: None,
             stun_servers: Vec::new(),
@@ -644,6 +711,137 @@ mod tests {
         ) -> ServiceResult<IssueGatewayDaemonCredentialResponse> {
             Err(ConnectError::unimplemented("not served by this fixture"))
         }
+    }
+
+    const SYNTHETIC_WORKSPACE_POD: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
+
+    struct DaemonCredentialService {
+        answers: Mutex<Vec<Result<(String, String), ErrorCode>>>,
+        authorizations: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[allow(refining_impl_trait)]
+    impl GatewayBindingService for DaemonCredentialService {
+        async fn issue_gateway_binding(
+            &self,
+            _ctx: RequestContext,
+            _request: ServiceRequest<'_, IssueGatewayBindingRequest>,
+        ) -> ServiceResult<IssueGatewayBindingResponse> {
+            Err(ConnectError::unimplemented("not served by this fixture"))
+        }
+
+        async fn issue_gateway_daemon_credential(
+            &self,
+            ctx: RequestContext,
+            _request: ServiceRequest<'_, IssueGatewayDaemonCredentialRequest>,
+        ) -> ServiceResult<IssueGatewayDaemonCredentialResponse> {
+            self.authorizations.lock().unwrap().push(
+                ctx.headers()
+                    .get(AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+            match self.answers.lock().unwrap().remove(0) {
+                Ok((daemon_credential, workspace_pod_uid)) => {
+                    connectrpc::Response::ok(IssueGatewayDaemonCredentialResponse {
+                        daemon_credential,
+                        workspace_pod_uid,
+                        ..Default::default()
+                    })
+                }
+                Err(code) => Err(ConnectError::new(code, "scripted")),
+            }
+        }
+    }
+
+    async fn daemon_credential_fixture(
+        answers: Vec<Result<(String, String), ErrorCode>>,
+    ) -> (BindingPollConfig, Arc<Mutex<Vec<String>>>, TempDir) {
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
+        let url = start_binding_service(Arc::new(DaemonCredentialService {
+            answers: Mutex::new(answers),
+            authorizations: authorizations.clone(),
+        }))
+        .await;
+        let (config, directory) = binding_config(url);
+        (config, authorizations, directory)
+    }
+
+    fn issued(credential: &str, pod: &str) -> Result<(String, String), ErrorCode> {
+        Ok((credential.into(), pod.into()))
+    }
+
+    #[tokio::test]
+    async fn daemon_credential_is_not_ready_until_a_binding_is_recorded() {
+        let (config, authorizations, _directory) = daemon_credential_fixture(vec![
+            Err(ErrorCode::NotFound),
+            Err(ErrorCode::Unavailable),
+            issued(
+                "synthetic-issued-daemon-credential",
+                SYNTHETIC_WORKSPACE_POD,
+            ),
+        ])
+        .await;
+        let client = config.client().unwrap();
+        for _ in 0..2 {
+            assert!(
+                fetch_daemon_credential_once(&client, &config)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let credential = fetch_daemon_credential_once(&client, &config)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            credential.token.expose_secret(),
+            "synthetic-issued-daemon-credential"
+        );
+        assert_eq!(credential.workspace_pod_uid, SYNTHETIC_WORKSPACE_POD);
+        assert!(!format!("{credential:?}").contains("synthetic-issued-daemon-credential"));
+        // The gateway's own projected binding token authenticates every call.
+        assert_eq!(
+            *authorizations.lock().unwrap(),
+            ["Bearer synthetic.projected.binding-token"; 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_credential_refusals_and_invalid_answers_are_errors() {
+        let (config, _authorizations, _directory) = daemon_credential_fixture(vec![
+            Err(ErrorCode::PermissionDenied),
+            Err(ErrorCode::Unauthenticated),
+            issued("", SYNTHETIC_WORKSPACE_POD),
+            issued(" padded", SYNTHETIC_WORKSPACE_POD),
+            issued("synthetic-issued-daemon-credential", ""),
+            issued("synthetic-issued-daemon-credential", "not-a-uid"),
+            issued(
+                "synthetic-issued-daemon-credential",
+                "7E7B20F6-0BD2-4F11-8B16-9C239851EB52",
+            ),
+        ])
+        .await;
+        let client = config.client().unwrap();
+        for expected in [ErrorCode::PermissionDenied, ErrorCode::Unauthenticated] {
+            match fetch_daemon_credential_once(&client, &config).await {
+                Err(BindingError::Connect(error)) => assert_eq!(error.code, expected),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        for _ in 0..5 {
+            assert!(matches!(
+                fetch_daemon_credential_once(&client, &config).await,
+                Err(BindingError::InvalidDaemonCredential)
+            ));
+        }
+        std::fs::remove_file(&config.binding_token_path).unwrap();
+        assert!(matches!(
+            fetch_daemon_credential_once(&client, &config).await,
+            Err(BindingError::IdentityUnavailable)
+        ));
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@ pub mod binding;
 pub mod config;
 pub mod credentials;
 pub mod daemon;
+pub mod daemon_credential;
 pub mod docker_proxy;
 pub mod host_key;
 mod hosted_bridge;

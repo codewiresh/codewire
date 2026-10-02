@@ -10,7 +10,8 @@ use std::io::Write as _;
 use clap::{Args, Parser, Subcommand};
 use codewire_daemon::HOSTED_EXEC_AMBIGUOUS_EXIT_CODE;
 use codewire_daemon::client::{SessionClient, v1};
-use codewire_daemon::config::DAEMON_AUTH_TOKEN_ENV;
+use codewire_daemon::config::{DAEMON_AUTH_TOKEN_ENV, HOSTED_DAEMON_CREDENTIAL_FILE};
+use std::path::Path;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_stream::{Stream, StreamExt};
 use tonic::metadata::{Ascii, MetadataValue};
@@ -20,6 +21,8 @@ const DAEMON_ENDPOINT: &str = "http://127.0.0.1:7777";
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_ARGUMENTS: usize = 1024;
 const FAILURE_DIAGNOSTIC: &str = "hosted exec failed";
+/// A daemon credential is a few hundred bytes.
+const MAX_CREDENTIAL_BYTES: usize = 4 * 1024;
 
 #[derive(Parser)]
 #[command(
@@ -84,7 +87,14 @@ where
     T: Into<OsString> + Clone,
 {
     let request = parse_request(args)?;
-    let token = read_daemon_token(|name| std::env::var(name).map_err(|_| HostedExecFailure))?;
+    let token = read_daemon_token(
+        |name| match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(HostedExecFailure),
+        },
+        || read_credential_file(Path::new(HOSTED_DAEMON_CREDENTIAL_FILE)),
+    )?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -149,10 +159,17 @@ where
     })
 }
 
+/// A legacy Pod renders the environment token into the container
+/// environment, which this exec inherits. An identity-free Pod has none; its
+/// bound daemon wrote its credential to an owner-only file before listening.
 fn read_daemon_token(
-    read: impl FnOnce(&str) -> Result<String, HostedExecFailure>,
+    environment: impl FnOnce(&str) -> Result<Option<String>, HostedExecFailure>,
+    credential_file: impl FnOnce() -> Result<Zeroizing<String>, HostedExecFailure>,
 ) -> Result<Zeroizing<String>, HostedExecFailure> {
-    let token = Zeroizing::new(read(DAEMON_AUTH_TOKEN_ENV)?);
+    let token = match environment(DAEMON_AUTH_TOKEN_ENV)? {
+        Some(token) => Zeroizing::new(token),
+        None => credential_file()?,
+    };
     // SessionClient trims its general-purpose inputs. This fixed-purpose path
     // requires canonical metadata instead of silently repairing the capability.
     if token.is_empty() || !token.is_ascii() || token.trim() != token.as_str() {
@@ -160,6 +177,30 @@ fn read_daemon_token(
     }
     MetadataValue::<Ascii>::try_from(token.as_str()).map_err(|_| HostedExecFailure)?;
     Ok(token)
+}
+
+/// The bound daemon's credential file: a small regular file holding exactly
+/// one canonical token. Anything else fails closed.
+fn read_credential_file(path: &Path) -> Result<Zeroizing<String>, HostedExecFailure> {
+    use std::io::Read as _;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| HostedExecFailure)?;
+    if !metadata.is_file() || metadata.len() > MAX_CREDENTIAL_BYTES as u64 {
+        return Err(HostedExecFailure);
+    }
+    let file = std::fs::File::open(path).map_err(|_| HostedExecFailure)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(256));
+    file.take(MAX_CREDENTIAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| HostedExecFailure)?;
+    if bytes.len() > MAX_CREDENTIAL_BYTES {
+        return Err(HostedExecFailure);
+    }
+    String::from_utf8(std::mem::take(&mut *bytes))
+        .map(Zeroizing::new)
+        .map_err(|error| {
+            drop(Zeroizing::new(error.into_bytes()));
+            HostedExecFailure
+        })
 }
 
 async fn relay_output<S, O, E>(
