@@ -3155,6 +3155,20 @@ mod tests {
             service["spec"]["ports"][0]["port"].as_i64(),
             Some(WORKSPACE_DAEMON_PORT)
         );
+        // The gateway reaches a commodity daemon while Docker is still
+        // starting; confidential keeps Ready-only endpoints.
+        assert_eq!(
+            service["spec"]["publishNotReadyAddresses"].as_bool(),
+            Some(true)
+        );
+        let mut confidential = opts.clone();
+        confidential.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
+        assert_eq!(
+            render_workspace_daemon_service("codewire-runtime", &confidential)["spec"]
+                ["publishNotReadyAddresses"]
+                .as_bool(),
+            Some(false)
+        );
 
         let policy = render_workspace_daemon_network_policy("codewire-runtime", &opts);
         assert_eq!(
