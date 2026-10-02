@@ -148,6 +148,7 @@ def self_test(base: dict[str, Any]) -> None:
     rejected("second binding egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
         {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"protocol": "TCP", "port": 8087}]}))
     rejected("Secret volume", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append({"name": "env", "secret": {"secretName": "env"}}))
+    rejected("environment import", lambda f: workspace(f).__setitem__("envFrom", [{"configMapRef": {"name": "environment"}}]))
 
 
 def check_identity_free_workspace(args: argparse.Namespace) -> int:
