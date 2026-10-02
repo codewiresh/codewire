@@ -16,6 +16,15 @@ KIND_DELETE_FAILURE=''
 DOCKER_PS_FAILURE=0
 # The fixture owns this transaction name even when hosted CI exports its own.
 export KIND_CLUSTER_NAME=codewire-e2e-ci
+# The fixture requests the default host topology even when the caller exports
+# a shifted harness port set; the occupied-port cases below occupy ports this
+# run requested, and the shifted case sets its own assignment explicitly.
+export KIND_INGRESS_HOST_PORT=8090
+export KIND_INGRESS_TLS_HOST_PORT=10443
+export KIND_TEMPORAL_HOST_PORT=7233
+export KIND_ORCHESTRATION_HOST_PORT=8084
+export KIND_COORDINATOR_DIRECT_HOST_PORT=18092
+export KIND_POSTGRES_HOST_PORT=25432
 
 cleanup_fixture() {
   rm -rf "$FIXTURE"
@@ -149,6 +158,31 @@ printf '%s\n' personal-kind | cmp -s - "$CLUSTERS" || fail 'unrelated Kind clust
 if grep -Ev '^ps --format ' "$DOCKER_CALLS" | grep -q .; then
   fail 'occupied port triggered a mutating Docker command'
 fi
+
+# A shifted run never requested the default ports: a holder of one must not
+# block its startup, but a holder of the requested port must, named in the
+# error, without mutating the unrelated cluster or container.
+reset_fixture
+printf '%s\n' personal-kind > "$CLUSTERS"
+printf 'abc123\tunrelated-postgres\t0.0.0.0:8090->5432/tcp\n' > "$DOCKER_PS"
+(
+  KIND_INGRESS_HOST_PORT=18090
+  reclaim_cancelled_ci_clusters "$KIND_CONFIG"
+) || fail 'shifted startup was blocked by a port it never requested'
+printf '%s\n' personal-kind | cmp -s - "$CLUSTERS" || fail 'shifted startup changed an unrelated Kind cluster'
+[ ! -s "$DELETIONS" ] || fail 'shifted startup deleted a cluster outside the CI prefix'
+reset_fixture
+printf '%s\n' personal-kind > "$CLUSTERS"
+printf 'abc123\tunrelated-postgres\t0.0.0.0:18090->5432/tcp\n' > "$DOCKER_PS"
+if (
+  KIND_INGRESS_HOST_PORT=18090
+  reclaim_cancelled_ci_clusters "$KIND_CONFIG"
+) >"$FIXTURE/shifted-occupied.out" 2>&1; then
+  fail 'requested-port holder did not block shifted startup'
+fi
+grep -Fq 'fixed Kind host port 18090 remains occupied' "$FIXTURE/shifted-occupied.out" ||
+  fail 'shifted occupied-port error does not name the requested port'
+[ ! -s "$DELETIONS" ] || fail 'requested-port holder triggered a Kind deletion outside the CI prefix'
 
 # Failure to prove fixed-port release is itself fatal.
 reset_fixture
