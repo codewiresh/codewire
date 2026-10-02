@@ -298,8 +298,74 @@ pub struct PlatformBrokerLeaseProvider<A> {
     instance_id: Uuid,
     credentials: Arc<PlatformCredentialStore>,
     profiles: PlatformAccessProfileStore,
+    /// The bridge service's shared concurrent-lease budget, if any.
+    leases: Option<LeaseBudget>,
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     ssh: Option<ssh::Epoch>,
+}
+
+/// One process-wide budget of concurrent leases, shared by every epoch of one
+/// bridge service. A slot covers exactly one lease's authority checks, grant
+/// and record reads and protected-material read (SQL and the KEK unwrap); never
+/// provider I/O, a refresh or a response body. A lease waits for a slot in
+/// arrival order until its connected identity's original expiry, the deadline
+/// that already bounds that lease, so a burst queues instead of failing.
+#[derive(Clone)]
+pub(crate) struct LeaseBudget {
+    permits: Arc<tokio::sync::Semaphore>,
+    capacity: usize,
+}
+
+impl LeaseBudget {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(capacity)),
+            capacity,
+        }
+    }
+
+    /// Fail every waiting and later lease; held slots finish normally.
+    pub(crate) fn close(&self) {
+        self.permits.close();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available(&self) -> usize {
+        self.permits.available_permits()
+    }
+
+    async fn acquire(
+        &self,
+        expires_at_unix: u64,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, BrokerLeaseError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| BrokerLeaseError::Unavailable)?;
+        let deadline = Duration::from_secs(expires_at_unix)
+            .checked_sub(now)
+            .and_then(|remaining| tokio::time::Instant::now().checked_add(remaining))
+            .ok_or(BrokerLeaseError::Denied)?;
+        let acquired = timing::timed(
+            Phase::LeaseWait,
+            tokio::time::timeout_at(deadline, Arc::clone(&self.permits).acquire_owned()),
+        )
+        .await;
+        match acquired {
+            Ok(Ok(permit)) => Ok(permit),
+            // Closed by shutdown.
+            Ok(Err(_)) => Err(BrokerLeaseError::Unavailable),
+            Err(_) => {
+                timing::capacity_rejected(
+                    "broker_leases",
+                    "lease",
+                    self.capacity,
+                    self.capacity
+                        .saturating_sub(self.permits.available_permits()),
+                );
+                Err(BrokerLeaseError::Unavailable)
+            }
+        }
+    }
 }
 
 /// Non-cloneable, non-serializable, zeroizing operation material.
@@ -365,6 +431,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             instance_id: Uuid::new_v4(),
             credentials,
             profiles,
+            leases: None,
             #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
             ssh: None,
         })
@@ -708,6 +775,16 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         if request_id.is_nil() {
             return Err(BrokerLeaseError::InvalidRequest);
         }
+        // Held until this lease returns: many epochs cannot stampede SQL,
+        // Kubernetes or the KEK with more than the service's lease budget.
+        let _budget = match &self.leases {
+            Some(leases) => Some(
+                leases
+                    .acquire(self.session.identity_expires_at_unix)
+                    .await?,
+            ),
+            None => None,
+        };
         let permission = GrantPermission { operation, route };
         let before = self.admit(&slot, permission.clone()).await?;
         let material = timing::timed(

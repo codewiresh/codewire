@@ -225,8 +225,9 @@ jq -s --arg finished "$finished_at" '
   def pct($q): sort | if length == 0 then null else .[(($q * length) | ceil) - 1] end;
   def round1: if . == null then null else (. * 10 | round) / 10 end;
   [.[] | select(.event == "proxied_request" and .slot == "openai" and .route == "openai-api")] as $requests
-  | ["total_ms", "authority_ms", "resolve_kubernetes_ms", "resolve_sql_ms", "grants_ms",
-     "record_ms", "read_db_ms", "unwrap_ms", "provider_connect_ttfb_ms", "refresh_ms"] as $phases
+  | ["total_ms", "lease_wait_ms", "authority_ms", "resolve_kubernetes_ms", "resolve_sql_ms",
+     "grants_ms", "record_ms", "read_db_ms", "unwrap_ms", "provider_connect_ttfb_ms",
+     "refresh_ms"] as $phases
   | {
       proxied_requests: ($requests | length),
       counts_p50: ({
@@ -244,6 +245,7 @@ jq -s --arg finished "$finished_at" '
       outcomes: ($requests | group_by(.outcome + " " + (.status | tostring))
         | map({key: .[0].outcome + " " + (.[0].status | tostring), value: length}) | from_entries),
       epoch_admissions: ([.[] | select(.event == "epoch_admission")] | length),
+      max_streams_in_use: ([.[] | select(.event == "epoch_admission") | .streams_in_use] | max),
       capacity_rejections: ([.[] | select(.event == "capacity_rejected")] | length)
     }
 ' "$OUT_DIR/timing.jsonl" | tee "$OUT_DIR/phases.json"

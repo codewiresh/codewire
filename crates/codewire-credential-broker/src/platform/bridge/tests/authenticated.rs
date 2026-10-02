@@ -81,19 +81,16 @@ async fn rejected_without_polling(
 
 #[tokio::test]
 async fn mixed_authorities_share_capacity_and_closed_admission_never_polls_lazy_work() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::with_limits(TEST_STREAMS, PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES).await;
     let authority = owner_authority(&fixture);
     let mut pod_streams = Vec::new();
     let mut owner_streams = Vec::new();
-    for _ in 0..PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS / 2 {
+    for _ in 0..TEST_STREAMS / 2 {
         let (input, output) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
         pod_streams.push((input, output.unwrap().into_inner()));
         owner_streams.push(open_direct(&fixture, authority.clone()).await);
     }
-    assert_eq!(
-        fixture.service.state.workers.len(),
-        PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS
-    );
+    assert_eq!(fixture.service.state.workers.len(), TEST_STREAMS);
     rejected_without_polling(&fixture, authority.clone(), Code::ResourceExhausted).await;
     let calls = fixture.authenticator.calls.load(Ordering::SeqCst);
     let (input, rejected) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
