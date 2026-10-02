@@ -23,8 +23,8 @@ use super::environments::{
 };
 use crate::confidential_storage::require_interactive_access;
 use crate::resize_metrics::{self, RequestOutcome};
-use crate::sandbox::client::SandboxClient;
 use crate::sandbox::client::WorkspacePodResizeState;
+use crate::sandbox::client::{SandboxClient, WorkspacePvcAnchor};
 use crate::sandbox::template::{RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC};
 
 const ACTIVE_OPERATION_STATES: [&str; 3] = ["pending", "applying", "restarting"];
@@ -359,13 +359,27 @@ pub(crate) fn classify_execution_mode(
     ))
 }
 
+/// state, type, namespace, cpu, memory, disk, claim name, claim UID, PVC UID.
+type ResizePlanRow = (
+    String,
+    String,
+    Option<String>,
+    i32,
+    i32,
+    i32,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 async fn build_resize_plan(
     state: &ApiState,
     user: &AuthUser,
     params: &PlanEnvironmentResizeParams,
 ) -> AppResult<EnvironmentResizePlan> {
-    let row: Option<(String, String, Option<String>, i32, i32, i32)> = sqlx::query_as(
-        "SELECT state, type, b.namespace, e.cpu_millicores, e.memory_mb, e.disk_gb
+    let row: Option<ResizePlanRow> = sqlx::query_as(
+        "SELECT state, type, b.namespace, e.cpu_millicores, e.memory_mb, e.disk_gb,
+                b.sandbox_claim_name, b.sandbox_claim_uid, b.workspace_pvc_uid
            FROM environments e
            LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
           WHERE e.id = $1 AND e.org_id = $2",
@@ -374,7 +388,17 @@ async fn build_resize_plan(
     .bind(&params.org_id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((environment_state, env_type, namespace, cpu_millicores, memory_mb, disk_gb)) = row
+    let Some((
+        environment_state,
+        env_type,
+        namespace,
+        cpu_millicores,
+        memory_mb,
+        disk_gb,
+        claim_name,
+        claim_uid,
+        recorded_pvc_uid,
+    )) = row
     else {
         return Err(coded(
             StatusCode::NOT_FOUND,
@@ -449,14 +473,17 @@ async fn build_resize_plan(
     };
 
     let storage = if params.desired_resources.disk_gb > previous.disk_gb {
+        // The shared resolver: the recorded Claim and PVC UIDs, never a name.
+        let anchor = WorkspacePvcAnchor {
+            claim_name: claim_name.unwrap_or_default(),
+            claim_uid: claim_uid.unwrap_or_default(),
+            recorded_pvc_uid,
+        };
         Some(
             client
                 .as_ref()
                 .expect("runtime client required for disk growth")
-                .require_workspace_storage_resize(
-                    &params.environment_id,
-                    params.desired_resources.disk_gb,
-                )
+                .require_workspace_storage_resize(&anchor, params.desired_resources.disk_gb)
                 .await
                 .map_err(|error| {
                     coded(

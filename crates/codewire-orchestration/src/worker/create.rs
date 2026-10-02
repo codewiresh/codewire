@@ -11,8 +11,12 @@ use super::env_data::{
     BackendRow, EnvironmentRow, load_backend_row, load_environment, load_environment_in,
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::issue_environment_tokens;
+use super::gatewayauth::{WorkspaceCredentialScope, issue_environment_tokens};
 use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
+use super::workspace_binding::{
+    EnvironmentBinding, bind_workspace_runtime, binding_bootstrap_current, credential_scope,
+    live_environment_binding,
+};
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{
@@ -2002,9 +2006,16 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
             expected_pod.is_none_or(|expected| observation.pod() == expected),
             "workspace Pod changed after the ready observation"
         );
-        if !client
-            .workspace_bootstrap_matches(&template_opts, &claim_name, &claim_uid, observation.pod())
-            .await?
+        let binding = live_environment_binding(&mut **guard.transaction(), &env.id).await?;
+        if !workspace_bootstrap_current(
+            &client,
+            &template_opts,
+            &claim_name,
+            &claim_uid,
+            observation.pod(),
+            binding.as_ref(),
+        )
+        .await?
         {
             return Err(WorkspaceBootstrapMismatch.into());
         }
@@ -2016,16 +2027,9 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
     .await?;
     guard.commit().await?;
 
-    ensure_gateway_stack_for_environment(
-        ctx,
-        &ctx.sandbox_cfg,
-        env,
-        &env.id,
-        &namespace,
-        authority,
-        states,
-    )
-    .await?;
+    // Design §10: Claim Ready with converged labels, then the binding, then
+    // the gateway. An identity-free daemon listens only once bound and the
+    // gateway reaches it only after that, so the gateway wait comes last.
     authority
         .run_while_authoritative_for_states(
             states,
@@ -2038,7 +2042,64 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
             ),
         )
         .await?;
+    let kube = ctx
+        .kube
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("sandbox backend is not configured"))?;
+    if let Some(elapsed) =
+        bind_workspace_runtime(kube, env, backend, authority, states, &observation).await?
+        && matches!(env.state.as_str(), "creating" | "starting")
+    {
+        observe_create_stage(
+            StartStage::WorkspaceBind,
+            start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+            elapsed,
+        );
+    }
+
+    ensure_gateway_stack_for_environment(
+        ctx,
+        &ctx.sandbox_cfg,
+        env,
+        &env.id,
+        &namespace,
+        authority,
+        states,
+    )
+    .await?;
     authority.ensure_for_states(states).await
+}
+
+/// Stale-bootstrap check for the observed Pod (design §12). A bound Pod-scope
+/// runtime compares the binding row's captured generation, digest and
+/// clients; a legacy environment-scope Pod compares the environment it was
+/// rendered with, as before; an identity-free Pod that is not bound yet is
+/// current by construction, because its binding captures the current
+/// environment row under the same fence.
+async fn workspace_bootstrap_current(
+    client: &SandboxClient,
+    template_opts: &TemplateOpts,
+    claim_name: &str,
+    claim_uid: &str,
+    pod: &WorkspacePodIdentity,
+    binding: Option<&EnvironmentBinding>,
+) -> anyhow::Result<bool> {
+    let live_pod = client
+        .get_workspace_pod(&pod.name)
+        .await?
+        .filter(|live| live.metadata.uid.as_deref() == Some(pod.uid.as_str()))
+        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap Pod was replaced"))?;
+    match credential_scope(&live_pod) {
+        Some(WorkspaceCredentialScope::Environment) => {
+            client
+                .workspace_bootstrap_matches(template_opts, claim_name, claim_uid, pod)
+                .await
+        }
+        Some(WorkspaceCredentialScope::Pod) => Ok(binding
+            .filter(|binding| binding.pod_uid == pod.uid)
+            .is_none_or(|binding| binding_bootstrap_current(binding, template_opts))),
+        None => anyhow::bail!("workspace credential scope is ambiguous"),
+    }
 }
 
 async fn record_error(

@@ -1,13 +1,38 @@
-//! Binding-time reads (Program #2238 B1, design §5 and §12): the live
+//! Binding-time reads (Program #2238 B1 and B2, design §5 and §12): the live
 //! Claim → Sandbox → Pod chain for the binding recorder, and the one Pod-less
 //! resolver for the workspace PVC. The resolver walks the recorded Claim UID to
 //! its Sandbox and that Sandbox's `workspace` volume claim template. The name is
-//! only a lookup key; the UID decides.
+//! only a lookup key; the UID decides. Destroy, resize, backups and restore use
+//! the same resolver, because they run while a stopped environment has no Pod.
 
 use super::*;
 
 const SANDBOX_API_VERSION: &str = "agents.x-k8s.io/v1beta1";
 const WORKSPACE_VOLUME: &str = "workspace";
+/// The agent-sandbox fork's PVC tracking label (`sandboxLabel` in
+/// `controllers/sandbox_controller.go`). `reconcilePVCs` adopts an unowned
+/// same-name PVC that carries it with the Sandbox's name hash.
+pub(crate) const SANDBOX_NAME_HASH_LABEL: &str = "agents.x-k8s.io/sandbox-name-hash";
+
+/// The fork's `NameHash`: FNV-1a 32 of the object name as 8 lowercase hex
+/// digits.
+pub(crate) fn sandbox_name_hash(name: &str) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in name.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{hash:08x}")
+}
+
+/// What the database recorded for one environment's workspace storage: the
+/// exact Claim and, once resolved, the exact PVC UID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePvcAnchor {
+    pub claim_name: String,
+    pub claim_uid: String,
+    pub recorded_pvc_uid: Option<String>,
+}
 
 /// The workspace PVC the environment's Sandbox owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +60,17 @@ pub struct BindableRuntime {
 impl RuntimeIdentityObservation {
     pub fn sandbox_uid(&self) -> &str {
         &self.sandbox_uid
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(sandbox_uid: &str, pod_name: &str, pod_uid: &str) -> Self {
+        Self {
+            sandbox_uid: sandbox_uid.to_owned(),
+            pod: WorkspacePodIdentity {
+                name: pod_name.to_owned(),
+                uid: pod_uid.to_owned(),
+            },
+        }
     }
 }
 
@@ -76,6 +112,21 @@ impl SandboxClient {
         expected_claim_uid: &str,
         recorded_uid: Option<&str>,
     ) -> anyhow::Result<WorkspacePvc> {
+        Ok(self
+            .resolve_workspace_pvc_object(expected_claim_name, expected_claim_uid, recorded_uid)
+            .await?
+            .map_or(WorkspacePvc::VolumeLess, |(_, pvc)| pvc))
+    }
+
+    /// The resolved PVC object with its identity, or `None` for a volume-less
+    /// Sandbox. Callers that need the PVC's spec or status (resize, destroy)
+    /// use this instead of computing a name.
+    pub async fn resolve_workspace_pvc_object(
+        &self,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        recorded_uid: Option<&str>,
+    ) -> anyhow::Result<Option<(PersistentVolumeClaim, WorkspacePvc)>> {
         let claim = self
             .claims
             .get(expected_claim_name)
@@ -99,7 +150,7 @@ impl SandboxClient {
             expected_claim_uid,
         )?
         else {
-            return Ok(WorkspacePvc::VolumeLess);
+            return Ok(None);
         };
         let pvc = self
             .persistent_volume_claims()
@@ -108,14 +159,28 @@ impl SandboxClient {
             .map_err(|_| anyhow::anyhow!("workspace PVC is unavailable"))?
             .ok_or_else(|| anyhow::anyhow!("workspace PVC is missing"))?;
         let sandbox_uid = sandbox.metadata.uid.as_deref().unwrap_or_default();
-        workspace_pvc_identity(
+        let identity = workspace_pvc_identity(
             &pvc,
             &self.namespace,
             &pvc_name,
             &sandbox_name,
             sandbox_uid,
             recorded_uid,
+        )?;
+        Ok(Some((pvc, identity)))
+    }
+
+    /// The resolver for a recorded anchor.
+    pub async fn resolve_anchored_workspace_pvc(
+        &self,
+        anchor: &WorkspacePvcAnchor,
+    ) -> anyhow::Result<Option<(PersistentVolumeClaim, WorkspacePvc)>> {
+        self.resolve_workspace_pvc_object(
+            &anchor.claim_name,
+            &anchor.claim_uid,
+            anchor.recorded_pvc_uid.as_deref(),
         )
+        .await
     }
 }
 
@@ -187,6 +252,12 @@ pub(super) fn workspace_pvc_name(
 
 /// The PVC is live, controlled by the Sandbox UID, and carries the recorded
 /// UID when one exists. A same-name PVC that no fenced write recorded fails.
+///
+/// The one exception is the window between a restore adoption and resume
+/// (design §12): an unowned PVC is accepted only when it carries the fork's
+/// tracking label for this Sandbox *and* the UID that
+/// `adopt_restored_workspace_pvc` recorded. First resolution (no recorded UID)
+/// always requires the Sandbox's controller reference.
 pub(super) fn workspace_pvc_identity(
     pvc: &PersistentVolumeClaim,
     namespace: &str,
@@ -196,13 +267,30 @@ pub(super) fn workspace_pvc_identity(
     recorded_uid: Option<&str>,
 ) -> anyhow::Result<WorkspacePvc> {
     let uid = runtime_object_uid(&pvc.metadata, namespace, name)?;
-    require_runtime_controller(
-        &pvc.metadata,
-        SANDBOX_API_VERSION,
-        "Sandbox",
-        sandbox_name,
-        sandbox_uid,
-    )?;
+    let unowned = pvc
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .all(|owner| owner.controller != Some(true));
+    let adoption_window = unowned
+        && recorded_uid == Some(uid)
+        && pvc
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(SANDBOX_NAME_HASH_LABEL))
+            .is_some_and(|hash| *hash == sandbox_name_hash(sandbox_name));
+    if !adoption_window {
+        require_runtime_controller(
+            &pvc.metadata,
+            SANDBOX_API_VERSION,
+            "Sandbox",
+            sandbox_name,
+            sandbox_uid,
+        )?;
+    }
     anyhow::ensure!(
         recorded_uid.is_none_or(|recorded| recorded == uid),
         "workspace PVC does not carry the recorded UID"

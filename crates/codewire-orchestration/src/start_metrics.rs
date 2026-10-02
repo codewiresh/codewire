@@ -43,6 +43,10 @@ pub enum StartStage {
     GatewayReady,
     /// Claim readiness wait, when the claim was not already ready.
     WaitForReady,
+    /// Recording the claim-time workspace binding (Program #2238 B2): the
+    /// live chain, image and PVC checks and the fenced write, between Claim
+    /// readiness and the gateway readiness wait.
+    WorkspaceBind,
     /// Workspace Pod created until scheduled (includes volume provisioning
     /// under `WaitForFirstConsumer`).
     PodScheduled,
@@ -57,10 +61,11 @@ pub enum StartStage {
 }
 
 impl StartStage {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::CreateClaim,
         Self::GatewayReady,
         Self::WaitForReady,
+        Self::WorkspaceBind,
         Self::PodScheduled,
         Self::PodInitialized,
         Self::PodRunning,
@@ -72,6 +77,7 @@ impl StartStage {
             Self::CreateClaim => "create_claim",
             Self::GatewayReady => "gateway_ready",
             Self::WaitForReady => "wait_for_ready",
+            Self::WorkspaceBind => "workspace_bind",
             Self::PodScheduled => "pod_scheduled",
             Self::PodInitialized => "pod_initialized",
             Self::PodRunning => "pod_running",

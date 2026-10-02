@@ -27,6 +27,7 @@ use super::setup::{
     handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
     jittered_duration, wait_for_sidecar,
 };
+use super::workspace_binding::release_workspace_binding;
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, Snapshot};
 use crate::sandbox::client::{
@@ -338,6 +339,9 @@ pub async fn handle_environment_stop(
             wait_for_workspace_suspension(&client, &env, &backend, &previous, DELETED_TIMEOUT),
         )
         .await?;
+    // Design §10: the Pod is observed absent, so its binding is released. A
+    // later start binds the new Pod UID.
+    release_workspace_binding(authority, STOP_MUTATION_STATES).await?;
     if let Err(e) = authority
         .run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(env_id))
         .await
@@ -652,6 +656,9 @@ pub(super) async fn restart_workspace_bootstrap(
             .await
     })
     .await?;
+    // Every previous Pod is gone: release its binding before the resumed Pod
+    // gets a new UID and its own binding.
+    release_workspace_binding(authority, states).await?;
     refresh_workspace_bootstrap(ctx, env, backend, opts, &suspended, authority, states).await?;
     run_template_mutation(
         authority,
@@ -1051,6 +1058,12 @@ pub async fn handle_environment_destroy(
 
     let per_environment_template =
         destroy_template_hint(&ctx.pool, env.preset_id.as_deref(), env_id).await?;
+    // Design §10: destroy releases the binding before its storage proof; the
+    // proof also counts the recorded workspace PVC UID (design §12).
+    release_workspace_binding(authority, DESTROY_CLEANUP_MUTATION_STATES).await?;
+    let recorded_pvc_uid = backend
+        .as_ref()
+        .and_then(|row| row.workspace_pvc_uid.clone());
 
     for namespace in namespaces {
         if namespace.trim().is_empty() {
@@ -1060,11 +1073,12 @@ pub async fn handle_environment_destroy(
         if let Err(error) = authority
             .run_external_mutation(
                 DESTROY_CLEANUP_MUTATION_STATES,
-                client.delete_environment_resources(
+                client.delete_environment_resources_with_recorded_storage(
                     env_id,
                     known_sandbox_name,
                     per_environment_template.as_deref(),
                     env.isolation_tier == "confidential",
+                    recorded_pvc_uid.as_deref(),
                     DELETED_TIMEOUT,
                 ),
             )
