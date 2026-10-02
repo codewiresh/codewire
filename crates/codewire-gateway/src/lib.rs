@@ -6,6 +6,7 @@ pub mod daemon_credential;
 pub mod docker_proxy;
 pub mod host_key;
 mod hosted_bridge;
+pub mod metrics;
 pub mod readiness;
 pub mod runtime;
 pub mod scp;

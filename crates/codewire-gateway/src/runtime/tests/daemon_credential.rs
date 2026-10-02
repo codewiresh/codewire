@@ -196,6 +196,133 @@ async fn a_refusal_installs_the_replaced_pods_credential_and_shutdown_ends_the_r
         .expect("refresher result");
 }
 
+#[test]
+fn refreshes_that_find_nothing_new_back_off_exponentially_to_the_cap() {
+    let backoff = DAEMON_CREDENTIAL_REFRESH_BACKOFF;
+    assert_eq!(backoff.base, Duration::from_secs(1));
+    assert_eq!(backoff.cap, Duration::from_secs(60));
+    let mut schedule = RefreshSchedule::default();
+    let pauses: Vec<u64> = (0..9)
+        .map(|_| schedule.after(RefreshOutcome::Unchanged, backoff).as_secs())
+        .collect();
+    assert_eq!(pauses, [2, 4, 8, 16, 32, 60, 60, 60, 60]);
+    // Failures back off the same way, and the doubling never overflows.
+    let mut failing = RefreshSchedule {
+        fruitless: u32::MAX - 1,
+    };
+    assert_eq!(failing.after(RefreshOutcome::Failed, backoff), backoff.cap);
+    assert_eq!(failing.after(RefreshOutcome::Failed, backoff), backoff.cap);
+}
+
+#[test]
+fn a_changed_credential_or_an_accepted_call_resets_the_backoff() {
+    let backoff = DAEMON_CREDENTIAL_REFRESH_BACKOFF;
+    let mut schedule = RefreshSchedule::default();
+    for _ in 0..5 {
+        schedule.after(RefreshOutcome::Unchanged, backoff);
+    }
+    assert_eq!(
+        schedule.after(RefreshOutcome::Changed, backoff),
+        Duration::from_secs(1)
+    );
+    for _ in 0..5 {
+        schedule.after(RefreshOutcome::Failed, backoff);
+    }
+    schedule.authenticated();
+    assert_eq!(
+        schedule.after(RefreshOutcome::Unchanged, backoff),
+        Duration::from_secs(2)
+    );
+}
+
+/// A daemon that refuses every call as fast as it can drives no more than the
+/// backoff allows, and each outcome is observed.
+#[tokio::test]
+async fn a_refusal_loop_is_throttled_and_every_outcome_is_observed() {
+    let (config, calls, _directory) = binding(vec![
+        Err(ErrorCode::NotFound),
+        Ok((FIRST_CREDENTIAL, FIRST_POD)),
+        Ok((REPLACEMENT_CREDENTIAL, REPLACEMENT_POD)),
+        Ok((REPLACEMENT_CREDENTIAL, REPLACEMENT_POD)),
+    ])
+    .await;
+    let credential = DaemonCredential::issued(token(FIRST_CREDENTIAL), FIRST_POD.into());
+    let observed = Arc::new(Mutex::new(
+        Vec::<(tokio::time::Instant, RefreshOutcome)>::new(),
+    ));
+    let record = observed.clone();
+    let backoff = RefreshBackoff {
+        base: Duration::from_millis(20),
+        cap: Duration::from_millis(160),
+    };
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let refresher = tokio::spawn(refresh_daemon_credential_with(
+        credential.clone(),
+        config,
+        shutdown_rx,
+        backoff,
+        move |outcome| {
+            record
+                .lock()
+                .unwrap()
+                .push((tokio::time::Instant::now(), outcome))
+        },
+    ));
+    let refusing = {
+        let credential = credential.clone();
+        tokio::spawn(async move {
+            loop {
+                credential.report_unauthenticated();
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+    };
+    sleep(Duration::from_millis(1_200)).await;
+    refusing.abort();
+    shutdown_tx.send(true).unwrap();
+    timeout(Duration::from_secs(3), refresher)
+        .await
+        .expect("refresher stopped")
+        .expect("refresher task")
+        .expect("refresher result");
+
+    let observed = observed.lock().unwrap().clone();
+    let outcomes: Vec<RefreshOutcome> = observed.iter().map(|(_, outcome)| *outcome).collect();
+    assert!(outcomes.len() >= 5, "{outcomes:?}");
+    assert_eq!(
+        outcomes[..4],
+        [
+            RefreshOutcome::Failed,
+            RefreshOutcome::Unchanged,
+            RefreshOutcome::Changed,
+            RefreshOutcome::Unchanged,
+        ]
+    );
+    assert!(
+        outcomes[4..]
+            .iter()
+            .all(|outcome| *outcome == RefreshOutcome::Unchanged)
+    );
+    assert_eq!(*calls.lock().unwrap() as usize, outcomes.len());
+    // Each pause is at least what the schedule asked for: 40, 80, then 20
+    // after the change, then 40, 80, 160, 160 ms.
+    let mut schedule = RefreshSchedule::default();
+    for (pair, outcome) in observed.windows(2).zip(&outcomes) {
+        let pause = schedule.after(*outcome, backoff);
+        assert!(
+            pair[1].0.duration_since(pair[0].0) >= pause,
+            "refreshed after {:?}, before the {pause:?} pause",
+            pair[1].0.duration_since(pair[0].0)
+        );
+    }
+    // Unthrottled, a 1 ms refusal loop would have driven hundreds.
+    assert!(outcomes.len() <= 12, "{outcomes:?}");
+    assert_eq!(
+        credential.workspace_pod_uid().as_deref(),
+        Some(REPLACEMENT_POD)
+    );
+}
+
 #[tokio::test]
 async fn the_daemon_client_follows_a_replaced_pod_behind_the_same_service() {
     // The daemon Service now reaches a replacement Pod, which accepts only its
