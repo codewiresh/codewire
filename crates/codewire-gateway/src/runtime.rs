@@ -22,6 +22,7 @@ use crate::daemon::{DaemonClientError, DaemonSessionClient};
 use crate::daemon_credential::DaemonCredential;
 use crate::docker_proxy::{DockerProxySettings, serve_docker_socket_proxy};
 use crate::host_key;
+use crate::metrics::RefreshOutcome;
 use crate::readiness::{
     CredentialReadiness, ReadinessState, StartupGate, router as readiness_router,
 };
@@ -82,8 +83,57 @@ const DAEMON_WAIT_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// daemon starts listening at once, and this fetch must follow within a
 /// quarter second. The schedule matches the daemon connect retry.
 const DAEMON_CREDENTIAL_BACKOFF: DaemonConnectBackoff = DAEMON_CONNECT_BACKOFF;
-/// A burst of refusals costs at most one credential fetch per interval.
-const DAEMON_CREDENTIAL_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// Refusal-driven refresh spacing. The daemon answering Unauthenticated is
+/// enough to trigger a refresh, and a workspace tenant controls what answers
+/// on the daemon address, so every refresh that finds nothing new (the same
+/// Pod UID and credential, or no credential) doubles the pause before the
+/// next one, from 1 s up to 60 s. Each refresh costs orchestration a
+/// TokenReview, three Kubernetes reads and a database query; at the cap a
+/// refusal loop costs one of those a minute. A changed credential or an
+/// accepted daemon call resets the pause, so a replaced Pod is followed within
+/// a second, and a slow replacement within at most the cap.
+const DAEMON_CREDENTIAL_REFRESH_BACKOFF: RefreshBackoff = RefreshBackoff {
+    base: Duration::from_secs(1),
+    cap: Duration::from_secs(60),
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RefreshBackoff {
+    base: Duration,
+    cap: Duration,
+}
+
+impl RefreshBackoff {
+    /// The pause after a refresh, given how many refreshes in a row found
+    /// nothing new.
+    fn delay(&self, fruitless: u32) -> Duration {
+        self.base
+            .saturating_mul(1_u32 << fruitless.min(16))
+            .min(self.cap)
+    }
+}
+
+/// The refresher's backoff state: refreshes in a row that found nothing new.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RefreshSchedule {
+    fruitless: u32,
+}
+
+impl RefreshSchedule {
+    /// The daemon accepted a call since the last refresh.
+    fn authenticated(&mut self) {
+        self.fruitless = 0;
+    }
+
+    /// Record a refresh's outcome and return the pause before the next one.
+    fn after(&mut self, outcome: RefreshOutcome, backoff: RefreshBackoff) -> Duration {
+        self.fruitless = match outcome {
+            RefreshOutcome::Changed => 0,
+            RefreshOutcome::Unchanged | RefreshOutcome::Failed => self.fruitless.saturating_add(1),
+        };
+        backoff.delay(self.fruitless)
+    }
+}
 
 pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
     run_gateway_until_shutdown(config, shutdown_signal()).await
@@ -735,26 +785,79 @@ async fn fetch_daemon_credential_with_retry(
 async fn refresh_daemon_credential(
     credential: DaemonCredential,
     binding: BindingPollConfig,
-    mut shutdown_rx: watch::Receiver<bool>,
+    shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
+    refresh_daemon_credential_with(
+        credential,
+        binding,
+        shutdown_rx,
+        DAEMON_CREDENTIAL_REFRESH_BACKOFF,
+        crate::metrics::observe_daemon_credential_refresh,
+    )
+    .await
+}
+
+/// One fetch per refusal, spaced by `backoff`. A fetch that issues nothing
+/// (a replacement Pod not bound yet, or orchestration unreachable) is retried
+/// on the same schedule without waiting for another refusal, so the gateway
+/// still follows a replaced Pod when no call is pending.
+async fn refresh_daemon_credential_with(
+    credential: DaemonCredential,
+    binding: BindingPollConfig,
+    mut shutdown_rx: watch::Receiver<bool>,
+    backoff: RefreshBackoff,
+    observe: impl Fn(RefreshOutcome),
+) -> Result<()> {
+    let client = binding
+        .client()
+        .context("build gateway binding client for the daemon credential refresh")?;
+    let mut schedule = RefreshSchedule::default();
+    let mut retry = false;
     loop {
-        tokio::select! {
-            _ = wait_for_shutdown(shutdown_rx.clone()) => return Ok(()),
-            _ = credential.refresh_requested() => {}
+        if !retry {
+            tokio::select! {
+                _ = wait_for_shutdown(shutdown_rx.clone()) => return Ok(()),
+                _ = credential.refresh_requested() => {}
+            }
         }
-        let issued = tokio::select! {
+        if credential.take_authenticated() {
+            schedule.authenticated();
+        }
+        let fetched = tokio::select! {
             _ = wait_for_shutdown(shutdown_rx.clone()) => return Ok(()),
-            issued = fetch_daemon_credential_with_retry(&binding, DAEMON_CREDENTIAL_BACKOFF) => issued?,
+            fetched = fetch_daemon_credential_once(&client, &binding) => fetched,
         };
-        let previous = credential.workspace_pod_uid();
-        if credential.replace(issued.token, issued.workspace_pod_uid.clone()) {
-            tracing::info!(
-                previous_workspace_pod_uid = ?previous,
-                workspace_pod_uid = %issued.workspace_pod_uid,
-                "rust gateway refreshed the workspace daemon credential"
+        let outcome = match fetched {
+            Ok(Some(issued)) => {
+                let previous = credential.workspace_pod_uid();
+                if credential.replace(issued.token, issued.workspace_pod_uid.clone()) {
+                    tracing::info!(
+                        previous_workspace_pod_uid = ?previous,
+                        workspace_pod_uid = %issued.workspace_pod_uid,
+                        "rust gateway refreshed the workspace daemon credential"
+                    );
+                    RefreshOutcome::Changed
+                } else {
+                    RefreshOutcome::Unchanged
+                }
+            }
+            Ok(None) => RefreshOutcome::Failed,
+            // Value-blind: the error carries a code, never a credential.
+            Err(error) => {
+                tracing::debug!(error = %error, "workspace daemon credential refresh failed");
+                RefreshOutcome::Failed
+            }
+        };
+        observe(outcome);
+        retry = outcome == RefreshOutcome::Failed;
+        let pause = schedule.after(outcome, backoff);
+        if outcome != RefreshOutcome::Changed {
+            tracing::debug!(
+                outcome = outcome.as_str(),
+                fruitless = schedule.fruitless,
+                next_refresh_ms = pause.as_millis() as u64,
+                "workspace daemon credential refresh found nothing new"
             );
-        } else {
-            tracing::debug!("workspace daemon credential unchanged after a refusal");
         }
         tokio::select! {
             changed = shutdown_rx.changed() => {
@@ -762,7 +865,7 @@ async fn refresh_daemon_credential(
                     return Ok(());
                 }
             }
-            _ = sleep(DAEMON_CREDENTIAL_REFRESH_INTERVAL) => {}
+            _ = sleep(pause) => {}
         }
     }
 }
