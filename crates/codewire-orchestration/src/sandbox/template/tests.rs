@@ -3329,6 +3329,7 @@ mod tests {
             workspace_identity: WorkspaceIdentity::Binding {
                 binding_url: IDENTITY_FREE_BINDING_URL.into(),
             },
+            gateway_daemon_credential_from_binding: true,
             ..credential_opts()
         }
     }
@@ -3471,6 +3472,11 @@ mod tests {
             image_command: vec!["sleep".into(), "infinity".into()],
             ..identity_free_opts()
         });
+        // The commodity Kata agent policy init-data is shape configuration.
+        variants.push(TemplateOpts {
+            kata_agent_policy_enabled: true,
+            ..identity_free_opts()
+        });
         // Every managed client selected.
         variants.push(TemplateOpts {
             managed_credential_clients:
@@ -3540,6 +3546,14 @@ mod tests {
         assert!(render_credential_codex_config("dev-sandboxes", &opts).is_none());
         let legacy = credential_opts();
         assert!(build_sidecar_env(&legacy)
+            .iter()
+            .any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
+        // Rollback: a legacy workspace whose gateway reads the binding.
+        let rollback = TemplateOpts {
+            gateway_daemon_credential_from_binding: true,
+            ..credential_opts()
+        };
+        assert!(!build_sidecar_env(&rollback)
             .iter()
             .any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
         assert!(render_credential_codex_config("dev-sandboxes", &legacy).is_some());

@@ -165,6 +165,13 @@ pub struct TemplateOpts {
     pub daemon_auth_token: String,
     /// How the workspace Pod is bound to this environment.
     pub workspace_identity: WorkspaceIdentity,
+    /// The gateway fetches the bound Pod's daemon credential with
+    /// `IssueGatewayDaemonCredential` instead of a rendered token. True for
+    /// every non-confidential workspace whose gateway can reach its binding,
+    /// in both identity modes: an identity-free daemon accepts only its
+    /// per-Pod credential, and under rollback a legacy Pod's binding answers
+    /// with the environment token, so one gateway rendering serves both.
+    pub gateway_daemon_credential_from_binding: bool,
     pub api_base_url: String,
     pub coordinator_url: String,
     pub server_namespace: String,
@@ -230,6 +237,10 @@ impl fmt::Debug for TemplateOpts {
             .field("gateway_token", &"<redacted>")
             .field("daemon_auth_token", &"<redacted>")
             .field("workspace_identity", &self.workspace_identity)
+            .field(
+                "gateway_daemon_credential_from_binding",
+                &self.gateway_daemon_credential_from_binding,
+            )
             .field("api_base_url", &self.api_base_url)
             .field("coordinator_url", &self.coordinator_url)
             .field("server_namespace", &self.server_namespace)

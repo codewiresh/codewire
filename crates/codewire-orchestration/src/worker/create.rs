@@ -438,11 +438,15 @@ pub fn environment_template_opts(
     // Commodity workspaces are identity-free (design §13); confidential keeps
     // its measured environment-bound init-data until B2c. A Pod reaches the
     // binding listener, and its gateway the binding RPC, only with the
-    // orchestration namespace and a coordinator known.
-    let workspace_identity = if cfg.workspace_identity_mode == WorkspaceIdentityMode::Binding
-        && runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
+    // orchestration namespace and a coordinator known. The gateway uses the
+    // binding RPC in both modes, so a rollback never strands an existing
+    // identity-free environment behind a rendered environment token.
+    let gateway_daemon_credential_from_binding = runtime_spec.profile
+        != RUNTIME_PROFILE_CONFIDENTIAL
         && !cfg.pod_namespace.trim().is_empty()
-        && !(cfg.coordinator_url.trim().is_empty() && cfg.api_base_url.trim().is_empty())
+        && !(cfg.coordinator_url.trim().is_empty() && cfg.api_base_url.trim().is_empty());
+    let workspace_identity = if cfg.workspace_identity_mode == WorkspaceIdentityMode::Binding
+        && gateway_daemon_credential_from_binding
     {
         WorkspaceIdentity::Binding {
             binding_url: workspace_binding_url(cfg.pod_namespace.trim()),
@@ -469,6 +473,7 @@ pub fn environment_template_opts(
         gateway_token: gateway_token.to_string(),
         daemon_auth_token: daemon_auth_token.to_string(),
         workspace_identity,
+        gateway_daemon_credential_from_binding,
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
         server_namespace: cfg.pod_namespace.clone(),
@@ -2300,6 +2305,24 @@ mod tests {
             ..cfg.clone()
         };
         assert_eq!(render(&rollback, &env), WorkspaceIdentity::EnvironmentToken);
+        // Under rollback the gateway still uses the binding RPC, so an
+        // existing identity-free environment keeps working; confidential
+        // keeps its rendered token.
+        let gateway = |cfg: &SandboxWorkerCfg, env: &EnvironmentRow| {
+            environment_template_opts(
+                cfg,
+                "ghcr.io/codewiresh/workspace:1",
+                "base",
+                env,
+                7,
+                "tok",
+                "daemon-tok",
+            )
+            .unwrap()
+            .gateway_daemon_credential_from_binding
+        };
+        assert!(gateway(&cfg, &env));
+        assert!(gateway(&rollback, &env));
         let no_namespace = SandboxWorkerCfg {
             pod_namespace: String::new(),
             ..cfg.clone()
@@ -2325,6 +2348,8 @@ mod tests {
             render(&cfg, &confidential),
             WorkspaceIdentity::EnvironmentToken
         );
+        assert!(!gateway(&cfg, &confidential));
+        assert!(!gateway(&no_namespace, &env));
     }
 
     #[test]

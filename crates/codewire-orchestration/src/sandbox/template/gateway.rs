@@ -105,9 +105,10 @@ pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
         "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
         "value": workspace_daemon_service_addr(&opts.environment_id),
     })];
-    // An identity-free workspace's gateway fetches the daemon credential of
-    // the currently bound Pod with IssueGatewayDaemonCredential (design §9).
-    if !opts.identity_free() {
+    // The gateway fetches the daemon credential of the currently bound Pod
+    // with IssueGatewayDaemonCredential (design §9); an identity-free
+    // workspace always does.
+    if !(opts.identity_free() || opts.gateway_daemon_credential_from_binding) {
         env.push(json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.daemon_auth_token }));
     }
     env.push(json!({ "name": "CODEWIRE_GATEWAY_TOKEN", "value": opts.gateway_token }));
