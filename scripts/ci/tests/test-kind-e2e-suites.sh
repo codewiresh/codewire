@@ -426,6 +426,10 @@ fi
 # Sealed scenarios below supply all five exact inputs to their own child shell.
 unset KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE \
   KIND_AGENT_SANDBOX_IMAGE KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE
+# ShellCheck reads a sourced file again at every directive. This one reads
+# kind-e2e.sh with common.sh and every suite, so the later restores of those
+# files use source=/dev/null; following each again doubled this file's analysis
+# to about 14 GiB and 90 seconds (#2405).
 # shellcheck source=scripts/ci/verify/kind-e2e.sh
 source "$SCRIPT"
 
@@ -540,7 +544,7 @@ grep -Fq 'cluster ${KIND_CLUSTER_NAME} is up; no test suites ran' "$SCRIPT" ||
   fail 'standalone up no longer reports its suite-free exit'
 
 # Restore the production up replaced by the dispatch spies.
-# shellcheck source=scripts/ci/verify/kind/suites/up.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
 
 # Up refuses an implicit cluster name and an already-existing cluster before
@@ -820,17 +824,17 @@ for wrapped_entry in former-shard:run_kind_up wrapped-suite:run_retained_credent
 done
 
 # Restore the production suite functions replaced by the dispatcher spies.
-# shellcheck source=scripts/ci/verify/kind/suites/integrated.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$INTEGRATED"
-# shellcheck source=scripts/ci/verify/kind/suites/dashboard-browser.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$DASHBOARD_BROWSER"
-# shellcheck source=scripts/ci/verify/kind/suites/final-fencing.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$FINAL_FENCING"
-# shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$ENVIRONMENT_SESSION"
-# shellcheck source=scripts/ci/verify/kind/suites/sandbox-supply-chain.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$SANDBOX_SUPPLY_CHAIN"
-# shellcheck source=scripts/ci/verify/kind/suites/runtime-acceptance.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$RUNTIME_ACCEPTANCE"
 
 # A browser prerequisite failure preserves its status and stops before the
@@ -923,7 +927,7 @@ cmp -s "$FIXTURE/want-order" "$CALLS" || {
 }
 
 # Restore shared production functions replaced by the integrated-order spies.
-# shellcheck source=scripts/ci/verify/kind/common.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$COMMON"
 
 # The retained integrated remainder validates its cluster, proves the consumed
@@ -1505,7 +1509,7 @@ if services == 0 or ports == 0:
     raise SystemExit(1)
 PY
   }
-  # shellcheck source=scripts/ci/verify/kind/common.sh
+  # shellcheck source=/dev/null # Read through kind-e2e.sh above.
   source "$COMMON"
   [ "$(kind_workspace_runtime_image)" = "$KIND_WORKSPACE_LOCAL_IMAGE" ] ||
     fail 'sealed workspace input did not resolve to its local alias'
@@ -1927,7 +1931,7 @@ grep -Fq 'VERIFICATION_EDGE_KIND_RESULT: ${{ needs.edge-kind.result }}' \
   fail 'Required verification does not consume the aggregated shard result'
 
 # Restore the production API recovery implementation after the load-order spy.
-# shellcheck source=scripts/ci/verify/kind/common.sh
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$COMMON"
 
 # A remote DinD job joins the exact Kind network, receives an internal
@@ -2141,7 +2145,7 @@ kubectl() {
 : >"$CALLS"
 (
   # Restore the production definitions replaced by the earlier order spies.
-  # shellcheck source=scripts/ci/verify/kind/common.sh
+  # shellcheck source=/dev/null # Read through kind-e2e.sh above.
   source "$COMMON"
   kubectl() { record "$*"; cat >/dev/null; }
   kubectl_apply() { record "apply:$*"; cat >/dev/null; }
