@@ -170,6 +170,8 @@ pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
         OperationKind::UpdateEnvironmentSources => UPDATE_ENVIRONMENT_SOURCES,
         OperationKind::Delete => DELETE,
         OperationKind::Reconcile => RECONCILE,
+        // Their closed transaction/recovery runs before lifecycle dispatch.
+        OperationKind::UpdateCwRuntime | OperationKind::RollbackCwRuntime => &[],
     }
 }
 

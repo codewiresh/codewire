@@ -8,6 +8,8 @@ pub mod env;
 pub mod execution;
 pub mod files;
 #[cfg(unix)]
+mod host_process;
+#[cfg(unix)]
 pub mod hosted_state;
 mod lifecycle;
 #[cfg(unix)]
@@ -19,7 +21,7 @@ pub mod session;
 pub use codewire_gateway_proto::{DaemonAuthToken, HOSTED_EXEC_AMBIGUOUS_EXIT_CODE};
 pub use config::{
     BindResponseFields, Config, ConfigError, CredentialBridgeConfig, CredentialBridgeTransport,
-    DEFAULT_HOME_ROOT, DEFAULT_LISTEN_ADDR, DEFAULT_WORKSPACE_ROOT, HOME_ROOT_ENV,
+    DEFAULT_HOME_ROOT, DEFAULT_LISTEN_ADDR, DEFAULT_WORKSPACE_ROOT, HOME_ROOT_ENV, HostConfig,
     HostedDaemonMode, InvalidWorkspaceBinding, LaunchProjectionConfig,
     NativeLaunchProjectionConfig, SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV, WorkspaceBinding,
     WorkspaceBindingConfig,

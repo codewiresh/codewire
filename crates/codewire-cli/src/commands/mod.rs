@@ -13,6 +13,13 @@
 //! `lib.rs` line positions are historical anchors only.
 
 use super::*;
+#[cfg(unix)]
+pub(crate) use sessions::agents::*;
+
+#[cfg(unix)]
+mod host;
+#[cfg(unix)]
+pub(crate) use host::*;
 
 #[cfg(target_os = "linux")]
 mod native;
@@ -674,6 +681,22 @@ pub(crate) struct EnvironmentShellArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentRunArgs {
+    #[arg(long, help = "Unique session name within this environment")]
+    pub(crate) name: Option<String>,
+    #[arg(long, help = "Parent session name or ID within this environment")]
+    pub(crate) parent: Option<String>,
+    #[arg(long, value_parser = ["codex", "claude", "kimi"], conflicts_with = "command")]
+    pub(crate) agent: Option<String>,
+    #[arg(long, requires = "agent")]
+    pub(crate) model: Option<String>,
+    #[arg(long, requires = "agent", value_parser = ["low", "medium", "high", "xhigh", "max", "ultra"])]
+    pub(crate) effort: Option<String>,
+    #[arg(
+        long,
+        requires = "agent",
+        help = "Initial task for the managed conversation"
+    )]
+    pub(crate) prompt: Option<String>,
     #[arg(value_name = "ENV")]
     pub(crate) environment: Option<String>,
     #[arg(short = 'w', long = "workdir", alias = "dir", value_name = "DIR")]
@@ -693,12 +716,14 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) detach: bool,
     #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
-    #[arg(last = true, required = true, value_name = "COMMAND")]
+    #[arg(last = true, required_unless_present = "agent", value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvCommand {
+    #[command(about = "Inspect or change cw in a running native Linux VM")]
+    Runtime(EnvRuntimeArgs),
     #[command(
         about = "Create a new environment",
         long_about = "Create a new environment from direct CLI flags.\n\nMultiple repos can be specified as positional args or with --repo flags.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo."
@@ -769,7 +794,120 @@ pub(crate) enum EnvCommand {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeArgs {
+    #[command(subcommand)]
+    command: EnvRuntimeCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum EnvRuntimeCommand {
+    #[command(about = "Show the running VM's bootstrap and live cw selection")]
+    Info(EnvRuntimeQueryArgs),
+    #[command(
+        about = "Select a pinned local cw image without restarting the VM or existing processes"
+    )]
+    Update(EnvRuntimeUpdateArgs),
+    #[command(about = "Select the retained previous cw without restarting existing processes")]
+    Rollback(EnvRuntimeRollbackArgs),
+    #[command(about = "Observe the same runtime request after an interrupted reply")]
+    Observe(EnvRuntimeOperationArgs),
+    #[command(about = "Cancel the same request or report its already committed effect")]
+    Cancel(EnvRuntimeOperationArgs),
+}
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeQueryArgs {
+    #[arg(value_name = "ENV", help = "Explicit native environment name or UUID")]
+    environment: String,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    output: OutputFormat,
+}
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeUpdateArgs {
+    #[arg(value_name = "ENV")]
+    environment: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Already admitted image-derived cw-runtime.lock.json"
+    )]
+    source: PathBuf,
+    #[arg(
+        long,
+        value_name = "SHA256",
+        help = "Exact lowercase cw image index SHA256",
+        value_parser = parse_runtime_sha256
+    )]
+    image_sha256: String,
+    #[arg(
+        long,
+        value_name = "SHA256",
+        help = "Exact lowercase cw executable SHA256",
+        value_parser = parse_runtime_sha256
+    )]
+    target_sha256: String,
+    #[arg(long, help = "Observed live selector revision", value_parser = parse_runtime_revision)]
+    expected_revision: u64,
+    #[arg(
+        long,
+        value_name = "UUID",
+        help = "Stable request UUID; an existing request is observation only",
+        value_parser = parse_runtime_request_id
+    )]
+    request_id: Option<uuid::Uuid>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    output: OutputFormat,
+}
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeRollbackArgs {
+    #[arg(value_name = "ENV")]
+    environment: String,
+    #[arg(long, help = "Observed live selector revision", value_parser = parse_runtime_revision)]
+    expected_revision: u64,
+    #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id)]
+    request_id: Option<uuid::Uuid>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    output: OutputFormat,
+}
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeOperationArgs {
+    #[arg(value_name = "ENV")]
+    environment: String,
+    #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id)]
+    request_id: uuid::Uuid,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    output: OutputFormat,
+}
+
+fn parse_runtime_sha256(value: &str) -> Result<String, String> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("runtime SHA256 must be exactly 64 lowercase hexadecimal characters".into())
+    }
+}
+fn parse_runtime_revision(value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|revision| *revision > 0)
+        .ok_or_else(|| "runtime selection revision must be a nonzero integer".into())
+}
+fn parse_runtime_request_id(value: &str) -> Result<uuid::Uuid, String> {
+    uuid::Uuid::parse_str(value)
+        .ok()
+        .filter(|id| !id.is_nil())
+        .ok_or_else(|| "runtime request ID must be a non-nil UUID".into())
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct EnvCreateArgs {
+    #[arg(long = "type", value_enum, default_value_t = EnvironmentTypeArg::Sandbox,
+        help = "Sandbox or explicitly trusted host execution")]
+    environment_type: EnvironmentTypeArg,
     #[arg(value_name = "REPO_URL")]
     repo_urls: Vec<String>,
     #[arg(
@@ -908,6 +1046,20 @@ pub(crate) enum PathModeArg {
     Auto,
     Clone,
     Copy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum EnvironmentTypeArg {
+    Sandbox,
+    Host,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HostDaemonArgs {
+    #[arg(long)]
+    pub(crate) environment: String,
+    #[arg(long)]
+    pub(crate) registry_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1761,6 +1913,12 @@ impl std::fmt::Debug for NetworkEnrollRedeemArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ListArgs {
+    #[arg(
+        long,
+        conflicts_with = "environment",
+        help = "List sessions across accessible environments"
+    )]
+    pub(crate) all: bool,
     #[arg(value_name = "ENV")]
     pub(crate) environment: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
@@ -1768,8 +1926,65 @@ pub(crate) struct ListArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct SessionTargetArgs {
+    #[arg(value_name = "TARGET", help = "SESSION, or ENV SESSION", num_args = 1..=2)]
+    pub(crate) target: Vec<String>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SendArgs {
+    #[arg(value_name = "TARGET_AND_TEXT", help = "SESSION TEXT, or ENV SESSION TEXT; --key omits TEXT", num_args = 1..=3)]
+    pub(crate) target_and_text: Vec<String>,
+    #[arg(
+        long,
+        conflicts_with = "key",
+        help = "Write text without a trailing newline"
+    )]
+    pub(crate) no_newline: bool,
+    #[arg(long, value_parser = ["ctrl-c", "ctrl-d", "enter", "escape", "tab"])]
+    pub(crate) key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WaitArgs {
+    #[arg(value_name = "TARGET", help = "SESSION, or ENV SESSION", num_args = 1..=2, required_unless_present = "message")]
+    pub(crate) target: Vec<String>,
+    #[arg(
+        long,
+        conflicts_with = "target",
+        help = "Wait for a managed message's terminal result"
+    )]
+    pub(crate) message: Option<String>,
+    #[arg(
+        long,
+        default_value = "30m",
+        help = "Maximum wait; timeout reports unknown, never success"
+    )]
+    pub(crate) timeout: String,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AgentMessageArgs {
+    #[arg(value_name = "TARGET_AND_TEXT", help = "SESSION TEXT, or ENV SESSION TEXT", num_args = 2..=3)]
+    pub(crate) target_and_text: Vec<String>,
+    #[arg(long, help = "Reply to a prior message ID")]
+    pub(crate) reply_to: Option<String>,
+    #[arg(long, help = "Expected active turn ID for steering")]
+    pub(crate) turn_id: Option<String>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct AttachArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV_OR_SESSION",
+        help = "Environment, or session in the selected environment"
+    )]
     pub(crate) environment: Option<String>,
     #[arg(value_name = "SESSION")]
     pub(crate) session: Option<String>,
@@ -1779,7 +1994,10 @@ pub(crate) struct AttachArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct LogsArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV_OR_SESSION",
+        help = "Environment, or session in the selected environment"
+    )]
     pub(crate) environment: Option<String>,
     #[arg(value_name = "SESSION")]
     pub(crate) session: Option<String>,
@@ -1809,6 +2027,8 @@ mod storage_placement;
 pub(crate) use collaboration::*;
 pub(crate) use core::*;
 pub(crate) use environment::*;
+#[cfg(target_os = "linux")]
+pub(crate) use mesh_commands::retained::StateDir as MeshStateDir;
 pub(crate) use mesh_commands::*;
 pub(crate) use platform_commands::*;
 pub(crate) use secrets::*;
@@ -1820,6 +2040,7 @@ mod tests {
     include!("tests/core.rs");
     include!("tests/network_delete.rs");
     include!("tests/environment.rs");
+    include!("tests/runtime.rs");
     include!("tests/run.rs");
     include!("tests/platform.rs");
     include!("tests/sessions.rs");

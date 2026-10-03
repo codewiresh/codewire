@@ -289,6 +289,11 @@ fn resolve_native_mesh_attachment(
                     "local Mesh is not running; run 'cw mesh up' before attaching network {network_id:?}"
                 )
             })?;
+            #[cfg(target_os = "linux")]
+            mesh_commands::retained::validate_owner(&runtime, &owner).context(
+                "standalone local Mesh runtime custody is unknown; no attachment was admitted",
+            )?;
+            #[cfg(not(target_os = "linux"))]
             if !local_process_is_running(runtime.pid) {
                 anyhow::bail!(
                     "local Mesh runtime is stale; run 'cw mesh up' before attaching network {network_id:?}"
@@ -341,7 +346,7 @@ pub(crate) async fn create_native_environment(
         .ok_or_else(|| anyhow::anyhow!("native local creation requires --name"))?
         .to_owned();
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let requested_path = args.path.as_deref().unwrap_or_else(|| Path::new("."));
     let source_path = std::fs::canonicalize(requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
@@ -520,7 +525,7 @@ pub(crate) async fn handle_native_environment_update(
     )
     .await?;
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let resolved = sources::resolve_requested_sources(
         globals,
         &paths,
@@ -652,7 +657,10 @@ pub(crate) async fn native_environment(name: &str) -> anyhow::Result<Option<v1::
     Ok(native_environments()
         .await?
         .into_iter()
-        .find(|environment| environment.name == name || environment.id == name))
+        .find(|environment| match uuid::Uuid::parse_str(name) {
+            Ok(id) => environment.id == id.to_string(),
+            Err(_) => environment.name == name,
+        }))
 }
 
 pub(crate) async fn native_selected_environment() -> anyhow::Result<Option<v1::Environment>> {
@@ -767,9 +775,70 @@ async fn get_native_environment_with_required_authority(
     client: &mut NativeSupervisorClient,
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
-    let environment = get_native_environment_with_authority_recovery(client, name).await?;
+    let expected_id = uuid::Uuid::parse_str(name).ok().map(|id| id.to_string());
+    let lookup_name = if let Some(expected_id) = &expected_id {
+        let listed = client.list().await.map_err(native_status)?;
+        native_environment_name_for_id(&listed, expected_id)?.to_owned()
+    } else {
+        name.to_owned()
+    };
+    let environment = get_native_environment_with_authority_recovery(client, &lookup_name).await?;
+    if expected_id.as_ref().is_some_and(|id| environment.id != *id) {
+        anyhow::bail!("native environment identity changed before the operation");
+    }
     ensure_native_credential_authority(&environment).await?;
     Ok(environment)
+}
+
+fn native_environment_name_for_id<'a>(
+    environments: &'a [v1::Environment],
+    expected_id: &str,
+) -> anyhow::Result<&'a str> {
+    environments
+        .iter()
+        .find(|environment| environment.id == expected_id)
+        .map(|environment| environment.name.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "native environment {expected_id} no longer exists; a reused name cannot replace it"
+            )
+        })
+}
+
+/// Managed guests use a selected typed proxy, never the host agent's login.
+pub(crate) async fn require_native_agent_profile(
+    environment_id: &str,
+    provider: &str,
+) -> anyhow::Result<()> {
+    let environment_id = uuid::Uuid::parse_str(environment_id)?.to_string();
+    let environment = native_environments()
+        .await?
+        .into_iter()
+        .find(|environment| environment.id == environment_id)
+        .context("the managed native environment no longer exists")?;
+    let spec = sources::project_from_environment(&environment)?;
+    let selected = spec
+        .credentials
+        .context("managed VM agents require a selected local credential profile")?;
+    if selected.profile.starts_with("platform:") {
+        anyhow::bail!("managed native agents currently require a local credential profile");
+    }
+    let profile_id = codewire_access::AccessProfileId::parse(environment.access_profile_id)?;
+    let mut credentials = connect_local_credential_authority().await?;
+    let bound = credentials
+        .get_profile_revision(&profile_id, environment.access_profile_revision)
+        .await?;
+    if !bound
+        .profile
+        .entries
+        .keys()
+        .any(|slot| slot.as_str() == provider)
+    {
+        anyhow::bail!(
+            "the native environment's selected credential profile has no {provider} provider"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) async fn delete_native_environment(
@@ -994,6 +1063,77 @@ pub(crate) async fn native_environment_data_client(
     .map_err(anyhow::Error::from)
 }
 
+pub(crate) async fn native_environment_managed_runtime(
+    environment_id: &str,
+) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeProvenance> {
+    native_environment_managed_runtime_catalog(environment_id)
+        .await?
+        .active()
+        .cloned()
+        .map_err(anyhow::Error::msg)
+}
+
+pub(crate) async fn native_environment_managed_runtime_catalog(
+    environment_id: &str,
+) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeCatalog> {
+    let mut supervisor = native_client().await?;
+    let environment =
+        get_native_environment_with_required_authority(&mut supervisor, environment_id).await?;
+    let runtime = supervisor
+        .managed_runtime(&environment.name, &environment.id)
+        .await
+        .map_err(native_status)?;
+    if runtime.environment_id != environment_id
+        || !native_runtime_digest_valid(&runtime.artifact_generation)
+        || !native_runtime_digest_valid(&runtime.cw_runtime_catalog_generation)
+    {
+        anyhow::bail!("managed runtime does not match the selected environment");
+    }
+    use sha2::{Digest as _, Sha256};
+    if format!("{:x}", Sha256::digest(&runtime.catalog_json))
+        != runtime.cw_runtime_catalog_generation
+    {
+        anyhow::bail!("managed runtime catalog digest does not match the running VM");
+    }
+    let catalog = codewire_local_vmm::artifact::CwRuntimeCatalog::decode(&runtime.catalog_json)
+        .map_err(anyhow::Error::msg)?;
+    if catalog.encode().map_err(anyhow::Error::msg)? != runtime.catalog_json
+        || catalog.active().map_err(anyhow::Error::msg)?
+            != &codewire_local_vmm::artifact::CwRuntimeProvenance::decode(&runtime.provenance_json)
+                .map_err(anyhow::Error::msg)?
+    {
+        anyhow::bail!("managed runtime catalog and active provenance disagree");
+    }
+    // Bootstrap remains fixed. The separate service admits the live default
+    // and retained helpers against the host's append-only asset custody.
+    let selected = supervisor
+        .runtime_info(environment_id)
+        .await
+        .map_err(native_status)?;
+    let selection: codewire_local_vmm::cw_runtime::RuntimeSelection =
+        serde_json::from_slice(&selected.selection_json)?;
+    selection.validate().map_err(anyhow::Error::msg)?;
+    if selected.environment_id != environment_id
+        || selected.generation != environment.generation
+        || selection.environment_id.to_string() != environment_id
+        || selection.bootstrap_catalog_sha256 != runtime.cw_runtime_catalog_generation
+        || catalog
+            .runtimes
+            .iter()
+            .any(|member| selection.catalog.runtime(&member.payload.sha256) != Some(member))
+    {
+        anyhow::bail!("live cw selection does not match the running VM bootstrap");
+    }
+    Ok(selection.catalog)
+}
+
+fn native_runtime_digest_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 pub(crate) async fn native_environment_diagnostic_client(
     name: &str,
 ) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicEnvironmentClient> {
@@ -1178,15 +1318,21 @@ fn format_binary_bytes(bytes: u64) -> String {
     }
 }
 
+pub(crate) async fn native_runtime_control_client() -> anyhow::Result<NativeSupervisorClient> {
+    NativeSupervisorClient::connect_runtime(&native_runtime_config()?)
+        .await
+        .context("connect to existing native runtime publisher")
+}
+
 async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
     let config = native_runtime_config()?;
     connect_native_after_authority_admission(
         || async {
             // Admit an authority visible at the current credential root before
-            // an existing supervisor can be reused. A live v6 authority is
-            // replaced with v7, an unconnectable existing endpoint fails
-            // closed, and only an absent endpoint avoids starting an authority
-            // for credential-free native operations.
+            // an existing supervisor can be reused. An incompatible or
+            // unconnectable endpoint fails without replacing its authority.
+            // Only an absent endpoint permits credential-free native
+            // operations to continue without starting an authority.
             admit_existing_local_credential_authority().await
         },
         || async {
@@ -1214,7 +1360,7 @@ where
 
 fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let root = absolute_override(NATIVE_STATE_ROOT_ENV)?
         .unwrap_or_else(|| paths.mesh_data_dir.join("native-v1"));
     let home = env::var_os("HOME")
@@ -1625,6 +1771,33 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_id_lookup_resolves_the_private_name_without_following_a_uuid_shaped_name() {
+        let expected_id = "8fc6e44a-047a-4e65-8e56-26df709fee44";
+        let environments = [
+            v1::Environment {
+                id: "d52a6f57-0f19-4b8c-b89b-b941abfc90b3".to_owned(),
+                name: expected_id.to_owned(),
+                ..Default::default()
+            },
+            v1::Environment {
+                id: expected_id.to_owned(),
+                name: "native-team".to_owned(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            native_environment_name_for_id(&environments, expected_id).unwrap(),
+            "native-team"
+        );
+        let error = native_environment_name_for_id(&environments[..1], expected_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("a reused name cannot replace it")
+        );
+    }
+
     #[tokio::test]
     async fn native_rpc_authority_recovery_is_exact_and_bounded() {
         let authority_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1843,6 +2016,8 @@ mod tests {
             binary: "codewire-mesh".to_owned(),
             log_path: root.path().join("mesh.log").display().to_string(),
             started_at: "2026-09-02T00:00:00Z".to_owned(),
+            #[cfg(target_os = "linux")]
+            custody: None,
             derp: None,
         };
         save_local_mesh_runtime(&mesh_data_dir, &runtime).unwrap();
@@ -1867,6 +2042,27 @@ mod tests {
             ..NativeProjectPlan::default()
         };
 
+        let error = resolve_native_mesh_attachment(
+            &paths,
+            &config::MapEnv::default(),
+            "native-dev",
+            &project,
+            Some("explicit-network"),
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("custody is unknown"), "{error}");
+        assert_eq!(
+            load_local_mesh_runtime(&mesh_data_dir).unwrap().unwrap(),
+            runtime
+        );
+        let mut hosted = load_local_mesh_owner_context(&mesh_data_dir)
+            .unwrap()
+            .unwrap();
+        hosted.auth_source = LocalMeshOwnerAuthSource::HostedCurrent;
+        save_local_mesh_owner_context(&mesh_data_dir, &hosted).unwrap();
+
         let explicit = resolve_native_mesh_attachment(
             &paths,
             &config::MapEnv::default(),
@@ -1885,7 +2081,7 @@ mod tests {
         assert_eq!(explicit.guest_ports, vec![3_001, 8_080]);
         assert_eq!(
             explicit.auth_source,
-            v1::MeshEnrollmentAuthSource::StandaloneLocal as i32
+            v1::MeshEnrollmentAuthSource::HostedCurrent as i32
         );
 
         let selected = resolve_native_mesh_attachment(

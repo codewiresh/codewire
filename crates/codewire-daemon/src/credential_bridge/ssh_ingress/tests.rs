@@ -50,6 +50,7 @@ fn daemon_config(root: &Path) -> Config {
             ["ssh"],
         )
         .unwrap(),
+        host: None,
         launch_projection: Some(crate::LaunchProjectionConfig {
             selection_sha256: [1; 32],
             native: None,

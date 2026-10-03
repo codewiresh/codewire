@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_session_pb2 import AttachSessionRequest, AttachSessionResponse, GetSessionRequest, GetSessionResponse, LaunchSessionRequest, LaunchSessionResponse, ListSessionsRequest, ListSessionsResponse, ReadSessionOutputRequest, ReadSessionOutputResponse, RestartSessionRequest, RestartSessionResponse, StopSessionRequest, StopSessionResponse
+from .environment_session_pb2 import AttachSessionRequest, AttachSessionResponse, GetSessionRequest, GetSessionResponse, LaunchSessionRequest, LaunchSessionResponse, ListSessionsRequest, ListSessionsResponse, ReadSessionOutputRequest, ReadSessionOutputResponse, RestartSessionRequest, RestartSessionResponse, SendSessionInputRequest, SendSessionInputResponse, StopSessionRequest, StopSessionResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -48,6 +48,9 @@ class EnvironmentSessionService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def restart_session(self, request: RestartSessionRequest, ctx: RequestContext[RestartSessionRequest, RestartSessionResponse]) -> RestartSessionResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def send_session_input(self, request: SendSessionInputRequest, ctx: RequestContext[SendSessionInputRequest, SendSessionInputResponse]) -> SendSessionInputResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def read_session_output(self, request: ReadSessionOutputRequest, ctx: RequestContext[ReadSessionOutputRequest, ReadSessionOutputResponse]) -> ReadSessionOutputResponse:
@@ -119,6 +122,16 @@ class EnvironmentSessionServiceASGIApplication(ConnectASGIApplication[Environmen
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.restart_session,
+                ),
+                "/codewire.v1.EnvironmentSessionService/SendSessionInput": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SendSessionInput",
+                        service_name="codewire.v1.EnvironmentSessionService",
+                        input=SendSessionInputRequest,
+                        output=SendSessionInputResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.send_session_input,
                 ),
                 "/codewire.v1.EnvironmentSessionService/ReadSessionOutput": Endpoint.unary(
                     method=MethodInfo(
@@ -282,6 +295,26 @@ class EnvironmentSessionServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def send_session_input(
+        self,
+        request: SendSessionInputRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SendSessionInputResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SendSessionInput",
+                service_name="codewire.v1.EnvironmentSessionService",
+                input=SendSessionInputRequest,
+                output=SendSessionInputResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def read_session_output(
         self,
         request: ReadSessionOutputRequest,
@@ -338,6 +371,9 @@ class EnvironmentSessionServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def restart_session(self, request: RestartSessionRequest, ctx: RequestContext[RestartSessionRequest, RestartSessionResponse]) -> RestartSessionResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def send_session_input(self, request: SendSessionInputRequest, ctx: RequestContext[SendSessionInputRequest, SendSessionInputResponse]) -> SendSessionInputResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def read_session_output(self, request: ReadSessionOutputRequest, ctx: RequestContext[ReadSessionOutputRequest, ReadSessionOutputResponse]) -> ReadSessionOutputResponse:
@@ -407,6 +443,16 @@ class EnvironmentSessionServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.restart_session,
+                ),
+                "/codewire.v1.EnvironmentSessionService/SendSessionInput": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SendSessionInput",
+                        service_name="codewire.v1.EnvironmentSessionService",
+                        input=SendSessionInputRequest,
+                        output=SendSessionInputResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.send_session_input,
                 ),
                 "/codewire.v1.EnvironmentSessionService/ReadSessionOutput": EndpointSync.unary(
                     method=MethodInfo(
@@ -560,6 +606,25 @@ class EnvironmentSessionServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentSessionService",
                 input=RestartSessionRequest,
                 output=RestartSessionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def send_session_input(
+        self,
+        request: SendSessionInputRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SendSessionInputResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SendSessionInput",
+                service_name="codewire.v1.EnvironmentSessionService",
+                input=SendSessionInputRequest,
+                output=SendSessionInputResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

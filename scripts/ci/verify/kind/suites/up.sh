@@ -11,6 +11,7 @@ fi
 
 run_kind_up() {
   require_kind_errexit
+  local clusters
   require_tool curl
   require_tool base64
   require_tool docker
@@ -25,15 +26,20 @@ run_kind_up() {
     echo "::error::kind-e2e.sh up requires an explicit KIND_CLUSTER_NAME"
     return 2
   fi
-  if kind get clusters 2>/dev/null | grep -Fxq "$KIND_CLUSTER_NAME"; then
+  KEEP_KIND_CLUSTER=1
+  prepare_kind_temp_runtime
+  acquire_kind_host_lock
+  clusters="$(kind get clusters)" || return $?
+  if grep -Fxq "$KIND_CLUSTER_NAME" <<<"$clusters"; then
+    if [ "${KIND_PROFILE:-0}" = 1 ]; then
+      validate_retained_cluster
+      log "cluster ${KIND_CLUSTER_NAME} is already up; saved identity and runtime accepted"
+      return 0
+    fi
     echo "::error::Kind cluster ${KIND_CLUSTER_NAME} already exists; update a service with make kind-deploy, or delete the cluster to recreate it"
     return 1
   fi
   require_kind_host_ports_available
-
-  KEEP_KIND_CLUSTER=1
-  prepare_kind_temp_runtime
-  acquire_kind_host_lock
   trap cleanup EXIT
 
   ingress_path_drift_check

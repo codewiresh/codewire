@@ -282,12 +282,16 @@ jobs:
           set -euo pipefail
           CW_RELEASE_PROFILE=ci \
             CW_RELEASE_BUILD_CMD='cargo zigbuild' \
-            CW_RELEASE_REQUIRE_SIGNATURE=0 \
             CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \
             scripts/ci/release/package-cw-release.sh v0.0.0-ci
           "dist/cw-release/cw-v0.0.0-ci-x86_64-unknown-linux-musl" --version | grep -F 'v0.0.0-ci'
           [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 4 ]
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
+          # One identity per final executable; the OCI image and runtime pack
+          # carry exactly the raw Linux x86-64 musl bytes.
+          [ "$(find dist/cw-release/delivery/identities -name '*.json' | wc -l)" -eq 4 ]
+          python3 scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned |
+            grep -Fx 'cw-release: verified targets=4 version=v0.0.0-ci runtime_equal=true signed=false'
 
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
@@ -1837,6 +1841,8 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         env:
           KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
+          CLUSTER: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
+          CODEWIRE_KIND_PROFILE_ROOT: ${{ runner.temp }}/kind-profiles
           KIND_SHARD_SUITES: ${{ matrix.shard.suites }}
         run: |
           set -euo pipefail
@@ -1856,12 +1862,15 @@ jobs:
           retention-days: 5
 
       - name: Delete the shard Kind cluster
-        # Teardown is best-effort, like the old in-process cleanup: a green
-        # leg must not fail on a transient DinD hiccup while deleting.
+        # The saved profile proves nonce and node identity before deletion;
+        # startup refusal never grants authority over a same-named cluster.
+        # Keep teardown best-effort on a transient DinD failure.
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         env:
           KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
-        run: kind delete cluster --name "$KIND_CLUSTER_NAME" || true
+          CLUSTER: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
+          CODEWIRE_KIND_PROFILE_ROOT: ${{ runner.temp }}/kind-profiles
+        run: scripts/ci/verify/kind-e2e.sh down || true
 
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run

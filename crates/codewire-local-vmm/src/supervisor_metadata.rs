@@ -99,8 +99,44 @@ pub(crate) struct RunnerRecord {
     pub(crate) process: ProcessIdentity,
     pub(crate) socket: SocketIdentity,
     pub(crate) artifact_generation: String,
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cw_runtime_catalog_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error_code: Option<String>,
+}
+
+/// Independent runtime custody; these generations never identify a boot or workspace.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CwRuntimeBinding {
+    pub(crate) schema_version: u32,
+    pub(crate) active_catalog_generation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) staging_catalog_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rollback_catalog_generation: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl CwRuntimeBinding {
+    pub(crate) fn validate(&self) -> Result<(), SupervisorMetadataError> {
+        if self.schema_version != 1
+            || !valid_sha256(&self.active_catalog_generation)
+            || self
+                .staging_catalog_generation
+                .as_deref()
+                .is_some_and(|generation| !valid_sha256(generation))
+            || self
+                .rollback_catalog_generation
+                .as_deref()
+                .is_some_and(|generation| !valid_sha256(generation))
+        {
+            return Err(SupervisorMetadataError::InvalidState);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +166,9 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) access_binding: Option<EnvironmentAccessBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) platform_source_authority: Option<PlatformSourceAuthority>,
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cw_runtime: Option<CwRuntimeBinding>,
     pub(crate) runner: Option<RunnerRecord>,
     #[serde(default)]
     pub(crate) active_artifact_generation: Option<String>,
@@ -216,6 +255,20 @@ impl EnvironmentRecord {
     }
 
     pub(crate) fn validate(&self, key: &str) -> Result<(), SupervisorMetadataError> {
+        #[cfg(target_os = "linux")]
+        if self
+            .cw_runtime
+            .as_ref()
+            .is_some_and(|binding| binding.validate().is_err())
+            || self.runner.as_ref().is_some_and(|runner| {
+                runner
+                    .cw_runtime_catalog_generation
+                    .as_deref()
+                    .is_some_and(|generation| !valid_sha256(generation))
+            })
+        {
+            return Err(SupervisorMetadataError::InvalidState);
+        }
         let invalid_workspace_generation = match (
             self.project_spec_json.as_deref(),
             self.project_spec_sha256.as_deref(),

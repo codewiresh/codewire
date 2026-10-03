@@ -32,6 +32,7 @@ fn config(directory: &Path) -> Config {
             ingress_gid: rustix::process::getegid().as_raw(),
         }),
         managed_credential_clients: Default::default(),
+        host: None,
         launch_projection: Some(LaunchProjectionConfig {
             selection_sha256: [3; 32],
             native: None,

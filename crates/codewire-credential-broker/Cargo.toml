@@ -14,6 +14,12 @@ platform = ["dep:codewire-platform-credentials", "dep:codewire-protected-store",
 codex-enrollment = ["dep:rustix"]
 ssh-agent = ["dep:rustix", "dep:codewire-protected-store", "codewire-protected-store/ssh-material"]
 local-broker-synthetic-smoke = []
+host-agent-synthetic-smoke = ["local", "local-broker-synthetic-smoke", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:rand", "dep:subtle", "dep:rustix"]
+
+[[bin]]
+name = "codewire-host-agent-smoke"
+path = "src/bin/codewire-host-agent-smoke.rs"
+required-features = ["host-agent-synthetic-smoke"]
 
 [dependencies]
 prost = { workspace = true }
@@ -30,10 +36,15 @@ codewire-protected-store = { workspace = true, optional = true }
 codewire-workload-secrets = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
 reqwest = { workspace = true }
-rustix = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true, features = ["pipe"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+subtle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

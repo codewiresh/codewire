@@ -1,3 +1,4 @@
+mod build_record;
 pub mod config;
 mod console_client;
 mod environment_client;
@@ -47,10 +48,9 @@ use presentation::{
 };
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};
 
-const CLI_VERSION: &str = match option_env!("CODEWIRE_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+// The effective compiled version: `CODEWIRE_VERSION` when the build set it,
+// otherwise the workspace version, read from this cw's embedded build record.
+use build_record::CLI_VERSION;
 
 /// Reassert a credential-bearing child's non-dumpable state immediately after
 /// `execve`, which resets this flag for an ordinary executable. The selected
@@ -126,8 +126,10 @@ enum Command {
     ConfigSsh(ConfigSshArgs),
     #[command(about = "Check Codewire CLI and environment setup")]
     Doctor(DoctorArgs),
-    #[command(about = "Show how to update cw during the private preview")]
-    Update,
+    #[command(about = "Update, inspect or roll back the managed cw installation")]
+    Update(update::UpdateArgs),
+    #[command(about = "Install this cw as a managed, versioned installation")]
+    Install(update::InstallArgs),
     #[command(about = "Sign in to Codewire")]
     Login(LoginArgs),
     #[command(
@@ -157,6 +159,38 @@ enum Command {
     Shell(EnvironmentShellArgs),
     #[command(about = "Run a durable session in the selected or named environment")]
     Run(EnvironmentRunArgs),
+    #[cfg(unix)]
+    #[command(name = "_host-daemon", hide = true)]
+    HostDaemon(HostDaemonArgs),
+    #[command(about = "Write acknowledged input to a terminal or command session")]
+    Send(SendArgs),
+    #[command(about = "Wait for a session or managed message to finish")]
+    Wait(WaitArgs),
+    #[command(about = "Stop an owned session")]
+    Stop(SessionTargetArgs),
+    #[command(about = "Restart a retained session with its canonical identity")]
+    Restart(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(about = "Send a task or follow-up to a managed agent conversation")]
+    Msg(AgentMessageArgs),
+    #[cfg(unix)]
+    #[command(about = "Steer the current turn of a managed agent")]
+    Steer(AgentMessageArgs),
+    #[cfg(unix)]
+    #[command(about = "Interrupt the current managed agent turn")]
+    Interrupt(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(about = "Show managed messages and their results")]
+    Inbox(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(name = "_agent-driver", hide = true)]
+    AgentDriver(AgentDriverArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_agent-control", hide = true)]
+    AgentControl(AgentControlArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_agent-peer", hide = true)]
+    AgentPeer(AgentPeerArgs),
     #[command(about = "Manage environments")]
     Env(EnvArgs),
     #[command(about = "Show usage and billing overview")]
@@ -333,6 +367,9 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let cli = Cli::parse_from(args);
+    // Validate an explicitly selected Mesh state root before any ordinary
+    // command effects, including routes that otherwise need only platform state.
+    ResolvePaths::from_env(&OsEnv)?;
     let globals = Globals {
         server: cli.server.clone(),
     };
@@ -343,7 +380,8 @@ where
         Command::Completion(args) => handle_completion_command(args),
         Command::ConfigSsh(args) => handle_config_ssh_command(args),
         Command::Doctor(args) => handle_doctor_command(&globals, args).await,
-        Command::Update => update::run_current().await,
+        Command::Update(args) => update::run(args),
+        Command::Install(args) => update::install(args),
         Command::Login(args) => handle_login_command(&globals, args).await,
         Command::Setup(args) => handle_setup_command(&globals, args).await,
         Command::Logout => handle_logout_command(&globals).await,
@@ -354,6 +392,26 @@ where
         Command::Vscode(args) => handle_vscode_command(&globals, args).await,
         Command::Shell(args) => handle_environment_shell_command(&globals, args).await,
         Command::Run(args) => handle_environment_run_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::HostDaemon(args) => run_host_daemon(args).await,
+        Command::Send(args) => handle_send_command(&globals, args).await,
+        Command::Wait(args) => handle_wait_command(&globals, args).await,
+        Command::Stop(args) => handle_stop_command(&globals, args).await,
+        Command::Restart(args) => handle_restart_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::Msg(args) => handle_agent_message_command(&globals, args, false).await,
+        #[cfg(unix)]
+        Command::Steer(args) => handle_agent_message_command(&globals, args, true).await,
+        #[cfg(unix)]
+        Command::Interrupt(args) => handle_agent_interrupt_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::Inbox(args) => handle_agent_inbox_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::AgentDriver(args) => run_agent_driver(args).await,
+        #[cfg(target_os = "linux")]
+        Command::AgentControl(args) => run_agent_control(args).await,
+        #[cfg(target_os = "linux")]
+        Command::AgentPeer(args) => run_agent_peer(args).await,
         Command::Env(args) => handle_env_command(&globals, args).await,
         Command::Cost(args) => handle_cost_command(&globals, args).await,
         Command::Org { command } => handle_org_command(&globals, command).await,

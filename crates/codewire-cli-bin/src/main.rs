@@ -1,4 +1,19 @@
+#[cfg(target_os = "linux")]
+mod local_mesh_helper;
+
 fn main() {
+    // Helper roles must not resolve ordinary CLI settings, credentials or the
+    // mutable managed entry. The parent already selected this exact executable.
+    #[cfg(target_os = "linux")]
+    if let Some(role) = std::env::args_os().nth(1)
+        && local_mesh_helper::is_role(&role)
+    {
+        if let Err(error) = local_mesh_helper::run(&role) {
+            eprintln!("local Mesh helper failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(target_os = "linux")]
     if std::env::args_os()
         .next()

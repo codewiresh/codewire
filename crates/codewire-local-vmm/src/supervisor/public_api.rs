@@ -48,6 +48,8 @@ const REQUIRED_LOCAL_DAEMON_CAPABILITIES: &[&str] = &[
     "files.v1",
     "health.v1",
     "pty.v1",
+    "session_input.v1",
+    "session_metadata.v1",
     "sessions.v1",
 ];
 
@@ -82,6 +84,12 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         .layer(axum::middleware::from_fn(enforce_connect_only));
 
     axum::Router::new()
+        .route_service(
+            "/codewire.local.v1.LinuxCwRuntimeService/{*method}",
+            v1::linux_cw_runtime_service_server::LinuxCwRuntimeServiceServer::new(
+                supervisor.clone(),
+            ),
+        )
         .route_service(
             PRIVATE_SUPERVISOR_ROUTE,
             LocalSupervisorServiceServer::new(supervisor),
@@ -1280,11 +1288,27 @@ impl EnvironmentSessionBackend for LocalSessionBackend {
         org_id: &str,
         environment_id: &str,
         session_id: &str,
+        expected_launch_generation: Option<u64>,
     ) -> Result<daemon_v1::SessionRecord, connectrpc::ConnectError> {
         self.supervisor
             .public_daemon_client(org_id, environment_id)
             .await?
-            .restart(session_id)
+            .restart_with_generation(session_id, expected_launch_generation)
+            .await
+            .map_err(local_session_error)
+    }
+
+    async fn send_input(
+        &self,
+        _ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        request: daemon_v1::SendSessionInputRequest,
+    ) -> Result<(), connectrpc::ConnectError> {
+        self.supervisor
+            .public_daemon_client(org_id, environment_id)
+            .await?
+            .send_input(&request.session_id, request.data)
             .await
             .map_err(local_session_error)
     }
@@ -3026,6 +3050,18 @@ mod tests {
         assert_eq!(status.diagnostics[0].name, "daemon");
         assert!(status.diagnostics[0].healthy);
         assert!(!format!("{status:?}").contains(sentinel));
+
+        for required in ["session_input.v1", "session_metadata.v1"] {
+            let mut older = capabilities.clone();
+            older.capabilities.retain(|value| value != required);
+            let status = project_daemon_status(&older, &health);
+            assert_eq!(
+                status.state.as_known(),
+                Some(proto::EnvironmentDaemonState::Unsupported),
+                "missing {required} must not report the current session profile ready"
+            );
+            assert!(!status.diagnostics[0].healthy);
+        }
 
         let mut incompatible = capabilities;
         incompatible.daemon_version = sentinel.to_owned();

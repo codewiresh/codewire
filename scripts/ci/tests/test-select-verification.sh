@@ -467,6 +467,15 @@ run_paths_case local_vmm_initramfs_builder pull_request refs/pull/5013/head fals
 run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh
+for kernel_input in scripts/ci/verify/build-linux-vmm-kernel.py \
+    scripts/ci/verify/linux-vmm-kernel/x86_64.config \
+    scripts/ci/verify/linux-vmm-kernel/dax.patch \
+    scripts/ci/verify/linux-vmm-kernel/provenance.json \
+    scripts/ci/tests/test-linux-vmm-kernel.py; do
+  run_paths_case "local_vmm_kernel_${kernel_input##*/}" pull_request refs/pull/2255/head false \
+    'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+    "$kernel_input"
+done
 run_paths_case native_local_environment_smoke pull_request refs/pull/5015/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-native-local-environment.sh
@@ -547,6 +556,12 @@ run_paths_case material_free_credential_bridge pull_request refs/pull/6011/head 
 run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/authority.rs
+run_paths_case credential_service_kind_entrypoint_without_opt_in pull_request refs/pull/6011/head false \
+  'database policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind.rs
+run_paths_case credential_service_kind_entrypoint_with_opt_in pull_request refs/pull/6011/head true \
+  'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind.rs
 run_paths_case credential_service_kind_runtime_without_opt_in pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/runtime/kind/provider.rs
@@ -950,6 +965,56 @@ grep -qF "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$CLI_RELEASE_WORKFLOW"
 run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   apps/cli/Makefile
+run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-cli-host.py
+run_paths_case cli_host_update_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-cli-update.py
+run_paths_case cli_host_update_port_regression pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/ci/tests/test-cli-update-mesh-endpoints.py
+run_paths_case cli_agent_peer_fixture pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/fixtures/agent-peer.py
+run_paths_case cli_native_managed_startup pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-native-managed-startup.py
+run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/test-cli-native-managed.py
+run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/test-cli-native-update.py
+run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/ci/tests/test-native-managed-update-entrypoint.py
+run_paths_case cli_native_managed_artifact pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/build-native-managed-agent.py
+# Release delivery sources and their proofs were unclassified (all product
+# verification) or missed the release suite; each now selects it.
+run_paths_case cw_release_delivery_core pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/release/cw_release.py scripts/ci/release/cw_release_r2.py
+run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/release/sign-cw-release.sh \
+  scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
+  scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh
+run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
+  scripts/ci/tests/test-cw-release-delivery.py scripts/ci/tests/test-cw-release-r2.py
+run_paths_case cw_runtime_image_tool pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/cw-runtime-image.py scripts/dev/test-cw-runtime-image.py
+run_paths_case cw_host_build_tool pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/build-cw.py
+run_paths_case cw_build_record_producer pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli' \
+  crates/codewire-cli/build.rs crates/codewire-cli/src/build_record.rs
 run_paths_case edge_harness pull_request refs/pull/153/head false \
   'policy' scripts/ci/verify/kind-e2e.sh
 run_paths_case edge_host_runtime pull_request refs/pull/1529/head true \

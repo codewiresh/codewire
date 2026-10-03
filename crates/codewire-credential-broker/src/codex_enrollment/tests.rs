@@ -9,7 +9,7 @@ const PROMPT: &str = "\nWelcome to Codex [v\x1b[90m0.149.0\x1b[0m]\n\x1b[90mOpen
 
 #[test]
 fn pinned_prompt_accepts_every_chunk_boundary_and_only_typed_challenge() {
-    for version in ["0.149.0", "0.153.4"] {
+    for version in ["0.149.0", "0.153.4", "0.157.0"] {
         assert_pinned_prompt(&PROMPT.replace("0.149.0", version));
     }
 }
@@ -55,20 +55,27 @@ fn prompt_rejects_wrong_url_codes_controls_duplicates_and_truncation() {
         PROMPT.replace("ABCD-EFGH", &"A".repeat(65)),
         PROMPT.replace("\x1b[94m", "\x1b[31m"),
         PROMPT.replace("ABCD-EFGH", "ABCD\x00EFGH"),
+        PROMPT.replace(
+            "If a website or another person gave you this code, cancel.",
+            "Continue anyway.",
+        ),
         format!("{PROMPT}{PROMPT}"),
         format!("{PROMPT}raw provider output\n"),
         "x".repeat(64 * 1024 + 1),
         "x".repeat(4097),
         PROMPT[..PROMPT.len() - 3].to_owned(),
     ];
-    for input in cases {
-        let mut parser = ChallengeParser::new(1234);
-        assert!(
-            parser
-                .push(input.as_bytes())
-                .and_then(|_| parser.finish())
-                .is_err()
-        );
+    for version in ["0.149.0", "0.153.4", "0.157.0"] {
+        for input in &cases {
+            let input = input.replace("0.149.0", version);
+            let mut parser = ChallengeParser::new(1234);
+            assert!(
+                parser
+                    .push(input.as_bytes())
+                    .and_then(|_| parser.finish())
+                    .is_err()
+            );
+        }
     }
     // The upstream fixture's 4+4 example is not a provider format guarantee.
     let mut parser = ChallengeParser::new(1234);
@@ -85,13 +92,15 @@ fn prompt_rejects_wrong_url_codes_controls_duplicates_and_truncation() {
 
 #[test]
 fn unsupported_version_and_all_errors_are_closed_and_value_blind() {
-    let mut parser = ChallengeParser::new(1234);
-    assert_eq!(
-        parser
-            .push(PROMPT.replace("0.149.0", "0.150.0").as_bytes())
-            .err(),
-        Some(CodexEnrollmentError::UnsupportedVersion)
-    );
+    for version in ["0.150.0", "0.157.1", "0.158.0"] {
+        let mut parser = ChallengeParser::new(1234);
+        assert_eq!(
+            parser
+                .push(PROMPT.replace("0.149.0", version).as_bytes())
+                .err(),
+            Some(CodexEnrollmentError::UnsupportedVersion)
+        );
+    }
     for error in [
         CodexEnrollmentError::Configuration,
         CodexEnrollmentError::Unavailable,
@@ -289,16 +298,26 @@ fn private_result_rejects_file_modes_links_fifo_size_and_removes_all_staging() {
 
 #[tokio::test]
 async fn completed_publication_cleans_private_home_without_logout() {
-    for newer in [false, true] {
-        assert_completed_publication(newer).await;
+    for version in ["0.149.0", "0.153.4"] {
+        assert_completed_publication(version).await;
     }
 }
 
-async fn assert_completed_publication(newer: bool) {
+#[tokio::test]
+async fn codex_0_157_0_completes_isolated_enrollment_and_cleans_private_home() {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        assert_completed_publication("0.157.0"),
+    )
+    .await
+    .expect("synthetic enrollment and cleanup must finish within the bound");
+}
+
+async fn assert_completed_publication(version: &str) {
     let fixture = Fixture::new();
-    if newer {
+    if version != "0.149.0" {
         std::fs::write(
-            fixture.root.path().join("codex-0.153.4"),
+            fixture.root.path().join(format!("codex-{version}")),
             b"synthetic version",
         )
         .unwrap();

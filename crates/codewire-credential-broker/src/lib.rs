@@ -17,6 +17,8 @@ pub mod github;
 pub mod github_app;
 #[cfg(feature = "codex-enrollment")]
 pub mod github_enrollment;
+#[cfg(all(feature = "host-agent-synthetic-smoke", target_os = "linux"))]
+pub mod host_agent_smoke;
 #[cfg(test)]
 mod http_test_support;
 mod network;

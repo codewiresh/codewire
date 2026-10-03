@@ -38,9 +38,9 @@ prepare_kind_credential_support_images() {
         [ "$status" -eq 1 ] || return "$status"
       fi
       log "pulling exact credential fixture dependency ${source}"
-      docker pull "$source"
+      docker pull "$source" || return $?
     fi
-    docker image tag "$source" "$alias"
+    docker image tag "$source" "$alias" || return $?
   done <<<"$images"
 }
 
@@ -48,10 +48,10 @@ load_kind_credential_support_images() {
   local source alias images
   images="$(kind_credential_support_images)" || return $?
   while IFS='|' read -r source alias; do
-    docker image inspect "$source" >/dev/null
+    docker image inspect "$source" >/dev/null || return $?
     log "loading ${alias} into Kind"
-    kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias"
-    wait_for_kind_api_after_image_load
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias" || return $?
+    wait_for_kind_api_after_image_load || return $?
   done <<<"$images"
 }
 
@@ -59,12 +59,12 @@ deploy_kind_credential_cert_manager() {
   local -r expected_manifest_sha256=c8d451522fbf7db1a4c11d2d8c4c0253f51f4b54fd4396b467c0a582fe834615
   local manifest actual current_context
   manifest="$ROOT/tests/e2e/kind/vendor/cert-manager-v1.17.1.yaml"
-  actual="$(sha256sum "$manifest" | cut -d' ' -f1)"
+  actual="$(sha256sum "$manifest" | cut -d' ' -f1)" || return $?
   if [ "$actual" != "$expected_manifest_sha256" ]; then
     echo "::error::credential fixture cert-manager manifest differs from its reviewed render" >&2
     return 1
   fi
-  current_context="$(kubectl config current-context)"
+  current_context="$(kubectl config current-context)" || return $?
   if [ "${KIND_E2E_COMMON_LOADED:-0}" != 1 ] \
       || [ "$NS" != codewire-e2e ] || [ "$SANDBOX_NS" != dev-sandboxes ] \
       || [ "$current_context" != "kind-${KIND_CLUSTER_NAME}" ]; then
@@ -72,29 +72,29 @@ deploy_kind_credential_cert_manager() {
     return 1
   fi
   log "deploying exact cert-manager credential fixture"
-  kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl_apply -f -
+  kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl_apply -f - || return $?
   # CRDs exceed client-side last-applied annotation limits. Retain the managed
   # helper's timeout and use an explicit owner without forcing conflicts.
-  kubectl_apply --server-side --field-manager=codewire-kind-credentials -f "$manifest"
+  kubectl_apply --server-side --field-manager=codewire-kind-credentials -f "$manifest" || return $?
   kubectl wait --for=condition=Established --timeout=90s \
     crd/certificates.cert-manager.io crd/certificaterequests.cert-manager.io \
-    crd/issuers.cert-manager.io
+    crd/issuers.cert-manager.io || return $?
   local deployment
   for deployment in cert-manager cert-manager-cainjector cert-manager-webhook; do
-    kubectl -n cert-manager rollout status "deployment/$deployment" --timeout=180s
+    kubectl -n cert-manager rollout status "deployment/$deployment" --timeout=180s || return $?
   done
 }
 
 deploy_kind_credential_issuers() {
   log "issuing independent synthetic Kind gateway and broker roots"
-  kubectl_apply -f "$ROOT/tests/e2e/kind/credential-issuers.yaml"
+  kubectl_apply -f "$ROOT/tests/e2e/kind/credential-issuers.yaml" || return $?
   kubectl -n "$SANDBOX_NS" wait --for=condition=Ready --timeout=120s \
-    certificate/codewire-kind-credential-gateway-root issuer/codewire-credential-gateway
+    certificate/codewire-kind-credential-gateway-root issuer/codewire-credential-gateway || return $?
   kubectl -n "$NS" wait --for=condition=Ready --timeout=120s \
     certificate/codewire-kind-credential-broker-root issuer/codewire-credential-broker \
     certificate/codewire-credential-broker \
     certificate/codewire-kind-postgres-root issuer/codewire-kind-postgres \
-    certificate/codewire-kind-postgres-tls
+    certificate/codewire-kind-postgres-tls || return $?
   local gateway_roots broker_roots
   # Only public certificates leave these synthetic controller-owned Secrets.
   # No private key is copied into the host, workspace, ConfigMap or log.
@@ -107,9 +107,9 @@ deploy_kind_credential_issuers() {
     return 1
   }
   kubectl -n "$SANDBOX_NS" create configmap codewire-credential-gateway-roots \
-    --from-literal="ca.crt=$gateway_roots" --dry-run=client -o yaml | kubectl_apply -f -
+    --from-literal="ca.crt=$gateway_roots" --dry-run=client -o yaml | kubectl_apply -f - || return $?
   kubectl -n "$SANDBOX_NS" create configmap codewire-credential-broker-roots \
-    --from-literal="ca.crt=$broker_roots" --dry-run=client -o yaml | kubectl_apply -f -
+    --from-literal="ca.crt=$broker_roots" --dry-run=client -o yaml | kubectl_apply -f - || return $?
 }
 
 delete_kind_credential_bootstrap() {
@@ -172,21 +172,43 @@ start_kind_credential_fixture() {
     log "release-image gate: synthetic credential service is not selected"
     return 0
   fi
-  local profile promotable
-  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' codewire-services:e2e)"
-  promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' codewire-services:e2e)"
+  local profile promotable image_ref fixture_patch
+  image_ref="${KIND_PROFILE_SERVICES_IMAGE_ID:-codewire-services:e2e}"
+  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")"
+  promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$image_ref")"
   if [ "$profile" != ci ] || [ "$promotable" != false ]; then
     echo '::error::synthetic credentials require the exact non-promotable services-ci image' >&2
     return 1
   fi
   log "provisioning synthetic restricted Kind credential login"
   kubectl -n "$NS" exec -i deploy/postgres -- psql -U codewire -d codewire \
-    -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/credential-broker.sql"
-  kubectl_apply -f "$ROOT/tests/e2e/kind/credential-fixture-config.yaml"
+    -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/credential-broker.sql" || return $?
+  kubectl_apply -f "$ROOT/tests/e2e/kind/credential-fixture-config.yaml" || return $?
+  fixture_patch="$(render_kind_credential_fixture_patch)" || return $?
   kubectl -n "$NS" patch deployment codewire-credential-service --type=strategic \
-    --patch-file "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
-  kubectl -n "$NS" scale deployment/codewire-credential-service --replicas=1
-  kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
+    --patch-file "$fixture_patch" || return $?
+  kubectl -n "$NS" scale deployment/codewire-credential-service --replicas=1 || return $?
+  kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s || return $?
+}
+
+render_kind_credential_fixture_patch() {
+  local source="$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+  if [ "${KIND_PROFILE:-0}" != 1 ]; then
+    printf '%s\n' "$source"
+    return 0
+  fi
+  local rendered="$RUN_DIR/credential-fixture-patch.yaml"
+  python3 - "$source" "$rendered" "$KIND_INGRESS_URL" <<'PY' || return $?
+from pathlib import Path
+import sys
+
+source, destination, origin = sys.argv[1:]
+text = Path(source).read_text()
+if text.count("value: http://127.0.0.1:8090") != 1:
+    raise SystemExit("Kind credential fixture public origin inventory changed")
+Path(destination).write_text(text.replace("value: http://127.0.0.1:8090", f"value: {origin}"))
+PY
+  printf '%s\n' "$rendered"
 }
 
 prepare_kind_credential_cli() (

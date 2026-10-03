@@ -211,7 +211,9 @@ impl PrivateRoot {
         let owned = openat2(
             self.directory.as_fd(),
             relative,
-            access | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            // A hostile FIFO must not block before its file type is checked.
+            // Regular files retain their ordinary read/write semantics.
+            access | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
             Mode::empty(),
             RESOLVE_PRIVATE,
         )
@@ -694,6 +696,19 @@ mod tests {
         assert!(matches!(
             root.open_regular(Path::new("not-a-file"), false, None, false, None),
             Err(PathError::UnsafeFile(path)) if path == directory
+        ));
+    }
+
+    #[test]
+    fn open_regular_refuses_a_fifo_without_waiting_for_a_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+        let (_parent, root) = root();
+        let fifo = CString::new(root.path().join("fifo").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            root.open_regular(Path::new("fifo"), false, None, false, None),
+            Err(PathError::UnsafeFile(_))
         ));
     }
 

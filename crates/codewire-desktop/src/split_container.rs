@@ -269,6 +269,11 @@ impl SplitContainer {
         self.home_views.keys().cloned().collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn browser_for_url(&self, url: &str) -> Option<Entity<WebBrowserView>> {
+        self.web_browsers.get(url).cloned()
+    }
+
     /// Open a web browser tab for the given URL.
     ///
     /// If a tab with the same URL already exists, switches to it.

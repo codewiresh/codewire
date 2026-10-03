@@ -1,0 +1,27 @@
+{
+  "source_commit": "0588c11efc32902bd1baa0a54351cf5fc57b8579",
+  "sources": {
+    "schema": {
+      "path": "crates/codewire-local-vmm/src/supervisor_store_codec.rs",
+      "sha256": "3304fe43a763161b057c3484bdb1e266f59fcb2c84fbb728477c16d05e97b239"
+    },
+    "writer": {
+      "path": "crates/codewire-local-vmm/src/supervisor_store.rs",
+      "sha256": "697f28c364cd8d2e9471961c46103c30ace075c6596538a74d35aed32422a10c"
+    }
+  },
+  "fixtures": {
+    "schema-11.sql": {
+      "source": "schema",
+      "sha256": "59b3a93d1560788f8f60fbee86e00dcd864d7f9bcb58b6a1d5efb21ee126b37b"
+    },
+    "schema-11-environment.sql": {
+      "source": "writer",
+      "sha256": "f59b91888de4055768b5a30a89ec27c6dfe2f90d53e905b352d44d184dbb8455"
+    },
+    "schema-11-operation.sql": {
+      "source": "writer",
+      "sha256": "c8bccf954346969a2f176d2dfee333115c83f1a893c0a012b65e93c65925b153"
+    }
+  }
+}

@@ -1,9 +1,14 @@
 use std::fs::{self, File, OpenOptions};
+#[cfg(target_os = "linux")]
+use std::io::Read;
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::cw_runtime::CwRuntimeProvenance;
+#[cfg(target_os = "linux")]
+use crate::cw_runtime::{CW_RUNTIME_MAX_BYTES, CW_RUNTIME_MAX_PROVENANCE};
 use thiserror::Error;
 
 const HEADER_LEN: usize = 110;
@@ -97,6 +102,26 @@ pub fn canonical_guest_root_newc(
     busybox: &[u8],
     runc: &[u8],
 ) -> Result<Vec<u8>, NewcError> {
+    canonical_guest_root_newc_with_cw(probe, busybox, runc, None)
+}
+
+/// Image payload and externally pinned image provenance are one atomic asset.
+/// The canonical archive fixes root ownership and workload-readable modes.
+pub fn canonical_guest_root_newc_with_cw(
+    probe: &[u8],
+    busybox: &[u8],
+    runc: &[u8],
+    cw: Option<(&[u8], &[u8])>,
+) -> Result<Vec<u8>, NewcError> {
+    let runtime = cw
+        .map(|(binary, provenance)| {
+            let identity = CwRuntimeProvenance::decode(provenance).map_err(NewcError::InvalidCw)?;
+            identity
+                .validate_payload(binary)
+                .map_err(NewcError::InvalidCw)?;
+            Ok::<_, NewcError>((binary, provenance, identity))
+        })
+        .transpose()?;
     let probe_size = u32::try_from(probe.len()).map_err(|_| NewcError::ProbeTooLarge)?;
     let busybox_size = u32::try_from(busybox.len()).map_err(|_| NewcError::BusyboxTooLarge)?;
     let runc_size = u32::try_from(runc.len()).map_err(|_| NewcError::RuncTooLarge)?;
@@ -115,6 +140,11 @@ pub fn canonical_guest_root_newc(
             .len()
             .saturating_add(busybox.len())
             .saturating_add(runc.len())
+            .saturating_add(
+                runtime
+                    .as_ref()
+                    .map_or(0, |(binary, provenance, _)| binary.len() + provenance.len()),
+            )
             .saturating_add(BASIC_BUSYBOX_APPLETS.len() * 160)
             .saturating_add(2048),
     );
@@ -149,6 +179,32 @@ pub fn canonical_guest_root_newc(
             7,
         );
         inode += 1;
+    }
+    if let Some((binary, provenance, identity)) = runtime {
+        for directory in [
+            "codewire-cw".to_owned(),
+            format!("codewire-cw/{}", identity.payload.sha256),
+        ] {
+            append_named_entry(&mut archive, inode, 0o040555, &directory, &[], 0);
+            inode += 1;
+        }
+        append_named_entry(
+            &mut archive,
+            inode,
+            0o100555,
+            &identity.archive_entry(),
+            binary,
+            binary.len() as u32,
+        );
+        inode += 1;
+        append_named_entry(
+            &mut archive,
+            inode,
+            0o100444,
+            "codewire-cw/provenance.json",
+            provenance,
+            provenance.len() as u32,
+        );
     }
     append_entry(&mut archive, 0, 0, TRAILER_NAME, &[], 0, (0, 0));
     pad_to(&mut archive, ARCHIVE_BLOCK);
@@ -191,6 +247,49 @@ pub fn write_canonical_guest_root_initramfs(
     let runc = read_regular_input(runc_path, GuestRootInput::Runc)?;
     let archive = canonical_guest_root_newc(&probe, &busybox, &runc)?;
     write_atomic(output_path, &archive)
+}
+
+#[cfg(target_os = "linux")]
+pub fn write_canonical_guest_root_initramfs_with_cw(
+    probe_path: impl AsRef<Path>,
+    busybox_path: impl AsRef<Path>,
+    runc_path: impl AsRef<Path>,
+    cw_path: impl AsRef<Path>,
+    provenance_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+) -> Result<(), NewcError> {
+    let probe = read_regular_input(probe_path.as_ref(), GuestRootInput::Probe)?;
+    let busybox = read_regular_input(busybox_path.as_ref(), GuestRootInput::Busybox)?;
+    let runc = read_regular_input(runc_path.as_ref(), GuestRootInput::Runc)?;
+    let cw = read_bounded_cw_input(cw_path.as_ref(), CW_RUNTIME_MAX_BYTES)?;
+    let provenance = read_bounded_cw_input(provenance_path.as_ref(), CW_RUNTIME_MAX_PROVENANCE)?;
+    let archive =
+        canonical_guest_root_newc_with_cw(&probe, &busybox, &runc, Some((&cw, &provenance)))?;
+    write_atomic(output_path.as_ref(), &archive)
+}
+
+#[cfg(target_os = "linux")]
+fn read_bounded_cw_input(path: &Path, limit: usize) -> Result<Vec<u8>, NewcError> {
+    let read = || -> io::Result<Vec<u8>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > limit as u64 {
+            return Err(io::Error::other("cw input is not a bounded regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(io::Error::other("cw input changed size"));
+        }
+        Ok(bytes)
+    };
+    read().map_err(|source| NewcError::ReadCw {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -376,6 +475,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), NewcError> {
 
 #[derive(Debug, Error)]
 pub enum NewcError {
+    #[error("invalid cw boot asset: {0}")]
+    InvalidCw(&'static str),
+    #[error("read cw boot asset {path}: {source}")]
+    ReadCw { path: PathBuf, source: io::Error },
     #[error("initramfs probe is empty")]
     EmptyProbe,
     #[error("initramfs probe exceeds the newc size field")]
@@ -558,6 +661,51 @@ mod tests {
             Sha256::digest(
                 canonical_guest_root_newc(b"probe-bytes", b"busybox-bytes", b"runc-bytes").unwrap()
             )
+        );
+    }
+
+    #[test]
+    fn cw_image_asset_has_root_ownership_readable_system_modes_and_atomic_identity() {
+        let (cw, provenance) = crate::cw_runtime::fixture();
+        let archive = canonical_guest_root_newc_with_cw(
+            b"probe",
+            b"busybox",
+            b"runc",
+            Some((&cw, &provenance)),
+        )
+        .unwrap();
+        let entries = parse_entries(&archive);
+        let runtime = entries
+            .iter()
+            .filter(|entry| entry.0.starts_with(b"codewire-cw"))
+            .collect::<Vec<_>>();
+        assert_eq!(runtime.len(), 4);
+        for (name, fields, payload) in runtime {
+            assert_eq!(fields[2..4], [0, 0]);
+            if name.ends_with(b"/cw") {
+                assert_eq!(fields[1], 0o100555);
+                assert_eq!(payload, &cw);
+            } else if name.ends_with(b".json") {
+                assert_eq!(fields[1], 0o100444);
+                assert_eq!(payload, &provenance);
+            } else {
+                assert_eq!(fields[1], 0o040555);
+            }
+        }
+        let mut substituted = cw.clone();
+        substituted[135] = 1;
+        assert!(
+            canonical_guest_root_newc_with_cw(
+                b"probe",
+                b"busybox",
+                b"runc",
+                Some((&substituted, &provenance))
+            )
+            .is_err()
+        );
+        assert_ne!(
+            archive,
+            canonical_guest_root_newc(b"probe", b"busybox", b"runc").unwrap()
         );
     }
 

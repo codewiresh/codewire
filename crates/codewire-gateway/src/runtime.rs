@@ -1496,6 +1496,15 @@ mod tests {
             Err(Status::unimplemented("restart session"))
         }
 
+        async fn send_session_input(
+            &self,
+            _request: Request<v1::SendSessionInputRequest>,
+        ) -> Result<Response<v1::SendSessionInputResponse>, Status> {
+            Err(Status::unimplemented(
+                "fixture unused acknowledged input RPC",
+            ))
+        }
+
         async fn read_session_output(
             &self,
             _request: Request<v1::ReadSessionOutputRequest>,

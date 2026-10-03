@@ -383,6 +383,10 @@ impl SessionClient {
         &self,
         request: v1::LaunchSessionRequest,
     ) -> Result<v1::SessionRecord, SessionClientError> {
+        if !request.name.is_empty() || request.parent_session_id.is_some() {
+            self.require_capability(codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_METADATA)
+                .await?;
+        }
         let mut client = self.inner.clone();
         Self::required_session(
             client
@@ -429,16 +433,75 @@ impl SessionClient {
     }
 
     pub async fn restart(&self, session_id: &str) -> Result<v1::SessionRecord, SessionClientError> {
+        self.restart_with_generation(session_id, None).await
+    }
+
+    pub async fn restart_with_generation(
+        &self,
+        session_id: &str,
+        expected_launch_generation: Option<u64>,
+    ) -> Result<v1::SessionRecord, SessionClientError> {
         let mut client = self.inner.clone();
         Self::required_session(
             client
                 .restart_session(self.authorized(v1::RestartSessionRequest {
                     session_id: session_id.to_string(),
+                    expected_launch_generation,
                 }))
                 .await?
                 .into_inner()
                 .session,
         )
+    }
+
+    async fn require_capability(&self, capability: &'static str) -> Result<(), SessionClientError> {
+        let capabilities = self.get_capabilities(&[capability]).await?;
+        Self::validate_capability(capabilities, capability)
+    }
+
+    fn validate_capability(
+        capabilities: v1::GetCapabilitiesResponse,
+        capability: &'static str,
+    ) -> Result<(), SessionClientError> {
+        if !capabilities
+            .capabilities
+            .iter()
+            .any(|value| value == capability)
+        {
+            return Err(SessionClientError::MissingCapability { capability });
+        }
+        if capabilities.state != v1::DaemonState::Ready as i32 {
+            return Err(SessionClientError::NotReady {
+                message: capabilities.message,
+            });
+        }
+        Ok(())
+    }
+
+    /// Acknowledged raw input. An ambiguous timeout is never retried.
+    pub async fn send_input(
+        &self,
+        session_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), SessionClientError> {
+        use codewire_gateway_proto::{
+            DAEMON_CAPABILITY_SESSION_INPUT, SESSION_INPUT_MAX_BYTES, SESSION_INPUT_TIMEOUT,
+        };
+        if data.is_empty() || data.len() > SESSION_INPUT_MAX_BYTES {
+            return Err(tonic::Status::invalid_argument(
+                "session input must contain 1..65536 bytes",
+            )
+            .into());
+        }
+        tokio::time::timeout(SESSION_INPUT_TIMEOUT, async {
+            self.require_capability(DAEMON_CAPABILITY_SESSION_INPUT).await?;
+            let mut client = self.inner.clone();
+            let mut request = self.authorized(v1::SendSessionInputRequest { session_id: session_id.into(), data });
+            request.set_timeout(SESSION_INPUT_TIMEOUT);
+            client.send_session_input(request).await?;
+            Ok(())
+        }).await.map_err(|_| SessionClientError::Status(tonic::Status::deadline_exceeded(
+            "session input acknowledgement timed out; input may have been written; do not retry automatically")))?
     }
 
     pub async fn read_output(
@@ -739,5 +802,29 @@ impl SessionAttachmentInput {
             })
             .await
             .map_err(|_| SessionClientError::RequestClosed)
+    }
+}
+
+#[cfg(test)]
+mod session_input_capability_tests {
+    use super::*;
+    #[test]
+    fn old_daemon_rejects_new_input_and_metadata_capabilities_before_dispatch() {
+        for capability in [
+            codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_INPUT,
+            codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_METADATA,
+        ] {
+            let old = v1::GetCapabilitiesResponse {
+                state: v1::DaemonState::Ready as i32,
+                capabilities: vec![
+                    DAEMON_CAPABILITY_SESSIONS.into(),
+                    DAEMON_CAPABILITY_ATTACH.into(),
+                ],
+                ..Default::default()
+            };
+            assert!(
+                matches!(SessionClient::validate_capability(old, capability), Err(SessionClientError::MissingCapability { capability: actual }) if actual == capability)
+            );
+        }
     }
 }

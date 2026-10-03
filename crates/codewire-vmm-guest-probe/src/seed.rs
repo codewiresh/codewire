@@ -19,8 +19,11 @@ pub const DOCKER_DISK_SERIAL: &str = "CWDOCKER1";
 const MAGIC: &[u8; 8] = b"CWSEED1\0";
 // One current format. Retired versions, including the unshipped material-
 // bearing v6, are never decoded or selected by a constructor.
-const FORMAT_VERSION: u16 = 8;
-const HEADER_LEN: usize = 256;
+const FORMAT_VERSION: u16 = 9;
+// Referenced by the guest entrypoint and inspected in the admitted init ELF.
+// A retained boot without this capability is never sent the current seed.
+pub const GUEST_RUNTIME_ABI_MARKER: &[u8] = b"\0CWGUESTABI\0seed=9;cw_catalog=1\0";
+const HEADER_LEN: usize = 288;
 const CHECKSUM_LEN: usize = 32;
 const CHECKSUM_OFFSET: usize = SEED_LEN - CHECKSUM_LEN;
 const TOKEN_MAX_LEN: usize = 512;
@@ -41,13 +44,16 @@ const DIRECT_SHARES_SHA256_OFFSET: usize = 120;
 const SKILL_SNAPSHOT_SHA256_OFFSET: usize = 152;
 const ENVIRONMENT_PROJECTION_SHA256_OFFSET: usize = 184;
 const MANAGED_CREDENTIAL_CLIENTS_OFFSET: usize = 216;
-const RESERVED_OFFSET: usize = 248;
+const MANAGED_CREDENTIAL_CLIENTS_END: usize = 248;
+const CW_RUNTIME_CATALOG_SHA256_OFFSET: usize = 248;
+const RESERVED_OFFSET: usize = 280;
 const TOKEN_OFFSET: usize = HEADER_LEN;
 const SETUP_PRESENT_FLAG: u16 = 1;
 const DIRECT_SHARES_PRESENT_FLAG: u16 = 1 << 1;
 const SKILL_SNAPSHOT_PRESENT_FLAG: u16 = 1 << 2;
 const DOCKER_DATA_DISK_PRESENT_FLAG: u16 = 1 << 3;
 const ENVIRONMENT_PROJECTION_PRESENT_FLAG: u16 = 1 << 4;
+const CW_RUNTIME_CATALOG_PRESENT_FLAG: u16 = 1 << 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetupBinding {
@@ -105,6 +111,7 @@ pub struct Seed {
     docker_data_disk: bool,
     environment_projection_sha256: Option<Sha256Value>,
     managed_credential_clients: ManagedCredentialClients,
+    cw_runtime_catalog_sha256: Option<Sha256Value>,
 }
 
 impl Seed {
@@ -125,6 +132,7 @@ impl Seed {
             docker_data_disk: false,
             environment_projection_sha256: None,
             managed_credential_clients: ManagedCredentialClients::default(),
+            cw_runtime_catalog_sha256: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -148,6 +156,7 @@ impl Seed {
             docker_data_disk: false,
             environment_projection_sha256: None,
             managed_credential_clients: ManagedCredentialClients::default(),
+            cw_runtime_catalog_sha256: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -172,6 +181,7 @@ impl Seed {
             docker_data_disk: false,
             environment_projection_sha256: None,
             managed_credential_clients: ManagedCredentialClients::default(),
+            cw_runtime_catalog_sha256: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -197,6 +207,7 @@ impl Seed {
             docker_data_disk: false,
             environment_projection_sha256: None,
             managed_credential_clients: ManagedCredentialClients::default(),
+            cw_runtime_catalog_sha256: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -261,6 +272,16 @@ impl Seed {
         self.managed_credential_clients
     }
 
+    /// Bind an independent read-only cw catalog, never workspace storage.
+    pub fn with_cw_runtime_catalog_sha256(mut self, hash: Sha256Value) -> Self {
+        self.cw_runtime_catalog_sha256 = Some(hash);
+        self
+    }
+
+    pub fn cw_runtime_catalog_sha256(&self) -> Option<Sha256Value> {
+        self.cw_runtime_catalog_sha256
+    }
+
     pub fn encode(&self) -> [u8; SEED_LEN] {
         // Construction and decoding are the only ways to obtain a Seed, so
         // these invariants have already been checked.
@@ -300,6 +321,11 @@ impl Seed {
         if let Some(hash) = self.environment_projection_sha256 {
             flags |= ENVIRONMENT_PROJECTION_PRESENT_FLAG;
             bytes[ENVIRONMENT_PROJECTION_SHA256_OFFSET..ENVIRONMENT_PROJECTION_SHA256_OFFSET + 32]
+                .copy_from_slice(&hash.as_bytes());
+        }
+        if let Some(hash) = self.cw_runtime_catalog_sha256 {
+            flags |= CW_RUNTIME_CATALOG_PRESENT_FLAG;
+            bytes[CW_RUNTIME_CATALOG_SHA256_OFFSET..CW_RUNTIME_CATALOG_SHA256_OFFSET + 32]
                 .copy_from_slice(&hash.as_bytes());
         }
         put_u16(&mut bytes, FLAGS_OFFSET, flags);
@@ -344,7 +370,8 @@ impl Seed {
                 | DIRECT_SHARES_PRESENT_FLAG
                 | SKILL_SNAPSHOT_PRESENT_FLAG
                 | DOCKER_DATA_DISK_PRESENT_FLAG
-                | ENVIRONMENT_PROJECTION_PRESENT_FLAG)
+                | ENVIRONMENT_PROJECTION_PRESENT_FLAG
+                | CW_RUNTIME_CATALOG_PRESENT_FLAG)
             != 0
             || bytes[RESERVED_OFFSET..HEADER_LEN]
                 .iter()
@@ -394,7 +421,14 @@ impl Seed {
             ENVIRONMENT_PROJECTION_SHA256_OFFSET,
         )?;
         let docker_data_disk = flags & DOCKER_DATA_DISK_PRESENT_FLAG != 0;
-        let client_bytes = &bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..RESERVED_OFFSET];
+        let cw_runtime_catalog_sha256 = decode_optional_hash(
+            bytes,
+            flags,
+            CW_RUNTIME_CATALOG_PRESENT_FLAG,
+            CW_RUNTIME_CATALOG_SHA256_OFFSET,
+        )?;
+        let client_bytes =
+            &bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..MANAGED_CREDENTIAL_CLIENTS_END];
         let client_len = client_bytes
             .iter()
             .position(|byte| *byte == 0)
@@ -439,6 +473,11 @@ impl Seed {
         };
         let seed = if let Some(hash) = environment_projection_sha256 {
             seed.with_environment_projection_sha256(hash)
+        } else {
+            seed
+        };
+        let seed = if let Some(hash) = cw_runtime_catalog_sha256 {
+            seed.with_cw_runtime_catalog_sha256(hash)
         } else {
             seed
         };
@@ -490,6 +529,7 @@ impl fmt::Debug for Seed {
             .field("direct_shares_sha256", &self.direct_shares_sha256)
             .field("skill_snapshot_sha256", &self.skill_snapshot_sha256)
             .field("docker_data_disk", &self.docker_data_disk)
+            .field("cw_runtime_catalog_sha256", &self.cw_runtime_catalog_sha256)
             .field(
                 "managed_credential_clients",
                 &self.managed_credential_clients,
@@ -619,7 +659,7 @@ mod tests {
         assert_eq!(&encoded[..8], MAGIC);
         assert_eq!(
             format!("{:x}", Sha256::digest(encoded)),
-            "80227b8d57794734ca9f230300f55291375eb4a42cf5e46d16f88dea3b86525a"
+            "f57d36e2c2629f7e2e5d0867a5a6ecbc74de61d3bf056d7f6b71648892a704eb"
         );
         assert_eq!(Seed::decode(&encoded).unwrap(), seed);
         assert_eq!(seed.encode(), encoded);
@@ -662,7 +702,9 @@ mod tests {
             "v2:1e",
             "v2:1f",
         ] {
-            assert!(clients.len() < RESERVED_OFFSET - MANAGED_CREDENTIAL_CLIENTS_OFFSET);
+            assert!(
+                clients.len() < MANAGED_CREDENTIAL_CLIENTS_END - MANAGED_CREDENTIAL_CLIENTS_OFFSET
+            );
             let clients = ManagedCredentialClients::decode(clients).unwrap();
             let seed = base.clone().with_managed_credential_clients(clients);
             assert_eq!(seed.vm_id(), base.vm_id());
@@ -675,14 +717,14 @@ mod tests {
                     .iter()
                     .all(|byte| *byte == 0)
             );
-            assert_eq!(get_u16(&encoded, VERSION_OFFSET), 8);
+            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
             let decoded = Seed::decode(&encoded).unwrap();
             assert_eq!(decoded.managed_credential_clients(), clients);
             assert_eq!(decoded, seed);
         }
         for invalid in ["", "codex", "v1:openai,codex", "v1:github", "v1:ssh,codex"] {
             let mut bytes = base.encode();
-            bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..RESERVED_OFFSET].fill(0);
+            bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..MANAGED_CREDENTIAL_CLIENTS_END].fill(0);
             bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET
                 ..MANAGED_CREDENTIAL_CLIENTS_OFFSET + invalid.len()]
                 .copy_from_slice(invalid.as_bytes());
@@ -693,7 +735,7 @@ mod tests {
             );
         }
         let mut bytes = base.encode();
-        bytes[RESERVED_OFFSET - 1] = 1;
+        bytes[MANAGED_CREDENTIAL_CLIENTS_END - 1] = 1;
         refresh_checksum(&mut bytes);
         assert_eq!(
             Seed::decode(&bytes),
@@ -710,7 +752,7 @@ mod tests {
             .encode();
         assert_eq!(encoded[MANAGED_CREDENTIAL_CLIENTS_OFFSET + 29], 0);
         assert!(
-            encoded[MANAGED_CREDENTIAL_CLIENTS_OFFSET + 30..RESERVED_OFFSET]
+            encoded[MANAGED_CREDENTIAL_CLIENTS_OFFSET + 30..MANAGED_CREDENTIAL_CLIENTS_END]
                 .iter()
                 .all(|byte| *byte == 0)
         );
@@ -718,6 +760,46 @@ mod tests {
         put_u16(&mut retired, VERSION_OFFSET, 7);
         refresh_checksum(&mut retired);
         assert_eq!(Seed::decode(&retired), Err(SeedError::UnsupportedVersion));
+    }
+
+    #[test]
+    fn runtime_catalog_binding_keeps_credential_framing_and_rejects_unbound_bytes() {
+        assert_eq!(
+            GUEST_RUNTIME_ABI_MARKER,
+            format!("\0CWGUESTABI\0seed={FORMAT_VERSION};cw_catalog=1\0").as_bytes()
+        );
+        let clients = ManagedCredentialClients::decode("v2:1f").unwrap();
+        let hash = Sha256Value::from_bytes([0xa5; 32]);
+        let seed = sample_seed()
+            .with_managed_credential_clients(clients)
+            .with_cw_runtime_catalog_sha256(hash);
+        let encoded = seed.encode();
+        let decoded = Seed::decode(&encoded).unwrap();
+        assert_eq!(decoded, seed);
+        assert_eq!(decoded.managed_credential_clients(), clients);
+        assert_eq!(decoded.cw_runtime_catalog_sha256(), Some(hash));
+        assert_eq!(
+            &encoded[CW_RUNTIME_CATALOG_SHA256_OFFSET..RESERVED_OFFSET],
+            &hash.as_bytes()
+        );
+        let mut corrupt = encoded;
+        let flags = get_u16(&corrupt, FLAGS_OFFSET);
+        put_u16(
+            &mut corrupt,
+            FLAGS_OFFSET,
+            flags & !CW_RUNTIME_CATALOG_PRESENT_FLAG,
+        );
+        refresh_checksum(&mut corrupt);
+        assert_eq!(Seed::decode(&corrupt), Err(SeedError::NonZeroReserved));
+        let mut retired = encoded;
+        put_u16(&mut retired, VERSION_OFFSET, 8);
+        refresh_checksum(&mut retired);
+        assert_eq!(Seed::decode(&retired), Err(SeedError::UnsupportedVersion));
+        let unbound = sample_seed().encode();
+        assert_eq!(
+            &unbound[CW_RUNTIME_CATALOG_SHA256_OFFSET..RESERVED_OFFSET],
+            &[0; 32]
+        );
     }
 
     #[test]
@@ -803,7 +885,7 @@ mod tests {
         let encoded = seed.encode();
         assert_eq!(
             format!("{:x}", Sha256::digest(encoded)),
-            "e8e0f945cae4404b931a8333fb2955f54343bbfe555de8ffe7c7ee62586303ee"
+            "f4409261c996d909ba583d1ef18ba2a9c1926b9aeb81c1c734a4642078df730e"
         );
         assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
         assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
@@ -1013,8 +1095,8 @@ mod tests {
                 seed = seed.with_environment_projection_sha256(projection);
             }
             let encoded = seed.encode();
-            assert_eq!(get_u16(&encoded, VERSION_OFFSET), 8);
-            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), 256);
+            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
+            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
             assert_eq!(get_u16(&encoded, FLAGS_OFFSET), flags);
             assert_eq!(
                 &encoded[TOKEN_OFFSET..TOKEN_OFFSET + TOKEN.len()],

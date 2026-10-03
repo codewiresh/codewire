@@ -180,7 +180,20 @@ run_shell_policy() {
   scripts/ci/verify/check-shell-scripts.sh
 }
 
+isolate_kind_fixture_environment() {
+  local key
+  # Fixtures own synthetic selectors and endpoints. They must not discover a
+  # caller's live profile, private context, artifact paths or lock descriptors.
+  # Unsetting descriptor names leaves the parent's open descriptions locked.
+  for key in ${!KIND_@}; do
+    unset "$key"
+  done
+  unset CLUSTER KEEP_KIND_CLUSTER KUBECONFIG KUBE_CONTEXT RUN_DIR CARGO_CI_DIR
+}
+
 run_policy_core() {
+  (
+  isolate_kind_fixture_environment
   run_verification_shell_syntax
   scripts/ci/tests/test-setup-kubeconfig.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
@@ -199,6 +212,7 @@ run_policy_core() {
   scripts/ci/tests/test-cargo-cache-capacity.sh
   scripts/ci/tests/test-admin-proto-boundary.sh
   scripts/ci/tests/test-ci-tool-downloads.sh
+  python3 -B scripts/ci/tests/test-linux-vmm-kernel.py
   scripts/ci/tests/test-build-local-image.sh
   scripts/ci/tests/test-dashboard-image-network-probe.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
@@ -233,6 +247,7 @@ run_policy_core() {
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/source/check-native-desktop-ui.py
   python3 scripts/checks/repo_checks.py go-source-classification
+  )
 }
 
 run_policy() {
@@ -519,6 +534,9 @@ run_rust() {
     run_rust_packages rust_pkg_
   fi
   rust_shard features || return 0
+  if selected rust_workspace || selected rust_pkg_codewire_cli || selected rust_pkg_codewire_cli_bin; then
+    python3 -B scripts/ci/tests/test-cli-update-mesh-endpoints.py
+  fi
   if selected rust_workspace || selected rust_pkg_codewire_cli \
       || selected rust_pkg_codewire_cli_bin || selected rust_pkg_codewire_admin_proto \
       || selected rust_pkg_codewire_proto; then
@@ -623,6 +641,12 @@ run_transport() {
     run_rust_packages transport_pkg_
   fi
   rust_shard local-vmm || return 0
+  if selected transport_pkg_codewire_local_vmm || selected transport_pkg_codewire_vmm_guest_probe; then
+    python3 -B scripts/dev/test-cw-runtime-image.py
+    python3 -B scripts/dev/test-cli-native-managed.py --self-test
+    python3 -B scripts/dev/test-cli-native-update.py --self-test
+    python3 -B scripts/ci/tests/test-native-managed-update-entrypoint.py
+  fi
   if selected transport_pkg_codewire_local_vmm; then
     crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
     python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
@@ -682,6 +706,8 @@ install_caddy() {
 }
 
 run_edge() {
+  (
+  isolate_kind_fixture_environment
   install_caddy
   caddy validate --config Caddyfile --adapter caddyfile
   caddy validate --config Caddyfile.docker --adapter caddyfile
@@ -711,10 +737,15 @@ run_edge() {
   python3 scripts/checks/repo_checks.py connect-edge-routing --self-test
   scripts/ci/tests/test-kind-e2e-cleanup.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
+  python3 -B scripts/ci/tests/test-kind-cluster-profiles.py
+  python3 -B scripts/ci/tests/test-kind-dev-profile.py
+  python3 -B scripts/ci/tests/test-kind-profile-artifacts.py
+  python3 -B scripts/ci/tests/test-kind-profile-gate.py
   scripts/ci/tests/test-kind-forwards.sh
   python3 -B scripts/ci/tests/test-kind-codex-session.py
   python3 -B scripts/ci/tests/test-kind-codex-login.py
   python3 -B scripts/ci/tests/test-kind-credentials.py
+  )
 }
 
 run_release() {

@@ -32,14 +32,15 @@ run_integrated_kind_suite() {
   # creating a cluster, rather than misreporting the later bootstrap fallout.
   prepare_kind_temp_runtime
 
-  # CI gives each replica a private DinD sidecar, while local worktrees share
-  # fixed host ports, image tags, and the default cluster name. Serialize the
-  # complete local transaction before reclaiming any CI-owned prior run.
+  # Saved profiles serialize only their own runtime. Legacy fixed-port callers
+  # retain the host transaction lock; builds share a bounded publication lock.
   acquire_kind_host_lock
 
-  # At job startup, the current transaction name and every cluster with this
-  # CI-owned run-ID prefix on the current daemon are stale. Reclaim them only
-  # after taking the host lock and before checking their fixed host ports.
+  # An existing cluster is never implicitly replaced, including legacy names.
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    python3 "$ROOT/scripts/dev/kind/cluster-profile.py" render-config \
+      --cluster "$CLUSTER" --template "$ROOT/tests/e2e/kind/kind-config.yaml" >/dev/null || return $?
+  fi
   reclaim_cancelled_ci_clusters "$KIND_CONFIG"
 
   trap cleanup EXIT
@@ -61,6 +62,9 @@ run_integrated_kind_suite() {
   dashboard_browser_e2e
   # TTL verifies provenance while its product-created workspace still exists.
   rust_reconciler_ttl_e2e
+  if [ "$KEEP_KIND_CLUSTER" = 1 ]; then
+    mark_retained_cluster_prepared
+  fi
   log "green"
 }
 

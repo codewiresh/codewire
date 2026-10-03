@@ -31,6 +31,13 @@ fn entrypoint() -> anyhow::Result<()> {
 
     let mut arguments = std::env::args_os();
     let executable = arguments.next();
+    if executable
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+        == Some(OsStr::new("cw"))
+    {
+        return codewire_vmm_guest_probe::cw_runtime_publisher::launch_default(arguments.collect());
+    }
     let command = arguments.next();
     match command.as_deref().and_then(|value| value.to_str()) {
         None => {
@@ -143,6 +150,9 @@ fn entrypoint() -> anyhow::Result<()> {
         Some("docker-fixture") => guest::run_docker_fixture(arguments.collect()),
         Some("newc") => build_newc(arguments),
         Some("newc-root") => build_guest_root_newc(arguments),
+        Some("newc-root-cw") => bail!(
+            "embedded cw boot assets are unsupported; supply the separate read-only cw runtime disk"
+        ),
         Some(_) => {
             let _ = executable;
             bail!("unknown guest probe command")

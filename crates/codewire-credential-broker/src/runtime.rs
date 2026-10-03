@@ -63,6 +63,10 @@ mod http_tests;
 #[path = "runtime/synthetic_smoke_tests.rs"]
 mod synthetic_smoke_tests;
 
+#[cfg(feature = "local-broker-synthetic-smoke")]
+#[path = "runtime/native_managed_smoke.rs"]
+mod native_managed_smoke;
+
 /// Metadata-only description of one exact OAuth generation to refresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrokerCredentialRefreshRequest {
@@ -617,6 +621,9 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         } else {
             "CWCODEX149"
         };
+        // Managed-agent fixture markers select their own stream; every other
+        // request keeps the canned one-turn bytes below.
+        let native = native_managed_smoke::codex(&body, protected_value)?;
         let response = format!(
             concat!(
                 "event: response.created\n",
@@ -648,7 +655,7 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
             response_headers,
-            Box::pin(stream::iter([Ok(first), Ok(second)])),
+            native.unwrap_or_else(|| Box::pin(stream::iter([Ok(first), Ok(second)]))),
         ))
     }
 }
@@ -758,6 +765,7 @@ impl SyntheticOpenAiSmokeTransport {
                 })),
             ));
         }
+        let native = native_managed_smoke::claude(&payload, protected_value)?;
         // A complete text-only Messages stream consumed by the pinned Claude
         // CLI, including the final usage/stop events. Split inside the reflected
         // key, not at an SSE boundary, to exercise streaming redaction.
@@ -789,7 +797,7 @@ impl SyntheticOpenAiSmokeTransport {
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
             response_headers,
-            Box::pin(stream::iter(chunks.map(Ok))),
+            native.unwrap_or_else(|| Box::pin(stream::iter(chunks.map(Ok)))),
         ))
     }
 }

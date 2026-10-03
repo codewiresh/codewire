@@ -226,6 +226,7 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
+    config.validate_host()?;
     #[cfg(target_os = "linux")]
     let codex_login =
         codex_home.and_then(|home| crate::codex_home::login::hosted_writer(&config, home));

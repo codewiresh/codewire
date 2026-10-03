@@ -5,6 +5,13 @@ set -euo pipefail
 
 export KIND_E2E_COMMON_LOADED=1
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+KIND_PROFILE=0
+if [ -n "${CLUSTER:-}" ]; then
+  # shellcheck source=scripts/dev/kind/profile.sh
+  source "$ROOT/scripts/dev/kind/profile.sh"
+  kind_profile_load "$ROOT" || return $?
+  KIND_CLUSTER_NAME_EXPLICIT=1
+fi
 # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
 source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
 # shellcheck source=scripts/ci/verify/kind-host-runtime.sh
@@ -13,20 +20,44 @@ CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"
 export CARGO_TARGET_DIR
-CARGO_CI_DIR="$CARGO_TARGET_DIR/ci"
+KIND_SMOKE_BUILD_DIR="$CARGO_TARGET_DIR/ci"
+if [ "$KIND_PROFILE" = 1 ]; then
+  CARGO_CI_DIR="$KIND_PROFILE_SMOKE_DIR"
+else
+  CARGO_CI_DIR="$KIND_SMOKE_BUILD_DIR"
+fi
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 KIND_CONFIG="${KIND_CONFIG:-$ROOT/tests/e2e/kind/kind-config.yaml}"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-kind-e2e-${KIND_CLUSTER_NAME}}"
-mkdir -p "$RUN_DIR"
 # Host topology for this harness cluster. Every hostPort the checked-in Kind
 # config maps is templated, so multiple sessions can run multiple harness
 # clusters on one workstation with distinct KIND_CLUSTER_NAME and port
 # assignments; the defaults keep every existing flow unchanged.
-KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-8090}"
+if [ -n "${KIND_INGRESS_HOST_PORT:-}" ] && [ -n "${KIND_INGRESS_HTTP_HOST_PORT:-}" ] \
+    && [ "$KIND_INGRESS_HOST_PORT" != "$KIND_INGRESS_HTTP_HOST_PORT" ]; then
+  echo '::error::Kind ingress port selectors conflict' >&2
+  return 2
+fi
+if [ -n "${KIND_COORDINATOR_DIRECT_HOST_PORT:-}" ] && [ -n "${KIND_COORDINATOR_HOST_PORT:-}" ] \
+    && [ "$KIND_COORDINATOR_DIRECT_HOST_PORT" != "$KIND_COORDINATOR_HOST_PORT" ]; then
+  echo '::error::Kind coordinator port selectors conflict' >&2
+  return 2
+fi
+if [ -n "${KIND_ORCHESTRATION_HTTP_URL:-}" ] && [ -n "${KIND_ORCHESTRATION_URL:-}" ] \
+    && [ "$KIND_ORCHESTRATION_HTTP_URL" != "$KIND_ORCHESTRATION_URL" ]; then
+  echo '::error::Kind orchestration endpoint selectors conflict' >&2
+  return 2
+fi
+if [ -n "${KIND_TEMPORAL_FRONTEND_URL:-}" ] && [ -n "${KIND_TEMPORAL_ADDRESS:-}" ] \
+    && [ "$KIND_TEMPORAL_FRONTEND_URL" != "$KIND_TEMPORAL_ADDRESS" ]; then
+  echo '::error::Kind Temporal endpoint selectors conflict' >&2
+  return 2
+fi
+KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-${KIND_INGRESS_HTTP_HOST_PORT:-8090}}"
 KIND_INGRESS_TLS_HOST_PORT="${KIND_INGRESS_TLS_HOST_PORT:-10443}"
 KIND_TEMPORAL_HOST_PORT="${KIND_TEMPORAL_HOST_PORT:-7233}"
 KIND_ORCHESTRATION_HOST_PORT="${KIND_ORCHESTRATION_HOST_PORT:-8084}"
-KIND_COORDINATOR_DIRECT_HOST_PORT="${KIND_COORDINATOR_DIRECT_HOST_PORT:-18092}"
+KIND_COORDINATOR_DIRECT_HOST_PORT="${KIND_COORDINATOR_DIRECT_HOST_PORT:-${KIND_COORDINATOR_HOST_PORT:-18092}}"
 KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"
 KIND_HOST_PORT_VARS=(
   KIND_INGRESS_HOST_PORT
@@ -58,10 +89,15 @@ unset kind_host_port_var kind_host_port_value kind_host_port_var_seen
 # coordinator TLS ingress intentionally owns Host/SNI localhost below.
 KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:${KIND_INGRESS_HOST_PORT}}"
 KIND_INGRESS_TLS_URL="${KIND_INGRESS_TLS_URL:-https://localhost:${KIND_INGRESS_TLS_HOST_PORT}}"
+KIND_ORCHESTRATION_URL="${KIND_ORCHESTRATION_HTTP_URL:-${KIND_ORCHESTRATION_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}}"
+KIND_TEMPORAL_ADDRESS="${KIND_TEMPORAL_FRONTEND_URL:-${KIND_TEMPORAL_ADDRESS:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}}"
+KIND_INGRESS_HTTP_HOST_PORT="${KIND_INGRESS_HTTP_HOST_PORT:-$KIND_INGRESS_HOST_PORT}"
+KIND_COORDINATOR_HOST_PORT="${KIND_COORDINATOR_HOST_PORT:-$KIND_COORDINATOR_DIRECT_HOST_PORT}"
 KIND_DATABASE_URL="postgres://codewire:codewire@127.0.0.1:${KIND_POSTGRES_HOST_PORT}/codewire"
-KIND_TEMPORAL_FRONTEND_URL="${KIND_TEMPORAL_FRONTEND_URL:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}"
-KIND_ORCHESTRATION_HTTP_URL="${KIND_ORCHESTRATION_HTTP_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}"
+KIND_TEMPORAL_FRONTEND_URL="$KIND_TEMPORAL_ADDRESS"
+KIND_ORCHESTRATION_HTTP_URL="$KIND_ORCHESTRATION_URL"
 KIND_COORDINATOR_DIRECT_URL="${KIND_COORDINATOR_DIRECT_URL:-http://127.0.0.1:${KIND_COORDINATOR_DIRECT_HOST_PORT}}"
+mkdir -p "$RUN_DIR"
 KEEP_KIND_CLUSTER="${KEEP_KIND_CLUSTER:-0}"
 KIND_HOST_LOCK_TIMEOUT_SECONDS="${KIND_HOST_LOCK_TIMEOUT_SECONDS:-1200}"
 if ! [[ "$KIND_HOST_LOCK_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
@@ -71,6 +107,7 @@ if ! [[ "$KIND_HOST_LOCK_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
 fi
 KIND_HOST_LOCK_FILE="${KIND_HOST_LOCK_FILE:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/codewire-kind-e2e-${UID}.lock}"
 KIND_HOST_LOCK_FD=""
+KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE=0
 NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
 # shellcheck source=scripts/ci/verify/kind/credentials.sh
@@ -86,6 +123,12 @@ RETAINED_KUBECONFIG=""
 REMOTE_DIND_JOB_CONTAINER=""
 REMOTE_DIND_KIND_NETWORK=""
 REMOTE_DIND_FORWARDER_PID=""
+KIND_CREATED_BY_TRANSACTION=0
+KIND_TRANSACTION_NODE_ID=""
+KIND_SHARD_TRANSACTION=0
+# Nested external observations never inherit the creating process's cleanup.
+export -n KIND_SHARD_TRANSACTION
+KIND_PROFILE_ARTIFACTS_VERIFIED=0
 if [ -z "${DEFAULT_KIND_WORKSPACE_IMAGE+x}" ]; then
   DEFAULT_KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff'
 fi
@@ -198,8 +241,8 @@ kind_host_port_holder() {
 # Fail fast when a requested host port is already held, naming the owner so a
 # session never mutates another session's cluster by accident. Runs before the
 # slow build phase in `up` and again inside create_cluster as the backstop.
-# An optional first argument names a cluster whose own holders are ignored:
-# create_cluster deletes and recreates that cluster, freeing its ports.
+# An optional first argument excludes a selected cluster's own holders from
+# this observation. create_cluster still refuses to replace an existing cluster.
 require_kind_host_ports_available() {
   local ignore_cluster="${1:-}"
   local port_var requested_port holder failures=0
@@ -232,21 +275,29 @@ kind_host_port_mappings() {
 # checked-in config keeps the default values, each exactly once; the rendered
 # copy is per-run state under RUN_DIR.
 render_kind_host_port_mappings() {
-  local source="$1" output="$2"
-  local mapping default_port requested_port
-  cp "$source" "$output"
-  while IFS= read -r mapping; do
-    default_port="${mapping%%:*}"
-    requested_port="${mapping##*:}"
-    if [ "$(grep -cE "hostPort: ${default_port}\$" "$source")" -ne 1 ]; then
-      echo "::error::Kind config must contain exactly one default host-port mapping for ${default_port}"
-      exit 1
-    fi
-    sed -i "s/hostPort: ${default_port}\$/hostPort: ${requested_port}/" "$output"
-  done < <(kind_host_port_mappings)
+  python3 - "$ROOT/scripts/dev/kind/cluster-profile.py" "$1" "$2" "$(kind_host_port_mappings)" <<'PY_RENDER'
+import importlib.util
+from pathlib import Path
+import sys
+spec = importlib.util.spec_from_file_location("kind_port_renderer", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+with Path(sys.argv[2]).open("rb") as stream:
+    data = stream.read(module.JSON_BOUND + 1)
+module.require(len(data) <= module.JSON_BOUND, "Kind config template exceeds its bound")
+replacements = {int(original): int(requested) for original, requested in
+                (line.split(":") for line in sys.argv[4].splitlines())}
+Path(sys.argv[3]).write_text(module.render_host_ports(data.decode(), replacements))
+PY_RENDER
+
 }
 
 acquire_kind_host_lock() {
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    kind_profile_lock "$ROOT"
+    return $?
+  fi
   # One process owns one transaction: a suite nested under an `up` or gate
   # invocation (e.g. `kind-e2e.sh shard ... runtime-acceptance`) must not
   # re-flock the file this process already holds, which would deadlock
@@ -263,6 +314,73 @@ acquire_kind_host_lock() {
     return 1
   fi
   log "acquired exclusive local Kind transaction lock"
+}
+
+acquire_kind_build_publication_lock() {
+  local lock_file inherited="${KIND_BUILD_PUBLICATION_LOCK_FD:-}" descriptor_path
+  lock_file="${KIND_BUILD_PUBLICATION_LOCK_FILE:-}"
+  if [ -z "$lock_file" ]; then
+    lock_file="$(python3 "$ROOT/scripts/dev/kind/cluster-profile.py" build-lock-path)" || return $?
+  fi
+  [ -f "$lock_file" ] && [ ! -L "$lock_file" ] \
+    && [ "$(stat -c '%u:%a:%h' "$lock_file")" = "$(id -u):600:1" ] || {
+    echo '::error::Kind build publication lock is not owner-private' >&2
+    return 1
+  }
+  if [ -n "$inherited" ]; then
+    [[ "$inherited" =~ ^[0-9]+$ ]] || return 1
+    descriptor_path="/proc/$BASHPID/fd/$inherited"
+    [ "$(readlink "$descriptor_path" 2>/dev/null)" = "$lock_file" ] \
+      && [ "$(stat -Lc '%d:%i:%u:%a:%h' "$descriptor_path" 2>/dev/null)" \
+        = "$(stat -c '%d:%i:%u:%a:%h' "$lock_file")" ] || {
+      echo '::error::inherited Kind publication lock differs from the selected registry' >&2
+      return 1
+    }
+  else
+    exec {KIND_BUILD_PUBLICATION_LOCK_FD}<>"$lock_file" || return $?
+    KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE=1
+  fi
+  export KIND_BUILD_PUBLICATION_LOCK_FD
+  flock -w "$KIND_HOST_LOCK_TIMEOUT_SECONDS" "$KIND_BUILD_PUBLICATION_LOCK_FD" || return $?
+  descriptor_path="/proc/$BASHPID/fd/$KIND_BUILD_PUBLICATION_LOCK_FD"
+  [ ! -L "$lock_file" ] \
+    && [ "$(stat -Lc '%d:%i:%u:%a:%h' "$descriptor_path")" \
+      = "$(stat -c '%d:%i:%u:%a:%h' "$lock_file")" ] \
+    && [ "$(stat -c '%u:%a:%h' "$lock_file")" = "$(id -u):600:1" ] || {
+    echo '::error::Kind publication lock was replaced while waiting' >&2
+    return 1
+  }
+}
+
+release_kind_build_publication_lock() {
+  [ "$KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE" = 1 ] || return 0
+  [ -n "${KIND_BUILD_PUBLICATION_LOCK_FD:-}" ] || return 0
+  exec {KIND_BUILD_PUBLICATION_LOCK_FD}>&-
+  unset KIND_BUILD_PUBLICATION_LOCK_FD
+  KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE=0
+}
+
+use_kind_profile_smokes() {
+  CARGO_CI_DIR="$KIND_PROFILE_SMOKE_DIR"
+  for jsonl in credential-bootstrap-build.jsonl billing-contract-build.jsonl; do
+    cp -- "$KIND_PROFILE_ARTIFACT_DIR/$jsonl" "$RUN_DIR/$jsonl" || return $?
+  done
+}
+
+delete_owned_kind_cluster() {
+  kind_profile_verify_node "$ROOT" || return $?
+  kind delete cluster --name "$KIND_CLUSTER_NAME" || return $?
+  python3 "$ROOT/scripts/dev/kind/cluster-profile.py" mark-deleted \
+    --cluster "$CLUSTER" --nonce "$KIND_PROFILE_NONCE" >/dev/null
+}
+
+run_kind_down() {
+  [ "${KIND_PROFILE:-0}" = 1 ] || {
+    echo '::error::kind-down requires an explicit saved CLUSTER profile' >&2
+    return 2
+  }
+  kind_profile_lock "$ROOT" || return $?
+  delete_owned_kind_cluster
 }
 
 dump_cluster_state() {
@@ -287,6 +405,49 @@ dump_cluster_state() {
   kubectl --context "$context" -n "$NS" logs deploy/codewire-idp --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-orchestration --tail=160 || true
   kubectl --context "$context" -n "$NS" logs deploy/codewire-coordinator --tail=160 || true
+
+  # Credential logs are safe only for the selected synthetic fixture. Read
+  # command/marker projections, never a full object: kubectl template errors
+  # can otherwise include the complete object in stderr. Check each pod too,
+  # because an older real pod may still exist during a mode transition.
+  local credential_identity credential_pods_json credential_pods credential_pod
+  local credential_deployment_projection credential_pod_projection
+  credential_deployment_projection='{.spec.template.spec.containers[?(@.name=="credential-service")].command}{.spec.template.spec.containers[?(@.name=="credential-service")].env[?(@.name=="CODEWIRE_KIND_CREDENTIAL_FIXTURE")].value}'
+  credential_pod_projection='{.spec.containers[?(@.name=="credential-service")].command}{.spec.containers[?(@.name=="credential-service")].env[?(@.name=="CODEWIRE_KIND_CREDENTIAL_FIXTURE")].value}'
+  if credential_identity="$(kubectl --context "$context" -n "$NS" \
+      get deployment/codewire-credential-service --request-timeout=5s \
+      -o "jsonpath-as-json=$credential_deployment_projection" 2>/dev/null)" \
+      && jq -es 'length == 2 and .[0] == [["/codewire-kind-fixtures/credential-service"]] and .[1] == ["1"]' \
+        <<<"$credential_identity" >/dev/null 2>&1 \
+      && credential_pods_json="$(kubectl --context "$context" -n "$NS" get pods \
+        -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=credential-service \
+        --request-timeout=5s -o 'jsonpath-as-json={.items[*].metadata.name}' 2>/dev/null)" \
+      && credential_pods="$(jq -er '
+        select(type == "array" and length > 0 and length <= 8 and
+          all(.[]; type == "string" and length <= 253 and
+            test("^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"))) | .[]
+      ' <<<"$credential_pods_json" 2>/dev/null)"; then
+    while IFS= read -r credential_pod; do
+      if credential_identity="$(kubectl --context "$context" -n "$NS" \
+          get "pod/$credential_pod" --request-timeout=5s \
+          -o "jsonpath-as-json=$credential_pod_projection" 2>/dev/null)" \
+          && jq -es 'length == 2 and .[0] == [["/codewire-kind-fixtures/credential-service"]] and .[1] == ["1"]' \
+            <<<"$credential_identity" >/dev/null 2>&1; then
+        printf '\nSynthetic credential fixture diagnostics: %s\n' "$credential_pod"
+        kubectl --context "$context" -n "$NS" get "pod/$credential_pod" \
+          --request-timeout=5s \
+          -o 'jsonpath={range .status.containerStatuses[?(@.name=="credential-service")]}{"current reason="}{.state.terminated.reason}{" exit_code="}{.state.terminated.exitCode}{"\nprevious reason="}{.lastState.terminated.reason}{" exit_code="}{.lastState.terminated.exitCode}{"\n"}{end}' \
+          2>/dev/null || true
+        kubectl --context "$context" -n "$NS" logs "pod/$credential_pod" \
+          -c credential-service --request-timeout=5s --tail=80 --limit-bytes=16384 \
+          2>/dev/null || true
+        kubectl --context "$context" -n "$NS" logs "pod/$credential_pod" \
+          -c credential-service --request-timeout=5s --tail=80 --limit-bytes=16384 --previous \
+          2>/dev/null || true
+      fi
+    done <<<"$credential_pods"
+  fi
+
   kubectl --context "$context" -n "$NS" get svc/codewire-coordinator-nodeport -o wide || true
   kubectl --context "$context" -n "$NS" logs deploy/temporal --tail=80 || true
   kubectl --context "$context" -n "$SANDBOX_NS" get sandboxclaim,sandbox,sandboxtemplate,sandboxwarmpool,pvc,pv -o wide || true
@@ -300,14 +461,37 @@ dump_cluster_state() {
 }
 
 cleanup() {
-  local status=$?
+  local status="${1:-$?}"
   stop_gateway_port_forward
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
   fi
   stop_remote_dind_kind_forwarding
   if [ "$KEEP_KIND_CLUSTER" != "1" ]; then
-    kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1 || true
+    if [ "${KIND_PROFILE:-0}" = 1 ]; then
+      # No deletion on a failed precondition or failed ownership read. A name
+      # alone is never authority over an existing retained cluster.
+      if [ "$KIND_CREATED_BY_TRANSACTION" = 1 ]; then
+        if ! delete_owned_kind_cluster; then
+          [ "$status" -ne 0 ] || status=1
+        fi
+      fi
+    else
+      if [ "$KIND_CREATED_BY_TRANSACTION" = 1 ]; then
+        local current_node_id
+        current_node_id="$(docker container inspect --format '{{.Id}}' \
+          "${KIND_CLUSTER_NAME}-control-plane" 2>/dev/null)" || current_node_id=""
+        if [ "$current_node_id" = "$KIND_TRANSACTION_NODE_ID" ] \
+            && [[ "$current_node_id" =~ ^[0-9a-f]{64}$ ]]; then
+          kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1 || {
+            [ "$status" -ne 0 ] || status=1
+          }
+        else
+          echo '::error::legacy transaction node identity changed; preserving the cluster' >&2
+          [ "$status" -ne 0 ] || status=1
+        fi
+      fi
+    fi
   fi
   if [ -n "$AUTHZ_TMPDIR" ]; then
     rm -rf "$AUTHZ_TMPDIR"
@@ -322,16 +506,16 @@ assert_kind_idp_topology() {
   local issuer ingress_paths
 
   issuer="$(kubectl -n "$NS" get configmap codewire-config \
-    -o jsonpath='{.data.PUBLIC_OIDC_ISSUER_URL}')"
+    -o jsonpath='{.data.PUBLIC_OIDC_ISSUER_URL}')" || return $?
   if [ "$issuer" != "$KIND_INGRESS_URL" ]; then
     echo "::error::Kind IdP issuer must match the host ingress: expected ${KIND_INGRESS_URL}, got ${issuer:-missing}"
     return 1
   fi
 
-  kubectl -n "$NS" get deployment/codewire-idp >/dev/null
-  kubectl -n "$NS" get service/codewire-idp >/dev/null
+  kubectl -n "$NS" get deployment/codewire-idp >/dev/null || return $?
+  kubectl -n "$NS" get service/codewire-idp >/dev/null || return $?
   ingress_paths="$(kubectl -n "$NS" get ingress codewire-idp-e2e \
-    -o jsonpath='{range .spec.rules[*].http.paths[*]}{.path}{"\n"}{end}')"
+    -o jsonpath='{range .spec.rules[*].http.paths[*]}{.path}{"\n"}{end}')" || return $?
   for required_path in \
       /api/oauth /api/auth/sign-up /api/auth/sign-in /api/auth/sessions /api/oidc \
       /.well-known/openid-configuration /.well-known/jwks.json; do
@@ -344,6 +528,12 @@ assert_kind_idp_topology() {
 
 retained_suite_cleanup() {
   local status=$?
+  if [ "$KIND_SHARD_TRANSACTION" = 1 ]; then
+    if [ -n "$RETAINED_KUBECONFIG" ]; then
+      rm -f "$RETAINED_KUBECONFIG" || { [ "$status" -ne 0 ] || status=1; }
+    fi
+    cleanup "$status"
+  fi
   stop_gateway_port_forward
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
@@ -422,6 +612,13 @@ validate_retained_cluster_identity() {
     return 1
   fi
   expected_context="kind-${KIND_CLUSTER_NAME}"
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    kind_profile_lock "$ROOT" || return $?
+    kind_profile_verify_node "$ROOT" || return $?
+    kind_profile_verify_artifacts "$ROOT" || return $?
+    KIND_PROFILE_ARTIFACTS_VERIFIED=1
+    use_kind_profile_smokes || return $?
+  fi
 
   if ! clusters="$(kind get clusters 2>&1)"; then
     echo "::error::failed to enumerate Kind clusters for retained suite: ${clusters}"
@@ -449,6 +646,7 @@ validate_retained_cluster_identity() {
   if is_remote_dind_kind_job; then
     kubeconfig_args+=(--internal)
   fi
+  if [ "${KIND_PROFILE:-0}" != 1 ]; then
   RETAINED_KUBECONFIG="$(mktemp "$RUN_DIR/retained-kubeconfig.XXXXXX")" || return $?
   if ! kind get kubeconfig "${kubeconfig_args[@]}" --name "$KIND_CLUSTER_NAME" \
       >"$RETAINED_KUBECONFIG"; then
@@ -456,6 +654,7 @@ validate_retained_cluster_identity() {
     return 1
   fi
   export KUBECONFIG="$RETAINED_KUBECONFIG"
+  fi
   if ! kubectl --context "$expected_context" cluster-info --request-timeout=10s >/dev/null 2>&1; then
     echo "::error::retained Kind context ${expected_context} is not reachable"
     return 1
@@ -511,6 +710,22 @@ validate_retained_cluster() {
     echo '::error::retained Kind workspace image does not match its verified source' >&2
     return 1
   fi
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    local binding node_id manifest_sha
+    node_id="$(docker container inspect --format '{{.Id}}' "${KIND_CLUSTER_NAME}-control-plane")" || return $?
+    manifest_sha="$(sha256sum "$KIND_PROFILE_IMAGE_MANIFEST" | cut -d' ' -f1)" || return $?
+    binding="$(kubectl --request-timeout=10s -n "$NS" get \
+      "configmap/${marker_configmap}" -o json)" || return $?
+    if ! jq -e --arg nonce "$KIND_PROFILE_NONCE" --arg node "$node_id" \
+        --arg manifest "$manifest_sha" --arg head "$KIND_PROFILE_SOURCE_HEAD" \
+        --arg tree "$KIND_PROFILE_SOURCE_TREE" '
+          .data["profile-nonce"] == $nonce and .data["node-id"] == $node and
+          .data["artifact-sha256"] == $manifest and .data["source-head"] == $head and
+          .data["source-tree"] == $tree' <<<"$binding" >/dev/null; then
+      echo '::error::retained prepared marker does not match the saved profile/node/artifact identity' >&2
+      return 1
+    fi
+  fi
 
   log "retained Kind cluster ${KIND_CLUSTER_NAME} accepted at compatibility version ${KIND_E2E_COMPATIBILITY_VERSION}"
   renew_retained_synthetic_bearer
@@ -544,19 +759,30 @@ kind_e2e_prepared_configmap() {
 
 mark_retained_cluster_prepared() {
   local workspace_image
+  local -a profile_binding=()
   workspace_image="$(kind_workspace_runtime_image)" || return $?
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    local node_id manifest_sha
+    kind_profile_verify_node "$ROOT" || return $?
+    node_id="$(docker container inspect --format '{{.Id}}' "${KIND_CLUSTER_NAME}-control-plane")" || return $?
+    manifest_sha="$(sha256sum "$KIND_PROFILE_IMAGE_MANIFEST" | cut -d' ' -f1)" || return $?
+    profile_binding=(--from-literal="profile-nonce=$KIND_PROFILE_NONCE"
+      --from-literal="node-id=$node_id" --from-literal="artifact-sha256=$manifest_sha"
+      --from-literal="source-head=$KIND_PROFILE_SOURCE_HEAD"
+      --from-literal="source-tree=$KIND_PROFILE_SOURCE_TREE")
+  fi
   log "marking Kind cluster ${KIND_CLUSTER_NAME} prepared for retained suites"
   kubectl -n "$NS" create configmap "$(kind_e2e_prepared_configmap)" \
     --from-literal="compatibility_version=${KIND_E2E_COMPATIBILITY_VERSION}" \
     --from-literal="cluster-name=${KIND_CLUSTER_NAME}" \
     --from-literal="workspace-image=$workspace_image" \
+    "${profile_binding[@]}" \
     --dry-run=client -o yaml | kubectl_apply -f -
 }
 
 reclaim_cancelled_ci_clusters() {
   local kind_config="$1"
-  local ci_cluster_prefix='codewire-e2e-ci-'
-  local clusters cluster remaining running_containers ports port owners
+  local clusters cluster running_containers ports port owners
 
   if ! clusters="$(kind get clusters 2>&1)"; then
     echo "::error::failed to enumerate Kind clusters before e2e startup: ${clusters}"
@@ -565,28 +791,12 @@ reclaim_cancelled_ci_clusters() {
 
   while IFS= read -r cluster; do
     case "$cluster" in
-      "$KIND_CLUSTER_NAME"|"${ci_cluster_prefix}"*)
-        log "reclaiming cancelled-run kind cluster ${cluster}"
-        if ! kind delete cluster --name "$cluster"; then
-          echo "::error::failed to reclaim cancelled-run kind cluster ${cluster}"
-          return 1
-        fi
-        ;;
-    esac
-  done <<< "$clusters"
-
-  if ! remaining="$(kind get clusters 2>&1)"; then
-    echo "::error::failed to verify Kind cluster cleanup: ${remaining}"
-    return 1
-  fi
-  while IFS= read -r cluster; do
-    case "$cluster" in
-      "$KIND_CLUSTER_NAME"|"${ci_cluster_prefix}"*)
-        echo "::error::cancelled-run kind cluster ${cluster} survived cleanup"
+      "$KIND_CLUSTER_NAME")
+        echo "::error::Kind cluster ${cluster} already exists; use a fresh verification profile or make kind-test"
         return 1
         ;;
     esac
-  done <<< "$remaining"
+  done <<< "$clusters"
 
   if ! ports="$(
     awk '
@@ -679,10 +889,10 @@ require_post_code() {
 # $PROBE_CODE.
 curl_settled() {
   local i
-  PROBE_HEADERS="$(mktemp)"
+  PROBE_HEADERS="$(mktemp)" || return $?
   for i in $(seq 1 15); do
-    PROBE_BODY="$(curl -s -D "$PROBE_HEADERS" "$@")"
-    PROBE_CODE="$(awk 'NR==1{print $2}' "$PROBE_HEADERS")"
+    PROBE_BODY="$(curl -s -D "$PROBE_HEADERS" "$@")" || return $?
+    PROBE_CODE="$(awk 'NR==1{print $2}' "$PROBE_HEADERS")" || return $?
     if [ "$PROBE_CODE" != "503" ]; then
       return 0
     fi
@@ -704,16 +914,16 @@ auth_token_for_environment_scope() {
   secret="$(
     kubectl -n "$NS" get secret codewire-secrets \
       -o jsonpath='{.data.SESSION_SECRET}' | base64 --decode
-  )"
-  payload="$(printf '{"environment_id":"%s","scope":"%s"}' "$environment_id" "$scope")"
+  )" || return $?
+  payload="$(printf '{"environment_id":"%s","scope":"%s"}' "$environment_id" "$scope")" || return $?
   encoded_payload="$(
     printf '%s' "$payload" | openssl base64 -A | tr '+/' '-_' | tr -d '='
-  )"
+  )" || return $?
   signature="$(
     printf '%s' "$encoded_payload" \
       | openssl dgst -sha256 -hmac "$secret" -binary \
       | openssl base64 -A | tr '+/' '-_' | tr -d '='
-  )"
+  )" || return $?
   printf '%s.%s' "$encoded_payload" "$signature"
 }
 
@@ -774,19 +984,59 @@ ingress_path_drift_check() {
   done
 }
 
+prepare_kind_profile_runtime_inputs() {
+  # Product images and clients are sealed in the profile. Workspace acceptance
+  # belongs to the invoking checkout, and fixed support images may have been
+  # removed from Docker. Resolve both before creating a replacement node.
+  acquire_kind_build_publication_lock || return $?
+  case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
+    build-ci)
+      "$ROOT/scripts/ci/verify/verify-workspace-image.sh" || return $?
+      ;;
+    prebuilt-ci)
+      RUN_DIR="$RUN_DIR" \
+        EXPECTED_MANIFEST_SHA256="${CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256:?missing workspace producer digest}" \
+        python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" consume workspace \
+          "${CODEWIRE_KIND_ARTIFACT_ROOT:?missing private artifact directory}/workspace" || return $?
+      ;;
+    *) return 2 ;;
+  esac
+  prepare_kind_support_images || return $?
+  release_kind_build_publication_lock
+}
+
 build_images_and_smokes() {
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    local reuse_status=0
+    python3 "$ROOT/scripts/ci/verify/kind/profile-artifacts.py" reuse \
+      --root "$ROOT" --cargo-ci-dir "$KIND_SMOKE_BUILD_DIR" --run-dir "$RUN_DIR" || reuse_status=$?
+    case "$reuse_status" in
+      0)
+        log 'reusing the admitted exact source image archive and smoke inventory'
+        prepare_kind_profile_runtime_inputs || return $?
+        use_kind_profile_smokes
+        return $?
+        ;;
+      3) ;; # No admitted base yet: run the bounded producer transaction.
+      *) return "$reuse_status" ;;
+    esac
+  fi
+  acquire_kind_build_publication_lock || return $?
   case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
     build-ci)
       log "verifying the canonical source workspace image once for Kind"
-      "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh"
-      "$ROOT/scripts/ci/verify/verify-workspace-image.sh"
+      "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh" || return $?
+      "$ROOT/scripts/ci/verify/verify-workspace-image.sh" || return $?
       log "building exact candidate product images once through the CI Bake profile"
-      CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
-        "$ROOT/scripts/ci/images/build-kind-images.sh"
+      local source_head
+      source_head="$(git -C "$ROOT" rev-parse HEAD)" || return $?
+      CODEWIRE_IMAGE_SOURCE_SHA="$source_head" \
+        CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
+        "$ROOT/scripts/ci/images/build-kind-images.sh" || return $?
       ;;
     prebuilt-release)
       log "using exact prebuilt protected release images without rebuilding"
-      assert_prebuilt_release_product_images
+      assert_prebuilt_release_product_images || return $?
       ;;
     prebuilt-ci)
       log "importing exact same-run CI artifacts without rebuilding"
@@ -799,7 +1049,7 @@ build_images_and_smokes() {
         esac
         RUN_DIR="$RUN_DIR" EXPECTED_MANIFEST_SHA256="$manifest" \
           python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" consume "$group" \
-            "${CODEWIRE_KIND_ARTIFACT_ROOT:?missing private artifact directory}/$group"
+            "${CODEWIRE_KIND_ARTIFACT_ROOT:?missing private artifact directory}/$group" || return $?
       done
       ;;
     *)
@@ -809,17 +1059,31 @@ build_images_and_smokes() {
   esac
 
   log "verifying the exact dashboard candidate runtime contract"
-  "$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"
+  "$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e" || return $?
 
-  prepare_kind_support_images
+  prepare_kind_support_images || return $?
 
   # `kind-e2e.sh up` deploys for manual testing and runs no smoke suite.
   if [ "${KIND_BUILD_SMOKES:-1}" = 1 ] \
       && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
     log "building Rust kind smoke binaries"
     "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
-      "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
+      "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl" || return $?
   fi
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    # A named retained cluster saves the complete smoke inventory at creation;
+    # future tests never read a concurrent worktree's mutable target directory.
+    if [ "${KIND_BUILD_SMOKES:-1}" != 1 ] \
+        && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
+      "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
+        "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl" || return $?
+    fi
+    python3 "$ROOT/scripts/ci/verify/kind/profile-artifacts.py" seal \
+      --root "$ROOT" --cargo-ci-dir "$KIND_SMOKE_BUILD_DIR" --run-dir "$RUN_DIR" || return $?
+    kind_profile_load "$ROOT" || return $?
+    use_kind_profile_smokes || return $?
+  fi
+  release_kind_build_publication_lock
 }
 
 # Retained suites rerun gate steps on a kept cluster. `up` builds no smoke
@@ -828,6 +1092,13 @@ build_images_and_smokes() {
 # (kind-build-artifacts.py SMOKE_FILES/TEST_FILES), so rebuilding there would
 # redo the producer's work on an empty cache; verify the consumed set instead.
 build_retained_kind_smokes() {
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    if [ "$KIND_PROFILE_ARTIFACTS_VERIFIED" != 1 ]; then
+      kind_profile_verify_artifacts "$ROOT" || return $?
+    fi
+    use_kind_profile_smokes
+    return $?
+  fi
   mkdir -p "$RUN_DIR"
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-ci ]; then
     local consumed missing=0
@@ -884,26 +1155,56 @@ assert_prebuilt_release_product_images() {
 
 create_cluster() {
   local kind_config rendered_kind_config
-  if kind get clusters | grep -qx "$KIND_CLUSTER_NAME"; then
-    log "deleting existing kind cluster ${KIND_CLUSTER_NAME}"
-    kind delete cluster --name "$KIND_CLUSTER_NAME"
+  local clusters
+  clusters="$(kind get clusters)" || return $?
+  if grep -Fxq "$KIND_CLUSTER_NAME" <<<"$clusters"; then
+    echo "::error::Kind cluster already exists; it cannot be replaced implicitly"
+    return 1
   fi
-  require_kind_host_ports_available "$KIND_CLUSTER_NAME"
+  require_kind_host_ports_available "$KIND_CLUSTER_NAME" || return $?
 
   log "checking Docker runtime for kind"
-  docker version
+  docker version || return $?
   docker info --format 'Server={{.ServerVersion}} Driver={{.Driver}} CgroupDriver={{.CgroupDriver}} SecurityOptions={{json .SecurityOptions}}' || docker info || true
 
   log "creating kind cluster ${KIND_CLUSTER_NAME}"
   kind_config="$KIND_CONFIG"
   rendered_kind_config="$RUN_DIR/kind-config.yaml"
-  render_kind_host_port_mappings "$kind_config" "$rendered_kind_config"
-  if ! kind create cluster --name "$KIND_CLUSTER_NAME" --config "$rendered_kind_config" --wait 120s; then
-    echo "::error::kind cluster creation failed. This gate needs a runner with a real privileged Docker runtime capable of starting kind node containers; rootless Podman/netavark runners are not sufficient."
-    exit 1
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    python3 "$ROOT/scripts/dev/kind/cluster-profile.py" render-config \
+      --cluster "$CLUSTER" --template "$ROOT/tests/e2e/kind/kind-config.yaml" >/dev/null || return $?
+    rendered_kind_config="$KIND_CONFIG"
+  else
+    render_kind_host_port_mappings "$kind_config" "$rendered_kind_config" || return $?
+  fi
+  local create_status=0
+  kind create cluster --name "$KIND_CLUSTER_NAME" --config "$rendered_kind_config" --wait 120s || create_status=$?
+  if [ "$create_status" -ne 0 ]; then
+    # A failed create cannot prove that a node now visible under this name was
+    # created by this transaction. Preserve it for diagnosis rather than adopt
+    # and delete it from the exit handler.
+    echo "::error::kind cluster creation failed; preserving any node with unconfirmed ownership. This gate needs a privileged Docker runtime capable of starting kind node containers."
+    return "$create_status"
+  fi
+  if docker container inspect "${KIND_CLUSTER_NAME}-control-plane" >/dev/null 2>&1; then
+    local node_id
+    node_id="$(docker container inspect --format '{{.Id}}' "${KIND_CLUSTER_NAME}-control-plane")" || return $?
+    if ! [[ "$node_id" =~ ^[0-9a-f]{64}$ ]]; then
+      echo '::error::created Kind node identity is invalid' >&2
+      return 1
+    fi
+    if [ "${KIND_PROFILE:-0}" = 1 ]; then
+      python3 "$ROOT/scripts/dev/kind/cluster-profile.py" record-node \
+        --cluster "$CLUSTER" --nonce "$KIND_PROFILE_NONCE" --node-id "$node_id" >/dev/null || return $?
+    fi
+    KIND_TRANSACTION_NODE_ID="$node_id"
+    KIND_CREATED_BY_TRANSACTION=1
+  else
+    echo '::error::Kind reported creation success without the expected node; ownership is unconfirmed' >&2
+    return 1
   fi
   log_kind_bound_endpoints
-  configure_remote_dind_kind_network
+  configure_remote_dind_kind_network || return $?
 }
 
 stop_remote_dind_kind_forwarding() {
@@ -990,26 +1291,26 @@ configure_remote_dind_kind_network() {
   REMOTE_DIND_JOB_CONTAINER="$self_container"
   REMOTE_DIND_KIND_NETWORK="${node_networks[0]}"
   docker network connect "$REMOTE_DIND_KIND_NETWORK" \
-    "$REMOTE_DIND_JOB_CONTAINER"
+    "$REMOTE_DIND_JOB_CONTAINER" || return $?
 
   kubeconfig_path="${KUBECONFIG:-$HOME/.kube/config}"
   if [[ "$kubeconfig_path" == *:* ]]; then
     echo "::error::remote DinD Kind requires one explicit kubeconfig path"
     return 1
   fi
-  mkdir -p "$(dirname "$kubeconfig_path")"
+  mkdir -p "$(dirname "$kubeconfig_path")" || return $?
   kubeconfig_tmp="$(mktemp "${kubeconfig_path}.internal.XXXXXX")"
-  chmod 600 "$kubeconfig_tmp"
+  chmod 600 "$kubeconfig_tmp" || return $?
   if ! kind get kubeconfig --internal --name "$KIND_CLUSTER_NAME" \
       >"$kubeconfig_tmp"; then
     shred -u "$kubeconfig_tmp"
     echo "::error::failed to render internal Kind kubeconfig for remote DinD"
     return 1
   fi
-  install -m 600 "$kubeconfig_tmp" "$kubeconfig_path"
-  shred -u "$kubeconfig_tmp"
+  install -m 600 "$kubeconfig_tmp" "$kubeconfig_path" || return $?
+  shred -u "$kubeconfig_tmp" || return $?
 
-  start_remote_dind_kind_forwarding "$node"
+  start_remote_dind_kind_forwarding "$node" || return $?
   log "remote DinD Kind API and host-port topology configured"
 }
 
@@ -1088,7 +1389,7 @@ prepare_kind_support_images() {
     fi
     if ! docker image inspect "$source" >/dev/null 2>&1; then
       log "pulling exact Kind support image ${source}"
-      docker pull "$source"
+      docker pull "$source" || return $?
     fi
   done
   for source in \
@@ -1096,9 +1397,9 @@ prepare_kind_support_images() {
       "$KIND_TEMPORAL_IMAGE|$KIND_TEMPORAL_LOCAL_IMAGE"; do
     alias="${source#*|}"
     source="${source%%|*}"
-    docker image tag "$source" "$alias"
+    docker image tag "$source" "$alias" || return $?
   done
-  prepare_kind_credential_support_images
+  prepare_kind_credential_support_images || return $?
 }
 
 load_images_into_kind() {
@@ -1108,25 +1409,35 @@ load_images_into_kind() {
   # kube-apiserver temporarily unavailable while containerd commits layers.
   # Admit one image at a time and require the control plane to recover before
   # adding the next source of I/O pressure.
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    kind_profile_verify_node "$ROOT" || return $?
+    kind_profile_verify_artifacts "$ROOT" || return $?
+    log 'loading sealed source-bound product image archive into Kind'
+    kind load image-archive --name "$KIND_CLUSTER_NAME" "$KIND_PROFILE_ARTIFACT_DIR/images.tar" || return $?
+    wait_for_kind_api_after_image_load || return $?
+  else
   for image in \
       codewire-dashboard:e2e \
       codewire-services:e2e \
       codewire-mesh:e2e \
-      codewire-gateway:e2e \
-      "$KIND_POSTGRES_LOCAL_IMAGE" \
-      "$KIND_TEMPORAL_LOCAL_IMAGE"; do
+      codewire-gateway:e2e; do
     log "loading ${image} into kind"
-    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
-    wait_for_kind_api_after_image_load
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+    wait_for_kind_api_after_image_load || return $?
+  done
+  fi
+  for image in "$KIND_POSTGRES_LOCAL_IMAGE" "$KIND_TEMPORAL_LOCAL_IMAGE"; do
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+    wait_for_kind_api_after_image_load || return $?
   done
 
-  load_kind_credential_support_images
+  load_kind_credential_support_images || return $?
 
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
     image="$(kind_workspace_runtime_image)" || return $?
     log "loading the exact verified source workspace image into Kind"
-    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
-    wait_for_kind_api_after_image_load
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+    wait_for_kind_api_after_image_load || return $?
   fi
 
   if validate_sealed_kind_images; then
@@ -1151,10 +1462,10 @@ load_images_into_kind() {
       # name after proving the exact approved digest, then render only that
       # side-loaded name with imagePullPolicy Never. No registry credential is
       # copied into the nested cluster.
-      docker image tag "$source" "$alias"
+      docker image tag "$source" "$alias" || return $?
       log "loading approved platform image into kind"
-      kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias"
-      wait_for_kind_api_after_image_load
+      kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias" || return $?
+      wait_for_kind_api_after_image_load || return $?
     done
   else
     local sealed_status=$?
@@ -1239,6 +1550,18 @@ render_kind_overlay_manifest() {
   local rendered="$RUN_DIR/codewire-kind-overlay.yaml"
 
   kubectl kustomize "$source" >"$rendered" || return $?
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    python3 - "$rendered" "$KIND_INGRESS_URL" <<'PY' || return $?
+from pathlib import Path
+import sys
+
+path, origin = Path(sys.argv[1]), sys.argv[2]
+text = path.read_text()
+if text.count("http://127.0.0.1:8090") != 4:
+    raise SystemExit("Kind public origin inventory changed; review every consumer")
+path.write_text(text.replace("http://127.0.0.1:8090", origin))
+PY
+  fi
   python3 - "$rendered" "$KIND_POSTGRES_LOCAL_IMAGE" "$KIND_TEMPORAL_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import re
@@ -1330,28 +1653,28 @@ wait_for_kind_api_after_image_load() {
 
 deploy_overlay() {
   local ingress_manifest kind_overlay
-  ingress_manifest="$(render_ingress_manifest)"
+  ingress_manifest="$(render_ingress_manifest)" || return $?
   log "deploying vendored ingress-nginx"
-  kubectl_apply --validate=false -f "$ingress_manifest"
+  kubectl_apply --validate=false -f "$ingress_manifest" || return $?
   kubectl wait --namespace ingress-nginx \
     --for=condition=ready pod \
     --selector=app.kubernetes.io/component=controller \
-    --timeout=180s
+    --timeout=180s || return $?
 
-  deploy_kind_credential_cert_manager
+  deploy_kind_credential_cert_manager || return $?
 
   log "ensuring isolated kind sandbox namespace"
   kubectl create namespace "$SANDBOX_NS" --dry-run=client -o yaml |
-    kubectl_apply -f -
+    kubectl_apply -f - || return $?
   kubectl label namespace "$SANDBOX_NS" \
     app.kubernetes.io/managed-by=codewire \
     codewire.sh/resource-type=sandbox \
     codewire.sh/runtime-scope=shared \
-    --overwrite
+    --overwrite || return $?
 
   log "deploying kind e2e overlay"
-  kubectl -n "$NS" delete job codewire-db-migrate --ignore-not-found --wait=true
-  kind_overlay="$(render_kind_overlay_manifest)"
+  kubectl -n "$NS" delete job codewire-db-migrate --ignore-not-found --wait=true || return $?
+  kind_overlay="$(render_kind_overlay_manifest)" || return $?
   local applied=0
   for i in $(seq 1 12); do
     if [ -n "$kind_overlay" ]; then
@@ -1367,8 +1690,8 @@ deploy_overlay() {
     echo "::error::rendered Kind overlay did not apply"
     exit 1
   fi
-  assert_kind_idp_topology
-  deploy_kind_credential_issuers
+  assert_kind_idp_topology || return $?
+  deploy_kind_credential_issuers || return $?
   # Staged rollout: the services fail fast (correctly) when Postgres or
   # Temporal is unreachable, so park them at zero replicas until their
   # dependencies are Ready — otherwise a slow runner leaves them in
@@ -1384,11 +1707,11 @@ deploy_overlay() {
     deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
-    --replicas=0
+    --replicas=0 || return $?
 
   log "waiting for postgres and temporal (service dependencies)"
-  kubectl -n "$NS" rollout status deploy/postgres --timeout=300s
-  kubectl -n "$NS" rollout status deploy/temporal --timeout=600s
+  kubectl -n "$NS" rollout status deploy/postgres --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/temporal --timeout=600s || return $?
 
   log "waiting for the standard SQLx application baseline"
   if ! kubectl -n "$NS" wait --for=condition=complete \
@@ -1396,7 +1719,7 @@ deploy_overlay() {
     kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true || true
     return 1
   fi
-  kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true
+  kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true || return $?
   local expected_migration_rows migration_rows
   expected_migration_rows="$(find "$ROOT/crates/codewire-server-core/migrations" \
     -maxdepth 1 -type f -name '*.sql' -print | wc -l | tr -d '[:space:]')"
@@ -1410,11 +1733,11 @@ deploy_overlay() {
 
   log "loading billing and coordinator contract fixtures"
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/fixtures/billing/seed.sql"
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/fixtures/billing/seed.sql" || return $?
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/coordinator-seed.sql"
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/coordinator-seed.sql" || return $?
 
-  start_kind_credential_fixture
+  start_kind_credential_fixture || return $?
 
   log "starting billing, IdP, primary authorization, Mesh, and coordinator (dependencies ready)"
   kubectl -n "$NS" scale \
@@ -1423,13 +1746,13 @@ deploy_overlay() {
     deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
-    --replicas=1
-  kubectl -n "$NS" rollout status deploy/codewire-billing --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-dashboard --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-idp --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s
-  kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
+    --replicas=1 || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-billing --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-dashboard --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-idp --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s || return $?
 }
 
 require_dashboard_browser_host_dependencies() {
@@ -1456,8 +1779,20 @@ require_dashboard_browser_host_dependencies() {
   prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
 }
 
-dashboard_browser_e2e() {
+dashboard_browser_e2e() (
   local playwright chromium workspace_image credential_fixture
+  # Playwright's shared auth/report files belong to this checkout. Serialize
+  # only the browser phase within one checkout; distinct worktrees and cluster
+  # runtime phases remain independent. The subshell releases the descriptor.
+  local browser_lock="$ROOT/.tmp/codewire-kind-browser.lock" browser_lock_fd
+  mkdir -p "$ROOT/.tmp"
+  [ ! -L "$browser_lock" ] || return 1
+  if [ ! -e "$browser_lock" ]; then
+    (umask 077; set -C; : >"$browser_lock") 2>/dev/null || [ -f "$browser_lock" ] || return 1
+  fi
+  [ "$(stat -c '%u:%a' "$browser_lock")" = "$(id -u):600" ] || return 1
+  exec {browser_lock_fd}<>"$browser_lock"
+  flock -w "$KIND_HOST_LOCK_TIMEOUT_SECONDS" "$browser_lock_fd" || return $?
   require_dashboard_browser_host_dependencies || return $?
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   credential_fixture=0
@@ -1507,7 +1842,7 @@ dashboard_browser_e2e() {
     PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture" \
     "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts"
-}
+)
 
 mesh_product_connect_ownership_smoke() {
   log "proving Mesh generated Connect ownership and private HMAC authorization"
@@ -2605,7 +2940,11 @@ coordinator_ingress_smoke() {
   KIND_COORDINATOR_URL="$KIND_INGRESS_TLS_URL" \
     KIND_COORDINATOR_DIRECT_URL="$KIND_COORDINATOR_DIRECT_URL" \
     KIND_COORDINATOR_CA_DER="$certificate_der" \
-    "$CARGO_CI_DIR/examples/coordinator-ingress-smoke"
+    "$CARGO_CI_DIR/examples/coordinator-ingress-smoke" || {
+    local smoke_status=$?
+    rm -rf "$certificate_dir"
+    return "$smoke_status"
+  }
   rm -rf "$certificate_dir"
 }
 
@@ -2620,20 +2959,20 @@ exec_service_connect_smoke() {
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
-    "$CARGO_CI_DIR/exec-stream-smoke"
+    "$CARGO_CI_DIR/exec-stream-smoke" || return $?
 
   ascii_command="printf 'stdout\\n'; printf 'stderr\\n' >&2; exit 17"
   ascii_connect_payload="$(jq -cn \
     --arg org_id org_contract_1 \
     --arg environment_id "$environment_id" \
     --arg command "$ascii_command" \
-    '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')"
+    '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')" || return $?
 
   curl_settled -X POST \
     -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -d "$ascii_connect_payload" \
-    "${KIND_INGRESS_URL}/api/v1/organizations/org_contract_1/environments/${environment_id}/exec"
+    "${KIND_INGRESS_URL}/api/v1/organizations/org_contract_1/environments/${environment_id}/exec" || return $?
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::retired authenticated REST exec returned ${PROBE_CODE}: ${PROBE_BODY}"
     return 1
@@ -2643,7 +2982,7 @@ exec_service_connect_smoke() {
     -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -d "$ascii_connect_payload" \
-    "${KIND_INGRESS_URL}/codewire.v1.ExecService/Exec"
+    "${KIND_INGRESS_URL}/codewire.v1.ExecService/Exec" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::Connect same-pod exec returned ${PROBE_CODE}: ${PROBE_BODY}"
     return 1
@@ -2666,13 +3005,13 @@ exec_service_connect_smoke() {
     --arg org_id org_contract_1 \
     --arg environment_id "$environment_id" \
     --arg command "$invalid_command" \
-    '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')"
+    '{orgId:$org_id,environmentId:$environment_id,command:["sh","-c",$command]}')" || return $?
 
   curl_settled -X POST \
     -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -d "$invalid_connect_payload" \
-    "${KIND_INGRESS_URL}/codewire.v1.ExecService/Exec"
+    "${KIND_INGRESS_URL}/codewire.v1.ExecService/Exec" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::Connect invalid-byte exec returned ${PROBE_CODE}: ${PROBE_BODY}"
     return 1
@@ -2697,7 +3036,7 @@ environment_setup_terminal_smoke() (
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
-    "$CARGO_CI_DIR/environment-setup-smoke"
+    "$CARGO_CI_DIR/environment-setup-smoke" || return $?
   log "EnvironmentSetupService ticket-to-WebSocket path green"
 )
 
@@ -2713,13 +3052,13 @@ file_service_smoke() (
   local sandbox_name="$daemon_pod"
   local gateway_token daemon_token original_replicas pod_ip pod_uid ready
   local claim_uid sandbox_uid pod_owner
-  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
-  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
+  gateway_token="$(gateway_auth_token_for_environment "$environment_id")" || return $?
+  daemon_token="$(daemon_auth_token_for_environment "$environment_id")" || return $?
 
   original_replicas="$(
     kubectl -n agent-sandbox-system get deploy/agent-sandbox-controller \
       -o jsonpath='{.spec.replicas}'
-  )"
+  )" || return $?
   if [[ ! "$original_replicas" =~ ^[0-9]+$ ]]; then
     echo "::error::agent-sandbox controller replica count is invalid: ${original_replicas:-missing}"
     return 1
@@ -2727,42 +3066,48 @@ file_service_smoke() (
 
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_file_service_binding() {
+    local status=$? cleanup_status=0
+    trap - EXIT
     set +e
     # Orphan the retained daemon Pod: it outlives its synthetic Sandbox.
     kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
-      --ignore-not-found=true --wait=true >/dev/null
+      --ignore-not-found=true --wait=true >/dev/null || cleanup_status=$?
     kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-      --ignore-not-found=true --wait=true >/dev/null
+      --ignore-not-found=true --wait=true >/dev/null || cleanup_status=$?
     kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
-      --replicas="$original_replicas" >/dev/null
+      --replicas="$original_replicas" >/dev/null || cleanup_status=$?
     if [ "$original_replicas" -gt 0 ]; then
       kubectl -n agent-sandbox-system rollout status \
-        deploy/agent-sandbox-controller --timeout=180s
+        deploy/agent-sandbox-controller --timeout=180s || cleanup_status=$?
     fi
+    if [ "$status" -eq 0 ]; then
+      status="$cleanup_status"
+    fi
+    exit "$status"
   }
   trap cleanup_file_service_binding EXIT
 
-  kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller --replicas=0
+  kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller --replicas=0 || return $?
   if [ "$original_replicas" -gt 0 ]; then
     kubectl -n agent-sandbox-system wait pod -l app=agent-sandbox-controller \
-      --for=delete --timeout=60s
+      --for=delete --timeout=60s || return $?
   fi
 
   pod_ip="$(
     kubectl -n "$SANDBOX_NS" get pod "$daemon_pod" -o jsonpath='{.status.podIP}'
-  )"
+  )" || return $?
   pod_uid="$(
     kubectl -n "$SANDBOX_NS" get pod "$daemon_pod" -o jsonpath='{.metadata.uid}'
-  )"
+  )" || return $?
   if [ -z "$pod_ip" ] || [ -z "$pod_uid" ]; then
     echo "::error::file-service fixture Pod has no current IP/UID"
     return 1
   fi
   kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
-    --ignore-not-found=true --wait=true >/dev/null
+    --ignore-not-found=true --wait=true >/dev/null || return $?
   kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-    --ignore-not-found=true --wait=true >/dev/null
-  kubectl_apply -f - <<EOF
+    --ignore-not-found=true --wait=true >/dev/null || return $?
+  kubectl_apply -f - <<EOF || return $?
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
@@ -2779,12 +3124,12 @@ EOF
   # quiesced, so nothing reconciles the synthetic Sandbox.
   claim_uid="$(
     kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}'
-  )"
+  )" || return $?
   if [ -z "$claim_uid" ]; then
     echo "::error::file-service fixture SandboxClaim has no UID"
     return 1
   fi
-  kubectl_apply -f - <<EOF
+  kubectl_apply -f - <<EOF || return $?
 apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
@@ -2807,7 +3152,7 @@ spec:
 EOF
   sandbox_uid="$(
     kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.metadata.uid}'
-  )"
+  )" || return $?
   if [ -z "$sandbox_uid" ]; then
     echo "::error::file-service fixture Sandbox has no UID"
     return 1
@@ -2816,22 +3161,22 @@ EOF
     jq -cn --arg sandbox "$sandbox_name" --arg uid "$sandbox_uid" --arg pod_uid "$pod_uid" \
       '{metadata: {uid: $pod_uid, ownerReferences: [{apiVersion: "agents.x-k8s.io/v1beta1",
         kind: "Sandbox", name: $sandbox, uid: $uid, controller: true}]}}'
-  )"
-  kubectl -n "$SANDBOX_NS" patch pod "$daemon_pod" --type=merge -p "$pod_owner"
+  )" || return $?
+  kubectl -n "$SANDBOX_NS" patch pod "$daemon_pod" --type=merge -p "$pod_owner" || return $?
   kubectl -n "$SANDBOX_NS" patch sandboxclaim "$claim_name" \
     --subresource=status --type=merge \
-    -p "{\"status\":{\"sandbox\":{\"name\":\"${daemon_pod}\",\"podIPs\":[\"${pod_ip}\"]},\"conditions\":[{\"lastTransitionTime\":\"2026-01-01T00:00:00Z\",\"message\":\"Kind file-service fixture is ready\",\"reason\":\"Ready\",\"status\":\"True\",\"type\":\"Ready\"}]}}"
+    -p "{\"status\":{\"sandbox\":{\"name\":\"${daemon_pod}\",\"podIPs\":[\"${pod_ip}\"]},\"conditions\":[{\"lastTransitionTime\":\"2026-01-01T00:00:00Z\",\"message\":\"Kind file-service fixture is ready\",\"reason\":\"Ready\",\"status\":\"True\",\"type\":\"Ready\"}]}}" || return $?
   ready="$(
     kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
-  )"
+  )" || return $?
   if [ "$ready" != "True" ]; then
     echo "::error::file-service fixture SandboxClaim Ready status is ${ready:-missing}"
     return 1
   fi
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL || return $?
 INSERT INTO environments (
   id, org_id, created_by, type, name, state, desired_state, preset_id,
   cpu_millicores, memory_mb, disk_gb,
@@ -2888,34 +3233,34 @@ END
 \$fixture\$;
 SQL
 
-  environment_daemon_proxy_smoke "$environment_id" "$daemon_pod"
-  environment_setup_terminal_smoke "$environment_id"
-  exec_service_connect_smoke "$environment_id"
-  platform_run_connect_smoke "$environment_id"
-  environment_session_protocol_smoke "$environment_id"
+  environment_daemon_proxy_smoke "$environment_id" "$daemon_pod" || return $?
+  environment_setup_terminal_smoke "$environment_id" || return $?
+  exec_service_connect_smoke "$environment_id" || return $?
+  platform_run_connect_smoke "$environment_id" || return $?
+  environment_session_protocol_smoke "$environment_id" || return $?
 
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
     SMOKE_DIRECT_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
     SMOKE_SESSION_TOKEN=contract-user-session-token \
-    "$CARGO_CI_DIR/file-service-smoke"
+    "$CARGO_CI_DIR/file-service-smoke" || return $?
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL || return $?
 DELETE FROM sandbox_environment_backend
 WHERE environment_id = '$environment_id';
 DELETE FROM environments WHERE id = '$environment_id';
 SQL
   kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
-    --ignore-not-found=true --wait=true >/dev/null
+    --ignore-not-found=true --wait=true >/dev/null || return $?
   kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-    --ignore-not-found=true --wait=true >/dev/null
+    --ignore-not-found=true --wait=true >/dev/null || return $?
   kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
-    --replicas="$original_replicas" >/dev/null
+    --replicas="$original_replicas" >/dev/null || return $?
   if [ "$original_replicas" -gt 0 ]; then
     kubectl -n agent-sandbox-system rollout status \
-      deploy/agent-sandbox-controller --timeout=180s
+      deploy/agent-sandbox-controller --timeout=180s || return $?
   fi
   trap - EXIT
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
@@ -2925,21 +3270,25 @@ SQL
     CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=cleanup \
     CRD_SMOKE_LOCAL_GATEWAY=1 \
-    "$CARGO_CI_DIR/crd-smoke"
-  kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null
-  rm -rf "$GATEWAY_SMOKE_TMPDIR"
+    "$CARGO_CI_DIR/crd-smoke" || return $?
+  kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null || return $?
+  rm -rf "$GATEWAY_SMOKE_TMPDIR" || return $?
   log "daemon-native FileService streaming and black-box Connect contract green"
 )
 
 platform_run_connect_smoke() {
   local environment_id="$1"
-  local certificate_dir certificate_pem
+  local certificate_dir certificate_pem status
 
   log "running public Connect platform Run smoke through TLS ingress"
-  certificate_dir="$(mktemp -d)"
+  certificate_dir="$(mktemp -d)" || return $?
   certificate_pem="$certificate_dir/ca.pem"
   kubectl -n "$NS" get secret/codewire-kind-ingress-ca \
-    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem"
+    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem" || {
+      status=$?
+      rm -rf "$certificate_dir"
+      return "$status"
+    }
 
   if ! SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_TLS_URL" \
     SMOKE_CA_CERT_FILE="$certificate_pem" \
@@ -2950,7 +3299,7 @@ platform_run_connect_smoke() {
     rm -rf "$certificate_dir"
     return 1
   fi
-  rm -rf "$certificate_dir"
+  rm -rf "$certificate_dir" || return $?
   log "public Connect platform Run pipe, PTY, and transport-loss behavior green"
 }
 
@@ -2964,7 +3313,7 @@ warm_environment_session_http_upstream() {
       -H 'content-type: application/json' \
       -H 'authorization: Bearer at_kind_connect_oidc_codewire_api' \
       -d '{"message":"whoami"}' \
-      "$base"
+      "$base" || return $?
     if [ "$PROBE_CODE" != "200" ] \
         || [ "$PROBE_BODY" != '{"message":"usr_contract_user"}' ]; then
       echo "::error::ordinary orchestration upstream warm ${i}/24 failed: code=${PROBE_CODE} body=${PROBE_BODY}"
@@ -2980,7 +3329,7 @@ assert_environment_session_grpc_service_upstream() {
   service_ip="$(
     kubectl -n "$NS" get service/codewire-orchestration-grpc \
       -o jsonpath='{.spec.clusterIP}'
-  )"
+  )" || return $?
   if [ -z "$service_ip" ] || [ "$service_ip" = "None" ]; then
     echo "::error::codewire-orchestration-grpc has no usable ClusterIP"
     return 1
@@ -2991,7 +3340,7 @@ assert_environment_session_grpc_service_upstream() {
   for i in $(seq 1 15); do
     controller_logs="$(
       kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --since=10m
-    )"
+    )" || return $?
     matching_lines="$(
       printf '%s\n' "$controller_logs" \
         | grep -F '/codewire.v1.EnvironmentSessionService/LaunchSession' \
@@ -3017,7 +3366,7 @@ assert_environment_session_grpc_service_upstream() {
     kubectl -n "$NS" get pods \
       -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration \
       -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}'
-  )"
+  )" || return $?
   while IFS= read -r pod_ip; do
     if [ -n "$pod_ip" ] && grep -Fq "${pod_ip}:8084" <<<"$matching_lines"; then
       echo "::error::EnvironmentSessionService gRPC ingress reused orchestration pod endpoint ${pod_ip}:8084"
@@ -3031,13 +3380,17 @@ assert_environment_session_grpc_service_upstream() {
 
 environment_session_protocol_smoke() {
   local environment_id="$1"
-  local certificate_dir certificate_pem
+  local certificate_dir certificate_pem status
 
   log "running EnvironmentSessionService direct Connect + public native-gRPC smoke"
-  certificate_dir="$(mktemp -d)"
+  certificate_dir="$(mktemp -d)" || return $?
   certificate_pem="$certificate_dir/ca.pem"
   kubectl -n "$NS" get secret/codewire-kind-ingress-ca \
-    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem"
+    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem" || {
+      status=$?
+      rm -rf "$certificate_dir"
+      return "$status"
+    }
 
   if ! SMOKE_SESSION_BASE_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_ORG_ID=org_contract_1 \
@@ -3066,7 +3419,7 @@ environment_session_protocol_smoke() {
     rm -rf "$certificate_dir"
     return 1
   fi
-  rm -rf "$certificate_dir"
+  rm -rf "$certificate_dir" || return $?
   log "EnvironmentSessionService direct Connect + public native-gRPC output/list/logs/exit proof green"
 }
 
@@ -3077,7 +3430,7 @@ environment_daemon_proxy_smoke() {
   log "running authenticated environment-daemon proxy smoke"
   curl_settled -X POST -H 'content-type: application/json' \
     -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\"}" \
-    "$base"
+    "$base" || return $?
   if [ "$PROBE_CODE" != "401" ] \
       || ! printf '%s' "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
     echo "::error::unauthenticated daemon status bypassed product auth: code=$PROBE_CODE body=$PROBE_BODY"
@@ -3087,7 +3440,7 @@ environment_daemon_proxy_smoke() {
   curl_settled -X POST -H 'content-type: application/json' \
     -H 'cookie: codewire.session_token=contract-user-session-token' \
     -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\"}" \
-    "$base"
+    "$base" || return $?
   if [ "$PROBE_CODE" != "200" ] \
       || ! printf '%s' "$PROBE_BODY" | jq -e \
         --arg pod_name "$pod_name" '
@@ -3113,38 +3466,42 @@ deploy_agent_sandbox() {
   local manifest
   log "deploying agent-sandbox controller and CRDs"
   manifest="$(render_agent_sandbox_manifest)" || return $?
-  kubectl_apply --validate=false -f "$manifest"
+  kubectl_apply --validate=false -f "$manifest" || return $?
   kubectl wait --for=condition=established --timeout=60s \
-    crd/sandboxclaims.extensions.agents.x-k8s.io
-  kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=180s
+    crd/sandboxclaims.extensions.agents.x-k8s.io || return $?
+  kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=180s || return $?
 }
 
 workspace_service_smokes() {
-  gateway_host_key_restart_smoke
+  # Callers check this composite with ||, which suppresses nested errexit.
+  # Every stage must explicitly preserve failure before running the next one.
+  gateway_host_key_restart_smoke || return $?
 
   log "running workspace exec smoke"
   SMOKE_NAMESPACE="$SANDBOX_NS" SMOKE_POD_NAME=crd-smoke-workspace-daemon \
-    "$CARGO_CI_DIR/exec-smoke"
-  file_service_smoke
-  environment_resize_smoke
+    "$CARGO_CI_DIR/exec-smoke" || return $?
+  file_service_smoke || return $?
+  environment_resize_smoke || return $?
 }
 
 environment_resize_smoke() (
   log "running public environment resize against the agent-sandbox controller"
-  umask 077
+  umask 077 || return $?
   local environment_id
-  environment_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  environment_id="$(python3 -c 'import uuid; print(uuid.uuid4())')" || return $?
   local request_id="kind-resize-${RANDOM}-${RANDOM}"
   local preset_id="preset-${environment_id}"
   local template_name shadow_pool_name
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
-  local gateway_token daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
+  local gateway_token daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid claim_uid
   local operation_id operation_state response runtime_state marker image resources
+  local current_pvc_uid resize_label sandbox_cpu claim_cpu storage_rbac pvc_rbac
+  local status
   local resize_manifest="$RUN_DIR/resize-$environment_id.json"
-  trap 'rm -f -- "$resize_manifest"' EXIT
-  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
-  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
+  trap 'status=$?; rm -f -- "$resize_manifest" || status=$?; exit "$status"' EXIT
+  gateway_token="$(gateway_auth_token_for_environment "$environment_id")" || return $?
+  daemon_token="$(daemon_auth_token_for_environment "$environment_id")" || return $?
 
   # Render through the same production code that runtime reconciliation validates.
   # No cluster mutation occurs before these exact object identities are known.
@@ -3155,13 +3512,13 @@ environment_resize_smoke() (
     SANDBOX_CREDENTIAL_GATEWAY_ROOTS_CONFIGMAP=codewire-credential-gateway-roots \
     SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots \
     CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
-    "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"
-  template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")"
-  shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")"
+    "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest" || return $?
+  template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")" || return $?
+  shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")" || return $?
   jq -e --arg claim "$claim_name" --arg pool "$shadow_pool_name" \
     '.items[] | select(.kind == "SandboxClaim") |
       .metadata.name == $claim and .spec.warmPoolRef.name == $pool' \
-    "$resize_manifest" >/dev/null
+    "$resize_manifest" >/dev/null || return $?
 
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_environment_resize_smoke() {
@@ -3204,30 +3561,31 @@ SQL
   }
   trap cleanup_environment_resize_smoke EXIT
 
-  kubectl_apply -f "$resize_manifest"
+  kubectl_apply -f "$resize_manifest" || return $?
   kubectl -n "$SANDBOX_NS" wait "sandboxclaim/${claim_name}" \
-    --for=condition=Ready --timeout=180s
+    --for=condition=Ready --timeout=180s || return $?
   sandbox_name="$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" \
-    -o jsonpath='{.status.sandbox.name}')"
+    -o jsonpath='{.status.sandbox.name}')" || return $?
   if [ -z "$sandbox_name" ]; then
     echo "::error::resize smoke claim did not resolve a Sandbox"
     return 1
   fi
   pod_name="$sandbox_name"
   kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" \
-    --for=condition=Ready --timeout=180s
-  old_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
-  old_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')"
-  pod_ip="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.podIP}')"
+    --for=condition=Ready --timeout=180s || return $?
+  old_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" || return $?
+  old_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')" || return $?
+  pod_ip="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.podIP}')" || return $?
   pvc_name="workspace-${sandbox_name}"
   kubectl -n "$SANDBOX_NS" wait "pvc/${pvc_name}" \
-    --for=jsonpath='{.status.phase}'=Bound --timeout=120s
-  pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')"
+    --for=jsonpath='{.status.phase}'=Bound --timeout=120s || return $?
+  pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" || return $?
   kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- \
-    sh -ceu 'printf codewire-resize-data > /workspace/resize-smoke-marker'
+    sh -ceu 'printf codewire-resize-data > /workspace/resize-smoke-marker' || return $?
+  claim_uid="$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}')" || return $?
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL || return $?
 BEGIN;
 -- A runnable fixture owns its own preset. The shared contract preset is
 -- deliberately missing runtime configuration for the Temporal failure test.
@@ -3255,7 +3613,7 @@ INSERT INTO sandbox_environment_backend (
 )
 VALUES (
   '$environment_id', '$SANDBOX_NS', '$claim_name',
-  '$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}')',
+  '$claim_uid',
   '$pod_name', '$pod_ip', true
 );
 COMMIT;
@@ -3265,12 +3623,12 @@ SQL
     -H 'cookie: codewire.session_token=contract-admin-session-token' \
     -H 'content-type: application/json' \
     -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":500,\"memoryMb\":512,\"diskGb\":1,\"requestId\":\"${request_id}\"}" \
-    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
+    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::public resize request failed: code=$PROBE_CODE body=$PROBE_BODY"
     return 1
   fi
-  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")"
+  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")" || return $?
   if [ -z "$operation_id" ]; then
     echo "::error::public resize response omitted operation identity: $PROBE_BODY"
     return 1
@@ -3282,13 +3640,13 @@ SQL
       -H 'cookie: codewire.session_token=contract-admin-session-token' \
       -H 'content-type: application/json' \
       -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"operationId\":\"${operation_id}\"}" \
-      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
+      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation" || return $?
     if [ "$PROBE_CODE" != "200" ]; then
       echo "::error::resize operation poll failed: code=$PROBE_CODE body=$PROBE_BODY"
       return 1
     fi
     response="$PROBE_BODY"
-    operation_state="$(jq -r '.operation.state // empty' <<<"$response")"
+    operation_state="$(jq -r '.operation.state // empty' <<<"$response")" || return $?
     case "$operation_state" in
       ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED) break ;;
       ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED)
@@ -3318,9 +3676,9 @@ SQL
 
   pod_name="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire -Atc \
-      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")"
-  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
-  new_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')"
+      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")" || return $?
+  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" || return $?
+  new_restart_count="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')" || return $?
   if [ -z "$new_pod_uid" ] || [ "$new_pod_uid" != "$old_pod_uid" ]; then
     echo "::error::live resize replaced the owned workspace Pod UID"
     return 1
@@ -3331,32 +3689,35 @@ SQL
   fi
   runtime_state="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire -Atc \
-      "SELECT state || ':' || cpu_millicores || ':' || memory_mb || ':' || disk_gb FROM environments WHERE id = '$environment_id'")"
+      "SELECT state || ':' || cpu_millicores || ':' || memory_mb || ':' || disk_gb FROM environments WHERE id = '$environment_id'")" || return $?
   if [ "$runtime_state" != "running:500:512:1" ]; then
     echo "::error::resize durable resource state is ${runtime_state:-missing}"
     return 1
   fi
   resources="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" \
-    -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}:{.spec.containers[?(@.name=="workspace")].resources.requests.memory}')"
+    -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}:{.spec.containers[?(@.name=="workspace")].resources.requests.memory}')" || return $?
   image="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" \
-    -o jsonpath='{.spec.containers[?(@.name=="workspace")].image}')"
+    -o jsonpath='{.spec.containers[?(@.name=="workspace")].image}')" || return $?
   marker="$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- \
-    sh -ceu 'cat /workspace/resize-smoke-marker')"
+    sh -ceu 'cat /workspace/resize-smoke-marker')" || return $?
   if [ "$resources" != "500m:512Mi" ] || [ "$image" != "codewire-gateway:e2e" ] \
       || [ "$marker" != "codewire-resize-data" ]; then
     echo "::error::live-resized Pod lost resources/image/data: resources=$resources image=$image marker=$marker"
     return 1
   fi
-  if [ "$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" != "$pvc_uid" ]; then
+  current_pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" || return $?
+  if [ "$current_pvc_uid" != "$pvc_uid" ]; then
     echo "::error::workspace PVC identity changed across resize"
     return 1
   fi
-  if [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.labels.codewire\.sh/resize-smoke-marker}')" != "preserved" ]; then
+  resize_label="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.labels.codewire\.sh/resize-smoke-marker}')" || return $?
+  if [ "$resize_label" != "preserved" ]; then
     echo "::error::live-resized Pod lost the resize identity label"
     return 1
   fi
-  if [ "$(kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.spec.podTemplate.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" != "500m" ] \
-      || [ "$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.spec.workspaceResources[?(@.containerName=="workspace")].resources.requests.cpu}')" != "500m" ]; then
+  sandbox_cpu="$(kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.spec.podTemplate.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" || return $?
+  claim_cpu="$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.spec.workspaceResources[?(@.containerName=="workspace")].resources.requests.cpu}')" || return $?
+  if [ "$sandbox_cpu" != "500m" ] || [ "$claim_cpu" != "500m" ]; then
     echo "::error::Sandbox or SandboxClaim did not retain the desired resize"
     return 1
   fi
@@ -3386,21 +3747,21 @@ SQL
     -H 'cookie: codewire.session_token=contract-admin-session-token' \
     -H 'content-type: application/json' \
     -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":500,\"memoryMb\":384,\"diskGb\":1,\"requestId\":\"${request_id}\",\"disruptionPolicy\":\"ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART\"}" \
-    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
+    "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::explicit restart resize request failed: code=$PROBE_CODE body=$PROBE_BODY"
     return 1
   fi
-  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")"
+  operation_id="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")" || return $?
   operation_state=""
   for _ in $(seq 1 180); do
     curl_settled -X POST \
       -H 'cookie: codewire.session_token=contract-admin-session-token' \
       -H 'content-type: application/json' \
       -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"operationId\":\"${operation_id}\"}" \
-      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
+      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation" || return $?
     response="$PROBE_BODY"
-    operation_state="$(jq -r '.operation.state // empty' <<<"$response")"
+    operation_state="$(jq -r '.operation.state // empty' <<<"$response")" || return $?
     case "$operation_state" in
       ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED) break ;;
       ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED)
@@ -3417,21 +3778,23 @@ SQL
   fi
   pod_name="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire -Atc \
-      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")"
-  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
+      "SELECT pod_name FROM sandbox_environment_backend WHERE environment_id = '$environment_id'")" || return $?
+  new_pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" || return $?
   if [ -z "$new_pod_uid" ] || [ "$new_pod_uid" = "$old_pod_uid" ]; then
     echo "::error::explicit restart did not replace the workspace Pod"
     return 1
   fi
-  if [ "$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" != "$pvc_uid" ] \
-      || [ "$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- sh -ceu 'cat /workspace/resize-smoke-marker')" != "codewire-resize-data" ]; then
+  current_pvc_uid="$(kubectl -n "$SANDBOX_NS" get pvc "$pvc_name" -o jsonpath='{.metadata.uid}')" || return $?
+  marker="$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- sh -ceu 'cat /workspace/resize-smoke-marker')" || return $?
+  if [ "$current_pvc_uid" != "$pvc_uid" ] || [ "$marker" != "codewire-resize-data" ]; then
     echo "::error::explicit restart failed to preserve PVC identity or workspace data"
     return 1
   fi
 
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"
-  if [ "$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" != "yes" ] \
-      || [ "$(kubectl auth can-i patch persistentvolumeclaims --namespace "$SANDBOX_NS" --as "$as_user")" != "yes" ]; then
+  storage_rbac="$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" || return $?
+  pvc_rbac="$(kubectl auth can-i patch persistentvolumeclaims --namespace "$SANDBOX_NS" --as "$as_user")" || return $?
+  if [ "$storage_rbac" != "yes" ] || [ "$pvc_rbac" != "yes" ]; then
     echo "::error::orchestration resize RBAC is incomplete"
     return 1
   fi
@@ -3451,7 +3814,7 @@ VALUES ('$env_id', 'org_contract_1', 'usr_contract_admin', 'sandbox', 'pending',
         2000, 4096, 10, 'preset_contract_1',
         '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 SQL
-  if ! DATABASE_URL="$KIND_DATABASE_URL" \
+  if ! DATABASE_URL="$KIND_DATABASE_URL" TEMPORAL_ADDRESS="$KIND_TEMPORAL_ADDRESS" \
     SMOKE_ENV_ID="$env_id" "$CARGO_CI_DIR/temporal-smoke"; then
     kubectl -n "$NS" logs deploy/codewire-orchestration --tail=80 || true
     kubectl -n "$NS" logs deploy/temporal --tail=50 || true
@@ -3608,7 +3971,7 @@ start_gateway_port_forward() {
   local log_file="$GATEWAY_SMOKE_TMPDIR/port-forward-${label}.log"
   local i
 
-  stop_gateway_port_forward
+  stop_gateway_port_forward || return $?
   kubectl -n "$SANDBOX_NS" port-forward --address=127.0.0.1 \
     service/cw-gateway-svc-env-crd-smoke :2222 >"$log_file" 2>&1 &
   GATEWAY_PORT_FORWARD_PID=$!
@@ -3616,7 +3979,7 @@ start_gateway_port_forward() {
     GATEWAY_PORT_FORWARD_PORT="$(
       sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> 2222$/\1/p' \
         "$log_file" | sed -n '1p'
-    )"
+    )" || return $?
     if [ -n "$GATEWAY_PORT_FORWARD_PORT" ]; then
       return 0
     fi
@@ -3637,7 +4000,7 @@ capture_gateway_public_fingerprint() {
   local public_key=""
   local i
 
-  start_gateway_port_forward "$label"
+  start_gateway_port_forward "$label" || return $?
   for i in $(seq 1 30); do
     public_key="$(
       { ssh-keyscan -T 2 -t ed25519 -p "$GATEWAY_PORT_FORWARD_PORT" 127.0.0.1 \
@@ -3648,14 +4011,14 @@ capture_gateway_public_fingerprint() {
     fi
     sleep 1
   done
-  stop_gateway_port_forward
+  stop_gateway_port_forward || return $?
   if [ -z "$public_key" ]; then
     echo "::error::gateway did not present an Ed25519 SSH host key during ${label} probe"
     return 1
   fi
   GATEWAY_PUBLIC_FINGERPRINT="$(
     printf '%s\n' "$public_key" | ssh-keygen -lf - -E sha256 | awk '{ print $2 }'
-  )"
+  )" || return $?
   if [[ "$GATEWAY_PUBLIC_FINGERPRINT" != SHA256:* ]]; then
     echo "::error::gateway ${label} SSH fingerprint was malformed"
     return 1
@@ -3672,9 +4035,9 @@ gateway_host_key_restart_smoke() {
   local before_fingerprint after_fingerprint before_uid after_uid
 
   log "running CRD round-trip and gateway host-key restart smoke"
-  gateway_token="$(gateway_auth_token_for_environment env-crd-smoke)"
-  daemon_token="$(daemon_auth_token_for_environment env-crd-smoke)"
-  GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")"
+  gateway_token="$(gateway_auth_token_for_environment env-crd-smoke)" || return $?
+  daemon_token="$(daemon_auth_token_for_environment env-crd-smoke)" || return $?
+  GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")" || return $?
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$workspace_image" \
@@ -3682,13 +4045,13 @@ gateway_host_key_restart_smoke() {
     CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=setup \
     CRD_SMOKE_LOCAL_GATEWAY=1 \
-    "$CARGO_CI_DIR/crd-smoke"
+    "$CARGO_CI_DIR/crd-smoke" || return $?
 
   # Pod specs are immutable. Recreate only this owned daemon fixture when a
   # retained service smoke is repeated; preserve the gateway and host-key Secret.
   kubectl -n "$SANDBOX_NS" delete "pod/${daemon_pod}" \
-    --ignore-not-found=true --wait=true --timeout=120s
-  kubectl_apply -f - <<EOF
+    --ignore-not-found=true --wait=true --timeout=120s || return $?
+  kubectl_apply -f - <<EOF || return $?
 apiVersion: v1
 kind: Pod
 metadata:
@@ -3747,21 +4110,21 @@ spec:
       emptyDir: {}
 EOF
   kubectl -n "$SANDBOX_NS" wait "pod/${daemon_pod}" \
-    --for=condition=Ready --timeout=120s
-  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s
+    --for=condition=Ready --timeout=120s || return $?
+  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s || return $?
 
   before_uid="$(
     kubectl -n "$SANDBOX_NS" get secret "$host_key_secret" -o jsonpath='{.metadata.uid}'
-  )"
-  capture_gateway_public_fingerprint before-restart
+  )" || return $?
+  capture_gateway_public_fingerprint before-restart || return $?
   before_fingerprint="$GATEWAY_PUBLIC_FINGERPRINT"
 
-  kubectl -n "$SANDBOX_NS" rollout restart "deployment/${gateway_deploy}" >/dev/null
-  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s
+  kubectl -n "$SANDBOX_NS" rollout restart "deployment/${gateway_deploy}" >/dev/null || return $?
+  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s || return $?
   after_uid="$(
     kubectl -n "$SANDBOX_NS" get secret "$host_key_secret" -o jsonpath='{.metadata.uid}'
-  )"
-  capture_gateway_public_fingerprint after-restart
+  )" || return $?
+  capture_gateway_public_fingerprint after-restart || return $?
   after_fingerprint="$GATEWAY_PUBLIC_FINGERPRINT"
 
   if [ "$after_uid" != "$before_uid" ]; then
