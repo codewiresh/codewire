@@ -29,6 +29,24 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESOLVED_ADDRESSES: usize = 16;
 const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
+/// A pooled provider connection unused this long is closed.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Idle connections kept per provider host. Concurrent requests beyond this
+/// still get their own connection; only the surplus is closed when idle.
+const POOL_MAX_IDLE_PER_HOST: usize = 32;
+/// TCP keepalive on pooled connections, so a dead idle peer is noticed and
+/// dropped from the pool rather than handed to the next request.
+const POOL_TCP_KEEPALIVE: Duration = Duration::from_secs(15);
+
+/// How a [`ProviderHttpsTransport`] reuses provider connections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectionReuse {
+    /// Every request opens its own TCP and TLS connection.
+    PerRequest,
+    /// HTTP/1.1 keep-alive: a connection carries one request at a time and
+    /// returns to the pool only after its response was read to the end.
+    Pooled,
+}
 
 /// Broker-local selected-provider transport. DNS is resolved once per broker process, every
 /// result is classified before dialing, and the admitted addresses are pinned
@@ -38,6 +56,7 @@ pub struct ProviderHttpsTransport {
     client: reqwest::Client,
     selected: BTreeSet<HttpProvider>,
     resolved_address_count: usize,
+    reuse: ConnectionReuse,
 }
 
 impl std::fmt::Debug for ProviderHttpsTransport {
@@ -46,6 +65,7 @@ impl std::fmt::Debug for ProviderHttpsTransport {
             .debug_struct("ProviderHttpsTransport")
             .field("selected", &self.selected)
             .field("resolved_address_count", &self.resolved_address_count)
+            .field("reuse", &self.reuse)
             .finish_non_exhaustive()
     }
 }
@@ -54,30 +74,51 @@ impl ProviderHttpsTransport {
     /// Resolve and classify the fixed provider destination before any
     /// credential lease is requested. The admitted addresses remain pinned for
     /// this broker process, so post-confinement requests perform no DNS I/O.
+    /// Every request opens its own connection: this is the transport of the
+    /// per-environment local and owner-local brokers.
     pub async fn resolve(selected: &BTreeSet<HttpProvider>) -> Result<Self, BrokerUpstreamError> {
+        Self::resolve_with(selected, ConnectionReuse::PerRequest, system_lookup)
+    }
+
+    /// [`Self::resolve`] with an HTTP/1.1 keep-alive connection pool, for the
+    /// long-lived credential service's broker upstream only.
+    ///
+    /// Resolution, address admission and pinning are identical, so a pooled
+    /// connection was dialed to an admitted address like any other, and every
+    /// request still passes the destination check before a connection is
+    /// chosen. The pool is keyed by scheme and authority (host and port) and
+    /// never coalesces hosts, so a connection is reused only for the same
+    /// validated destination. Provider authentication is in each request's
+    /// headers, and HTTP/1.1 keeps no state between requests on a
+    /// connection, so a connection carries nothing from one credential to the
+    /// next. A response dropped before its end closes its connection.
+    ///
+    /// HTTP/2 is deliberately not offered here. One HTTP/2 connection per host
+    /// would multiplex every tenant's requests: its shared receive window can
+    /// be held by responses a stalled guest is not reading, its stream limit
+    /// queues new requests behind long-lived streams, and one connection
+    /// error fails them all. With HTTP/1.1, concurrent requests use separate
+    /// connections exactly as before; only sequential ones skip the handshake.
+    pub async fn resolve_pooled(
+        selected: &BTreeSet<HttpProvider>,
+    ) -> Result<Self, BrokerUpstreamError> {
+        Self::resolve_with(selected, ConnectionReuse::Pooled, system_lookup)
+    }
+
+    fn resolve_with(
+        selected: &BTreeSet<HttpProvider>,
+        reuse: ConnectionReuse,
+        lookup: impl Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>>,
+    ) -> Result<Self, BrokerUpstreamError> {
         // This deliberately uses the calling thread instead of Tokio's
         // blocking resolver pool. Broker launch is bounded by the authority's
         // readiness timeout, and retaining a resolver worker here would leave
         // an already-running thread outside older Landlock thread domains.
         let hosts = selected_hosts(selected)?;
         let mut resolved_address_count = 0_usize;
-        let mut builder = reqwest::Client::builder()
-            .https_only(true)
-            .no_proxy()
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .no_zstd()
-            .redirect(Policy::none())
-            .referer(false)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .http2_max_header_list_size(MAX_RESPONSE_HEADER_BYTES as u32)
-            .pool_max_idle_per_host(0);
+        let mut builder = client_builder(reuse);
         for host in &hosts {
-            let addresses = (*host, OPENAI_PORT)
-                .to_socket_addrs()
-                .map_err(|_| BrokerUpstreamError::Connect)?;
+            let addresses = lookup(host, OPENAI_PORT).map_err(|_| BrokerUpstreamError::Connect)?;
             let addresses = admit_resolved_addresses(addresses)?;
             resolved_address_count = resolved_address_count
                 .checked_add(addresses.len())
@@ -90,7 +131,38 @@ impl ProviderHttpsTransport {
             client,
             selected: selected.clone(),
             resolved_address_count,
+            reuse,
         })
+    }
+}
+
+fn system_lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    Ok((host, port).to_socket_addrs()?.collect())
+}
+
+/// Everything about the provider client except its pinned addresses.
+fn client_builder(reuse: ConnectionReuse) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .redirect(Policy::none())
+        .referer(false)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .http2_max_header_list_size(MAX_RESPONSE_HEADER_BYTES as u32);
+    match reuse {
+        ConnectionReuse::PerRequest => builder.pool_max_idle_per_host(0),
+        // TLS offers only http/1.1. Its response head is bounded by the
+        // HTTP/1.1 parser's buffer, then by `validate_response_headers`.
+        ConnectionReuse::Pooled => builder
+            .http1_only()
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+            .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+            .tcp_keepalive(POOL_TCP_KEEPALIVE),
     }
 }
 
@@ -359,7 +431,28 @@ fn validate_response_headers(headers: &HeaderMap) -> Result<(), BrokerUpstreamEr
     if bytes.is_none_or(|bytes| bytes > MAX_RESPONSE_HEADER_BYTES) {
         return Err(BrokerUpstreamError::ResourceLimit);
     }
+    validate_transfer_coding(headers)?;
     crate::openai::validate_response_encoding(headers).map_err(|_| BrokerUpstreamError::Protocol)
+}
+
+/// The broker redacts identity bytes, so HTTP/1.1 framing may only be
+/// `chunked`. The client removes chunked framing but would pass any other
+/// transfer coding through as body bytes, past the content-coding admission.
+/// HTTP/2 responses have no transfer codings.
+fn validate_transfer_coding(headers: &HeaderMap) -> Result<(), BrokerUpstreamError> {
+    let mut values = headers.get_all(http::header::TRANSFER_ENCODING).iter();
+    match (values.next(), values.next()) {
+        (None, _) => Ok(()),
+        (Some(value), None)
+            if value
+                .as_bytes()
+                .trim_ascii()
+                .eq_ignore_ascii_case(b"chunked") =>
+        {
+            Ok(())
+        }
+        _ => Err(BrokerUpstreamError::Protocol),
+    }
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> BrokerUpstreamError {
@@ -658,6 +751,313 @@ mod tests {
             admit_resolved_addresses(too_many),
             Err(BrokerUpstreamError::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn response_admission_transport_admits_only_chunked_framing() {
+        for value in ["chunked", "Chunked", " chunked\t"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::TRANSFER_ENCODING,
+                http::HeaderValue::from_static(value),
+            );
+            assert_eq!(validate_response_headers(&headers), Ok(()), "{value:?}");
+        }
+        for values in [
+            &["gzip"][..],
+            &["gzip, chunked"],
+            &["chunked, chunked"],
+            &["identity"],
+            &["chunked", "chunked"],
+            &[""],
+        ] {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(
+                    http::header::TRANSFER_ENCODING,
+                    http::HeaderValue::from_static(value),
+                );
+            }
+            assert_eq!(
+                validate_response_headers(&headers),
+                Err(BrokerUpstreamError::Protocol),
+                "{values:?}"
+            );
+        }
+    }
+
+    fn public(last: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, last)), OPENAI_PORT)
+    }
+
+    #[test]
+    fn pooled_resolution_admits_and_pins_exactly_like_per_request_resolution() {
+        let openai = BTreeSet::from([HttpProvider::OpenAiApiKey]);
+        for reuse in [ConnectionReuse::PerRequest, ConnectionReuse::Pooled] {
+            // No selection never reaches the resolver.
+            assert_eq!(
+                ProviderHttpsTransport::resolve_with(&BTreeSet::new(), reuse, |_, _| {
+                    panic!("an empty selection must not resolve")
+                })
+                .err(),
+                Some(BrokerUpstreamError::DestinationDenied)
+            );
+            for (answer, expected) in [
+                (
+                    vec![SocketAddr::from(([127, 0, 0, 1], OPENAI_PORT))],
+                    BrokerUpstreamError::DestinationDenied,
+                ),
+                (
+                    vec![public(1), SocketAddr::from(([10, 0, 0, 1], OPENAI_PORT))],
+                    BrokerUpstreamError::DestinationDenied,
+                ),
+                (
+                    vec![SocketAddr::new(public(1).ip(), 80)],
+                    BrokerUpstreamError::DestinationDenied,
+                ),
+                (
+                    (1..=17).map(public).collect(),
+                    BrokerUpstreamError::ResourceLimit,
+                ),
+                (Vec::new(), BrokerUpstreamError::Connect),
+            ] {
+                assert_eq!(
+                    ProviderHttpsTransport::resolve_with(&openai, reuse, |_, _| Ok(answer.clone()))
+                        .err(),
+                    Some(expected),
+                    "{reuse:?} {answer:?}"
+                );
+            }
+            assert_eq!(
+                ProviderHttpsTransport::resolve_with(&openai, reuse, |_, _| {
+                    Err(std::io::ErrorKind::NotFound.into())
+                })
+                .err(),
+                Some(BrokerUpstreamError::Connect)
+            );
+            let looked_up = std::sync::Mutex::new(Vec::new());
+            let transport = ProviderHttpsTransport::resolve_with(
+                &BTreeSet::from([HttpProvider::OpenAiApiKey, HttpProvider::CodexOAuth]),
+                reuse,
+                |host, port| {
+                    looked_up.lock().unwrap().push((host.to_owned(), port));
+                    Ok(vec![public(1), public(2)])
+                },
+            )
+            .unwrap();
+            assert_eq!(transport.reuse, reuse);
+            assert_eq!(transport.resolved_address_count, 6);
+            assert_eq!(
+                looked_up.into_inner().unwrap(),
+                [OPENAI_HOST, OPENAI_AUTH_HOST, CHATGPT_HOST].map(|host| (host.to_owned(), 443))
+            );
+        }
+    }
+
+    /// A loopback HTTP/1.1 provider stand-in. It counts accepted connections
+    /// and records which Host each connection served. `/partial` announces
+    /// ten body bytes, sends five and waits for the client to close.
+    struct ProviderStandIn {
+        address: SocketAddr,
+        hosts_by_connection: std::sync::Arc<std::sync::Mutex<Vec<BTreeSet<String>>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl ProviderStandIn {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let hosts_by_connection =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::<BTreeSet<String>>::new()));
+            let record = hosts_by_connection.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let connection = {
+                        let mut hosts = record.lock().unwrap();
+                        hosts.push(BTreeSet::new());
+                        hosts.len() - 1
+                    };
+                    tokio::spawn(Self::serve(stream, connection, record.clone()));
+                }
+            });
+            Self {
+                address,
+                hosts_by_connection,
+                task,
+            }
+        }
+
+        async fn serve(
+            stream: tokio::net::TcpStream,
+            connection: usize,
+            record: std::sync::Arc<std::sync::Mutex<Vec<BTreeSet<String>>>>,
+        ) {
+            use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+            let mut stream = tokio::io::BufReader::new(stream);
+            loop {
+                let mut request_line = String::new();
+                if stream.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                loop {
+                    let mut line = String::new();
+                    if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("host")
+                    {
+                        record.lock().unwrap()[connection].insert(value.trim().to_owned());
+                    }
+                }
+                if request_line.starts_with("GET /partial ") {
+                    let _ = stream
+                        .get_mut()
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nhello")
+                        .await;
+                    let _ = stream.read_to_end(&mut Vec::new()).await;
+                    return;
+                }
+                if stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+
+        /// The production client settings for `reuse`; only what a plain
+        /// loopback stand-in needs differs: http, and both hosts pinned to it.
+        fn client(&self, reuse: ConnectionReuse) -> reqwest::Client {
+            client_builder(reuse)
+                .https_only(false)
+                .resolve(OPENAI_HOST, self.address)
+                .resolve(CHATGPT_HOST, self.address)
+                .build()
+                .unwrap()
+        }
+
+        fn url(&self, host: &str, path: &str) -> String {
+            format!("http://{host}:{}{path}", self.address.port())
+        }
+
+        async fn get(&self, client: &reqwest::Client, host: &str, path: &str) -> bytes::Bytes {
+            let response = client.get(self.url(host, path)).send().await.unwrap();
+            assert_eq!(response.version(), http::Version::HTTP_11);
+            response.bytes().await.unwrap()
+        }
+
+        fn connections(&self) -> Vec<BTreeSet<String>> {
+            self.hosts_by_connection.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for ProviderStandIn {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn pooled_transport_reuses_one_connection_for_sequential_requests() {
+        let provider = ProviderStandIn::start().await;
+        let client = provider.client(ConnectionReuse::Pooled);
+        for _ in 0..3 {
+            assert_eq!(&provider.get(&client, OPENAI_HOST, "/").await[..], b"ok");
+        }
+        assert_eq!(
+            provider.connections(),
+            [BTreeSet::from([format!(
+                "{OPENAI_HOST}:{}",
+                provider.address.port()
+            )])]
+        );
+    }
+
+    #[tokio::test]
+    async fn per_request_transport_opens_a_connection_for_every_request() {
+        let provider = ProviderStandIn::start().await;
+        let client = provider.client(ConnectionReuse::PerRequest);
+        for _ in 0..3 {
+            assert_eq!(&provider.get(&client, OPENAI_HOST, "/").await[..], b"ok");
+        }
+        assert_eq!(provider.connections().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn pooled_connections_are_never_shared_between_provider_hosts() {
+        // Both hosts resolve to the same address, so only the pool key can
+        // keep their connections apart.
+        let provider = ProviderStandIn::start().await;
+        let client = provider.client(ConnectionReuse::Pooled);
+        for host in [OPENAI_HOST, CHATGPT_HOST, OPENAI_HOST, CHATGPT_HOST] {
+            assert_eq!(&provider.get(&client, host, "/").await[..], b"ok");
+        }
+        let port = provider.address.port();
+        let mut connections = provider.connections();
+        connections.sort();
+        assert_eq!(
+            connections,
+            [
+                BTreeSet::from([format!("{OPENAI_HOST}:{port}")]),
+                BTreeSet::from([format!("{CHATGPT_HOST}:{port}")]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pooled_connection_closes_when_a_response_is_not_read_to_its_end() {
+        let provider = ProviderStandIn::start().await;
+        let client = provider.client(ConnectionReuse::Pooled);
+        let partial = client
+            .get(provider.url(OPENAI_HOST, "/partial"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(partial.status(), http::StatusCode::OK);
+        drop(partial);
+        // The next request must not read the rest of the abandoned body.
+        assert_eq!(&provider.get(&client, OPENAI_HOST, "/").await[..], b"ok");
+        assert_eq!(provider.connections().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pooled_transport_checks_the_destination_before_choosing_a_connection() {
+        let provider = ProviderStandIn::start().await;
+        let transport = ProviderHttpsTransport {
+            client: provider.client(ConnectionReuse::Pooled),
+            selected: BTreeSet::from([HttpProvider::OpenAiApiKey]),
+            resolved_address_count: 1,
+            reuse: ConnectionReuse::Pooled,
+        };
+        let port = provider.address.port();
+        for target in [
+            format!("http://{OPENAI_HOST}:{port}/v1/responses"),
+            format!("https://{OPENAI_HOST}:{port}/v1/responses"),
+            format!("http://{OPENAI_HOST}/v1/responses"),
+            format!("https://{CHATGPT_HOST}/backend-api/codex/responses"),
+            format!("https://{OPENAI_HOST}/v1/other"),
+        ] {
+            let request = BrokerUpstreamRequest::new(
+                Method::POST,
+                url::Url::parse(&target).unwrap(),
+                HeaderMap::new(),
+                Vec::new(),
+            );
+            assert_eq!(
+                transport.execute(request).await.err(),
+                Some(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+        assert!(provider.connections().is_empty());
     }
 
     #[test]

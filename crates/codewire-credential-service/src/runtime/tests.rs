@@ -791,3 +791,85 @@ async fn shutdown_drains_issued_enrollment_commit_and_real_refresh_past_transpor
     };
     h.finish(result).await
 }
+
+#[test]
+fn credential_database_pool_does_not_ping_on_every_acquire() {
+    let options = database_pool_options();
+    assert!(!options.get_test_before_acquire());
+    assert_eq!(options.get_max_connections(), 16);
+    assert_eq!(options.get_acquire_timeout(), Duration::from_secs(5));
+}
+
+/// Only this long-lived service's broker upstream keeps provider connections
+/// alive. Its GitHub App authorization transport and the per-environment local
+/// broker open one connection per request.
+#[test]
+fn only_the_long_lived_broker_upstream_pools_provider_connections() {
+    let service = include_str!("../runtime.rs");
+    let local = include_str!("../../../codewire-cli/src/commands/credential_broker.rs");
+    assert_eq!(
+        service
+            .matches("ProviderHttpsTransport::resolve_pooled(")
+            .count(),
+        1
+    );
+    assert!(service.contains("let upstream = ProviderHttpsTransport::resolve_pooled("));
+    assert_eq!(
+        service.matches("ProviderHttpsTransport::resolve(").count(),
+        1
+    );
+    assert!(local.contains("ProviderHttpsTransport::resolve(&http_providers)"));
+    assert!(!local.contains("resolve_pooled"));
+}
+
+async fn database_backend(pool: &PgPool) -> Result<i32> {
+    Ok(sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(pool)
+        .await?)
+}
+
+/// A pooled connection whose backend died is used by at most one failing
+/// statement and then replaced. Past the reprove threshold it is replaced
+/// before any statement uses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn dead_pooled_database_connection_fails_at_most_one_statement() -> Result<()> {
+    use sqlx::Connection as _;
+    let options = std::env::var("TEST_DATABASE_URL")
+        .context("TEST_DATABASE_URL")?
+        .parse::<PgConnectOptions>()?;
+    let mut admin = sqlx::postgres::PgConnection::connect_with(&options).await?;
+    for (reprove_after_idle, failed_statements) in
+        [(Duration::from_secs(3600), 1), (Duration::ZERO, 0)]
+    {
+        // One connection, so every statement uses the same pooled backend.
+        let pool = database_pool_options_reproving_after(reprove_after_idle)
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await?;
+        let dead = database_backend(&pool).await?;
+        ensure!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1, 5000)")
+                .bind(dead)
+                .fetch_one(&mut admin)
+                .await?,
+            "pooled backend did not terminate"
+        );
+        let mut failed = 0;
+        let replacement = loop {
+            match database_backend(&pool).await {
+                Ok(backend) => break backend,
+                Err(_) if failed == 0 => failed += 1,
+                Err(error) => return Err(error),
+            }
+        };
+        ensure!(
+            failed == failed_statements && replacement != dead,
+            "reprove after {reprove_after_idle:?}: {failed} failed statements, \
+             replacement {replacement}, dead {dead}"
+        );
+        pool.close().await;
+    }
+    admin.close().await?;
+    Ok(())
+}

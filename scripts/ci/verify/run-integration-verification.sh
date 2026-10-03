@@ -233,7 +233,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib runtime::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "isolated credential runtime matrix" "$logfile" 4
+  assert_passed_count "isolated credential runtime matrix" "$logfile" 5
 
   logfile="$RUN_DIR/github-repository-discovery.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

@@ -1423,7 +1423,7 @@ grep -qF 'assert_passed_count "public access profile restricted API matrix" "$lo
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
 grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 26' "$integration_runner"
 grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 4' "$integration_runner"
+grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority' "$integration_runner"
 grep -qF 'assert_passed_count "Kind credential effective ACL matrix" "$logfile" 1' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-credential-service --features enrollment' "$integration_runner"

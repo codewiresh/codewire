@@ -57,10 +57,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         .disable_statement_logging();
     let pool = tokio::time::timeout(
         DATABASE_TIMEOUT,
-        PgPoolOptions::new()
-            .max_connections(16)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect_with(options),
+        database_pool_options().connect_with(options),
     )
     .await
     .map_err(|_| RuntimeError::Database)?
