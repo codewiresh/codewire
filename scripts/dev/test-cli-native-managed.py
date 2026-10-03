@@ -576,7 +576,19 @@ class Journey:
             raise
         self.scan(stdout, stderr)
         if expect == "ok" and process.returncode != 0:
-            raise Failure(f"cw {verb} exited {process.returncode}: {scrub(stderr)}")
+            detail = f"cw {verb} exited {process.returncode}: {scrub(stderr)}"
+            if args[0] == "wait" and any(args[index:index + 2] == ("--output", "json")
+                                         for index in range(len(args) - 1)):
+                # wait emits retained session output before reporting a failed
+                # exit. Keep its diagnostic, never arbitrary command stdout.
+                try:
+                    record = json.loads(stdout)
+                except (ValueError, RecursionError):
+                    record = None
+                if isinstance(record, dict) and isinstance(record.get("output"), str) and record["output"]:
+                    detail = (f"cw {verb} exited {process.returncode}: {scrub(stderr, 300)}\n"
+                              f"retained session output:\n{scrub(record['output'], 1000)}")
+            raise Failure(detail)
         if expect == "fail" and process.returncode == 0:
             raise Failure(f"cw {verb} unexpectedly succeeded")
         return process.returncode, stdout, stderr
@@ -1575,6 +1587,7 @@ def contract_tests():
     """Source-only harness contracts: no cw, provider, VM, socket or signal calls."""
     import ast
     import copy
+    from unittest import mock
 
     environment, driver, instance, boot = [f"00000000-0000-4000-8000-{number:012d}" for number in range(1, 5)]
     session = "session-00000000-0000-4000-8000-000000000005"
@@ -1599,6 +1612,60 @@ def contract_tests():
         return value
 
     class Contracts(unittest.TestCase):
+        def failed_call(self, stdout, stderr="session exited with code 1\n", verb="wait", output="json"):
+            journey = Journey("/not/executed/cw", environment, False, None, None)
+            process = mock.Mock(returncode=1)
+            process.communicate.return_value = stdout, stderr
+            with mock.patch.object(subprocess, "Popen", return_value=process) as launch:
+                with self.assertRaises(Failure) as caught:
+                    journey.call(verb, environment, session, "--output", output)
+            launch.assert_called_once()
+            process.communicate.assert_called_once()
+            return journey, str(caught.exception)
+
+        def test_failed_wait_keeps_traceback_without_retry_or_success(self):
+            traceback = 'Traceback (most recent call last):\n  File "<string>", line 17\nAssertionError\n'
+            _, detail = self.failed_call(json.dumps({"session": {"exit_code": 1}, "eof": True,
+                                                     "output": traceback}))
+            self.assertIn("cw wait exited 1: session exited with code 1", detail)
+            self.assertIn(traceback, scrub(detail))
+
+        def test_failed_wait_redacts_and_bounds_both_streams_before_report(self):
+            canary = "cwlocal" + "a" * 32
+            token = "sk-" + "b" * 32
+            traceback = "Traceback\n" + canary + "\n " + token + "\n" + "stack frame\n" * 200
+            journey, detail = self.failed_call(json.dumps({"output": traceback}), "stderr\n" * 100)
+            report = scrub(detail)
+            self.assertLessEqual(len(report), 1500)
+            self.assertIn("Traceback\n[scrubbed]\n [scrubbed]", report)
+            self.assertNotIn(canary, detail)
+            self.assertNotIn(token, detail)
+            self.assertEqual(journey.canary_hits, 2)
+            self.assertNotIn("stack frame\n" * 100, report)
+
+        def test_failed_wait_does_not_report_unframed_or_other_command_stdout(self):
+            for stdout in ("", "not JSON", "[]", "null", '{}', '{"output":null}',
+                           '{"output":42}', '{"output":[]}'):
+                with self.subTest(stdout=stdout):
+                    _, detail = self.failed_call(stdout)
+                    self.assertEqual(detail, "cw wait exited 1: session exited with code 1\n")
+            for verb, output in (("wait", "text"), ("env", "json")):
+                with self.subTest(verb=verb, output=output):
+                    _, detail = self.failed_call('{"output":"unrelated stdout"}', verb=verb, output=output)
+                    self.assertNotIn("unrelated stdout", detail)
+
+        def test_expected_failed_wait_and_success_keep_original_result(self):
+            stdout, stderr = '{"output":"retained output"}', "diagnostic"
+            for code, expect in ((1, "fail"), (0, "ok")):
+                with self.subTest(code=code, expect=expect):
+                    journey = Journey("/not/executed/cw", environment, False, None, None)
+                    process = mock.Mock(returncode=code)
+                    process.communicate.return_value = stdout, stderr
+                    with mock.patch.object(subprocess, "Popen", return_value=process) as launch:
+                        result = journey.call("wait", environment, session, "--output", "json", expect=expect)
+                    self.assertEqual(result, (code, stdout, stderr))
+                    launch.assert_called_once()
+
         def test_generation_refuses_missing_zero_stale_types(self):
             self.assertEqual(generation({"launch_generation": 1}), 1)
             for value in (None, 0, -1, True, 1.0, "1"):
