@@ -583,6 +583,8 @@ impl AuthoritySource {
         )
         .map_err(|_| Error::Denied)?;
         let selection = metadata.selection(&scope, reserved_keys)?;
+        // The lineage reads run concurrently, so this adds their wall time,
+        // not their sum.
         let lineage = kubernetes_read(
             kubernetes,
             validate_lineage(&self.client, &scope, &gateway, &identities.workspace),
@@ -629,7 +631,7 @@ impl AuthoritySource {
 }
 
 /// Await Kubernetes reads and add their wall time to `elapsed`.
-async fn kubernetes_read<T>(elapsed: &mut Duration, read: impl Future<Output = T>) -> T {
+pub(crate) async fn kubernetes_read<T>(elapsed: &mut Duration, read: impl Future<Output = T>) -> T {
     let started = std::time::Instant::now();
     let output = read.await;
     *elapsed = elapsed.saturating_add(started.elapsed());
