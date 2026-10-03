@@ -77,6 +77,20 @@ if [ "$mode" = mounted-home-agents ]; then
   esac
 fi
 
+# The fixed cw launcher must have trusted ancestry in both image checks. Root
+# extraction of upstream archives must not restore their build user's owners.
+for component in / /usr /usr/local "$bin_root"; do
+  if [ ! -d "$component" ] || [ -L "$component" ] ||
+    ! metadata="$(stat --format=%u:%g:%a -- "$component" 2>/dev/null)"; then
+    printf 'workspace image verification: invalid fixed launcher ancestry: %s\n' "$component" >&2
+    exit 1
+  fi
+  case "$metadata" in
+    0:0:[0-7][0145][0145]|0:0:[0-7][0-7][0145][0145]) ;;
+    *) printf 'workspace image verification: untrusted fixed launcher ancestry: %s\n' "$component" >&2; exit 1 ;;
+  esac
+done
+
 for agent in codex claude gemini kimi pi aider; do
   executable="$(command -v "$agent")"
   test -n "$executable"

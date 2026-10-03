@@ -108,11 +108,11 @@ RUN set -euo pipefail; \
       "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
       -o /tmp/node.tgz; \
     echo "${node_sha}  /tmp/node.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/node.tgz -C /usr/local --strip-components=1; \
+    tar --no-same-owner -xzf /tmp/node.tgz -C /usr/local --strip-components=1; \
     curl --proto '=https' --tlsv1.2 -fsSL \
       "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tgz; \
     echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/go.tgz -C /usr/local; \
+    tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local; \
     rm -f /tmp/node.tgz /tmp/go.tgz; \
     node --version; npm --version; /usr/local/go/bin/go version
 
