@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Node;
+use k8s_openapi::api::core::v1::{Node, Taint, Toleration};
 use k8s_openapi::jiff::Timestamp;
 use kube::api::DynamicObject;
 use serde_json::Value;
@@ -157,12 +157,110 @@ pub fn node_schedulable(node: &Node) -> bool {
     !cordoned && ready
 }
 
-/// Whether a node is cordoned (`spec.unschedulable`), whatever its readiness.
-pub fn node_cordoned(node: &Node) -> bool {
-    node.spec
-        .as_ref()
-        .and_then(|spec| spec.unschedulable)
-        .unwrap_or(false)
+/// Whether `toleration` tolerates `taint` (the scheduler's rule).
+fn tolerates(toleration: &Toleration, taint: &Taint) -> bool {
+    let effect_matches = toleration
+        .effect
+        .as_deref()
+        .is_none_or(|effect| effect.is_empty() || effect == taint.effect);
+    let key = toleration.key.as_deref().unwrap_or_default();
+    let key_matches = match toleration.operator.as_deref() {
+        Some("Exists") => key.is_empty() || key == taint.key,
+        _ => {
+            key == taint.key
+                && toleration.value.as_deref().unwrap_or_default()
+                    == taint.value.as_deref().unwrap_or_default()
+        }
+    };
+    effect_matches && key_matches
+}
+
+/// Review M3: an unclaimed member's node can no longer hold it. The node is
+/// gone, not Ready, cordoned, or carries a NoSchedule or NoExecute taint the
+/// member's Pod does not tolerate. A claim adopting such a member would
+/// stall, so it is replaced instead.
+pub fn node_unfit(node: Option<&Node>, tolerations: &[Toleration]) -> bool {
+    let Some(node) = node else {
+        return true;
+    };
+    !node_schedulable(node)
+        || node
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.taints.as_deref())
+            .unwrap_or_default()
+            .iter()
+            .any(|taint| {
+                matches!(taint.effect.as_str(), "NoSchedule" | "NoExecute")
+                    && !tolerations
+                        .iter()
+                        .any(|toleration| tolerates(toleration, taint))
+            })
+}
+
+/// Review L6: a lower budget applies only after it held for this many
+/// passes, so one node flapping NotReady does not shrink every pool.
+pub const BUDGET_DECREASE_PASSES: u8 = 3;
+
+/// The budget to apply: a higher one at once, a lower one once it has been
+/// observed for [`BUDGET_DECREASE_PASSES`] consecutive passes. Returns the
+/// applied budget and the count of consecutive lower observations.
+pub fn settle_budget(previous: Option<(Budget, u8)>, observed: Budget) -> (Budget, u8) {
+    match previous {
+        Some((applied, lower))
+            if observed.cpu_millis < applied.cpu_millis
+                || observed.memory_bytes < applied.memory_bytes =>
+        {
+            if lower + 1 >= BUDGET_DECREASE_PASSES {
+                (observed, 0)
+            } else {
+                (applied, lower + 1)
+            }
+        }
+        _ => (observed, 0),
+    }
+}
+
+/// Review H1: whether the running agent-sandbox controller guards warm-pool
+/// member deletes, adopts only current-revision members and marks a claim
+/// Ready only after its Pod labels land (C0). The fork pin that carries C0
+/// (`aacf9ba`) also carries upstream #1328 (`fa7f00f`), which records
+/// `status.observedGeneration` on every SandboxWarmPool it reconciles; the
+/// pinned `4c528d3` controller and its CRD have no such field, and the API
+/// server would prune it. Any pool, an environment's zero-replica shadow
+/// included, whose status observed its current generation is the evidence.
+/// Without it, pools are held: no template, pool or member is written.
+pub fn controller_capable(pools: &[DynamicObject]) -> bool {
+    pools.iter().any(pool_observed_by_capable_controller)
+}
+
+/// One pool's status was written by a capable controller at its current
+/// generation.
+pub fn pool_observed_by_capable_controller(pool: &DynamicObject) -> bool {
+    pool.data
+        .pointer("/status/observedGeneration")
+        .and_then(Value::as_i64)
+        .is_some_and(|observed| observed >= 1 && Some(observed) == pool.metadata.generation)
+}
+
+/// Review L5: the live template is this replica's rendering, not only
+/// labelled with its revision: its Pod template, volume claim templates and
+/// network policy are [`spec_equivalent`] to the rendering's.
+pub fn template_spec_current(live: &DynamicObject, rendered: &Value) -> bool {
+    [
+        "/spec/podTemplate",
+        "/spec/volumeClaimTemplates",
+        "/spec/networkPolicy",
+    ]
+    .into_iter()
+    .all(|path| {
+        spec_equivalent(
+            rendered.pointer(path).unwrap_or(&Value::Null),
+            live.data.pointer(path).unwrap_or(&Value::Null),
+            path,
+        )
+        .is_ok()
+    })
 }
 
 /// The owner's cap: [`NODE_RESERVATION_PERCENT`] of the smallest
@@ -254,8 +352,8 @@ pub fn image_cache_warm(daemon_set: Option<&Value>, images: &[&str]) -> bool {
 /// Why an unclaimed member is deleted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeleteReason {
-    /// Its Pod runs on a cordoned node, which is about to be drained.
-    Cordoned,
+    /// Its Pod's node is gone, not Ready, cordoned or tainted against it.
+    NodeUnfit,
     /// Its pool is no longer configured.
     Unconfigured,
     /// It was built from an older template revision.
@@ -267,7 +365,7 @@ pub enum DeleteReason {
 impl DeleteReason {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Cordoned => "cordoned",
+            Self::NodeUnfit => "node_unfit",
             Self::Unconfigured => "unconfigured",
             Self::Stale => "stale",
             Self::OverAge => "over_age",
@@ -324,15 +422,26 @@ pub struct Observed<'a> {
     pub pools: &'a BTreeMap<String, DynamicObject>,
     /// Sandboxes labelled as some pool's member.
     pub members: &'a [DynamicObject],
-    /// Pod name → node name, for member Pods.
-    pub member_nodes: &'a BTreeMap<String, String>,
-    pub cordoned_nodes: &'a BTreeSet<String>,
+    /// Member Pod name → where it runs.
+    pub member_pods: &'a BTreeMap<String, Placement>,
+    /// Runtime nodes by name.
+    pub nodes: &'a BTreeMap<String, Node>,
     /// Pools a SandboxClaim names, when claims were read.
     pub referenced_pools: Option<&'a BTreeSet<String>>,
+    /// Template-reference hashes live Sandboxes carry, when read. A template
+    /// in use owns the NetworkPolicy its Pods run under.
+    pub template_users: Option<&'a BTreeSet<String>>,
     pub cache_warm: bool,
     /// The pool whose template this leader last changed, and how long ago.
     pub rotation: Option<(&'a str, Duration)>,
     pub now: Timestamp,
+}
+
+/// Where a member Pod runs, and what it tolerates.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Placement {
+    pub node: String,
+    pub tolerations: Vec<Toleration>,
 }
 
 /// Per-pool facts for metrics and logs.
@@ -589,8 +698,10 @@ pub fn plan(observed: &Observed<'_>) -> Plan {
             plan.reports.insert(desired.label(), report);
             continue;
         }
-        let template_current = live_template
-            .is_some_and(|template| revision(template) == Some(&desired.objects.revision));
+        let template_current = live_template.is_some_and(|template| {
+            revision(template) == Some(&desired.objects.revision)
+                && template_spec_current(template, &desired.objects.template)
+        });
         report.template_current = template_current;
 
         if !template_current {
@@ -667,11 +778,13 @@ pub fn plan(observed: &Observed<'_>) -> Plan {
             report.members = owned.len() as i64;
             report.ready = ready_replicas(pool);
             for member in owned {
-                let on_cordoned_node = member_pod_name(member)
-                    .and_then(|pod| observed.member_nodes.get(pod))
-                    .is_some_and(|node| observed.cordoned_nodes.contains(node));
-                let reason = if on_cordoned_node {
-                    Some(DeleteReason::Cordoned)
+                let on_unfit_node = member_pod_name(member)
+                    .and_then(|pod| observed.member_pods.get(pod))
+                    .is_some_and(|placement| {
+                        node_unfit(observed.nodes.get(&placement.node), &placement.tolerations)
+                    });
+                let reason = if on_unfit_node {
+                    Some(DeleteReason::NodeUnfit)
                 } else if template_current
                     && live_template.is_some_and(|template| member_stale(member, template))
                 {
@@ -766,7 +879,20 @@ pub fn plan(observed: &Observed<'_>) -> Plan {
                         .and_then(Value::as_str)
                         == Some(name.as_str()))
         });
-        if !still_named && let Some((uid, resource_version)) = uid_and_version(template) {
+        // Review L4: no claim may still name the pool of this template, and
+        // no live Sandbox may still run under the NetworkPolicy the template
+        // owns. Unread claims or users keep it.
+        let claimed = observed
+            .referenced_pools
+            .is_none_or(|referenced| referenced.contains(name));
+        let in_use = observed
+            .template_users
+            .is_none_or(|users| users.contains(&sandbox_name_hash(name)));
+        if !still_named
+            && !claimed
+            && !in_use
+            && let Some((uid, resource_version)) = uid_and_version(template)
+        {
             plan.writes.push(Write::DeleteTemplate {
                 name: name.clone(),
                 uid,

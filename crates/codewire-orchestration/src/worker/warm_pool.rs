@@ -64,13 +64,14 @@ use crate::sandbox::client::sandbox_name_hash;
 use crate::sandbox::image_cache::IMAGE_CACHE_NAME;
 use crate::sandbox::warm_pool::{
     LAUNCH_TYPE_LABEL, LAUNCH_TYPE_WARM, MEMBER_POOL_LABEL, TEMPLATE_REF_HASH_LABEL,
-    is_warm_pool_name, parse_warm_pool_shapes, pod_template_images, pool_label_selector,
-    shape_label, warm_pool_name_shape,
+    has_pool_labels, is_warm_pool_name, parse_warm_pool_shapes, pod_template_images,
+    pool_label_selector, shape_label, warm_pool_name_shape,
 };
 use crate::sandbox::{CRD_VERSION, EXTENSIONS_GROUP, SANDBOX_GROUP};
 pub use plan::{
-    Budget, DeleteReason, DesiredPool, Observed, Plan, Reservation, Write, clamp_members,
-    image_cache_warm, member_reservation, node_budget, node_cordoned,
+    Budget, DeleteReason, DesiredPool, Observed, Placement, Plan, Reservation, Write,
+    clamp_members, controller_capable, image_cache_warm, member_reservation, node_budget,
+    node_unfit, pool_observed_by_capable_controller, settle_budget, template_spec_current,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
@@ -83,6 +84,46 @@ pub struct WarmPoolConfig {
     /// `false` with `SANDBOX_IMAGE_CACHE=disabled`: nothing is cached, so the
     /// gate is open.
     pub image_cache_enabled: bool,
+    /// The configuration was invalid: no pool is desired, so every existing
+    /// pool drains (review L7).
+    pub draining: bool,
+}
+
+/// What the loop does at startup.
+#[derive(Debug, PartialEq)]
+pub enum Startup {
+    /// No shape configured: no Kubernetes access at all.
+    Inert,
+    Reconcile(WarmPoolConfig),
+}
+
+/// Decide startup. No shape configured is inert. A configured value that is
+/// invalid, or that any renderer refusal rejects, never leaves existing pools
+/// unmanaged: the reconciler runs with no desired pool, so each existing one
+/// is drained and removed once unreferenced (review L7), still only on a
+/// capable controller.
+pub fn startup(cfg: &SandboxWorkerCfg, image_cache_enabled: anyhow::Result<bool>) -> Startup {
+    if cfg.warm_pool_shapes.trim().is_empty() {
+        return Startup::Inert;
+    }
+    match image_cache_enabled.and_then(|enabled| WarmPoolConfig::from_cfg(cfg, enabled)) {
+        Ok(Some(config)) => Startup::Reconcile(config),
+        Ok(None) => Startup::Inert,
+        Err(error) => {
+            config_valid_metric().set(0);
+            tracing::error!(error = %format!("{error:#}"), "warm pools: invalid configuration; draining every existing pool");
+            let namespace = cfg.sandbox_namespace.trim();
+            if namespace.is_empty() {
+                return Startup::Inert;
+            }
+            Startup::Reconcile(WarmPoolConfig {
+                namespace: namespace.to_owned(),
+                pools: Vec::new(),
+                image_cache_enabled: false,
+                draining: true,
+            })
+        }
+    }
 }
 
 impl WarmPoolConfig {
@@ -117,6 +158,7 @@ impl WarmPoolConfig {
             namespace: namespace.to_owned(),
             pools,
             image_cache_enabled,
+            draining: false,
         }))
     }
 
@@ -149,26 +191,20 @@ impl WarmPoolConfig {
 
 /// Leader-gated; runs until the process exits. Inert without configuration.
 pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>) {
-    let image_cache_enabled = match ImageCacheConfig::from_env(&ctx.sandbox_cfg) {
-        Ok(enabled) => enabled.is_some(),
-        Err(error) => {
-            record_result(PassResult::InvalidConfig);
-            tracing::error!(%error, "warm pools: invalid image cache configuration; not reconciling");
-            return;
-        }
-    };
-    let config = match WarmPoolConfig::from_cfg(&ctx.sandbox_cfg, image_cache_enabled) {
-        Ok(Some(config)) => config,
-        Ok(None) => {
+    let image_cache_enabled =
+        ImageCacheConfig::from_env(&ctx.sandbox_cfg).map(|config| config.is_some());
+    let config = match startup(&ctx.sandbox_cfg, image_cache_enabled) {
+        Startup::Reconcile(config) => config,
+        Startup::Inert => {
             tracing::info!("warm pools: no shapes configured; the reconciler is inert");
             return;
         }
-        Err(error) => {
-            record_result(PassResult::InvalidConfig);
-            tracing::error!(%error, "warm pools: invalid configuration; not reconciling");
-            return;
-        }
     };
+    if config.draining {
+        record_result(PassResult::InvalidConfig);
+    } else {
+        config_valid_metric().set(1);
+    }
     let Some(client) = ctx.kube.clone() else {
         tracing::warn!("warm pools: Kubernetes access unavailable; not reconciling");
         return;
@@ -177,6 +213,7 @@ pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>)
         namespace = %config.namespace,
         pools = config.pools.len(),
         image_cache = config.image_cache_enabled,
+        draining = config.draining,
         "warm pools: reconciling configured shapes"
     );
     let mut state = LoopState::default();
@@ -201,6 +238,10 @@ pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>)
 #[derive(Default)]
 struct LoopState {
     rotation: Option<(String, Instant)>,
+    /// The last controller capability observed, for logging transitions.
+    capable: Option<bool>,
+    /// The applied node budget and its consecutive lower observations.
+    budget: Option<(Budget, u8)>,
     /// Owned member UIDs per pool at the previous pass; `None` before the
     /// first pass, which only records a baseline.
     members: Option<BTreeMap<String, BTreeSet<String>>>,
@@ -211,6 +252,8 @@ struct LoopState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PassResult {
     Unchanged,
+    /// The controller lacks C0's claim safety: nothing was written.
+    Held,
     Wrote,
     Conflict,
     Error,
@@ -221,6 +264,7 @@ impl PassResult {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Unchanged => "unchanged",
+            Self::Held => "held",
             Self::Wrote => "wrote",
             Self::Conflict => "conflict",
             Self::Error => "error",
@@ -284,8 +328,34 @@ async fn reconcile_once(
     );
     let sandboxes_api = dynamic(client, namespace, SANDBOX_GROUP, "Sandbox", "sandboxes");
     let pool_selector = ListParams::default().labels(&pool_label_selector());
+    // Every pool, environment shadows included: the controller's capability
+    // shows on whichever it reconciled (review H1).
+    let all_pools = pools_api.list(&ListParams::default()).await?.items;
+    let capable = controller_capable(&all_pools);
+    controller_ready_metric().set(i64::from(capable));
+    if state.capable != Some(capable) {
+        if capable {
+            tracing::info!(
+                "warm pools: the agent-sandbox controller guards member deletes; reconciling"
+            );
+        } else {
+            tracing::warn!(
+                "warm pools: the agent-sandbox controller shows no claim-safe pool support \
+                 (no SandboxWarmPool status.observedGeneration); holding every pool"
+            );
+        }
+        state.capable = Some(capable);
+    }
+    if !capable {
+        return Ok(PassResult::Held);
+    }
     let templates = by_name(templates_api.list(&pool_selector).await?.items);
-    let pools = by_name(pools_api.list(&pool_selector).await?.items);
+    let pools = by_name(
+        all_pools
+            .into_iter()
+            .filter(|pool| has_pool_labels(pool.metadata.labels.as_ref()))
+            .collect(),
+    );
     let members = sandboxes_api
         .list(&ListParams::default().labels(MEMBER_POOL_LABEL))
         .await?
@@ -294,13 +364,23 @@ async fn reconcile_once(
         .list(&ListParams::default().labels(&format!("{LAUNCH_TYPE_LABEL}={LAUNCH_TYPE_WARM}")))
         .await?
         .items;
-    let member_nodes: BTreeMap<String, String> = Api::<Pod>::namespaced(client.clone(), namespace)
-        .list(&ListParams::default().labels(MEMBER_POOL_LABEL))
-        .await?
-        .items
-        .into_iter()
-        .filter_map(|pod| Some((pod.metadata.name?, pod.spec?.node_name?)))
-        .collect();
+    let member_pods: BTreeMap<String, Placement> =
+        Api::<Pod>::namespaced(client.clone(), namespace)
+            .list(&ListParams::default().labels(MEMBER_POOL_LABEL))
+            .await?
+            .items
+            .into_iter()
+            .filter_map(|pod| {
+                let spec = pod.spec?;
+                Some((
+                    pod.metadata.name?,
+                    Placement {
+                        node: spec.node_name?,
+                        tolerations: spec.tolerations.unwrap_or_default(),
+                    },
+                ))
+            })
+            .collect();
 
     let cache_warm = if config.image_cache_enabled {
         let daemon_set = dynamic_daemon_sets(client, namespace)
@@ -336,11 +416,11 @@ async fn reconcile_once(
         .list(&ListParams::default().labels(&selector_of(&node_selector)))
         .await?
         .items;
-    let budget = node_budget(&nodes);
-    let cordoned: BTreeSet<String> = nodes
-        .iter()
-        .filter(|node| node_cordoned(node))
-        .filter_map(|node| node.metadata.name.clone())
+    let (budget, lower) = settle_budget(state.budget, node_budget(&nodes));
+    state.budget = Some((budget, lower));
+    let nodes: BTreeMap<String, Node> = nodes
+        .into_iter()
+        .filter_map(|node| Some((node.metadata.name.clone()?, node)))
         .collect();
     let reservations: Vec<Option<Reservation>> = config
         .pools
@@ -378,10 +458,32 @@ async fn reconcile_once(
         .iter()
         .map(|pool| pool.objects.name.as_str())
         .collect();
-    let referenced = if pools
+    // Claims and template users are read only when a pool or template might
+    // be removed.
+    let removal_candidates = pools
         .keys()
-        .any(|name| !desired_names.contains(name.as_str()))
-    {
+        .chain(templates.keys())
+        .any(|name| !desired_names.contains(name.as_str()));
+    let template_users = if removal_candidates {
+        Some(
+            sandboxes_api
+                .list(&ListParams::default().labels(TEMPLATE_REF_HASH_LABEL))
+                .await?
+                .items
+                .into_iter()
+                .filter_map(|sandbox| {
+                    sandbox
+                        .metadata
+                        .labels?
+                        .get(TEMPLATE_REF_HASH_LABEL)
+                        .cloned()
+                })
+                .collect::<BTreeSet<String>>(),
+        )
+    } else {
+        None
+    };
+    let referenced = if removal_candidates {
         Some(
             dynamic(
                 client,
@@ -417,9 +519,10 @@ async fn reconcile_once(
         templates: &templates,
         pools: &pools,
         members: &members,
-        member_nodes: &member_nodes,
-        cordoned_nodes: &cordoned,
+        member_pods: &member_pods,
+        nodes: &nodes,
         referenced_pools: referenced.as_ref(),
+        template_users: template_users.as_ref(),
         cache_warm,
         rotation,
         now: Timestamp::now(),
@@ -741,6 +844,28 @@ static RECONCILES: OnceLock<IntCounterVec> = OnceLock::new();
 static MEMBERS: OnceLock<IntGaugeVec> = OnceLock::new();
 static TEMPLATE_CURRENT: OnceLock<IntGaugeVec> = OnceLock::new();
 static CACHE_WARM: OnceLock<IntGauge> = OnceLock::new();
+static CONTROLLER_READY: OnceLock<IntGauge> = OnceLock::new();
+static CONFIG_VALID: OnceLock<IntGauge> = OnceLock::new();
+
+fn controller_ready_metric() -> &'static IntGauge {
+    CONTROLLER_READY.get_or_init(|| {
+        register_int_gauge!(
+            "codewire_warm_pool_controller_ready",
+            "1 when the agent-sandbox controller shows claim-safe pool support (C0); 0 holds every pool."
+        )
+        .expect("warm pool controller metric registration must be unique")
+    })
+}
+
+fn config_valid_metric() -> &'static IntGauge {
+    CONFIG_VALID.get_or_init(|| {
+        register_int_gauge!(
+            "codewire_warm_pool_config_valid",
+            "0 when SANDBOX_WARM_POOL_SHAPES is invalid and every existing pool drains."
+        )
+        .expect("warm pool config metric registration must be unique")
+    })
+}
 static REFILLS: OnceLock<IntCounterVec> = OnceLock::new();
 static ADOPTIONS: OnceLock<IntCounterVec> = OnceLock::new();
 static MEMBER_DELETIONS: OnceLock<IntCounterVec> = OnceLock::new();

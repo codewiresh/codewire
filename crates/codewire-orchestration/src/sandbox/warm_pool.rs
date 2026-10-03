@@ -284,11 +284,54 @@ pub fn is_warm_pool_name(name: &str) -> bool {
 }
 
 /// The pool revision of a rendered SandboxTemplate spec: the SHA-256 of its
-/// serialization. serde_json maps are sorted, so equal specs hash equally.
+/// serialization without the revision marker ([`POOL_REVISION_ENV`]), so a
+/// marked pool spec and the unmarked per-environment rendering of the same
+/// shape share one revision. serde_json maps are sorted, so equal specs hash
+/// equally.
 pub fn pool_revision(template_spec: &Value) -> String {
     hex(&Sha256::digest(
-        serde_json::to_vec(template_spec).expect("rendered template spec serializes"),
+        serde_json::to_vec(&without_revision_marker(template_spec))
+            .expect("rendered template spec serializes"),
     ))
+}
+
+/// Program #2238 C3 review M1: every pool member's workspace container
+/// carries its pool revision in its environment. A Pod's spec is immutable,
+/// so the bind reads the revision the Pod booted with from the Pod itself;
+/// adoption rewrites only the Sandbox's Pod-template metadata.
+pub const POOL_REVISION_ENV: &str = "CODEWIRE_WORKSPACE_POOL_REVISION";
+
+/// `spec` (a SandboxTemplate or Sandbox spec) without the revision marker.
+pub fn without_revision_marker(spec: &Value) -> Value {
+    let mut spec = spec.clone();
+    if let Some(containers) = spec
+        .pointer_mut("/podTemplate/spec/containers")
+        .and_then(Value::as_array_mut)
+    {
+        for container in containers {
+            if let Some(env) = container.get_mut("env").and_then(Value::as_array_mut) {
+                env.retain(|entry| entry["name"] != POOL_REVISION_ENV);
+            }
+        }
+    }
+    spec
+}
+
+/// The pool revision a Pod spec's workspace container booted with, when it
+/// carries exactly one literal marker.
+pub fn pod_spec_pool_revision(pod_spec: &Value) -> Option<&str> {
+    let workspace = pod_spec["containers"]
+        .as_array()?
+        .iter()
+        .find(|container| container["name"] == "workspace")?;
+    let mut markers = workspace["env"]
+        .as_array()?
+        .iter()
+        .filter(|entry| entry["name"] == POOL_REVISION_ENV);
+    match (markers.next(), markers.next()) {
+        (Some(marker), None) if marker.get("valueFrom").is_none() => marker["value"].as_str(),
+        _ => None,
+    }
 }
 
 /// One rendered pool: the shared SandboxTemplate and its SandboxWarmPool.
@@ -338,6 +381,18 @@ pub fn render_warm_pool(
         }
     }
     let revision = pool_revision(&template["spec"]);
+    let workspace = template["spec"]["podTemplate"]["spec"]["containers"]
+        .as_array_mut()
+        .and_then(|containers| {
+            containers
+                .iter_mut()
+                .find(|container| container["name"] == "workspace")
+        })
+        .ok_or_else(|| anyhow::anyhow!("warm pool rendering has no workspace container"))?;
+    match workspace.get_mut("env").and_then(Value::as_array_mut) {
+        Some(env) => env.push(json!({ "name": POOL_REVISION_ENV, "value": revision })),
+        None => workspace["env"] = json!([{ "name": POOL_REVISION_ENV, "value": revision }]),
+    }
     let metadata = &mut template["metadata"];
     metadata["labels"] = pool_labels();
     metadata["annotations"] = json!({ POOL_REVISION_ANNOTATION: revision });
@@ -411,15 +466,17 @@ pub fn spec_equivalent(expected: &Value, live: &Value, path: &str) -> Result<(),
     }
 }
 
-/// A rendered value a Go `omitempty` field drops.
+/// A rendered value a Go `omitempty` field drops. A rendered `false` is never
+/// one: Kubernetes keeps security-relevant booleans such as
+/// `automountServiceAccountToken` as pointers, so absent means the API
+/// default, which may be `true` (review L1).
 fn omitted_when_empty(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::String(text) => text.is_empty(),
-        Value::Bool(flag) => !flag,
         Value::Array(items) => items.is_empty(),
         Value::Object(fields) => fields.is_empty(),
-        Value::Number(_) => false,
+        Value::Bool(_) | Value::Number(_) => false,
     }
 }
 

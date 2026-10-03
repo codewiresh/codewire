@@ -120,7 +120,11 @@ fn pool_template_equals_the_environment_rendering_of_its_shape() {
             let opts = environment_opts(&cfg, &env);
             assert!(opts.identity_free());
             let rendered = render_sandbox_template(SANDBOX_NAMESPACE, &opts);
-            assert_eq!(rendered["spec"], pool.template["spec"], "{shape:?}");
+            assert_eq!(
+                rendered["spec"],
+                crate::sandbox::warm_pool::without_revision_marker(&pool.template["spec"]),
+                "{shape:?}"
+            );
         }
     }
 }

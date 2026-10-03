@@ -118,6 +118,20 @@ patches:
     target:
       kind: Ingress
       name: codewire-billing
+  # Warm-pool members on Kind run a diagnostic runtime: runc, or the node
+  # default ('') when SANDBOX_RUNTIME_PROFILE is none. The test op pins the
+  # variable's position in the base policy.
+  - target:
+      group: admissionregistration.k8s.io
+      kind: ValidatingAdmissionPolicy
+      name: codewire-orchestration-warm-pool-template
+    patch: |-
+      - op: test
+        path: /spec/variables/0/name
+        value: runtimeClasses
+      - op: replace
+        path: /spec/variables/0/expression
+        value: "['commodity', 'runc', '']"
 
 # Namespace transforms do not rewrite DNS SANs inside custom resources.
 replacements:
@@ -214,7 +228,7 @@ transformers:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup|image-cache|warm-pool|warm-pool-template)
+      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup|image-cache|warm-pool|warm-pool-template|warm-pool-member)
   - |-
     apiVersion: builtin
     kind: PatchTransformer

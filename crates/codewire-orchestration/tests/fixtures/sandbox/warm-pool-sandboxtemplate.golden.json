@@ -159,6 +159,10 @@
               {
                 "name": "DOCKER_HOST",
                 "value": "unix:///var/run/docker/docker.sock"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
+                "value": "3e8a7313a819f042331056e8c5121b322ad826cf2a91eeb6e2c52ba327e81d35"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",

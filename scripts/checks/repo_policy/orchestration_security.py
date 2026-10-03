@@ -233,14 +233,22 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
 
 WARM_POOL_POLICY = "codewire-orchestration-warm-pool"
 WARM_POOL_TEMPLATE_POLICY = "codewire-orchestration-warm-pool-template"
+WARM_POOL_MEMBER_POLICY = "codewire-orchestration-warm-pool-member"
 WARM_POOL_NAME_PATTERN = "^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$"
 WARM_POOL_DIGEST_PATTERN = "^[^@ ]+@sha256:[0-9a-f]{64}$"
-WARM_POOL_IDENTITY_ENVIRONMENT = (
-    "CODEWIRE_DAEMON_AUTH_TOKEN", "CODEWIRE_ENVIRONMENT_ID", "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
-    "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256", "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS", "OPENAI_BASE_URL",
-    "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CODEX_HOME",
-    "CODEX_CA_CERTIFICATE", "SSH_AUTH_SOCK", "GIT_ASKPASS",
+# The identity-free workspace and DinD variables, and the pool revision
+# marker: the only environment a pool template may set (review M2).
+WARM_POOL_ENVIRONMENT = (
+    "CODEWIRE_WORKSPACE_SHIM_ADDR", "HOME", "USER", "CODEWIRE_WORKSPACE_BINDING_URL", "CODEWIRE_POD_UID",
+    "CODEWIRE_WORKSPACE_POOL_REVISION", "DOCKER_HOST", "DOCKER_TLS_CERTDIR", "CODEWIRE_DOCKER_DATA_IMAGE",
+    "CODEWIRE_DOCKER_DATA_ROOT", "CODEWIRE_DOCKER_DATA_SIZE", "CODEWIRE_DOCKER_MOUNT_MODE",
 )
+WARM_POOL_AUDIENCES = ("codewire.internal.workspace-binding.v1", "codewire.internal.credential-workspace.v1")
+WARM_POOL_KIND_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8s/overlays/local-kind-static", "tests/e2e/kind")
+
+
+def cel_list(values: tuple[str, ...] | list[str]) -> str:
+    return "[" + ", ".join(f"'{value}'" for value in values) + "]"
 
 
 def cluster_role_rules(cluster_role: str) -> list[str]:
@@ -251,9 +259,11 @@ def cluster_role_rules(cluster_role: str) -> list[str]:
 
 def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
     """Program #2238 C2. The warm-pool reconciler reads runtime nodes and the
-    pool RuntimeClass, nothing more, and two identity-bound admission policies
-    bound every pool and pool template orchestration writes. CEL behaviour is
-    evaluated against the renderer's goldens out of tree and proven on Kind."""
+    pool RuntimeClass, nothing more, and three identity-bound admission
+    policies bound every pool and pool template orchestration writes and keep
+    it off unclaimed members. Template admission is an allowlist (review M2);
+    only Kind targets add diagnostic runtimes. CEL behaviour is evaluated
+    against the renderer's goldens out of tree and proven on Kind."""
     cluster_role = exactly_one(resources, "ClusterRole", "codewire-orchestration", label, output)
     if cluster_role:
         rules = cluster_role_rules(cluster_role)
@@ -286,18 +296,40 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             f"v.image.reference.matches('{WARM_POOL_DIGEST_PATTERN}')",
             "!has(variables.pod.ephemeralContainers)",
             "variables.containers.all(c, !has(c.envFrom)",
-            "!has(e.valueFrom.secretKeyRef) && !has(e.valueFrom.configMapKeyRef)",
+            f"- expression: '{cel_list(WARM_POOL_ENVIRONMENT)}' name: environment",
+            f"- expression: '{cel_list(WARM_POOL_AUDIENCES)}' name: audiences",
+            "e.name in variables.environment && dyn(e).all(k, k in ['name', 'value', 'valueFrom'])",
+            "(!has(e.valueFrom) || (e.name == 'CODEWIRE_POD_UID' && dyn(e.valueFrom).all(k, k == 'fieldRef')",
+            "dyn(e.valueFrom.fieldRef).all(k, k in ['fieldPath', 'apiVersion'])",
+            "e.valueFrom.fieldRef.fieldPath == 'metadata.uid'",
+            "variables.pod.containers.exists_one(c, c.name == 'workspace')",
             "e.name == 'CODEWIRE_WORKSPACE_BINDING_URL'",
-            "variables.volumes.all(v, !has(v.secret)",
-            "v.projected.sources.all(s, !has(s.secret))",
+            "c.env.exists_one(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION')",
+            "e.value == object.metadata.annotations['codewire.sh/pool-revision']",
+            "variables.volumes.all(v, dyn(v).all(k, k in ['name', 'image', 'emptyDir', 'configMap', 'projected'])",
+            "v.configMap.name == 'codewire-credential-gateway-roots'",
+            "v.projected.sources.all(s, dyn(s).all(k, k == 'serviceAccountToken')",
+            "has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.audiences",
             "variables.pod.serviceAccountName == 'codewire-sandbox'",
             "variables.pod.automountServiceAccountToken == false",
+            "(has(variables.pod.runtimeClassName) ? variables.pod.runtimeClassName : '') in variables.runtimeClasses",
+            "(!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork)",
+            "(!has(variables.pod.hostPID) || !variables.pod.hostPID)",
+            "(!has(variables.pod.hostIPC) || !variables.pod.hostIPC)",
+            "!has(variables.pod.hostAliases) && !has(variables.pod.nodeName)",
             "variables.pod.runtimeClassName != 'confidential'",
             "'io.katacontainers.config.hypervisor.kernel_params' in object.spec.podTemplate.metadata.annotations",
             "t.spec.storageClassName != 'longhorn-confidential'",
             "object.spec.networkPolicyManagement == 'Managed'",
             "size(object.spec.networkPolicy.ingress) == 0",
-        ] + [f"'{name}'" for name in WARM_POOL_IDENTITY_ENVIRONMENT],
+        ],
+        WARM_POOL_MEMBER_POLICY: [
+            "apiGroups: - agents.x-k8s.io apiVersions: - v1beta1 operations: - CREATE - UPDATE resources: - sandboxes",
+            "!(has(object.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in object.metadata.labels)",
+            "!(has(object.metadata.ownerReferences) && object.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool'))",
+            "request.operation != 'UPDATE' || (!(has(oldObject.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in oldObject.metadata.labels)",
+            "!(has(oldObject.metadata.ownerReferences) && oldObject.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool'))",
+        ],
     }
     for policy_name, required in required_by_policy.items():
         policy = exactly_one(resources, "ValidatingAdmissionPolicy", policy_name, label, output)
@@ -310,6 +342,14 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                     output.append(f"{label}: {policy_name} missing {fragment}")
             if metadata_field(policy, "namespace") is not None:
                 output.append(f"{label}: {policy_name} must remain cluster-scoped")
+            if policy_name == WARM_POOL_TEMPLATE_POLICY:
+                # Only Kind adds diagnostic runtimes; the variable stays first
+                # so the Kind overlays' test-guarded patch replaces it.
+                classes = ["commodity", "runc", ""] if target["path"] in WARM_POOL_KIND_TARGETS else ["commodity"]
+                found = re.search(r"variables: - expression: '?(\[[^\]]*\])'? name: runtimeClasses ", normalized)
+                if not found or found.group(1) != cel_list(classes):
+                    output.append(f"{label}: {policy_name} runtime classes must be exactly {cel_list(classes)}, first: "
+                                  f"{found.group(1) if found else None}")
         if binding:
             expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
             if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
@@ -780,20 +820,49 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_POLICY, "object.spec.replicas <= 16", "true"),
             (WARM_POOL_POLICY, "object.spec.sandboxTemplateRef.name == request.name", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "@sha256:[0-9a-f]{64}$')) &&", "')) &&"),
-            (WARM_POOL_TEMPLATE_POLICY, "'CODEWIRE_DAEMON_AUTH_TOKEN', ", ""),
-            (WARM_POOL_TEMPLATE_POLICY, "!has(v.secret) &&", "true &&"),
             (WARM_POOL_TEMPLATE_POLICY, "variables.pod.runtimeClassName != 'confidential'", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "size(object.spec.networkPolicy.ingress) == 0", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "variables.pod.automountServiceAccountToken == false", "true"),
+            # Review M2: every allowlist and host rule is load-bearing.
+            (WARM_POOL_TEMPLATE_POLICY, "e.name in variables.environment &&", "true &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "'CODEWIRE_DOCKER_MOUNT_MODE']", "'CODEWIRE_DOCKER_MOUNT_MODE', 'OPENAI_API_KEY']"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(e).all(k, k in ['name', 'value', 'valueFrom'])", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "(!has(e.valueFrom) || (e.name == 'CODEWIRE_POD_UID' &&", "(true || (e.name == 'CODEWIRE_POD_UID' &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(e.valueFrom).all(k, k == 'fieldRef')", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "e.valueFrom.fieldRef.fieldPath == 'metadata.uid'", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "'configMap', 'projected'])", "'configMap', 'projected', 'hostPath'])"),
+            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.name == 'codewire-credential-gateway-roots'", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(s).all(k, k == 'serviceAccountToken')", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "s.serviceAccountToken.audience in variables.audiences", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "'codewire.internal.credential-workspace.v1']", "'codewire.internal.credential-workspace.v1', 'https://kubernetes.default.svc']"),
+            (WARM_POOL_TEMPLATE_POLICY, "in variables.runtimeClasses", "!= 'confidential'"),
+            (WARM_POOL_TEMPLATE_POLICY, "['commodity']", "['commodity', 'runc']"),
+            (WARM_POOL_TEMPLATE_POLICY, "!variables.pod.hostNetwork", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "!variables.pod.hostPID", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "!variables.pod.hostIPC", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "!has(variables.pod.hostAliases)", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "!has(variables.pod.nodeName)", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "c.env.exists_one(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION')", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "e.value == object.metadata.annotations['codewire.sh/pool-revision']", "true"),
+            (WARM_POOL_MEMBER_POLICY, "o.kind == 'SandboxWarmPool'", "false"),
+            (WARM_POOL_MEMBER_POLICY, "'agents.x-k8s.io/warm-pool-sandbox' in object.metadata.labels", "false"),
+            (WARM_POOL_MEMBER_POLICY, "'agents.x-k8s.io/warm-pool-sandbox' in oldObject.metadata.labels", "false"),
+            (WARM_POOL_MEMBER_POLICY, "request.operation != 'UPDATE' ||", "true ||"),
+            (WARM_POOL_MEMBER_POLICY, "- UPDATE\n    resources:", "    resources:"),
         ]:
             image_cache_rejected(f"warm pool {before}", "ValidatingAdmissionPolicy", before, after, policy_name)
         image_cache_rejected("warm pool namespace-label bypass", "ValidatingAdmissionPolicyBinding",
                              "spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n",
                              WARM_POOL_POLICY)
-        expect_rejected("missing warm pool template policy", lambda resources: [
-            resource for resource in resources
-            if metadata_field(resource, "name") != WARM_POOL_TEMPLATE_POLICY
-        ])
+        for missing in [WARM_POOL_TEMPLATE_POLICY, WARM_POOL_MEMBER_POLICY]:
+            expect_rejected(f"missing {missing}", lambda resources, missing=missing: [
+                resource for resource in resources
+                if metadata_field(resource, "name") != missing
+            ])
+        for bypassed in [WARM_POOL_TEMPLATE_POLICY, WARM_POOL_MEMBER_POLICY]:
+            image_cache_rejected(f"{bypassed} namespace-label bypass", "ValidatingAdmissionPolicyBinding",
+                                 "spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n",
+                                 bypassed)
         for before, after in [
             ("  - nodes\n  verbs:\n  - get\n  - list", "  - nodes\n  verbs:\n  - get\n  - list\n  - watch"),
             ("  - nodes\n  verbs:\n  - get\n  - list", "  - nodes\n  verbs:\n  - get\n  - list\n  - patch"),

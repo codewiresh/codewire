@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Node;
+use k8s_openapi::api::core::v1::{Node, Taint, Toleration};
 use k8s_openapi::jiff::Timestamp;
 use kube::api::DynamicObject;
 use serde_json::{Value, json};
@@ -99,9 +99,10 @@ struct Fixture {
     templates: BTreeMap<String, DynamicObject>,
     pools: BTreeMap<String, DynamicObject>,
     members: Vec<DynamicObject>,
-    member_nodes: BTreeMap<String, String>,
-    cordoned: BTreeSet<String>,
+    member_pods: BTreeMap<String, Placement>,
+    nodes: BTreeMap<String, Node>,
     referenced: Option<BTreeSet<String>>,
+    template_users: Option<BTreeSet<String>>,
     cache_warm: bool,
     rotation: Option<(String, Duration)>,
 }
@@ -115,9 +116,19 @@ impl Fixture {
             templates: BTreeMap::new(),
             pools: BTreeMap::new(),
             members: Vec::new(),
-            member_nodes: BTreeMap::new(),
-            cordoned: BTreeSet::new(),
+            member_pods: BTreeMap::new(),
+            nodes: BTreeMap::from([
+                (
+                    "runtime-1".to_owned(),
+                    node("runtime-1", "32", "128Gi", true, false),
+                ),
+                (
+                    "runtime-2".to_owned(),
+                    node("runtime-2", "32", "128Gi", true, true),
+                ),
+            ]),
             referenced: None,
+            template_users: None,
             cache_warm: true,
             rotation: None,
         }
@@ -139,6 +150,17 @@ impl Fixture {
         fixture
     }
 
+    /// Place a member's Pod on `node` with no tolerations.
+    fn place(&mut self, pod: &str, node: &str) {
+        self.member_pods.insert(
+            pod.to_owned(),
+            Placement {
+                node: node.to_owned(),
+                tolerations: Vec::new(),
+            },
+        );
+    }
+
     fn plan(&self) -> Plan {
         plan(&Observed {
             desired: &self.desired,
@@ -146,9 +168,10 @@ impl Fixture {
             templates: &self.templates,
             pools: &self.pools,
             members: &self.members,
-            member_nodes: &self.member_nodes,
-            cordoned_nodes: &self.cordoned,
+            member_pods: &self.member_pods,
+            nodes: &self.nodes,
             referenced_pools: self.referenced.as_ref(),
+            template_users: self.template_users.as_ref(),
             cache_warm: self.cache_warm,
             rotation: self
                 .rotation
@@ -412,18 +435,13 @@ fn unclaimed_members_are_deleted_with_preconditions_by_reason() {
     .into_iter()
     .map(object)
     .collect();
-    fixture
-        .member_nodes
-        .insert("member-cordoned".into(), "runtime-2".into());
-    fixture
-        .member_nodes
-        .insert("member-fresh".into(), "runtime-1".into());
-    fixture.cordoned.insert("runtime-2".into());
+    fixture.place("member-cordoned", "runtime-2");
+    fixture.place("member-fresh", "runtime-1");
     let plan = fixture.plan();
     assert_eq!(
         names(&plan.writes),
         [
-            "delete-member member-cordoned cordoned",
+            "delete-member member-cordoned node_unfit",
             "delete-member member-stale stale",
             "delete-member member-old over_age",
         ]
@@ -448,7 +466,6 @@ fn unclaimed_members_are_deleted_with_preconditions_by_reason() {
 fn member_deletions_are_bounded_per_pass() {
     let mut fixture = Fixture::settled();
     let small = fixture.desired[0].clone();
-    fixture.cordoned.insert("runtime-2".into());
     for index in 0..7 {
         let name = format!("member-{index}");
         fixture.members.push(object(member(
@@ -457,7 +474,7 @@ fn member_deletions_are_bounded_per_pass() {
             &name,
             &small.objects.template,
         )));
-        fixture.member_nodes.insert(name, "runtime-2".into());
+        fixture.place(&name, "runtime-2");
     }
     let plan = fixture.plan();
     assert_eq!(plan.writes.len(), MAX_MEMBER_DELETES_PER_PASS);
@@ -502,6 +519,18 @@ fn unconfigured_pools_drain_and_are_removed_only_when_no_claim_names_them() {
     fixture.referenced = Some(BTreeSet::from([name.clone()]));
     assert!(fixture.plan().writes.is_empty());
     fixture.referenced = Some(BTreeSet::from(["shadow-pool-workspace-env".to_owned()]));
+    // The pool goes; its template stays while template users are unread.
+    assert_eq!(
+        names(&fixture.plan().writes),
+        [format!("delete-pool {name}")]
+    );
+    // Review L4: or while a live Sandbox runs under its NetworkPolicy.
+    fixture.template_users = Some(BTreeSet::from([sandbox_name_hash(&name)]));
+    assert_eq!(
+        names(&fixture.plan().writes),
+        [format!("delete-pool {name}")]
+    );
+    fixture.template_users = Some(BTreeSet::new());
     let plan = fixture.plan();
     assert_eq!(
         names(&plan.writes),
@@ -586,7 +615,7 @@ fn the_node_cap_is_a_quarter_of_the_smallest_schedulable_node() {
         node_budget(&[nodes[0].clone(), unreadable]),
         Budget::default()
     );
-    assert!(node_cordoned(&nodes[2]) && !node_cordoned(&nodes[0]));
+    assert!(node_unfit(Some(&nodes[2]), &[]) && !node_unfit(Some(&nodes[0]), &[]));
 }
 
 #[test]
@@ -719,4 +748,122 @@ fn a_member_in_the_controllers_spelling_is_current() {
         .push(object(member(&small, "pool-0", "member-copied", &copy)));
     assert!(fixture.plan().writes.is_empty());
     assert_eq!(fixture.plan().reports[&small.label()].members, 1);
+}
+
+/// Review M3: members on nodes that are not Ready, or tainted against them,
+/// are replaced like cordoned ones; a tolerated taint keeps them.
+#[test]
+fn members_on_unfit_nodes_are_replaced() {
+    let mut fixture = Fixture::settled();
+    let small = fixture.desired[0].clone();
+    let mut tainted = node("runtime-3", "32", "128Gi", true, false);
+    tainted.spec.as_mut().unwrap().taints = Some(vec![Taint {
+        key: "node.codewire.sh/maintenance".into(),
+        effect: "NoExecute".into(),
+        ..Taint::default()
+    }]);
+    fixture.nodes.insert("runtime-3".into(), tainted);
+    fixture.nodes.insert(
+        "runtime-4".into(),
+        node("runtime-4", "32", "128Gi", false, false),
+    );
+    for (pod, node) in [
+        ("member-tainted", "runtime-3"),
+        ("member-not-ready", "runtime-4"),
+        ("member-gone-node", "runtime-9"),
+        ("member-healthy", "runtime-1"),
+        ("member-tolerating", "runtime-3"),
+    ] {
+        fixture.members.push(object(member(
+            &small,
+            "pool-0",
+            pod,
+            &small.objects.template,
+        )));
+        fixture.place(pod, node);
+    }
+    fixture
+        .member_pods
+        .get_mut("member-tolerating")
+        .unwrap()
+        .tolerations = vec![Toleration {
+        key: Some("node.codewire.sh/maintenance".into()),
+        operator: Some("Exists".into()),
+        ..Toleration::default()
+    }];
+    assert_eq!(
+        names(&fixture.plan().writes),
+        [
+            "delete-member member-tainted node_unfit",
+            "delete-member member-not-ready node_unfit",
+            "delete-member member-gone-node node_unfit",
+        ]
+    );
+}
+
+/// Review H1: only a pool whose status observed its current generation shows
+/// a claim-safe controller; the pinned controller writes no such field.
+#[test]
+fn only_an_observed_generation_shows_a_capable_controller() {
+    let small = desired()[0].clone();
+    let with_status = |generation: i64, status: Value| {
+        let mut pool = small.objects.pool.clone();
+        pool["metadata"]["generation"] = json!(generation);
+        pool["status"] = status;
+        object(pool)
+    };
+    assert!(!controller_capable(&[]));
+    assert!(!controller_capable(&[with_status(
+        2,
+        json!({ "replicas": 0, "readyReplicas": 0 })
+    )]));
+    assert!(!controller_capable(&[with_status(
+        3,
+        json!({ "observedGeneration": 2 })
+    )]));
+    assert!(controller_capable(&[
+        with_status(1, json!({})),
+        with_status(3, json!({ "observedGeneration": 3 })),
+    ]));
+}
+
+/// Review L6: a lower budget waits three passes; a higher one applies now.
+#[test]
+fn a_lower_budget_applies_only_after_it_holds() {
+    let high = Budget {
+        cpu_millis: 8000,
+        memory_bytes: 32 << 30,
+    };
+    let low = Budget {
+        cpu_millis: 2000,
+        memory_bytes: 32 << 30,
+    };
+    assert_eq!(settle_budget(None, low), (low, 0));
+    let mut state = settle_budget(None, high);
+    for expected in [1, 2] {
+        state = settle_budget(Some(state), low);
+        assert_eq!(state, (high, expected));
+    }
+    assert_eq!(settle_budget(Some(state), low), (low, 0));
+    // A recovery resets the count.
+    let state = settle_budget(Some((high, 2)), high);
+    assert_eq!(state, (high, 0));
+}
+
+/// Review L5: a template with this replica's revision label but another spec
+/// is not current, and is replaced.
+#[test]
+fn a_template_is_current_only_when_its_spec_is() {
+    let mut fixture = Fixture::settled();
+    let small = fixture.desired[0].clone();
+    let template = fixture.templates.get_mut(&small.objects.name).unwrap();
+    assert!(template_spec_current(template, &small.objects.template));
+    template.data["spec"]["podTemplate"]["spec"]["hostNetwork"] = json!(true);
+    assert!(!template_spec_current(template, &small.objects.template));
+    let plan = fixture.plan();
+    assert_eq!(
+        names(&plan.writes),
+        [format!("replace-template {}", small.objects.name)]
+    );
+    assert!(!plan.reports[&small.label()].template_current);
 }

@@ -246,7 +246,11 @@ fn pool_spec_equals_each_environment_rendering_of_its_shape() {
             },
         ] {
             let rendered = render_sandbox_template(NAMESPACE, &environment);
-            assert_eq!(rendered["spec"], pool.template["spec"]);
+            assert_eq!(
+                rendered["spec"],
+                without_revision_marker(&pool.template["spec"])
+            );
+            assert_eq!(pool_revision(&rendered["spec"]), pool.revision);
             assert_eq!(rendered["metadata"]["labels"], json!({}));
         }
     }
@@ -554,6 +558,48 @@ fn the_admission_policy_pins_the_renderer() {
             .get("ingress")
             .is_none()
     );
+    // Review M2: the template policy is an allowlist, so everything the
+    // renderer emits must be on it.
+    let pod = &rendered.template["spec"]["podTemplate"]["spec"];
+    assert_eq!(pod["runtimeClassName"], "commodity");
+    assert!(policy.contains(r#"expression: "['commodity']""#));
+    let containers = pod["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(pod["initContainers"].as_array().into_iter().flatten());
+    for container in containers {
+        for entry in container["env"].as_array().into_iter().flatten() {
+            let name = entry["name"].as_str().unwrap();
+            assert!(policy.contains(&format!("'{name}'")), "policy lacks {name}");
+        }
+    }
+    assert!(policy.contains(&format!("'{POOL_REVISION_ENV}'")));
+    for volume in pod["volumes"].as_array().unwrap() {
+        let source = volume
+            .as_object()
+            .unwrap()
+            .keys()
+            .find(|key| *key != "name")
+            .unwrap();
+        assert!(
+            ["image", "emptyDir", "configMap", "projected"].contains(&source.as_str()),
+            "policy refuses {source}"
+        );
+        for projected in volume["projected"]["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let audience = projected["serviceAccountToken"]["audience"]
+                .as_str()
+                .unwrap();
+            assert!(
+                policy.contains(&format!("'{audience}'")),
+                "policy lacks {audience}"
+            );
+        }
+    }
 }
 
 /// What the agent-sandbox controller stores when it copies a rendering
@@ -651,5 +697,20 @@ fn stored_specs_compare_by_meaning_not_spelling() {
             "/container"
         )
         .is_ok()
+    );
+}
+
+/// Review L1: an absent pointer boolean is the API default, not `false`.
+#[test]
+fn an_absent_rendered_false_is_not_equivalent() {
+    let rendered = render(&pool_opts()).template["spec"].clone();
+    let mut live = controller_copy(&rendered);
+    live["podTemplate"]["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("automountServiceAccountToken");
+    assert_eq!(
+        spec_equivalent(&rendered, &live, "/spec"),
+        Err("/spec/podTemplate/spec/automountServiceAccountToken".to_owned())
     );
 }
