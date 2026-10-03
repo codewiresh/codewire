@@ -226,7 +226,7 @@ pub fn settle_budget(previous: Option<(Budget, u8)>, observed: Budget) -> (Budge
 /// Ready only after its Pod labels land (C0). The fork pin that carries C0
 /// (`aacf9ba`) also carries upstream #1328 (`fa7f00f`), which records
 /// `status.observedGeneration` on every SandboxWarmPool it reconciles; the
-/// pinned `4c528d3` controller and its CRD have no such field, and the API
+/// earlier `4c528d3` controller and its CRD have no such field, and the API
 /// server would prune it. Any pool, an environment's zero-replica shadow
 /// included, whose status observed its current generation is the evidence.
 /// Without it, pools are held: nothing is replaced, scaled or deleted, and

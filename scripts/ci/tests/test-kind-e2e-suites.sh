@@ -29,7 +29,7 @@ FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
 readonly SEALED_CONTROLLER_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
 readonly SEALED_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
-readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615'
 readonly SEALED_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
 readonly SEALED_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
 
@@ -1879,7 +1879,7 @@ grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
 expect_failure substituted-agent-image env \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
-  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41' \
+  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:199efbb13e4af3fff69eaba218e5d36d3103568b2fa73e8606e7ad7da8c28609' \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
@@ -1919,7 +1919,7 @@ grep -Fq "docker:image tag $SEALED_CERTGEN_IMAGE localhost/codewire-ci/ingress-k
   fail 'sealed certgen was not assigned its disposable Kind reference'
 grep -Fq "docker:image inspect $SEALED_AGENT_IMAGE" "$CALLS" ||
   fail 'sealed agent-sandbox controller was not proven in the runner-preloaded Docker store'
-grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
+grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615" "$CALLS" ||
   fail 'sealed agent-sandbox controller was not assigned its disposable Kind reference'
 grep -Fq "docker:image inspect $SEALED_WORKSPACE_IMAGE" "$CALLS" ||
   fail 'sealed workspace was not proven in the runner-preloaded Docker store'
