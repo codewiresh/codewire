@@ -15,7 +15,7 @@ use super::gatewayauth::{WorkspaceCredentialScope, issue_environment_tokens};
 use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
 use super::workspace_binding::{
     EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
-    credential_scope, definitive_refusal, live_environment_binding, sandbox_ever_bound,
+    credential_scope, definitive_refusal, live_environment_binding, sandbox_bound_by_any,
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
@@ -1118,7 +1118,7 @@ async fn run_environment_create(
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        if reclaim_cold(ctx, &env, authority, &error).await? {
+                        if reclaim_cold(ctx, &env, authority, &error).await {
                             reclaimed_cold = true;
                             continue;
                         }
@@ -1222,10 +1222,10 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        client.wait_for_ready(
+                        readiness_wait(client.wait_for_ready(
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
-                        ),
+                        )),
                     ),
                 )
                 .await
@@ -1239,7 +1239,7 @@ async fn run_environment_create(
                         duration_meta(started),
                     )
                     .await?;
-                    if reclaim_cold(ctx, &env, authority, &e).await? {
+                    if reclaim_cold(ctx, &env, authority, &e).await {
                         reclaimed_cold = true;
                         continue;
                     }
@@ -1673,10 +1673,10 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        client.wait_for_credential_gateway_ready(
+                        readiness_wait(client.wait_for_credential_gateway_ready(
                             &template_opts,
                             ready_timeout_for_isolation(&env.isolation_tier),
-                        ),
+                        )),
                     ),
                 )
                 .await;
@@ -1694,7 +1694,7 @@ async fn run_environment_create(
                         gateway_meta,
                     )
                     .await?;
-                    if reclaim_cold(ctx, &env, authority, &e).await? {
+                    if reclaim_cold(ctx, &env, authority, &e).await {
                         reclaimed_cold = true;
                         continue;
                     }
@@ -2436,21 +2436,72 @@ async fn workspace_bootstrap_current(
 /// How long a cold re-claim waits for the pool-born Claim to be gone.
 const RECLAIM_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Program #2238 C3: a definitive bind-check failure on a pool-born Claim
-/// whose Sandbox this environment never bound deletes that Claim and its
-/// Sandbox, each by UID, so the create loop claims cold. A Sandbox the
-/// environment ever bound may hold tenant data and is never deleted here; a
-/// member is never handed back to its pool. `Ok(false)` leaves the error to
-/// the caller's ordinary failure path.
+/// A create's readiness wait expired or failed before its Sandbox bound
+/// (review M3). It reads exactly as the wait's own error.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct ReadinessWaitFailed(anyhow::Error);
+
+/// Mark a readiness wait's failure, so a never-bound pool-born Claim that
+/// never became Ready can be re-claimed cold. Authority loss is checked
+/// outside this wait and is never marked.
+async fn readiness_wait<T>(
+    wait: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    wait.await.map_err(|error| {
+        if crate::worker::activity_authority::is_authority_lost(&error) {
+            error
+        } else {
+            ReadinessWaitFailed(error).into()
+        }
+    })
+}
+
+/// Whether a create failure may re-claim cold: a definitive bind-check
+/// refusal, or a readiness wait that failed (review M3).
+fn reclaim_eligible(error: &anyhow::Error) -> bool {
+    definitive_refusal(error)
+        || (error.downcast_ref::<ReadinessWaitFailed>().is_some()
+            && !crate::worker::activity_authority::is_authority_lost(error))
+}
+
+/// Program #2238 C3: a definitive bind-check failure, or a readiness wait
+/// that failed (review M3), on a pool-born Claim whose Sandbox nothing ever
+/// bound deletes that Claim and its Sandbox, each by UID, so the create loop
+/// claims cold. A Sandbox any environment ever bound may hold tenant data
+/// and is never deleted here; a member is never handed back to its pool.
+/// `false` leaves the original error to the caller's ordinary failure path:
+/// a failure inside the re-claim is logged and counted, never returned in
+/// its place (review L3).
 async fn reclaim_cold(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
     authority: &ActivityAuthority,
     error: &anyhow::Error,
-) -> anyhow::Result<bool> {
-    if !definitive_refusal(error) || !matches!(env.state.as_str(), "pending" | "creating") {
-        return Ok(false);
+) -> bool {
+    if !reclaim_eligible(error) || !matches!(env.state.as_str(), "pending" | "creating") {
+        return false;
     }
+    match try_reclaim_cold(ctx, env, authority).await {
+        Ok(reclaimed) => reclaimed,
+        Err(reclaim_error) => {
+            pool_route::record_reclaim("failed");
+            tracing::warn!(
+                env = %env.id,
+                error = %format!("{reclaim_error:#}"),
+                original = %format!("{error:#}"),
+                "create: cold re-claim failed; keeping the original failure"
+            );
+            false
+        }
+    }
+}
+
+async fn try_reclaim_cold(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    authority: &ActivityAuthority,
+) -> anyhow::Result<bool> {
     let Some(kube) = ctx.kube.as_ref() else {
         return Ok(false);
     };
@@ -2463,7 +2514,7 @@ async fn reclaim_cold(
         return Ok(false);
     };
     if let Some((_, sandbox_uid)) = &observed.sandbox
-        && sandbox_ever_bound(&ctx.pool, &env.id, sandbox_uid).await?
+        && sandbox_bound_by_any(&ctx.pool, sandbox_uid).await?
     {
         pool_route::record_reclaim("refused_bound");
         return Ok(false);
@@ -2479,7 +2530,7 @@ async fn reclaim_cold(
         authority,
         "reclaim_cold",
         "completed",
-        "the pool-born Claim failed its first bind; claiming cold",
+        "the pool-born Claim never bound; claiming cold",
         duration_meta(started),
     )
     .await?;

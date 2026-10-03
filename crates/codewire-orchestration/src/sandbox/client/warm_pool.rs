@@ -6,7 +6,7 @@
 //! never held tenant data, and a member is never handed back to its pool.
 
 use super::*;
-use crate::sandbox::warm_pool::is_warm_pool_name;
+use crate::sandbox::warm_pool::{MEMBER_POOL_LABEL, is_warm_pool_name};
 
 /// A Claim that selects a shared warm pool, as observed for a re-claim.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +34,18 @@ impl SandboxClient {
             .await
             .map_err(|error| anyhow::anyhow!("get SandboxTemplate {name}: {error}"))?;
         Ok((pool, template))
+    }
+
+    /// The pool's member Sandboxes: those the controller labels with the
+    /// pool's name hash. Adoption removes the label.
+    pub async fn warm_pool_members(&self, pool: &str) -> anyhow::Result<Vec<DynamicObject>> {
+        let selector = format!("{MEMBER_POOL_LABEL}={}", sandbox_name_hash(pool));
+        Ok(self
+            .sandboxes()
+            .list(&ListParams::default().labels(&selector))
+            .await
+            .map_err(|error| anyhow::anyhow!("list members of SandboxWarmPool {pool}: {error}"))?
+            .items)
     }
 
     /// The environment's recorded Claim when it selects a shared `cw-pool-`
@@ -92,26 +104,17 @@ impl SandboxClient {
         }))
     }
 
-    /// Delete a pool-born Claim's Sandbox and then the Claim, each with a UID
+    /// Delete a pool-born Claim and then its Sandbox, each with a UID
     /// precondition, and wait until the Claim's name is free for a cold
-    /// Claim. A replacement under either name is never deleted.
+    /// Claim. The Claim goes first so its controller cannot adopt or create
+    /// another Sandbox for it meanwhile (review L8). A replacement under
+    /// either name is never deleted.
     pub async fn delete_pool_born_claim(
         &self,
         env_id: &str,
         observed: &PoolBornClaim,
         timeout: Duration,
     ) -> anyhow::Result<()> {
-        if let Some((name, uid)) = &observed.sandbox {
-            match self
-                .sandboxes()
-                .delete(name, &delete_params_for_observed_uid(uid))
-                .await
-            {
-                Ok(_) => {}
-                Err(kube::Error::Api(error)) if matches!(error.code, 404 | 409) => {}
-                Err(error) => return Err(anyhow::anyhow!("delete pool-born Sandbox: {error}")),
-            }
-        }
         let name = claim_name(env_id);
         if let Some(claim) = self.get_sandbox_claim(env_id).await?
             && claim.metadata.uid.as_deref() == Some(observed.claim_uid.as_str())
@@ -143,6 +146,17 @@ impl SandboxClient {
                 Err(error) => {
                     return Err(anyhow::anyhow!("delete pool-born SandboxClaim: {error}"));
                 }
+            }
+        }
+        if let Some((sandbox, uid)) = &observed.sandbox {
+            match self
+                .sandboxes()
+                .delete(sandbox, &delete_params_for_observed_uid(uid))
+                .await
+            {
+                Ok(_) => {}
+                Err(kube::Error::Api(error)) if matches!(error.code, 404 | 409) => {}
+                Err(error) => return Err(anyhow::anyhow!("delete pool-born Sandbox: {error}")),
             }
         }
         tokio::time::timeout(timeout, async {

@@ -4,9 +4,11 @@
 //! tier, exactly the canonical workspace image, identity mode `binding`, an
 //! exact configured shape with members, an own identity-free rendering equal
 //! to the pool's (design invariant 10, which covers CPU, memory, disk,
-//! storage class, runtime and images), and a live pool and template at this
-//! replica's own revision. Anything else goes cold, unchanged. With no shape
-//! configured the decision is made before any Kubernetes read.
+//! storage class, runtime and images), a controller that shows C0's claim
+//! safety, a live pool and template at this replica's own revision and spec,
+//! and no unclaimed member of another revision. Anything else goes cold,
+//! unchanged. With no shape configured the decision is made before any
+//! Kubernetes read.
 //!
 //! A pool Claim carries only `warmPoolRef` and the identity labels, so the
 //! agent-sandbox controller may adopt a member. The bind then requires the
@@ -25,9 +27,10 @@ use crate::sandbox::client::SandboxClient;
 use crate::sandbox::template::{TemplateOpts, render_sandbox_template};
 use crate::sandbox::warm_pool::{
     POOL_REVISION_ANNOTATION, WarmPoolObjects, WorkspaceShape, has_pool_labels,
-    parse_warm_pool_shapes, pool_revision,
+    parse_warm_pool_shapes, pod_spec_pool_revision, pool_revision,
 };
 use crate::worker::env_data::EnvironmentRow;
+use crate::worker::warm_pool::{pool_observed_by_capable_controller, template_spec_current};
 
 /// Where one create claims from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,8 +58,14 @@ pub(crate) enum ColdReason {
     /// The environment's own rendering differs from the pool's.
     Rendering,
     /// The live pool or template is missing, empty, terminating or at another
-    /// revision (a rotation, or another release's replica).
+    /// revision or spec (a rotation, or another release's replica).
     Revision,
+    /// The agent-sandbox controller shows no C0 claim safety on the pool: no
+    /// `status.observedGeneration` at its generation (review H1).
+    Controller,
+    /// An unclaimed member still carries another revision in its Pod spec;
+    /// the reconciler replaces it first (review M1).
+    StaleMembers,
     /// The live pool could not be read.
     Unavailable,
     /// A pool-born Claim failed its first bind and was re-claimed.
@@ -73,6 +82,8 @@ impl ColdReason {
             Self::Shape => "cold_shape",
             Self::Rendering => "cold_rendering",
             Self::Revision => "cold_revision",
+            Self::Controller => "cold_controller",
+            Self::StaleMembers => "cold_stale_members",
             Self::Unavailable => "cold_unavailable",
             Self::Reclaimed => "cold_reclaimed",
         }
@@ -117,7 +128,8 @@ pub(crate) fn pool_candidate(
 }
 
 /// The live half: the pool and its template are Codewire's, not
-/// terminating, at this replica's revision, and the pool holds members.
+/// terminating, at this replica's revision, the template's spec is this
+/// replica's rendering (review L5), and the pool holds members.
 pub(crate) fn live_pool_current(
     pool: Option<&DynamicObject>,
     template: Option<&DynamicObject>,
@@ -138,6 +150,7 @@ pub(crate) fn live_pool_current(
     };
     at_revision(pool)
         && at_revision(template)
+        && template_spec_current(template, &objects.template)
         && pool
             .data
             .pointer("/spec/sandboxTemplateRef/name")
@@ -148,6 +161,45 @@ pub(crate) fn live_pool_current(
             .pointer("/spec/replicas")
             .and_then(Value::as_i64)
             .is_some_and(|replicas| replicas > 0)
+}
+
+/// Every unclaimed, non-terminating member booted from `revision`: its Pod
+/// spec carries exactly that marker (review M1). The controller could adopt
+/// any of them.
+pub(crate) fn members_current(members: &[DynamicObject], revision: &str) -> bool {
+    members
+        .iter()
+        .filter(|member| member.metadata.deletion_timestamp.is_none())
+        .all(|member| {
+            member
+                .data
+                .pointer("/spec/podTemplate/spec")
+                .and_then(pod_spec_pool_revision)
+                == Some(revision)
+        })
+}
+
+/// The live pool's route: claim only on a capable controller, a current
+/// pool and template, and current members. Members are read only once the
+/// rest holds.
+async fn live_route(client: &SandboxClient, objects: &WarmPoolObjects) -> anyhow::Result<Route> {
+    let (pool, template) = client.warm_pool_objects(&objects.name).await?;
+    let Some(pool) = pool else {
+        return Ok(Route::Cold(ColdReason::Revision));
+    };
+    if !pool_observed_by_capable_controller(&pool) {
+        return Ok(Route::Cold(ColdReason::Controller));
+    }
+    if !live_pool_current(Some(&pool), template.as_ref(), objects) {
+        return Ok(Route::Cold(ColdReason::Revision));
+    }
+    let members = client.warm_pool_members(&objects.name).await?;
+    if !members_current(&members, &objects.revision) {
+        return Ok(Route::Cold(ColdReason::StaleMembers));
+    }
+    Ok(Route::Pool {
+        name: objects.name.clone(),
+    })
 }
 
 /// Decide one create's route, and count it.
@@ -164,13 +216,8 @@ pub(crate) async fn route(
     } else {
         match pool_candidate(cfg, env, image_ref, opts, &client.namespace) {
             Err(reason) => Route::Cold(reason),
-            Ok(objects) => match client.warm_pool_objects(&objects.name).await {
-                Ok((pool, template))
-                    if live_pool_current(pool.as_ref(), template.as_ref(), &objects) =>
-                {
-                    Route::Pool { name: objects.name }
-                }
-                Ok(_) => Route::Cold(ColdReason::Revision),
+            Ok(objects) => match live_route(client, &objects).await {
+                Ok(route) => route,
                 Err(error) => {
                     tracing::warn!(env = %env.id, error = %format!("{error:#}"), "warm pool unavailable; creating cold");
                     Route::Cold(ColdReason::Unavailable)

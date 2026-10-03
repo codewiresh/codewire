@@ -41,7 +41,10 @@ use super::gatewayauth::{WorkspaceCredentialScope, daemon_credential_for};
 use crate::sandbox::client::{
     RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity, WorkspacePvc,
 };
-use crate::sandbox::warm_pool::{LAUNCH_TYPE_LABEL, is_warm_pool_name, sandbox_matches_rendering};
+use crate::sandbox::warm_pool::{
+    LAUNCH_TYPE_LABEL, WarmPoolObjects, is_warm_pool_name, pod_spec_pool_revision,
+    sandbox_matches_rendering,
+};
 use crate::sandbox::{ClaimOpts, LABEL_OPERATION_GENERATION};
 use crate::start_metrics::StartPath;
 
@@ -936,14 +939,27 @@ pub(crate) async fn sandbox_ever_bound(
     .await?)
 }
 
-/// The expected rendering of a pool-born environment (Program #2238 C3): the
-/// identity-free pool template of its exact shape on this replica. Routing
-/// sends an environment to a pool only when its own rendering equals this.
+/// Whether any environment's binding, live or released, ever named this
+/// Sandbox. A cold re-claim never deletes such a Sandbox, and only a Sandbox
+/// nothing ever bound counts as a warm start.
+pub(crate) async fn sandbox_bound_by_any(pool: &PgPool, sandbox_uid: &str) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM sandbox_workspace_bindings WHERE sandbox_uid = $1)",
+    )
+    .bind(sandbox_uid)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The expected pool of a pool-born environment (Program #2238 C3): the
+/// identity-free pool of its exact shape on this replica, whose template
+/// carries the pool revision marker. Routing sends an environment to a pool
+/// only when its own rendering equals this one's, less the marker.
 fn pool_born_rendering(
     cfg: &SandboxWorkerCfg,
     env: &EnvironmentRow,
     namespace: &str,
-) -> anyhow::Result<serde_json::Value> {
+) -> anyhow::Result<WarmPoolObjects> {
     anyhow::ensure!(
         env.isolation_tier == "standard",
         "only standard environments are pool-born"
@@ -954,16 +970,14 @@ fn pool_born_rendering(
         disk_gib: i64::from(env.disk_gb),
     };
     let opts = super::create::warm_pool_template_opts(cfg, shape)?;
-    Ok(crate::sandbox::template::render_sandbox_template(
-        namespace, &opts,
-    ))
+    crate::sandbox::warm_pool::render_warm_pool(namespace, &opts, 0, cfg.allow_diagnostic_runtime)
 }
 
 /// What one checked attempt would record, before the fenced write.
 struct CheckedBinding {
     record: BindingRecord,
     pod: WorkspacePodIdentity,
-    /// The Sandbox is an adopted warm-pool member.
+    /// Warm only for the first bind of an adopted warm-pool member.
     path: StartPath,
 }
 
@@ -1016,13 +1030,14 @@ async fn check_bindable_runtime(
         return refuse(BindRefused::Denied(DENIED_IMAGES), scope, true);
     }
     // Program #2238 C3: the first bind of a pool-born Sandbox (its Claim
-    // selects a shared `cw-pool-` pool) requires its spec to be exactly this
-    // environment's expected rendering, so a stale, foreign or altered member
-    // never binds. Without the configuration to render it, refuse without
-    // deleting.
-    if is_warm_pool_name(&runtime.warm_pool_ref)
-        && !sandbox_ever_bound(pool, &env.id, &sandbox_uid).await?
-    {
+    // selects a shared `cw-pool-` pool) requires the Claim to name this
+    // environment's own pool, the Sandbox's spec to be exactly that pool's
+    // rendering, and the Pod to have booted from that pool revision, read
+    // from its immutable spec (review M1), so a stale, foreign or altered
+    // member never binds. Without the configuration to render it, refuse
+    // without deleting.
+    let pool_born = is_warm_pool_name(&runtime.warm_pool_ref);
+    if pool_born && !sandbox_ever_bound(pool, &env.id, &sandbox_uid).await? {
         let Some(cfg) = cfg else {
             return refuse(
                 BindRefused::Denied("pool rendering unverified"),
@@ -1031,9 +1046,19 @@ async fn check_bindable_runtime(
             );
         };
         let sandbox = serde_json::to_value(&runtime.sandbox)?;
+        let pod_spec = serde_json::to_value(&pod.spec)?;
         let matched = pool_born_rendering(cfg, env, &backend.namespace)
             .map_err(|error| format!("{error:#}"))
-            .and_then(|expected| sandbox_matches_rendering(&sandbox, &expected));
+            .and_then(|expected| {
+                if runtime.warm_pool_ref != expected.name {
+                    return Err("/spec/warmPoolRef/name".to_owned());
+                }
+                sandbox_matches_rendering(&sandbox, &expected.template)?;
+                if pod_spec_pool_revision(&pod_spec) != Some(expected.revision.as_str()) {
+                    return Err("pod /spec/containers/workspace/env".to_owned());
+                }
+                Ok(())
+            });
         if let Err(path) = matched {
             tracing::warn!(env = %env.id, %path, "pool-born Sandbox differs from the expected rendering");
             return refuse(BindRefused::Denied(DENIED_POOL_RENDERING), scope, true);
@@ -1067,7 +1092,9 @@ async fn check_bindable_runtime(
     let Some(captured) = captured else {
         return refuse(BindRefused::Denied(DENIED_CAPTURE), scope, true);
     };
-    let path = StartPath::from_launch_type(
+    // Review L2: an adopted member's launch-type label outlives its first
+    // bind; a restart of the same Sandbox is not a warm start.
+    let adopted = StartPath::from_launch_type(
         runtime
             .sandbox
             .metadata
@@ -1076,6 +1103,14 @@ async fn check_bindable_runtime(
             .and_then(|labels| labels.get(LAUNCH_TYPE_LABEL))
             .map(String::as_str),
     );
+    let path = if pool_born
+        && adopted == StartPath::Warm
+        && !sandbox_bound_by_any(pool, &sandbox_uid).await?
+    {
+        StartPath::Warm
+    } else {
+        StartPath::Cold
+    };
     Ok(Ok(CheckedBinding {
         path,
         record: BindingRecord {

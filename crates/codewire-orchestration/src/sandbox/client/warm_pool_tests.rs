@@ -175,8 +175,10 @@ async fn only_the_recorded_pool_born_claim_is_observed() {
     assert!(api.mutations().is_empty(), "observation never writes");
 }
 
+/// Review L8: the Claim goes first, so its controller cannot adopt or create
+/// another Sandbox for it while the observed one is deleted.
 #[tokio::test]
-async fn the_cold_reclaim_deletes_the_sandbox_and_claim_each_by_uid() {
+async fn the_cold_reclaim_deletes_the_claim_then_its_sandbox_each_by_uid() {
     let api = Api::pool_born(POOL);
     let client = api.client();
     let observed = client
@@ -190,14 +192,14 @@ async fn the_cold_reclaim_deletes_the_sandbox_and_claim_each_by_uid() {
         .unwrap();
     let mutations = api.mutations();
     assert_eq!(mutations.len(), 3, "{mutations:?}");
-    assert_eq!(mutations[0].0, "DELETE");
-    assert_eq!(mutations[0].1, sandbox_path());
-    assert_eq!(mutations[0].2["preconditions"]["uid"], SANDBOX_UID);
-    assert_eq!(mutations[1].0, "PATCH");
-    assert_eq!(mutations[1].2[1]["value"], json!(["other/keep"]));
+    assert_eq!(mutations[0].0, "PATCH");
+    assert_eq!(mutations[0].2[1]["value"], json!(["other/keep"]));
+    assert_eq!(mutations[1].0, "DELETE");
+    assert_eq!(mutations[1].1, claim_path());
+    assert_eq!(mutations[1].2["preconditions"]["uid"], CLAIM_UID);
     assert_eq!(mutations[2].0, "DELETE");
-    assert_eq!(mutations[2].1, claim_path());
-    assert_eq!(mutations[2].2["preconditions"]["uid"], CLAIM_UID);
+    assert_eq!(mutations[2].1, sandbox_path());
+    assert_eq!(mutations[2].2["preconditions"]["uid"], SANDBOX_UID);
     assert!(api.objects.lock().unwrap().is_empty());
 
     // A Claim replaced after the observation is never deleted or patched.

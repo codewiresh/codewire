@@ -147,9 +147,13 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
     );
 }
 
+/// The pool and template as a C0 controller left them: the pool's status
+/// observed its generation.
 fn live(objects: &WarmPoolObjects) -> (DynamicObject, DynamicObject) {
     let mut pool = objects.pool.clone();
     pool["metadata"]["uid"] = json!("pool-uid");
+    pool["metadata"]["generation"] = json!(3);
+    pool["status"] = json!({ "replicas": 2, "readyReplicas": 2, "observedGeneration": 3 });
     let mut template = objects.template.clone();
     template["metadata"]["uid"] = json!("template-uid");
     (
@@ -214,16 +218,101 @@ fn a_live_pool_routes_only_at_this_replicas_revision_with_members() {
         Some(&template),
         &objects
     ));
+    // Review L5: the revision annotation alone does not make a template
+    // current; its spec must be this replica's rendering.
+    let respecified = |value: &mut Value| {
+        value["spec"]["podTemplate"]["spec"]["hostNetwork"] = json!(true);
+    };
+    assert!(!live_pool_current(
+        Some(&pool),
+        Some(&edit(&template, &respecified)),
+        &objects
+    ));
 }
 
-/// A recorded API serving one pool and template, or failing every request.
+/// A member Sandbox as the controller creates it from `template`.
+fn member(objects: &WarmPoolObjects, name: &str) -> Value {
+    json!({
+        "apiVersion": "agents.x-k8s.io/v1beta1",
+        "kind": "Sandbox",
+        "metadata": {
+            "name": name,
+            "namespace": NAMESPACE,
+            "uid": format!("{name}-uid"),
+            "labels": {
+                crate::sandbox::warm_pool::MEMBER_POOL_LABEL:
+                    crate::sandbox::client::sandbox_name_hash(&objects.name),
+            },
+        },
+        "spec": objects.template["spec"].clone(),
+    })
+}
+
+fn with_marker(mut member: Value, revision: &str) -> Value {
+    for entry in member["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if entry["name"] == crate::sandbox::warm_pool::POOL_REVISION_ENV {
+            entry["value"] = json!(revision);
+        }
+    }
+    member
+}
+
+/// Review M1: a member booted from another revision blocks the pool until
+/// the reconciler replaces it; a terminating one does not.
+#[test]
+fn only_members_of_this_revision_keep_a_pool_routable() {
+    let objects = candidate(&dev_cfg(SHAPES), &environment(1000, 4096, 10)).unwrap();
+    let parse = |values: Vec<Value>| -> Vec<DynamicObject> {
+        values
+            .into_iter()
+            .map(|value| serde_json::from_value(value).unwrap())
+            .collect()
+    };
+    let current = member(&objects, "a");
+    assert!(members_current(&[], &objects.revision));
+    assert!(members_current(
+        &parse(vec![current.clone()]),
+        &objects.revision
+    ));
+    let stale = with_marker(member(&objects, "b"), &"0".repeat(64));
+    assert!(!members_current(
+        &parse(vec![current.clone(), stale.clone()]),
+        &objects.revision
+    ));
+    let mut unmarked = member(&objects, "c");
+    unmarked["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| entry["name"] != crate::sandbox::warm_pool::POOL_REVISION_ENV);
+    assert!(!members_current(&parse(vec![unmarked]), &objects.revision));
+    let mut terminating = stale;
+    terminating["metadata"]["deletionTimestamp"] = json!("2026-10-03T00:00:00Z");
+    assert!(members_current(
+        &parse(vec![current, terminating]),
+        &objects.revision
+    ));
+}
+
+/// A recorded API serving one pool, its template and its members, or failing
+/// every request.
 fn api(objects: Option<&WarmPoolObjects>, fail: bool) -> (SandboxClient, Arc<Mutex<Vec<String>>>) {
+    api_with(objects.map(live), Vec::new(), fail)
+}
+
+fn api_with(
+    served: Option<(DynamicObject, DynamicObject)>,
+    members: Vec<Value>,
+    fail: bool,
+) -> (SandboxClient, Arc<Mutex<Vec<String>>>) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&requests);
-    let served = objects.map(live);
     let service = Router::new().fallback(move |request: Request<Body>| {
         let recorded = Arc::clone(&recorded);
         let served = served.clone();
+        let members = members.clone();
         async move {
             let path = request.uri().path().to_owned();
             recorded.lock().unwrap().push(format!("{} {path}", request.method()));
@@ -238,6 +327,15 @@ fn api(objects: Option<&WarmPoolObjects>, fail: bool) -> (SandboxClient, Arc<Mut
                 (Some((_, template)), false) if path.contains("/sandboxtemplates/") => {
                     (StatusCode::OK, serde_json::to_value(template).unwrap())
                 }
+                (_, false) if path.ends_with("/sandboxes") => (
+                    StatusCode::OK,
+                    json!({
+                        "apiVersion": "agents.x-k8s.io/v1beta1",
+                        "kind": "SandboxList",
+                        "metadata": {},
+                        "items": members,
+                    }),
+                ),
                 _ => (
                     StatusCode::NOT_FOUND,
                     json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}),
@@ -299,8 +397,9 @@ async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_p
             .lock()
             .unwrap()
             .iter()
-            .all(|request| request.starts_with("GET ") && request.ends_with(&objects.name)),
-        "routing only reads the one pool and template"
+            .all(|request| request.starts_with("GET ")
+                && (request.ends_with(&objects.name) || request.ends_with("/sandboxes"))),
+        "routing only reads the one pool, its template and its members"
     );
 
     // A re-claimed create is cold without a read; a missing pool is a
@@ -376,5 +475,124 @@ fn a_pool_claim_carries_only_the_pool_reference_and_identity_labels() {
             "codewire.sh/org-id",
             "codewire.sh/type",
         ]
+    );
+}
+
+/// Review H1 and M1: a pool the C0 controller has not observed, or one that
+/// still holds a member of another revision, routes cold.
+#[tokio::test]
+async fn routing_needs_a_capable_controller_and_current_members() {
+    let env = environment(1000, 4096, 10);
+    let canonical = CANONICAL_WORKSPACE_RUNTIME_IMAGE;
+    let cfg = dev_cfg(SHAPES);
+    let objects = candidate(&cfg, &env).unwrap();
+    let decide = |client: SandboxClient| {
+        let cfg = cfg.clone();
+        let env = env.clone();
+        async move {
+            route(
+                &cfg,
+                &env,
+                canonical,
+                &opts(&cfg, &env, canonical),
+                &client,
+                false,
+            )
+            .await
+        }
+    };
+
+    let (pool, template) = live(&objects);
+    for status in [
+        json!(null),
+        json!({ "replicas": 2, "readyReplicas": 2 }),
+        json!({ "replicas": 2, "readyReplicas": 2, "observedGeneration": 2 }),
+    ] {
+        let mut legacy = serde_json::to_value(&pool).unwrap();
+        legacy["status"] = status.clone();
+        let (client, requests) = api_with(
+            Some((serde_json::from_value(legacy).unwrap(), template.clone())),
+            vec![member(&objects, "a")],
+            false,
+        );
+        assert_eq!(
+            decide(client).await,
+            Route::Cold(ColdReason::Controller),
+            "{status}"
+        );
+        assert!(
+            !requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.ends_with("/sandboxes")),
+            "members are read only on a capable controller"
+        );
+    }
+
+    let (client, _) = api_with(
+        Some(live(&objects)),
+        vec![member(&objects, "a"), member(&objects, "b")],
+        false,
+    );
+    assert_eq!(
+        decide(client).await,
+        Route::Pool {
+            name: objects.name.clone()
+        }
+    );
+    let (client, _) = api_with(
+        Some(live(&objects)),
+        vec![
+            member(&objects, "a"),
+            with_marker(member(&objects, "b"), &"0".repeat(64)),
+        ],
+        false,
+    );
+    assert_eq!(decide(client).await, Route::Cold(ColdReason::StaleMembers));
+}
+
+/// Review M3 and L3: a definitive bind refusal or a failed readiness wait may
+/// re-claim cold; a bare error or lost authority may not. Marking a wait
+/// never changes how its error reads.
+#[tokio::test]
+async fn only_a_definitive_refusal_or_a_failed_readiness_wait_reclaims() {
+    use crate::worker::activity_authority::AuthorityLost;
+    use crate::worker::create::{readiness_wait, reclaim_eligible};
+    use crate::worker::workspace_binding::BindRefused;
+
+    let message = "timeout waiting for SandboxClaim sandbox-x to become Ready";
+    let expired = readiness_wait(async { Err::<(), _>(anyhow::anyhow!(message)) })
+        .await
+        .unwrap_err();
+    assert!(reclaim_eligible(&expired));
+    assert_eq!(format!("{expired:#}"), message);
+    let chained = readiness_wait(async {
+        Err::<(), _>(anyhow::anyhow!("inner").context("credential gateway readiness"))
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(
+        format!("{chained:#}"),
+        "credential gateway readiness: inner"
+    );
+    assert!(reclaim_eligible(&chained));
+    assert!(!reclaim_eligible(&anyhow::anyhow!(message)));
+    let lost = readiness_wait(async { Err::<(), _>(anyhow::Error::from(AuthorityLost)) })
+        .await
+        .unwrap_err();
+    assert!(crate::worker::activity_authority::is_authority_lost(&lost));
+    assert!(!reclaim_eligible(&lost));
+    assert!(reclaim_eligible(&anyhow::Error::from(BindRefused::Denied(
+        "pool rendering"
+    ))));
+    assert!(!reclaim_eligible(&anyhow::Error::from(
+        BindRefused::NotConverged
+    )));
+    assert_eq!(
+        readiness_wait(async { Ok::<_, anyhow::Error>(7) })
+            .await
+            .unwrap(),
+        7
     );
 }
