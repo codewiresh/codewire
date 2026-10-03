@@ -5,7 +5,9 @@
 //! `WORKER_LOOPS` is the allow-list of loops this worker runs; the
 //! orchestration replicas elect a leader among themselves under a
 //! dedicated pg advisory lock so only one runs the loops at a time.
-//! The `image-cache` loop is the exception: it runs on every replica.
+//! The `image-cache` loop is the exception: it runs on every replica. The
+//! `warm-pool` loop is leader-gated and inert until warm-pool shapes are
+//! configured.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,6 +93,16 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
                 let namespace = ctx.sandbox_cfg.sandbox_namespace.clone();
                 tokio::spawn(async move {
                     super::billing_sessions::billing_session_loop(ctx, is_leader, namespace).await;
+                });
+            }
+            // Program #2238 C2: shared identity-free warm pools. Inert, with no
+            // Kubernetes access at all, until SANDBOX_WARM_POOL_SHAPES names a
+            // shape.
+            "warm-pool" => {
+                let ctx = ctx.clone();
+                let is_leader = is_leader.clone();
+                tokio::spawn(async move {
+                    super::warm_pool::warm_pool_loop(ctx, is_leader).await;
                 });
             }
             // Not leader-gated: every orchestration Pod adds the image set it

@@ -10,6 +10,7 @@ resources:
   - gateway-host-key-authz.yaml
   - credential-bootstrap-authz.yaml
   - image-cache-authz.yaml
+  - warm-pool-authz.yaml
   - gateway-daemon-credential-authz.yaml
   - workspace-binding-network-policy.yaml
 

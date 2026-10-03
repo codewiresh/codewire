@@ -258,7 +258,6 @@ mod credentials;
 
 #[path = "client/workspace_binding.rs"]
 mod workspace_binding;
-#[cfg(test)]
 pub(crate) use workspace_binding::sandbox_name_hash;
 pub use workspace_binding::{BindableRuntime, WorkspacePvc, WorkspacePvcAnchor};
 
@@ -4516,7 +4515,7 @@ fn workspace_resources_match(pod: &Pod, cpu: &str, memory: &str) -> bool {
 /// The kubelet canonicalizes equivalent requests (for example `3000m` to `3`
 /// and `5120Mi` to `5Gi`). Resource convergence must accept that formatting
 /// change without accepting a different value or a malformed observation.
-fn quantities_equal(left: &str, right: &str) -> bool {
+pub(crate) fn quantities_equal(left: &str, right: &str) -> bool {
     let Some((left_numerator, left_denominator)) = parse_quantity_ratio(left) else {
         return false;
     };
@@ -4532,7 +4531,7 @@ fn quantities_equal(left: &str, right: &str) -> bool {
     }
 }
 
-fn parse_quantity_ratio(quantity: &str) -> Option<(i128, i128)> {
+pub(crate) fn parse_quantity_ratio(quantity: &str) -> Option<(i128, i128)> {
     let quantity = quantity.trim();
     if quantity.is_empty() {
         return None;

@@ -246,7 +246,11 @@ fn pool_spec_equals_each_environment_rendering_of_its_shape() {
             },
         ] {
             let rendered = render_sandbox_template(NAMESPACE, &environment);
-            assert_eq!(rendered["spec"], pool.template["spec"]);
+            assert_eq!(
+                rendered["spec"],
+                without_revision_marker(&pool.template["spec"])
+            );
+            assert_eq!(pool_revision(&rendered["spec"]), pool.revision);
             assert_eq!(rendered["metadata"]["labels"], json!({}));
         }
     }
@@ -421,4 +425,292 @@ fn pool_images_must_be_digest_pinned_outside_diagnostic_runtimes() {
         ..pool_opts()
     };
     assert!(render_warm_pool(NAMESPACE, &tag_and_digest, 2, false).is_ok());
+}
+
+#[test]
+fn warm_pool_shapes_parse_exact_shapes_and_member_counts() {
+    assert_eq!(parse_warm_pool_shapes("").unwrap(), []);
+    assert_eq!(parse_warm_pool_shapes("  ").unwrap(), []);
+    assert_eq!(
+        parse_warm_pool_shapes(" 1000m/4096Mi/10Gi=2 , 2000m/8192Mi/10Gi=0").unwrap(),
+        [
+            ConfiguredShape {
+                shape: shape(1000, 4096, 10),
+                members: 2,
+            },
+            ConfiguredShape {
+                shape: shape(2000, 8192, 10),
+                members: 0,
+            },
+        ]
+    );
+    assert_eq!(
+        parse_warm_pool_shapes("500m/1024Mi/5Gi=16").unwrap()[0].members,
+        MAX_POOL_MEMBERS
+    );
+    for invalid in [
+        "1000m/4096Mi/10Gi",
+        "1000m/4096Mi/10Gi=",
+        "1000m/4096Mi/10Gi=17",
+        "1000m/4096Mi/10Gi=-1",
+        "1000m/4096Mi/10Gi=02",
+        "1/4096Mi/10Gi=1",
+        "1000m/4Gi/10Gi=1",
+        "1000m/4096Mi/10G=1",
+        "1000m/4096Mi=1",
+        "1000m/4096Mi/10Gi/1Gi=1",
+        "0m/4096Mi/10Gi=1",
+        "01000m/4096Mi/10Gi=1",
+        "1000m/4096Mi/0Gi=1",
+        "1000m/4096Mi/10Gi=1,",
+        "1000m/4096Mi/10Gi=1,1000m/4096Mi/10Gi=2",
+        "4294967296m/4096Mi/10Gi=1",
+        "1000m / 4096Mi / 10Gi=1",
+    ] {
+        assert!(
+            parse_warm_pool_shapes(invalid).is_err(),
+            "{invalid:?} must be refused"
+        );
+    }
+}
+
+#[test]
+fn shape_labels_and_pool_names_round_trip() {
+    let [small, large] = owner_shapes();
+    assert_eq!(shape_label(small), "1000m-4096mi-10gi");
+    for shape in [small, large] {
+        let name = key(shape, "linstor-local", NAMESPACE, "dev").name();
+        assert_eq!(warm_pool_name_shape(&name), Some(shape));
+    }
+    assert_eq!(warm_pool_name_shape("shadow-pool-workspace-env"), None);
+    assert_eq!(warm_pool_name_shape("cw-pool-1000m-4096mi-10gi"), None);
+}
+
+#[test]
+fn pool_labels_select_only_codewire_pools() {
+    use std::collections::BTreeMap;
+    assert_eq!(
+        pool_label_selector(),
+        "app.kubernetes.io/managed-by=codewire,codewire.sh/type=workspace-pool"
+    );
+    let labels = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    };
+    let pool = labels(&[
+        ("app.kubernetes.io/managed-by", "codewire"),
+        ("codewire.sh/type", "workspace-pool"),
+        (TEMPLATE_REF_HASH_LABEL, "0f0f0f0f"),
+    ]);
+    assert!(has_pool_labels(Some(&pool)));
+    assert!(!has_pool_labels(Some(&labels(&[(
+        "codewire.sh/type",
+        "workspace-pool"
+    )]))));
+    assert!(!has_pool_labels(None));
+}
+
+/// The admission policies pin what this renderer produces; drift in either
+/// fails here first.
+#[test]
+fn the_admission_policy_pins_the_renderer() {
+    let policy = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deployments/k8s/orchestration/warm-pool-authz.yaml"
+    ))
+    .expect("warm-pool admission policy");
+    for fragment in [
+        format!("object.spec.replicas <= {MAX_POOL_MEMBERS}"),
+        format!("'{POOL_REVISION_ANNOTATION}' in object.metadata.annotations"),
+        format!("object.metadata.labels['codewire.sh/type'] == '{WARM_POOL_TYPE}'"),
+        format!("request.name.startsWith('{WARM_POOL_NAME_PREFIX}')"),
+        "object.spec.updateStrategy.type == 'Recreate'".to_owned(),
+        format!(
+            "variables.pod.runtimeClassName != '{}'",
+            crate::sandbox::template::RUNTIME_CLASS_CONFIDENTIAL
+        ),
+    ] {
+        assert!(policy.contains(&fragment), "policy lost {fragment}");
+    }
+    // The policy's name pattern accepts exactly the names the renderer emits.
+    let pattern = "^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$";
+    assert!(policy.contains(pattern));
+    for shape in owner_shapes() {
+        let name = key(shape, "linstor-local", NAMESPACE, "dev").name();
+        assert!(is_warm_pool_name(&name));
+        let (_, hash) = name.rsplit_once('-').unwrap();
+        assert_eq!(hash.len(), 8);
+    }
+    let rendered = render(&pool_opts());
+    assert_eq!(rendered.pool["spec"]["updateStrategy"]["type"], "Recreate");
+    assert_eq!(
+        rendered.template["spec"]["podTemplate"]["spec"]["serviceAccountName"],
+        "codewire-sandbox"
+    );
+    assert_eq!(
+        rendered.template["spec"]["podTemplate"]["spec"]["automountServiceAccountToken"],
+        false
+    );
+    assert!(
+        rendered.template["spec"]["networkPolicy"]
+            .get("ingress")
+            .is_none()
+    );
+    // Review M2: the template policy is an allowlist, so everything the
+    // renderer emits must be on it.
+    let pod = &rendered.template["spec"]["podTemplate"]["spec"];
+    assert_eq!(pod["runtimeClassName"], "commodity");
+    assert!(policy.contains(r#"expression: "['commodity']""#));
+    let containers = pod["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(pod["initContainers"].as_array().into_iter().flatten());
+    for container in containers {
+        for entry in container["env"].as_array().into_iter().flatten() {
+            let name = entry["name"].as_str().unwrap();
+            assert!(policy.contains(&format!("'{name}'")), "policy lacks {name}");
+        }
+    }
+    assert!(policy.contains(&format!("'{POOL_REVISION_ENV}'")));
+    for volume in pod["volumes"].as_array().unwrap() {
+        let source = volume
+            .as_object()
+            .unwrap()
+            .keys()
+            .find(|key| *key != "name")
+            .unwrap();
+        assert!(
+            ["image", "emptyDir", "configMap", "projected"].contains(&source.as_str()),
+            "policy refuses {source}"
+        );
+        for projected in volume["projected"]["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let audience = projected["serviceAccountToken"]["audience"]
+                .as_str()
+                .unwrap();
+            assert!(
+                policy.contains(&format!("'{audience}'")),
+                "policy lacks {audience}"
+            );
+        }
+    }
+}
+
+/// What the agent-sandbox controller stores when it copies a rendering
+/// through typed Go structs: canonical quantities and no empty `omitempty`
+/// values.
+pub(crate) fn controller_copy(rendered: &Value) -> Value {
+    fn walk(value: &mut Value, path: &str) {
+        match value {
+            Value::Object(fields) => {
+                fields.retain(|key, field| !(key == "value" && field.as_str() == Some("")));
+                for (key, field) in fields.iter_mut() {
+                    walk(field, &format!("{path}/{key}"));
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter_mut().enumerate() {
+                    walk(item, &format!("{path}/{index}"));
+                }
+            }
+            Value::String(text) if path.contains("/resources/") => {
+                let canonical = match text.as_str() {
+                    "1000m" => "1",
+                    "2000m" => "2",
+                    "4096Mi" => "4Gi",
+                    "8192Mi" => "8Gi",
+                    other => other,
+                };
+                *text = canonical.to_owned();
+            }
+            _ => {}
+        }
+    }
+    let mut copy = rendered.clone();
+    walk(&mut copy, "");
+    copy
+}
+
+#[test]
+fn stored_specs_compare_by_meaning_not_spelling() {
+    let rendered = render(&pool_opts()).template["spec"].clone();
+    let stored = controller_copy(&rendered);
+    assert_ne!(
+        stored, rendered,
+        "the fixture exercises the controller's spelling"
+    );
+    assert_eq!(spec_equivalent(&rendered, &stored, "/spec"), Ok(()));
+
+    let mut defaulted = stored.clone();
+    defaulted["podTemplate"]["spec"]["containers"][0]["terminationMessagePath"] = json!("");
+    defaulted["podTemplate"]["spec"]["containers"][0]["stdin"] = json!(false);
+    assert_eq!(spec_equivalent(&rendered, &defaulted, "/spec"), Ok(()));
+
+    let refused = |mutate: &dyn Fn(&mut Value)| {
+        let mut live = stored.clone();
+        mutate(&mut live);
+        spec_equivalent(&rendered, &live, "/spec").expect_err("a different spec was equivalent")
+    };
+    assert_eq!(
+        refused(
+            &|live| live["podTemplate"]["spec"]["containers"][0]["resources"]["limits"]["cpu"] =
+                json!("2")
+        ),
+        "/spec/podTemplate/spec/containers/0/resources/limits/cpu"
+    );
+    assert_eq!(
+        refused(&|live| live["podTemplate"]["spec"]["hostNetwork"] = json!(true)),
+        "/spec/podTemplate/spec/hostNetwork"
+    );
+    assert_eq!(
+        refused(&|live| live["podTemplate"]["spec"]["securityContext"]["runAsUser"] = json!(0)),
+        "/spec/podTemplate/spec/securityContext/runAsUser"
+    );
+    assert_eq!(
+        refused(
+            &|live| live["podTemplate"]["spec"]["containers"][0]["image"] = json!("x@sha256:0")
+        ),
+        "/spec/podTemplate/spec/containers/0/image"
+    );
+    assert_eq!(
+        refused(&|live| {
+            live["podTemplate"]["spec"]["volumes"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+        }),
+        "/spec/podTemplate/spec/volumes"
+    );
+    // Only resource quantities are compared by value.
+    let with_env = |value: &str| json!({ "env": [{ "name": "LIMIT", "value": value }] });
+    assert!(spec_equivalent(&with_env("1000m"), &with_env("1"), "/container").is_err());
+    assert!(
+        spec_equivalent(
+            &json!({ "resources": { "limits": { "memory": "4096Mi" } } }),
+            &json!({ "resources": { "limits": { "memory": "4Gi" } } }),
+            "/container"
+        )
+        .is_ok()
+    );
+}
+
+/// Review L1: an absent pointer boolean is the API default, not `false`.
+#[test]
+fn an_absent_rendered_false_is_not_equivalent() {
+    let rendered = render(&pool_opts()).template["spec"].clone();
+    let mut live = controller_copy(&rendered);
+    live["podTemplate"]["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("automountServiceAccountToken");
+    assert_eq!(
+        spec_equivalent(&rendered, &live, "/spec"),
+        Err("/spec/podTemplate/spec/automountServiceAccountToken".to_owned())
+    );
 }

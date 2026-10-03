@@ -7,8 +7,9 @@
 //!   path after the D3 NATS retirement (owner decision 2026-06-12)
 //! - leader-gated background loops (`WORKER_LOOPS`): the env reconciler,
 //!   sandbox-liveness, and billing-session controller, whose enqueues
-//!   SignalWithStart workflows; plus the per-replica `image-cache`
-//!   reconciler for the runtime-node image cache DaemonSet
+//!   SignalWithStart workflows; the warm-pool reconciler, inert until
+//!   `SANDBOX_WARM_POOL_SHAPES` names a shape; plus the per-replica
+//!   `image-cache` reconciler for the runtime-node image cache DaemonSet
 //!
 //! NATS is gone: there is no consumer plane and no `TENANT_LOCKS`
 //! distributed lock — one workflow per environment id serializes
@@ -30,6 +31,7 @@ const DEFAULT_WORKER_LOOPS: &[&str] = &[
     "sandbox-liveness",
     "billing-session",
     "image-cache",
+    "warm-pool",
 ];
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
@@ -539,6 +541,7 @@ mod tests {
                 "sandbox-liveness",
                 "billing-session",
                 "image-cache",
+                "warm-pool",
             ]
         );
     }

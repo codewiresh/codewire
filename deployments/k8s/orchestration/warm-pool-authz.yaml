@@ -1,0 +1,273 @@
+# Shared warm pools (Program #2238 C2). The orchestration leader reconciles one
+# SandboxTemplate and one SandboxWarmPool per configured exact shape, named
+# cw-pool-<cpu>m-<mem>mi-<disk>gi-<h8>. A pool's unclaimed members belong to no
+# environment until a claim adopts one and the claim-time binding records it,
+# so the shared template must be identity-free (design invariant 1, §13).
+#
+# These policies bound what the orchestration identity may write, whatever its
+# renderer does:
+# - only a cw-pool- SandboxWarmPool may hold members; every other pool it
+#   writes is a zero-replica environment shadow;
+# - a cw-pool- pool keeps its exact name, labels and revision, names its own
+#   template, holds at most 16 members and replaces stale members (Recreate);
+# - a cw-pool- template is an allowlist: digest-pinned images; the
+#   identity-free workspace and DinD variables only, the Pod UID the only
+#   reference; image, emptyDir, the gateway roots ConfigMap and the two
+#   workspace-audience projected tokens the only volumes; the commodity
+#   runtime (Kind overlays add their diagnostic runtimes); no host namespace,
+#   host alias or node pin; its revision in the workspace container's
+#   immutable environment; no environment identity label; and no ingress
+#   before adoption (the controller's template-owned NetworkPolicy then denies
+#   all ingress to unclaimed members);
+# - orchestration never creates or changes an unclaimed member Sandbox; only
+#   the agent-sandbox controller writes those.
+#
+# The Rust renderer (crates/codewire-orchestration/src/sandbox/warm_pool.rs)
+# and its goldens produce exactly these shapes;
+# scripts/checks/repo_policy/orchestration_security.py pins this file.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-warm-pool
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["extensions.agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxwarmpools"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+  variables:
+    - name: pool
+      expression: request.name.startsWith('cw-pool-')
+  validations:
+    - expression: >-
+        variables.pool ||
+        (has(object.spec.replicas) && object.spec.replicas == 0)
+      message: only a cw-pool- SandboxWarmPool may hold members; every other orchestration pool is a zero-replica environment shadow
+    - expression: >-
+        !variables.pool ||
+        (request.name.matches('^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$') &&
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/managed-by' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire' &&
+        'codewire.sh/type' in object.metadata.labels &&
+        object.metadata.labels['codewire.sh/type'] == 'workspace-pool' &&
+        !['codewire.sh/environment-id', 'codewire.sh/org-id', 'codewire.sh/environment-operation-generation', 'codewire.sh/isolation-tier'].exists(k, k in object.metadata.labels) &&
+        has(object.metadata.annotations) &&
+        'codewire.sh/pool-revision' in object.metadata.annotations &&
+        object.metadata.annotations['codewire.sh/pool-revision'].matches('^[0-9a-f]{64}$'))
+      message: a warm pool keeps its exact cw-pool- shape name, its pool labels and its revision, and carries no environment label
+    - expression: >-
+        !variables.pool ||
+        (has(object.spec.sandboxTemplateRef) &&
+        object.spec.sandboxTemplateRef.name == request.name &&
+        has(object.spec.updateStrategy) && has(object.spec.updateStrategy.type) &&
+        object.spec.updateStrategy.type == 'Recreate' &&
+        has(object.spec.replicas) &&
+        object.spec.replicas >= 0 && object.spec.replicas <= 16)
+      message: a warm pool names its own template, replaces stale members (Recreate) and holds at most 16 members
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-warm-pool
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  policyName: codewire-orchestration-warm-pool
+  validationActions: [Deny]
+  # No mutable namespace selector: orchestration can update namespace labels.
+  # The identity match bounds the policy; it follows the writer everywhere.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-warm-pool-template
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["extensions.agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxtemplates"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+    - name: warm-pool-template
+      expression: request.name.startsWith('cw-pool-')
+  variables:
+    # Kind overlays replace this first variable with their diagnostic
+    # runtimes; keep it first. '' is a Pod without runtimeClassName.
+    - name: runtimeClasses
+      expression: "['commodity']"
+    - name: pod
+      expression: object.spec.podTemplate.spec
+    - name: containers
+      expression: >-
+        object.spec.podTemplate.spec.containers +
+        (has(object.spec.podTemplate.spec.initContainers) ? object.spec.podTemplate.spec.initContainers : [])
+    - name: volumes
+      expression: "has(object.spec.podTemplate.spec.volumes) ? object.spec.podTemplate.spec.volumes : []"
+    - name: identity
+      expression: >-
+        ['codewire.sh/environment-id', 'codewire.sh/org-id', 'codewire.sh/environment-operation-generation', 'codewire.sh/isolation-tier']
+    - name: environment
+      expression: >-
+        ['CODEWIRE_WORKSPACE_SHIM_ADDR', 'HOME', 'USER', 'CODEWIRE_WORKSPACE_BINDING_URL', 'CODEWIRE_POD_UID',
+        'CODEWIRE_WORKSPACE_POOL_REVISION', 'DOCKER_HOST', 'DOCKER_TLS_CERTDIR', 'CODEWIRE_DOCKER_DATA_IMAGE',
+        'CODEWIRE_DOCKER_DATA_ROOT', 'CODEWIRE_DOCKER_DATA_SIZE', 'CODEWIRE_DOCKER_MOUNT_MODE']
+    - name: audiences
+      expression: "['codewire.internal.workspace-binding.v1', 'codewire.internal.credential-workspace.v1']"
+  validations:
+    - expression: >-
+        request.name.matches('^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$') &&
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/managed-by' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire' &&
+        'codewire.sh/type' in object.metadata.labels &&
+        object.metadata.labels['codewire.sh/type'] == 'workspace-pool' &&
+        !variables.identity.exists(k, k in object.metadata.labels) &&
+        has(object.metadata.annotations) &&
+        'codewire.sh/pool-revision' in object.metadata.annotations &&
+        object.metadata.annotations['codewire.sh/pool-revision'].matches('^[0-9a-f]{64}$')
+      message: a warm-pool template keeps its exact cw-pool- shape name, its pool labels and its revision, and carries no environment label
+    - expression: >-
+        !has(object.spec.podTemplate.metadata) ||
+        !has(object.spec.podTemplate.metadata.labels) ||
+        !variables.identity.exists(k, k in object.spec.podTemplate.metadata.labels)
+      message: warm-pool members carry no environment, organization, generation or tier label until a claim adopts them
+    - expression: >-
+        variables.containers.all(c, c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$')) &&
+        variables.volumes.all(v, !has(v.image) ||
+        (has(v.image.reference) && v.image.reference.matches('^[^@ ]+@sha256:[0-9a-f]{64}$'))) &&
+        !has(variables.pod.ephemeralContainers)
+      message: a warm-pool template runs and mounts only digest-pinned images
+    - expression: >-
+        variables.containers.all(c, !has(c.envFrom) &&
+        (!has(c.env) || c.env.all(e, e.name in variables.environment &&
+        dyn(e).all(k, k in ['name', 'value', 'valueFrom']) &&
+        (!has(e.valueFrom) || (e.name == 'CODEWIRE_POD_UID' &&
+        dyn(e.valueFrom).all(k, k == 'fieldRef') &&
+        dyn(e.valueFrom.fieldRef).all(k, k in ['fieldPath', 'apiVersion']) &&
+        e.valueFrom.fieldRef.fieldPath == 'metadata.uid' &&
+        (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1'))))))
+      message: a warm-pool template sets only the identity-free workspace and DinD variables, takes no environment source and reads only its own Pod UID
+    - expression: >-
+        variables.pod.containers.exists_one(c, c.name == 'workspace') &&
+        variables.pod.containers.all(c, c.name != 'workspace' ||
+        (has(c.env) && c.env.exists(e, e.name == 'CODEWIRE_WORKSPACE_BINDING_URL') &&
+        c.env.exists_one(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION') &&
+        c.env.exists(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION' && has(e.value) &&
+        e.value == object.metadata.annotations['codewire.sh/pool-revision'])))
+      message: a warm-pool workspace binds through the workspace binding listener and carries its pool revision in its immutable Pod spec
+    - expression: >-
+        variables.volumes.all(v, dyn(v).all(k, k in ['name', 'image', 'emptyDir', 'configMap', 'projected']) &&
+        (!has(v.configMap) || (has(v.configMap.name) && v.configMap.name == 'codewire-credential-gateway-roots')) &&
+        (!has(v.projected) || (has(v.projected.sources) && v.projected.sources.all(s,
+        dyn(s).all(k, k == 'serviceAccountToken') &&
+        has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.audiences))))
+      message: a warm-pool template mounts only images, emptyDirs, the gateway roots ConfigMap and workspace-audience projected tokens
+    - expression: >-
+        has(variables.pod.serviceAccountName) &&
+        variables.pod.serviceAccountName == 'codewire-sandbox' &&
+        has(variables.pod.automountServiceAccountToken) &&
+        variables.pod.automountServiceAccountToken == false
+      message: warm-pool members run as codewire-sandbox without a Kubernetes API token
+    - expression: >-
+        (has(variables.pod.runtimeClassName) ? variables.pod.runtimeClassName : '') in variables.runtimeClasses
+      message: warm-pool members run under the commodity runtime; only Kind overlays add a diagnostic runtime
+    - expression: >-
+        (!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork) &&
+        (!has(variables.pod.hostPID) || !variables.pod.hostPID) &&
+        (!has(variables.pod.hostIPC) || !variables.pod.hostIPC) &&
+        !has(variables.pod.hostAliases) && !has(variables.pod.nodeName)
+      message: warm-pool members share no host namespace, carry no host alias and are never pinned to a node
+    - expression: >-
+        (!has(variables.pod.runtimeClassName) || variables.pod.runtimeClassName != 'confidential') &&
+        (!has(object.spec.podTemplate.metadata) ||
+        !has(object.spec.podTemplate.metadata.annotations) ||
+        !('io.katacontainers.config.hypervisor.kernel_params' in object.spec.podTemplate.metadata.annotations)) &&
+        (!has(object.spec.volumeClaimTemplates) ||
+        object.spec.volumeClaimTemplates.all(t, !has(t.spec) || !has(t.spec.storageClassName) ||
+        t.spec.storageClassName != 'longhorn-confidential'))
+      message: confidential workspaces are never pooled
+    - expression: >-
+        (!has(object.spec.networkPolicyManagement) || object.spec.networkPolicyManagement == 'Managed') &&
+        (!has(object.spec.networkPolicy) || !has(object.spec.networkPolicy.ingress) ||
+        size(object.spec.networkPolicy.ingress) == 0)
+      message: unclaimed warm-pool members admit no ingress before adoption
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-warm-pool-template
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  policyName: codewire-orchestration-warm-pool-template
+  validationActions: [Deny]
+  # No mutable namespace selector: orchestration can update namespace labels.
+  # The identity match bounds the policy; it follows the writer everywhere.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-warm-pool-member
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxes"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+  # The reconciler deletes stale members by UID and resourceVersion; DELETE is
+  # not matched. Bootstrap and resize patch only Sandboxes a claim adopted,
+  # which carry neither the pool label nor a pool owner.
+  validations:
+    - expression: >-
+        !(has(object.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in object.metadata.labels) &&
+        !(has(object.metadata.ownerReferences) &&
+        object.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool'))
+      message: orchestration never creates or changes an unclaimed warm-pool member; only the controller writes it
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        (!(has(oldObject.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in oldObject.metadata.labels) &&
+        !(has(oldObject.metadata.ownerReferences) &&
+        oldObject.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool')))
+      message: orchestration never strips an unclaimed warm-pool member's pool label or owner
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-warm-pool-member
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  policyName: codewire-orchestration-warm-pool-member
+  validationActions: [Deny]
+  # No mutable namespace selector: orchestration can update namespace labels.
+  # The identity match bounds the policy; it follows the writer everywhere.

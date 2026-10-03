@@ -152,10 +152,35 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
     return output
 
 
+POOL_REVISION_ENV = "CODEWIRE_WORKSPACE_POOL_REVISION"
+
+
+def without_revision_marker(spec: Any) -> Any:
+    """The template spec without the workspace container's revision marker."""
+    spec = copy.deepcopy(spec)
+    containers = (((spec or {}).get("podTemplate") or {}).get("spec") or {}).get("containers") or []
+    for container in containers:
+        if isinstance(container.get("env"), list):
+            container["env"] = [entry for entry in container["env"] if entry.get("name") != POOL_REVISION_ENV]
+    return spec
+
+
 def pool_revision(template: dict[str, Any]) -> str:
-    """serde_json's compact, key-sorted serialization of the template spec."""
-    spec = json.dumps(template.get("spec"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """serde_json's compact, key-sorted serialization of the template spec,
+    without the revision marker the spec carries."""
+    spec = json.dumps(without_revision_marker(template.get("spec")), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(spec.encode("utf-8")).hexdigest()
+
+
+def revision_markers(template: dict[str, Any]) -> list[Any]:
+    """Every revision marker the template's containers carry, by container."""
+    containers = (((template.get("spec") or {}).get("podTemplate") or {}).get("spec") or {}).get("containers") or []
+    return [
+        (container.get("name"), entry)
+        for container in containers
+        for entry in container.get("env") or []
+        if entry.get("name") == POOL_REVISION_ENV
+    ]
 
 
 def walk_keys(value: Any) -> list[str]:
@@ -205,6 +230,10 @@ def pool_violations(template: dict[str, Any], pool: dict[str, Any], label: str) 
     if pool_spec.get("updateStrategy") != {"type": "Recreate"}:
         output.append(f"{label}: pool does not recreate stale members")
     revision = pool_revision(template)
+    # Review M1: the workspace container carries exactly its revision, which
+    # the bind reads from the immutable Pod spec.
+    if revision_markers(template) != [("workspace", {"name": POOL_REVISION_ENV, "value": revision})]:
+        output.append(f"{label}: the workspace container does not carry exactly its pool revision")
     for kind, obj in (("template", template), ("pool", pool)):
         metadata = obj.get("metadata") or {}
         if metadata.get("labels") != POOL_LABELS:
@@ -255,6 +284,9 @@ def pool_self_test(template: dict[str, Any], pool: dict[str, Any]) -> None:
             annotations = (obj.get("metadata") or {}).get("annotations")
             if isinstance(annotations, dict) and POOL_REVISION in annotations:
                 annotations[POOL_REVISION] = signed
+        if resign:
+            for _, entry in revision_markers(fixture["template"]):
+                entry["value"] = signed
         if not pool_violations(fixture["template"], fixture["pool"], f"negative pool fixture {name}"):
             raise RuntimeError(f"negative pool fixture {name} was accepted")
 
@@ -285,6 +317,17 @@ def pool_self_test(template: dict[str, Any], pool: dict[str, Any]) -> None:
         "codewire.sh/environment-operation-generation", "7"))
     rejected("missing revision", lambda f: f["pool"]["metadata"].__setitem__("annotations", {}))
     rejected("stale revision", lambda f: f["template"]["metadata"]["annotations"].__setitem__(POOL_REVISION, "0" * 64), resign=False)
+
+    def stale_marker(f: dict[str, Any]) -> None:
+        for _, entry in revision_markers(f["template"]):
+            entry["value"] = "0" * 64
+
+    rejected("stale revision marker", stale_marker, resign=False)
+
+    def no_marker(f: dict[str, Any]) -> None:
+        f["template"]["spec"] = without_revision_marker(f["template"]["spec"])
+
+    rejected("missing revision marker", no_marker)
     rejected("unsigned image change", lambda f: workspace(f).__setitem__(
         "image", "registry.example.invalid/codewire/workspace@sha256:" + "4" * 64), resign=False)
     rejected("environment UUID in env", lambda f: workspace(f)["env"].append({"name": "CODEWIRE_SANDBOX", "value": environment_id}))
