@@ -1032,9 +1032,13 @@ start_orchestration_process() {
       ;;
   esac
 
+  # A worker with a sandbox backend requires the workspace-binding Service
+  # namespace and an API URL at startup (Program #2238 review L2).
   start_proc orchestration "$ORCHESTRATION_PORT" env \
     KUBECONFIG="$kubeconfig" \
     KUBERNETES_SERVICE_HOST= KUBERNETES_SERVICE_PORT= \
+    POD_NAMESPACE=codewire-integration \
+    CODEWIRE_API_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
     DATABASE_URL="$DATABASE_URL_RUST" SESSION_SECRET="$SESSION_SECRET" \
     CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER=true \
     ORCHESTRATION_PORT="$ORCHESTRATION_PORT" \

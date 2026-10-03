@@ -2,6 +2,9 @@
 # Local Kind development only (`make kind-deploy`): compile one product binary
 # incrementally in the same pinned Rust/Bookworm toolchain as the services
 # image and export just that file. Never promotable; nothing here is published.
+# With KIND_DEV_FIXTURE_FEATURES it also exports the crate's library test
+# binary as kind-fixtures/<bin>, built the way services-ci builds the Kind
+# credential fixture, so the gate's synthetic mode runs the current source.
 FROM codewire-rust-base AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -14,6 +17,7 @@ COPY apps/cli/install.sh ./apps/cli/install.sh
 ARG KIND_DEV_CRATE
 ARG KIND_DEV_FEATURES=
 ARG KIND_DEV_BIN=
+ARG KIND_DEV_FIXTURE_FEATURES=
 ARG KIND_DEV_TREE
 # A persistent target directory makes repeated builds incremental; the
 # registry caches are shared with the services image build.
@@ -44,6 +48,14 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     if [ -n "$KIND_DEV_FEATURES" ]; then set -- --features "$KIND_DEV_FEATURES"; fi && \
     cargo build --locked --profile ci -p "$KIND_DEV_CRATE" --bin "$bin" "$@" && \
     install -D "$CARGO_TARGET_DIR/ci/$bin" "/out/$bin" && \
+    if [ -n "$KIND_DEV_FIXTURE_FEATURES" ]; then \
+      cargo test --locked --profile ci -p "$KIND_DEV_CRATE" \
+        --features "$KIND_DEV_FIXTURE_FEATURES" --lib --no-run \
+        --message-format=json >/tmp/kind-dev-fixture.jsonl && \
+      fixture="$(sed -n '/"reason":"compiler-artifact"/{/"test":true/{s@.*"executable":"\([^"]*\)".*@\1@p;}}' /tmp/kind-dev-fixture.jsonl)" && \
+      test -n "$fixture" && test -x "$fixture" && \
+      install -D "$fixture" "/out/kind-fixtures/$bin"; \
+    fi && \
     cp /tmp/kind-dev-sources.sha256 "$built"
 
 FROM scratch

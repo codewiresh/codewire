@@ -106,6 +106,11 @@ elif tool == "docker":
         binary = destination / os.environ["KIND_DEV_BIN"]
         binary.write_text(os.environ.get("FAKE_BINARY_CONTENT", "synthetic-current-source"))
         binary.chmod(0o755)
+        if "kind-dev-binary.args.KIND_DEV_FIXTURE_FEATURES=enrollment" in args and not os.environ.get("FAKE_MISSING_FIXTURE"):
+            fixture = destination / "kind-fixtures" / os.environ["KIND_DEV_BIN"]
+            fixture.parent.mkdir()
+            fixture.write_text(os.environ.get("FAKE_FIXTURE_CONTENT", "synthetic-current-fixture"))
+            fixture.chmod(0o755)
     elif args[:2] == ["buildx", "build"]:
         tag = args[args.index("-t") + 1]
         (state / "last-image").write_text(tag)
@@ -445,6 +450,52 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         builds = [call for call in self.calls("docker") if call["args"][:2] == ["buildx", "build"]]
         self.assertIn("COPY codewire-idp /codewire-idp", builds[-1]["dockerfile"])
         self.assertIn("COPY codewire-billing /codewire-billing", builds[-1]["dockerfile"])
+
+    def test_credential_fixture_is_current_and_retained_with_later_deploys(self) -> None:
+        result = self.run_script("deploy-service.sh", "credential-service")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fixture = self.state / "dev-a/dev/codewire-services/fixtures/credential-service"
+        self.assertEqual(fixture.read_text(), "synthetic-current-fixture")
+        result = self.run_script("deploy-service.sh", "billing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        builds = [call for call in self.calls("docker") if call["args"][:2] == ["buildx", "build"]]
+        self.assertIn("COPY --from=fixtures credential-service /codewire-kind-fixtures/credential-service", builds[-1]["dockerfile"])
+        self.assertIn("fixtures=" + str(fixture.parent), builds[-1]["args"])
+
+    def test_changed_fixture_changes_tag_with_unchanged_service_binary(self) -> None:
+        first = self.run_script("deploy-service.sh", "credential-service", FAKE_FIXTURE_CONTENT="fixture-one")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        before = (self.state / "last-image").read_text()
+        second = self.run_script("deploy-service.sh", "credential-service", FAKE_FIXTURE_CONTENT="fixture-two")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotEqual((self.state / "last-image").read_text(), before)
+
+    def test_missing_rebuilt_fixture_prevents_image_delivery(self) -> None:
+        result = self.run_script("deploy-service.sh", "credential-service", FAKE_MISSING_FIXTURE="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("produced no credential-service fixture", result.stderr)
+        self.assertFalse([call for call in self.calls("docker") if call["args"][:2] == ["buildx", "build"]])
+        self.assertFalse([call for call in self.calls("kind") if call["args"][:2] == ["load", "docker-image"]])
+
+    def test_linked_fixture_is_preserved_and_rejected_before_build(self) -> None:
+        fixture_dir = self.state / "dev-a/dev/codewire-services/fixtures"
+        fixture_dir.mkdir(parents=True, mode=0o700)
+        for directory in (fixture_dir.parent, fixture_dir.parent.parent):
+            directory.chmod(0o700)
+        unrelated = self.directory / "unrelated-fixture"
+        unrelated.write_text("preserve")
+        fixture = fixture_dir / "credential-service"
+        for kind in ("symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    fixture.symlink_to(unrelated)
+                else:
+                    os.link(unrelated, fixture)
+                result = self.run_script("deploy-service.sh", "idp")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(unrelated.read_text(), "preserve")
+                self.assertFalse([call for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]])
+                fixture.unlink()
 
     def test_mutable_cache_symlink_is_preserved_and_rejected(self) -> None:
         unrelated = self.directory / "unrelated"

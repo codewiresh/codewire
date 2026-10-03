@@ -701,6 +701,70 @@ fn workspace_daemon_image(spec: &Value) -> anyhow::Result<Option<&str>> {
         .ok_or_else(|| anyhow::anyhow!("workspace daemon image is malformed"))
 }
 
+/// Whether a SandboxTemplate or Sandbox renders an identity-free workspace:
+/// its workspace container names the binding listener and carries no
+/// environment token. Both at once is refused as ambiguous; neither is the
+/// legacy shape.
+fn workspace_object_identity_free(object: &DynamicObject) -> anyhow::Result<bool> {
+    let containers = object
+        .data
+        .pointer("/spec/podTemplate/spec/containers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("runtime object has no containers"))?;
+    let (_, container) = workspace_container(containers)?;
+    let env = workspace_environment(container)?;
+    let named = |name: &str| {
+        env.iter()
+            .any(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+    };
+    match (
+        named(codewire_gateway_proto::WORKSPACE_BINDING_URL_ENV),
+        named(super::template::DAEMON_AUTH_TOKEN_ENV),
+    ) {
+        (true, false) => Ok(true),
+        (false, _) => Ok(false),
+        (true, true) => anyhow::bail!("workspace identity rendering is ambiguous"),
+    }
+}
+
+/// The JSON Patch that replaces a legacy object's workspace Pod spec (and,
+/// for the template, its egress) with the identity-free rendering, bound to
+/// the validated UID and resourceVersion. `None` when already identity-free.
+fn identity_free_upgrade_patch(
+    object: &DynamicObject,
+    pod_spec: &Value,
+    network_policy: Option<&Value>,
+) -> anyhow::Result<Option<Patch<()>>> {
+    if workspace_object_identity_free(object)? {
+        return Ok(None);
+    }
+    let uid = object
+        .metadata
+        .uid
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap object has no UID"))?;
+    let version = object
+        .metadata
+        .resource_version
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap object has no resource version"))?;
+    let mut patch = vec![
+        serde_json::json!({"op":"test", "path":"/metadata/uid", "value":uid}),
+        serde_json::json!({"op":"test", "path":"/metadata/resourceVersion", "value":version}),
+        serde_json::json!({"op":"replace", "path":"/spec/podTemplate/spec", "value":pod_spec}),
+    ];
+    if let Some(network_policy) = network_policy {
+        patch.push(
+            serde_json::json!({"op":"add", "path":"/spec/networkPolicy", "value":network_policy}),
+        );
+    }
+    Ok(Some(Patch::Json(serde_json::from_value(Value::Array(
+        patch,
+    ))?)))
+}
+
 fn require_bootstrap_object(
     object: &DynamicObject,
     namespace: &str,
@@ -1909,13 +1973,17 @@ impl SandboxClient {
             .await
             .map_err(|_| anyhow::anyhow!("workspace environment template is unavailable"))?;
         require_bootstrap_object(&template, &self.namespace, &opts.name, "SandboxTemplate")?;
+        // A legacy template carries this environment's label. An
+        // identity-free template carries none (design §13); its
+        // environment-owned shadow pool, checked above, names it.
+        let template_environment = template
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(LABEL_ENV_ID));
         anyhow::ensure!(
-            template
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|labels| labels.get(LABEL_ENV_ID))
-                == Some(&opts.environment_id),
+            template_environment == Some(&opts.environment_id)
+                || (template_environment.is_none() && workspace_object_identity_free(&template)?),
             "workspace template belongs to another environment"
         );
         Ok(WorkspaceBootstrapSnapshot {
@@ -1936,6 +2004,16 @@ impl SandboxClient {
         expected_claim_uid: &str,
         expected_sandbox: &WorkspaceSandboxIdentity,
     ) -> anyhow::Result<()> {
+        if opts.identity_free() {
+            return self
+                .reconcile_identity_free_bootstrap(
+                    opts,
+                    expected_claim_name,
+                    expected_claim_uid,
+                    expected_sandbox,
+                )
+                .await;
+        }
         let expected = workspace_bootstrap_values(opts)?;
         let before = self
             .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
@@ -1945,6 +2023,45 @@ impl SandboxClient {
             sandbox_suspension_observed(&before.sandbox),
             "workspace bootstrap refresh requires current controller-completed suspension"
         );
+        // Rollback (`environment-token`) renders legacy Pods for new
+        // environments but leaves an identity-free one as it is: it keeps
+        // binding, and environment values patched into it would make its
+        // binding-mode daemon refuse to start. Only both objects count as
+        // identity-free (review L5). An upgrade interrupted between the
+        // template and the Sandbox is finished rather than skipped, so a start
+        // never resumes a legacy Sandbox beside an identity-free template and
+        // loops on its stale bootstrap.
+        match (
+            workspace_object_identity_free(&before.template)?,
+            workspace_object_identity_free(&before.sandbox)?,
+        ) {
+            (true, true) => return Ok(()),
+            (false, false) => {}
+            (true, false) | (false, true) => {
+                anyhow::ensure!(
+                    !opts.server_namespace.trim().is_empty()
+                        && opts.runtime_profile_spec().profile
+                            != super::template::RUNTIME_PROFILE_CONFIDENTIAL,
+                    "a partial workspace identity upgrade cannot be finished here"
+                );
+                let finish = TemplateOpts {
+                    workspace_identity: super::template::WorkspaceIdentity::Binding {
+                        binding_url: crate::worker::create::workspace_binding_url(
+                            opts.server_namespace.trim(),
+                        ),
+                    },
+                    ..opts.clone()
+                };
+                return self
+                    .reconcile_identity_free_bootstrap(
+                        &finish,
+                        expected_claim_name,
+                        expected_claim_uid,
+                        expected_sandbox,
+                    )
+                    .await;
+            }
+        }
         let recovery = if opts.runtime_profile_spec().profile
             == super::template::RUNTIME_PROFILE_CONFIDENTIAL
         {
@@ -2035,6 +2152,85 @@ impl SandboxClient {
                 "workspace bootstrap publication is no longer current"
             );
         }
+        Ok(())
+    }
+
+    /// Upgrade on start (design §12): with the identity mode at `binding`, the
+    /// suspended environment's template and Sandbox get the whole
+    /// identity-free workspace Pod spec (containers, init containers,
+    /// volumes, probes, current images) and the template its identity-free
+    /// egress. `volumeClaimTemplates` and the Pod template metadata are kept.
+    /// Each object is patched under UID and resourceVersion tests; an object
+    /// that is already identity-free is left alone, so a partly upgraded
+    /// environment converges on its next start. The resumed Pod then binds
+    /// with `credential_scope='pod'`.
+    async fn reconcile_identity_free_bootstrap(
+        &self,
+        opts: &TemplateOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        expected_sandbox: &WorkspaceSandboxIdentity,
+    ) -> anyhow::Result<()> {
+        let before = self
+            .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        expected_sandbox.require_match(&before.sandbox)?;
+        anyhow::ensure!(
+            sandbox_suspension_observed(&before.sandbox),
+            "workspace bootstrap refresh requires current controller-completed suspension"
+        );
+        let rendered = render_sandbox_template(&self.namespace, opts);
+        let pod_spec = rendered
+            .pointer("/spec/podTemplate/spec")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("identity-free workspace rendering has no Pod spec"))?;
+        let network_policy = rendered.pointer("/spec/networkPolicy").cloned();
+        for (object, api, network_policy) in [
+            (&before.template, self.templates(), network_policy.as_ref()),
+            (&before.sandbox, self.sandboxes(), None),
+        ] {
+            let Some(patch) = identity_free_upgrade_patch(object, &pod_spec, network_policy)?
+            else {
+                continue;
+            };
+            let name = object
+                .metadata
+                .name
+                .as_deref()
+                .expect("validated runtime name");
+            let updated = api
+                .patch(name, &PatchParams::default(), &patch)
+                .await
+                .map_err(|_| anyhow::anyhow!("workspace identity upgrade was not admitted"))?;
+            anyhow::ensure!(
+                runtime_object_uid(&updated.metadata, &self.namespace, name)?
+                    == object
+                        .metadata
+                        .uid
+                        .as_deref()
+                        .expect("validated runtime UID")
+                    && workspace_object_identity_free(&updated)?,
+                "workspace identity upgrade did not converge"
+            );
+        }
+        let after = self
+            .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        expected_sandbox.require_match(&after.sandbox)?;
+        anyhow::ensure!(
+            after
+                .sandbox
+                .data
+                .pointer("/spec/operatingMode")
+                .and_then(Value::as_str)
+                == Some("Suspended")
+                && before.pool.metadata.uid == after.pool.metadata.uid
+                && before.template.metadata.uid == after.template.metadata.uid
+                && before.sandbox.metadata.uid == after.sandbox.metadata.uid
+                && workspace_object_identity_free(&after.template)?
+                && workspace_object_identity_free(&after.sandbox)?,
+            "workspace identity upgrade is no longer current"
+        );
         Ok(())
     }
 

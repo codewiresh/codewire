@@ -10,7 +10,9 @@
 # (the in-workspace `cw` carried by the gateway image; sandboxes created
 # afterwards run it). Each image is always the gate-built base plus every
 # binary deployed since, so repeated deploys never stack layers; a new base
-# from the gate or `up` resets it.
+# from the gate or `up` resets it. credential-service also rebuilds the
+# synthetic fixture (/codewire-kind-fixtures/credential-service) that the
+# gate's fake credential mode runs, so both modes run the current source.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -31,10 +33,17 @@ crate="codewire-${SERVICE}"
 bin="$crate"
 destination=/
 features=""
+fixture=""
+fixture_features=""
 case "$SERVICE" in
   idp | billing | coordinator) ;;
   orchestration) features="kind-e2e" ;;
-  credential-service) features="enrollment,kind-e2e" ;;
+  credential-service)
+    features="enrollment,kind-e2e"
+    # Built exactly as services.Dockerfile builds the fake-mode fixture.
+    fixture=credential-service
+    fixture_features=enrollment
+    ;;
   dashboard)
     image=codewire-dashboard
     crate=codewire-dashboard-web
@@ -81,8 +90,10 @@ fi
 [[ "$base" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'the product base is not one exact Docker image ID'
 umask 077
 kind_profile_private_dir "$STATE/bin" || exit $?
-[ ! -L "$STATE" ] && [ ! -L "$STATE/bin" ] || die 'dev binary state must not be a symlink'
-mkdir -p "$STATE/bin"
+kind_profile_private_dir "$STATE/fixtures" || exit $?
+[ ! -L "$STATE" ] && [ ! -L "$STATE/bin" ] && [ ! -L "$STATE/fixtures" ] \
+  || die 'dev binary state must not be a symlink'
+mkdir -p "$STATE/bin" "$STATE/fixtures"
 if [ -e "$STATE/base" ] || [ -L "$STATE/base" ]; then
   [ -f "$STATE/base" ] && [ ! -L "$STATE/base" ] \
     && [ "$(stat -c '%h' "$STATE/base")" = 1 ] || die 'dev base state must be one regular owned file'
@@ -100,15 +111,25 @@ for binary in "$STATE/bin/"*; do
     *) die 'dev binary state contains an unknown binary' ;;
   esac
 done
+for fixture_file in "$STATE/fixtures/"*; do
+  [ -e "$fixture_file" ] || [ -L "$fixture_file" ] || continue
+  [ -f "$fixture_file" ] && [ ! -L "$fixture_file" ] \
+    || die 'dev fixture state contains an unowned file'
+  if [ "$KIND_PROFILE" = 1 ]; then
+    [ "$(stat -c '%u:%h' "$fixture_file")" = "$(id -u):1" ] \
+      || die 'dev fixture state contains a foreign or multiply linked file'
+  fi
+  [ "${fixture_file##*/}" = credential-service ] || die 'dev fixture state contains an unknown fixture'
+done
 if [ "$(cat "$STATE/base" 2>/dev/null || true)" != "$base" ]; then
   log "new base image ${base:7:12}; forgetting earlier dev binaries"
-  rm -f "$STATE/bin/"*
+  rm -f "$STATE/bin/"* "$STATE/fixtures/"*
   printf '%s\n' "$base" >"$STATE/base"
 fi
 
 docker buildx inspect "$BUILDER" >/dev/null 2>&1 \
   || docker buildx create --name "$BUILDER" --driver docker-container >/dev/null
-log "compiling ${crate} ${bin}${features:+ (features ${features})}"
+log "compiling ${crate} ${bin}${features:+ (features ${features})}${fixture:+ and the ${fixture} fixture}"
 out="$(mktemp -d "$STATE/out.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
 # One build target per worktree: crates built from another worktree's source
@@ -117,13 +138,27 @@ tree="$(printf '%s' "$ROOT" | sha256sum | cut -c1-16)"
 KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bin" KIND_DEV_FEATURES="$features" \
   docker buildx bake --builder "$BUILDER" --file "$ROOT/docker-bake.hcl" \
     --set "kind-dev-binary.args.KIND_DEV_TREE=${tree}" \
+    --set "kind-dev-binary.args.KIND_DEV_FIXTURE_FEATURES=${fixture_features}" \
     --set "kind-dev-binary.output=type=local,dest=${out}" kind-dev-binary
 [ -x "$out/$bin" ] || die "the build produced no ${bin} binary"
 install -m 0755 "$out/$bin" "$STATE/bin/$bin"
+if [ -n "$fixture" ]; then
+  [ -x "$out/kind-fixtures/$bin" ] || die "the build produced no ${fixture} fixture"
+  install -m 0755 "$out/kind-fixtures/$bin" "$STATE/fixtures/$fixture"
+fi
 
-log "layering $(cd "$STATE/bin" && echo *) onto the base image"
+shopt -s nullglob
+fixtures=("$STATE/fixtures/"*)
+shopt -u nullglob
+log "layering $(cd "$STATE/bin" && echo *)${fixtures[*]:+ and fixtures $(cd "$STATE/fixtures" && echo *)} onto the base image"
 if [ "$KIND_PROFILE" = 1 ]; then
-  content="$( { printf '%s\n' "$base"; sha256sum "$STATE/bin/"*; } | sha256sum)"
+  content="$( {
+    printf '%s\n' "$base"
+    sha256sum "$STATE/bin/"*
+    if [ "${#fixtures[@]}" -gt 0 ]; then
+      sha256sum "${fixtures[@]}"
+    fi
+  } | sha256sum)"
   content="${content%% *}"
   IMAGE="${KIND_PROFILE_IMAGE_PREFIX}-${image#codewire-}:dev-${content}"
   BASE_IMAGE="${KIND_PROFILE_IMAGE_PREFIX}-${image#codewire-}:base-${base#sha256:}"
@@ -141,8 +176,12 @@ fi
   for binary in "$STATE/bin/"*; do
     printf 'COPY %s %s%s\n' "$(basename "$binary")" "$destination" "$(basename "$binary")"
   done
+  for binary in "${fixtures[@]}"; do
+    printf 'COPY --from=fixtures %s /codewire-kind-fixtures/%s\n' "$(basename "$binary")" "$(basename "$binary")"
+  done
   printf 'LABEL %s=%s\n' "$BASE_LABEL" "$base"
-} | docker buildx build --builder default --load --quiet -t "$IMAGE" -f - "$STATE/bin" >/dev/null
+} | docker buildx build --builder default --load --quiet -t "$IMAGE" -f - \
+  --build-context "fixtures=$STATE/fixtures" "$STATE/bin" >/dev/null
 
 log "loading ${IMAGE} into ${KIND_CLUSTER_NAME}"
 kind load docker-image "$IMAGE" --name "$KIND_CLUSTER_NAME" >/dev/null

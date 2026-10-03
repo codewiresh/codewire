@@ -183,6 +183,10 @@ pub fn render_credential_gateway_certificate(
 }
 
 pub fn render_credential_codex_config(namespace: &str, opts: &TemplateOpts) -> Option<Value> {
+    // An identity-free daemon writes the Codex config from its binding.
+    if opts.identity_free() {
+        return None;
+    }
     let cfg = opts.credential_runtime.as_ref()?;
     cfg.assert_namespace(namespace);
     let projection = opts
@@ -301,6 +305,14 @@ pub(super) fn workspace_mounts(opts: &TemplateOpts) -> Vec<Value> {
 }
 
 pub(super) fn workspace_client_volumes(opts: &TemplateOpts) -> Vec<Value> {
+    // Identity-free: the memory home is shape configuration, present whether
+    // or not Codex is selected, and the daemon writes its config.toml after
+    // binding. No per-environment ConfigMap is mounted (design §13).
+    if opts.identity_free() {
+        return vec![
+            json!({"name":"credential-codex-home","emptyDir":{"medium":"Memory","sizeLimit":"256Mi"}}),
+        ];
+    }
     if !opts
         .managed_credential_clients
         .contains(ManagedCredentialClient::Codex)
@@ -314,9 +326,10 @@ pub(super) fn workspace_client_volumes(opts: &TemplateOpts) -> Vec<Value> {
 }
 
 pub(super) fn workspace_client_mounts(opts: &TemplateOpts) -> Vec<Value> {
-    if !opts
-        .managed_credential_clients
-        .contains(ManagedCredentialClient::Codex)
+    if !opts.identity_free()
+        && !opts
+            .managed_credential_clients
+            .contains(ManagedCredentialClient::Codex)
     {
         return Vec::new();
     }

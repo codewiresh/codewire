@@ -56,6 +56,57 @@ pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
     egress
 }
 
+/// The shared template egress of an identity-free workspace (design §3.5,
+/// §13): today's rules without the environment's own gateway on 8443, which
+/// `cw-daemon-net-<env>` keeps and applies once labels converge, plus exactly
+/// one new rule, TCP 8087 to orchestration Pods in the server namespace.
+pub(super) fn identity_free_workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
+    let mut egress = vec![
+        json!({
+            "to": [
+                { "ipBlock": { "cidr": "0.0.0.0/0", "except": ["10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"] } },
+                { "ipBlock": { "cidr": "::/0", "except": ["fc00::/7"] } },
+            ],
+        }),
+        json!({
+            "to": [
+                { "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } } },
+            ],
+            "ports": [
+                { "protocol": "UDP", "port": 53 },
+                { "protocol": "TCP", "port": 53 },
+            ],
+        }),
+        json!({
+            "to": [
+                {
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } },
+                    "podSelector": { "matchLabels": { "app.kubernetes.io/name": "rke2-ingress-nginx" } },
+                },
+            ],
+            "ports": [
+                { "protocol": "TCP", "port": 443 },
+                { "protocol": "TCP", "port": 80 },
+            ],
+        }),
+        json!({
+            "to": [
+                {
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
+                    "podSelector": { "matchLabels": { "app.kubernetes.io/component": "orchestration" } },
+                },
+            ],
+            "ports": [
+                { "protocol": "TCP", "port": i64::from(codewire_gateway_proto::WORKSPACE_BINDING_PORT) },
+            ],
+        }),
+    ];
+    if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
+        egress.push(rule);
+    }
+    egress
+}
+
 fn kata_coco_kbs_egress_rule(kbs_url: &str) -> Option<Value> {
     let parsed = url::Url::parse(kbs_url.trim()).ok()?;
     let host = parsed.host_str()?.trim_end_matches('.');

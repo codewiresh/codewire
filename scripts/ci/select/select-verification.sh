@@ -1303,9 +1303,9 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
-      scripts/dev/kind/dev-loop.sh)
-        # Retained-cluster review helpers that the Kind gate never runs. Their
-        # runtime-image table has a hermetic policy fixture.
+      scripts/dev/kind/dev-loop.sh|scripts/dev/kind/deploy-service.sh)
+        # Retained-cluster review helpers (`make kind-*`) that the Kind gate
+        # never runs. The runtime-image table has a hermetic policy fixture.
         select_token policy
         recognized=true
         ;;
