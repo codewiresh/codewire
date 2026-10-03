@@ -12,6 +12,11 @@ Required inputs:
   --runtime-b ABS/cw-runtime.lock.json --image-b ABS/image.json --sha256-b SHA
   --vm-state ABS/state.json --runner-socket ABS/runner.sock
 
+Before creating a VM, use --admit-only with --cw and both runtime/image inputs
+and --sha256-b. Only this mode may omit --sha256-a, deriving it from the bounded
+A receipt before complete byte admission. It accepts no runtime or model flags
+and reports asset admission, never a completed VM journey.
+
 Use the checked-in synthetic protected brokers and actual pinned guest agents.
 --synthetic-peers is component evidence only and retains that inherited limit.
 All inherited checks and cleanup remain mandatory. Source-only --self-test
@@ -218,6 +223,40 @@ def pair(a, b):
             and a.identity["source_tree_sha256"] == b.identity["source_tree_sha256"]
             and a.identity["rustc"] == b.identity["rustc"],
             "A/B do not share the qualified consumer source, target and toolchain")
+
+
+def admit_assets(args):
+    """Shared source admission; no kernel custody, runtime launch or publication."""
+    producer, image = shared_tools()
+    source_tree = producer.source_tree_sha256(ROOT)
+    pin = args.sha256_a
+    if pin is None:
+        require(args.admit_only, "runtime execution requires an explicit A digest")
+        receipt_raw, _ = regular(path_arg(args.image_a), MAX_JSON)
+        receipt = producer.parse_json(receipt_raw)
+        require(isinstance(receipt, dict) and hex_digest(receipt.get("cw_sha256")),
+                "A receipt has no canonical CW digest")
+        pin = receipt["cw_sha256"]
+    a = Asset(args.runtime_a, args.image_a, pin, producer, image, source_tree)
+    b = Asset(args.runtime_b, args.image_b, args.sha256_b, producer, image, source_tree)
+    pair(a, b)
+    cw = path_arg(args.cw)
+    host_cw, host_stamp = regular(cw, MAX_EXE)
+    require(host_stamp[2] & 0o111, "host CW is not executable")
+    admitted_host = host_identity(host_cw, producer, source_tree)
+    return producer, a, b, cw, host_stamp, admitted_host
+
+
+class SingleUse(argparse.Action):
+    """Reject repeated options and empty values before reading admission inputs."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        provided = vars(namespace).setdefault("_provided", set())
+        if self.dest in provided:
+            parser.error(f"duplicate option: {option_string}")
+        if self.nargs != 0 and not values:
+            parser.error(f"empty value for {option_string}")
+        provided.add(self.dest)
+        setattr(namespace, self.dest, self.const if self.nargs == 0 else values)
 
 
 def proc_stat(raw):
@@ -993,6 +1032,43 @@ def contract_tests(producer=None, image=None):
             (root/name).chmod(0o400)
         return str(root/"cw-runtime.lock.json"), str(root/"image.json"), digest(data)
 
+    def entrypoint_fixture(root):
+        first = root/"a"; first.mkdir(mode=0o700)
+        second = root/"b"; second.mkdir(mode=0o700)
+        a = write_fixture(first)
+        b = write_fixture(second, data=byte_fixture(version="1.0.1"))
+        host = root/"cw"; host.write_bytes(byte_fixture()[0]); host.chmod(0o500)
+        argv = [str(Path(__file__)), "--cw", str(host),
+                "--runtime-a", a[0], "--image-a", a[1],
+                "--runtime-b", b[0], "--image-b", b[1], "--sha256-b", b[2]]
+        return argv, a, b
+
+    def invoke_entrypoint(argv):
+        import contextlib
+        import io
+        current = sys.modules[__name__]
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(sys, "argv", argv))
+            stack.enter_context(mock.patch.object(sys, "stdout", output))
+            stack.enter_context(mock.patch.object(sys, "stderr", errors))
+            source = stack.enter_context(mock.patch.object(current, "shared_tools", return_value=(producer, image)))
+            stack.enter_context(mock.patch.object(producer, "source_tree_sha256", return_value="c"*64))
+            assets = stack.enter_context(mock.patch.object(current, "Asset", wraps=Asset))
+            effects = {}
+            for name, target, field in (("custody", current, "HostCustody"), ("journey", current, "Journey"),
+                                        ("product", managed.Journey, "call"), ("socket", socket, "socket"),
+                                        ("pidfd", os, "pidfd_open"), ("signals", signal, "signal"),
+                                        ("self_test", current, "contract_tests")):
+                effects[name] = stack.enter_context(mock.patch.object(
+                    target, field, side_effect=Failure("test effect boundary: "+name)))
+            effects["process"] = stack.enter_context(mock.patch("subprocess.Popen", side_effect=Failure("test process boundary")))
+            try:
+                code = main()
+            except SystemExit as error:
+                code = error.code
+        return code, output.getvalue(), errors.getvalue(), effects, source, assets
+
     class Contracts(unittest.TestCase):
         def test_complete_asset_roundtrip_uses_real_shared_admission(self):
             with tempfile.TemporaryDirectory() as name:
@@ -1032,6 +1108,135 @@ def contract_tests(producer=None, image=None):
                     self.assertFalse(proof["vm_journey_started"])
                     self.assertIn("runtime lock schema must be the integer 1",proof["failure"])
                     custody.assert_not_called(); journey.assert_not_called(); call.assert_not_called()
+
+        def test_admit_only_complete_assets_and_derived_or_explicit_a_pin_without_effects(self):
+            for explicit in (False, True):
+                with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as name:
+                    root = Path(name)
+                    argv, a, b = entrypoint_fixture(root)
+                    sentinel = root/"unrelated"; sentinel.write_bytes(b"preserve")
+                    before = {str(path):stamp(path.stat()) for path in root.rglob("*") if path.is_file()}
+                    argv += ["--admit-only"] + (["--sha256-a", a[2]] if explicit else [])
+                    code, output, errors, effects, source, assets = invoke_entrypoint(argv)
+                    self.assertEqual((code, errors), (0, ""))
+                    proof = json.loads(output)
+                    self.assertEqual(proof["status"], "admitted")
+                    self.assertEqual(proof["proof"], "asset-admission-only")
+                    self.assertEqual(proof["harness"], "scripts/dev/test-cli-native-update.py")
+                    self.assertFalse(proof["vm_journey_started"])
+                    self.assertEqual(proof["assets"]["A"]["identity"]["sha256"], a[2])
+                    self.assertEqual(proof["assets"]["B"]["identity"]["sha256"], b[2])
+                    self.assertEqual(proof["assets"]["host_cw"]["sha256"], a[2])
+                    self.assertNotEqual(proof["assets"]["A"]["identity"]["package_version"],
+                                        proof["assets"]["B"]["identity"]["package_version"])
+                    self.assertEqual(len(proof["assets"]["A"]["files"]), 4)
+                    self.assertEqual(len(proof["assets"]["B"]["files"]), 4)
+                    source.assert_called_once(); self.assertEqual(assets.call_count, 2)
+                    for effect in effects.values(): effect.assert_not_called()
+                    after = {str(path):stamp(path.stat()) for path in root.rglob("*") if path.is_file()}
+                    self.assertEqual(before, after)
+                    self.assertEqual(sentinel.read_bytes(), b"preserve")
+
+        def test_admit_only_bad_a_receipt_or_pin_refuses_without_effects(self):
+            for case in ("json", "missing", "nonstring", "false-pin", "explicit-pin", "fifo", "symlink", "hardlink", "oversize"):
+                with self.subTest(case=case), tempfile.TemporaryDirectory() as name:
+                    argv, a, _ = entrypoint_fixture(Path(name))
+                    argv += ["--admit-only"]
+                    receipt = Path(a[1])
+                    if case == "explicit-pin":
+                        argv += ["--sha256-a", "e"*64]
+                    elif case in ("fifo", "symlink"):
+                        receipt.unlink()
+                        if case == "fifo": os.mkfifo(receipt, 0o400)
+                        else: receipt.symlink_to(receipt.with_name("runtime.pack"))
+                    elif case == "hardlink":
+                        retained = receipt.with_name("retained.json")
+                        receipt.rename(retained); os.link(retained, receipt)
+                    else:
+                        value = producer.parse_json(receipt.read_bytes())
+                        if case == "missing": del value["cw_sha256"]
+                        if case == "nonstring": value["cw_sha256"] = True
+                        if case == "false-pin": value["cw_sha256"] = "e"*64
+                        raw = b"invalid-json" if case == "json" else producer.canonical(value)
+                        if case == "oversize": raw = b" "*(MAX_JSON+1)
+                        receipt.chmod(0o600); receipt.write_bytes(raw); receipt.chmod(0o400)
+                    code, output, _, effects, _, _ = invoke_entrypoint(argv)
+                    self.assertEqual(code, 1)
+                    proof = json.loads(output)
+                    self.assertEqual(proof["status"], "failed")
+                    self.assertEqual(proof["stage"], "source-admission-before-product-effects")
+                    self.assertFalse(proof["vm_journey_started"])
+                    self.assertNotIn("assets", proof)
+                    for effect in effects.values(): effect.assert_not_called()
+
+        def test_duplicate_and_empty_options_refuse_before_source_or_runtime_effects(self):
+            with tempfile.TemporaryDirectory() as name:
+                argv, a, _ = entrypoint_fixture(Path(name))
+                argv += ["--sha256-a", a[2], "--environment", "00000000-0000-4000-8000-000000000001",
+                         "--vm-state", name+"/state.json", "--runner-socket", name+"/runner.sock",
+                         "--codex-model", "fixture", "--claude-model", "fixture"]
+                for flag in ("cw", "runtime-a", "runtime-b", "image-a", "image-b", "sha256-a", "sha256-b",
+                             "environment", "vm-state", "runner-socket", "codex-model", "claude-model"):
+                    value = argv[argv.index("--"+flag)+1]
+                    with self.subTest(flag=flag):
+                        code, _, errors, effects, source, assets = invoke_entrypoint(argv+["--"+flag+"="+value])
+                        self.assertEqual(code, 2); self.assertIn("duplicate option", errors)
+                        source.assert_not_called(); assets.assert_not_called()
+                        for effect in effects.values(): effect.assert_not_called()
+                for flag in ("admit-only", "self-test", "synthetic-peers"):
+                    with self.subTest(flag=flag):
+                        code, _, errors, effects, source, assets = invoke_entrypoint(argv+["--"+flag, "--"+flag])
+                        self.assertEqual(code, 2); self.assertIn("duplicate option", errors)
+                        source.assert_not_called(); assets.assert_not_called()
+                        for effect in effects.values(): effect.assert_not_called()
+                for flag in ("cw", "sha256-a", "codex-model"):
+                    with self.subTest(empty=flag):
+                        code, _, errors, effects, source, assets = invoke_entrypoint([argv[0], "--"+flag, ""])
+                        self.assertEqual(code, 2); self.assertIn("empty value", errors)
+                        source.assert_not_called(); assets.assert_not_called()
+                        for effect in effects.values(): effect.assert_not_called()
+
+        def test_admit_only_closed_mode_and_required_inputs_refuse_before_admission(self):
+            with tempfile.TemporaryDirectory() as name:
+                argv, _, _ = entrypoint_fixture(Path(name))
+                argv += ["--admit-only"]
+                illegal = (["--environment", "00000000-0000-4000-8000-000000000001"],
+                           ["--vm-state", name+"/state.json"], ["--runner-socket", name+"/runner.sock"],
+                           ["--codex-model", "fixture"], ["--claude-model", "fixture"],
+                           ["--synthetic-peers"], ["--self-test"])
+                incomplete = []
+                for flag in ("cw", "runtime-a", "runtime-b", "image-a", "image-b", "sha256-b"):
+                    selected = list(argv); index = selected.index("--"+flag); del selected[index:index+2]
+                    incomplete.append(selected)
+                for index, selected in enumerate([argv+extra for extra in illegal]+incomplete):
+                    with self.subTest(case=index):
+                        code, output, _, effects, source, assets = invoke_entrypoint(selected)
+                        self.assertEqual(code, 2); self.assertEqual(output, "")
+                        source.assert_not_called(); assets.assert_not_called()
+                        for effect in effects.values(): effect.assert_not_called()
+
+        def test_runtime_requires_explicit_inputs_and_repeats_admission_before_custody(self):
+            with tempfile.TemporaryDirectory() as name:
+                argv, a, b = entrypoint_fixture(Path(name))
+                argv += ["--sha256-a", a[2], "--environment", "00000000-0000-4000-8000-000000000001",
+                         "--vm-state", name+"/state.json", "--runner-socket", name+"/runner.sock"]
+                for flag in ("sha256-a", "environment", "vm-state", "runner-socket"):
+                    with self.subTest(missing=flag):
+                        selected = list(argv); index = selected.index("--"+flag); del selected[index:index+2]
+                        code, output, _, effects, source, assets = invoke_entrypoint(selected)
+                        self.assertEqual(code, 2); self.assertEqual(output, "")
+                        source.assert_not_called(); assets.assert_not_called()
+                        for effect in effects.values(): effect.assert_not_called()
+                code, output, _, effects, source, assets = invoke_entrypoint(argv)
+                self.assertEqual(code, 1)
+                self.assertIn("test effect boundary: custody", json.loads(output)["failure"])
+                source.assert_called_once(); self.assertEqual(assets.call_count, 2)
+                self.assertEqual(assets.call_args_list[0].args[:3], a)
+                self.assertEqual(assets.call_args_list[1].args[:3], b)
+                effects["custody"].assert_called_once_with(name+"/state.json", name+"/runner.sock",
+                                                        "00000000-0000-4000-8000-000000000001", producer)
+                for key, effect in effects.items():
+                    if key != "custody": effect.assert_not_called()
 
         def test_rehashed_false_metadata_cannot_override_compiled_identity(self):
             for changes in ({"package_version":"1.0.1"}, {"source_revision":"e"*40},
@@ -1290,31 +1495,39 @@ def contract_tests(producer=None, image=None):
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter,
+                                   allow_abbrev=False)
     for flag in ("cw","environment","runtime-a","runtime-b","image-a","image-b","sha256-a","sha256-b",
-                 "vm-state","runner-socket"):
-        parser.add_argument("--"+flag)
-    parser.add_argument("--codex-model"); parser.add_argument("--claude-model")
-    parser.add_argument("--synthetic-peers",action="store_true")
-    parser.add_argument("--self-test",action="store_true")
+                 "vm-state","runner-socket","codex-model","claude-model"):
+        parser.add_argument("--"+flag,action=SingleUse)
+    for flag in ("synthetic-peers","self-test","admit-only"):
+        parser.add_argument("--"+flag,action=SingleUse,nargs=0,const=True,default=False)
     args=parser.parse_args()
+    provided=getattr(args,"_provided",set())
     if args.self_test:
+        if provided != {"self_test"}:
+            parser.error("--self-test accepts no admission or runtime inputs")
         return 0 if contract_tests() else 1
     if not all(getattr(args,name.replace("-","_")) for name in
-               ("cw","environment","runtime-a","runtime-b","image-a","image-b","sha256-a","sha256-b","vm-state","runner-socket")):
-        parser.error("all pinned A/B transports, host CW, environment and kernel custody inputs are required")
-    require(sys.platform.startswith("linux") and hasattr(os,"pidfd_open"), "native update acceptance requires Linux pidfds")
-    require(managed.is_uuid(args.environment), "environment must be an immutable canonical UUID")
+               ("cw","runtime-a","runtime-b","image-a","image-b","sha256-b")):
+        parser.error("both pinned A/B transports and host CW are required")
+    if args.admit_only:
+        if provided & {"environment","vm_state","runner_socket","codex_model","claude_model","synthetic_peers"}:
+            parser.error("--admit-only accepts no environment, kernel custody, model or synthetic-peer inputs")
+    else:
+        if not all(getattr(args,name) for name in ("sha256_a","environment","vm_state","runner_socket")):
+            parser.error("runtime execution requires an explicit A digest, environment and kernel custody inputs")
+        require(sys.platform.startswith("linux") and hasattr(os,"pidfd_open"), "native update acceptance requires Linux pidfds")
+        require(managed.is_uuid(args.environment), "environment must be an immutable canonical UUID")
     try:
-        producer,image=shared_tools()
-        source_tree=producer.source_tree_sha256(ROOT)
-        a=Asset(args.runtime_a,args.image_a,args.sha256_a,producer,image,source_tree)
-        b=Asset(args.runtime_b,args.image_b,args.sha256_b,producer,image,source_tree)
-        pair(a,b)
-        cw=path_arg(args.cw)
-        host_cw,host_stamp=regular(cw,MAX_EXE)
-        require(host_stamp[2] & 0o111, "host CW is not executable")
-        admitted_host=host_identity(host_cw,producer,source_tree)
+        producer,a,b,cw,host_stamp,admitted_host=admit_assets(args)
+        if args.admit_only:
+            a.unchanged(); b.unchanged()
+            require(stamp(cw.lstat()) == host_stamp, "host CW changed during source admission")
+            print(json.dumps({"status":"admitted","proof":"asset-admission-only",
+                              "harness":"scripts/dev/test-cli-native-update.py","vm_journey_started":False,
+                              "assets":{"A":a.proof(),"B":b.proof(),"host_cw":admitted_host}},indent=2))
+            return 0
         custody=HostCustody(args.vm_state,args.runner_socket,args.environment,producer)
     except Exception as error:
         print(json.dumps({"status":"failed", "harness":"scripts/dev/test-cli-native-update.py",

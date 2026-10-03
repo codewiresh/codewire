@@ -70,6 +70,16 @@ CW_COMMAND_TIMEOUT_SECONDS=180
 MANAGED_CREDENTIAL_BROKER=0
 MANAGED_AGENT_SESSIONS=0
 MANAGED_AGENT_CW_IMAGE_RECEIPT=''
+MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN=0
+MANAGED_AGENT_UPDATE=0
+MANAGED_AGENT_UPDATE_RUNTIME_LOCK=''
+MANAGED_AGENT_UPDATE_IMAGE_RECEIPT=''
+MANAGED_AGENT_UPDATE_SHA256=''
+MANAGED_AGENT_UPDATE_RUNTIME_SEEN=0
+MANAGED_AGENT_UPDATE_IMAGE_SEEN=0
+MANAGED_AGENT_UPDATE_SHA_SEEN=0
+MANAGED_AGENT_UPDATE_A_LOCK=''
+MANAGED_AGENT_UPDATE_A_SHA256=''
 CREDENTIAL_ROOT=''
 CREDENTIAL_PROFILE_NAME='native-broker'
 CREDENTIAL_ID=''
@@ -125,6 +135,9 @@ usage: smoke-native-local-environment.sh \
   --artifact-lock ABSOLUTE_LOCK_FILE \
   [--managed-credential-broker] \
   [--managed-agent-sessions --managed-agent-cw-image-receipt ABSOLUTE_IMAGE_RECEIPT] \
+  [--managed-agent-update-runtime-lock ABSOLUTE_B_LOCK \
+   --managed-agent-update-cw-image-receipt ABSOLUTE_B_IMAGE_RECEIPT \
+   --managed-agent-update-cw-sha256 B_CW_SHA256] \
   [--workspace-image-import-bin ABSOLUTE_PATH] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
@@ -173,6 +186,10 @@ Codex and Claude managed conversations before the existing revocation proof.
 It requires native acknowledgement, follow-up/resume, held-turn controls,
 guest tool execution, same-VM parent continuation, history/wait and cleanup.
 This mode retains the exact workspace-image and private credential-store gates.
+The three update inputs additionally select the running-VM A-to-B-to-A journey.
+They require both managed modes. Host and both asset identities are admitted
+before allocating scratch; the same journey repeats admission and preserves
+every existing managed-session assertion before revocation and cleanup.
 USAGE
 }
 
@@ -272,8 +289,27 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --managed-agent-cw-image-receipt)
-      [[ $# -ge 2 && -z "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]] || { usage; exit 2; }
+      [[ $# -ge 2 && -n "$2" && "$MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN=1
       MANAGED_AGENT_CW_IMAGE_RECEIPT="$2"
+      shift 2
+      ;;
+    --managed-agent-update-runtime-lock)
+      [[ $# -ge 2 && "$MANAGED_AGENT_UPDATE_RUNTIME_SEEN" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_UPDATE_RUNTIME_SEEN=1
+      MANAGED_AGENT_UPDATE_RUNTIME_LOCK="$2"
+      shift 2
+      ;;
+    --managed-agent-update-cw-image-receipt)
+      [[ $# -ge 2 && "$MANAGED_AGENT_UPDATE_IMAGE_SEEN" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_UPDATE_IMAGE_SEEN=1
+      MANAGED_AGENT_UPDATE_IMAGE_RECEIPT="$2"
+      shift 2
+      ;;
+    --managed-agent-update-cw-sha256)
+      [[ $# -ge 2 && "$MANAGED_AGENT_UPDATE_SHA_SEEN" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_UPDATE_SHA_SEEN=1
+      MANAGED_AGENT_UPDATE_SHA256="$2"
       shift 2
       ;;
     -h|--help)
@@ -291,6 +327,15 @@ done
   usage
   exit 2
 }
+
+if (( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANAGED_AGENT_UPDATE_SHA_SEEN > 0 )); then
+  [[ "$MANAGED_AGENT_UPDATE_RUNTIME_SEEN" -eq 1 && "$MANAGED_AGENT_UPDATE_IMAGE_SEEN" -eq 1 &&
+     "$MANAGED_AGENT_UPDATE_SHA_SEEN" -eq 1 && -n "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK" &&
+     -n "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT" && "$MANAGED_AGENT_UPDATE_SHA256" =~ ^[0-9a-f]{64}$ &&
+     "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "$MANAGED_AGENT_SESSIONS" -eq 1 &&
+     -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]] || { usage; exit 2; }
+  MANAGED_AGENT_UPDATE=1
+fi
 
 for tool in awk base64 cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
@@ -367,6 +412,35 @@ case ",$SCRATCH_MOUNT_OPTIONS," in
 esac
 ORIGINAL_ARTIFACT_ROOT="$ARTIFACT_ROOT"
 ORIGINAL_ARTIFACT_LOCK="$ARTIFACT_LOCK"
+
+admit_native_managed_update_assets() {
+  local admission
+  MANAGED_AGENT_UPDATE_A_LOCK="$(dirname -- "$ORIGINAL_ARTIFACT_LOCK")/cw-runtime.lock.json"
+  require_absolute_canonical_file 'managed A runtime lock' "$MANAGED_AGENT_UPDATE_A_LOCK"
+  require_absolute_canonical_file 'managed B runtime lock' "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK"
+  require_absolute_canonical_file 'managed B cw image receipt' "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT"
+  require_absolute_canonical_file 'managed native update journey' "$SOURCE_ROOT/scripts/dev/test-cli-native-update.py"
+  if ! admission="$(env -i PATH='/usr/bin:/bin' HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
+    LC_ALL=C PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$SOURCE_ROOT/scripts/dev/test-cli-native-update.py" --admit-only \
+      --cw "$CW_BIN" --runtime-a "$MANAGED_AGENT_UPDATE_A_LOCK" \
+      --image-a "$MANAGED_AGENT_CW_IMAGE_RECEIPT" \
+      --runtime-b "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK" --image-b "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT" \
+      --sha256-b "$MANAGED_AGENT_UPDATE_SHA256")"; then
+    die 'native managed update asset admission failed before scratch allocation'
+  fi
+  jq -e --arg pin "$MANAGED_AGENT_UPDATE_SHA256" '
+    .status == "admitted" and .proof == "asset-admission-only" and
+    .harness == "scripts/dev/test-cli-native-update.py" and .vm_journey_started == false and
+    (.assets.A.identity.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+    .assets.B.identity.sha256 == $pin
+  ' <<<"$admission" >/dev/null || die 'native managed update admission receipt drifted'
+  MANAGED_AGENT_UPDATE_A_SHA256="$(jq -er '.assets.A.identity.sha256' <<<"$admission")"
+}
+
+if [[ "$MANAGED_AGENT_UPDATE" -eq 1 ]]; then
+  admit_native_managed_update_assets
+fi
 
 SMOKE_ROOT="$(mktemp -d "$SMOKE_PARENT/.cwn.XXXXXX")"
 chmod 0700 "$SMOKE_ROOT"
@@ -1291,7 +1365,23 @@ run_managed_credential_broker_smoke() {
 }
 
 run_native_managed_agent_smoke() {
-  local stdout_file stderr_file
+  local stdout_file stderr_file journey expected_harness
+  local -a journey_args
+  journey="$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py"
+  expected_harness='scripts/dev/test-cli-native-managed.py'
+  journey_args=(--cw "$CW_BIN" --environment "$ENVIRONMENT_ID")
+  if [[ "$MANAGED_AGENT_UPDATE" -eq 1 ]]; then
+    journey="$SOURCE_ROOT/scripts/dev/test-cli-native-update.py"
+    expected_harness='scripts/dev/test-cli-native-update.py'
+    journey_args+=(--runtime-a "$MANAGED_AGENT_UPDATE_A_LOCK" --image-a "$MANAGED_AGENT_CW_IMAGE_RECEIPT"
+      --sha256-a "$MANAGED_AGENT_UPDATE_A_SHA256" --runtime-b "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK"
+      --image-b "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT" --sha256-b "$MANAGED_AGENT_UPDATE_SHA256"
+      --vm-state "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json"
+      --runner-socket "$STATE_ROOT/runners/$ENVIRONMENT_ID.sock")
+  else
+    journey_args+=(--cw-image-receipt "$MANAGED_AGENT_CW_IMAGE_RECEIPT")
+  fi
+  journey_args+=(--codex-model codewire-synthetic --claude-model claude-sonnet-4-6)
   COMMAND_INDEX=$((COMMAND_INDEX + 1))
   stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
   stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
@@ -1310,10 +1400,7 @@ run_native_managed_agent_smoke() {
     ALL_PROXY='http://127.0.0.1:1' NO_PROXY='127.0.0.1,localhost' \
     PYTHONDONTWRITEBYTECODE=1 \
     /usr/bin/timeout --foreground --signal=TERM --kill-after=10s 1220s \
-    python3 "$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py" \
-      --cw "$CW_BIN" --environment "$ENVIRONMENT_ID" \
-      --cw-image-receipt "$MANAGED_AGENT_CW_IMAGE_RECEIPT" \
-      --codex-model codewire-synthetic --claude-model claude-sonnet-4-6 \
+    python3 "$journey" "${journey_args[@]}" \
       >"$stdout_file" 2>"$stderr_file"; then
     cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
     cat "$stdout_file" >&2
@@ -1321,7 +1408,8 @@ run_native_managed_agent_smoke() {
     die 'native managed agent session journey failed'
   fi
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
-  jq -e '.status == "passed" and .mode == "protected-broker-actual-agents" and
+  jq -e --arg harness "$expected_harness" '.status == "passed" and
+    .harness == $harness and .mode == "protected-broker-actual-agents" and
     (.missing_acceptance | length) == 0 and (.cleanup_errors | length) == 0' \
     "$stdout_file" >/dev/null || die 'native managed agent journey receipt drifted'
   log 'native managed agent session journey passed'

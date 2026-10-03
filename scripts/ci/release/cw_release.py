@@ -74,6 +74,12 @@ SOURCE_PATHSPEC = ("*.rs", "*.toml", "*.lock", "*.proto",
                    "crates/codewire-server-core/migrations", "scripts/ci/release/cw_release.py",
                    "scripts/dev/build-cw.py", "scripts/dev/build-native-managed-agent.py",
                    "scripts/dev/cw-runtime-image.py")
+# Cargo's server-core rerun-if-changed rule names this directory. Its leaves,
+# rather than the directory name, are source-digest inputs. No other directory
+# dependency is admitted by this exception.
+SOURCE_DIRECTORY_INPUTS = ("crates/codewire-server-core/migrations",)
+MAX_SOURCE_DIRECTORY_ENTRIES = 4096
+MAX_SOURCE_DIRECTORY_DEPTH = 16
 # The closed record crates/codewire-cli/build.rs embeds once in every cw.
 BUILD_RECORD_MAGIC = b"\0codewire-cw-build-record-v1\0"
 BUILD_RECORD_FIELDS = {"package_version", "rustc", "source_revision", "source_tree_sha256", "target"}
@@ -284,15 +290,106 @@ def source_inputs(root):
     return sorted(set(name for name in names if name))
 
 
+def source_directory_inventory(root, inputs):
+    """Validate the complete, bounded inventory of known directory inputs.
+
+    Ignored entries are inspected too. Every real leaf must be regular and in
+    the digest, every covered leaf must exist, and every subdirectory must lead
+    to a covered leaf. Held directory descriptors and before/after stats refuse
+    links, replacement and mutation during enumeration. The returned stamps
+    also bind the inventory across source hashing and dep-info admission.
+    """
+    root = Path(root).absolute()
+    covered = {os.fsdecode(name) for name in inputs}
+    inventory = {}
+
+    def stamp(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    def open_directory(name, parent=None):
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        require(stat.S_ISDIR(info.st_mode), "source directory input contains a link or non-directory")
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            require(stamp(os.fstat(fd)) == stamp(info), "source directory input changed while opening")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def walk(fd, relative, expected, depth):
+        require(depth <= MAX_SOURCE_DIRECTORY_DEPTH, "source directory input exceeds its depth bound")
+        before = stamp(os.fstat(fd))
+        inventory[relative] = before
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                name = relative + "/" + entry.name
+                require(len(inventory) < MAX_SOURCE_DIRECTORY_ENTRIES,
+                        "source directory input exceeds its entry bound")
+                info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    require(any(leaf.startswith(name + "/") for leaf in expected),
+                            "source directory input contains an empty or uncovered directory")
+                    child = open_directory(entry.name, fd)
+                    try:
+                        walk(child, name, expected, depth + 1)
+                        require(stamp(os.stat(entry.name, dir_fd=fd, follow_symlinks=False)) ==
+                                stamp(os.fstat(child)), "source directory input was replaced")
+                    finally:
+                        os.close(child)
+                else:
+                    require(stat.S_ISREG(info.st_mode), "source directory input leaf is not a regular file")
+                    require(name in expected, "source directory input contains an undigested leaf")
+                    inventory[name] = stamp(info)
+        require(stamp(os.fstat(fd)) == before, "source directory input changed during enumeration")
+
+    try:
+        for relative in SOURCE_DIRECTORY_INPUTS:
+            expected = {name for name in covered if name.startswith(relative + "/")}
+            if not expected and not os.path.lexists(root / relative):
+                continue  # Small synthetic source repositories need not contain it.
+            require(root.resolve(strict=True) == root, "source directory input root is not canonical")
+            require(expected, "source directory input is empty or uncovered")
+            fds = [open_directory(root)]
+            bindings = []
+            try:
+                for part in relative.split("/"):
+                    parent = fds[-1]
+                    before = stamp(os.fstat(parent))
+                    child = open_directory(part, parent)
+                    fds.append(child)
+                    bindings.append((parent, part, child, before))
+                start = set(inventory)
+                walk(fds[-1], relative, expected, 0)
+                actual = {name for name in set(inventory) - start
+                          if stat.S_ISREG(inventory[name][2])}
+                require(actual == expected, "source directory input has missing digest leaves")
+                for parent, part, child, before in reversed(bindings):
+                    require(stamp(os.fstat(parent)) == before and
+                            stamp(os.stat(part, dir_fd=parent, follow_symlinks=False)) ==
+                            stamp(os.fstat(child)), "source directory input path changed")
+            finally:
+                for fd in reversed(fds):
+                    os.close(fd)
+    except OSError as error:
+        raise ReleaseError("source directory input cannot be safely enumerated") from error
+    return inventory
+
+
 def source_tree_sha256(root):
     """Digest of every source input the cw build compiles and its producers."""
     root = Path(root)
     digest = hashlib.sha256()
-    for raw in source_inputs(root):
+    inputs = source_inputs(root)
+    inventory = source_directory_inventory(root, inputs)
+    for raw in inputs:
         path = root / os.fsdecode(raw)
         require(not path.is_symlink() and path.is_file(), "source digest input must be a regular file")
         data = path.read_bytes()
         digest.update(raw + b"\0" + str(len(data)).encode() + b"\0" + hashlib.sha256(data).digest())
+    require(source_inputs(root) == inputs and source_directory_inventory(root, inputs) == inventory,
+            "source directory inputs changed during hashing")
     return digest.hexdigest()
 
 
@@ -361,9 +458,11 @@ def check_build_inputs(root, depinfo, allowed_outside):
     output, and the Cargo home for lockfile-checksummed dependency sources) are
     not repository inputs. Anything else is refused.
     """
+    names = source_inputs(root)
+    inventory = source_directory_inventory(root, names)
     root = Path(root).resolve()
     allowed = [Path(path).resolve() for path in allowed_outside]
-    inputs = {os.fsdecode(name) for name in source_inputs(root)}
+    inputs = {os.fsdecode(name) for name in names}
     missing, foreign, repository = [], [], 0
     for path in depinfo_inputs(depinfo):
         require(path.is_absolute(), "dep-info path is not absolute")
@@ -374,11 +473,17 @@ def check_build_inputs(root, depinfo, allowed_outside):
             foreign.append(str(path))
             continue
         repository += 1
-        if resolved.relative_to(root).as_posix() not in inputs:
-            missing.append(resolved.relative_to(root).as_posix())
+        relative = resolved.relative_to(root).as_posix()
+        if relative in SOURCE_DIRECTORY_INPUTS:
+            require(path == resolved and relative in inventory,
+                    "compiled directory input is not canonical and covered")
+        elif relative not in inputs:
+            missing.append(relative)
     require(not foreign, f"compiled inputs outside the repository and Cargo home: {sorted(foreign)[:5]}")
     require(not missing, f"compiled inputs missing from the source digest: {sorted(missing)[:8]}")
     require(repository > 0, "dep-info names no repository input")
+    require(source_inputs(root) == names and source_directory_inventory(root, names) == inventory,
+            "source directory inputs changed during dep-info admission")
     return repository
 
 

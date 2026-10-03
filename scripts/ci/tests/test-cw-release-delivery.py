@@ -2,6 +2,7 @@
 """Synthetic proof for cw release identities, transports, manifest and trust."""
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import struct
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -208,6 +210,91 @@ class DeliveryTest(unittest.TestCase):
                 release.check_build_inputs(source, self.depinfo(base, [*covered, extra]), (target, cargo))
         with self.assertRaises(release.ReleaseError):
             release.check_build_inputs(source, self.depinfo(base, [target / "out/generated.rs"]), (target, cargo))
+
+    def directory_source(self, name):
+        base = self.base / name
+        base.mkdir()
+        source, _ = fx.source_repo(base)
+        directory = source / "crates/codewire-server-core/migrations"
+        directory.mkdir(parents=True)
+        (directory / "0001.sql").write_text("create table core(id int);\n")
+        return base, source, directory
+
+    def test_complete_known_directory_is_admitted_without_changing_the_digest(self):
+        base, source, directory = self.directory_source("directory-covered")
+        (directory / "nested").mkdir()
+        (directory / "nested/0002.sql").write_text("select 2;\n")
+        (directory / ".hidden.sql").write_text("select 3;\n")
+        subprocess.run(["git", "add", "crates/codewire-server-core/migrations"], cwd=source, check=True)
+        (directory / "0003.sql").write_text("select 4;\n")  # covered untracked leaf
+        inputs = release.source_inputs(source)
+        self.assertNotIn(os.fsencode(directory.relative_to(source)), inputs)
+        expected = hashlib.sha256()
+        for raw in inputs:
+            data = (source / os.fsdecode(raw)).read_bytes()
+            expected.update(raw + b"\0" + str(len(data)).encode() + b"\0" + hashlib.sha256(data).digest())
+        self.assertEqual(release.source_tree_sha256(source), expected.hexdigest())
+        self.assertEqual(release.check_build_inputs(source, self.depinfo(base, [directory]), (base / "target",)), 1)
+        for path in (source / "crates/codewire-server-core", source / "crates/demo/src",
+                     directory / "nested", directory / "../migrations"):
+            with self.subTest(path=path), self.assertRaises(release.ReleaseError):
+                release.check_build_inputs(source, self.depinfo(base, [path]), (base / "target",))
+        alias = source / "migration-alias"; alias.symlink_to(directory)
+        with self.assertRaises(release.ReleaseError):
+            release.check_build_inputs(source, self.depinfo(base, [alias]), (base / "target",))
+
+    def test_hostile_directory_inventory_refuses_before_build_and_admission(self):
+        def ignored(source, directory):
+            (source / ".gitignore").write_text("ignored.sql\n")
+            (directory / "ignored.sql").write_text("not digested\n")
+
+        def missing(source, directory):
+            subprocess.run(["git", "add", "crates/codewire-server-core/migrations"], cwd=source, check=True)
+            (directory / "0001.sql").unlink()
+
+        def linked_parent(source, directory):
+            saved = source / "saved-core"
+            directory.parent.rename(saved)
+            directory.parent.symlink_to(saved)
+
+        changes = {
+            "ignored leaf": ignored,
+            "missing tracked leaf": missing,
+            "empty root": lambda s, d: (d / "0001.sql").unlink(),
+            "empty subdirectory": lambda s, d: (d / "empty").mkdir(),
+            "leaf symlink": lambda s, d: (d / "linked.sql").symlink_to(d / "0001.sql"),
+            "directory symlink": lambda s, d: (d / "linked").symlink_to(d),
+            "parent symlink": linked_parent,
+            "fifo": lambda s, d: os.mkfifo(d / "pipe"),
+        }
+        for index, (name, change) in enumerate(changes.items()):
+            base, source, directory = self.directory_source(f"directory-hostile-{index}")
+            change(source, directory)
+            with self.subTest(name=name):
+                with self.assertRaises(release.ReleaseError):
+                    release.source_tree_sha256(source)
+                with self.assertRaises(release.ReleaseError):
+                    release.check_build_inputs(source, self.depinfo(base, [directory]), (base / "target",))
+
+    def test_directory_bounds_and_replacement_refuse(self):
+        base, source, directory = self.directory_source("directory-bounds")
+        (directory / "nested").mkdir()
+        (directory / "nested/0002.sql").write_text("select 2;\n")
+        for limit, value in (("MAX_SOURCE_DIRECTORY_ENTRIES", 1), ("MAX_SOURCE_DIRECTORY_DEPTH", 0)):
+            with self.subTest(limit=limit), mock.patch.object(release, limit, value), self.assertRaises(release.ReleaseError):
+                release.source_tree_sha256(source)
+        original = release.depinfo_inputs
+
+        def replaced(path):
+            paths = original(path)
+            saved = source / "saved-migrations"
+            directory.rename(saved)
+            shutil.copytree(saved, directory)
+            return paths
+
+        with mock.patch.object(release, "depinfo_inputs", side_effect=replaced), self.assertRaisesRegex(
+                release.ReleaseError, "changed during dep-info admission"):
+            release.check_build_inputs(source, self.depinfo(base, [directory]), (base / "target",))
 
     def test_admission_refuses_a_source_change_during_the_build(self):
         base = self.base / "admit"
