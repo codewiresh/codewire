@@ -1,5 +1,5 @@
 use codewire_credential_service::runtime::{
-    CredentialServiceConfig, DEFAULT_LOG_FILTER, RuntimeError, run,
+    CredentialServiceConfig, DEFAULT_LOG_FILTER, RuntimeError, harden_process, run,
 };
 
 #[tokio::main]
@@ -15,6 +15,9 @@ async fn main() -> std::process::ExitCode {
         .with_current_span(false)
         .init();
     let result = async {
+        // Before any configuration, database or provider material: this
+        // process is never dumpable and never writes a core file.
+        harden_process()?;
         let config = CredentialServiceConfig::from_env()?;
         #[cfg(unix)]
         {

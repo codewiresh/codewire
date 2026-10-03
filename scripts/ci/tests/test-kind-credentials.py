@@ -518,8 +518,8 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
         response("broker_retry_exhausted", 1, 401)
         refresh()
         response("broker_retry_exhausted", 2, 400)
-        if baseline == 3:
-            response("baseline", 3, 200)
+        for attempt in range(3, baseline + 1):
+            response("baseline", attempt, 200)
         return events
 
     def provider_counts(self, events, baseline=2, restarts=0):
@@ -542,11 +542,80 @@ assert_kind_credential_provider_counts %d
 ''' % (logs, pods, baseline))
 
     def test_provider_audit_accepts_one_refresh_retry_and_closed_exhaustion(self):
-        for baseline in (2, 3):
+        for baseline in (2, 3, 5):
             with self.subTest(baseline=baseline):
                 result = self.provider_counts(self.provider_events(baseline), baseline)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "")
+        for baseline, events in ((4, 4), (5, 4), (5, 3), (3, 5)):
+            with self.subTest(baseline=baseline, events=events):
+                self.assertNotEqual(
+                    self.provider_counts(self.provider_events(events), baseline).returncode, 0)
+
+    @staticmethod
+    def reuse_lines(presented=(2, 2, 0), caches=("miss", "hit", "miss"), admitted_between=False,
+                    gap=1.5, total_ms=40):
+        fixture = [{"target": "codewire_kind_credential_fixture", "fields": {
+            "event": "provider_response", "scenario": "baseline", "attempt": attempt,
+            "status": 200, "generation": generation, "response_calls": attempt + 4,
+            "refresh_calls": 2}} for attempt, generation in zip((3, 4, 5), presented)]
+        def at(seconds):
+            whole, fraction = divmod(round(seconds * 1_000_000), 1_000_000)
+            return f"2026-10-04T00:{whole // 60:02d}:{whole % 60:02d}.{fraction:06d}Z"
+        def timed(cache, seconds):
+            read = 0 if cache == "hit" else 1
+            return {"timestamp": at(seconds), "target": "codewire_credential_broker::timing",
+                    "fields": {"event": "proxied_request", "slot": "codex", "route": "openai-api",
+                               "outcome": "response", "status": 200, "cache": cache,
+                               "total_ms": total_ms, "material_reads": read, "unwraps": read}}
+        admission = {"timestamp": at(10.5), "target": "codewire_credential_broker::timing",
+                     "fields": {"event": "epoch_admission", "outcome": "admitted"}}
+        # The earlier session's requests, then the warm-up at 10 s.
+        lines = [timed("miss", 1), timed("hit", 2), fixture[0], timed(caches[0], 10)]
+        if admitted_between:
+            lines.append(admission)
+        lines += [fixture[1], timed(caches[1], 10 + gap), fixture[2],
+                  timed(caches[2], 20 + gap)]
+        return lines
+
+    def material_reuse(self, lines):
+        logs = "\n".join(json.dumps(line) for line in lines)
+        return self.shell('''
+NS=codewire-e2e
+kubectl() {
+  [ "$*" = '-n codewire-e2e logs deployment/codewire-credential-service -c credential-service' ] ||
+    return 99
+  printf '%%s\\n' '%s'
+}
+assert_kind_credential_material_reuse
+''' % logs)
+
+    def test_material_reuse_requires_a_hit_then_the_reconnected_login(self):
+        result = self.material_reuse(self.reuse_lines())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Only a new epoch admitted between the first two requests, or a gap
+        # that can reach the two-minute window, may miss.
+        for cold in ({"admitted_between": True}, {"gap": 119.97}, {"gap": 125}):
+            with self.subTest(cold=cold):
+                result = self.material_reuse(self.reuse_lines(caches=("miss", "miss", "miss"),
+                                                              **cold))
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for lines in (
+                self.reuse_lines(caches=("miss", "miss", "miss")),
+                self.reuse_lines(caches=("hit", "hit", "miss")),
+                # A reuse after Reconnect, or the old login presented.
+                self.reuse_lines(caches=("miss", "hit", "hit")),
+                self.reuse_lines(presented=(2, 2, 2)),
+                self.reuse_lines(presented=(0, 0, 0)),
+                self.reuse_lines(presented=(2, 1, 0)),
+                self.reuse_lines(caches=("miss", "hit", "miss"), admitted_between=True),
+                self.reuse_lines(caches=("miss", "hit", "miss"), gap=125),
+                self.reuse_lines(caches=("miss", "miss", "miss"), gap=119.9),
+                self.reuse_lines()[:-1]):
+            with self.subTest(lines=lines):
+                result = self.material_reuse(lines)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("reused a login after Reconnect", result.stderr)
 
     def test_provider_audit_rejects_old_third_request_missing_refresh_and_extra_replay(self):
         correct = self.provider_events()
@@ -680,16 +749,23 @@ kind_credential_codex_login '%s' %s %s
         start = index('env --platform start "$environment"')
         redelivered = index('kind_credential_codex_login "$environment" redelivered || return $?')
         success = index('kind_credential_probe "$environment" success')
+        warm = index("assert_kind_credential_provider_counts 3")
+        reuse = index('kind_credential_probe "$environment" success', warm)
+        reconnect = index('credentials --platform connect codex --name "$credential_name" --yes')
+        reconnected = index('kind_credential_probe "$environment" success', reconnect)
+        reused = index("assert_kind_credential_material_reuse")
         revoke = index('credentials --platform revoke "$credential_name"')
         revoked = index('kind_credential_codex_login "$environment" revoked || return $?')
         destroy = index('env --platform rm "$environment"')
         # Delivery before the proxy session whose refreshes rotate it; the
         # user's own login and logout after rotation; a new container forgets
-        # the logout; revocation removes the login before destroy.
-        self.assertEqual(sorted([deliver, session, counts, rotation, own, logout, stop, start,
-                                 redelivered, success, revoke, revoked, destroy]),
-                         [deliver, session, counts, rotation, own, logout, stop, start,
-                          redelivered, success, revoke, revoked, destroy])
+        # the logout; a cached request then Reconnect precede revocation, which
+        # removes the login before destroy.
+        order = [deliver, session, counts, rotation, own, logout, stop, start, redelivered,
+                 success, warm, reuse, reconnect, reconnected, reused, revoke, revoked, destroy]
+        self.assertEqual(sorted(order), order)
+        self.assertEqual(flow.count('kind_credential_probe "$environment" success'), 3)
+        self.assertEqual(flow.count("assert_kind_credential_provider_counts 5"), 2)
         self.assertIn('login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?',
                       flow)
 

@@ -21,7 +21,9 @@ use codewire_gateway_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
 };
 use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformCredentialStore};
+use codewire_platform_credentials::{
+    EpochMaterialCache, PlatformAccessProfileStore, PlatformCredentialStore,
+};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
@@ -52,12 +54,13 @@ use crate::{
 /// bounded.
 pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS: usize = 1024;
 /// Concurrent leases across all epochs: authority checks, grant and record
-/// reads and the protected-material read (SQL and KEK unwrap). A lease runs
-/// its statements one at a time, so it holds at most one of the credential
-/// service's 16 pool connections and none during its Kubernetes reads or the
-/// unwrap. Sixty-four leases queue at most four per connection for a few
-/// statement times, far inside the pool's 5-second acquire timeout, whose
-/// expiry would end the epoch, and bound Kubernetes and OpenBao concurrency.
+/// reads and the protected-material read (SQL and KEK unwrap), or a reuse from
+/// this epoch's material cache. A lease runs its statements one at a time, so
+/// it holds at most one of the credential service's 16 pool connections and
+/// none during its Kubernetes reads or the unwrap. Sixty-four leases queue at
+/// most four per connection for a few statement times, far inside the pool's
+/// 5-second acquire timeout, whose expiry would end the epoch, and bound
+/// Kubernetes and OpenBao concurrency.
 pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
 /// Optional operations this broker serves, listed in the admitted stream's
 /// response headers. The gateway copies them into the daemon's Open, and the
@@ -387,6 +390,8 @@ where
         let provider = PlatformBrokerLeaseProvider {
             // Every epoch of this service shares its one lease budget.
             leases: Some(self.state.leases.clone()),
+            // Each epoch owns its own material cache and drops it on exit.
+            material: Some(EpochMaterialCache::new()),
             ..PlatformBrokerLeaseProvider::connect(
                 authority,
                 Arc::clone(&self.state.credentials),

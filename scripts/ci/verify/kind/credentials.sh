@@ -456,7 +456,7 @@ assert_kind_credential_provider_counts() {
     # forwarding and the broker-only retry bound have separate runtime proof.
     [.[] | select(.event == "provider_response" or .event == "provider_refresh") |
       [.event, .scenario, .attempt, .status, .response_calls, .refresh_calls]] as $observed |
-    ($baseline == 2 or $baseline == 3) and
+    ($baseline == 2 or $baseline == 3 or $baseline == 5) and
     ($observed == ([
       ["provider_response", "baseline", 1, 200, 1, 0],
       ["provider_response", "baseline", 2, 200, 2, 0],
@@ -466,7 +466,9 @@ assert_kind_credential_provider_counts() {
       ["provider_response", "broker_retry_exhausted", 1, 401, 5, 1],
       ["provider_refresh", null, null, null, 5, 2],
       ["provider_response", "broker_retry_exhausted", 2, 400, 6, 2]
-    ] + if $baseline == 3 then [["provider_response", "baseline", 3, 200, 7, 2]] else [] end))
+    ] + if $baseline >= 3 then [["provider_response", "baseline", 3, 200, 7, 2]] else [] end
+      + if $baseline == 5 then [["provider_response", "baseline", 4, 200, 8, 2],
+        ["provider_response", "baseline", 5, 200, 9, 2]] else [] end))
   ' <<<"$counts" >/dev/null || {
     echo '::error::synthetic provider retry/refresh counts differ from the exact hosted scenarios' >&2
     return 1
@@ -475,6 +477,52 @@ assert_kind_credential_provider_counts() {
     [.items[] | select(.metadata.deletionTimestamp == null)] |
     length == 1 and .[0].status.containerStatuses[0].restartCount == 0
   ' >/dev/null || { echo '::error::credential fixture restarted during acceptance' >&2; return 1; }
+}
+
+assert_kind_credential_material_reuse() {
+  # Two requests in one epoch, then Reconnect, then one more. Inside the
+  # two-minute reuse window the second request reuses the first one's login
+  # without a material read; the request after Reconnect reads and presents
+  # the new login.
+  local logs
+  logs="$(kubectl -n "$NS" logs deployment/codewire-credential-service -c credential-service)" ||
+    return $?
+  jq -Rse '
+    def seconds: capture("^(?<whole>[^.Z]+)(?<fraction>[.][0-9]+)?Z$")
+      | ((.whole + "Z") | fromdateiso8601) + ("0" + (.fraction // ".0") | tonumber);
+    [split("\n")[] | fromjson? | select(type == "object")] as $lines |
+    [$lines[] | select(.target == "codewire_kind_credential_fixture"
+      and .fields.event == "provider_response" and .fields.scenario == "baseline"
+      and .fields.attempt >= 3) | .fields | [.attempt, .status, .generation]] as $presented |
+    [$lines[] | select(.target == "codewire_credential_broker::timing")
+      | select((.fields.event == "proxied_request" and .fields.slot == "codex")
+        or (.fields.event == "epoch_admission" and .fields.outcome == "admitted"))
+      | .fields + {at: (.timestamp | seconds)}] as $timed |
+    [$timed | to_entries[] | select(.value.event == "proxied_request")] as $requests |
+    ($requests[-3].value // {}) as $warm | ($requests[-2].value // {}) as $reuse |
+    # The warm-up and the reuse present the refreshed login; Reconnect
+    # published a newly enrolled one, the fixture login generation 0.
+    ($presented | map(.[0:2])) == [[3, 200], [4, 200], [5, 200]] and
+    ($presented[0][2] | type == "number" and . > 0) and
+    $presented[1][2] == $presented[0][2] and $presented[2][2] == 0 and
+    ($requests | length >= 3) and
+    ($requests[-3:] | map(.value | [.outcome, .status])) == [["response", 200],
+      ["response", 200], ["response", 200]] and
+    ($requests[-3].value | .cache == "miss" and .material_reads >= 1) and
+    ($requests[-1].value | .cache == "miss" and .material_reads >= 1) and
+    # The warm-up filled before its line, at most its total time earlier, and
+    # the reuse leased before its own line. The value can have expired only
+    # if that bound reaches the two-minute reuse window; a new epoch admitted
+    # between them also starts cold.
+    (if (($reuse.at - $warm.at + $warm.total_ms / 1000) >= 120)
+        or any($timed[$requests[-3].key:$requests[-2].key][]; .event == "epoch_admission")
+     then $reuse.cache == "miss"
+     else ($reuse | .cache == "hit" and .material_reads == 0 and .unwraps == 0)
+     end)
+  ' <<<"$logs" >/dev/null || {
+    echo '::error::the epoch material cache did not reuse, or reused a login after Reconnect' >&2
+    return 1
+  }
 }
 
 save_kind_credential_rotation_evidence() (
@@ -718,14 +766,23 @@ kind_credential_native_smoke() (
     return $?
   # A new container forgets the logout and receives the login again.
   kind_credential_codex_login "$environment" redelivered || return $?
+  # The new epoch's first proxied request reads the login and fills its
+  # material cache; the next one, inside two minutes, reuses it. Reconnect
+  # then replaces the login: the next request must present the new one.
   kind_credential_probe "$environment" success
   assert_kind_credential_provider_counts 3
+  kind_credential_probe "$environment" success
+  kind_credential_cli credentials --platform connect codex --name "$credential_name" --yes
+  kind_credential_probe "$environment" success
+  assert_kind_credential_provider_counts 5
+  assert_kind_credential_material_reuse
+  # Revoking right after a cached use still denies the very next request.
   kind_credential_cli credentials --platform revoke "$credential_name" --output json
   kind_credential_probe "$environment" revoked
   # Revocation is an explicit denial: the daemon removes Codewire's login and
   # restores its proxy config.toml at the next check.
   kind_credential_codex_login "$environment" revoked || return $?
-  assert_kind_credential_provider_counts 3
+  assert_kind_credential_provider_counts 5
 
   # Do not unbind before destroy: terminal cleanup itself must remove the
   # binding, so a tombstone cannot permanently pin the profile and credential.

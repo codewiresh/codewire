@@ -491,3 +491,143 @@ async fn generated_service_shutdown_drains_durable_oauth_rotation() -> Result<()
 async fn trusted_receiver_drop_drains_durable_oauth_rotation_with_input_retained() -> Result<()> {
     rotation_drain(false, true).await
 }
+
+/// Answers only Codex Responses requests, with a fixed synthetic stream.
+#[derive(Clone, Default)]
+struct ResponsesUpstream(Arc<AtomicUsize>);
+
+#[async_trait]
+impl BrokerUpstreamTransport for ResponsesUpstream {
+    async fn execute(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let (method, target, _, _) = request.into_parts();
+        if method != Method::POST
+            || target.as_str() != "https://chatgpt.com/backend-api/codex/responses"
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(BrokerUpstreamResponse::new(
+            StatusCode::OK,
+            HeaderMap::new(),
+            Box::pin(stream::once(async {
+                Ok(Bytes::from_static(b"synthetic response\n"))
+            })),
+        ))
+    }
+}
+
+async fn completed_response(
+    output: &mut ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
+    request_id: &str,
+) -> Result<()> {
+    tokio::time::timeout(TIMEOUT, async {
+        let mut started = false;
+        loop {
+            let message = output
+                .next()
+                .await
+                .context("epoch ended before the response End")??;
+            match message.payload {
+                Some(v1::credential_bridge_host_message::Payload::ResponseStart(start)) => {
+                    ensure!(
+                        !started && start.request_id == request_id && start.status_code == 200,
+                        "unexpected response start (status={})",
+                        start.status_code
+                    );
+                    started = true;
+                }
+                Some(v1::credential_bridge_host_message::Payload::ResponseBody(chunk)) => {
+                    ensure!(started && chunk.request_id == request_id);
+                }
+                Some(v1::credential_bridge_host_message::Payload::ResponseEnd(end)) => {
+                    ensure!(started && end.request_id == request_id);
+                    return Ok(());
+                }
+                Some(v1::credential_bridge_host_message::Payload::ResponseFailure(failure)) => {
+                    anyhow::bail!("synthetic request failed (reason={})", failure.reason)
+                }
+                _ => anyhow::bail!("unexpected response frame"),
+            }
+        }
+    })
+    .await
+    .context("synthetic response did not complete")?
+}
+
+/// Each admitted epoch gets its own empty material cache: the first proxied
+/// request of every epoch unwraps, and later requests in that epoch reuse.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn each_admitted_epoch_starts_with_a_cold_material_cache() -> Result<()> {
+    let fixture = DatabaseFixture::create_for_bridge().await?;
+    let upstream = ResponsesUpstream::default();
+    let service = PlatformCredentialBridgeService::new(
+        Arc::new(DatabaseAuthenticator(Arc::clone(&fixture.authority))),
+        Arc::clone(&fixture.store),
+        PlatformAccessProfileStore::new(fixture.pool.clone(), builtin_provider_catalog()),
+        upstream.clone(),
+    );
+    let result = async {
+        // A login whose access token is still valid needs no refresh.
+        fixture
+            .store
+            .replace(
+                &fixture.owner,
+                &fixture.record.metadata.id,
+                fixture.record.version,
+                &crate::platform::tests::support::value(
+                    crate::platform::tests::bundle(false, "fresh").as_bytes(),
+                ),
+                None,
+            )
+            .await?;
+        let unwraps = || fixture.provider.unwrap_calls.load(Ordering::SeqCst);
+        let initial = unwraps();
+        for epoch in 1..=2 {
+            let (input, receiver) = mpsc::channel(4);
+            input
+                .send(v1::CredentialBridgeGuestMessage {
+                    payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
+                        v1::CredentialBridgeReady {
+                            protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                            environment_id: fixture.context.environment_id.to_string(),
+                            environment_generation: fixture.context.environment_generation,
+                        },
+                    )),
+                })
+                .await?;
+            let (mut output, _expires_at) = tokio::time::timeout(
+                TIMEOUT,
+                service.serve_authenticated(async {
+                    Ok((
+                        fixture.authority.clone(),
+                        ReceiverStream::new(receiver).map(Ok),
+                    ))
+                }),
+            )
+            .await
+            .context("typed database bridge admission timed out")??;
+            for request in 1..=3 {
+                let (request_id, frame) = request_frame();
+                input.send(frame).await?;
+                completed_response(&mut output, &request_id).await?;
+                ensure!(
+                    unwraps() == initial + epoch,
+                    "epoch {epoch} request {request}: expected one unwrap per epoch"
+                );
+            }
+            drop((input, output));
+        }
+        ensure!(upstream.0.load(Ordering::SeqCst) == 6);
+        Ok(())
+    }
+    .await;
+    let drained = tokio::time::timeout(TIMEOUT, service.shutdown())
+        .await
+        .context("generated service did not drain")
+        .and_then(|drained| drained.map_err(anyhow::Error::from));
+    fixture.finish(result.and(drained)).await
+}

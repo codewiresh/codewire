@@ -121,6 +121,8 @@ impl SshFixture {
             )
             .await?;
             adapter.ssh = Some(service.epoch());
+            // As in an admitted bridge epoch, which always has a cache.
+            adapter.material = Some(EpochMaterialCache::new());
             Ok::<_, anyhow::Error>((
                 Arc::new(adapter),
                 record,
@@ -272,6 +274,57 @@ async fn identities_are_public_only_and_each_signature_unwraps_and_drains_once()
         }
         Ok(())
     }.await;
+    f.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL and checked-in OpenSSH tools"]
+async fn ssh_signatures_and_ssh_key_leases_never_reuse_material_in_an_epoch() -> Result<()> {
+    let f = SshFixture::create().await?;
+    let result = async {
+        let initial = f.f.provider.unwrap_calls.load(Ordering::SeqCst);
+        const SIGNATURES: usize = 3;
+        for count in 1..=SIGNATURES {
+            let response = f
+                .adapter
+                .ssh_operation(f.request(true), CancellationToken::new())
+                .await?;
+            ensure!(matches!(
+                response,
+                v1::credential_ssh_response::Result::Signature(_)
+            ));
+            ensure!(f.f.provider.unwrap_calls.load(Ordering::SeqCst) == initial + count);
+            ensure!(
+                f.adapter
+                    .material
+                    .as_ref()
+                    .is_some_and(EpochMaterialCache::is_empty)
+            );
+        }
+        // Even an ordinary lease of an SSH key reads through every time.
+        for count in 1..=2 {
+            let (leased, timings) = crate::timing::measure(f.adapter.lease_operation(
+                Uuid::new_v4(),
+                CapabilitySlot::parse("ssh")?,
+                BrokerOperationId::parse("ssh-sign")?,
+                BrokerRouteId::parse("ssh-agent")?,
+            ))
+            .await;
+            leased?;
+            ensure!(timings.material_cache == crate::timing::MaterialCacheUse::Bypass);
+            ensure!(
+                f.f.provider.unwrap_calls.load(Ordering::SeqCst) == initial + SIGNATURES + count
+            );
+            ensure!(
+                f.adapter
+                    .material
+                    .as_ref()
+                    .is_some_and(EpochMaterialCache::is_empty)
+            );
+        }
+        Ok(())
+    }
+    .await;
     f.finish(result).await
 }
 

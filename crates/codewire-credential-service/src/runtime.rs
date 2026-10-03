@@ -5,6 +5,7 @@
 //! schema migrations and authority provisioning belong to their existing owners.
 
 mod config;
+mod hardening;
 #[cfg(test)]
 mod kind;
 mod ssh;
@@ -47,6 +48,7 @@ use crate::KubernetesPlatformBridgeAuthenticator;
 use crate::mutation::CredentialMutationOwner;
 use crate::repositories::GithubRepositoryOwner;
 pub use config::CredentialServiceConfig;
+pub use hardening::harden_process;
 
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A pooled database connection idle this long is pinged before reuse.
@@ -85,6 +87,8 @@ pub enum RuntimeError {
     Cleanup,
     #[error("credential shutdown signal unavailable")]
     Signal,
+    #[error("credential process hardening unavailable")]
+    Hardening,
 }
 
 /// Run the production service using only explicit restricted dependencies.

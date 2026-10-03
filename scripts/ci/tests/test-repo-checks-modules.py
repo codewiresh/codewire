@@ -22,6 +22,7 @@ from repo_policy import (  # noqa: E402 - dispatcher directory is the import roo
     edge_routing,
     idp_security,
     licensing,
+    material_cache,
     mesh,
     orchestration_security,
     permanent_raw,
@@ -89,6 +90,11 @@ COMMANDS = {
         False,
     ),
     "design-tokens": (design_tokens.check_design_tokens, "design tokens: OK", True),
+    "epoch-material-cache-owner": (
+        material_cache.check_epoch_material_cache_owner,
+        "epoch material cache owner: OK",
+        True,
+    ),
 }
 
 

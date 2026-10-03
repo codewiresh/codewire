@@ -1416,11 +1416,11 @@ grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
 grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 23' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 30' "$integration_runner"
 grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 4' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 3' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 4' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runner"
 grep -qF -- '--skip tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6' "$integration_runner"
@@ -2757,6 +2757,7 @@ for policy_owner in \
     'scripts/checks/repo_checks.py license-map' \
     'scripts/checks/repo_checks.py permanent-raw-surface --self-test' \
     'scripts/checks/repo_checks.py design-tokens --self-test' \
+    'scripts/checks/repo_checks.py epoch-material-cache-owner --self-test' \
     'scripts/checks/repo_checks.py rust-validation-source' \
     'scripts/checks/repo_checks.py retired-reference-source' \
     'scripts/checks/source/check-native-desktop-ui.py' \
