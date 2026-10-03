@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use codewire_access::{
     AccessProfile, AccessProfileName, CapabilitySlot, CredentialAuthKind as Kind, CredentialId,
-    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner,
+    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId,
     builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
@@ -38,6 +38,11 @@ const MARK_ORGANIZATION_DELETING: &str = "UPDATE public.organizations \
         deletion_workflow_id='organization-deletion/' || id || '/1', \
         deletion_phase='write_fenced', deletion_failure_code=NULL, \
         updated_at=clock_timestamp() WHERE id=$1";
+
+const RESTORE_ORGANIZATION: &str = "UPDATE public.organizations \
+    SET deletion_state='active', deletion_requested_by=NULL, deletion_requested_at=NULL, \
+        deletion_operation_id=NULL, deletion_workflow_id=NULL, deletion_phase=NULL, \
+        deletion_failure_code=NULL, updated_at=clock_timestamp() WHERE id=$1";
 
 fn profiles(pool: &PgPool) -> PlatformAccessProfileStore {
     PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog())
@@ -734,36 +739,63 @@ async fn restricted_binding_metadata_waits_for_atomic_rebind_and_clear() -> Resu
         let (broker, _) = db.broker_pool().await?;
         let reader = PgPoolOptions::new().max_connections(1)
             .connect_with(broker.connect_options().as_ref().clone()).await?;
-        for clear in [false, true] {
-            let mut writer = db.pool.begin().await?;
-            let holder: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
-                .fetch_one(&mut *writer).await?;
-            sqlx::query("SELECT id FROM public.environments WHERE id=$1 FOR UPDATE")
-                .bind(context.environment_id.as_str()).execute(&mut *writer).await?;
-            if clear {
+        // The separate binding read, and the two runtime authority reads that
+        // merge it into fewer statements, each wait behind the same writers.
+        for reading in ["binding metadata", "binding metadata and revision", "grants"] {
+            for clear in [false, true] {
+                // Each case starts from the personal binding and its one grant.
                 sqlx::query("DELETE FROM public.platform_environment_access_bindings WHERE environment_id=$1")
+                    .bind(context.environment_id.as_str()).execute(&db.pool).await?;
+                manager.create_binding(&context, binding(&context, &personal), Some(user.id())).await?;
+                ensure!(profiles(&reader).evaluate_grants(&context).await?.grants.len() == 1);
+                let mut writer = db.pool.begin().await?;
+                let holder: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+                    .fetch_one(&mut *writer).await?;
+                sqlx::query("SELECT id FROM public.environments WHERE id=$1 FOR UPDATE")
                     .bind(context.environment_id.as_str()).execute(&mut *writer).await?;
-            } else {
-                sqlx::query("UPDATE public.platform_environment_access_bindings SET profile_id=$2, \
-                    profile_revision=$3,personal_owner_confirmed_by=NULL WHERE environment_id=$1")
-                    .bind(context.environment_id.as_str()).bind(shared.id.as_str()).bind(1_i64)
-                    .execute(&mut *writer).await?;
-            }
-            let waiter: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
-                .fetch_one(&reader).await?;
-            let runtime = profiles(&reader);
-            let reading_context = context.clone();
-            let reading = tokio::spawn(async move { runtime.get_binding_metadata(&reading_context).await });
-            wait_blocked(&db.pool, waiter, holder).await?;
-            writer.commit().await?;
-            let observed = tokio::time::timeout(TIMEOUT, reading).await??;
-            if clear {
-                ensure!(observed == Err(ProfileError::NotFound));
-            } else {
-                let observed = observed?;
-                ensure!(observed.binding == binding(&context, &shared));
-                ensure!(observed.personal_owner_confirmed_by.is_none());
-                ensure!(profiles(&reader).evaluate_grants(&context).await?.grants.is_empty());
+                if clear {
+                    sqlx::query("DELETE FROM public.platform_environment_access_bindings WHERE environment_id=$1")
+                        .bind(context.environment_id.as_str()).execute(&mut *writer).await?;
+                } else {
+                    sqlx::query("UPDATE public.platform_environment_access_bindings SET profile_id=$2, \
+                        profile_revision=$3,personal_owner_confirmed_by=NULL WHERE environment_id=$1")
+                        .bind(context.environment_id.as_str()).bind(shared.id.as_str()).bind(1_i64)
+                        .execute(&mut *writer).await?;
+                }
+                let waiter: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+                    .fetch_one(&reader).await?;
+                let runtime = profiles(&reader);
+                let reading_context = context.clone();
+                let reading_org = org.clone();
+                let read = tokio::spawn(async move {
+                    match reading {
+                        "binding metadata" => runtime.get_binding_metadata(&reading_context).await
+                            .map(|metadata| (Some(metadata), None, None)),
+                        "binding metadata and revision" => runtime
+                            .get_binding_metadata_and_revision(&reading_context, &reading_org).await
+                            .map(|(metadata, revision)| (Some(metadata), Some(revision), None)),
+                        _ => runtime.evaluate_grants(&reading_context).await
+                            .map(|grants| (None, None, Some(grants.grants.len()))),
+                    }
+                });
+                wait_blocked(&db.pool, waiter, holder).await?;
+                writer.commit().await?;
+                let observed = tokio::time::timeout(TIMEOUT, read).await??;
+                match (reading, clear) {
+                    // Without a binding, grants fall back to the account's
+                    // GitHub connection, which this account does not have.
+                    ("grants", _) => ensure!(observed == Ok((None, None, Some(0))), "{reading} {clear}"),
+                    (_, true) => ensure!(observed.err() == Some(ProfileError::NotFound), "{reading}"),
+                    (_, false) => {
+                        let (metadata, revision, _) = observed?;
+                        let metadata = metadata.context("binding metadata")?;
+                        ensure!(metadata.binding == binding(&context, &shared));
+                        ensure!(metadata.personal_owner_confirmed_by.is_none());
+                        if let Some(revision) = revision {
+                            ensure!(revision? == shared, "{reading}");
+                        }
+                    }
+                }
             }
         }
         reader.close().await;
@@ -869,6 +901,479 @@ async fn an_environment_without_a_profile_is_granted_only_the_creators_authorize
         // Not authorized by launch authority: GitHub is omitted, not denied.
         context.authorized_credentials.clear();
         ensure!(runtime.evaluate_grants(&context).await?.grants.is_empty());
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Statement round trips of one runtime grant evaluation, counted at the wire
+/// after a warm-up evaluation has prepared every statement on the one pooled
+/// connection. Each count is exact: a change must update it deliberately.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn each_grant_evaluation_takes_a_fixed_number_of_statement_round_trips() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("round-trip-user").await?;
+        let org = db.organization("round-trip-org").await?;
+        let (broker, _) = db.broker_pool().await?;
+        let credentials = store(&broker, Arc::new(SyntheticKek::default()));
+        let codex = credentials
+            .create(&user, registration("Codex", Kind::OAuth), &value(OLD_VALUE))
+            .await?;
+        let api_key = credentials
+            .create(
+                &user,
+                registration("OpenAI", Kind::ApiKey),
+                &value(OLD_VALUE),
+            )
+            .await?;
+        let mut github = registration("GitHub", Kind::OAuth);
+        github.provider = codewire_access::ProviderId::parse("github")?;
+        let github = credentials.create(&user, github, &value(OLD_VALUE)).await?;
+        let shared = credentials
+            .create(
+                &org,
+                registration("Shared", Kind::ApiKey),
+                &value(NEW_VALUE),
+            )
+            .await?;
+        let manager = profiles(&db.pool);
+        let personal = manager
+            .create(&user, name("personal"), entries(&codex.metadata.id))
+            .await?;
+        let two = manager
+            .create(
+                &user,
+                name("two-entries"),
+                BTreeMap::from([
+                    (CapabilitySlot::codex(), codex.metadata.id.clone()),
+                    (CapabilitySlot::openai(), api_key.metadata.id.clone()),
+                ]),
+            )
+            .await?;
+        let organization = manager
+            .create(&org, name("organization"), entries(&shared.metadata.id))
+            .await?;
+        let mut cases = Vec::new();
+        // BEGIN, timeouts, owner and environment locks, binding and profile,
+        // the profile's credentials, the GitHub connection read and its lock,
+        // COMMIT. With one statement per lock and read these were 16, 18, 13
+        // and 10.
+        for (case, profile, confirmation, expected_grants, statements) in [
+            ("round-trip-personal", Some(&personal), true, 2, 8),
+            ("round-trip-two", Some(&two), true, 3, 8),
+            ("round-trip-organization", Some(&organization), false, 1, 6),
+            ("round-trip-unbound", None, false, 1, 7),
+        ] {
+            let mut context = environment(&db, &user, &org, case, &codex.metadata.id).await?;
+            context.authorized_credentials = [
+                &codex.metadata.id,
+                &api_key.metadata.id,
+                &github.metadata.id,
+                &shared.metadata.id,
+            ]
+            .into_iter()
+            .cloned()
+            .collect();
+            if let Some(profile) = profile {
+                manager
+                    .create_binding(
+                        &context,
+                        binding(&context, profile),
+                        confirmation.then_some(&context.user_id),
+                    )
+                    .await?;
+            }
+            cases.push((case, context, expected_grants, statements));
+        }
+        let (counter, pool) = StatementCounter::pool(&broker, 1).await?;
+        let runtime = profiles(&pool);
+        let mut observed = Vec::new();
+        for (case, context, expected_grants, statements) in &cases {
+            // The first evaluation prepares this path's statements.
+            ensure!(runtime.evaluate_grants(context).await?.grants.len() == *expected_grants);
+            let (grants, counted) = counter.count(runtime.evaluate_grants(context)).await;
+            ensure!(grants?.grants.len() == *expected_grants);
+            observed.push((*case, counted, *statements));
+        }
+        ensure!(
+            observed
+                .iter()
+                .all(|(_, counted, expected)| counted == expected),
+            "statement round trips per grant evaluation (case, observed, expected): {observed:?}"
+        );
+        // No statement on the path is planned large enough to be JIT-compiled.
+        ensure_cheap_plans(&db.pool, &counter.texts()).await?;
+        pool.close().await;
+        broker.close().await;
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A pool of one connection for `pool`'s login, and that connection's backend.
+async fn single_backend(pool: &PgPool) -> Result<(PgPool, i32)> {
+    let single = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await?;
+    let pid = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&single)
+        .await?;
+    Ok((single, pid))
+}
+
+/// One runtime grant and the exact binding, as admitted before any change.
+async fn admitted(
+    runtime: &PlatformAccessProfileStore,
+    context: &GrantContext,
+    profile: &AccessProfile,
+) -> Result<()> {
+    ensure!(runtime.evaluate_grants(context).await?.grants.len() == 1);
+    ensure!(runtime.get_binding_metadata(context).await?.binding == binding(context, profile));
+    let (metadata, revision) = runtime
+        .get_binding_metadata_and_revision(context, &profile.owner)
+        .await?;
+    ensure!(metadata.binding == binding(context, profile) && revision? == *profile);
+    Ok(())
+}
+
+/// The runtime binding read (merged statements) for the context's user, with
+/// its outer result only, to compare with `get_binding_metadata`.
+async fn runtime_binding(
+    runtime: &PlatformAccessProfileStore,
+    context: &GrantContext,
+) -> std::result::Result<(), ProfileError> {
+    runtime
+        .get_binding_metadata_and_revision(context, &Owner::User(context.user_id.clone()))
+        .await
+        .map(|_| ())
+}
+
+/// An administrator transaction holding `sql`'s row locks, and its backend.
+async fn hold(
+    db: &TestDatabase,
+    sql: &str,
+    id: &str,
+) -> Result<(Transaction<'static, Postgres>, i32)> {
+    let mut holder = db.pool.begin().await?;
+    let pid = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
+    sqlx::query(sql).bind(id).execute(&mut *holder).await?;
+    Ok((holder, pid))
+}
+
+/// The one-statement environment fence: each condition it decides denies on
+/// its own, with the error the separate statements returned, and a failed
+/// owner lock takes no environment lock after it.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn environment_fence_denies_each_condition_alone_and_stops_at_the_first() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("fence-user").await?;
+        let org = db.organization("fence-org").await?;
+        let other_org = db.organization("fence-other-org").await?;
+        let stranger = db.user("fence-stranger").await?;
+        let (pool, _) = db.broker_pool().await?;
+        let credentials = store(&pool, Arc::new(SyntheticKek::default()));
+        let codex = credentials
+            .create(&user, registration("Codex", Kind::OAuth), &value(OLD_VALUE))
+            .await?;
+        let context = environment(&db, &user, &org, "fence-env", &codex.metadata.id).await?;
+        let manager = profiles(&db.pool);
+        let profile = manager
+            .create(&user, name("fence"), entries(&codex.metadata.id))
+            .await?;
+        manager
+            .create_binding(
+                &context,
+                binding(&context, &profile),
+                Some(&context.user_id),
+            )
+            .await?;
+        let runtime = profiles(&pool);
+        admitted(&runtime, &context, &profile).await?;
+        // Conditions of the caller's context.
+        let mut unknown = context.clone();
+        unknown.user_id = OwnerId::parse("fence-unknown-user")?;
+        let mut not_creator = context.clone();
+        not_creator.user_id = stranger.id().clone();
+        let mut other_organization = context.clone();
+        other_organization.organization_id = Some(other_org.id().clone());
+        let mut stale = context.clone();
+        stale.environment_generation += 1;
+        for (case, changed, expected) in [
+            ("unknown user", &unknown, ProfileError::NotFound),
+            ("not the creator", &not_creator, ProfileError::NotFound),
+            (
+                "other organization",
+                &other_organization,
+                ProfileError::NotFound,
+            ),
+            ("stale generation", &stale, ProfileError::StaleEnvironment),
+        ] {
+            ensure!(
+                runtime.evaluate_grants(changed).await == Err(expected),
+                "{case}"
+            );
+            ensure!(
+                runtime.get_binding_metadata(changed).await == Err(expected),
+                "{case}"
+            );
+            ensure!(
+                runtime_binding(&runtime, changed).await == Err(expected),
+                "{case}"
+            );
+        }
+        // Conditions of the database, each restored before the next. Binding
+        // metadata does not require a running runtime; grants do.
+        let environment_id = context.environment_id.as_str();
+        for (case, change, restore, id, grants, metadata) in [
+            (
+                "organization deleting",
+                MARK_ORGANIZATION_DELETING,
+                RESTORE_ORGANIZATION,
+                org.id().as_str(),
+                ProfileError::NotFound,
+                Some(ProfileError::NotFound),
+            ),
+            (
+                "stop requested",
+                "UPDATE environments SET desired_state='stopped' WHERE id=$1",
+                "UPDATE environments SET desired_state='started' WHERE id=$1",
+                environment_id,
+                ProfileError::StaleEnvironment,
+                None,
+            ),
+            (
+                "not running",
+                "UPDATE environments SET state='stopped' WHERE id=$1",
+                "UPDATE environments SET state='running' WHERE id=$1",
+                environment_id,
+                ProfileError::StaleEnvironment,
+                None,
+            ),
+            (
+                "destroy requested",
+                "UPDATE environments SET desired_state='destroyed' WHERE id=$1",
+                "UPDATE environments SET desired_state='started' WHERE id=$1",
+                environment_id,
+                ProfileError::StaleEnvironment,
+                Some(ProfileError::StaleEnvironment),
+            ),
+            (
+                "destroyed",
+                "UPDATE environments SET state='destroyed' WHERE id=$1",
+                "UPDATE environments SET state='running' WHERE id=$1",
+                environment_id,
+                ProfileError::StaleEnvironment,
+                Some(ProfileError::StaleEnvironment),
+            ),
+            (
+                "operation advanced",
+                "UPDATE environments SET environment_operation_generation=8 WHERE id=$1",
+                "UPDATE environments SET environment_operation_generation=7 WHERE id=$1",
+                environment_id,
+                ProfileError::StaleEnvironment,
+                Some(ProfileError::StaleEnvironment),
+            ),
+        ] {
+            sqlx::query(change).bind(id).execute(&db.pool).await?;
+            ensure!(
+                runtime.evaluate_grants(&context).await == Err(grants),
+                "{case}"
+            );
+            let observed = runtime.get_binding_metadata(&context).await.map(|_| ());
+            ensure!(observed == metadata.map_or(Ok(()), Err), "{case}");
+            ensure!(
+                runtime_binding(&runtime, &context).await == observed,
+                "{case} runtime"
+            );
+            sqlx::query(restore).bind(id).execute(&db.pool).await?;
+            admitted(&runtime, &context, &profile).await.context(case)?;
+        }
+        // A writer holding the environment row delays the fence when both
+        // owners lock, and the fence then reads the committed row.
+        let (reader, waiter) = single_backend(&pool).await?;
+        let lock_environment = "SELECT id FROM environments WHERE id=$1 FOR UPDATE";
+        let (holder, holder_pid) = hold(&db, lock_environment, environment_id).await?;
+        let waiting_context = context.clone();
+        let waiting_runtime = profiles(&reader);
+        let waiting =
+            tokio::spawn(async move { waiting_runtime.evaluate_grants(&waiting_context).await });
+        wait_blocked(&db.pool, waiter, holder_pid).await?;
+        holder.rollback().await?;
+        ensure!(tokio::time::timeout(TIMEOUT, waiting).await???.grants.len() == 1);
+        // With the organization lock failing, the same held row is never
+        // waited for: the denial returns at once, not at the statement timeout.
+        sqlx::query(MARK_ORGANIZATION_DELETING)
+            .bind(org.id().as_str())
+            .execute(&db.pool)
+            .await?;
+        let (holder, _) = hold(&db, lock_environment, environment_id).await?;
+        let denied = tokio::time::timeout(
+            Duration::from_secs(2),
+            profiles(&reader).evaluate_grants(&context),
+        )
+        .await
+        .context("a failed owner lock waited for the environment lock")?;
+        ensure!(denied == Err(ProfileError::NotFound));
+        holder.rollback().await?;
+        reader.close().await;
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// The one-statement binding and profile read, the batched credential locks
+/// and the GitHub connection read: each condition they decide changes runtime
+/// grants on its own, as the separate statements did, and the credential
+/// locks stop at the first credential not found.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn bound_profile_and_credential_reads_decide_each_condition_alone() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("bound-user").await?;
+        let org = db.organization("bound-org").await?;
+        let stranger = db.user("bound-stranger").await?;
+        let (pool, _) = db.broker_pool().await?;
+        let credentials = store(&pool, Arc::new(SyntheticKek::default()));
+        let codex = credentials
+            .create(&user, registration("Codex", Kind::OAuth), &value(OLD_VALUE))
+            .await?;
+        let api_key = credentials
+            .create(&user, registration("OpenAI", Kind::ApiKey), &value(OLD_VALUE))
+            .await?;
+        let mut context = environment(&db, &user, &org, "bound-env", &codex.metadata.id).await?;
+        context.authorized_credentials.insert(api_key.metadata.id.clone());
+        let manager = profiles(&db.pool);
+        let profile = manager
+            .create(
+                &user,
+                name("bound"),
+                BTreeMap::from([
+                    (CapabilitySlot::codex(), codex.metadata.id.clone()),
+                    (CapabilitySlot::openai(), api_key.metadata.id.clone()),
+                ]),
+            )
+            .await?;
+        let bound = binding(&context, &profile);
+        manager.create_binding(&context, bound.clone(), Some(&context.user_id)).await?;
+        let runtime = profiles(&pool);
+        let slots = |grants: &codewire_access::AvailableGrants| {
+            grants.grants.iter().map(|grant| grant.capability_slot.to_string()).collect::<BTreeSet<_>>()
+        };
+        let both = BTreeSet::from(["codex".to_string(), "openai".to_string()]);
+        ensure!(slots(&runtime.evaluate_grants(&context).await?) == both);
+        // Runtime authority's two profile reads, together.
+        let (metadata, revision) =
+            runtime.get_binding_metadata_and_revision(&context, &user).await?;
+        ensure!(metadata.binding == bound && metadata.personal_owner_confirmed_by.as_ref() == Some(user.id()));
+        ensure!(revision? == runtime.get_revision(&user, &profile.id, profile.revision).await?);
+        // The bound profile belongs to the user, so the organization's
+        // revision read alone finds nothing; the binding read still succeeds.
+        let (_, revision) = runtime.get_binding_metadata_and_revision(&context, &org).await?;
+        ensure!(revision == Err(ProfileError::NotFound));
+        ensure!(
+            runtime.get_binding_metadata_and_revision(&context, &stranger).await.err()
+                == Some(ProfileError::InvalidInput)
+        );
+        // Conditions of the stored binding, profile and credentials, each
+        // restored before the next.
+        let profile_id = profile.id.as_str();
+        for (case, change, restore, id, grants) in [
+            ("profile of another owner",
+             "UPDATE platform_access_profiles SET user_id='bound-stranger' WHERE id=$1",
+             "UPDATE platform_access_profiles SET user_id='bound-user' WHERE id=$1",
+             profile_id, Err(ProfileError::NotFound)),
+            ("confirmation cleared",
+             "UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by=NULL WHERE profile_id=$1",
+             "UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by='bound-user' WHERE profile_id=$1",
+             profile_id, Err(ProfileError::UnsupportedEntry)),
+            ("credential of another owner",
+             "UPDATE platform_credentials SET user_id='bound-stranger' WHERE id=$1",
+             "UPDATE platform_credentials SET user_id='bound-user' WHERE id=$1",
+             codex.metadata.id.as_str(), Err(ProfileError::NotFound)),
+            ("credential revoked",
+             "UPDATE platform_credentials SET status='revoked' WHERE id=$1",
+             "UPDATE platform_credentials SET status='active' WHERE id=$1",
+             api_key.metadata.id.as_str(), Ok(BTreeSet::from(["codex".to_string()]))),
+        ] {
+            sqlx::query(change).bind(id).execute(&db.pool).await?;
+            let observed = runtime.evaluate_grants(&context).await.map(|grants| slots(&grants));
+            ensure!(observed == grants, "{case}: {observed:?}");
+            sqlx::query(restore).bind(id).execute(&db.pool).await?;
+            ensure!(slots(&runtime.evaluate_grants(&context).await?) == both, "{case} restored");
+        }
+        ensure!(
+            runtime.get_binding_metadata_and_revision(&context, &user).await?.1?.revision
+                == profile.revision
+        );
+        let mut personal_disallowed = context.clone();
+        personal_disallowed.allow_personal_credentials = false;
+        ensure!(runtime.evaluate_grants(&personal_disallowed).await == Err(ProfileError::UnsupportedEntry));
+        // The GitHub connection: absent, connected, expired, revoked.
+        let mut github = registration("GitHub", Kind::OAuth);
+        github.provider = codewire_access::ProviderId::parse("github")?;
+        let github = credentials.create(&user, github, &value(OLD_VALUE)).await?;
+        context.authorized_credentials.insert(github.metadata.id.clone());
+        let all = BTreeSet::from(["codex".to_string(), "github".to_string(), "openai".to_string()]);
+        ensure!(slots(&runtime.evaluate_grants(&context).await?) == all);
+        for change in ["expires_at_unix=1", "status='revoked'"] {
+            sqlx::query(&format!("UPDATE platform_credentials SET {change} WHERE id=$1"))
+                .bind(github.metadata.id.as_str()).execute(&db.pool).await?;
+            ensure!(slots(&runtime.evaluate_grants(&context).await?) == both, "{change}");
+            sqlx::query("UPDATE platform_credentials SET expires_at_unix=NULL,status='active' WHERE id=$1")
+                .bind(github.metadata.id.as_str()).execute(&db.pool).await?;
+            ensure!(slots(&runtime.evaluate_grants(&context).await?) == all, "{change} restored");
+        }
+        // No binding: only the account's GitHub connection.
+        sqlx::query("DELETE FROM platform_environment_access_bindings WHERE environment_id=$1")
+            .bind(context.environment_id.as_str()).execute(&db.pool).await?;
+        ensure!(slots(&runtime.evaluate_grants(&context).await?) == BTreeSet::from(["github".to_string()]));
+        ensure!(runtime.get_binding_metadata(&context).await == Err(ProfileError::NotFound));
+        ensure!(
+            runtime.get_binding_metadata_and_revision(&context, &user).await.err()
+                == Some(ProfileError::NotFound)
+        );
+        manager.create_binding(&context, bound.clone(), Some(&context.user_id)).await?;
+        ensure!(slots(&runtime.evaluate_grants(&context).await?) == all);
+        // The credential locks run in ID order. When the first is no longer
+        // the owner's, the second is never locked, so a writer holding it does
+        // not delay the denial. With the first restored, the same writer does.
+        let (first, second) = if codex.metadata.id < api_key.metadata.id {
+            (&codex.metadata.id, &api_key.metadata.id)
+        } else {
+            (&api_key.metadata.id, &codex.metadata.id)
+        };
+        let (reader, waiter) = single_backend(&pool).await?;
+        let lock_credential = "SELECT id FROM platform_credentials WHERE id=$1 FOR UPDATE";
+        sqlx::query("UPDATE platform_credentials SET user_id='bound-stranger' WHERE id=$1")
+            .bind(first.as_str()).execute(&db.pool).await?;
+        let (holder, holder_pid) = hold(&db, lock_credential, second.as_str()).await?;
+        let denied = tokio::time::timeout(Duration::from_secs(2), profiles(&reader).evaluate_grants(&context))
+            .await
+            .context("a missing first credential waited for the second one's lock")?;
+        ensure!(denied == Err(ProfileError::NotFound));
+        sqlx::query("UPDATE platform_credentials SET user_id='bound-user' WHERE id=$1")
+            .bind(first.as_str()).execute(&db.pool).await?;
+        let waiting_context = context.clone();
+        let waiting_runtime = profiles(&reader);
+        let waiting =
+            tokio::spawn(async move { waiting_runtime.evaluate_grants(&waiting_context).await });
+        wait_blocked(&db.pool, waiter, holder_pid).await?;
+        holder.rollback().await?;
+        ensure!(slots(&tokio::time::timeout(TIMEOUT, waiting).await???) == all);
+        reader.close().await;
         pool.close().await;
         Ok(())
     }

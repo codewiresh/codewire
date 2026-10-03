@@ -27,6 +27,20 @@
 //! not revoke bytes already returned, authenticate a sandbox, or replace the
 //! broker's per-operation grant, lifecycle, expiry and revocation checks.
 
+/// The account's active, unexpired GitHub OAuth connections for the user `$1`.
+/// At most two, so that a second connection is reported instead of a winner
+/// being picked. One text, so every statement that reads the connection reads
+/// exactly the same rows.
+macro_rules! active_github_connection_ids {
+    () => {
+        "SELECT id FROM platform_credentials \
+         WHERE user_id=$1 AND organization_id IS NULL \
+           AND provider='github' AND authentication_kind='oauth' AND status='active' \
+           AND (expires_at_unix IS NULL OR expires_at_unix>extract(epoch FROM clock_timestamp())) \
+         ORDER BY id LIMIT 2"
+    };
+}
+
 mod model;
 mod profiles;
 mod refresh;
@@ -39,8 +53,9 @@ pub use refresh::{
     PreparedOAuthRefreshResult, StartedOAuthRefresh,
 };
 pub use store::{
-    CredentialMetadataReader, PlatformCredentialStore, PreparedCredentialCreation,
-    PreparedCredentialReplacement, active_github_connection,
+    CredentialMetadataReader, OwnedCredentials, PlatformCredentialStore,
+    PreparedCredentialCreation, PreparedCredentialReplacement, active_github_connection,
+    owned_credentials_and_github_connection,
 };
 
 /// Closed, value-blind errors. SQL/provider errors are deliberately discarded:
