@@ -11,17 +11,27 @@
 //!   with exact births recorded in `.cwnm-<nonce>-custody.json`, then a held turn.
 //! - Codex or Claude `CW_FIXTURE_HOLD <8 lowercase hex>`
 //! - Codex `CW_FIXTURE_STEERABLE <8 lowercase hex>`, then `CW_FIXTURE_STEER <same nonce>`
+//! - Codex `CW_FIXTURE_UPDATE_STEERABLE <8 lowercase hex>` holds across a live
+//!   update. A separate `CW_FIXTURE_UPDATE_RELEASE <same nonce>` releases it;
+//!   the original queued `CW_FIXTURE_UPDATE_STEER <same nonce>` consumes the
+//!   scoped release evidence exactly once. Caller history cannot create it.
 //!
 //! Every stream reflects the injected value split across chunks, so the real
 //! streaming redactor must remove it. Timers live inside the response stream:
 //! a client cancellation drops them, and an uncancelled hold ends after a
 //! bounded limit with distinct expiry text rather than a success marker.
 
+use std::collections::BTreeMap;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::{StreamExt as _, stream};
+use futures::{Stream, StreamExt as _, stream};
 use serde_json::{Value, json};
+use tokio::sync::watch;
+use tokio::time::Instant;
 
 use super::{BrokerUpstreamBody, BrokerUpstreamError};
 
@@ -90,6 +100,8 @@ const CLAUDE_REMINDER_TAG: &str = "<system-reminder>";
 const HOLD_LIMIT: Duration = Duration::from_secs(120);
 /// A steerable stream completes on its own after the harness can steer it.
 const STEERABLE_DELAY: Duration = Duration::from_secs(12);
+const UPDATE_HOLD_LIMIT: Duration = Duration::from_secs(600);
+const MAXIMUM_UPDATE_REGISTRATIONS: usize = 16;
 const CLAUDE_KEEPALIVE: Duration = Duration::from_secs(15);
 /// The streaming redactor withholds a tail as long as its longest pattern;
 /// an ignored SSE comment after timed events lets them reach the client.
@@ -111,6 +123,9 @@ enum Marker {
     Hold(String),
     Steerable(String),
     Steer(String),
+    UpdateSteerable(String),
+    UpdateSteer(String),
+    UpdateRelease(String),
 }
 
 /// Marker-selected Codex Responses stream, or `None` for the canned reply.
@@ -195,6 +210,34 @@ pub(super) fn codex(
                 Planned {
                     opening: codex_created("steer", reflection)
                         + &codex_reply("steer", &format!("CW_STEERED {nonce}")),
+                    later: Later::Complete,
+                }
+            }
+            Marker::UpdateSteerable(nonce) => Planned {
+                opening: codex_created("update_hold", reflection),
+                later: Later::UpdateHold(update_register(reflection, &nonce)?),
+            },
+            Marker::UpdateRelease(nonce) => {
+                update_release(reflection, &nonce)?;
+                Planned {
+                    opening: codex_created("update_release", reflection)
+                        + &codex_reply("update_release", &format!("CW_UPDATE_RELEASE_ACK {nonce}")),
+                    later: Later::Complete,
+                }
+            }
+            Marker::UpdateSteer(nonce) => {
+                let held = format!("CW_FIXTURE_UPDATE_STEERABLE {nonce}");
+                if !earlier
+                    .iter()
+                    .filter_map(codex_user_text)
+                    .any(|text| first_line(text) == held)
+                {
+                    return Err(BrokerUpstreamError::Protocol);
+                }
+                update_consume(reflection, &nonce)?;
+                Planned {
+                    opening: codex_created("update_steer", reflection)
+                        + &codex_reply("update_steer", &format!("CW_UPDATE_STEERED {nonce}")),
                     later: Later::Complete,
                 }
             }
@@ -301,6 +344,249 @@ fn marker_line(line: &str) -> Option<Marker> {
         .or_else(|| nonce("CW_FIXTURE_CUSTODY ").map(Marker::Custody))
         .or_else(|| nonce("CW_FIXTURE_STEERABLE ").map(Marker::Steerable))
         .or_else(|| nonce("CW_FIXTURE_STEER ").map(Marker::Steer))
+        .or_else(|| nonce("CW_FIXTURE_UPDATE_STEERABLE ").map(Marker::UpdateSteerable))
+        .or_else(|| nonce("CW_FIXTURE_UPDATE_STEER ").map(Marker::UpdateSteer))
+        .or_else(|| nonce("CW_FIXTURE_UPDATE_RELEASE ").map(Marker::UpdateRelease))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct UpdateKey {
+    // The transport already validates this exact synthetic Codex credential
+    // and fixed account. Keep the full scope, without a lossy hash or logs.
+    scope: [u8; 32],
+    nonce: [u8; 8],
+}
+
+fn update_key(reflection: &str, nonce: &str) -> Result<UpdateKey, BrokerUpstreamError> {
+    let scope = reflection
+        .strip_prefix("cwlocalbroker")
+        .filter(|scope| scope.len() == 32 && hex(scope, b'a'))
+        .ok_or(BrokerUpstreamError::Protocol)?;
+    if nonce.len() != 8 || !hex(nonce, b'a') {
+        return Err(BrokerUpstreamError::Protocol);
+    }
+    Ok(UpdateKey {
+        scope: scope
+            .as_bytes()
+            .try_into()
+            .map_err(|_| BrokerUpstreamError::Protocol)?,
+        nonce: nonce
+            .as_bytes()
+            .try_into()
+            .map_err(|_| BrokerUpstreamError::Protocol)?,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UpdatePhase {
+    Held,
+    ReleasedAwaitingSteer,
+    Consumed,
+}
+
+struct UpdateEntry {
+    token: Arc<()>,
+    deadline: Instant,
+    phase: UpdatePhase,
+    normal_eof: bool,
+    released: watch::Sender<bool>,
+}
+
+type UpdateEntries = Arc<Mutex<BTreeMap<UpdateKey, UpdateEntry>>>;
+
+fn update_entries() -> &'static UpdateEntries {
+    static ENTRIES: OnceLock<UpdateEntries> = OnceLock::new();
+    ENTRIES.get_or_init(|| Arc::new(Mutex::new(BTreeMap::new())))
+}
+
+/// Construct this synchronously and move it into the whole returned body.
+/// Keeping it only in the delayed future would leak a never-polled hold.
+struct UpdateRegistration {
+    entries: UpdateEntries,
+    key: UpdateKey,
+    token: Arc<()>,
+    deadline: Instant,
+    released: watch::Receiver<bool>,
+    retained_after_eof: bool,
+}
+
+impl UpdateRegistration {
+    fn waiter(&self) -> UpdateWaiter {
+        UpdateWaiter {
+            entries: self.entries.clone(),
+            key: self.key,
+            token: self.token.clone(),
+            deadline: self.deadline,
+            released: self.released.clone(),
+        }
+    }
+
+    fn normal_eof(&mut self) {
+        if self.retained_after_eof {
+            return;
+        }
+        if let Ok(mut entries) = self.entries.lock()
+            && let Some(entry) = entries.get_mut(&self.key)
+            && Arc::ptr_eq(&entry.token, &self.token)
+            && entry.deadline > Instant::now()
+            && entry.phase == UpdatePhase::ReleasedAwaitingSteer
+        {
+            entry.normal_eof = true;
+            self.retained_after_eof = true;
+        }
+    }
+}
+
+impl Drop for UpdateRegistration {
+    fn drop(&mut self) {
+        if !self.retained_after_eof
+            && let Ok(mut entries) = self.entries.lock()
+            && entries
+                .get(&self.key)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.token, &self.token))
+        {
+            entries.remove(&self.key);
+        }
+    }
+}
+
+struct UpdateWaiter {
+    entries: UpdateEntries,
+    key: UpdateKey,
+    token: Arc<()>,
+    deadline: Instant,
+    released: watch::Receiver<bool>,
+}
+
+impl UpdateWaiter {
+    async fn wait(mut self) -> Result<bool, BrokerUpstreamError> {
+        loop {
+            {
+                let entries = self
+                    .entries
+                    .lock()
+                    .map_err(|_| BrokerUpstreamError::Protocol)?;
+                let Some(entry) = entries
+                    .get(&self.key)
+                    .filter(|entry| Arc::ptr_eq(&entry.token, &self.token))
+                else {
+                    return Ok(false);
+                };
+                if Instant::now() >= entry.deadline {
+                    return Ok(false);
+                }
+                if entry.phase == UpdatePhase::ReleasedAwaitingSteer {
+                    return Ok(true);
+                }
+                if entry.phase != UpdatePhase::Held {
+                    return Err(BrokerUpstreamError::Protocol);
+                }
+            }
+            // watch latches a release sent before the body/receiver's first
+            // poll. The original absolute deadline is never extended.
+            tokio::select! {
+                changed = self.released.changed() => {
+                    if changed.is_err() { return Ok(false); }
+                }
+                _ = tokio::time::sleep_until(self.deadline) => {}
+            }
+        }
+    }
+}
+
+fn update_register(
+    reflection: &str,
+    nonce: &str,
+) -> Result<UpdateRegistration, BrokerUpstreamError> {
+    let key = update_key(reflection, nonce)?;
+    let entries = update_entries().clone();
+    let mut locked = entries.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
+    let now = Instant::now();
+    // Expiry is the only implicit retirement. Never evict live/released/
+    // consumed evidence merely to make room for another uncertain caller.
+    locked.retain(|_, entry| entry.deadline > now);
+    if locked.contains_key(&key) || locked.len() >= MAXIMUM_UPDATE_REGISTRATIONS {
+        return Err(BrokerUpstreamError::Protocol);
+    }
+    let token = Arc::new(());
+    let deadline = now + UPDATE_HOLD_LIMIT;
+    let (released, receiver) = watch::channel(false);
+    locked.insert(
+        key,
+        UpdateEntry {
+            token: token.clone(),
+            deadline,
+            phase: UpdatePhase::Held,
+            normal_eof: false,
+            released,
+        },
+    );
+    drop(locked);
+    Ok(UpdateRegistration {
+        entries,
+        key,
+        token,
+        deadline,
+        released: receiver,
+        retained_after_eof: false,
+    })
+}
+
+fn update_release(reflection: &str, nonce: &str) -> Result<(), BrokerUpstreamError> {
+    let key = update_key(reflection, nonce)?;
+    let mut entries = update_entries()
+        .lock()
+        .map_err(|_| BrokerUpstreamError::Protocol)?;
+    let entry = entries
+        .get_mut(&key)
+        .filter(|entry| entry.deadline > Instant::now() && entry.phase == UpdatePhase::Held)
+        .ok_or(BrokerUpstreamError::Protocol)?;
+    entry.phase = UpdatePhase::ReleasedAwaitingSteer;
+    entry.released.send_replace(true);
+    Ok(())
+}
+
+fn update_consume(reflection: &str, nonce: &str) -> Result<(), BrokerUpstreamError> {
+    let key = update_key(reflection, nonce)?;
+    let mut entries = update_entries()
+        .lock()
+        .map_err(|_| BrokerUpstreamError::Protocol)?;
+    let entry = entries
+        .get_mut(&key)
+        .filter(|entry| {
+            entry.deadline > Instant::now()
+                && entry.phase == UpdatePhase::ReleasedAwaitingSteer
+                && entry.normal_eof
+        })
+        .ok_or(BrokerUpstreamError::Protocol)?;
+    entry.phase = UpdatePhase::Consumed;
+    Ok(())
+}
+
+struct UpdateHeldBody {
+    inner: BrokerUpstreamBody,
+    registration: Option<UpdateRegistration>,
+}
+
+impl Stream for UpdateHeldBody {
+    type Item = Result<Bytes, BrokerUpstreamError>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let next = this.inner.as_mut().poll_next(context);
+        match &next {
+            Poll::Ready(None) => {
+                if let Some(registration) = &mut this.registration {
+                    registration.normal_eof();
+                }
+            }
+            Poll::Ready(Some(Err(_))) => {
+                this.registration.take();
+            }
+            _ => {}
+        }
+        next
+    }
 }
 
 fn hex(value: &str, letters: u8) -> bool {
@@ -591,6 +877,7 @@ enum Later {
         keepalive: Option<(Duration, String)>,
         expiry: String,
     },
+    UpdateHold(UpdateRegistration),
 }
 
 impl Planned {
@@ -614,6 +901,24 @@ impl Planned {
                 tokio::time::sleep(delay).await;
                 Ok(Bytes::from(tail))
             }))),
+            Later::UpdateHold(registration) => {
+                let waiter = registration.waiter();
+                let nonce = String::from_utf8(registration.key.nonce.to_vec())
+                    .map_err(|_| BrokerUpstreamError::Protocol)?;
+                let later = stream::once(async move {
+                    let released = waiter.wait().await?;
+                    let text = if released {
+                        format!("CW_UPDATE_RELEASED {nonce}")
+                    } else {
+                        format!("CW_UPDATE_HOLD_EXPIRED {nonce}")
+                    };
+                    Ok(Bytes::from(codex_reply("update_hold", &text)))
+                });
+                Box::pin(UpdateHeldBody {
+                    inner: Box::pin(opening.chain(later)),
+                    registration: Some(registration),
+                })
+            }
             Later::Hold { keepalive, expiry } => {
                 let (every, ping) = keepalive
                     .map_or((Duration::ZERO, Bytes::new()), |(every, ping)| {
@@ -645,6 +950,7 @@ impl Planned {
 mod tests {
     use av_credential_proxy::{RedactionSet, StreamingRedactor};
     use codewire_access::CredentialAuthKind;
+    use futures::FutureExt as _;
     use http::{HeaderMap, HeaderName, HeaderValue, Method};
     use tokio::time::{Instant, timeout};
     use url::Url;
@@ -662,6 +968,7 @@ mod tests {
     const CODEX_KEY: &str = "cwlocalbroker0123456789abcdef0123456789abcdef";
     const OPENAI_KEY: &str = "cwlocalopenai0123456789abcdef0123456789abcdef";
     const ANTHROPIC_KEY: &str = "cwlocalanthropic0123456789abcdef0123456789abcdef";
+    const OTHER_CODEX_KEY: &str = "cwlocalbrokerfedcba9876543210fedcba9876543210";
     const TOOL_COMMAND: &str =
         "printf %s CW_TOOL_MARKER_0123456789ABCDEF > .cwnm-0a1b2c3d-tool-marker";
     const CALL_ID: &str = "call_cw_tool_0123456789abcdef";
@@ -907,6 +1214,77 @@ mod tests {
             .filter(|event| event["type"] == "response.output_item.done")
             .map(|event| event["item"]["content"][0]["text"].as_str().unwrap())
             .collect()
+    }
+
+    /// Registry tests share the production process-local registry. Serialize
+    /// them before constructing each paused runtime; retire only expired
+    /// evidence through the real authenticated transport after the assertions.
+    fn update_test(body: impl std::future::Future<Output = ()>) {
+        static TEST_LOCK: Mutex<()> = Mutex::new(());
+        let _serial = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let result = std::panic::AssertUnwindSafe(body).catch_unwind().await;
+            tokio::time::advance(Duration::from_secs(601)).await;
+            let request = update_request("STEERABLE", "0fffffff");
+            let cleanup = SyntheticOpenAiSmokeTransport.execute(request).await;
+            match cleanup {
+                Ok(response) => drop(response), // exact new body guard removes its own entry
+                Err(_) if result.is_ok() => panic!("update fixture cleanup was refused"),
+                Err(_) => {}
+            }
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
+            }
+        });
+    }
+
+    fn update_request(action: &str, nonce: &str) -> BrokerUpstreamRequest {
+        codex_request(&codex_body(
+            vec![user(&format!("CW_FIXTURE_UPDATE_{action} {nonce}"))],
+            Vec::new(),
+        ))
+    }
+
+    fn update_steer_request(nonce: &str) -> BrokerUpstreamRequest {
+        codex_request(&codex_body(
+            vec![
+                user(&format!("CW_FIXTURE_UPDATE_STEERABLE {nonce}")),
+                json!({"type":"message", "role":"assistant", "content":[{
+                    "type":"output_text", "text":format!("CW_UPDATE_RELEASED {nonce}")
+                }]}),
+                user(&format!("CW_FIXTURE_UPDATE_STEER {nonce}")),
+            ],
+            Vec::new(),
+        ))
+    }
+
+    fn with_codex_scope(
+        mut request: BrokerUpstreamRequest,
+        key: &'static str,
+    ) -> BrokerUpstreamRequest {
+        request.headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {key}")).unwrap(),
+        );
+        request
+    }
+
+    fn response_client(response: crate::runtime::BrokerUpstreamResponse) -> Client {
+        let (_, _, body) = response.into_parts();
+        let redaction = RedactionSet::new([CODEX_KEY.to_owned(), format!("Bearer {CODEX_KEY}")]);
+        Client {
+            body,
+            redaction: Box::new(redaction.into_streaming()),
+            key: CODEX_KEY,
+            received: String::new(),
+        }
     }
 
     #[test]
@@ -1498,6 +1876,429 @@ with original_open(path, 'rb') as receipt:
             ]
         );
         assert_eq!(reply_text(&events), ["CW_HOLD_EXPIRED 0a1b2c3d"]);
+    }
+
+    #[test]
+    fn codex_update_release_latches_before_the_held_body_first_poll() {
+        update_test(async {
+            let held =
+                user("CW_FIXTURE_UPDATE_STEERABLE 9a1b2c3d\nWait for the queued native steer.");
+            let held_body = codex_body(vec![held.clone()], Vec::new());
+            let client = Client::start(codex_request(&held_body), CODEX_KEY).await;
+            let release_body =
+                codex_body(vec![user("CW_FIXTURE_UPDATE_RELEASE 9a1b2c3d")], Vec::new());
+            let release = Client::start(codex_request(&release_body), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&release)),
+                ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+            );
+            let released = client.finish().await;
+            assert_eq!(
+                reply_text(&events(&released)),
+                ["CW_UPDATE_RELEASED 9a1b2c3d"]
+            );
+            let next = codex_body(
+                vec![held, user("CW_FIXTURE_UPDATE_STEER 9a1b2c3d")],
+                Vec::new(),
+            );
+            let steered = Client::start(codex_request(&next), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&steered)),
+                ["CW_UPDATE_STEERED 9a1b2c3d"]
+            );
+            assert!(!release.contains("CW_UPDATE_STEERED"));
+            assert!(!released.contains("CW_UPDATE_STEERED"));
+            assert_eq!(
+                events(&released)[0]["response"]["metadata"]["broker"],
+                "[REDACTED]"
+            );
+            assert!(rejected(update_request("RELEASE", "9a1b2c3d")).await);
+            assert!(rejected(update_steer_request("9a1b2c3d")).await);
+            assert!(rejected(update_request("STEERABLE", "9a1b2c3d")).await);
+            assert_eq!(
+                tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks(),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn codex_update_grammar_and_existing_route_authority_are_closed() {
+        update_test(async {
+            for action in ["STEERABLE", "STEER", "RELEASE"] {
+                for bad in [
+                    "",
+                    "9a1b2c3",
+                    "9a1b2c3d4",
+                    "9A1B2C3D",
+                    "9a1b2c3g",
+                    " 9a1b2c3d",
+                    "9a1b2c3d ",
+                    "../9a1b2c3d",
+                    "9a1b2c3d; exit",
+                    "9a1b2c3d\r\nWait.",
+                ] {
+                    assert!(rejected(update_request(action, bad)).await);
+                }
+                let mut account = update_request(action, "9a1b2c3d");
+                account.headers.insert(
+                    "chatgpt-account-id",
+                    HeaderValue::from_static("account-other"),
+                );
+                assert!(rejected(account).await);
+                let mut api_key = update_request(action, "9a1b2c3d");
+                api_key.target = Url::parse("https://api.openai.com/v1/responses").unwrap();
+                api_key.headers.remove("chatgpt-account-id");
+                assert!(rejected(with_codex_scope(api_key, OPENAI_KEY)).await);
+                let claude = claude_body(
+                    json!([{"role":"user", "content":format!("CW_FIXTURE_UPDATE_{action} 9a1b2c3d")}]),
+                );
+                assert!(rejected(claude_request(&claude)).await);
+            }
+            // Every refused request above must leave the same nonce available.
+            let held = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            drop(held);
+        });
+    }
+
+    #[test]
+    fn codex_update_unknown_or_fabricated_history_cannot_create_release_evidence() {
+        update_test(async {
+            assert!(rejected(update_request("RELEASE", "9a1b2c3d")).await);
+            assert!(rejected(update_steer_request("9a1b2c3d")).await);
+            let client = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            assert!(rejected(update_steer_request("9a1b2c3d")).await);
+            let ack = Client::start(update_request("RELEASE", "9a1b2c3d"), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&ack)),
+                ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+            );
+            assert!(rejected(update_steer_request("9a1b2c3d")).await); // body has not reached EOF
+            let released = client.finish().await;
+            assert_eq!(
+                reply_text(&events(&released)),
+                ["CW_UPDATE_RELEASED 9a1b2c3d"]
+            );
+            let latest = user("CW_FIXTURE_UPDATE_STEER 9a1b2c3d");
+            for earlier in [
+                Vec::new(),
+                vec![user("CW_FIXTURE_UPDATE_STEERABLE 9a1b2c3e")],
+                vec![user("[Codewire] note CW_FIXTURE_UPDATE_STEERABLE 9a1b2c3d")],
+                vec![
+                    json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"CW_FIXTURE_UPDATE_STEERABLE 9a1b2c3d"}]}),
+                ],
+            ] {
+                let mut history = earlier;
+                history.push(latest.clone());
+                assert!(rejected(codex_request(&codex_body(history, Vec::new()))).await);
+            }
+            let success = Client::start(update_steer_request("9a1b2c3d"), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&success)),
+                ["CW_UPDATE_STEERED 9a1b2c3d"]
+            );
+            assert!(rejected(update_steer_request("9a1b2c3d")).await);
+        });
+    }
+
+    #[test]
+    fn codex_update_protected_scopes_with_the_same_nonce_are_independent() {
+        update_test(async {
+            let mut original =
+                Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            original.read(2).await;
+            assert!(
+                rejected(with_codex_scope(
+                    update_request("RELEASE", "9a1b2c3d"),
+                    OTHER_CODEX_KEY
+                ))
+                .await
+            );
+            assert!(
+                rejected(with_codex_scope(
+                    update_steer_request("9a1b2c3d"),
+                    OTHER_CODEX_KEY
+                ))
+                .await
+            );
+            let other = Client::start(
+                with_codex_scope(update_request("STEERABLE", "9a1b2c3d"), OTHER_CODEX_KEY),
+                OTHER_CODEX_KEY,
+            )
+            .await;
+            let ack = Client::start(
+                with_codex_scope(update_request("RELEASE", "9a1b2c3d"), OTHER_CODEX_KEY),
+                OTHER_CODEX_KEY,
+            )
+            .await
+            .finish()
+            .await;
+            assert_eq!(
+                reply_text(&events(&ack)),
+                ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+            );
+            assert!(
+                timeout(Duration::from_secs(1), original.body.next())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                reply_text(&events(&other.finish().await)),
+                ["CW_UPDATE_RELEASED 9a1b2c3d"]
+            );
+            let steered = Client::start(
+                with_codex_scope(update_steer_request("9a1b2c3d"), OTHER_CODEX_KEY),
+                OTHER_CODEX_KEY,
+            )
+            .await
+            .finish()
+            .await;
+            assert_eq!(
+                reply_text(&events(&steered)),
+                ["CW_UPDATE_STEERED 9a1b2c3d"]
+            );
+            assert!(rejected(update_steer_request("9a1b2c3d")).await);
+            drop(original);
+        });
+    }
+
+    #[test]
+    fn codex_update_drop_before_first_poll_removes_only_that_registration() {
+        update_test(async {
+            let held = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            drop(held);
+            assert!(rejected(update_request("RELEASE", "9a1b2c3d")).await);
+            assert!(rejected(update_steer_request("9a1b2c3d")).await);
+            let mut held = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            held.read(2).await;
+            assert!(
+                timeout(Duration::from_secs(30), held.body.next())
+                    .await
+                    .is_err()
+            );
+            drop(held);
+            assert!(rejected(update_request("RELEASE", "9a1b2c3d")).await);
+            assert!(rejected(update_steer_request("9a1b2c3d")).await);
+            assert_eq!(
+                tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks(),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn codex_update_abandoning_a_released_body_does_not_fabricate_normal_eof() {
+        update_test(async {
+            for read in [0, 3] {
+                let mut held =
+                    Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+                let ack = Client::start(update_request("RELEASE", "9a1b2c3d"), CODEX_KEY)
+                    .await
+                    .finish()
+                    .await;
+                assert_eq!(
+                    reply_text(&events(&ack)),
+                    ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+                );
+                held.read(read).await; // even a delivered completion chunk is not EOF
+                drop(held);
+                assert!(rejected(update_steer_request("9a1b2c3d")).await);
+                assert!(rejected(update_request("RELEASE", "9a1b2c3d")).await);
+            }
+        });
+    }
+
+    #[test]
+    fn codex_update_deadline_starts_at_registration_and_never_becomes_success() {
+        update_test(async {
+            let start = Instant::now();
+            let held = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            tokio::time::advance(Duration::from_secs(599)).await;
+            let mut held = held;
+            held.read(2).await;
+            let expired = held.finish().await;
+            assert_eq!(start.elapsed(), Duration::from_secs(600));
+            assert_eq!(
+                reply_text(&events(&expired)),
+                ["CW_UPDATE_HOLD_EXPIRED 9a1b2c3d"]
+            );
+            assert!(!expired.contains("CW_UPDATE_STEERED"));
+            assert!(rejected(update_request("RELEASE", "9a1b2c3d")).await);
+            assert!(rejected(update_steer_request("9a1b2c3d")).await);
+        });
+    }
+
+    #[test]
+    fn codex_update_expiry_release_races_cannot_yield_a_steered_marker() {
+        update_test(async {
+            for release_before in [false, true] {
+                let held = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+                tokio::time::advance(Duration::from_secs(599)).await;
+                if release_before {
+                    let ack = Client::start(update_request("RELEASE", "9a1b2c3d"), CODEX_KEY)
+                        .await
+                        .finish()
+                        .await;
+                    assert_eq!(
+                        reply_text(&events(&ack)),
+                        ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+                    );
+                }
+                tokio::time::advance(Duration::from_secs(1)).await;
+                assert!(rejected(update_request("RELEASE", "9a1b2c3d")).await);
+                let expired = held.finish().await;
+                assert_eq!(
+                    reply_text(&events(&expired)),
+                    ["CW_UPDATE_HOLD_EXPIRED 9a1b2c3d"]
+                );
+                assert!(rejected(update_steer_request("9a1b2c3d")).await);
+            }
+            let held = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            let ack = Client::start(update_request("RELEASE", "9a1b2c3d"), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&ack)),
+                ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+            );
+            assert_eq!(
+                reply_text(&events(&held.finish().await)),
+                ["CW_UPDATE_RELEASED 9a1b2c3d"]
+            );
+            tokio::time::advance(Duration::from_secs(600)).await;
+            assert!(rejected(update_steer_request("9a1b2c3d")).await); // retained EOF is still bounded
+        });
+    }
+
+    #[test]
+    fn codex_update_an_expired_guard_cannot_delete_a_newer_same_nonce_hold() {
+        update_test(async {
+            let old = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            tokio::time::advance(Duration::from_secs(600)).await;
+            let current = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            drop(old);
+            let ack = Client::start(update_request("RELEASE", "9a1b2c3d"), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&ack)),
+                ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+            );
+            assert_eq!(
+                reply_text(&events(&current.finish().await)),
+                ["CW_UPDATE_RELEASED 9a1b2c3d"]
+            );
+            let success = Client::start(update_steer_request("9a1b2c3d"), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&success)),
+                ["CW_UPDATE_STEERED 9a1b2c3d"]
+            );
+        });
+    }
+
+    #[test]
+    fn codex_update_capacity_includes_live_released_and_consumed_evidence() {
+        update_test(async {
+            let mut clients = Vec::new();
+            for index in 0..16 {
+                let nonce = format!("a{index:07x}");
+                clients.push(Client::start(update_request("STEERABLE", &nonce), CODEX_KEY).await);
+            }
+            assert!(rejected(update_request("STEERABLE", "afffffff")).await);
+            assert!(
+                rejected(with_codex_scope(
+                    update_request("STEERABLE", "afffffff"),
+                    OTHER_CODEX_KEY
+                ))
+                .await
+            );
+            assert!(rejected(update_request("STEERABLE", "a0000000")).await);
+            let first = clients.remove(0);
+            let ack = Client::start(update_request("RELEASE", "a0000000"), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&ack)),
+                ["CW_UPDATE_RELEASE_ACK a0000000"]
+            );
+            assert_eq!(
+                reply_text(&events(&first.finish().await)),
+                ["CW_UPDATE_RELEASED a0000000"]
+            );
+            assert!(rejected(update_request("STEERABLE", "afffffff")).await);
+            let success = Client::start(update_steer_request("a0000000"), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&success)),
+                ["CW_UPDATE_STEERED a0000000"]
+            );
+            assert!(rejected(update_request("STEERABLE", "afffffff")).await);
+            drop(clients); // exact abandoned registrations free their own capacity
+            let new = Client::start(update_request("STEERABLE", "afffffff"), CODEX_KEY).await;
+            drop(new);
+            assert!(rejected(update_request("STEERABLE", "a0000000")).await); // consumed remains retained
+        });
+    }
+
+    #[test]
+    fn codex_update_duplicate_release_and_steer_requests_each_have_one_winner() {
+        update_test(async {
+            let held = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            let (left, right) = tokio::join!(
+                SyntheticOpenAiSmokeTransport.execute(update_request("RELEASE", "9a1b2c3d")),
+                SyntheticOpenAiSmokeTransport.execute(update_request("RELEASE", "9a1b2c3d")),
+            );
+            let release = match (left, right) {
+                (Ok(response), Err(BrokerUpstreamError::Protocol))
+                | (Err(BrokerUpstreamError::Protocol), Ok(response)) => response,
+                _ => panic!("release did not have exactly one winner"),
+            };
+            assert_eq!(
+                reply_text(&events(&response_client(release).finish().await)),
+                ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+            );
+            assert_eq!(
+                reply_text(&events(&held.finish().await)),
+                ["CW_UPDATE_RELEASED 9a1b2c3d"]
+            );
+            let (left, right) = tokio::join!(
+                SyntheticOpenAiSmokeTransport.execute(update_steer_request("9a1b2c3d")),
+                SyntheticOpenAiSmokeTransport.execute(update_steer_request("9a1b2c3d")),
+            );
+            let steer = match (left, right) {
+                (Ok(response), Err(BrokerUpstreamError::Protocol))
+                | (Err(BrokerUpstreamError::Protocol), Ok(response)) => response,
+                _ => panic!("steer did not have exactly one winner"),
+            };
+            assert_eq!(
+                reply_text(&events(&response_client(steer).finish().await)),
+                ["CW_UPDATE_STEERED 9a1b2c3d"]
+            );
+        });
     }
 
     #[tokio::test(start_paused = true)]
