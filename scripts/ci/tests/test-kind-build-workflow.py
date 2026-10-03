@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -456,9 +457,15 @@ kubectl_apply() {
   if [ "${!#}" = - ]; then
     local manifest
     manifest="$(cat)"
-    [[ "$manifest" == *'kind: SandboxClaim'* ]] || return 61
-    record runtime-created
-    touch "$FIXTURE/runtime"
+    case "$manifest" in
+      *$'\nkind: SandboxClaim\n'*)
+        record runtime-created
+        touch "$FIXTURE/runtime"
+        ;;
+      *$'\nkind: Sandbox\n'*|*$'\nkind: Pod\n'*) [ -f "$FIXTURE/runtime" ] || return 61 ;;
+      *) return 61 ;;
+    esac
+    printf '%s\n---\n' "$manifest" >>"$FIXTURE/objects.yaml"
   fi
 }
 kubectl() {
@@ -481,6 +488,8 @@ kubectl() {
       fi
       ;;
     *' get pod '*) printf '10.244.0.9' ;;
+    *' get sandboxclaim '*) printf 'claim-uid' ;;
+    *' get sandbox '*) printf 'sandbox-uid' ;;
     *' exec cw-binding-gateway-'*)
       printf '%s\n' '{"environmentId":"00000000-0000-4000-8000-000000000501","workspacePodIp":"10.244.0.9","appPorts":[3000],"sidecarToken":"synthetic"}'
       ;;
@@ -488,13 +497,14 @@ kubectl() {
       printf 'Forwarding from 127.0.0.1:23456 -> 8085\n'
       exec /usr/bin/sleep 60
       ;;
-    *' delete sandboxclaim '*|*' delete pod '*)
+    *' delete sandboxclaim '*|*' delete sandbox '*|*' delete pod '*)
       if [ -f "$FIXTURE/runtime" ] && [ "$(<"$FIXTURE/state")" = stopped ]; then
         record runtime-deleted
         rm -f "$FIXTURE/runtime"
       fi
       ;;
-    'wait '*|*' wait '*|*' patch sandboxclaim '*) : ;;
+    *' patch sandboxclaim '*) printf '%s\n' "${!#}" >"$FIXTURE/claim-status.json" ;;
+    'wait '*|*' wait '*) : ;;
     *) printf 'unexpected synthetic kubectl: %s\n' "$args" >&2; return 63 ;;
   esac
 }
@@ -538,10 +548,15 @@ coordinator_ingress_smoke() {
                 for name in ("admit", "retire")
                 if (fixture / f"{name}.sql").exists()
             }
-            return result, events, sql
+            runtime = {
+                name: (fixture / name).read_text()
+                for name in ("objects.yaml", "claim-status.json")
+                if (fixture / name).exists()
+            }
+            return result, events, sql, runtime
 
     def test_shared_runtime_survives_every_consumer_then_retires(self) -> None:
-        result, events, sql = self.run_owner()
+        result, events, sql, _ = self.run_owner()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(events, [
             "runtime-created", "admit", "internal", "mesh", "coordinator",
@@ -556,7 +571,7 @@ coordinator_ingress_smoke() {
                         sql["retire"].index("DELETE FROM sandbox_environment_backend"))
 
     def test_prior_premature_cleanup_is_rejected(self) -> None:
-        result, events, _ = self.run_owner(premature_cleanup=True)
+        result, events, _, _ = self.run_owner(premature_cleanup=True)
         self.assertEqual(result.returncode, 66, result.stderr)
         self.assertIn("mesh", events)
         self.assertNotIn("coordinator", events)
@@ -569,15 +584,49 @@ coordinator_ingress_smoke() {
             ("coordinator", 37, "downstream"),
         ):
             with self.subTest(failure=failure):
-                result, events, _ = self.run_owner(failure=failure)
+                result, events, _, _ = self.run_owner(failure=failure)
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertEqual(events.count("retire"), 1)
                 self.assertEqual(events.count("runtime-deleted"), 1)
                 self.assertNotIn(absent, events)
                 self.assertNotIn("downstream", events)
 
+    def test_runtime_is_reachable_only_through_the_bound_chain(self) -> None:
+        # Program #2238 B2: orchestration resolves the workspace Pod through
+        # Claim status -> bound Sandbox -> the Pod that Sandbox controls, with
+        # no Claim-name fallback. The admitted fixture must be that chain.
+        result, _, sql, runtime = self.run_owner()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        objects = [item for item in yaml.safe_load_all(runtime["objects.yaml"]) if item]
+        by_kind: dict[str, list[dict]] = {}
+        for item in objects:
+            by_kind.setdefault(item["kind"], []).append(item)
+        [claim] = by_kind["SandboxClaim"]
+        [sandbox] = by_kind["Sandbox"]
+        claim_name = claim["metadata"]["name"]
+        self.assertEqual(claim_name, "sandbox-00000000-0000-4000-8000-000000000501")
+
+        status = json.loads(runtime["claim-status.json"])["status"]
+        self.assertEqual(status["sandbox"]["name"], sandbox["metadata"]["name"])
+        self.assertIn({"type": "Ready", "status": "True"},
+                      [{"type": c["type"], "status": c["status"]} for c in status["conditions"]])
+        self.assertEqual(sandbox["metadata"]["ownerReferences"], [{
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+            "name": claim_name, "uid": "claim-uid", "controller": True,
+        }])
+
+        pod_name = sandbox["metadata"]["annotations"]["agents.x-k8s.io/pod-name"]
+        self.assertNotEqual(pod_name, claim_name)
+        [workspace] = [pod for pod in by_kind["Pod"] if pod["metadata"]["name"] == pod_name]
+        self.assertEqual(workspace["metadata"]["labels"]["codewire.sh/type"], "workspace")
+        self.assertEqual(workspace["metadata"]["ownerReferences"], [{
+            "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+            "name": sandbox["metadata"]["name"], "uid": "sandbox-uid", "controller": True,
+        }])
+        self.assertIn(f"'codewire-e2e', '{pod_name}', '10.244.0.9'", sql["admit"])
+
     def test_retirement_failure_cannot_pass_or_remove_live_runtime(self) -> None:
-        result, events, _ = self.run_owner(failure="retirement")
+        result, events, _, _ = self.run_owner(failure="retirement")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("failed to retire", result.stderr)
         self.assertNotIn("runtime-deleted", events)
