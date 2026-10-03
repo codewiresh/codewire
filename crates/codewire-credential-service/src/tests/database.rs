@@ -181,8 +181,16 @@ async fn restricted_metadata_login_admits_personal_scope_and_pins_exact_binding(
                 .fetch_one(&fixture.pool)
                 .await?;
         ensure!(identities == (fixture.role.clone(), fixture.role.clone()));
-        let authority = fixture.admitted().await?;
-        authority.current_session().await?;
+        let (authority, admission) = timing::measure(fixture.admitted()).await;
+        let authority = authority?;
+        ensure!(admission.token_review.count == 2 && admission.resolve.count == 1);
+        let (session, timings) = timing::measure(authority.current_session()).await;
+        session?;
+        // One resolve, split into its six Kubernetes reads and its SQL.
+        ensure!(timings.resolve.count == 1);
+        ensure!(timings.resolve_kubernetes > std::time::Duration::ZERO);
+        ensure!(timings.resolve_sql() > std::time::Duration::ZERO);
+        ensure!(timings.token_review.count == 0);
         for sql in [
             "UPDATE public.environments SET state=state",
             "UPDATE public.org_members SET role=role",

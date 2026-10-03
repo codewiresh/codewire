@@ -410,6 +410,45 @@ async fn owner_local_admit_rejects_malformed_grants_before_credential_lookup() {
 }
 
 #[tokio::test]
+async fn admission_timing_counts_each_authority_grant_and_record_call() {
+    let session = owner_local(true);
+    let valid = description(&session);
+    let fixture = ClosedDatabaseFixture::new(session, vec![valid]).await;
+    let counts = |timings: &crate::timing::Timings| {
+        (
+            timings.authority.count,
+            timings.grants.count,
+            timings.record.count,
+            timings.material_read.count,
+        )
+    };
+    // One authority check, one grant evaluation and one record read, which
+    // fails on the closed pool before a second check or any material read.
+    let (admitted, timings) = crate::timing::measure(
+        fixture
+            .adapter
+            .admit(&CapabilitySlot::codex(), permission()),
+    )
+    .await;
+    assert!(matches!(admitted, Err(BrokerLeaseError::Unavailable)));
+    assert_eq!(counts(&timings), (1, 1, 1, 0));
+    let (leased, timings) = crate::timing::measure(fixture.adapter.lease_operation(
+        Uuid::new_v4(),
+        CapabilitySlot::codex(),
+        permission().operation,
+        permission().route,
+    ))
+    .await;
+    assert!(matches!(leased, Err(BrokerLeaseError::Unavailable)));
+    assert_eq!(counts(&timings), (1, 1, 1, 0));
+    assert_eq!(timings.resolve.count, 0);
+    assert_eq!(
+        fixture.authority.description_calls.load(Ordering::SeqCst),
+        2
+    );
+}
+
+#[tokio::test]
 async fn owner_local_app_only_admit_never_asks_for_profile_grants_or_material() {
     let fixture =
         ClosedDatabaseFixture::new(owner_local(false), vec![description(&owner_local(true))]).await;

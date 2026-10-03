@@ -585,6 +585,61 @@ async fn cloned_services_share_eight_slots_and_shutdown_closes_all_epochs() {
 }
 
 #[tokio::test]
+async fn admissions_and_capacity_rejections_write_secret_free_timing_lines() {
+    let (log, _guard) = crate::timing::tests::TimingLog::install();
+    let fixture = Fixture::new().await;
+    let (input, denied) = fixture.open(Some("synthetic-deny"), fixture.ready()).await;
+    assert_eq!(denied.unwrap_err().code(), Code::PermissionDenied);
+    drop(input);
+    fixture.slots_released().await;
+    let mut streams = Vec::new();
+    for _ in 0..PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS {
+        let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+        streams.push((input, response.unwrap().into_inner()));
+    }
+    let (input, rejected) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    assert_eq!(rejected.unwrap_err().code(), Code::ResourceExhausted);
+    drop(input);
+    drop(streams);
+    fixture.slots_released().await;
+    fixture.finish().await;
+
+    let lines = log.lines();
+    for line in &lines {
+        crate::timing::tests::assert_secret_free(line);
+    }
+    let fields = |event: &str| -> Vec<serde_json::Value> {
+        lines
+            .iter()
+            .filter(|line| line["fields"]["event"] == event)
+            .map(|line| line["fields"].clone())
+            .collect()
+    };
+    let admissions = fields("epoch_admission");
+    assert_eq!(admissions.len(), PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS + 1);
+    assert_eq!(admissions[0]["outcome"], "denied");
+    assert_eq!(admissions[0]["authority_checks"], 0);
+    for admitted in &admissions[1..] {
+        assert_eq!(admitted["outcome"], "admitted");
+        // Connect, then the recheck after the guest's Ready frame.
+        assert_eq!(admitted["authority_checks"], 2);
+    }
+    let rejected = fields("capacity_rejected");
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["limit"], "bridge_streams");
+    assert_eq!(rejected[0]["operation"], "epoch");
+    assert_eq!(
+        rejected[0]["capacity"],
+        PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS
+    );
+    assert_eq!(
+        rejected[0]["in_use"],
+        PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS
+    );
+    assert!(fields("proxied_request").is_empty());
+}
+
+#[tokio::test]
 async fn shutdown_cancels_pending_authentication_without_admitting_a_worker() {
     let fixture = Fixture::new().await;
     fixture

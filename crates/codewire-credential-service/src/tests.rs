@@ -16,6 +16,7 @@ use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator,
 };
 use codewire_credential_broker::platform::{PlatformRuntimeAuthority, PlatformRuntimeError};
+use codewire_credential_broker::timing;
 use codewire_platform_credentials::PlatformAccessProfileStore;
 use codewire_protected_store::secret_envelope::TestKekProvider;
 use codewire_server_core::pod_identity::{
@@ -387,15 +388,21 @@ async fn real_kube_client_reviews_both_fixed_purposes_before_any_domain_lookup()
         closed_pool().await,
         Arc::new(TestKekProvider),
     );
+    let (result, timings) =
+        timing::measure(authenticator.authenticate(&headers(unix_now().unwrap() + 600))).await;
     assert!(matches!(
-        authenticator
-            .authenticate(&headers(unix_now().unwrap() + 600))
-            .await,
+        result,
         Err(PlatformBridgeAuthenticationError::Unavailable)
     ));
     let paths = fixture.paths.lock().unwrap().clone();
     assert_eq!(&paths[..2], &[TOKEN_REVIEW_PATH, TOKEN_REVIEW_PATH]);
     assert_eq!(&paths[2..], &[pod_path(GATEWAY)]);
+    // Both concurrent TokenReviews, then one resolve whose only Kubernetes
+    // read (the gateway Pod) preceded its first, failing, SQL statement.
+    assert_eq!(timings.token_review.count, 2);
+    assert_eq!(timings.resolve.count, 1);
+    assert!(timings.resolve_kubernetes > std::time::Duration::ZERO);
+    assert!(timings.resolve_kubernetes <= timings.resolve.elapsed);
     fixture.paths.lock().unwrap().clear();
     let mut swapped = headers(unix_now().unwrap() + 600);
     swapped.insert_bin(
@@ -416,6 +423,86 @@ async fn real_kube_client_reviews_both_fixed_purposes_before_any_domain_lookup()
             .iter()
             .all(|path| path == TOKEN_REVIEW_PATH)
     );
+}
+
+#[tokio::test]
+async fn timed_kek_forwards_each_operation_once_and_times_only_unwrap() {
+    use codewire_protected_store::secret_envelope::{
+        DEK_BYTES, DekContext, GeneratedDek, KekProvider, KekProviderKind, SecretEnvelopeError,
+        WrappedDek,
+    };
+    use zeroize::Zeroizing;
+
+    #[derive(Default)]
+    struct Counting(Mutex<Vec<&'static str>>);
+
+    #[async_trait::async_trait]
+    impl KekProvider for Counting {
+        fn kind(&self) -> KekProviderKind {
+            self.0.lock().unwrap().push("kind");
+            TestKekProvider.kind()
+        }
+        async fn generate(
+            &self,
+            context: &DekContext,
+        ) -> Result<GeneratedDek, SecretEnvelopeError> {
+            self.0.lock().unwrap().push("generate");
+            TestKekProvider.generate(context).await
+        }
+        async fn unwrap(
+            &self,
+            context: &DekContext,
+            wrapped: &WrappedDek,
+        ) -> Result<Zeroizing<[u8; DEK_BYTES]>, SecretEnvelopeError> {
+            self.0.lock().unwrap().push("unwrap");
+            TestKekProvider.unwrap(context, wrapped).await
+        }
+        async fn rewrap(
+            &self,
+            context: &DekContext,
+            wrapped: &WrappedDek,
+        ) -> Result<WrappedDek, SecretEnvelopeError> {
+            self.0.lock().unwrap().push("rewrap");
+            TestKekProvider.rewrap(context, wrapped).await
+        }
+        async fn authority_id(&self) -> Result<Option<String>, SecretEnvelopeError> {
+            self.0.lock().unwrap().push("authority_id");
+            TestKekProvider.authority_id().await
+        }
+    }
+
+    let inner = Arc::new(Counting::default());
+    let timed = crate::authority::TimedKekProvider::wrap(inner.clone());
+    let context = DekContext::canary();
+    let (generated, timings) = timing::measure(async {
+        assert_eq!(timed.kind(), KekProviderKind::OpenBaoTransit);
+        let generated = timed.generate(&context).await.unwrap();
+        let dek = timed.unwrap(&context, &generated.wrapped).await.unwrap();
+        assert_eq!(*dek, *generated.plaintext);
+        timed.rewrap(&context, &generated.wrapped).await.unwrap();
+        assert_eq!(
+            timed.authority_id().await.unwrap(),
+            TestKekProvider.authority_id().await.unwrap()
+        );
+        generated
+    })
+    .await;
+    assert_eq!(
+        *inner.0.lock().unwrap(),
+        ["kind", "generate", "unwrap", "rewrap", "authority_id"]
+    );
+    assert_eq!(timings.unwrap.count, 1);
+    assert_eq!(
+        timings,
+        timing::Timings {
+            total: timings.total,
+            unwrap: timings.unwrap,
+            ..Default::default()
+        }
+    );
+    // Outside a measured request the decorator only forwards.
+    timed.unwrap(&context, &generated.wrapped).await.unwrap();
+    assert_eq!(inner.0.lock().unwrap().len(), 6);
 }
 
 #[tokio::test]

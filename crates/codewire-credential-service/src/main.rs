@@ -1,4 +1,6 @@
-use codewire_credential_service::runtime::{CredentialServiceConfig, RuntimeError, run};
+use codewire_credential_service::runtime::{
+    CredentialServiceConfig, DEFAULT_LOG_FILTER, RuntimeError, run,
+};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -8,7 +10,7 @@ async fn main() -> std::process::ExitCode {
         .json()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER)),
         )
         .with_current_span(false)
         .init();
