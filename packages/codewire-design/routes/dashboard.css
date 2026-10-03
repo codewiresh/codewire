@@ -90,8 +90,10 @@
 }
 
 @media (max-width: 48rem) {
-  /* Compact on phones so a lifecycle alert still leaves the terminal footer on screen. */
-  .cw-sandbox-heading { align-items: stretch; flex-direction: column; gap: var(--space-3); padding: var(--space-3) var(--space-4); }
+  /* Compact on phones so a lifecycle alert still leaves the terminal footer on screen:
+     a navigation-sized title, an 8px gap and padding, and a 6px metadata grid. */
+  .cw-sandbox-heading { align-items: stretch; flex-direction: column; gap: var(--space-2); padding: var(--space-2) var(--space-4); }
+  .cw-sandbox-heading h1 { font-size: var(--text-title); }
   .cw-sandbox-heading > div:first-child { width: 100%; min-width: 0; }
   .cw-sandbox-heading dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-1-5); margin-top: var(--space-1-5); }
   .cw-sandbox-heading dl div { min-width: 0; }
