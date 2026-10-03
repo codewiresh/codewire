@@ -168,6 +168,18 @@ New invocations use the selected version; running processes keep their original
 executable. Read the current generation from `cw update status` before each
 selection change.
 
+After public delivery at `releases.codewire.sh` is activated, choose a signed
+release or the stable channel:
+
+```bash
+cw update --version v1.2.3 --expect-generation <generation>
+cw update --channel stable --expect-generation <generation>
+```
+
+Public downloads require GnuPG. The CLI verifies the signed release and its
+executable before selecting it; stable refuses downgrades and different bytes
+with the same version. Public delivery is not activated yet.
+
 For cw inside a running native Linux VM:
 
 ```bash
