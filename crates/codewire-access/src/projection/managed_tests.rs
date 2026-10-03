@@ -239,17 +239,21 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         let codex = clients(&["codex"]).for_placement(placement);
         let expected_home = match placement {
             ManagedCredentialClientPlacement::Native => "/run/codewire-agent/codex",
-            ManagedCredentialClientPlacement::Platform => "/run/codewire-codex/home",
+            ManagedCredentialClientPlacement::Platform => "/home/codewire/.codex",
         };
         assert_eq!(
             codex.environment,
             BTreeMap::from([("CODEX_HOME".into(), expected_home.into())])
         );
         let config = codex.codex.unwrap();
-        assert_eq!(
-            config,
-            CodexProviderProjection::for_loopback_port(38_081).unwrap()
-        );
+        let route = CodexProviderProjection::for_loopback_port(38_081).unwrap();
+        match placement {
+            ManagedCredentialClientPlacement::Native => assert_eq!(config, route),
+            ManagedCredentialClientPlacement::Platform => assert_eq!(
+                config.config_toml(),
+                format!("{CODEX_MANAGED_CONFIG_HEADER}\n{}", route.config_toml())
+            ),
+        }
         assert!(
             !config
                 .config_toml()

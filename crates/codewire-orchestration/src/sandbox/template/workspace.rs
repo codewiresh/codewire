@@ -31,8 +31,9 @@ use super::{
 /// Copies the daemon from the support image into `codewire-bin` where the
 /// daemon cannot be mounted from the image itself.
 pub(crate) const DAEMON_INIT_CONTAINER: &str = "codewire-daemon-init";
-/// Installs selected stock-client configuration when the daemon comes from an
-/// image volume. Rendered only when a selected client needs it.
+/// The init container that once copied Codex's ConfigMap into a memory home
+/// for an image-volume Pod. It is no longer rendered: the daemon writes
+/// `~/.codex` itself. The name stays so a start removes it from older objects.
 pub(crate) const CLIENT_BOOTSTRAP_CONTAINER: &str = "codewire-client-bootstrap";
 /// The volume that holds `/codewire/bin/cw` in the workspace container.
 pub(crate) const DAEMON_VOLUME: &str = "codewire-bin";
@@ -370,7 +371,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         ws["volumeMounts"]
             .as_array_mut()
             .expect("workspace mounts")
-            .extend(credentials::workspace_mounts(opts));
+            .extend(credentials::workspace_mounts());
         // An identity-free daemon expands its managed clients into child
         // environments from the bind response; nothing is rendered here.
         if !opts.identity_free() {
@@ -469,22 +470,15 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         containers.push(ws.clone());
     }
 
-    // An identity-free daemon writes the Codex config itself after binding
-    // (design §17.1), so no init container copies a per-environment
-    // ConfigMap.
-    if daemon_image_volume {
-        if opts.credential_runtime.is_some()
-            && !opts.identity_free()
-            && let Some(init) = client_bootstrap_container(support_image, opts)
-        {
-            spec.insert("initContainers".into(), json!([init]));
-        }
-    } else {
-        let mut init = daemon_init_container(support_image);
-        if opts.credential_runtime.is_some() && !opts.identity_free() {
-            credentials::configure_bootstrap(&mut init, opts);
-        }
-        spec.insert("initContainers".into(), json!([init]));
+    // The daemon in the workspace container writes Codex's `~/.codex` on the
+    // persistent home itself, in both identity modes, so no init container
+    // copies client configuration. On confidential, no init container can
+    // reach that protected disk at all.
+    if !daemon_image_volume {
+        spec.insert(
+            "initContainers".into(),
+            json!([daemon_init_container(support_image)]),
+        );
     }
     spec.insert("containers".into(), Value::Array(containers));
     spec.insert("volumes".into(), Value::Array(volumes));
@@ -619,40 +613,22 @@ fn daemon_init_container(support_image: &str) -> Value {
     })
 }
 
-/// The stock-client bootstrap of an image-volume Pod, or `None` when no
-/// selected client needs one. The daemon creates its own process directory.
-fn client_bootstrap_container(support_image: &str, opts: &TemplateOpts) -> Option<Value> {
-    let mut init = json!({
-        "name": CLIENT_BOOTSTRAP_CONTAINER,
-        "image": support_image,
-        "command": ["sh", "-c", "umask 077"],
-        "volumeMounts": [],
-        "resources": bootstrap_resources(),
-    });
-    credentials::configure_bootstrap(&mut init, opts);
-    (!init["volumeMounts"]
-        .as_array()
-        .expect("client bootstrap mounts")
-        .is_empty())
-    .then_some(init)
-}
-
 /// Only machine-owned stock-client fields, without rendering confidential
 /// init-data or resolving public trust. Used by suspended recipe refresh and
 /// exact immutable Pod verification; it contains no provider material.
 ///
 /// `init` is the daemon-copy init of a Pod whose `codewire-bin` is an
-/// emptyDir. `clientInit` is the whole client bootstrap of an image-volume
-/// Pod, or null when none is needed; its image is the Pod's own daemon image.
+/// emptyDir. `clientInit` is the client bootstrap of an image-volume Pod. No
+/// client volume, mount or init copy is rendered any more: the daemon writes
+/// Codex's `~/.codex` itself. Reconciling against this removes the ones an
+/// older object still carries.
 pub(crate) fn render_workspace_client_bootstrap(opts: &TemplateOpts) -> Value {
-    let mut init = daemon_init_container("");
-    credentials::configure_bootstrap(&mut init, opts);
     json!({
         "environment": credentials::workspace_environment(opts),
-        "volumes": credentials::workspace_client_volumes(opts),
-        "volumeMounts": credentials::workspace_client_mounts(opts),
-        "init": init,
-        "clientInit": client_bootstrap_container("", opts),
+        "volumes": [],
+        "volumeMounts": [],
+        "init": daemon_init_container(""),
+        "clientInit": null,
     })
 }
 

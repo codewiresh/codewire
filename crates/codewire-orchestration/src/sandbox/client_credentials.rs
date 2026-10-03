@@ -3,7 +3,7 @@
 use super::*;
 use crate::sandbox::template::{
     credential_codex_config_name, credential_gateway_certificate_name,
-    render_credential_codex_config, render_credential_gateway_certificate,
+    render_credential_gateway_certificate,
 };
 
 impl SandboxClient {
@@ -26,12 +26,9 @@ impl SandboxClient {
         &self,
         opts: &TemplateOpts,
     ) -> anyhow::Result<()> {
+        // Codex has no bootstrap object: the workspace daemon writes `~/.codex`.
         if let Some(certificate) = render_credential_gateway_certificate(&self.namespace, opts) {
             self.ensure_credential_object(self.credential_certificates(), certificate, "spec")
-                .await?;
-        }
-        if let Some(config) = render_credential_codex_config(&self.namespace, opts) {
-            self.ensure_credential_object(self.credential_config_maps(), config, "data")
                 .await?;
         }
         Ok(())
@@ -115,6 +112,8 @@ impl SandboxClient {
         // exact Certificate owner reference. There is no Secret GET permission,
         // not even a metadata-only GET (which would grant the same read verb).
         delete_dynamic_until_absent(&self.secrets(), &name, timeout).await?;
+        // Only environments created before the daemon wrote `~/.codex` still
+        // own a Codex ConfigMap; absence is the normal case.
         self.delete_owned_credential_object(
             &self.credential_config_maps(),
             &credential_codex_config_name(env_id),

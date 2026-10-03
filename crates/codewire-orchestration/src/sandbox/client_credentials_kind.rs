@@ -85,9 +85,26 @@ async fn prove_bootstrap(
         certificate.data["spec"] == rendered["spec"],
         "API defaulting changed certificate intent"
     );
+    // Selected Codex creates no ConfigMap: the workspace daemon writes
+    // `~/.codex`. An environment created before that still owns one, which
+    // the kept admission policy and final destruction must handle. Plant it
+    // the way the previous orchestration created it.
+    ensure!(
+        orchestration
+            .credential_config_maps()
+            .get_opt(&config_name)
+            .await?
+            .is_none(),
+        "selected Codex created a ConfigMap"
+    );
+    let legacy: DynamicObject = serde_json::from_value(json!({
+        "apiVersion":"v1", "kind":"ConfigMap",
+        "metadata":{"name":config_name,"namespace":NAMESPACE,"labels":certificate.metadata.labels},
+        "data":{"config.toml":"model_provider = \"codewire_openai\"\n"}
+    }))?;
     let config = orchestration
         .credential_config_maps()
-        .get(&config_name)
+        .create(&PostParams::default(), &legacy)
         .await?;
     orchestration.ensure_credential_bootstrap(opts).await?;
     let retried = orchestration.credential_certificates().get(&name).await?;

@@ -898,14 +898,69 @@ fn install_selected_client_recipe(fixture: &mut Fixture, opts: &TemplateOpts) {
     fixture.pod["spec"] = fixture.sandbox["spec"]["podTemplate"]["spec"].clone();
 }
 
+const LEGACY_CODEX_HOME: &str = "/run/codewire-codex/home";
+
+/// The Codex recipe orchestration rendered before the daemon wrote
+/// `~/.codex`: a per-environment ConfigMap, a memory home mounted in the
+/// workspace, an init copy between them and `CODEX_HOME` in that home. An
+/// image-volume Pod had a separate client-bootstrap init container instead
+/// of extending the daemon copy.
+fn install_legacy_codex_recipe(fixture: &mut Fixture) {
+    let mut legacy = opts();
+    legacy.managed_credential_clients =
+        codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+    install_selected_client_recipe(fixture, &legacy);
+    let copy = format!(
+        " && mkdir -p -m 0700 {LEGACY_CODEX_HOME} && cp /codewire/codex-bootstrap/config.toml {LEGACY_CODEX_HOME}/config.toml"
+    );
+    let init_mounts = json!([
+        {"name":"credential-codex-config","mountPath":"/codewire/codex-bootstrap","readOnly":true},
+        {"name":"credential-codex-home","mountPath":"/run/codewire-codex"},
+    ]);
+    for spec in [
+        &mut fixture.template["spec"]["podTemplate"]["spec"],
+        &mut fixture.sandbox["spec"]["podTemplate"]["spec"],
+        &mut fixture.pod["spec"],
+    ] {
+        let volumes = spec["volumes"].as_array_mut().unwrap();
+        let image_volume = volumes.iter().any(|volume| volume.get("image").is_some());
+        volumes.push(json!({"name":"credential-codex-config","configMap":{"name":format!("cw-credential-codex-{ENV}"),"defaultMode":0o644}}));
+        volumes.push(json!({"name":"credential-codex-home","emptyDir":{"medium":"Memory","sizeLimit":"256Mi"}}));
+        spec["containers"][1]["volumeMounts"] =
+            json!([{"name":"credential-codex-home","mountPath":"/run/codewire-codex"}]);
+        for entry in spec["containers"][1]["env"].as_array_mut().unwrap() {
+            if entry["name"] == "CODEX_HOME" {
+                entry["value"] = json!(LEGACY_CODEX_HOME);
+            }
+        }
+        if image_volume {
+            spec["initContainers"] = json!([{
+                "name":"codewire-client-bootstrap", "image":DAEMON_IMAGE,
+                "command":["sh","-c",format!("umask 077{copy}")],
+                "volumeMounts":init_mounts,
+            }]);
+        } else {
+            let init = &mut spec["initContainers"][0];
+            init["command"][2] = json!(format!("{}{copy}", init["command"][2].as_str().unwrap()));
+            init["volumeMounts"]
+                .as_array_mut()
+                .unwrap()
+                .extend(init_mounts.as_array().unwrap().iter().cloned());
+        }
+    }
+}
+
+/// Rollback (`environment-token`) and confidential Pods keep their
+/// environment-scope recipe. A suspended legacy Codex recipe converges on the
+/// next start: no Codex volume, mount or init copy remains, only `CODEX_HOME`
+/// at `~/.codex` when Codex stays selected. The old Pod is stale exactly once;
+/// the Pod rendered from the converged Sandbox certifies, so the
+/// bootstrap-mismatch restart cannot repeat (#2364).
 #[tokio::test]
-async fn suspended_client_replacement_removes_codex_fields_and_preserves_unrelated_spec() {
-    for slots in [vec![], vec!["openai"], vec!["github"]] {
-        let mut initial_opts = opts();
-        initial_opts.managed_credential_clients =
-            codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+async fn suspended_legacy_codex_recipe_converges_and_preserves_unrelated_spec() {
+    for slots in [vec![], vec!["openai"], vec!["github"], vec!["codex"]] {
         let mut fixture = fixture();
-        install_selected_client_recipe(&mut fixture, &initial_opts);
+        install_legacy_codex_recipe(&mut fixture);
         let (client, state) = client(fixture);
         let mut target = opts();
         target.managed_credential_clients =
@@ -930,8 +985,27 @@ async fn suspended_client_replacement_removes_codex_fields_and_preserves_unrelat
             let mut state = state.lock().unwrap();
             for object in [&state.template, &state.sandbox] {
                 let spec = &object["spec"]["podTemplate"]["spec"];
-                assert!(!spec.to_string().contains("credential-codex"));
-                assert!(!spec.to_string().contains("CODEX_HOME"));
+                for legacy in ["credential-codex", "codex-bootstrap", "/run/codewire-codex"] {
+                    assert!(!spec.to_string().contains(legacy), "{legacy}");
+                }
+                assert_eq!(
+                    spec["containers"][1]["env"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|entry| entry["name"] == "CODEX_HOME")
+                        .map(|entry| entry["value"].clone()),
+                    target
+                        .managed_credential_clients
+                        .contains(codewire_access::ManagedCredentialClient::Codex)
+                        .then(|| json!(codewire_access::CODEX_PLATFORM_HOME))
+                );
+                assert_eq!(
+                    spec["initContainers"],
+                    json!([
+                        super::super::template::render_workspace_client_bootstrap(&target)["init"]
+                    ])
+                );
                 assert_eq!(
                     spec["containers"][1]["resources"]["requests"]["cpu"],
                     "900m"
@@ -971,15 +1045,48 @@ async fn suspended_client_replacement_removes_codex_fields_and_preserves_unrelat
                 .await
                 .unwrap()
         );
+        // A second start publishes nothing, and nothing creates a ConfigMap.
+        let writes = state.lock().unwrap().requests.len();
+        client
+            .reconcile_workspace_bootstrap(
+                &target,
+                &claim_name(ENV),
+                CLAIM_UID,
+                &expected_sandbox(),
+            )
+            .await
+            .unwrap();
+        let state = state.lock().unwrap();
+        assert!(
+            state.requests[writes..]
+                .iter()
+                .all(|(method, _, _)| *method == Method::GET)
+        );
+        assert!(
+            state
+                .requests
+                .iter()
+                .all(|(_, path, _)| !path.contains("/configmaps"))
+        );
+        assert!(state.config_map.is_none());
     }
 }
 
 #[tokio::test]
 async fn actual_pod_clients_require_exact_token_env_mounts_and_init_not_just_selection_sha() {
-    for corruption in 0..6 {
-        let mut opts = opts();
-        opts.managed_credential_clients =
-            codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+    let mut opts = opts();
+    opts.managed_credential_clients =
+        codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+    let mut current = fixture();
+    install_selected_client_recipe(&mut current, &opts);
+    let (current, _) = client(current);
+    assert!(
+        current
+            .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
+            .await
+            .unwrap()
+    );
+    for corruption in 0..7 {
         let mut fixture = fixture();
         install_selected_client_recipe(&mut fixture, &opts);
         match corruption {
@@ -996,13 +1103,26 @@ async fn actual_pod_clients_require_exact_token_env_mounts_and_init_not_just_sel
                 .as_array_mut()
                 .unwrap()
                 .push(json!({"name":"OPENAI_API_KEY","value":"unexpected-routing-placeholder"})),
+            // A Pod that still carries any piece of the legacy Codex recipe.
             2 => fixture.pod["spec"]["volumes"]
                 .as_array_mut()
                 .unwrap()
-                .retain(|volume| volume["name"] != "credential-codex-home"),
-            3 => fixture.pod["spec"]["containers"][1]["volumeMounts"] = json!([]),
+                .push(json!({"name":"credential-codex-home","emptyDir":{"medium":"Memory","sizeLimit":"256Mi"}})),
+            3 => {
+                fixture.pod["spec"]["containers"][1]["volumeMounts"] =
+                    json!([{"name":"credential-codex-home","mountPath":"/run/codewire-codex"}]);
+            }
             4 => fixture.pod["spec"]["initContainers"][0]["command"] = json!(["sh", "-c", "true"]),
-            5 => fixture.pod["spec"]["initContainers"][0]["volumeMounts"] = json!([]),
+            5 => fixture.pod["spec"]["initContainers"][0]["volumeMounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name":"credential-codex-config","mountPath":"/codewire/codex-bootstrap","readOnly":true})),
+            6 => fixture.pod["spec"]["containers"][1]["env"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["name"] == "CODEX_HOME")
+                .unwrap()["value"] = json!(LEGACY_CODEX_HOME),
             _ => unreachable!(),
         }
         let (client, _) = client(fixture);
@@ -1067,7 +1187,7 @@ async fn stored_pod_omitting_blank_client_values_still_certifies_its_bootstrap()
 }
 
 #[tokio::test]
-async fn newly_selected_codex_public_bootstrap_precedes_suspended_recipe_publication() {
+async fn newly_selected_codex_publishes_only_its_environment_and_no_config_map() {
     let (client, state) = client(fixture());
     let mut opts = opts();
     opts.managed_credential_clients =
@@ -1077,40 +1197,28 @@ async fn newly_selected_codex_public_bootstrap_precedes_suspended_recipe_publica
         .await
         .unwrap();
     let state = state.lock().unwrap();
-    let config_created = state
-        .requests
-        .iter()
-        .position(|(method, path, _)| *method == Method::POST && path.ends_with("/configmaps"))
-        .unwrap();
-    let first_recipe_write = state
-        .requests
-        .iter()
-        .position(|(method, _, _)| *method == Method::PATCH)
-        .unwrap();
-    assert!(config_created < first_recipe_write);
-    assert!(
-        state
-            .requests
-            .iter()
-            .all(|(_, path, _)| !path.contains("/secrets") && !path.contains("/pods/"))
-    );
-    assert_eq!(
-        state.config_map.as_ref().unwrap()["data"]["config.toml"],
-        opts.managed_credential_clients
-            .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
-            .codex
+    assert!(state.requests.iter().all(|(_, path, _)| {
+        !path.contains("/configmaps") && !path.contains("/secrets") && !path.contains("/pods/")
+    }));
+    assert!(state.config_map.is_none());
+    for object in [&state.template, &state.sandbox] {
+        let spec = &object["spec"]["podTemplate"]["spec"];
+        assert!(!spec.to_string().contains("credential-codex"));
+        assert!(
+            spec["containers"][1]["env"].as_array().unwrap().contains(
+                &json!({"name":"CODEX_HOME","value":codewire_access::CODEX_PLATFORM_HOME})
+            )
+        );
+        assert!(
+            workspace_client_changes(
+                object,
+                &super::super::template::render_workspace_client_bootstrap(&opts),
+                "/spec/podTemplate/spec"
+            )
             .unwrap()
-            .config_toml()
-    );
-    assert!(
-        workspace_client_changes(
-            &state.sandbox,
-            &super::super::template::render_workspace_client_bootstrap(&opts),
-            "/spec/podTemplate/spec"
-        )
-        .unwrap()
-        .is_empty()
-    );
+            .is_empty()
+        );
+    }
 }
 
 const DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:48549d19114407c712d043af3ba2136d97052a2c30c82935190f75a3a61f13ab";
@@ -1140,28 +1248,50 @@ fn with_clients(slots: &[&str]) -> TemplateOpts {
     opts
 }
 
+/// An image-volume Pod's legacy client bootstrap is removed on the next
+/// start, and no selection adds one back.
 #[tokio::test]
-async fn image_volume_recipe_adds_and_removes_only_the_client_bootstrap() {
-    let (client, state) = client(image_volume_fixture());
+async fn image_volume_legacy_client_bootstrap_is_removed_and_never_added() {
     let codex = with_clients(&["codex"]);
+    // A current image-volume recipe gains no init container for Codex.
+    let (fresh, fresh_state) = client(image_volume_fixture());
+    fresh
+        .reconcile_workspace_bootstrap(&codex, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    assert!(
+        fresh_state.lock().unwrap().sandbox["spec"]["podTemplate"]["spec"]
+            .get("initContainers")
+            .is_none()
+    );
+
+    let mut legacy = image_volume_fixture();
+    install_legacy_codex_recipe(&mut legacy);
+    assert_eq!(
+        legacy.pod["spec"]["initContainers"][0]["name"],
+        "codewire-client-bootstrap"
+    );
+    let (client, state) = client(legacy);
     client
         .reconcile_workspace_bootstrap(&codex, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
         .await
         .unwrap();
-    let rendered = super::super::template::render_workspace_client_bootstrap(&codex);
     {
         let state = state.lock().unwrap();
         for object in [&state.template, &state.sandbox] {
             let spec = &object["spec"]["podTemplate"]["spec"];
-            let mut expected = rendered["clientInit"].clone();
-            expected["image"] = json!(DAEMON_IMAGE);
-            assert_eq!(spec["initContainers"], json!([expected]));
+            assert_eq!(spec["initContainers"], json!([]));
             assert!(!spec.to_string().contains("codewire-daemon-init"));
+            assert!(!spec.to_string().contains("credential-codex"));
             assert!(
                 spec["volumes"]
                     .as_array()
                     .unwrap()
                     .contains(&json!({"name":"codewire-bin","image":{"reference":DAEMON_IMAGE,"pullPolicy":"IfNotPresent"}}))
+            );
+            assert_eq!(
+                spec["volumes"][0]["persistentVolumeClaim"]["claimName"],
+                "saved-pvc"
             );
         }
     }
@@ -1170,7 +1300,7 @@ async fn image_volume_recipe_adds_and_removes_only_the_client_bootstrap() {
             .workspace_bootstrap_matches(&codex, &claim_name(ENV), CLAIM_UID, &expected_pod())
             .await
             .unwrap(),
-        "a Pod without the selected client bootstrap must not certify it"
+        "a Pod with the legacy client bootstrap must not certify its removal"
     );
     let replacement = WorkspacePodIdentity {
         name: POD.into(),
@@ -1181,44 +1311,46 @@ async fn image_volume_recipe_adds_and_removes_only_the_client_bootstrap() {
         state.pod["spec"] = state.sandbox["spec"]["podTemplate"]["spec"].clone();
         state.pod["metadata"]["uid"] = json!("replacement-pod");
     }
-    assert!(
+    for (index, selection) in [codex.clone(), with_clients(&[])].iter().enumerate() {
+        if index > 0 {
+            client
+                .reconcile_workspace_bootstrap(
+                    selection,
+                    &claim_name(ENV),
+                    CLAIM_UID,
+                    &expected_sandbox(),
+                )
+                .await
+                .unwrap();
+            let mut state = state.lock().unwrap();
+            state.pod["spec"] = state.sandbox["spec"]["podTemplate"]["spec"].clone();
+        }
+        assert!(
+            client
+                .workspace_bootstrap_matches(selection, &claim_name(ENV), CLAIM_UID, &replacement)
+                .await
+                .unwrap()
+        );
+        // Reconciling the same selection again writes nothing.
+        let writes = state.lock().unwrap().requests.len();
         client
-            .workspace_bootstrap_matches(&codex, &claim_name(ENV), CLAIM_UID, &replacement)
+            .reconcile_workspace_bootstrap(
+                selection,
+                &claim_name(ENV),
+                CLAIM_UID,
+                &expected_sandbox(),
+            )
             .await
-            .unwrap()
-    );
-    // Reconciling the same selection again writes nothing.
-    let writes = state.lock().unwrap().requests.len();
-    client
-        .reconcile_workspace_bootstrap(&codex, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    assert!(
-        state.lock().unwrap().requests[writes..]
-            .iter()
-            .all(|(method, _, _)| *method != Method::PATCH)
-    );
-
-    let cleared = with_clients(&[]);
-    client
-        .reconcile_workspace_bootstrap(&cleared, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    assert!(
-        !client
-            .workspace_bootstrap_matches(&cleared, &claim_name(ENV), CLAIM_UID, &replacement)
-            .await
-            .unwrap(),
-        "a stale client bootstrap must not certify its removal"
-    );
-    let state = state.lock().unwrap();
-    for object in [&state.template, &state.sandbox] {
-        let spec = &object["spec"]["podTemplate"]["spec"];
-        assert_eq!(spec["initContainers"], json!([]));
-        assert!(!spec.to_string().contains("credential-codex"));
+            .unwrap();
+        assert!(
+            state.lock().unwrap().requests[writes..]
+                .iter()
+                .all(|(method, _, _)| *method != Method::PATCH)
+        );
+        let state = state.lock().unwrap();
         assert_eq!(
-            spec["volumes"][0]["persistentVolumeClaim"]["claimName"],
-            "saved-pvc"
+            state.sandbox["spec"]["podTemplate"]["spec"]["initContainers"],
+            json!([])
         );
     }
 }
@@ -1366,6 +1498,90 @@ async fn binding_mode_upgrades_a_suspended_legacy_environment_on_start() {
             .all(|(_, path, _)| !path.contains("/pods/"))
     );
     assert!(state.config_map.is_none());
+}
+
+/// A suspended legacy Codex environment upgrades to the identity-free
+/// rendering, which carries no Codex volume, mount or init copy and no
+/// `CODEX_HOME`: the bound daemon writes `~/.codex` and sets it for children.
+#[tokio::test]
+async fn binding_mode_upgrades_a_legacy_codex_environment_to_the_daemon_written_home() {
+    let mut before = legacy_fixture();
+    install_legacy_codex_recipe(&mut before);
+    let (sandboxes, state) = client(before);
+    let mut opts = binding_opts();
+    opts.managed_credential_clients =
+        codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+    for _ in 0..2 {
+        sandboxes
+            .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+            .await
+            .unwrap();
+    }
+    let state = state.lock().unwrap();
+    assert_eq!(patches(&state).len(), 2, "the second start must be a no-op");
+    let rendered = render_sandbox_template(NS, &opts);
+    for object in [&state.template, &state.sandbox] {
+        let spec = &object["spec"]["podTemplate"]["spec"];
+        assert_eq!(spec, &rendered["spec"]["podTemplate"]["spec"]);
+        for legacy in [
+            "credential-codex",
+            "codex-bootstrap",
+            "/run/codewire-codex",
+            "CODEX_HOME",
+        ] {
+            assert!(!spec.to_string().contains(legacy), "{legacy}");
+        }
+    }
+    assert!(state.config_map.is_none());
+}
+
+/// An identity-free environment created before the daemon wrote `~/.codex`
+/// still mounts Codex's memory home. Its next start replaces its Pod spec
+/// with the current identity-free rendering once; later starts are no-ops.
+#[tokio::test]
+async fn binding_mode_converges_an_identity_free_environment_with_a_memory_codex_home() {
+    let mut before = fixture();
+    let rendered = render_sandbox_template(NS, &binding_opts());
+    for object in [&mut before.template, &mut before.sandbox] {
+        let spec = &mut object["spec"]["podTemplate"]["spec"];
+        *spec = rendered["spec"]["podTemplate"]["spec"].clone();
+        spec["volumes"].as_array_mut().unwrap().push(
+            json!({"name":"credential-codex-home","emptyDir":{"medium":"Memory","sizeLimit":"256Mi"}}),
+        );
+        spec["containers"][0]["volumeMounts"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"credential-codex-home","mountPath":"/run/codewire-codex"}));
+    }
+    before.template["metadata"]["labels"] = json!({});
+    before.template["spec"]["networkPolicy"] = rendered["spec"]["networkPolicy"].clone();
+    let (sandboxes, state) = client(before);
+    for _ in 0..2 {
+        sandboxes
+            .reconcile_workspace_bootstrap(
+                &binding_opts(),
+                &claim_name(ENV),
+                CLAIM_UID,
+                &expected_sandbox(),
+            )
+            .await
+            .unwrap();
+    }
+    let state = state.lock().unwrap();
+    assert_eq!(patches(&state).len(), 2, "the second start must be a no-op");
+    for object in [&state.template, &state.sandbox] {
+        assert_eq!(
+            object["spec"]["podTemplate"]["spec"],
+            rendered["spec"]["podTemplate"]["spec"]
+        );
+    }
+    assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+    assert!(
+        state
+            .requests
+            .iter()
+            .all(|(_, path, _)| !path.contains("/pods/") && !path.contains("/configmaps"))
+    );
 }
 
 /// A conflicting write during the upgrade never reports success.

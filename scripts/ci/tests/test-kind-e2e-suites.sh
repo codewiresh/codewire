@@ -260,8 +260,8 @@ SH
         fail 'issuing Certificate must disappear before its outputs'
       [[ "$failure" != certificate ]]
     elif [[ " $* " == *" secret/cw-credential-gateway-$environment_id "* ]]; then
-      [[ " $* " == *" configmap/cw-credential-codex-$environment_id "* ]] ||
-        fail 'credential cleanup omitted its exact configuration'
+      [[ " $* " != *' configmap/'* ]] ||
+        fail 'credential cleanup names a Codex ConfigMap that nothing creates'
       [[ "$failure" != leaf ]]
     elif [[ " $* " == *" secret/cw-gateway-host-key-$environment_id "* ]]; then
       [[ "$failure" != hostkey ]]

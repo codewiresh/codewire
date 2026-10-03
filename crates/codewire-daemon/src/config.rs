@@ -360,16 +360,6 @@ impl WorkspaceBinding {
     pub fn daemon_credential(&self) -> &DaemonAuthToken {
         &self.daemon_credential
     }
-
-    /// The stock Codex `config.toml` the selected clients need under
-    /// `CODEX_PLATFORM_HOME`, or `None` when Codex is not selected. It
-    /// replaces the per-environment ConfigMap and its init-container copy.
-    pub fn codex_config_toml(&self) -> Option<String> {
-        self.managed_credential_clients
-            .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
-            .codex
-            .map(codewire_access::CodexProviderProjection::into_config_toml)
-    }
 }
 
 /// A bind response the daemon refused. It is value-blind; the daemon backs
@@ -957,7 +947,6 @@ mod tests {
             binding.daemon_credential().expose_secret(),
             SYNTHETIC_CREDENTIAL
         );
-        assert!(binding.codex_config_toml().is_none());
         let served = config.into_config(&binding);
         assert_eq!(served.auth_token.expose_secret(), SYNTHETIC_CREDENTIAL);
         assert!(served.credential_bridge.is_none());
@@ -980,8 +969,13 @@ mod tests {
                 ..response()
             })
             .unwrap();
-        assert!(binding.codex_config_toml().is_some());
         let served = config.into_config(&binding);
+        // Codex's home is prepared from these served clients in both modes.
+        assert!(
+            served
+                .managed_credential_clients
+                .contains(codewire_access::ManagedCredentialClient::Codex)
+        );
 
         // The same configuration the legacy rendered environment produces.
         let values = [

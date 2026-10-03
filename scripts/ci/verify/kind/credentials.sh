@@ -121,10 +121,20 @@ delete_kind_credential_bootstrap() {
   # Both phases must complete; this is not best-effort teardown.
   kubectl -n "$SANDBOX_NS" delete "certificate/cw-credential-gateway-$environment" \
     --ignore-not-found=true --cascade=background --wait=true --timeout=120s >/dev/null || return $?
-  kubectl -n "$SANDBOX_NS" delete \
-    "secret/cw-credential-gateway-$environment" \
-    "configmap/cw-credential-codex-$environment" \
+  kubectl -n "$SANDBOX_NS" delete "secret/cw-credential-gateway-$environment" \
     --ignore-not-found=true --wait=true --timeout=120s >/dev/null
+}
+
+# Codex has no bootstrap object: the workspace daemon writes Codewire's
+# config.toml into the user's ~/.codex on the persistent home.
+assert_no_kind_codex_config_map() {
+  local environment="$1" found
+  found="$(kubectl -n "$SANDBOX_NS" get configmap "cw-credential-codex-$environment" \
+    --ignore-not-found=true -o name)" || return $?
+  [ -z "$found" ] || {
+    echo '::error::selected Codex created a per-environment ConfigMap' >&2
+    return 1
+  }
 }
 
 kind_credential_bootstrap_smoke() (
@@ -406,8 +416,8 @@ kind_credential_native_smoke() (
     return 0
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
-  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway_uid
-  local certificate certificate_uid config_uid after_certificate_uid after_config_uid workspace_image
+  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
+  local certificate certificate_uid after_certificate_uid workspace_image marker
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
   trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
@@ -446,15 +456,21 @@ kind_credential_native_smoke() (
   wait_kind_credential_environment "$environment" running
   pod="$(kind_credential_workspace "$environment")"
   pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
-  generation="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o json | jq -er '
-    [.spec.containers[] | select(.name == "workspace") | .env[] |
-      select(.name == "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION") | .value] |
-    if length == 1 and (.[0] | test("^[1-9][0-9]*$")) then .[0]
-    else error("expected exact immutable workspace generation") end')"
-  gateway_uid="$(kubectl -n "$SANDBOX_NS" get pods \
-    -l "codewire.sh/environment-id=$environment,codewire.sh/type=gateway" -o json | jq -er '
+  gateway="$(kubectl -n "$SANDBOX_NS" get pods \
+    -l "codewire.sh/environment-id=$environment,codewire.sh/type=gateway" -o json | jq -ec '
       [.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] |
-      if length == 1 then .[0].metadata.uid else error("expected one exact managed gateway") end')"
+      if length == 1 then .[0] else error("expected one exact managed gateway") end')"
+  gateway_uid="$(jq -er '.metadata.uid' <<<"$gateway")"
+  # An environment-token workspace renders its operation generation; an
+  # identity-free one takes it from its binding. The gateway renders it in
+  # both identity modes, and a rendered workspace value must agree.
+  generation="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o json | jq -er --argjson gateway "$gateway" '
+    def generation: [.spec.containers[] | .env[]? |
+      select(.name == "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION") | .value];
+    ($gateway | generation) as $expected | generation as $rendered |
+    if ($expected | length) == 1 and ($expected[0] | test("^[1-9][0-9]*$"))
+      and ($rendered == [] or $rendered == $expected)
+    then $expected[0] else error("expected exact immutable workspace generation") end')"
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
   assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$gateway_uid" \
@@ -467,17 +483,32 @@ kind_credential_native_smoke() (
 
   certificate="cw-credential-gateway-$environment"
   certificate_uid="$(kubectl -n "$SANDBOX_NS" get certificate "$certificate" -o 'jsonpath={.metadata.uid}')"
-  config_uid="$(kubectl -n "$SANDBOX_NS" get configmap "cw-credential-codex-$environment" -o 'jsonpath={.metadata.uid}')"
+  assert_no_kind_codex_config_map "$environment" || return $?
+  # Codex's home is ~/.codex on the persistent home: state written there
+  # survives Stop/Start, as on a laptop.
+  marker="kind-persistence-${RANDOM}${RANDOM}"
+  kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
+    sh -ec 'umask 077; printf "%s\n" "$1" > /home/codewire/.codex/kind-persistence' sh "$marker" ||
+    return $?
   kind_credential_cli env --platform stop "$environment" --output json
   wait_kind_credential_environment "$environment" stopped
   after_certificate_uid="$(kubectl -n "$SANDBOX_NS" get certificate "$certificate" -o 'jsonpath={.metadata.uid}')"
-  after_config_uid="$(kubectl -n "$SANDBOX_NS" get configmap "cw-credential-codex-$environment" -o 'jsonpath={.metadata.uid}')"
-  [ "$certificate_uid" = "$after_certificate_uid" ] && [ "$config_uid" = "$after_config_uid" ] || {
+  [ "$certificate_uid" = "$after_certificate_uid" ] || {
     echo '::error::ordinary stop did not retain its environment bootstrap' >&2
     return 1
   }
+  assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli env --platform start "$environment" --output json
   wait_kind_credential_environment "$environment" running
+  assert_no_kind_codex_config_map "$environment" || return $?
+  pod="$(kind_credential_workspace "$environment")" || return $?
+  [ "$(kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
+    cat /home/codewire/.codex/kind-persistence)" = "$marker" ] || {
+    echo '::error::Codex home state did not survive Stop/Start' >&2
+    return 1
+  }
+  kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- rm -f /home/codewire/.codex/kind-persistence ||
+    return $?
   kind_credential_probe "$environment" success
   assert_kind_credential_provider_counts 3
   kind_credential_cli credentials --platform revoke "$credential_name" --output json
@@ -489,7 +520,8 @@ kind_credential_native_smoke() (
   kind_credential_cli env --platform rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s \
-    "certificate/$certificate" "secret/$certificate" "configmap/cw-credential-codex-$environment"
+    "certificate/$certificate" "secret/$certificate"
+  assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
   kind_credential_cli credentials --platform delete "$credential_name" --yes
   log "public synthetic Codex flow, native rotation/retry, revocation and terminal cleanup passed"

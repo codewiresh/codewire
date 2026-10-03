@@ -22,8 +22,7 @@ mod workspace;
 pub use credentials::{
     CREDENTIAL_GATEWAY_HTTPS_PORT, CREDENTIAL_GATEWAY_ISSUER_NAME, CredentialRuntimeTemplateConfig,
     MANAGED_CREDENTIAL_CLIENTS_ENV, credential_codex_config_name,
-    credential_gateway_certificate_name, render_credential_codex_config,
-    render_credential_gateway_certificate,
+    credential_gateway_certificate_name, render_credential_gateway_certificate,
 };
 
 #[cfg(test)]

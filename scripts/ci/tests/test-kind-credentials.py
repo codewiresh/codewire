@@ -44,6 +44,7 @@ class WorkspaceProbe(unittest.TestCase):
         self.connection.getresponse.return_value.status = 200
         self.connection.getresponse.return_value.read.return_value = b"CWCODEX149 kind"
         self.output = io.StringIO()
+        self.managed()
         for fixture in (
             patch.object(PROBE, "CODEX_HOME", self.home),
             patch.object(PROBE, "TOKEN", self.token),
@@ -56,9 +57,14 @@ class WorkspaceProbe(unittest.TestCase):
             fixture.__enter__()
             self.addCleanup(fixture.__exit__, None, None, None)
 
+    def managed(self, first_line=None):
+        header = PROBE.MANAGED_HEADER.decode() if first_line is None else first_line
+        (self.home / "config.toml").write_text(header + "\nmodel_provider = \"codewire_openai\"\n")
+
     def unselected(self):
         os.environ.pop("CODEX_HOME", None)
         os.environ.pop("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS", None)
+        (self.home / "config.toml").unlink(missing_ok=True)
 
     def test_current_selected_loopback_configuration_needs_no_ca_override(self):
         PROBE.probe(ENVIRONMENT, "success")
@@ -91,6 +97,7 @@ class WorkspaceProbe(unittest.TestCase):
                 if mode == "revoked":
                     os.environ["CODEX_HOME"] = str(self.home)
                     os.environ["CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"] = "v1:codex"
+                    self.managed()
                 else:
                     self.unselected()
                 self.connection.getresponse.return_value.status = status
@@ -174,6 +181,26 @@ class WorkspaceProbe(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_HOME": "/synthetic/other-home"}):
             with self.assertRaisesRegex(ValueError, "^projection$"):
                 PROBE.probe(ENVIRONMENT, "success")
+        self.connection.request.assert_not_called()
+
+    def test_identity_free_selection_is_the_daemon_written_config_alone(self):
+        os.environ.pop("CODEX_HOME")
+        os.environ.pop("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS")
+        PROBE.probe(ENVIRONMENT, "success")
+        self.connection.request.reset_mock()
+        for first_line in ("", "model = \"gpt-5\"", " " + PROBE.MANAGED_HEADER.decode()):
+            with self.subTest(first_line=first_line):
+                self.managed(first_line)
+                with self.assertRaisesRegex(ValueError, "^projection$"):
+                    PROBE.probe(ENVIRONMENT, "success")
+        (self.home / "config.toml").unlink()
+        with self.assertRaisesRegex(ValueError, "^projection$"):
+            PROBE.probe(ENVIRONMENT, "success")
+        outside = self.home / "outside.toml"
+        outside.write_text(PROBE.MANAGED_HEADER.decode() + "\n")
+        (self.home / "config.toml").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "^projection$"):
+            PROBE.probe(ENVIRONMENT, "success")
         self.connection.request.assert_not_called()
 
     def test_unselected_probe_rejects_stale_client_configuration(self):
@@ -507,12 +534,12 @@ kubectl() {
   printf '%%s\\n' "$*" >&2
   case "$*" in
     '-n dev-sandboxes delete certificate/cw-credential-gateway-%s --ignore-not-found=true --cascade=background --wait=true --timeout=120s') return %s ;;
-    '-n dev-sandboxes delete secret/cw-credential-gateway-%s configmap/cw-credential-codex-%s --ignore-not-found=true --wait=true --timeout=120s') return %s ;;
+    '-n dev-sandboxes delete secret/cw-credential-gateway-%s --ignore-not-found=true --wait=true --timeout=120s') return %s ;;
     *) return 99 ;;
   esac
 }
 delete_kind_credential_bootstrap '%s'
-''' % (ENVIRONMENT, certificate_status, ENVIRONMENT, ENVIRONMENT, leaf_status, ENVIRONMENT))
+''' % (ENVIRONMENT, certificate_status, ENVIRONMENT, leaf_status, ENVIRONMENT))
             self.assertEqual(result.returncode, certificate_status or leaf_status, result.stderr)
             calls = result.stderr.splitlines()
             self.assertEqual(len(calls), 1 if certificate_status else 2, result.stderr)
@@ -526,6 +553,35 @@ delete_kind_credential_bootstrap '%s'
         self.assertLess(cleanup.index("--cascade=foreground --wait=true"),
                         cleanup.index('delete_kind_credential_bootstrap "$environment_id"'))
         self.assertIn('exit "$status"', cleanup)
+
+    def test_codex_config_map_absence_is_exact_and_fails_closed(self):
+        for found, expected in (("", 0), ("configmap/cw-credential-codex-%s" % ENVIRONMENT, 1)):
+            result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+kubectl() {
+  printf '%%s\\n' "$*" >&2
+  [ "$*" = '-n dev-sandboxes get configmap cw-credential-codex-%s --ignore-not-found=true -o name' ] || return 99
+  printf '%%s' '%s'
+}
+assert_no_kind_codex_config_map '%s'
+''' % (ENVIRONMENT, found, ENVIRONMENT))
+            self.assertEqual(result.returncode, expected, result.stderr)
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+kubectl() { return 42; }
+assert_no_kind_codex_config_map '%s'
+''' % ENVIRONMENT)
+        self.assertEqual(result.returncode, 42, result.stderr)
+
+    def test_native_flow_proves_codex_home_persistence_without_a_config_map(self):
+        source = HELPERS.read_text()
+        flow = source.split("kind_credential_native_smoke() (", 1)[1]
+        self.assertNotIn("configmap", flow.lower().replace("assert_no_kind_codex_config_map", ""))
+        self.assertEqual(flow.count('assert_no_kind_codex_config_map "$environment" || return $?'), 4)
+        stop = flow.index('env --platform stop "$environment"')
+        start = flow.index('env --platform start "$environment"')
+        self.assertLess(flow.index("/home/codewire/.codex/kind-persistence"), stop)
+        self.assertLess(start, flow.index('cat /home/codewire/.codex/kind-persistence'))
 
     def test_bootstrap_cleanup_rejects_noncanonical_environment_without_io(self):
         for environment in ("", "foreign", ENVIRONMENT.upper()):
