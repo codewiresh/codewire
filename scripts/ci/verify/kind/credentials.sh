@@ -238,8 +238,12 @@ SELECT state FROM environments
 WHERE id = :'environment' AND org_id = 'org_contract_1';
 SQL
       )"
-    else
-      state="$(kind_credential_cli env --platform info "$environment" --output json | jq -er '.state')"
+    elif ! state="$(kind_credential_cli env --platform info "$environment" --output json |
+        jq -er '.state')"; then
+      # A failed observation must name itself: jq exits 4 without a word when
+      # its input is empty, which would otherwise kill the suite silently.
+      echo "::error::credential fixture environment observation failed while waiting for ${expected}" >&2
+      return 1
     fi
     if [ "$state" = "$expected" ]; then return 0; fi
     if [ "$state" = error ]; then
@@ -249,6 +253,42 @@ SQL
     sleep 2
   done
   echo "::error::credential fixture environment did not reach ${expected}" >&2
+  return 1
+}
+
+# A managed restart replaces both sandbox Pods after the update is accepted.
+# The environment state can read running again while the new Pods are still
+# Pending, and one-shot selectors then miss them: a jq empty result exits 4
+# without printing anything, which is how the failure reaches the log as a
+# bare exit code. Wait for exactly one exact workspace and one exact gateway
+# rendering the restart's operation generation, then print the workspace name
+# and the gateway document on two lines. Binding the gateway to the update's
+# generation keeps the pre-restart Pods from satisfying the wait.
+wait_kind_credential_sandbox_pair() {
+  local environment="$1" generation="$2" attempt pair
+  [[ "$generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  for ((attempt = 0; attempt < 90; attempt++)); do
+    if pair="$(kubectl -n "$SANDBOX_NS" get pods \
+        -l "codewire.sh/environment-id=$environment" -o json | jq -er \
+        --arg generation "$generation" '
+      [.items[] | select(.metadata.deletionTimestamp == null
+          and .status.phase == "Running")] as $live |
+      def rendered: [.spec.containers[]? | .env[]? |
+        select(.name == "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION") | .value];
+      ([$live[] | select(.metadata.labels["codewire.sh/type"] == "workspace"
+          and .spec.serviceAccountName == "codewire-sandbox"
+          and .spec.automountServiceAccountToken == false)]) as $workspace |
+      ([$live[] | select(.metadata.labels["codewire.sh/type"] == "gateway"
+          and (rendered == [$generation]))]) as $gateway |
+      if ($workspace | length) == 1 and ($gateway | length) == 1 then
+        $workspace[0].metadata.name + "\n" + ($gateway[0] | tojson)
+      else empty end')" && [ -n "$pair" ]; then
+      printf '%s\n' "$pair"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "::error::credential fixture environment ${environment} did not materialize its generation-${generation} workspace and gateway Pods after the managed restart" >&2
   return 1
 }
 
@@ -436,7 +476,7 @@ kind_credential_native_smoke() (
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
   local certificate certificate_uid after_certificate_uid workspace_image marker
-  local login_events login_generation
+  local login_events login_generation update restart_generation pair
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
   trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
@@ -470,15 +510,17 @@ kind_credential_native_smoke() (
   kind_credential_probe "$environment" wrong-root
   kind_credential_probe "$environment" missing
   kind_credential_probe "$environment" unbound
-  kind_credential_cli env --platform update "$environment" \
-    --profile "platform:$profile_name" --yes --output json
+  update="$(kind_credential_cli env --platform update "$environment" \
+    --profile "platform:$profile_name" --yes --output json)"
+  printf '%s\n' "$update"
+  restart_generation="$(jq -er '.operation_generation |
+    if type == "number" and . > 0 and . == floor then .
+    else error("expected a positive operation generation") end' <<<"$update")"
   wait_kind_credential_environment "$environment" running
-  pod="$(kind_credential_workspace "$environment")"
+  pair="$(wait_kind_credential_sandbox_pair "$environment" "$restart_generation")"
+  pod="$(sed -n '1p' <<<"$pair")"
+  gateway="$(sed -n '2p' <<<"$pair")"
   pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
-  gateway="$(kubectl -n "$SANDBOX_NS" get pods \
-    -l "codewire.sh/environment-id=$environment,codewire.sh/type=gateway" -o json | jq -ec '
-      [.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] |
-      if length == 1 then .[0] else error("expected one exact managed gateway") end')"
   gateway_uid="$(jq -er '.metadata.uid' <<<"$gateway")"
   # An environment-token workspace renders its operation generation; an
   # identity-free one takes it from its binding. The gateway renders it in
