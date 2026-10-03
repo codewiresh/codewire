@@ -358,13 +358,16 @@ class Journey:
                 result = self.call("env", "rm", "--local", self.environment, "--yes")
                 assert (self.workspace / "child.pid").exists(), "workspace removed with runtime"
                 self.check("remove-runtime/preserve-project")
-            shutil.rmtree(self.root)
+            self.remove_files()
         except Exception:
             print(f"cli-host: runtime retained for diagnosis: {self.root}", file=sys.stderr)
             raise
         finally:
             self.sentinel.terminate()
             self.sentinel.wait(timeout=5)
+
+    def remove_files(self):
+        shutil.rmtree(self.root)
 
 
 def process_alive(pid):

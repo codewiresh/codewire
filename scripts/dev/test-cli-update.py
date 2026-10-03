@@ -118,6 +118,8 @@ class Journey(host.Journey):
                 "--derp-url", f"http://{derp_address}", "--derp-listen", derp_address,
             ]
         super().__init__(a[0] / "cw", False)
+        root_metadata = self.root.lstat()
+        self.disposable_root_identity = (root_metadata.st_dev, root_metadata.st_ino)
         # Synthetic peers must not inherit provider or other ambient secrets.
         self.env = {key: value for key, value in self.env.items() if key in (
             "HOME", "USER", "LOGNAME", "PATH", "LANG", "LC_ALL", "TERM", "TMPDIR",
@@ -137,6 +139,49 @@ class Journey(host.Journey):
         self.mesh_processes = []
         self.mesh_original = None
         self.network_original = None
+
+    def remove_files(self):
+        # This hook runs after public env-rm and workspace-preservation checks.
+        # Only a successful journey may make its immutable test store disposable.
+        assert not self.mesh_started, "retained Mesh helpers have not been stopped"
+        handles = [process.fd for process in [*self.processes, *self.mesh_processes]]
+        assert all(handle is not None for handle in handles), "actor custody was closed before cleanup"
+        ready, _, _ = select.select(handles, [], [], 0)
+        assert set(ready) == set(handles), "owned actor cleanup is unknown; retain runtime evidence"
+        assert self.store == self.root / "store", "store is outside the disposable journey"
+        pins = {identity["sha256"] for _, identity in (self.a, self.b)}
+        assert len(pins) == 2 and all(len(pin) == 64 and all(c in "0123456789abcdef" for c in pin)
+                                     for pin in pins), "invalid disposable release identities"
+        descriptors = []
+
+        def directory(name, parent=None, mode=None):
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         dir_fd=parent)
+            descriptors.append(fd)
+            metadata = os.fstat(fd)
+            permissions = stat.S_IMODE(metadata.st_mode)
+            assert metadata.st_uid == os.geteuid(), "unowned disposable directory"
+            assert permissions == mode if mode is not None else (
+                permissions & 0o700 == 0o700 and permissions & 0o7022 == 0), "unsafe disposable directory mode"
+            return fd
+
+        try:
+            root = directory(self.root, mode=0o700)
+            metadata = os.fstat(root)
+            assert (metadata.st_dev, metadata.st_ino) == self.disposable_root_identity, "journey root replaced"
+            store = directory("store", root)
+            versions = directory("versions", store)
+            assert set(os.listdir(versions)) == pins, "unknown release member; retain store evidence"
+            members = [directory(pin, versions, 0o555) for pin in sorted(pins)]
+            # Validate both members before changing either; never chmod a path or file.
+            for member in members:
+                os.fchmod(member, 0o700)
+            current = self.root.lstat()
+            assert (current.st_dev, current.st_ino) == self.disposable_root_identity, "journey root moved"
+            super().remove_files()
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
 
     def call(self, *args, **kwargs):
         started = time.monotonic()
