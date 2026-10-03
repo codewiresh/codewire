@@ -5,6 +5,9 @@ The image has one uncompressed layer and no base image, build hooks or runtime
 interpreter. Import reads only its two fixed payloads; it never extracts a
 filesystem or executes image code. The independently supplied index digest is
 the admission pin. The resulting boot provenance binds all image descriptors.
+The cw provenance must be exactly the identity the shared producer
+(scripts/ci/release/cw_release.py) derives from the payload bytes and their
+embedded build record.
 """
 import argparse
 import hashlib
@@ -17,6 +20,9 @@ import struct
 import signal
 import sys
 import tarfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts/ci/release"))
+import cw_release as release  # noqa: E402
 
 MAX_CW = 256 * 1024 * 1024
 MAX_ARCHIVE = MAX_CW + 4 * 1024 * 1024
@@ -114,6 +120,12 @@ def validate_payload(metadata, cw):
             and metadata["sha256"] == sha(cw)
             and type(metadata["size"]) is int and metadata["size"] == len(cw), "invalid cw provenance")
     static_elf(cw)
+    try:
+        admitted = release.make_identity(cw, TARGET, metadata["package_version"], metadata["source_revision"],
+                                         metadata["source_tree_sha256"], metadata["rustc"])
+    except release.ReleaseError as error:
+        raise ValueError(f"cw build record contradicts its provenance: {error}") from None
+    require(admitted == metadata, "cw provenance differs from the identity its bytes admit")
 
 
 def tar_bytes(entries):

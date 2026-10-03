@@ -7,11 +7,21 @@ on:
         description: Existing canonical vMAJOR.MINOR.PATCH tag to recover
         required: true
         type: string
+      r2_publication:
+        description: Immutable R2 publication (requires the admitted release route)
+        required: false
+        type: choice
+        default: none
+        options: [none, immutable]
+      r2_promote_channel:
+        description: Channel to move after exact public readback (default none)
+        required: false
+        type: choice
+        default: none
+        options: [none, stable]
 
 permissions:
   contents: read
-
-enable-openid-connect: true
 
 env:
   ZIG_VERSION: 0.15.2
@@ -19,6 +29,9 @@ env:
   CARGO_ZIGBUILD_VERSION: 0.23.0
   OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror
   OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror
+  # The R2 release route stays inactive until its OpenBao role, policy and
+  # runner egress are admitted (docs/runbooks/cw-release-delivery.md).
+  CW_RELEASE_R2_ROUTE_ADMITTED: 'false'
 
 jobs:
   release-selection:
@@ -89,12 +102,14 @@ jobs:
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
 
-  package-release:
-    name: Package and publish signed Rust cw release
+  build-release:
+    # Compilation and packaging only: no OIDC, signing, mirror or R2
+    # capability exists in this job.
+    name: Build four-target cw release delivery
     needs: [release-selection]
     runs-on: ci-protected
-    permissions:
-      contents: write
+    outputs:
+      delivery_sha256: ${{ steps.prepare.outputs.delivery_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -102,6 +117,7 @@ jobs:
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
+          fetch-depth: 0
 
       - name: Confirm selected release checkout
         env:
@@ -109,14 +125,6 @@ jobs:
         run: |
           set -euo pipefail
           [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
-
-      - name: Verify release signing key
-        working-directory: .release-source
-        env:
-          CW_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}
-          CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}
-          CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
-        run: ../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc
 
       - name: Verify sealed Rust toolchain and release targets
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -144,12 +152,136 @@ jobs:
 
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
-      - name: Package signed release assets
+      - name: Package unsigned release delivery
+        id: prepare
+        working-directory: .release-source
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: |
+          set -euo pipefail
+          ../scripts/ci/release/check-cw-darwin-sdkless.sh
+          CW_RELEASE_BUILD_CMD='cargo zigbuild' \
+            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \
+            ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
+          python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned
+          (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
+          printf 'delivery_sha256=%s\n' \
+            "$(python3 ../scripts/ci/release/cw_release.py digest --dist dist/cw-release)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the unsigned delivery to signing
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-delivery-${{ github.run_id }}
+          path: .release-source/dist/cw-release/
+          if-no-files-found: error
+          retention-days: 1
+
+  package-release:
+    # Signing, mirror and R2 capabilities exist only after a successful build.
+    name: Sign and publish cw release
+    needs: [release-selection, build-release]
+    runs-on: ci-protected
+    enable-openid-connect: true
+    permissions:
+      contents: write
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Confirm selected release checkout
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Receive the unsigned delivery
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-delivery-${{ github.run_id }}
+          path: .release-source/dist/cw-release
+
+      - name: Verify the received delivery is the built delivery
+        working-directory: .release-source
+        env:
+          DELIVERY_SHA256: ${{ needs.build-release.outputs.delivery_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DELIVERY_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(python3 ../scripts/ci/release/cw_release.py digest --dist dist/cw-release)" = "$DELIVERY_SHA256" ]
+          python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned
+
+      - name: Reuse an already-published signed R2 release
+        if: ${{ inputs.r2_publication == 'immutable' }}
+        working-directory: .release-source
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [ "$CW_RELEASE_R2_ROUTE_ADMITTED" = 'true' ] || {
+            echo 'The R2 release route is not admitted; select r2_publication=none' >&2
+            exit 1
+          }
+          r2_work="${RUNNER_TEMP:?}/codewire-release-r2"
+          mkdir -m 0700 "$r2_work"
+          ../scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh "$r2_work/aws-credentials"
+          state="$(python3 ../scripts/ci/release/cw_release_r2.py probe \
+            --dist dist/cw-release --version "$RELEASE_TAG" \
+            --retain-into dist/cw-release-retained --credentials "$r2_work/aws-credentials")"
+          if [ "$state" = retained ]; then
+            # A retry keeps the exact signed bytes already published.
+            mv dist/cw-release dist/cw-release-rebuilt
+            mv dist/cw-release-retained dist/cw-release
+          fi
+
+      - name: Verify release signing key
         working-directory: .release-source
         env:
           CW_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}
           CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}
           CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
+        run: ../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc
+
+      - name: Sign release delivery
+        working-directory: .release-source
+        env:
+          CW_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}
+          CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}
+          CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          ../scripts/ci/release/sign-cw-release.sh dist/cw-release
+          gpg --import apps/cli/GPG_PUBLIC_KEY.asc
+          gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS
+          (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
+
+      - name: Publish immutable R2 release objects
+        if: ${{ inputs.r2_publication == 'immutable' }}
+        working-directory: .release-source
+        env:
+          PROMOTE_CHANNEL: ${{ inputs.r2_promote_channel }}
+        run: |
+          set -euo pipefail
+          [ "$CW_RELEASE_R2_ROUTE_ADMITTED" = 'true' ]
+          python3 ../scripts/ci/release/cw_release_r2.py publish \
+            --dist dist/cw-release --credentials "${RUNNER_TEMP:?}/codewire-release-r2/aws-credentials" \
+            --promote "$PROMOTE_CHANNEL"
+
+      - name: Remove the R2 publisher credential
+        if: ${{ always() && inputs.r2_publication == 'immutable' }}
+        run: |
+          r2_work="${RUNNER_TEMP:?}/codewire-release-r2"
+          [ ! -d "$r2_work" ] || { find "$r2_work" -type f -exec shred -u {} + && rmdir "$r2_work"; }
+
+      - name: Publish signed release assets
+        working-directory: .release-source
+        env:
           GITEA_TOKEN: ${{ github.token }}
           CW_REQUIRE_GITHUB_MIRROR: '1'
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
@@ -174,12 +306,5 @@ jobs:
             "$github_work/private-key" \
             "$github_work/token"
           export GH_MIRROR_TOKEN_FILE="$github_work/token"
-          ../scripts/ci/release/check-cw-darwin-sdkless.sh
-          CW_RELEASE_BUILD_CMD='cargo zigbuild' \
-            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \
-            ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
-          gpg --import apps/cli/GPG_PUBLIC_KEY.asc
           gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS
-          (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
-
           ../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release

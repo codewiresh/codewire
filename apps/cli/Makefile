@@ -5,12 +5,12 @@ REPO_ROOT := $(abspath ../..)
 BINARY := cw
 REQUESTED_CARGO_TARGET_DIR := $(CARGO_TARGET_DIR)
 RESOLVED_CARGO_TARGET_DIR := $(shell cd "$(REPO_ROOT)" && CARGO_TARGET_DIR="$(REQUESTED_CARGO_TARGET_DIR)" scripts/ci/verify/resolve-cargo-target-dir.sh .)
-RELEASE_BINARY := $(RESOLVED_CARGO_TARGET_DIR)/release/$(BINARY)
 USER_BIN_DIR ?= $(if $(strip $(XDG_BIN_HOME)),$(XDG_BIN_HOME),$(HOME)/.local/bin)
 SYSTEM_BIN_DIR ?= /usr/local/bin
+# The build records this checkout's version, source revision, source digest,
+# target and compiler in cw; `cw install --managed` refuses a cw without them.
 build:
-	cd "$(REPO_ROOT)" && CARGO_TARGET_DIR="$(RESOLVED_CARGO_TARGET_DIR)" cargo build --locked --release -p codewire-cli-bin --bin cw
-	cp "$(RELEASE_BINARY)" "$(BINARY)"
+	cd "$(REPO_ROOT)" && CARGO_TARGET_DIR="$(RESOLVED_CARGO_TARGET_DIR)" python3 scripts/dev/build-cw.py --output "$(CURDIR)/$(BINARY)"
 
 test:
 	cd $(REPO_ROOT) && cargo test -p codewire-cli
