@@ -878,7 +878,7 @@ fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> 
     // both. Its UID differs from the bound one, so the reconcile records the
     // replacement's binding before any gateway wait; until then its daemon
     // stays unbound and unreachable, never serving the old binding.
-    !probe.claim_ready
+    (!probe.claim_ready && !is_transient_claim_reason(&probe.claim_reason))
         || !probe.pod_exists
         || probe.pod_name.is_empty()
         || probe.pod_uid.is_empty()
@@ -899,6 +899,16 @@ fn setup_activity_active(row: &LivenessRow) -> bool {
             row.setup_owner_status.as_str(),
             "claimed" | "running" | "reaping"
         )
+}
+
+/// A claim that is not Ready for a reason that resolves on its own while the
+/// Pod keeps running. `SandboxUpdatePending` (agent-sandbox fork, Program
+/// #2238 C0): the Sandbox controller has not yet applied the Sandbox's
+/// current generation, for example a claim's metadata after a warm adoption,
+/// to the Pod. Liveness neither fails nor recovers the runtime for it; the Pod
+/// checks still apply.
+fn is_transient_claim_reason(reason: &str) -> bool {
+    matches!(reason, "SandboxUpdatePending")
 }
 
 /// Mirrors `sandbox.IsTerminalClaimReason`.
@@ -930,7 +940,7 @@ fn sandbox_liveness_reason(
         "running" => {
             if !probe.claim_exists {
                 Some("sandbox claim missing".to_string())
-            } else if !probe.claim_ready {
+            } else if !probe.claim_ready && !is_transient_claim_reason(&probe.claim_reason) {
                 if probe.claim_reason.is_empty() {
                     Some("sandbox claim not ready".to_string())
                 } else {
@@ -1145,6 +1155,59 @@ mod tests {
 
         let terminal = probe(true, false, "PodFailed", false, "", "");
         assert!(!running_runtime_recovery_required(&running, &terminal));
+    }
+
+    /// A claim waiting for the Sandbox controller to apply its current
+    /// generation to a still-running Pod is neither an error nor a reason to
+    /// recover the runtime; the Pod checks still apply.
+    #[test]
+    fn sandbox_update_pending_is_transient() {
+        let now = chrono::Utc::now();
+        let mut running = row("running", 300);
+        running.pod_name = "pod".into();
+        running.pod_ip = "10.1.1.1".into();
+        let mut pending = probe(
+            true,
+            false,
+            "SandboxUpdatePending",
+            true,
+            "Running",
+            "10.1.1.1",
+        );
+        pending.pod_name = "pod".into();
+        assert!(is_transient_claim_reason("SandboxUpdatePending"));
+        assert!(!is_terminal_claim_reason("SandboxUpdatePending"));
+        assert!(!running_runtime_recovery_required(&running, &pending));
+        assert_eq!(sandbox_liveness_reason(now, &running, &pending), None);
+
+        // The Pod checks still apply while the update is pending.
+        let mut lost = pending.clone();
+        lost.pod_exists = false;
+        lost.pod_uid = String::new();
+        assert!(running_runtime_recovery_required(&running, &lost));
+        assert_eq!(
+            sandbox_liveness_reason(now, &running, &lost),
+            Some("sandbox pod missing".into())
+        );
+
+        // Other not-ready reasons keep their behavior.
+        let mut not_ready = pending.clone();
+        not_ready.claim_reason = "SandboxNotReady".into();
+        assert!(running_runtime_recovery_required(&running, &not_ready));
+        assert_eq!(
+            sandbox_liveness_reason(now, &running, &not_ready),
+            Some("sandbox claim not ready: SandboxNotReady".into())
+        );
+
+        // Transitional states keep waiting on it, as on any non-terminal reason.
+        assert_eq!(
+            sandbox_liveness_reason(
+                now,
+                &row("starting", 120),
+                &probe(true, false, "SandboxUpdatePending", true, "Running", "")
+            ),
+            None
+        );
     }
 
     /// Design §10: a Pod replaced under the same name and IP is found by its
