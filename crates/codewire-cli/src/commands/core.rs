@@ -4,7 +4,7 @@ use super::*;
 
 pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     if let Ok(platform) = resolve_platform(globals, &paths, &env) {
         if let Some(path) = &platform.oauth_credentials_path {
             let store = codewire_client::FileCredentialStore::at(path);
@@ -30,7 +30,7 @@ pub(crate) async fn handle_whoami_command(
     args: WhoamiArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let token = platform.token_provider()?.token().await?;
     let response = codewire_client::OAuthClient::for_server_url(&platform.server_url)?
@@ -53,7 +53,7 @@ pub(crate) async fn handle_use_command(
     args: UseTargetArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let placement = if args.local {
         Some(EnvironmentPlacement::Local)
     } else if args.platform {
@@ -106,7 +106,7 @@ pub(crate) async fn handle_current_command(
     args: CurrentTargetArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let target = config::current_target(&paths.mesh_data_dir)?;
     let network = config::selected_mesh_network(&paths, &env);
     let environment = lookup_environment_for_target(globals, &paths, &env, &target).await;
@@ -178,7 +178,7 @@ pub(crate) async fn resolve_platform_context(
     globals: &Globals,
 ) -> anyhow::Result<(String, OrganizationClient, EnvironmentClient)> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let organization_client = organization_client(&platform)?;
     let orgs = organization_client.list_orgs().await.context("list orgs")?;
@@ -195,7 +195,7 @@ pub(crate) async fn handle_vscode_command(
     args: VscodeArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let environment_client = EnvironmentClient::new(&platform)?;
     let orgs = organization_client(&platform)?
@@ -229,7 +229,7 @@ pub(crate) async fn handle_shell_stdio(
     environment: Option<&str>,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = codewire_client(&platform)?;
     let environment_client = EnvironmentClient::new(&platform)?;

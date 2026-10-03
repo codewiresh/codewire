@@ -1347,11 +1347,13 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.states(document), ("affected", "affected"))
         self.assertEqual(self.workspace_states(document), ("affected", "unaffected", "affected"))
 
-    def test_embedded_policy_and_private_protos_affect_every_reachable_package(self) -> None:
+    def test_embedded_policy_private_protos_and_sql_affect_every_reachable_package(self) -> None:
         inputs = {
             "codewire-egress-policy": "policies/developer-v1.yaml",
             "codewire-local-credentials": "proto/codewire/local/credentials/v1/authority.proto",
             "codewire-local-vmm": "proto/codewire/local/v1/control.proto",
+            "codewire-mesh": "migrations/001_initial.sql",
+            "codewire-server-core": "migrations/001_initial.sql",
         }
         graph_path = "scripts/ci/plan/artifact-graph.json"
         graph = json.loads((self.repo.root / graph_path).read_text())
@@ -1390,7 +1392,7 @@ class PlannerFixtureTests(unittest.TestCase):
                 self.assertEqual(self.states(document), ("affected", "affected"))
                 self.assertEqual(document["artifacts"]["workspace_cw_binary"]["state"], "affected")
                 self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "affected")
-                self.repo.base = head
+            self.repo.base = head
 
     def test_desktop_detached_manifest_change_is_isolated(self) -> None:
         self.repo.change("desktop/src/main.rs", "fn main() { core::run(); println!(\"desktop\"); }\n")
@@ -1402,6 +1404,33 @@ class PlannerFixtureTests(unittest.TestCase):
         )
         self.repo.change("desktop/Cargo.toml", manifest)
         self.assertEqual(self.states(self.repo.plan()), ("unaffected", "affected"))
+
+    def test_cw_release_producers_and_reachable_build_script_bind_cli_assets(self) -> None:
+        graph_path = "scripts/ci/plan/artifact-graph.json"
+        graph = json.loads((self.repo.root / graph_path).read_text())
+        graph["artifacts"]["cw_cli_release_assets"]["explicit_inputs"] = list(
+            PRODUCTION_GRAPH["artifacts"]["cw_cli_release_assets"]["explicit_inputs"]
+        )
+        self.repo.write(graph_path, json.dumps(graph, sort_keys=True, indent=2) + "\n")
+        inputs = (
+            "scripts/ci/release/cw_release.py",
+            "scripts/dev/cw-runtime-image.py",
+            "scripts/dev/build-cw.py",
+            "cli/build.rs",
+        )
+        for path in inputs:
+            self.repo.write(path, "synthetic producer input\n")
+        self.repo.base = self.repo.commit("CLI producer and build inputs")
+        for path in inputs:
+            with self.subTest(path=path):
+                head = self.repo.change(path, "changed producer input\n")
+                document = self.repo.plan()
+                self.assertEqual(document["artifacts"]["cw_cli_release_assets"]["state"], "affected")
+                # Unknown producer paths remain conservative for consumers that
+                # do not declare them; this binding is only for CLI assets.
+                self.assertEqual(document["artifacts"]["desktop_package"]["state"],
+                    "unclassified" if path.startswith("scripts/dev/") else "unaffected")
+            self.repo.base = head
 
     def test_compile_time_package_metadata_change_affects_cli(self) -> None:
         manifest = (self.repo.root / "cli/Cargo.toml").read_text().replace(

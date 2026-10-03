@@ -1915,6 +1915,8 @@ mod storage_placement;
 pub(crate) use collaboration::*;
 pub(crate) use core::*;
 pub(crate) use environment::*;
+#[cfg(target_os = "linux")]
+pub(crate) use mesh_commands::retained::StateDir as MeshStateDir;
 pub(crate) use mesh_commands::*;
 pub(crate) use platform_commands::*;
 pub(crate) use secrets::*;
