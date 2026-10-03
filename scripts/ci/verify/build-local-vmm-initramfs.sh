@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly PACKAGE='codewire-vmm-guest-probe'
 readonly BINARY='codewire-vmm-guest-probe'
-readonly REQUIRED_RUST='1.91.1'
+readonly REQUIRED_RUST='1.93.0'
 readonly REQUIRED_PROTOC='libprotoc 35.1'
 readonly DEFAULT_TARGET='x86_64-unknown-linux-musl'
 readonly ARM64_TARGET='aarch64-unknown-linux-musl'
@@ -39,7 +39,7 @@ usage() {
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
     'It does not prove the probe is static or came from the sealed Rust toolchain.' \
     '--verify accepts only x86_64-unknown-linux-musl (the default) or' \
-    'aarch64-unknown-linux-musl. It requires exact Rust 1.91.1, libprotoc' \
+    'aarch64-unknown-linux-musl. It requires exact Rust 1.93.0, libprotoc' \
     '35.1, the selected installed musl standard library, and readelf. It builds' \
     'each required binary twice and fails closed on any drift. With --output,' \
     'the verified archive' \
@@ -49,6 +49,7 @@ usage() {
     'lowercase SHA-256 values must be supplied; runc must match the built-in' \
     'reviewed release digest. Arm64 BusyBox must also match its built-in' \
     'reviewed Alpine package payload digest.' \
+    'cw is supplied separately through the pinned read-only runtime disk.' \
     '--workload-network-fixture is allowed only with --verify-root and adds the' \
     'fixed opt-in developer client to both independent builds. This is not a' \
     'default production guest or CLI parity claim.' \
@@ -199,6 +200,19 @@ verify_static_elf() {
   fi
 }
 
+verify_guest_runtime_abi() {
+  python3 - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open('rb') as stream:
+    data = stream.read(64 * 1024 * 1024 + 1)
+marker = b'\0CWGUESTABI\0seed=9;cw_catalog=1\0'
+if len(data) > 64 * 1024 * 1024 or data.count(marker) != 1 or data.count(b'\0CWGUESTABI\0') != 1:
+    raise SystemExit('static guest must contain exactly one current seed9/catalog1 capability marker')
+PY
+}
+
 verify_reproducible() {
   local requested_output="$1" root_busybox="$2" root_busybox_sha256="$3"
   local root_runc="$4" root_runc_sha256="$5"
@@ -250,6 +264,8 @@ verify_reproducible() {
   [[ -x "$binary_a" && -x "$binary_b" ]] || die "static guest build did not produce both binaries"
   verify_static_elf 'guest probe' "$binary_a" "$TARGET"
   verify_static_elf 'guest probe' "$binary_b" "$TARGET"
+  verify_guest_runtime_abi "$binary_a"
+  verify_guest_runtime_abi "$binary_b"
   cmp -s "$binary_a" "$binary_b" || die "independent static guest builds are not byte-identical"
 
   packer_a="$binary_a"
@@ -270,8 +286,8 @@ verify_reproducible() {
   fi
 
   if [[ -n "$root_busybox" ]]; then
-    "$packer_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$archive_a"
-    "$packer_b" newc-root "$binary_b" "$root_busybox" "$root_runc" "$archive_b"
+    pack_product_root "$packer_a" "$binary_a" "$root_busybox" "$root_runc" "$archive_a"
+    pack_product_root "$packer_b" "$binary_b" "$root_busybox" "$root_runc" "$archive_b"
   else
     "$packer_a" newc "$binary_a" "$archive_a"
     "$packer_b" newc "$binary_b" "$archive_b"
@@ -284,7 +300,7 @@ verify_reproducible() {
     # rename, and parent-directory fsync; the comparison proves the published
     # bytes are archive A rather than a third unverified build.
     if [[ -n "$root_busybox" ]]; then
-      "$packer_a" newc-root "$binary_a" "$root_busybox" "$root_runc" "$requested_output"
+      pack_product_root "$packer_a" "$binary_a" "$root_busybox" "$root_runc" "$requested_output"
     else
       "$packer_a" newc "$binary_a" "$requested_output"
     fi
@@ -314,6 +330,11 @@ verify_reproducible() {
   if [[ -n "$requested_output" ]]; then
     printf 'local VMM initramfs: verified archive path=%s\n' "$requested_output"
   fi
+}
+
+pack_product_root() {
+  local packer="$1" probe="$2" root_busybox="$3" root_runc="$4" archive="$5"
+  "$packer" newc-root "$probe" "$root_busybox" "$root_runc" "$archive"
 }
 
 VERIFY_WORK=''
@@ -386,6 +407,9 @@ while [[ $# -gt 0 ]]; do
       runc_sha256="$2"
       shift 2
       ;;
+    --cw-image|--cw-image-index-sha256)
+      die 'embedded cw boot assets are unsupported; use cw-runtime-image.py pack and the separate runtime disk'
+      ;;
     --output)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       [[ -z "$output" ]] || { usage; exit 2; }
@@ -413,6 +437,7 @@ if [[ "$workload_network_fixture" -eq 1 && "$mode" != verify-root ]]; then
   usage
   exit 2
 fi
+
 
 case "$mode" in
   verify)

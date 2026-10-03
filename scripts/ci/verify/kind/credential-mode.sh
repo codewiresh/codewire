@@ -14,9 +14,10 @@ KIND_GITHUB_APP_OPENBAO_PATH="${KIND_GITHUB_APP_OPENBAO_PATH:-apps/codewire/dev/
 KIND_REAL_CREDENTIAL_DATABASE_URL="postgres://codewire_credential_broker:kind-credential-broker-synthetic-only@postgres.${NS}.svc.cluster.local:5432/codewire?sslmode=verify-full&sslrootcert=/run/codewire-credential-db-roots/ca.pem"
 
 require_kind_services_ci_image() {
-  local profile promotable
-  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' codewire-services:e2e)"
-  promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' codewire-services:e2e)"
+  local profile promotable image_ref
+  image_ref="${KIND_PROFILE_SERVICES_IMAGE_ID:-codewire-services:e2e}"
+  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")"
+  promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$image_ref")"
   if [ "$profile" != ci ] || [ "$promotable" != false ]; then
     echo '::error::credential modes require the exact non-promotable services-ci image' >&2
     return 1
@@ -115,12 +116,14 @@ switch_kind_credentials_real() {
 }
 
 switch_kind_credentials_fake() {
+  local fixture_patch
   require_kind_services_ci_image || return $?
   log "restoring the gate's synthetic credential fixture"
   kubectl_apply -f "$ROOT/tests/e2e/kind/credential-fixture-config.yaml"
   patch_kind_credential_container '[]'
+  fixture_patch="$(render_kind_credential_fixture_patch)" || return $?
   kubectl -n "$NS" patch deployment codewire-credential-service --type=strategic \
-    --patch-file "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+    --patch-file "$fixture_patch" || return $?
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
   set_kind_frontend_url "$KIND_INGRESS_URL"
 }

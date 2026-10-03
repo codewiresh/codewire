@@ -9,6 +9,7 @@ use crate::host_port::HostPortBinding;
 use crate::linux::path::FileIdentity;
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::oci::{OciArchitecture, ResolvedDescriptor, ResolvedImage, Sha256Digest};
+use crate::supervisor_metadata::CwRuntimeBinding;
 
 use super::*;
 
@@ -41,6 +42,7 @@ fn runner_record() -> RunnerRecord {
             mode: 0o140600,
         },
         artifact_generation: "c".repeat(64),
+        cw_runtime_catalog_generation: None,
         error_code: Some("runner_failed".to_owned()),
     }
 }
@@ -183,6 +185,7 @@ fn omitted_environment_fields_keep_the_existing_defaults() {
     assert!(decoded.access_profile.is_none());
     assert!(decoded.access_binding.is_none());
     assert!(decoded.platform_source_authority.is_none());
+    assert!(decoded.cw_runtime.is_none());
     assert!(decoded.active_artifact_generation.is_none());
     assert!(decoded.staging_artifact_generation.is_none());
     assert!(decoded.active_workspace_generation.is_none());
@@ -238,4 +241,94 @@ fn durable_metadata_rejects_unknown_fields() {
         .insert("future".to_owned(), serde_json::Value::Null);
     assert!(serde_json::from_value::<SupervisorState>(state).is_err());
     assert!(serde_json::from_str::<StoredEnvironmentState>(r#""future""#).is_err());
+}
+
+#[test]
+fn runtime_binding_requires_a_closed_schema_and_exact_generation_digests() {
+    let binding = CwRuntimeBinding {
+        schema_version: 1,
+        active_catalog_generation: "1".repeat(64),
+        staging_catalog_generation: Some("2".repeat(64)),
+        rollback_catalog_generation: Some("3".repeat(64)),
+    };
+    binding.validate().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<CwRuntimeBinding>(&serde_json::to_vec(&binding).unwrap()).unwrap(),
+        binding
+    );
+    for version in [0, 2, u32::MAX] {
+        let mut invalid = binding.clone();
+        invalid.schema_version = version;
+        assert!(invalid.validate().is_err());
+    }
+    for generation in [
+        "".to_owned(),
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+    ] {
+        let mut invalid = binding.clone();
+        invalid.active_catalog_generation = generation.clone();
+        assert!(invalid.validate().is_err());
+        let mut invalid = binding.clone();
+        invalid.staging_catalog_generation = Some(generation.clone());
+        assert!(invalid.validate().is_err());
+        let mut invalid = binding.clone();
+        invalid.rollback_catalog_generation = Some(generation);
+        assert!(invalid.validate().is_err());
+    }
+    let mut unknown = serde_json::to_value(&binding).unwrap();
+    unknown
+        .as_object_mut()
+        .unwrap()
+        .insert("future".to_owned(), serde_json::Value::Null);
+    assert!(serde_json::from_value::<CwRuntimeBinding>(unknown).is_err());
+    let duplicate = format!(
+        "{{\"schema_version\":1,\"schema_version\":1,\"active_catalog_generation\":\"{}\"}}",
+        binding.active_catalog_generation,
+    );
+    assert!(serde_json::from_str::<CwRuntimeBinding>(&duplicate).is_err());
+    let omitted: CwRuntimeBinding = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "active_catalog_generation": binding.active_catalog_generation,
+    }))
+    .unwrap();
+    assert!(omitted.staging_catalog_generation.is_none());
+    assert!(omitted.rollback_catalog_generation.is_none());
+    omitted.validate().unwrap();
+}
+
+#[test]
+fn runtime_generations_validate_independently_of_boot_and_workspace_identity() {
+    let mut environment = super::super::tests::project_environment();
+    environment.validate(&environment.name).unwrap();
+    let artifact = environment.active_artifact_generation.clone();
+    let workspace = environment.workspace_plan.clone();
+    environment.cw_runtime = Some(CwRuntimeBinding {
+        schema_version: 1,
+        active_catalog_generation: "1".repeat(64),
+        staging_catalog_generation: None,
+        rollback_catalog_generation: Some("2".repeat(64)),
+    });
+    let mut runner = runner_record();
+    assert!(runner.cw_runtime_catalog_generation.is_none());
+    runner.cw_runtime_catalog_generation = Some("3".repeat(64));
+    environment.runner = Some(runner);
+    environment.validate(&environment.name).unwrap();
+    assert_eq!(environment.active_artifact_generation, artifact);
+    assert_eq!(environment.workspace_plan, workspace);
+    environment
+        .runner
+        .as_mut()
+        .unwrap()
+        .cw_runtime_catalog_generation = Some("G".repeat(64));
+    assert!(environment.validate(&environment.name).is_err());
+    environment
+        .runner
+        .as_mut()
+        .unwrap()
+        .cw_runtime_catalog_generation = Some("3".repeat(64));
+    environment.cw_runtime.as_mut().unwrap().schema_version = 2;
+    assert!(environment.validate(&environment.name).is_err());
 }

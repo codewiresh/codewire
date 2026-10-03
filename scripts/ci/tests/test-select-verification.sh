@@ -547,6 +547,12 @@ run_paths_case material_free_credential_bridge pull_request refs/pull/6011/head 
 run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/authority.rs
+run_paths_case credential_service_kind_entrypoint_without_opt_in pull_request refs/pull/6011/head false \
+  'database policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind.rs
+run_paths_case credential_service_kind_entrypoint_with_opt_in pull_request refs/pull/6011/head true \
+  'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind.rs
 run_paths_case credential_service_kind_runtime_without_opt_in pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/runtime/kind/provider.rs
@@ -943,6 +949,21 @@ grep -qF "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$CLI_RELEASE_WORKFLOW"
 run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   apps/cli/Makefile
+run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-cli-host.py
+run_paths_case cli_agent_peer_fixture pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/fixtures/agent-peer.py
+run_paths_case cli_native_managed_startup pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-native-managed-startup.py
+run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/test-cli-native-managed.py
+run_paths_case cli_native_managed_artifact pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/build-native-managed-agent.py
 run_paths_case edge_harness pull_request refs/pull/153/head false \
   'policy' scripts/ci/verify/kind-e2e.sh
 run_paths_case edge_host_runtime pull_request refs/pull/1529/head true \

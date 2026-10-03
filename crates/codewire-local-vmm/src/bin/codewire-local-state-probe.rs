@@ -36,7 +36,7 @@ mod linux {
     use uuid::Uuid;
 
     const DATABASE_APPLICATION_ID: i64 = 0x4357_564d;
-    const DATABASE_SCHEMA_VERSION: i64 = 11;
+    const DATABASE_SCHEMA_VERSION: i64 = 12;
     const DATABASE_FILE: &str = "supervisor.db";
     const MAXIMUM_OPERATIONS: usize = 128;
     const MAXIMUM_WORKSPACE_METADATA_BYTES: usize = 512 * 1024;
@@ -483,6 +483,29 @@ mod linux {
                 .is_some();
             require(present)?;
         }
+        let platform: (i64, Option<String>) = connection.query_row(
+            "SELECT COUNT(*), MIN(value) FROM supervisor_metadata WHERE key = 'platform'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        require(platform == (1, Some("linux-v1".to_owned())))?;
+        let runtime_binding = connection
+            .query_row(
+                "SELECT type, \"notnull\", dflt_value, pk, hidden
+                 FROM pragma_table_xinfo('environments') WHERE name = 'cw_runtime_binding_json'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        require(runtime_binding == Some(("BLOB".to_owned(), 0, None, 0, 0)))?;
         Ok(())
     }
 
@@ -582,7 +605,8 @@ mod linux {
                          CREATE TABLE environments(
                            id TEXT, name TEXT, runner_json BLOB,
                            active_artifact_generation TEXT,
-                           active_workspace_generation_json BLOB
+                           active_workspace_generation_json BLOB,
+                           cw_runtime_binding_json BLOB NULL
                          );
                          CREATE TABLE supervisor_settings(
                            singleton INTEGER, current_environment_id TEXT
@@ -593,9 +617,10 @@ mod linux {
                            checkpoint INTEGER, created_unix_ms INTEGER,
                            environment_id TEXT
                          );
+                         INSERT INTO supervisor_metadata VALUES ('platform', 'linux-v1');
                          INSERT INTO supervisor_settings VALUES (1, NULL);
                          PRAGMA application_id = 1129797197;
-                         PRAGMA user_version = 11;",
+                         PRAGMA user_version = 12;",
                     )
                     .unwrap();
                 fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
@@ -603,7 +628,10 @@ mod linux {
                 let runner = runner_record(process);
                 writer
                     .execute(
-                        "INSERT INTO environments VALUES (?1, 'native-smoke', ?2, ?3, ?4)",
+                        "INSERT INTO environments
+                         (id, name, runner_json, active_artifact_generation,
+                          active_workspace_generation_json)
+                         VALUES (?1, 'native-smoke', ?2, ?3, ?4)",
                         params![
                             environment_id,
                             serde_json::to_vec(&runner).unwrap(),
@@ -811,19 +839,103 @@ mod linux {
                     .database()
                     .value(Field::Contract, "native-smoke")
                     .unwrap(),
-                "1129797197:11:wal:ok"
+                "1129797197:12:wal:ok"
             );
+            for version in [0, 10, 11, 13] {
+                fixture
+                    .writer
+                    .pragma_update(None, "user_version", version)
+                    .unwrap();
+                assert!(ProbeDatabase::open(&fixture.root).is_err());
+                assert_eq!(
+                    fixture
+                        .writer
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                        .unwrap(),
+                    version
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_a_mislabeled_runtime_schema_without_repairing_it() {
+            for column in [
+                "unrelated BLOB NULL",
+                "cw_runtime_binding_json TEXT NULL",
+                "cw_runtime_binding_json BLOB NOT NULL",
+                "cw_runtime_binding_json BLOB NULL DEFAULT NULL",
+                "cw_runtime_binding_json BLOB PRIMARY KEY",
+                "other BLOB, cw_runtime_binding_json BLOB GENERATED ALWAYS AS (other) VIRTUAL",
+            ] {
+                let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+                let schema = format!("CREATE TABLE environments ({column})");
+                fixture
+                    .writer
+                    .execute_batch(&format!("DROP TABLE environments; {schema};"))
+                    .unwrap();
+                assert!(ProbeDatabase::open(&fixture.root).is_err(), "{column}");
+                assert_eq!(
+                    fixture
+                        .writer
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema WHERE name = 'environments'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                    schema
+                );
+                assert_eq!(
+                    fixture
+                        .writer
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                        .unwrap(),
+                    12
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_foreign_or_ambiguous_platform_without_changing_it() {
+            for platform in ["darwin-v1", "linux-v2", ""] {
+                let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+                fixture
+                    .writer
+                    .execute("UPDATE supervisor_metadata SET value = ?1", [platform])
+                    .unwrap();
+                assert!(ProbeDatabase::open(&fixture.root).is_err());
+                assert_eq!(
+                    fixture
+                        .writer
+                        .query_row("SELECT value FROM supervisor_metadata", [], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .unwrap(),
+                    platform
+                );
+            }
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
             fixture
                 .writer
-                .pragma_update(None, "user_version", 10)
+                .execute("DELETE FROM supervisor_metadata", [])
+                .unwrap();
+            assert!(ProbeDatabase::open(&fixture.root).is_err());
+            fixture
+                .writer
+                .execute_batch(
+                    "INSERT INTO supervisor_metadata VALUES ('platform', 'linux-v1');
+                     INSERT INTO supervisor_metadata VALUES ('platform', 'linux-v1');",
+                )
                 .unwrap();
             assert!(ProbeDatabase::open(&fixture.root).is_err());
             assert_eq!(
                 fixture
                     .writer
-                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .query_row("SELECT COUNT(*) FROM supervisor_metadata", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
                     .unwrap(),
-                10
+                2
             );
         }
 

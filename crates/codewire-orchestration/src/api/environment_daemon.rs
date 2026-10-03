@@ -197,12 +197,20 @@ pub async fn launch_environment_daemon_session_core(
     environment_id: &str,
     request: v1::LaunchSessionRequest,
 ) -> AppResult<v1::SessionRecord> {
+    let required = if !request.name.is_empty() || request.parent_session_id.is_some() {
+        &[
+            DAEMON_CAPABILITY_SESSIONS,
+            codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_METADATA,
+        ][..]
+    } else {
+        &[DAEMON_CAPABILITY_SESSIONS][..]
+    };
     let (mut client, token) = session_client_for_target(
         state,
         user,
         org_id,
         environment_id,
-        &[DAEMON_CAPABILITY_SESSIONS],
+        required,
         DaemonRequestBudget::Launch,
     )
     .await?;
@@ -355,6 +363,7 @@ pub async fn restart_environment_daemon_session_core(
     org_id: &str,
     environment_id: &str,
     session_id: &str,
+    expected_launch_generation: Option<u64>,
 ) -> AppResult<v1::SessionRecord> {
     let (mut client, token) = session_client_for_target(
         state,
@@ -368,6 +377,7 @@ pub async fn restart_environment_daemon_session_core(
     let request = authorize(
         v1::RestartSessionRequest {
             session_id: session_id.to_string(),
+            expected_launch_generation,
         },
         &token,
     )?;
@@ -384,6 +394,34 @@ pub async fn restart_environment_daemon_session_core(
         },
     )
     .await
+}
+
+/// Raw acknowledged input uses the same authorized running-environment target.
+/// A deadline has an ambiguous write outcome and is never automatically retried.
+pub async fn send_environment_daemon_session_input_core(
+    state: &ApiState,
+    user: &AuthUser,
+    org_id: &str,
+    environment_id: &str,
+    request: v1::SendSessionInputRequest,
+) -> AppResult<()> {
+    let (mut client, token) = session_client_for_target(
+        state,
+        user,
+        org_id,
+        environment_id,
+        &[codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_INPUT],
+        DaemonRequestBudget::Control,
+    )
+    .await?;
+    let mut request = authorize(request, &token)?;
+    request.set_timeout(codewire_gateway_proto::SESSION_INPUT_TIMEOUT);
+    client.send_session_input(request).await.map_err(|error| match error.code() {
+        tonic::Code::DeadlineExceeded | tonic::Code::Cancelled | tonic::Code::Unavailable => AppError::Precondition(
+            "session input outcome is ambiguous; input may have been written; do not retry automatically".into()),
+        _ => daemon_session_error(error),
+    })?;
+    Ok(())
 }
 
 pub async fn read_environment_daemon_session_output_core(
@@ -1384,6 +1422,7 @@ mod tests {
                 process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 credential_bridge: None,
                 managed_credential_clients: Default::default(),
+                host: None,
                 launch_projection: None,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -1504,6 +1543,8 @@ mod tests {
             .launch_session(
                 authorize(
                     v1::LaunchSessionRequest {
+                        name: String::new(),
+                        parent_session_id: None,
                         command: vec![
                             "/bin/sh".into(),
                             "-c".into(),
