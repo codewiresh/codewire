@@ -2048,3 +2048,86 @@ mod tests;
 
 #[cfg(test)]
 mod database_tests;
+
+// ------------------------------------------------ cw runtime capture reader
+
+/// A read-only capture of the current backend pointer and its complete
+/// immutable binding. Keep the mutable environment/backend gate values too:
+/// a later admission must compare the original row, not resolve a new Pod.
+/// This reader does not issue a credential or alter the B2 binding writer.
+#[derive(Clone, PartialEq, Eq, sqlx::FromRow)]
+pub(crate) struct CwRuntimeLiveBinding {
+    pub organization_id: String,
+    pub organization_deletion_state: String,
+    pub organization_deletion_generation: i64,
+    pub environment_id: String,
+    pub environment_state: String,
+    pub desired_state: String,
+    pub environment_type: String,
+    pub isolation_tier: String,
+    pub environment_generation: i64,
+    pub deletion_requested_at: Option<chrono::NaiveDateTime>,
+    pub backend_namespace: String,
+    pub backend_pod_name: String,
+    pub backend_pod_ip: String,
+    pub backend_pod_uid: String,
+    pub backend_claim_uid: Option<String>,
+    pub backend_pvc_uid: Option<String>,
+    pub backend_bound_at: chrono::DateTime<chrono::Utc>,
+    pub setup_complete: bool,
+    pub setup_owner_status: Option<String>,
+    pub pod_uid: String,
+    pub namespace: String,
+    pub pod_name: String,
+    pub claim_uid: String,
+    pub sandbox_uid: String,
+    pub workspace_pvc_uid: Option<String>,
+    pub binding_generation: i64,
+    pub projection_selection_sha256: Option<String>,
+    pub managed_credential_clients: String,
+    pub credential_scope: String,
+    pub binding_bound_at: chrono::DateTime<chrono::Utc>,
+}
+
+const LIVE_CW_RUNTIME_BINDING: &str = "SELECT
+        e.org_id AS organization_id, e.id AS environment_id,
+        o.deletion_state AS organization_deletion_state,
+        o.deletion_generation AS organization_deletion_generation,
+        e.state AS environment_state, e.desired_state,
+        e.type AS environment_type, e.isolation_tier,
+        e.environment_operation_generation AS environment_generation,
+        e.deletion_requested_at,
+        b.namespace AS backend_namespace,
+        COALESCE(b.pod_name, '') AS backend_pod_name,
+        COALESCE(b.pod_ip, '') AS backend_pod_ip,
+        b.pod_uid AS backend_pod_uid,
+        b.sandbox_claim_uid AS backend_claim_uid,
+        b.workspace_pvc_uid AS backend_pvc_uid,
+        b.bound_at AS backend_bound_at,
+        COALESCE(b.setup_complete, false) AS setup_complete, b.setup_owner_status,
+        w.pod_uid, w.namespace, w.pod_name, w.claim_uid, w.sandbox_uid,
+        w.workspace_pvc_uid, w.operation_generation AS binding_generation,
+        w.projection_selection_sha256, w.managed_credential_clients,
+        w.credential_scope, w.bound_at AS binding_bound_at
+    FROM environments e
+    JOIN organizations o ON o.id = e.org_id
+    JOIN sandbox_environment_backend b ON b.environment_id = e.id
+    JOIN sandbox_workspace_bindings w
+      ON w.environment_id = b.environment_id AND w.pod_uid = b.pod_uid
+    WHERE e.org_id = $1 AND e.id = $2
+      AND b.bound_at IS NOT NULL AND w.released_at IS NULL";
+
+/// Query through a pool during capture, or through the future operation
+/// owner's transaction during admission. A read alone is not a durable
+/// admission lock: that owner must fence its own write in the same transaction.
+pub(crate) async fn live_cw_runtime_binding(
+    executor: impl sqlx::PgExecutor<'_>,
+    organization_id: &str,
+    environment_id: &str,
+) -> Result<Option<CwRuntimeLiveBinding>, sqlx::Error> {
+    sqlx::query_as(LIVE_CW_RUNTIME_BINDING)
+        .bind(organization_id)
+        .bind(environment_id)
+        .fetch_optional(executor)
+        .await
+}

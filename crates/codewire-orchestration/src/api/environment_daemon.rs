@@ -144,7 +144,7 @@ impl EnvironmentDaemonEndpointOverrides {
         })
     }
 
-    fn endpoint(&self, namespace: &str, environment_id: &str) -> String {
+    pub(super) fn endpoint(&self, namespace: &str, environment_id: &str) -> String {
         self.endpoints
             .get(environment_id)
             .cloned()
