@@ -494,6 +494,7 @@ run_runtime_dev_smoke() {
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
   scripts/runtime/tests/test-smoke-dev-commodity.sh
   scripts/runtime/tests/test-workspace-binding-proof.sh
+  scripts/runtime/tests/test-warm-pool-proof.sh
   scripts/runtime/tests/test-local-platform-sources-smoke.sh
   scripts/runtime/tests/test-private-checkout-smoke.sh
   scripts/runtime/tests/test-dev-initial-private-checkout.sh

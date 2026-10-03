@@ -33,6 +33,8 @@ source "$ROOT/scripts/ci/verify/kind/suites/edge-contract.sh"
 source "$ROOT/scripts/ci/verify/kind/suites/credential-journey.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/workspace-services.sh
 source "$ROOT/scripts/ci/verify/kind/suites/workspace-services.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/warm-pools.sh
+source "$ROOT/scripts/ci/verify/kind/suites/warm-pools.sh"
 
 kind_e2e_usage() {
   cat >&2 <<'EOF'
@@ -49,6 +51,7 @@ usage:
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite environment-session
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite sandbox-supply-chain
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite runtime-acceptance
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite warm-pools
   KIND_CLUSTER_NAME=<retained-cluster> KIND_PUBLIC_ORIGIN=<origin> scripts/ci/verify/kind-e2e.sh credentials real
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh credentials fake
 EOF
@@ -135,6 +138,9 @@ dispatch_kind_e2e() {
       ;;
     runtime-acceptance)
       run_retained_runtime_acceptance_suite
+      ;;
+    warm-pools)
+      run_retained_warm_pools_suite
       ;;
     *)
       echo "::error::unknown Kind e2e suite: $2"

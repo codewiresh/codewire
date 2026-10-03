@@ -910,6 +910,12 @@ run_paths_case runtime_dev_tooling pull_request refs/pull/1516/head false \
   scripts/runtime/dev/measure-dev-commodity-overhead.sh \
   scripts/runtime/dev/smoke-dev-commodity.sh \
   scripts/runtime/kata/kata-genpolicy.sh
+run_paths_case runtime_dev_proofs pull_request refs/pull/2411/head false \
+  'policy runtime_dev_smoke' \
+  scripts/runtime/dev/prove-dev-workspace-binding.sh \
+  scripts/runtime/dev/prove-dev-warm-pools.sh \
+  scripts/runtime/tests/test-workspace-binding-proof.sh \
+  scripts/runtime/tests/test-warm-pool-proof.sh
 run_paths_case runtime_dev_auth pull_request refs/pull/1517/head false \
   'policy runtime_dev_smoke security security_dev_smoke_auth' \
   scripts/runtime/dev/provision-dev-smoke-user.sh \
