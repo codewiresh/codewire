@@ -514,6 +514,7 @@ run_retained_final_fencing_suite() { record final-fencing; }
 run_retained_environment_session_suite() { record environment-session; }
 run_retained_sandbox_supply_chain_suite() { record sandbox-supply-chain; }
 run_retained_runtime_acceptance_suite() { record runtime-acceptance; }
+run_retained_warm_pools_suite() { record warm-pools; }
 dispatch_kind_e2e
 printf '%s\n' integrated | cmp -s - "$CALLS" || fail 'no-argument dispatch changed'
 
@@ -660,6 +661,11 @@ printf '%s\n' sandbox-supply-chain | cmp -s - "$CALLS" ||
 dispatch_kind_e2e suite runtime-acceptance
 printf '%s\n' runtime-acceptance | cmp -s - "$CALLS" ||
   fail 'runtime-acceptance dispatch changed'
+
+: >"$CALLS"
+dispatch_kind_e2e suite warm-pools
+printf '%s\n' warm-pools | cmp -s - "$CALLS" ||
+  fail 'warm-pools dispatch changed'
 
 expect_failure missing-suite dispatch_kind_e2e suite
 grep -Fq 'requires exactly one suite name' "$FIXTURE/missing-suite.out" ||
