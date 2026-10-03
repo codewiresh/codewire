@@ -89,6 +89,26 @@ def hex_digest(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def shell_default_witness(output, marker, version):
+    fields, selected = {}, {}
+    for field in ("PATH", "VERSION"):
+        occurrences = list(re.finditer(r"^" + re.escape(marker + "_" + field + ":"), output, re.MULTILINE))
+        value = None
+        if len(occurrences) == 1:
+            line = output[occurrences[0].end():occurrences[0].end() + 514].split("\n", 1)[0].removesuffix("\r")
+            if 1 <= len(line) <= 512 and "\r" not in line:
+                value = line
+        selected[field] = value
+        # Only the two public marker fields enter diagnostics, never terminal output.
+        fields[field.lower()] = {"count": len(occurrences),
+                                 "value": managed.scrub(value, 256) if value is not None else None}
+    expected_path = RUNTIME_ROOT + "/cw"
+    require(selected["PATH"] == expected_path and selected["VERSION"] == "cw " + version,
+            "ordinary same-shell CW did not select the admitted default: "
+            + json.dumps(fields, sort_keys=True))
+    return fields
+
+
 def path_arg(value):
     require(isinstance(value, str) and value.startswith("/") and len(os.fsencode(value)) <= 4096
             and not any(ord(c) < 32 or ord(c) == 127 for c in value)
@@ -741,10 +761,7 @@ class Journey(managed.Journey):
         output = self.until(lambda:self.call("logs", self.environment, self.sentinel, "--tail", "50")[1],
                             lambda text:f"{marker}_END" in text and f"{marker}_VERSION:cw " in text,
                             30, f"same shell selected {stage}")
-        require(re.search(re.escape(f"{marker}_PATH:/usr/local/bin/cw")+r"\r?$", output, re.MULTILINE)
-                and re.search(re.escape(f"{marker}_VERSION:cw {asset.identity['package_version']}")+r"\r?$",
-                              output, re.MULTILINE),
-                "ordinary same-shell CW did not select the admitted default")
+        shell_default_witness(output, marker, asset.identity["package_version"])
         self.sentinel_live()
 
     def workspace(self, op):
@@ -766,8 +783,8 @@ else:
     before=os.fstat(fd)
     assert stat.S_ISREG(before.st_mode) and before.st_uid==os.geteuid() and before.st_nlink==1
     assert stat.S_IMODE(before.st_mode)==0o600 and before.st_size==len(token)
-    assert os.read(fd,128)==token.encode() and before==os.fstat(fd)
-    assert before==os.stat(name,follow_symlinks=False)
+    assert os.read(fd,128)==token.encode() and identity(before)==identity(os.fstat(fd))
+    assert identity(before)==identity(os.stat(name,follow_symlinks=False))
     assert identity(before)==json.loads(saved)
     if op=="remove": os.unlink(name)
     else: assert op=="observe"
@@ -777,8 +794,9 @@ print(json.dumps({"operation":op,"identity":identity(before)}))
         code, output = self.guest("update-workspace-"+op,
                                   'exec python3 -I -B -c "$1" "$2" "$3" "$4" "$5"',
                                   script, op, name, token, json.dumps(self.workspace_identity))
+        require(code == 0, "owned workspace marker operation failed")
         proof = json.loads(output)
-        require(code == 0 and proof["operation"] == op, "owned workspace marker changed")
+        require(proof["operation"] == op, "owned workspace marker changed")
         if op == "create":
             self.workspace_identity = proof["identity"]
         else:
@@ -1070,6 +1088,101 @@ def contract_tests(producer=None, image=None):
         return code, output.getvalue(), errors.getvalue(), effects, source, assets
 
     class Contracts(unittest.TestCase):
+        def test_same_shell_runtime_alias_and_exact_versions_across_update(self):
+            guest = (ROOT / "crates/codewire-vmm-guest-probe/src/guest.rs").read_text()
+            self.assertIn('format!("PATH={CW_RUNTIME_ROOT}:{}", &path[5..])', guest)
+            for stage, version in (("a-before", "1.0.0"), ("b", "1.0.1"), ("a-after", "1.0.0")):
+                with self.subTest(stage=stage):
+                    marker = "CWNU_fixture_" + stage.upper()
+                    output = f"{marker}_PATH:{RUNTIME_ROOT}/cw\r\n{marker}_VERSION:cw {version}\r\n"
+                    proof = shell_default_witness(output, marker, version)
+                    self.assertEqual(proof["path"]["value"], RUNTIME_ROOT + "/cw")
+
+        def test_same_shell_wrong_alias_version_duplicate_or_unanchored_refused(self):
+            marker = "CWNU_fixture_A"
+            correct = f"{marker}_PATH:{RUNTIME_ROOT}/cw\n{marker}_VERSION:cw 1.0.0\n"
+            for output in (correct.replace(RUNTIME_ROOT + "/cw", "/usr/local/bin/cw"),
+                           correct.replace(RUNTIME_ROOT + "/cw", "/workspace/cw"),
+                           correct.replace("cw 1.0.0", "cw 0.9.0"), correct + correct,
+                           "echo " + correct, correct.replace("_PATH:", "_OTHER:")):
+                with self.subTest(output=output), self.assertRaises(Failure):
+                    shell_default_witness(output, marker, "1.0.0")
+
+        def test_same_shell_long_public_version_is_compared_before_diagnostic_redaction(self):
+            marker, version = "CWNU_fixture_LONG", "1.0.0-" + "a" * 32
+            output = f"{marker}_PATH:{RUNTIME_ROOT}/cw\n{marker}_VERSION:cw {version}\n"
+            proof = shell_default_witness(output, marker, version)
+            self.assertEqual(proof["path"]["value"], RUNTIME_ROOT + "/cw")
+
+        def test_same_shell_empty_or_oversized_duplicate_refused(self):
+            marker = "CWNU_fixture_DUPLICATE"
+            correct = f"{marker}_PATH:{RUNTIME_ROOT}/cw\n{marker}_VERSION:cw 1.0.0\n"
+            for field in ("PATH", "VERSION"):
+                for value in ("", "x" * 513):
+                    with self.subTest(field=field, length=len(value)), self.assertRaises(Failure):
+                        shell_default_witness(correct + f"{marker}_{field}:{value}\n", marker, "1.0.0")
+
+        def test_workspace_read_ignores_only_access_time(self):
+            import contextlib
+            import io
+            source = ast.parse(Path(__file__).read_text())
+            method = next(node for node in ast.walk(source)
+                          if isinstance(node, ast.FunctionDef) and node.name == "workspace")
+            script = next(node.value.value for node in ast.walk(method)
+                          if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == "script" for target in node.targets))
+            real_fstat, real_open = os.fstat, os.open
+            cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                with tempfile.TemporaryDirectory() as directory:
+                    os.chdir(directory)
+                    name, token = ".cwnm-fixture-update-workspace", "fixture-owned-marker"
+                    def invoke(operation, saved, changed=None):
+                        opened, metadata_calls = [], []
+                        def opened_file(*args, **kwargs):
+                            fd = real_open(*args, **kwargs); opened.append(fd); return fd
+                        def observed(fd):
+                            actual = real_fstat(fd); metadata_calls.append(actual)
+                            if changed and len(metadata_calls) == 2:
+                                values = list(actual)
+                                extra = {key: getattr(actual, key) for key in ("st_atime_ns", "st_mtime_ns", "st_ctime_ns")}
+                                if changed == "st_atime_ns":
+                                    values[7] += 1; extra[changed] += 1000000000
+                                elif changed in extra:
+                                    extra[changed] += 1
+                                else:
+                                    values[{"st_ino": 1, "st_nlink": 3, "st_uid": 4, "st_size": 6}[changed]] += 1
+                                return os.stat_result(values, extra)
+                            return actual
+                        output = io.StringIO()
+                        try:
+                            with mock.patch.object(sys, "argv", ["workspace-probe", operation, name, token, json.dumps(saved)]), \
+                                    mock.patch.object(os, "open", side_effect=opened_file), \
+                                    mock.patch.object(os, "fstat", side_effect=observed), contextlib.redirect_stdout(output):
+                                exec(compile(script, "checked-in-workspace-probe", "exec"), {})
+                            return json.loads(output.getvalue())["identity"]
+                        finally:
+                            for fd in opened:
+                                try: os.close(fd)
+                                except OSError: pass
+                    saved = invoke("create", None)
+                    self.assertEqual(invoke("observe", saved, "st_atime_ns"), saved)
+                    for field in ("st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_uid", "st_nlink"):
+                        with self.subTest(field=field), self.assertRaises(AssertionError):
+                            invoke("observe", saved, field)
+                    self.assertEqual(invoke("remove", saved), saved)
+                    self.assertFalse(Path(name).exists())
+            finally:
+                os.fchdir(cwd); os.close(cwd)
+
+        def test_workspace_failed_status_precedes_json_decode(self):
+            journey = Journey.__new__(Journey)
+            journey.prefix, journey.marker = "cwnm-fixture", (".cwnm-fixture-update-workspace", "marker")
+            journey.workspace_identity = None
+            journey.guest = mock.Mock(return_value=(1, ""))
+            with self.assertRaisesRegex(Failure, "workspace marker operation failed"):
+                journey.workspace("observe")
+
         def test_complete_asset_roundtrip_uses_real_shared_admission(self):
             with tempfile.TemporaryDirectory() as name:
                 args = write_fixture(Path(name))
