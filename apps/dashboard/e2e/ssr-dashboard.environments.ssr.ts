@@ -496,7 +496,9 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await expect(page.locator('[action$="/_actions/sandboxes/prepare"]')).toHaveCount(0);
     await expect(page.locator('[data-event-action$="/_events/sandboxes/prepare"]')).toHaveCount(0);
-    const drawerGeometry = await drawer.evaluate((element) => {
+    // The drawer slides in (cw-drawer-in); measure where it settles.
+    const drawerGeometry = await drawer.evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map((animation) => animation.finished));
       const box = element.getBoundingClientRect();
       return { width: box.width, height: box.height, right: box.right, viewportWidth: innerWidth, viewportHeight: innerHeight };
     });
