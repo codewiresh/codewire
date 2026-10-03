@@ -1,13 +1,17 @@
+use std::fmt::Debug;
+
 use codewire_access::{
     MANAGED_CREDENTIAL_CLIENTS_ENV, ManagedCredentialClient, ManagedCredentialClients,
 };
 use codewire_credential_broker::platform::PlatformRuntimeError as Error;
 use codewire_server_core::pod_identity::VerifiedPodIdentity;
+use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
-use kube::{Api, Client};
+use kube::{Api, Client, Resource};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -384,37 +388,23 @@ fn dynamic(
     Api::namespaced_with(client, namespace, &resource)
 }
 
-pub(crate) async fn validate_lineage(
+async fn read<K>(client: &Client, namespace: &str, name: &str) -> Result<K, Error>
+where
+    K: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Debug,
+    K::DynamicType: Default,
+{
+    Api::namespaced(client.clone(), namespace)
+        .get(name)
+        .await
+        .map_err(kube_error)
+}
+
+/// The scope's Claim, then the Sandbox its status names: the one lineage read
+/// that depends on another object.
+async fn claim_and_sandbox(
     client: &Client,
     scope: &Scope,
-    gateway: &Pod,
-    workspace_identity: &VerifiedPodIdentity,
-) -> Result<Lineage, Error> {
-    // The reviewed workspace Pod must be the one orchestration bound, by UID,
-    // and the live binding must name the backend's Claim. Checked before any
-    // Kubernetes read.
-    if !valid_name(&scope.claim_name, false)
-        || !valid_uid(&scope.claim_uid)
-        || scope.pod_name != workspace_identity.pod_name()
-        || scope.namespace != workspace_identity.namespace()
-        || !valid_uid(&scope.pod_uid)
-        || scope.pod_uid != workspace_identity.pod_uid()
-        || scope.binding_claim_uid != scope.claim_uid
-        || !valid_uid(&scope.binding_sandbox_uid)
-    {
-        return Err(Error::Denied);
-    }
-    let rs_owner = controller(&gateway.metadata, "apps/v1", "ReplicaSet")?;
-    let replica_set: ReplicaSet = Api::namespaced(client.clone(), &scope.namespace)
-        .get(&rs_owner.name)
-        .await
-        .map_err(kube_error)?;
-    let deployment: Deployment = Api::namespaced(client.clone(), &scope.namespace)
-        .get(&format!("cw-gateway-{}", scope.environment_id))
-        .await
-        .map_err(kube_error)?;
-    let (replica_set_uid, deployment_uid) =
-        gateway_chain(scope, gateway, &replica_set, &deployment)?;
+) -> Result<(DynamicObject, DynamicObject), Error> {
     let claim = dynamic(
         client.clone(),
         &scope.namespace,
@@ -441,10 +431,45 @@ pub(crate) async fn validate_lineage(
     .get(sandbox_name)
     .await
     .map_err(kube_error)?;
-    let workspace: Pod = Api::namespaced(client.clone(), &scope.namespace)
-        .get(&scope.pod_name)
-        .await
-        .map_err(kube_error)?;
+    Ok((claim, sandbox))
+}
+
+pub(crate) async fn validate_lineage(
+    client: &Client,
+    scope: &Scope,
+    gateway: &Pod,
+    workspace_identity: &VerifiedPodIdentity,
+) -> Result<Lineage, Error> {
+    // The reviewed workspace Pod must be the one orchestration bound, by UID,
+    // and the live binding must name the backend's Claim. Checked before any
+    // Kubernetes read.
+    if !valid_name(&scope.claim_name, false)
+        || !valid_uid(&scope.claim_uid)
+        || scope.pod_name != workspace_identity.pod_name()
+        || scope.namespace != workspace_identity.namespace()
+        || !valid_uid(&scope.pod_uid)
+        || scope.pod_uid != workspace_identity.pod_uid()
+        || scope.binding_claim_uid != scope.claim_uid
+        || !valid_uid(&scope.binding_sandbox_uid)
+    {
+        return Err(Error::Denied);
+    }
+    let rs_owner = controller(&gateway.metadata, "apps/v1", "ReplicaSet")?;
+    let deployment_name = format!("cw-gateway-{}", scope.environment_id);
+    // Every name below is fixed before any request (the ReplicaSet by the
+    // verified gateway Pod's controller, the Deployment, Claim and workspace
+    // Pod by the scope), except the Sandbox's, which only its Claim's status
+    // names. So four reads run concurrently and the Sandbox read follows its
+    // Claim. The first failed read ends the resolve and drops the rest; no
+    // object is compared with another until all five are fetched.
+    let (replica_set, deployment, (claim, sandbox), workspace) = tokio::try_join!(
+        read::<ReplicaSet>(client, &scope.namespace, &rs_owner.name),
+        read::<Deployment>(client, &scope.namespace, &deployment_name),
+        claim_and_sandbox(client, scope),
+        read::<Pod>(client, &scope.namespace, &scope.pod_name),
+    )?;
+    let (replica_set_uid, deployment_uid) =
+        gateway_chain(scope, gateway, &replica_set, &deployment)?;
     live_pod(&workspace, workspace_identity)?;
     let (claim_uid, sandbox_uid) = workspace_chain(scope, &claim, &sandbox, &workspace)?;
     // The live Claim → Sandbox → Pod chain is the recorded one, by UID. A

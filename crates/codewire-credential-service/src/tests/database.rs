@@ -186,7 +186,8 @@ async fn restricted_metadata_login_admits_personal_scope_and_pins_exact_binding(
         ensure!(admission.token_review.count == 2 && admission.resolve.count == 1);
         let (session, timings) = timing::measure(authority.current_session()).await;
         session?;
-        // One resolve, split into its six Kubernetes reads and its SQL.
+        // One resolve, split into its Kubernetes reads (the gateway Pod, then
+        // the concurrent lineage reads) and its SQL.
         ensure!(timings.resolve.count == 1);
         ensure!(timings.resolve_kubernetes > std::time::Duration::ZERO);
         ensure!(timings.resolve_sql() > std::time::Duration::ZERO);

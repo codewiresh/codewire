@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use axum::{Router, body::Body};
@@ -34,7 +35,7 @@ use tonic::metadata::{MetadataMap, MetadataValue};
 use uuid::Uuid;
 
 use crate::KubernetesPlatformBridgeAuthenticator;
-use crate::authority::{Scope, WORKSPACE_AUTHORIZATION, unix_now};
+use crate::authority::{Scope, WORKSPACE_AUTHORIZATION, kubernetes_read, unix_now};
 use crate::objects::{
     binding_managed_clients, gateway_chain, gateway_environment, validate_lineage, workspace_chain,
 };
@@ -223,12 +224,48 @@ impl Gate {
     }
 }
 
+/// Requests the fixture is answering now, and the most it answered at once.
+#[derive(Default)]
+struct Concurrency {
+    current: AtomicUsize,
+    peak: AtomicUsize,
+}
+impl Concurrency {
+    fn enter(self: &Arc<Self>) -> InFlight {
+        let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(current, Ordering::SeqCst);
+        InFlight(self.clone())
+    }
+    fn reset_peak(&self) {
+        self.peak
+            .store(self.current.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+}
+/// Counts one request until its response is sent or it is dropped.
+struct InFlight(Arc<Concurrency>);
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.current.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// One answered request: its path, when it arrived and when it was answered.
+struct Span {
+    path: String,
+    started: Instant,
+    answered: Instant,
+}
+
 #[derive(Clone)]
 struct KubeFixture {
     objects: Arc<Mutex<BTreeMap<String, Value>>>,
     paths: Arc<Mutex<Vec<String>>>,
     reviews: Arc<AtomicUsize>,
     gate: Arc<Gate>,
+    /// How long each path waits before it is answered.
+    delays: Arc<Mutex<BTreeMap<String, Duration>>>,
+    spans: Arc<Mutex<Vec<Span>>>,
+    concurrency: Arc<Concurrency>,
 }
 
 impl KubeFixture {
@@ -238,6 +275,9 @@ impl KubeFixture {
             paths: Arc::new(Mutex::new(Vec::new())),
             reviews: Arc::new(AtomicUsize::new(0)),
             gate: Arc::new(Gate::default()),
+            delays: Arc::new(Mutex::new(BTreeMap::new())),
+            spans: Arc::new(Mutex::new(Vec::new())),
+            concurrency: Arc::new(Concurrency::default()),
         }
     }
     fn client(&self) -> Client {
@@ -247,6 +287,12 @@ impl KubeFixture {
             async move {
                 let path = request.uri().path().to_owned();
                 fixture.paths.lock().unwrap().push(path.clone());
+                let started = Instant::now();
+                let _in_flight = fixture.concurrency.enter();
+                let delay = fixture.delays.lock().unwrap().get(&path).copied();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
                 let value = if path == TOKEN_REVIEW_PATH {
                     fixture.reviews.fetch_add(1,Ordering::SeqCst);
                     let bytes = axum::body::to_bytes(request.into_body(),40_000).await.unwrap();
@@ -258,7 +304,13 @@ impl KubeFixture {
                     }))
                 };
                 fixture.gate.pass(&path).await;
-                Response::builder().status(if value["code"] == 404 {StatusCode::NOT_FOUND} else {StatusCode::OK})
+                fixture.spans.lock().unwrap().push(Span { path, started, answered: Instant::now() });
+                let status = if value["kind"] == "Status" {
+                    StatusCode::from_u16(value["code"].as_u64().unwrap() as u16).unwrap()
+                } else {
+                    StatusCode::OK
+                };
+                Response::builder().status(status)
                     .header("content-type","application/json").body(Body::from(value.to_string())).unwrap()
             }
         }),NAMESPACE)
@@ -748,6 +800,150 @@ async fn lineage_requires_the_bound_pod_uid_and_the_recorded_claim_and_sandbox()
     validate_lineage(&client, &rebound, &gateway, &workspace)
         .await
         .map_err(|error| anyhow::anyhow!("rebound lineage was denied: {error}"))?;
+    Ok(())
+}
+
+/// The five lineage reads, by the kind each one fetches.
+fn lineage_paths() -> BTreeMap<&'static str, String> {
+    let objects = objects();
+    let path = |kind: &str| {
+        objects
+            .iter()
+            .find(|(path, value)| value["kind"] == kind && **path != pod_path(GATEWAY))
+            .map(|(path, _)| path.clone())
+            .unwrap()
+    };
+    ["ReplicaSet", "Deployment", "SandboxClaim", "Sandbox", "Pod"]
+        .into_iter()
+        .map(|kind| (kind, path(kind)))
+        .collect()
+}
+
+#[tokio::test]
+async fn independent_lineage_reads_overlap_and_only_the_sandbox_waits_for_its_claim() -> Result<()>
+{
+    const DELAY: Duration = Duration::from_millis(300);
+    let fixture = KubeFixture::new();
+    let client = fixture.client();
+    let workspace = verified_identity(
+        &fixture,
+        PodIdentityPurpose::CredentialWorkspace,
+        "workspace",
+    )
+    .await?;
+    let gateway: Pod = serde_json::from_value(objects()[&pod_path(GATEWAY)].clone())?;
+    let undelayed = validate_lineage(&client, &scope(), &gateway, &workspace)
+        .await
+        .map_err(|error| anyhow::anyhow!("undelayed lineage was denied: {error}"))?;
+
+    let paths = lineage_paths();
+    fixture
+        .delays
+        .lock()
+        .unwrap()
+        .extend(paths.values().map(|path| (path.clone(), DELAY)));
+    fixture.spans.lock().unwrap().clear();
+    fixture.concurrency.reset_peak();
+    let started = Instant::now();
+    let mut kubernetes = Duration::ZERO;
+    let lineage = kubernetes_read(
+        &mut kubernetes,
+        validate_lineage(&client, &scope(), &gateway, &workspace),
+    )
+    .await;
+    let wall = started.elapsed();
+    let lineage =
+        lineage.map_err(|error| anyhow::anyhow!("delayed lineage was denied: {error}"))?;
+    ensure!(lineage == undelayed, "concurrent reads changed the lineage");
+
+    let spans = fixture.spans.lock().unwrap();
+    ensure!(
+        spans.len() == paths.len(),
+        "every lineage object is read once"
+    );
+    let span = |kind: &str| spans.iter().find(|span| span.path == paths[kind]).unwrap();
+    let first_answer = spans.iter().map(|span| span.answered).min().unwrap();
+    for kind in ["ReplicaSet", "Deployment", "SandboxClaim", "Pod"] {
+        ensure!(
+            span(kind).started < first_answer,
+            "the {kind} read waited for another"
+        );
+    }
+    ensure!(fixture.concurrency.peak.load(Ordering::SeqCst) == 4);
+    // The Sandbox's name comes from its Claim's status, so that read alone
+    // follows another.
+    ensure!(span("Sandbox").started >= span("SandboxClaim").answered);
+
+    // Five reads of DELAY each take two DELAYs, the Claim then its Sandbox,
+    // not five; PR-1's Kubernetes time is that wall time, not the sum.
+    let sum = DELAY * paths.len() as u32;
+    eprintln!(
+        "lineage reads: {} of {DELAY:?} each; wall {wall:?}, accounted Kubernetes {kubernetes:?}, sequential sum {sum:?}",
+        paths.len()
+    );
+    ensure!(
+        wall >= DELAY * 2 && wall < DELAY * 3,
+        "lineage wall time {wall:?} is not the dependent pair's"
+    );
+    ensure!(kubernetes >= DELAY * 2 && kubernetes <= wall);
+    Ok(())
+}
+
+#[tokio::test]
+async fn any_failed_lineage_read_fails_closed_without_waiting_for_the_others() -> Result<()> {
+    // Far beyond the 5 s authority deadline, whose expiry is Unavailable.
+    const HANG: Duration = Duration::from_secs(60);
+    const QUICK: Duration = Duration::from_secs(2);
+    let fixture = KubeFixture::new();
+    let client = fixture.client();
+    let workspace = verified_identity(
+        &fixture,
+        PodIdentityPurpose::CredentialWorkspace,
+        "workspace",
+    )
+    .await?;
+    let gateway: Pod = serde_json::from_value(objects()[&pod_path(GATEWAY)].clone())?;
+    let paths = lineage_paths();
+    let original = fixture.objects.lock().unwrap().clone();
+    for (kind, failing) in &paths {
+        for (code, expected) in [
+            (404, PlatformRuntimeError::Denied),
+            (500, PlatformRuntimeError::Unavailable),
+        ] {
+            {
+                let mut objects = fixture.objects.lock().unwrap();
+                *objects = original.clone();
+                objects.insert(
+                    failing.clone(),
+                    json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":code}),
+                );
+            }
+            // Every other read hangs, except the Claim a Sandbox read needs.
+            *fixture.delays.lock().unwrap() = paths
+                .iter()
+                .filter(|(other, _)| {
+                    *other != kind && !(*kind == "Sandbox" && **other == "SandboxClaim")
+                })
+                .map(|(_, path)| (path.clone(), HANG))
+                .collect();
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                TIMEOUT,
+                validate_lineage(&client, &scope(), &gateway, &workspace),
+            )
+            .await
+            .with_context(|| format!("a failed {kind} read waited for the others"))?;
+            let elapsed = started.elapsed();
+            ensure!(
+                matches!(result, Err(error) if error == expected),
+                "a {code} {kind} read was not {expected}"
+            );
+            ensure!(
+                elapsed < QUICK,
+                "a {code} {kind} read took {elapsed:?} to fail"
+            );
+        }
+    }
     Ok(())
 }
 

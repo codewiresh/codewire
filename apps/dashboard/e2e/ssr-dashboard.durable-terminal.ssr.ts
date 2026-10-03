@@ -651,7 +651,13 @@ test("send deadlines follow the oldest outstanding frame and partial progress ca
   await page.getByRole("button", { name: "Reconnect", exact: true }).click();
   await expect.poll(() => state.connections.length).toBe(2);
   await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
-  await page.evaluate(() => { (window as unknown as { terminalTestBuffer: { buffered: number } }).terminalTestBuffer.buffered = 0; });
+  // The reconnected socket drains everything it sends, including a late
+  // resize under load, so no frame is outstanding when the clock jumps.
+  await page.evaluate(() => {
+    const buffer = (window as unknown as { terminalTestBuffer: { buffered: number; tail: number | null } }).terminalTestBuffer;
+    buffer.buffered = 0;
+    buffer.tail = 0;
+  });
   await page.clock.fastForward(6000);
   await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
   expect(state.connections[1].frames.some((frame) => frame.type === "input")).toBe(false);
