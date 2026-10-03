@@ -535,6 +535,7 @@ run_rust() {
   fi
   rust_shard features || return 0
   if selected rust_workspace || selected rust_pkg_codewire_cli || selected rust_pkg_codewire_cli_bin; then
+    python3 -B scripts/ci/tests/test-cli-host-managed.py || return $?
     python3 -B scripts/ci/tests/test-cli-update-mesh-endpoints.py
   fi
   if selected rust_workspace || selected rust_pkg_codewire_cli \

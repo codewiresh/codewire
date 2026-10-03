@@ -10,8 +10,10 @@ TMP_ROOT="$ROOT/.tmp"
 mkdir -p "$TMP_ROOT"
 TMP="$(mktemp -d "$TMP_ROOT/selector.XXXXXX")"
 NEGATIVE_CACHE_PATH="$ROOT/scripts/ci/cache/unlisted-cache-helper.sh"
+HOST_CLASSIFICATION_NEIGHBORS=()
 cleanup() {
   rm -f "$NEGATIVE_CACHE_PATH"
+  rm -f "${HOST_CLASSIFICATION_NEIGHBORS[@]}"
   rmdir "$ROOT/scripts/ci/cache" 2>/dev/null || true
   rm -rf "$TMP"
 }
@@ -968,6 +970,33 @@ run_paths_case cli_makefile pull_request refs/pull/1521/head false \
 run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   scripts/dev/test-cli-host.py
+run_paths_case source_approval_policy pull_request refs/pull/2255/head false \
+  'policy' .supplychain/source-policy.json
+for host_input in scripts/dev/test-cli-host-managed.py scripts/ci/tests/test-cli-host-managed.py; do
+  run_paths_case "host_managed_${host_input//\//_}" pull_request refs/pull/2255/head false \
+    'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' "$host_input"
+done
+run_paths_case host_managed_and_source_policy pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  .supplychain/source-policy.json scripts/dev/test-cli-host-managed.py \
+  scripts/ci/tests/test-cli-host-managed.py
+# Nearby unrecognized files retain conservative fallback; do not broaden
+# either the protected source-policy name or the exact harness path cases.
+for neighbor in .supplychain/source-policy-unlisted.json \
+    scripts/dev/test-cli-host-managed-unlisted.py scripts/ci/tests/test-cli-host-managed-unlisted.py; do
+  if ! (set -C; printf '%s\n' '# classifier fixture, never executed' > "$ROOT/$neighbor"); then
+    echo "classification neighbor already exists: $neighbor" >&2; exit 1
+  fi
+  HOST_CLASSIFICATION_NEIGHBORS+=("$ROOT/$neighbor")
+  printf '%s\n' "$neighbor" > "$TMP/host-neighbor.paths"
+  neighbor_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/2255/head \
+    KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/host-neighbor.paths" 2>/dev/null)"
+  [[ "$neighbor_output" == *'classification=unclassified'* \
+      && "$neighbor_output" == *'required_local_mode=full'* ]] || {
+    echo "classification neighbor lost conservative fallback: $neighbor" >&2; exit 1
+  }
+done
 run_paths_case cli_host_update_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   scripts/dev/test-cli-update.py
@@ -2970,9 +2999,64 @@ set -euo pipefail
 selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
 has_root_rust_selection() { return 0; }
 run_rust_packages() { printf '%s\n' "$*" > "$PRIMITIVE_PACKAGE_LOG"; }
+python3() {
+  if [[ "$*" == '-B scripts/ci/tests/test-cli-host-managed.py' ]]; then
+    if [[ -n "${PRIMITIVE_HOST_ROUTING_LOG:-}" ]]; then
+      printf '%s\n' host-fixture >> "$PRIMITIVE_HOST_ROUTING_LOG"
+    fi
+    return "${PRIMITIVE_HOST_FIXTURE_EXIT:-0}"
+  fi
+  if [[ -n "${PRIMITIVE_HOST_ROUTING_LOG:-}" ]] \
+      && [[ "$*" == '-B scripts/ci/tests/test-cli-update-mesh-endpoints.py' ]]; then
+    printf '%s\n' mesh-fixture >> "$PRIMITIVE_HOST_ROUTING_LOG"
+    return 0
+  fi
+  command python3 "$@"
+}
 source "$PRIMITIVE_RUST_BODY"
+if [[ "${PRIMITIVE_HOST_EXPLICIT_STATUS:-false}" == true ]]; then
+  status=0
+  run_rust || status=$?
+  if [[ "$status" == 0 ]]; then
+    printf '%s\n' success-receipt >> "$PRIMITIVE_HOST_ROUTING_LOG"
+  fi
+  exit "$status"
+fi
 run_rust
 SH
+# The actual feature dispatcher must run this fixture once, preserve its
+# failure even under explicit status capture, and omit it on unrelated shards.
+run_host_fixture_routing_case() {
+  local name="$1" tokens="$2" shard="$3" expected_calls="$4" fixture_exit="$5" expected_exit="$6"
+  local log="$primitive_probe/host-$name.log" output="$primitive_probe/host-$name.out" status=0
+  : > "$log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
+    PRIMITIVE_CARGO_LOG="$primitive_probe/host-$name.cargo" \
+    PRIMITIVE_PACKAGE_LOG="$primitive_probe/host-$name.packages" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" PRIMITIVE_HOST_ROUTING_LOG="$log" \
+    PRIMITIVE_HOST_FIXTURE_EXIT="$fixture_exit" PRIMITIVE_HOST_EXPLICIT_STATUS=true \
+    RUST_TRANSPORT_SHARD="$shard" SELECTION="|valid:v3|$tokens|complete|" \
+    bash "$primitive_probe/dispatch.sh" > "$output" 2>&1 || status=$?
+  [[ "$status" == "$expected_exit" ]] || { cat "$output" >&2; exit 1; }
+  [[ "$(grep -cxF host-fixture "$log" || true)" == "$expected_calls" ]] || {
+    echo "$name: host fixture routing count changed" >&2; exit 1;
+  }
+  if [[ "$expected_exit" != 0 ]]; then
+    [[ "$(wc -l < "$log")" == 1 ]] || {
+      echo "$name: verification continued or emitted success after host fixture failure" >&2; exit 1;
+    }
+  else
+    [[ "$(grep -cxF success-receipt "$log" || true)" == 1 ]] || exit 1
+  fi
+}
+run_host_fixture_routing_case workspace rust_workspace features 1 0 0
+run_host_fixture_routing_case cli rust_pkg_codewire_cli features 1 0 0
+run_host_fixture_routing_case cli_bin rust_pkg_codewire_cli_bin features 1 0 0
+run_host_fixture_routing_case combined 'rust_pkg_codewire_cli|rust_pkg_codewire_cli_bin' features 1 0 0
+run_host_fixture_routing_case unrelated rust_pkg_codewire_client features 0 0 0
+run_host_fixture_routing_case packages rust_pkg_codewire_cli packages 0 0 0
+run_host_fixture_routing_case local_vmm rust_pkg_codewire_cli local-vmm 0 0 0
+run_host_fixture_routing_case refused rust_pkg_codewire_cli features 1 79 79
 run_primitive_rust_case() {
   local name="$1" token="$2" graph="$3" platform="$4" fail="${5:-}" features="${6:-platform}"
   local log="$primitive_probe/$name.log" status=0 graph_count cli_count clippy_count test_count

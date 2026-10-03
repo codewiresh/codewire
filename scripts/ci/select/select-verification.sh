@@ -805,11 +805,11 @@ if [ "$event_selected" = false ]; then
         select_js_security
         recognized=true
         ;;
-      .supplychain/bun-baseline.json)
-        # The independent source-approval job verifies this tracked registry
-        # review baseline against the protected base. Repository CI needs only
-        # its static policy contract; this data file cannot affect a product
-        # image or Kind topology by itself.
+      .supplychain/bun-baseline.json|.supplychain/source-policy.json)
+        # The independent source-approval job verifies the registry baseline
+        # and source policy against the protected base. Repository CI keeps
+        # its static policy contract; these inputs cannot change a product
+        # image or Kind topology by themselves.
         select_token policy
         recognized=true
         ;;
@@ -858,7 +858,7 @@ if [ "$event_selected" = false ]; then
         select_token ios
         recognized=true
         ;;
-      apps/cli/Makefile|scripts/dev/test-cli-host.py|scripts/dev/test-cli-update.py|scripts/ci/tests/test-cli-update-mesh-endpoints.py|scripts/dev/test-native-managed-startup.py|scripts/dev/fixtures/agent-peer.py)
+      apps/cli/Makefile|scripts/dev/test-cli-host.py|scripts/dev/test-cli-host-managed.py|scripts/ci/tests/test-cli-host-managed.py|scripts/dev/test-cli-update.py|scripts/ci/tests/test-cli-update-mesh-endpoints.py|scripts/dev/test-native-managed-startup.py|scripts/dev/fixtures/agent-peer.py)
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_cli_bin
