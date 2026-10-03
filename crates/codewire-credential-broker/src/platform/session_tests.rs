@@ -438,8 +438,9 @@ async fn admission_timing_counts_each_authority_grant_and_record_call() {
             timings.material_read.count,
         )
     };
-    // One authority check, one grant evaluation and one record read, which
-    // fails on the closed pool before a second check or any material read.
+    // Admission and a lease each begin with one authority check, one grant
+    // evaluation and one record read. That read fails on the closed pool, before
+    // any material read or later authority check.
     let (admitted, timings) = crate::timing::measure(
         fixture
             .adapter
@@ -792,4 +793,84 @@ fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
         }
         assert!(!session.same_authority(&changed), "{attack}");
     }
+}
+
+#[test]
+fn lease_authority_is_the_same_response_apart_from_expiry() {
+    let local = owner_local(true);
+    let (gateway, workspace) = hosted_pods();
+    let session = PlatformRuntimeSession::new(
+        gateway,
+        workspace,
+        GrantContext {
+            placement: GrantPlacement::Platform,
+            ..local.context.clone()
+        },
+        local.credential_owner.clone(),
+        local.identity_expires_at_unix,
+    )
+    .unwrap();
+    for changed_expiry in [
+        session.identity_expires_at_unix - 10,
+        session.identity_expires_at_unix + 3_600,
+    ] {
+        let mut renewed = session.clone();
+        renewed.identity_expires_at_unix = changed_expiry;
+        assert!(session.same_except_expiry(&renewed));
+    }
+    for attack in [
+        "authorized set cleared",
+        "authorized set replaced",
+        "environment",
+        "generation",
+        "placement",
+        "user",
+        "organization",
+        "personal",
+        "gateway",
+        "workspace",
+        "identity kind",
+        "owner",
+    ] {
+        let mut changed = session.clone();
+        match attack {
+            "authorized set cleared" => changed.context.authorized_credentials.clear(),
+            // A GitHub reconnect: the hosted binding still matches.
+            "authorized set replaced" => {
+                changed.context.authorized_credentials =
+                    [CredentialId::parse(Uuid::new_v4().to_string()).unwrap()].into()
+            }
+            "environment" => {
+                changed.context.environment_id =
+                    EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap()
+            }
+            "generation" => changed.context.environment_generation += 1,
+            "placement" => changed.context.placement = GrantPlacement::PlatformToLocal,
+            "user" => changed.context.user_id = OwnerId::parse("changed-owner").unwrap(),
+            "organization" => {
+                changed.context.organization_id = Some(OwnerId::parse("changed-org").unwrap())
+            }
+            "personal" => {
+                changed.context.allow_personal_credentials =
+                    !changed.context.allow_personal_credentials
+            }
+            "gateway" => changed.gateway_mut().uid = Uuid::new_v4(),
+            "workspace" => changed.workspace_mut().uid = Uuid::new_v4(),
+            "identity kind" => changed.identity = local.identity.clone(),
+            "owner" => changed.credential_owner = Owner::User(OwnerId::parse("other").unwrap()),
+            _ => unreachable!(),
+        }
+        if attack.starts_with("authorized set") {
+            assert!(session.same_authority(&changed), "{attack}");
+        }
+        assert!(!session.same_except_expiry(&changed), "{attack}");
+    }
+    // An owner-local selection is held to the same exact response.
+    let mut renewed = local.clone();
+    renewed.identity_expires_at_unix += 3_600;
+    assert!(local.same_except_expiry(&renewed));
+    let mut replaced = local.clone();
+    replaced.context.authorized_credentials =
+        [CredentialId::parse(Uuid::new_v4().to_string()).unwrap()].into();
+    assert!(!local.same_except_expiry(&replaced));
 }

@@ -220,6 +220,24 @@ impl PlatformRuntimeSession {
         self.same_binding(current)
     }
 
+    /// Whether `other` is this exact response apart from its expiry: the same
+    /// authenticated identity, credential owner and whole grant context,
+    /// including the authorized credentials that [`Self::same_binding`]
+    /// deliberately lets a hosted session follow. A lease evaluates both of its
+    /// grant reads against one response, so the response read after them must
+    /// still authorize exactly that context. Expiry is attenuated separately.
+    fn same_except_expiry(&self, other: &Self) -> bool {
+        let Self {
+            identity,
+            context,
+            credential_owner,
+            identity_expires_at_unix: _,
+        } = self;
+        *identity == other.identity
+            && *context == other.context
+            && *credential_owner == other.credential_owner
+    }
+
     #[cfg(test)]
     fn gateway_mut(&mut self) -> &mut PlatformPodIdentity {
         let RuntimeIdentity::Hosted { gateway, .. } = &mut self.identity else {
@@ -452,12 +470,35 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         Ok(current)
     }
 
+    /// One runtime authority check, the grant and record reads, then a second
+    /// check that attenuates the deadline. Refresh and SSH admissions use this.
     async fn admit(
         &self,
         slot: &CapabilitySlot,
         permission: GrantPermission,
     ) -> Result<Admission, BrokerLeaseError> {
         let session = self.session().await?;
+        let mut admission = self.grant_and_record(&session, slot, permission).await?;
+        // The profile/record reads can wait for SQL locks. Their completion
+        // cannot preserve runtime authority that was revoked during that wait.
+        let current = self.session().await?;
+        admission.grant.expires_at_unix = admission
+            .grant
+            .expires_at_unix
+            .map(|deadline| deadline.min(current.identity_expires_at_unix));
+        ensure_live(&admission.record.metadata, &admission.grant)?;
+        Ok(admission)
+    }
+
+    /// Evaluate the slot's grant for `session` and read its credential record.
+    /// This performs no runtime authority check of its own: every caller reads
+    /// the authority again after it, before releasing anything it admits.
+    async fn grant_and_record(
+        &self,
+        session: &PlatformRuntimeSession,
+        slot: &CapabilitySlot,
+        permission: GrantPermission,
+    ) -> Result<Admission, BrokerLeaseError> {
         let AvailableGrants {
             grants,
             reconnect_required,
@@ -473,7 +514,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 ..
             } => {
                 let grants =
-                    timing::timed(Phase::Grants, self.authority.owner_local_grants(&session))
+                    timing::timed(Phase::Grants, self.authority.owner_local_grants(session))
                         .await
                         .map_err(runtime_error)?;
                 if grants.iter().any(|grant| {
@@ -537,13 +578,6 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         {
             return Err(BrokerLeaseError::Denied);
         }
-        // The profile/record reads can wait for SQL locks. Their completion
-        // cannot preserve runtime authority that was revoked during that wait.
-        let current = self.session().await?;
-        grant.expires_at_unix = grant
-            .expires_at_unix
-            .map(|deadline| deadline.min(current.identity_expires_at_unix));
-        ensure_live(&record.metadata, &grant)?;
         Ok(Admission {
             record,
             grant,
@@ -786,7 +820,16 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
             None => None,
         };
         let permission = GrantPermission { operation, route };
-        let before = self.admit(&slot, permission.clone()).await?;
+        // Two runtime authority checks bracket the whole lease. Both grant
+        // evaluations use the first response, and the last response must be
+        // exactly that one apart from its expiry, so nothing either evaluation
+        // relied on can have changed without denying the lease. The response is
+        // never kept beyond this lease.
+        let initial = self.session().await?;
+        let before = self
+            .grant_and_record(&initial, &slot, permission.clone())
+            .await?;
+        ensure_live(&before.record.metadata, &before.grant)?;
         let material = timing::timed(
             Phase::MaterialRead,
             self.credentials.read_for_broker(
@@ -798,15 +841,22 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         .await
         .map_err(credential_error)?;
         // OpenBao unwrap and SQL lock waits may outlive the original authority.
-        // Recheck runtime, exact profile selection, current record and deadline.
-        let mut after = self.admit(&slot, permission).await?;
-        if before.record != after.record || !same_grant_binding(&before.grant, &after.grant) {
+        // Recheck the exact profile selection and current record, then runtime
+        // authority last. Nothing below awaits, so no wait follows that check.
+        let mut after = self.grant_and_record(&initial, &slot, permission).await?;
+        let current = self.session().await?;
+        if !initial.same_except_expiry(&current)
+            || before.record != after.record
+            || before.permission != after.permission
+            || !same_grant_binding(&before.grant, &after.grant)
+        {
             return Err(BrokerLeaseError::Denied);
         }
         after.grant.expires_at_unix = before
             .grant
             .expires_at_unix
-            .min(after.grant.expires_at_unix);
+            .min(after.grant.expires_at_unix)
+            .map(|deadline| deadline.min(current.identity_expires_at_unix));
         ensure_live(&after.record.metadata, &after.grant)?;
         Ok(PlatformCredentialLease {
             record: after.record,
