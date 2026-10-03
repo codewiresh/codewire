@@ -422,8 +422,11 @@ class Modes(unittest.TestCase):
                     marker.unlink()
                 self.workspace.deliver(login(1))
                 if action == "undo":
-                    daemon_after_logout(self.workspace, redeliver_after=0.5)
-                with patch.object(driver, "FULL_CHECK", 1.5):
+                    # The wrong redelivery must land after the script has seen
+                    # auth.json gone (which can take a while under load) and
+                    # before its full check ends.
+                    daemon_after_logout(self.workspace, redeliver_after=2.0)
+                with patch.object(driver, "FULL_CHECK", 4.0):
                     self.assertEqual(self.run_mode("logout")[1][-1]["reason"], reason)
 
     def test_redelivery_requires_a_fresh_container(self):
