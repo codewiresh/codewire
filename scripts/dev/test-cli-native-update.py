@@ -805,7 +805,7 @@ class Journey(managed.Journey):
         shell_default_witness(output, marker, asset.identity["package_version"])
         self.sentinel_live()
 
-    def workspace(self, op):
+    def workspace(self, op, *, phase=None):
         if self.marker is None:
             self.marker = (f".{self.prefix}-update-workspace", uuid.uuid4().hex)
         name, token = self.marker
@@ -832,7 +832,7 @@ else:
     os.close(fd)
 print(json.dumps({"operation":op,"identity":identity(before)}))
 '''
-        code, output = self.guest("update-workspace-"+op,
+        code, output = self.guest("update-workspace-"+(phase or op),
                                   'exec python3 -I -B -c "$1" "$2" "$3" "$4" "$5"',
                                   script, op, name, token, json.dumps(self.workspace_identity))
         require(code == 0, "owned workspace marker operation failed")
@@ -933,7 +933,7 @@ print(json.dumps({"operation":op,"identity":identity(before)}))
         self.unchanged_conversations(original)
         self.observe("selected-b")
         self.shell(self.b, "b")
-        self.workspace("observe")
+        self.workspace("observe", phase="selected-b")
         self.check(UPDATE_REQUIRED[2])
         self.refusals(original, updated["selection"])
         launched = self.launch_agent("update-b-child", "codex", parent=self.lead, model=self.codex_model,
@@ -959,7 +959,7 @@ print(json.dumps({"operation":op,"identity":identity(before)}))
                 "rollback replaced an original guest birth or executable")
         self.unchanged_conversations(original)
         self.shell(self.a, "a-after")
-        self.workspace("observe")
+        self.workspace("observe", phase="rolled-back-a")
         self.check(UPDATE_REQUIRED[5])
         b_inbox = self.inbox(child)
         self.turn(child, "B_AFTER_ROLLBACK", "CW_B_AFTER_ROLLBACK")
@@ -1213,6 +1213,43 @@ def contract_tests(producer=None, image=None):
                             invoke("observe", saved, field)
                     self.assertEqual(invoke("remove", saved), saved)
                     self.assertFalse(Path(name).exists())
+            finally:
+                os.fchdir(cwd); os.close(cwd)
+
+        def test_workspace_phases_preserve_marker_and_retained_names(self):
+            import contextlib
+            import io
+            journey = Journey.__new__(Journey)
+            journey.prefix, journey.marker = "cwnm-fixture", None
+            journey.workspace_identity = None
+            retained, operations = set(), []
+            cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                with tempfile.TemporaryDirectory() as directory:
+                    os.chdir(directory)
+                    def guest(label, command, script, op, name, token, saved):
+                        require(label not in retained, "fixture session name already retained")
+                        retained.add(label)
+                        output = io.StringIO()
+                        with mock.patch.object(sys, "argv", ["workspace-probe", op, name, token, saved]), \
+                                contextlib.redirect_stdout(output):
+                            exec(compile(script, "checked-in-workspace-probe", "exec"), {})
+                        operations.append(op)
+                        return 0, output.getvalue()
+                    journey.guest = guest
+                    journey.workspace("create")
+                    identity = journey.workspace_identity
+                    journey.workspace("observe", phase="selected-b")
+                    journey.workspace("observe", phase="rolled-back-a")
+                    self.assertEqual(journey.workspace_identity, identity)
+                    with self.assertRaisesRegex(Failure, "name already retained"):
+                        journey.workspace("observe", phase="selected-b")
+                    self.assertEqual(operations, ["create", "observe", "observe"])
+                    journey.workspace("remove")
+                    self.assertEqual(operations, ["create", "observe", "observe", "remove"])
+                    self.assertEqual(len(retained), 4)
+                    self.assertIsNone(journey.marker)
+                    self.assertEqual(list(Path(directory).iterdir()), [])
             finally:
                 os.fchdir(cwd); os.close(cwd)
 
