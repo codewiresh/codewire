@@ -87,7 +87,8 @@ where
         // Retain only the original opaque authority, never request headers.
         drop(ctx);
         let mut admitted = None;
-        let output = self
+        // The owner-local epoch's expiry needs no early successor here.
+        let (output, _expires_at_unix) = self
             .bridge
             .serve_authenticated(async {
                 // This future is first polled AFTER the existing shared stream

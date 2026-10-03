@@ -2,7 +2,9 @@
 """Hermetic credential acceptance guards; no cluster, account or provider I/O."""
 
 import contextlib
+from datetime import datetime, timezone
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -22,6 +24,10 @@ SPEC = importlib.util.spec_from_file_location(
     "credential_probe", ROOT / "scripts/ci/verify/kind/credential_probe.py")
 PROBE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROBE)
+RENEWAL_SPEC = importlib.util.spec_from_file_location(
+    "bridge_renewal", ROOT / "scripts/ci/verify/kind/bridge_renewal.py")
+RENEWAL = importlib.util.module_from_spec(RENEWAL_SPEC)
+RENEWAL_SPEC.loader.exec_module(RENEWAL)
 ENVIRONMENT = "86fb3daa-dde0-4fb4-bf83-6e2399d78a5f"
 WORKSPACE_UID = "57f35d02-39f9-40ed-b9e1-bc4a64ad3b0e"
 GATEWAY_UID = "65d41c9c-510b-4c8a-961d-338a879c1fa4"
@@ -1195,6 +1201,338 @@ prepare_kind_credential_support_images
         self.assertIn(digest, HELPERS.read_text())
         self.assertIn(digest, (manifest.parent / "cert-manager-README.md").read_text())
         self.assertIn("--enable-certificate-owner-ref=true", manifest.read_text())
+
+    RENEWAL_STARTED_MS = 1_800_000_000_000
+    RENEWAL_ENDED_MS = RENEWAL_STARTED_MS + 700_000
+
+    @classmethod
+    def renewal_probe(cls, requests=700, statuses=None, **fields):
+        event = {"event": "bridge_renewal_probe", "started_unix_ms": cls.RENEWAL_STARTED_MS,
+                 "ended_unix_ms": cls.RENEWAL_ENDED_MS, "requests": requests,
+                 "statuses": {"403": requests} if statuses is None else statuses}
+        event.update(fields)
+        return json.dumps(event)
+
+    @classmethod
+    def gateway_line(cls, offset_ms, event="credential_bridge_epoch_overlap",
+                     target="codewire_gateway::hosted_bridge"):
+        stamp = datetime.fromtimestamp((cls.RENEWAL_STARTED_MS + offset_ms) / 1000, timezone.utc)
+        return json.dumps({
+            "timestamp": stamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "level": "INFO",
+            "fields": {"event": event, "previous_ends_in_ms": 29000, "next_ends_in_ms": 509000,
+                       "message": "hosted credential bridge admitted the next epoch"},
+            "target": target,
+        })
+
+    def renewal_assertion(self, probe, logs, log_status=0, pod="cw-gateway-renewal"):
+        directory = tempfile.TemporaryDirectory(prefix="kind-bridge-renewal-")
+        self.addCleanup(directory.cleanup)
+        probe_path = Path(directory.name) / "probe.jsonl"
+        probe_path.write_text("".join(f"{line}\n" for line in probe))
+        logs_path = Path(directory.name) / "gateway.log"
+        logs_path.write_text("".join(f"{line}\n" for line in logs))
+        return self.shell('''
+SANDBOX_NS=dev-sandboxes
+kubectl() {
+  [ "$*" = '-n dev-sandboxes logs pod/cw-gateway-renewal -c codewire-gateway' ] || { echo unexpected-kubectl >&2; return 99; }
+  cat '%s'
+  return %d
+}
+assert_kind_credential_bridge_renewal '%s' '%s'
+''' % (logs_path, log_status, probe_path, pod))
+
+    def test_bridge_renewal_requires_only_broker_answers_and_an_overlap_in_the_window(self):
+        noise = ["not-json", json.dumps({"timestamp": "x", "fields": "x"}),
+                 self.gateway_line(100_000, event="credential_bridge_epoch_ended")]
+        for offset in (300_000, -2_000, 702_000):
+            with self.subTest(offset=offset):
+                result = self.renewal_assertion(
+                    [self.renewal_probe()], [*noise, self.gateway_line(offset)])
+                self.assertEqual(result.returncode, 0, result.stderr)
+        # About one request a second: the minimum is a short renewal window.
+        result = self.renewal_assertion([self.renewal_probe(requests=60)],
+                                        [self.gateway_line(300_000)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bridge_renewal_rejects_any_503_other_status_or_thin_probe(self):
+        for probe in (
+                self.renewal_probe(statuses={"403": 699, "503": 1}),
+                self.renewal_probe(statuses={"403": 699, "error": 1}),
+                self.renewal_probe(statuses={"200": 700}),
+                self.renewal_probe(statuses={"403": 699}),
+                self.renewal_probe(statuses={}),
+                self.renewal_probe(requests=59),
+                self.renewal_probe(requests=0),
+                self.renewal_probe(requests=700.5, statuses={"403": 700.5}),
+                self.renewal_probe(ended_unix_ms=self.RENEWAL_STARTED_MS),
+                self.renewal_probe(extra=True),
+                json.dumps({"event": "bridge_renewal_probe_failed"}),
+                "not-json"):
+            with self.subTest(probe=probe):
+                result = self.renewal_assertion([probe], [self.gateway_line(300_000)])
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("a proxied request failed or the probe was incomplete", result.stderr)
+                self.assertNotIn("unexpected-kubectl", result.stderr)
+        for probes in ([], [self.renewal_probe(), self.renewal_probe()]):
+            with self.subTest(probes=probes):
+                result = self.renewal_assertion(probes, [self.gateway_line(300_000)])
+                self.assertEqual(result.returncode, 1, result.stderr)
+
+    def test_bridge_renewal_requires_the_gateway_overlap_inside_the_window(self):
+        for logs in (
+                [],
+                [self.gateway_line(-3_000)],
+                [self.gateway_line(703_000)],
+                [self.gateway_line(300_000, event="credential_bridge_epoch_ended")],
+                [self.gateway_line(300_000, target="codewire_gateway::runtime")],
+                [self.gateway_line(300_000).replace("Z\"", "+00:00\"")]):
+            with self.subTest(logs=logs):
+                result = self.renewal_assertion([self.renewal_probe()], logs)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("gateway logged no epoch overlap", result.stderr)
+
+    def test_bridge_renewal_fails_closed_on_log_or_pod_name_failure(self):
+        result = self.renewal_assertion([self.renewal_probe()], [self.gateway_line(300_000)],
+                                        log_status=7)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("could not read the gateway log", result.stderr)
+        for pod in ("", "Gateway", "pod/cw-gateway-renewal", "cw gateway"):
+            with self.subTest(pod=pod):
+                result = self.renewal_assertion([self.renewal_probe()],
+                                                [self.gateway_line(300_000)], pod=pod)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertNotIn("unexpected-kubectl", result.stderr)
+
+    def test_bridge_renewal_probe_starts_in_the_exact_workspace_and_stops_on_request(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-bridge-renewal-run-")
+        self.addCleanup(directory.cleanup)
+        result = self.shell('''
+RUN_DIR='%s'
+SANDBOX_NS=dev-sandboxes
+calls="$RUN_DIR/calls"
+kubectl() {
+  printf '%%s\\n' "$*" >> "$calls"
+  case "$*" in
+    '-n dev-sandboxes exec -i workspace-pod -c workspace -- python3 -B -u - /tmp/codewire-kind-bridge-renewal-42 900')
+      cmp -s - "$ROOT/scripts/ci/verify/kind/bridge_renewal.py" || return 98
+      printf '%%s\\n' '{"event":"bridge_renewal_probe"}' ;;
+    '--request-timeout=15s -n dev-sandboxes exec workspace-pod -c workspace -- touch /tmp/codewire-kind-bridge-renewal-42'|\\
+    '-n dev-sandboxes exec workspace-pod -c workspace -- rm -f /tmp/codewire-kind-bridge-renewal-42') ;;
+    *) return 99 ;;
+  esac
+}
+start_kind_credential_bridge_renewal workspace-pod /tmp/codewire-kind-bridge-renewal-42
+stop_kind_credential_bridge_renewal workspace-pod /tmp/codewire-kind-bridge-renewal-42 "$KIND_BRIDGE_RENEWAL_PID"
+cat "$RUN_DIR/credential-bridge-renewal.jsonl"
+''' % directory.name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '{"event":"bridge_renewal_probe"}\n')
+        calls = (Path(directory.name) / "calls").read_text().splitlines()
+        self.assertEqual([call.split(" -- ")[1].split()[0] for call in calls],
+                         ["python3", "touch", "rm"])
+
+    def test_bridge_renewal_stop_propagates_probe_and_cleanup_failures(self):
+        for probe, touch, remove, expected in (
+                (0, 0, 0, 0), (1, 0, 0, 1), (0, 0, 5, 1), (3, 0, 5, 3)):
+            with self.subTest(probe=probe, touch=touch, remove=remove):
+                result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+kubectl() {
+  case "$*" in
+    *' touch '*) return %d ;;
+    *' rm -f '*) return %d ;;
+    *) return 99 ;;
+  esac
+}
+( exit %d ) &
+stop_kind_credential_bridge_renewal workspace-pod /tmp/codewire-kind-bridge-renewal-7 $!
+''' % (touch, remove, probe))
+                self.assertEqual(result.returncode, expected, result.stderr)
+        # A probe that cannot be told to stop is asked again, bounded, then its
+        # local exec is killed, never left behind.
+        directory = tempfile.TemporaryDirectory(prefix="kind-bridge-renewal-stop-")
+        self.addCleanup(directory.cleanup)
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+calls='%s/calls'
+kubectl() { printf '%%s\\n' "$*" >> "$calls"; return 4; }
+sleep 30 &
+pid=$!
+if stop_kind_credential_bridge_renewal workspace-pod /tmp/codewire-kind-bridge-renewal-7 "$pid"; then
+  exit 90
+fi
+kill -0 "$pid" 2>/dev/null && exit 91
+exit 0
+''' % directory.name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("could not stop the bridge renewal probe", result.stderr)
+        touch = ("--request-timeout=15s -n dev-sandboxes exec workspace-pod -c workspace -- "
+                 "touch /tmp/codewire-kind-bridge-renewal-7")
+        self.assertEqual((Path(directory.name) / "calls").read_text().splitlines(),
+                         [touch, touch])
+        for stop in ("/tmp/other", "/tmp/codewire-kind-bridge-renewal-", "relative",
+                     "/tmp/codewire-kind-bridge-renewal-1/../x"):
+            with self.subTest(stop=stop):
+                result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+RUN_DIR=/nonexistent
+kubectl() { echo unexpected-kubectl >&2; return 99; }
+if start_kind_credential_bridge_renewal workspace-pod '%s'; then exit 90; fi
+if stop_kind_credential_bridge_renewal workspace-pod '%s' 1; then exit 91; fi
+''' % (stop, stop))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("unexpected-kubectl", result.stderr)
+
+    def test_abandoning_the_probe_stops_it_in_the_pod_first_then_kills_the_local_exec(self):
+        for touch_status in (0, 4):
+            with self.subTest(touch_status=touch_status):
+                directory = tempfile.TemporaryDirectory(prefix="kind-bridge-renewal-abandon-")
+                self.addCleanup(directory.cleanup)
+                result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+events='%s/events'
+kubectl() {
+  printf 'kubectl %%s\\n' "$*" >> "$events"
+  kill -0 "$pid" 2>/dev/null && printf 'probe alive at touch\\n' >> "$events"
+  return %d
+}
+sleep 30 &
+pid=$!
+abandon_kind_credential_bridge_renewal workspace-pod /tmp/codewire-kind-bridge-renewal-9 "$pid" || exit 90
+kill -0 "$pid" 2>/dev/null && exit 91
+exit 0
+''' % (directory.name, touch_status))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((Path(directory.name) / "events").read_text().splitlines(), [
+                    "kubectl --request-timeout=15s -n dev-sandboxes exec workspace-pod -c workspace"
+                    " -- touch /tmp/codewire-kind-bridge-renewal-9",
+                    "probe alive at touch",
+                ])
+
+    def test_native_flow_runs_the_renewal_probe_across_the_idle_codex_session(self):
+        flow = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
+        index = flow.index
+        start = index('start_kind_credential_bridge_renewal "$pod" "$renewal_stop" || return $?')
+        session = index("scripts/ci/verify/kind/codex_session.py")
+        stop = index('stop_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid" || return $?')
+        rotation = index("assert_kind_credential_rotation")
+        renewal = index('assert_kind_credential_bridge_renewal "$RUN_DIR/credential-bridge-renewal.jsonl"')
+        counts = index("assert_kind_credential_provider_counts 2")
+        self.assertEqual(sorted([start, session, stop, rotation, renewal, counts]),
+                         [start, session, stop, rotation, renewal, counts])
+        self.assertEqual(flow.count("start_kind_credential_bridge_renewal"), 1)
+        trap = flow[:start].rsplit("trap '", 1)[1].split("' EXIT", 1)[0]
+        self.assertIn('[ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal '
+                      '"$pod" "$renewal_stop" "$renewal_pid"', trap)
+        self.assertIn('renewal_stop="/tmp/codewire-kind-bridge-renewal-${RANDOM}${RANDOM}"', flow)
+
+
+class BridgeRenewalProbe(unittest.TestCase):
+    STOP = "/tmp/codewire-kind-bridge-renewal-123"
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="kind-bridge-renewal-probe-")
+        self.addCleanup(self.scratch.cleanup)
+        self.stop = Path(self.scratch.name) / "stop"
+        self.outcomes = []
+        self.connections = []
+        self.sleeps = 0
+        def connection(*args, **kwargs):
+            result = Mock()
+            result.args = (args, kwargs)
+            outcome = self.outcomes.pop(0) if self.outcomes else 403
+            if isinstance(outcome, BaseException):
+                result.request.side_effect = outcome
+            else:
+                result.getresponse.return_value.status = outcome
+                result.getresponse.return_value.read.return_value = b"CW_SECRET_BODY_CANARY"
+            self.connections.append(result)
+            return result
+        def sleep(seconds):
+            self.assertEqual(seconds, RENEWAL.INTERVAL)
+            self.sleeps += 1
+            if self.sleeps >= self.stop_after:
+                self.stop.touch()
+        self.stop_after = 3
+        for fixture in (
+            patch.object(RENEWAL.http.client, "HTTPConnection", side_effect=connection),
+            patch.object(RENEWAL.time, "sleep", side_effect=sleep),
+        ):
+            fixture.__enter__()
+            self.addCleanup(fixture.__exit__, None, None, None)
+
+    def test_requests_use_the_daemon_loopback_and_an_unselected_fixed_route(self):
+        result = RENEWAL.run(str(self.stop), 60)
+        self.assertEqual((result["requests"], result["statuses"]), (3, {"403": 3}))
+        self.assertGreaterEqual(result["ended_unix_ms"], result["started_unix_ms"])
+        for connection in self.connections:
+            self.assertEqual(connection.args, (("127.0.0.1", 38081), {"timeout": 20}))
+            request = connection.request.call_args
+            self.assertEqual(request.args, ("POST", "/v1/messages"))
+            self.assertEqual(request.kwargs["headers"],
+                             {"Host": "localhost", "Content-Type": "application/json"})
+            self.assertNotIn("Authorization", request.kwargs["headers"])
+            connection.close.assert_called_once()
+
+    def test_every_status_and_transport_failure_is_counted(self):
+        self.stop_after = 6
+        self.outcomes = [403, 503, OSError("synthetic"), http.client.RemoteDisconnected("x"),
+                         403, 502]
+        result = RENEWAL.run(str(self.stop), 60)
+        self.assertEqual(result["requests"], 6)
+        self.assertEqual(result["statuses"], {"403": 2, "503": 1, "error": 2, "502": 1})
+
+    def test_the_bound_stops_the_loop_without_a_stop_file(self):
+        self.stop_after = 10**9
+        ticks = iter(range(0, 10**6, 7))
+        with patch.object(RENEWAL.time, "monotonic", side_effect=lambda: next(ticks)):
+            result = RENEWAL.run(str(self.stop), 30)
+        self.assertEqual(result["requests"], 4)
+        self.assertFalse(self.stop.exists())
+
+    def test_an_existing_stop_file_sends_nothing(self):
+        self.stop.touch()
+        result = RENEWAL.run(str(self.stop), 60)
+        self.assertEqual((result["requests"], result["statuses"]), (0, {}))
+        self.assertEqual(self.connections, [])
+
+    def test_arguments_are_closed(self):
+        with patch.object(RENEWAL.os.path, "lexists", return_value=False):
+            self.assertEqual(RENEWAL.arguments(["probe", self.STOP, "1200"]), (self.STOP, 1200))
+            for argv in (
+                    ["probe", self.STOP],
+                    ["probe", self.STOP, "1200", "extra"],
+                    ["probe", "/tmp/other", "1200"],
+                    ["probe", self.STOP + "/../x", "1200"],
+                    ["probe", "/tmp/codewire-kind-bridge-renewal-1234567890123", "1200"],
+                    ["probe", self.STOP, "0"],
+                    ["probe", self.STOP, "1801"],
+                    ["probe", self.STOP, "-5"],
+                    ["probe", self.STOP, "012"],
+                    ["probe", self.STOP, "1e3"]):
+                with self.subTest(argv=argv):
+                    with self.assertRaises(RENEWAL.Failure):
+                        RENEWAL.arguments(argv)
+        with patch.object(RENEWAL.os.path, "lexists", return_value=True):
+            with self.assertRaises(RENEWAL.Failure):
+                RENEWAL.arguments(["probe", self.STOP, "1200"])
+
+    def test_main_prints_one_closed_event_and_never_a_response(self):
+        output = io.StringIO()
+        with patch.object(RENEWAL, "arguments", return_value=(str(self.stop), 60)), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(RENEWAL.main(["probe", self.STOP, "60"]), 0)
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        event = json.loads(lines[0])
+        self.assertEqual(sorted(event), ["ended_unix_ms", "event", "requests",
+                                         "started_unix_ms", "statuses"])
+        self.assertEqual((event["event"], event["statuses"]), ("bridge_renewal_probe", {"403": 3}))
+        self.assertNotIn("CANARY", output.getvalue())
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(RENEWAL.main(["probe", "/tmp/other", "60"]), 1)
+        self.assertEqual(output.getvalue(), '{"event":"bridge_renewal_probe_failed"}\n')
 
 
 if __name__ == "__main__":

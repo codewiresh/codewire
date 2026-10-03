@@ -1,5 +1,7 @@
 //! Generated-RPC transport proof with synthetic peers. These fixtures do not
 //! claim Kubernetes authentication, provider success, or protected-store proof.
+mod relay;
+
 use super::*;
 use codewire_gateway_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
@@ -40,6 +42,8 @@ struct SyntheticBroker {
     calls: mpsc::Sender<BrokerCall>,
     /// Response-header capability values; empty models an older broker.
     capabilities: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    /// Response-header expiry values; empty models an older broker.
+    expires_at: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 macro_rules! daemon_service {
@@ -142,6 +146,12 @@ impl CredentialBrokerService for SyntheticBroker {
                 tonic::metadata::MetadataValue::from_static(capability),
             );
         }
+        for value in self.expires_at.lock().unwrap().iter() {
+            response.metadata_mut().append(
+                codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
+                value.parse().unwrap(),
+            );
+        }
         Ok(response)
     }
 }
@@ -154,6 +164,7 @@ struct Fixture {
     broker_calls: mpsc::Receiver<BrokerCall>,
     workspace_token: Arc<Mutex<String>>,
     broker_capabilities: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    broker_expires_at: Arc<std::sync::Mutex<Vec<String>>>,
     shutdown: CancellationToken,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -174,9 +185,11 @@ impl Fixture {
         let daemon_shutdown = shutdown.clone();
         let broker_shutdown = shutdown.clone();
         let broker_capabilities = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let broker_expires_at = Arc::new(std::sync::Mutex::new(Vec::new()));
         let synthetic_broker = SyntheticBroker {
             calls: broker_tx,
             capabilities: broker_capabilities.clone(),
+            expires_at: broker_expires_at.clone(),
         };
         let synthetic_daemon = SyntheticDaemon {
             environment: environment_id,
@@ -226,6 +239,7 @@ impl Fixture {
             broker_calls,
             workspace_token,
             broker_capabilities,
+            broker_expires_at,
             shutdown,
             tasks,
         }
@@ -246,14 +260,35 @@ impl Fixture {
         CancellationToken,
         tokio::task::JoinHandle<Result<(), DrainFailure>>,
     ) {
+        let (cancellation, _admitted, task) = self.start_epoch(None, lifetime);
+        (cancellation, task)
+    }
+
+    /// A fresh epoch (`succeeds` None) or a successor of an epoch with that
+    /// expiry. The receiver reports the daemon's Open.
+    fn start_epoch(
+        &self,
+        succeeds: Option<u64>,
+        lifetime: Duration,
+    ) -> (
+        CancellationToken,
+        oneshot::Receiver<Admitted>,
+        tokio::task::JoinHandle<Result<(), DrainFailure>>,
+    ) {
         let cancellation = CancellationToken::new();
-        let child = cancellation.clone();
+        let (admitted, receiver) = oneshot::channel();
+        let start = EpochStart {
+            cancellation: cancellation.clone(),
+            admitted,
+            succeeds,
+        };
         let config = self.config.clone();
         let daemon = self.daemon.clone();
         (
             cancellation,
+            receiver,
             tokio::spawn(async move {
-                run_epoch_with_lifetime(&config, &daemon, &|| {}, child, lifetime).await
+                run_epoch_with_lifetime(&config, &daemon, &|| {}, start, lifetime).await
             }),
         )
     }
@@ -728,7 +763,11 @@ async fn a_daemon_refusing_the_credential_asks_for_a_refresh() {
         &config,
         &daemon,
         &report,
-        CancellationToken::new(),
+        EpochStart {
+            cancellation: CancellationToken::new(),
+            admitted: oneshot::channel().0,
+            succeeds: None,
+        },
         EPOCH_MAX_LIFETIME,
     ))
     .await
@@ -736,4 +775,172 @@ async fn a_daemon_refusing_the_credential_asks_for_a_refresh() {
     assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
     shutdown.cancel();
     bounded(server).await.unwrap();
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[test]
+fn broker_expiry_header_is_parsed_strictly() {
+    use ExpiryRejected::{Malformed, OutOfRange};
+    let now = Duration::from_secs(1_800_000_000) + Duration::from_millis(400);
+    let secs = now.as_secs();
+    for (value, expected) in [
+        ((secs + 1).to_string(), Ok(secs + 1)),
+        ((secs + 600).to_string(), Ok(secs + 600)),
+        ((secs + 660).to_string(), Ok(secs + 660)),
+        (format!("000{}", secs + 60), Ok(secs + 60)),
+        (secs.to_string(), Err(OutOfRange)),
+        ((secs - 1).to_string(), Err(OutOfRange)),
+        ((secs + 661).to_string(), Err(OutOfRange)),
+        ("0".to_owned(), Err(OutOfRange)),
+        (String::new(), Err(Malformed)),
+        (format!("+{}", secs + 60), Err(Malformed)),
+        (format!(" {}", secs + 60), Err(Malformed)),
+        (format!("{}.0", secs + 60), Err(Malformed)),
+        (format!("{}s", secs + 60), Err(Malformed)),
+        ("-1".to_owned(), Err(Malformed)),
+        // 20 digits overflowing u64, and 21 digits.
+        ("99999999999999999999".to_owned(), Err(Malformed)),
+        (format!("{:0>21}", secs + 60), Err(Malformed)),
+    ] {
+        assert_eq!(parse_expiry(&value, now), expected, "{value:?}");
+    }
+
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    assert_eq!(broker_expiry(&metadata), Err(ExpiryRejected::Absent));
+    let ahead = unix_now() + 120;
+    metadata.insert(
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
+        ahead.to_string().parse().unwrap(),
+    );
+    let expiry = broker_expiry(&metadata).unwrap();
+    assert_eq!(expiry.unix, ahead);
+    let remaining = expiry.at.saturating_duration_since(Instant::now());
+    assert!(remaining > Duration::from_secs(118) && remaining <= Duration::from_secs(120));
+    // Two values are ambiguous, never a choice.
+    metadata.append(
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
+        ahead.to_string().parse().unwrap(),
+    );
+    assert_eq!(broker_expiry(&metadata), Err(ExpiryRejected::Ambiguous));
+    for (reason, expected) in [
+        (ExpiryRejected::Absent, "absent"),
+        (ExpiryRejected::Ambiguous, "ambiguous"),
+        (ExpiryRejected::Malformed, "malformed"),
+        (ExpiryRejected::OutOfRange, "out_of_range"),
+        (ExpiryRejected::Clock, "clock"),
+    ] {
+        assert_eq!(reason.reason(), expected);
+    }
+}
+
+#[test]
+fn a_successor_must_outlive_the_current_epoch_by_a_minute() {
+    let at = Instant::now();
+    let expiry = |unix| Some(BrokerExpiry { unix, at });
+    assert!(extends(expiry(1_060), 1_000));
+    assert!(extends(expiry(1_600), 1_000));
+    assert!(!extends(expiry(1_059), 1_000));
+    assert!(!extends(expiry(1_000), 1_000));
+    assert!(!extends(None, 1_000));
+    assert!(!extends(expiry(u64::MAX), u64::MAX));
+}
+
+/// Admit one epoch with `succeeds` against a broker reporting `expires_at`.
+/// Returns whether the daemon was sent an Open, and what was admitted.
+async fn admit_successor(
+    fixture: &mut Fixture,
+    succeeds: Option<u64>,
+    expires_at: Vec<String>,
+) -> Option<Admitted> {
+    *fixture.broker_expires_at.lock().unwrap() = expires_at;
+    let (cancel, admitted, task) = fixture.start_epoch(succeeds, EPOCH_MAX_LIFETIME);
+    let mut daemon = bounded(fixture.daemon_calls.recv()).await.unwrap();
+    let BrokerCall {
+        mut input,
+        output,
+        accept,
+        ..
+    } = bounded(fixture.broker_calls.recv()).await.unwrap();
+    accept.send(Ok(())).unwrap();
+    let opened = match bounded(daemon.input.message()).await.unwrap() {
+        Some(frame) => {
+            assert!(matches!(
+                frame.payload,
+                Some(v1::credential_bridge_host_message::Payload::Open(_))
+            ));
+            let admitted = bounded(admitted).await.unwrap();
+            cancel.cancel();
+            Some(admitted)
+        }
+        // Dropped while prepared: the request stream ends with no Open, and
+        // the epoch drains by itself without being cancelled.
+        None => {
+            assert!(bounded(admitted).await.is_err());
+            None
+        }
+    };
+    bounded(task).await.unwrap().unwrap();
+    assert!(!matches!(bounded(input.message()).await, Ok(Some(_))));
+    drop((input, output, daemon));
+    opened
+}
+
+#[tokio::test]
+async fn a_successor_that_does_not_extend_the_expiry_never_sends_open() {
+    let mut fixture = Fixture::new().await;
+    let current = unix_now() + 100;
+    // A fresh epoch reports the expiry it was admitted with.
+    let admitted = admit_successor(&mut fixture, None, vec![current.to_string()])
+        .await
+        .unwrap();
+    assert_eq!(admitted.expiry.map(|expiry| expiry.unix), Some(current));
+    for refused in [
+        vec![(current + 59).to_string()],
+        vec![current.to_string()],
+        // An older broker, or a malformed or ambiguous header, cannot prove
+        // that kubelet already rotated the successor's tokens.
+        vec![],
+        vec!["soon".to_owned()],
+        vec![(current + 60).to_string(), (current + 60).to_string()],
+    ] {
+        assert!(
+            admit_successor(&mut fixture, Some(current), refused.clone())
+                .await
+                .is_none(),
+            "{refused:?}"
+        );
+    }
+    let admitted = admit_successor(
+        &mut fixture,
+        Some(current),
+        vec![(current + 60).to_string()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        admitted.expiry.map(|expiry| expiry.unix),
+        Some(current + 60)
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn a_missing_or_malformed_expiry_admits_a_fresh_epoch_without_one() {
+    let mut fixture = Fixture::new().await;
+    for header in [
+        vec![],
+        vec!["12a".to_owned()],
+        vec![(unix_now() + 900).to_string()],
+    ] {
+        let admitted = admit_successor(&mut fixture, None, header).await.unwrap();
+        assert_eq!(admitted.expiry, None);
+        assert!(Renewal::new(&admitted).is_none());
+    }
+    fixture.stop().await;
 }

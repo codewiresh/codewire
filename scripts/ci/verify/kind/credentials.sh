@@ -337,6 +337,108 @@ kind_credential_codex_login() {
   fi
 }
 
+# Proxied requests through the bridge while a natural epoch renewal happens.
+# The probe stops at its stop file, or after this bound as a backstop only: an
+# overlap happens within the first ten minutes, and the Codex session it spans
+# normally ends within twelve.
+KIND_BRIDGE_RENEWAL_MAX_SECONDS=900
+# About one request a second; a window spanning one renewal sees hundreds.
+KIND_BRIDGE_RENEWAL_MIN_REQUESTS=60
+# Bound on asking the in-Pod probe to stop.
+KIND_BRIDGE_RENEWAL_STOP_TIMEOUT=15s
+
+# Start bridge_renewal.py in the exact workspace, in the background of the
+# calling shell, and set KIND_BRIDGE_RENEWAL_PID. Its stdout is the closed
+# event stream, kept in the run directory.
+start_kind_credential_bridge_renewal() {
+  local pod="$1" stop="$2"
+  [[ "$stop" =~ ^/tmp/codewire-kind-bridge-renewal-[0-9]{1,12}$ ]] || return 1
+  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- \
+    python3 -B -u - "$stop" "$KIND_BRIDGE_RENEWAL_MAX_SECONDS" \
+    < "$ROOT/scripts/ci/verify/kind/bridge_renewal.py" \
+    > "$RUN_DIR/credential-bridge-renewal.jsonl" &
+  KIND_BRIDGE_RENEWAL_PID=$!
+}
+
+# Ask the in-Pod probe to stop, within a bounded request.
+signal_kind_credential_bridge_renewal() {
+  local pod="$1" stop="$2"
+  [[ "$stop" =~ ^/tmp/codewire-kind-bridge-renewal-[0-9]{1,12}$ ]] || return 1
+  kubectl --request-timeout="$KIND_BRIDGE_RENEWAL_STOP_TIMEOUT" -n "$SANDBOX_NS" \
+    exec "$pod" -c workspace -- touch "$stop"
+}
+
+# Failure path: ask the in-Pod probe to stop, best effort, then end the local
+# exec. Killing only the local kubectl could leave the probe running in the
+# Pod until its backstop.
+abandon_kind_credential_bridge_renewal() {
+  local pod="$1" stop="$2" pid="$3"
+  signal_kind_credential_bridge_renewal "$pod" "$stop" >/dev/null 2>&1 || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# Ask the probe to stop, await its own exit status, then remove the stop file.
+# The first failure wins; the probe is never left running locally.
+stop_kind_credential_bridge_renewal() {
+  local pod="$1" stop="$2" pid="$3" status=0
+  [[ "$stop" =~ ^/tmp/codewire-kind-bridge-renewal-[0-9]{1,12}$ ]] || return 1
+  if ! signal_kind_credential_bridge_renewal "$pod" "$stop"; then
+    abandon_kind_credential_bridge_renewal "$pod" "$stop" "$pid"
+    echo '::error::could not stop the bridge renewal probe' >&2
+    return 1
+  fi
+  wait "$pid" || status=$?
+  kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- rm -f "$stop" || {
+    [ "$status" -ne 0 ] || status=1
+  }
+  if [ "$status" -ne 0 ]; then
+    echo '::error::bridge renewal probe failed' >&2
+  fi
+  return "$status"
+}
+
+# Every proxied request through the renewal window was answered by the broker
+# (the unselected slot's 403): none failed with 503 for want of an epoch. The
+# gateway also logged admitting a successor while its predecessor drained,
+# inside that same window. Log timestamps have one-second resolution after
+# their fraction is dropped; allow two seconds of slack at each end.
+assert_kind_credential_bridge_renewal() {
+  local probe="$1" gateway_pod="$2" window logs
+  [[ "$gateway_pod" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || return 1
+  window="$(jq -sce --argjson minimum "$KIND_BRIDGE_RENEWAL_MIN_REQUESTS" '
+    def count: type == "number" and . >= 0 and . <= 9007199254740991 and floor == .;
+    if length == 1 and (.[0] | type == "object")
+        and (.[0] | keys == ["ended_unix_ms", "event", "requests", "started_unix_ms", "statuses"])
+        and .[0].event == "bridge_renewal_probe"
+        and (.[0].started_unix_ms | count) and (.[0].ended_unix_ms | count)
+        and .[0].ended_unix_ms > .[0].started_unix_ms
+        and (.[0].requests | count) and .[0].requests >= $minimum
+        and .[0].statuses == {"403": .[0].requests}
+    then {started: .[0].started_unix_ms, ended: .[0].ended_unix_ms}
+    else error("bridge renewal probe evidence is invalid") end
+  ' "$probe" 2>/dev/null)" || {
+    echo "::error::a proxied request failed or the probe was incomplete across the bridge renewal; probe record: $probe" >&2
+    return 1
+  }
+  logs="$(kubectl -n "$SANDBOX_NS" logs "pod/$gateway_pod" -c codewire-gateway)" || {
+    echo '::error::could not read the gateway log for bridge renewal evidence' >&2
+    return 1
+  }
+  jq -Rne --argjson window "$window" '
+    [inputs | fromjson? | select(type == "object"
+        and .target == "codewire_gateway::hosted_bridge"
+        and (.fields | type == "object")
+        and .fields.event == "credential_bridge_epoch_overlap")
+      | .timestamp | strings | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // empty)
+      | . * 1000]
+    | any(.[]; . >= $window.started - 2000 and . <= $window.ended + 2000)
+  ' <<<"$logs" >/dev/null || {
+    echo '::error::the gateway logged no epoch overlap while proxied requests were running' >&2
+    return 1
+  }
+}
+
 kind_credential_fixture_events() {
   # This test-only subscriber disables all SQL/HTTP/material diagnostics.
   # Do not turn on a generic debug logger to obtain acceptance evidence.
@@ -487,7 +589,7 @@ kind_credential_native_smoke() (
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
   local certificate certificate_uid after_certificate_uid workspace_image marker
-  local login_events login_generation update restart_generation pair
+  local login_events login_generation update restart_generation pair renewal_stop renewal_pid=""
   # The acceptance must never die with a bare exit status again (runs 10381,
   # 10459, 10465 all lost the failing command to a silent jq exit 4). Report
   # the exact failing command before errexit unwinds the suite.
@@ -495,7 +597,8 @@ kind_credential_native_smoke() (
   trap 'echo "::error::native Codex acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
-  trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  # A failed step must not leave the renewal probe running, here or in the Pod.
+  trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   credential_name="kind-codex-${RANDOM}-${RANDOM}"
   profile_name="kind-profile-${RANDOM}-${RANDOM}"
@@ -559,12 +662,21 @@ kind_credential_native_smoke() (
     echo '::error::the delivered Codex login event is missing its generation' >&2
     return 1
   }
+  # The session idles past a projected-token rotation, so at least one natural
+  # bridge epoch renewal happens under it. Proxied requests run throughout.
+  renewal_stop="/tmp/codewire-kind-bridge-renewal-${RANDOM}${RANDOM}"
+  start_kind_credential_bridge_renewal "$pod" "$renewal_stop" || return $?
+  renewal_pid="$KIND_BRIDGE_RENEWAL_PID"
   # The proxy session forces the proxy provider; its broker refreshes rotate
   # the delivered login too.
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
+  stop_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid" || return $?
+  renewal_pid=""
   assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$gateway_uid" \
     "$RUN_DIR/credential-native-session.jsonl"
+  assert_kind_credential_bridge_renewal "$RUN_DIR/credential-bridge-renewal.jsonl" \
+    "$(jq -er '.metadata.name' <<<"$gateway")" || return $?
   [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')" = "$pod_uid" ] || {
     echo '::error::native Codex rotation proof changed workspace Pod identity' >&2
     return 1

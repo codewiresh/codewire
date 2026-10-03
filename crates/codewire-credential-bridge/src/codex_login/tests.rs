@@ -22,6 +22,14 @@ struct Harness {
 
 impl Harness {
     async fn new(bridge: CredentialBridge, capabilities: &[String]) -> Self {
+        Self::with_replacement(bridge, capabilities, EpochReplacement::FailPending).await
+    }
+
+    async fn with_replacement(
+        bridge: CredentialBridge,
+        capabilities: &[String],
+        replacement: EpochReplacement,
+    ) -> Self {
         let (prepared, mut output) = bridge.prepare_connection().unwrap();
         assert!(matches!(
             output.next().await.unwrap().unwrap().payload,
@@ -29,7 +37,7 @@ impl Harness {
         ));
         let (input, receiver) = mpsc::channel(32);
         let connection = prepared
-            .activate_with_capabilities(ReceiverStream::new(receiver), capabilities)
+            .activate_with_replacement(ReceiverStream::new(receiver), capabilities, replacement)
             .await
             .unwrap();
         let task = tokio::spawn(connection.run());
@@ -364,4 +372,96 @@ async fn application_http_ingress_cannot_request_a_login() {
     }
     assert!(harness.bridge.inner.lock().await.codex_logins.is_empty());
     harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_login_answered_on_a_draining_epoch_is_unavailable() {
+    let bridge = bridge();
+    let mut first = Harness::new(bridge.clone(), &capabilities()).await;
+    let (task, request) = first.submit().await;
+    let mut second =
+        Harness::with_replacement(bridge.clone(), &capabilities(), EpochReplacement::Drain).await;
+    // The draining epoch accepts its own answer frame and stays open...
+    let sealed = first.seal(&request, &request.request_id);
+    first
+        .reply(&request.request_id, LoginResult::SealedLogin(sealed))
+        .await;
+    // ...but a login answered on a replaced epoch is never released.
+    assert_eq!(
+        bounded(task).await.unwrap().unwrap_err(),
+        CodexLoginFailure::Unavailable
+    );
+    {
+        let state = bridge.inner.lock().await;
+        assert!(state.codex_logins.is_empty());
+        assert!(state.draining.is_some());
+    }
+    assert!(!first.task.is_finished());
+    // A retry goes to the successor and is released there.
+    let (task, request) = second.submit().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), first.output.next())
+            .await
+            .is_err()
+    );
+    let sealed = second.seal(&request, &request.request_id);
+    second
+        .reply(&request.request_id, LoginResult::SealedLogin(sealed))
+        .await;
+    assert_eq!(
+        bounded(task).await.unwrap().unwrap().login.access_token(),
+        ACCESS
+    );
+    first.stop().await;
+    second.stop().await;
+}
+
+#[tokio::test]
+async fn a_login_answer_on_the_wrong_epoch_leaves_the_other_request() {
+    for draining_sends in [true, false] {
+        let bridge = bridge();
+        let mut old = Harness::new(bridge.clone(), &capabilities()).await;
+        let (old_task, old_request) = old.submit().await;
+        let mut new =
+            Harness::with_replacement(bridge.clone(), &capabilities(), EpochReplacement::Drain)
+                .await;
+        let (new_task, new_request) = new.submit().await;
+        let (wrong, kept, kept_request, kept_task, wrong_task) = if draining_sends {
+            (old, new, new_request, new_task, old_task)
+        } else {
+            (new, old, old_request, old_task, new_task)
+        };
+        let sealed = kept.seal(&kept_request, &kept_request.request_id);
+        wrong
+            .reply(
+                &kept_request.request_id,
+                LoginResult::SealedLogin(sealed.clone()),
+            )
+            .await;
+        bounded(wrong.task).await.unwrap();
+        assert_eq!(
+            bounded(wrong_task).await.unwrap().unwrap_err(),
+            CodexLoginFailure::Unavailable
+        );
+        assert!(
+            bridge
+                .inner
+                .lock()
+                .await
+                .codex_logins
+                .contains_key(&kept_request.request_id)
+        );
+        kept.reply(&kept_request.request_id, LoginResult::SealedLogin(sealed))
+            .await;
+        let result = bounded(kept_task).await.unwrap();
+        if draining_sends {
+            assert_eq!(result.unwrap().login.access_token(), ACCESS);
+        } else {
+            // Its own epoch accepts the answer but no longer releases it.
+            assert_eq!(result.unwrap_err(), CodexLoginFailure::Unavailable);
+        }
+        assert!(!kept.task.is_finished());
+        assert!(bridge.inner.lock().await.codex_logins.is_empty());
+        kept.stop().await;
+    }
 }

@@ -289,7 +289,7 @@ async fn rotation_drain(shutdown: bool, direct: bool) -> Result<()> {
             }).await?;
             let output = tokio::time::timeout(TIMEOUT, service.serve_authenticated(async {
                 Ok((fixture.authority.clone(), ReceiverStream::new(receiver).map(Ok)))
-            })).await.context("typed database bridge admission timed out")??;
+            })).await.context("typed database bridge admission timed out")??.0;
             (input, output.boxed())
         } else {
             let (input, output) = listeners[0].open(&fixture).await?;

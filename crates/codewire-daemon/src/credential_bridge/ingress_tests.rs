@@ -385,7 +385,7 @@ async fn hosted_both_endpoints_are_ready_before_admission_and_share_closed_route
 async fn hosted_shared_budget_and_replacement_cover_both_endpoints_without_replay() {
     let _lock = LOOPBACK_TEST.lock().await;
     let harness = Harness::start();
-    let (_first_sender, mut first) = harness.first_host().await;
+    let (first_sender, mut first) = harness.first_host().await;
     let mut pending = Vec::new();
     for index in 0..CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
         let stream = request(
@@ -434,6 +434,33 @@ async fn hosted_shared_budget_and_replacement_cover_both_endpoints_without_repla
             .starts_with(b"HTTP/1.1 503 Service Unavailable")
     );
     harness.open_host(&second_sender).await;
+    // The replaced epoch drains: it stays open, its requests stay pending and
+    // keep their share of the budget, and none is replayed to its successor.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), first.next())
+            .await
+            .is_err()
+    );
+    let extra = request(
+        harness.connect(false).await,
+        "POST",
+        "/v1/responses",
+        "localhost",
+        b"{}",
+    )
+    .await;
+    assert!(
+        response(extra)
+            .await
+            .starts_with(b"HTTP/1.1 503 Service Unavailable")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), second.next())
+            .await
+            .is_err()
+    );
+    // Its host ends it unanswered: only its own requests fail.
+    drop(first_sender);
     assert!(
         tokio::time::timeout(TEST_TIMEOUT, first.next())
             .await
@@ -479,6 +506,138 @@ async fn hosted_shared_budget_and_replacement_cover_both_endpoints_without_repla
     }
     harness.stop().await;
     assert!(second.next().await.is_none());
+}
+
+#[tokio::test]
+async fn hosted_replacement_completes_the_request_pending_on_the_replaced_epoch() {
+    let _lock = LOOPBACK_TEST.lock().await;
+    let harness = Harness::start();
+    let (first_sender, mut first) = harness.first_host().await;
+    let pending = request(
+        harness.connect(true).await,
+        "POST",
+        "/v1/responses",
+        "localhost",
+        b"{}",
+    )
+    .await;
+    let pending_request = host_request(&mut first).await;
+    let (second_sender, mut second) = harness.prepare_host().await;
+    harness.open_host(&second_sender).await;
+    // New requests reach only the successor, on both endpoints.
+    for tcp in [false, true] {
+        let stream = request(
+            harness.connect(tcp).await,
+            "POST",
+            "/v1/responses",
+            "localhost",
+            b"{}",
+        )
+        .await;
+        complete(&second_sender, host_request(&mut second).await).await;
+        assert!(
+            response(stream)
+                .await
+                .starts_with(b"HTTP/1.1 204 No Content")
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), first.next())
+            .await
+            .is_err()
+    );
+    // The request sent before the successor activated still completes.
+    complete(&first_sender, pending_request).await;
+    assert!(
+        response(pending)
+            .await
+            .starts_with(b"HTTP/1.1 204 No Content")
+    );
+    drop(first_sender);
+    assert!(
+        tokio::time::timeout(TEST_TIMEOUT, first.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    harness.stop().await;
+    assert!(second.next().await.is_none());
+}
+
+#[tokio::test]
+async fn hosted_successor_can_be_prepared_while_one_epoch_is_active_and_one_drains() {
+    let _lock = LOOPBACK_TEST.lock().await;
+    let harness = Harness::start();
+    let (first_sender, mut first) = harness.first_host().await;
+    let oldest = request(
+        harness.connect(false).await,
+        "POST",
+        "/v1/responses",
+        "localhost",
+        b"{}",
+    )
+    .await;
+    host_request(&mut first).await;
+    let (second_sender, mut second) = harness.prepare_host().await;
+    harness.open_host(&second_sender).await;
+    let draining = request(
+        harness.connect(true).await,
+        "POST",
+        "/v1/responses",
+        "localhost",
+        b"{}",
+    )
+    .await;
+    let draining_request = host_request(&mut second).await;
+    // Active, draining and prepared each hold one admission permit; a fourth
+    // preparation is refused rather than queued.
+    let (third_sender, mut third) = harness.prepare_host().await;
+    assert_eq!(
+        harness
+            .bridge
+            .connect_with_token_file(tokio_stream::pending(), &harness.token)
+            .await
+            .err()
+            .map(|status| status.code()),
+        Some(tonic::Code::ResourceExhausted)
+    );
+    harness.open_host(&third_sender).await;
+    // The third activation loses only the oldest epoch.
+    assert!(
+        tokio::time::timeout(TEST_TIMEOUT, first.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        response(oldest)
+            .await
+            .starts_with(b"HTTP/1.1 503 Service Unavailable")
+    );
+    complete(&second_sender, draining_request).await;
+    assert!(
+        response(draining)
+            .await
+            .starts_with(b"HTTP/1.1 204 No Content")
+    );
+    let stream = request(
+        harness.connect(false).await,
+        "POST",
+        "/v1/responses",
+        "localhost",
+        b"{}",
+    )
+    .await;
+    complete(&third_sender, host_request(&mut third).await).await;
+    assert!(
+        response(stream)
+            .await
+            .starts_with(b"HTTP/1.1 204 No Content")
+    );
+    drop(first_sender);
+    harness.stop().await;
+    assert!(second.next().await.is_none());
+    assert!(third.next().await.is_none());
 }
 
 #[tokio::test]

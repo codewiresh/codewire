@@ -571,6 +571,60 @@ async fn original_verified_expiry_ends_an_idle_epoch_without_extension() {
 }
 
 #[tokio::test]
+async fn admitted_streams_carry_their_expiry_and_overlapping_epochs_hold_two_slots() {
+    let fixture = Fixture::new().await;
+    let expiry = |response: &Response<Streaming<v1::CredentialBridgeHostMessage>>| {
+        let values: Vec<_> = response
+            .metadata()
+            .get_all(codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(values.len(), 1);
+        values[0].parse::<u64>().unwrap()
+    };
+    let session_expiry = || {
+        fixture
+            .authenticator
+            .authority
+            .session
+            .lock()
+            .unwrap()
+            .identity_expires_at_unix
+    };
+    let first_expiry = session_expiry();
+    let (first_input, first) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let first = first.unwrap();
+    assert_eq!(expiry(&first), first_expiry);
+    assert_eq!(fixture.service.streams_in_use(), 1);
+    // The gateway admits the next epoch, with a later identity expiry, while
+    // the current one still drains: both hold a stream slot.
+    fixture
+        .authenticator
+        .authority
+        .session
+        .lock()
+        .unwrap()
+        .identity_expires_at_unix += 600;
+    let (second_input, second) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let second = second.unwrap();
+    assert_eq!(expiry(&second), first_expiry + 600);
+    assert_eq!(fixture.service.streams_in_use(), 2);
+    // Ending the replaced epoch releases only its slot.
+    drop((first_input, first));
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while fixture.service.streams_in_use() != 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop((second_input, second));
+    fixture.slots_released().await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn cloned_services_share_stream_slots_and_shutdown_closes_all_epochs() {
     let fixture = Fixture::with_limits(TEST_STREAMS, PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES).await;
     let mut streams = Vec::new();

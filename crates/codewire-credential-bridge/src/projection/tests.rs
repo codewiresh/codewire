@@ -140,6 +140,10 @@ struct Harness {
 
 impl Harness {
     async fn new(bridge: CredentialBridge) -> Self {
+        Self::with_replacement(bridge, EpochReplacement::FailPending).await
+    }
+
+    async fn with_replacement(bridge: CredentialBridge, replacement: EpochReplacement) -> Self {
         let (prepared, mut output) = bridge.prepare_connection().unwrap();
         assert!(matches!(
             output.next().await.unwrap().unwrap().payload,
@@ -147,7 +151,7 @@ impl Harness {
         ));
         let (input, receiver) = mpsc::channel(32);
         let connection = prepared
-            .activate(ReceiverStream::new(receiver))
+            .activate_with_replacement(ReceiverStream::new(receiver), &[], replacement)
             .await
             .unwrap();
         let task = tokio::spawn(connection.run());
@@ -344,6 +348,71 @@ async fn replacing_the_epoch_fails_old_projection_and_old_reply_cannot_reach_new
     bounded(task).await.unwrap().unwrap();
     old.stop().await;
     new.stop().await;
+}
+
+#[tokio::test]
+async fn a_projection_answered_on_a_draining_epoch_is_not_released() {
+    let shared = bridge();
+    let mut old = Harness::new(shared.clone()).await;
+    let (task, request) = old.submit().await;
+    let mut new = Harness::with_replacement(shared.clone(), EpochReplacement::Drain).await;
+    // The draining epoch accepts the answer without ending, but the release
+    // stays strict like `validate`: only the active epoch's fence is kept.
+    old.reply(&request).await;
+    assert_eq!(
+        bounded(task).await.unwrap().unwrap_err().code(),
+        tonic::Code::Aborted
+    );
+    assert!(!old.task.is_finished());
+    assert!(shared.inner.lock().await.projections.is_empty());
+    let (task, request) = new.submit().await;
+    new.reply(&request).await;
+    bounded(task).await.unwrap().unwrap();
+    old.stop().await;
+    new.stop().await;
+}
+
+#[tokio::test]
+async fn a_projection_answer_on_the_wrong_epoch_leaves_the_other_request() {
+    for draining_sends in [true, false] {
+        let shared = bridge();
+        let mut old = Harness::new(shared.clone()).await;
+        let (old_task, old_request) = old.submit().await;
+        let mut new = Harness::with_replacement(shared.clone(), EpochReplacement::Drain).await;
+        let (new_task, new_request) = new.submit().await;
+        let (wrong, kept, kept_request, kept_task, wrong_task) = if draining_sends {
+            (old, new, new_request, new_task, old_task)
+        } else {
+            (new, old, old_request, old_task, new_task)
+        };
+        wrong.reply(&kept_request).await;
+        bounded(wrong.task).await.unwrap();
+        assert_eq!(
+            bounded(wrong_task).await.unwrap().unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        assert!(
+            shared
+                .inner
+                .lock()
+                .await
+                .projections
+                .contains_key(&kept_request.request_id)
+        );
+        kept.reply(&kept_request).await;
+        let result = bounded(kept_task).await.unwrap();
+        if draining_sends {
+            // The active epoch's own answer is released.
+            result.unwrap();
+        } else {
+            // Answered on its own, now inactive epoch: accepted without
+            // ending that epoch, and released strictly, as `validate` is.
+            assert_eq!(result.unwrap_err().code(), tonic::Code::Aborted);
+        }
+        assert!(!kept.task.is_finished());
+        assert!(shared.inner.lock().await.projections.is_empty());
+        kept.stop().await;
+    }
 }
 
 #[tokio::test]
