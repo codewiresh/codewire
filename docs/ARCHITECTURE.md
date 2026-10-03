@@ -258,7 +258,15 @@ platform: child -> local relay -> gateway Pod -> internal broker -> provider
 
 The relay and edge hold no provider credential. The platform workspace daemon
 cannot be that edge because it shares the workload's container and process
-boundary. `av-credential-proxy` and `av-proxy-helper` are reusable libraries
+boundary. The one listed
+[direct delivery exception](dev/SECRETS-AND-CREDENTIALS.md#direct-delivery-exceptions)
+is the Sandbox creator's own personal Codex ChatGPT access and ID tokens,
+because Codex enables `/usage`, analytics and account routing only with its own
+login. The broker seals them to a recipient key the workspace daemon holds and
+the gateway relays only ciphertext; once the daemon writer ships, the daemon
+writes them as Codex's own `~/.codex/auth.json`. The refresh token stays in the
+broker. A delivered token is a bearer token for the creator's ChatGPT account
+that every process in the Sandbox can read until it expires. `av-credential-proxy` and `av-proxy-helper` are reusable libraries
 inside the placement-owned processes, not new control planes. Proxying is only
 cooperative credential non-disclosure while direct provider egress remains
 open; enforced mediation also requires denying bypass.

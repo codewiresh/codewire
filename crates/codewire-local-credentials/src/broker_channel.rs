@@ -310,6 +310,12 @@ where
             operation: operation.clone(),
             route: route.clone(),
         };
+        // The Codex login permission names the one listed direct delivery
+        // exception, which only a hosted platform Sandbox may receive; a local
+        // broker never leases it, whatever the shared catalog grants.
+        if requested_permission == codewire_access::codex_login_permission() {
+            return Err(BrokerLeaseChannelError::Denied);
+        }
         let response = self
             .inner
             .lease_credential_operation(v1::BrokerLeaseRequest {
@@ -1816,6 +1822,115 @@ mod tests {
         assert_eq!(events[2].decision, BrokerLeaseAuditDecision::Admitted);
         assert!(events[2].credential_id.is_some());
         assert!(!format!("{events:?}").contains("synthetic-openai-material"));
+        drop(client);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_channel_never_leases_the_codex_login_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TestProtectedStore::default();
+        // The shared catalog grants every Codex selection the login permission.
+        let authority = Arc::new(
+            LocalCredentialAuthority::open(
+                &temp.path().join("authority"),
+                store.clone(),
+                codewire_access::builtin_provider_catalog(),
+            )
+            .unwrap(),
+        );
+        let credential = authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse("openai").unwrap(),
+                    authentication_kind: CredentialAuthKind::ApiKey,
+                    display_name: "synthetic".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(b"synthetic-openai-material").unwrap(),
+            )
+            .unwrap();
+        let profile = authority
+            .create_profile(
+                AccessProfileName::parse("synthetic").unwrap(),
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            )
+            .unwrap();
+        let environment_id = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
+        authority
+            .create_environment_access_binding(EnvironmentAccessBinding {
+                environment_id: environment_id.clone(),
+                profile_id: profile.profile.id,
+                profile_revision: profile.profile.revision,
+            })
+            .unwrap();
+        let login = codewire_access::codex_login_permission();
+        // The authority itself would admit it; the refusal is the channel's.
+        assert!(
+            authority
+                .lease_environment_credential_operation(&CredentialOperationLeaseRequest {
+                    environment_id: environment_id.clone(),
+                    environment_generation: 7,
+                    capability_slot: CapabilitySlot::codex(),
+                    operation: login.operation.clone(),
+                    route: login.route.clone(),
+                })
+                .is_ok()
+        );
+
+        let (server_stream, client_stream) = UnixStream::pair().unwrap();
+        let audit = Arc::new(BrokerLeaseAuditLog::default());
+        let server = tokio::spawn(serve_broker_lease_channel_with_ready(
+            BrokerChannelRefreshLifetime::new(Arc::clone(&authority)),
+            server_stream,
+            environment_id.clone(),
+            7,
+            Arc::clone(&audit),
+            None,
+            BrokerLeaseChannelControl {
+                local_profile: Some(
+                    authority
+                        .get_environment_access_binding(&environment_id)
+                        .unwrap()
+                        .binding,
+                ),
+                ..Default::default()
+            },
+        ));
+        let mut client = LocalCredentialBrokerLeaseClient::connect(
+            client_stream,
+            store.clone(),
+            environment_id.clone(),
+            7,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            client
+                .lease_operation(
+                    Uuid::new_v4(),
+                    CapabilitySlot::codex(),
+                    login.operation,
+                    login.route,
+                )
+                .await,
+            Err(BrokerLeaseChannelError::Denied)
+        ));
+        // Refused before any request reached the authority.
+        assert!(audit.recent(8).await.is_empty());
+        // The proxied permission on the same selection is unaffected.
+        assert!(
+            client
+                .lease_operation(
+                    Uuid::new_v4(),
+                    CapabilitySlot::codex(),
+                    BrokerOperationId::parse("responses").unwrap(),
+                    BrokerRouteId::parse("openai-api").unwrap(),
+                )
+                .await
+                .is_ok()
+        );
         drop(client);
         server.abort();
     }

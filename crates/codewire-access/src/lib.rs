@@ -12,7 +12,9 @@ mod id;
 mod model;
 mod projection;
 
-pub use catalog::builtin_provider_catalog;
+pub use catalog::{
+    CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE, builtin_provider_catalog, codex_login_permission,
+};
 pub use grant::{
     AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile,
     derive_account_github_grant, derive_available_grants, derive_grants, validate_profile_entries,

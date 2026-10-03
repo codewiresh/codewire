@@ -264,7 +264,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib platform::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker admission matrix" "$logfile" 20
+  assert_passed_count "platform broker admission matrix" "$logfile" 23
 
   logfile="$RUN_DIR/platform-broker-ssh.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -292,7 +292,7 @@ run_database() {
     cargo test --locked -p codewire-credential-service \
       --lib tests::database::projection:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform runtime projection matrix" "$logfile" 11
+  assert_passed_count "platform runtime projection matrix" "$logfile" 12
 
   logfile="$RUN_DIR/owner-local-delegation-authority.log"
   TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" \

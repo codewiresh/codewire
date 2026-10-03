@@ -12,7 +12,9 @@ use codewire_gateway_proto::{
     CREDENTIAL_BRIDGE_MAX_HEADERS, CREDENTIAL_BRIDGE_MAX_IN_FLIGHT,
     CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };
-use codewire_workload_secrets::MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES;
+use codewire_workload_secrets::{
+    MAX_SEALED_CODEX_LOGIN_BYTES, MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES,
+};
 use futures::StreamExt as _;
 use thiserror::Error;
 use tokio::task::JoinSet;
@@ -61,6 +63,8 @@ impl<B: CredentialBridgeTransport> AdmittedCredentialBridge<B> {
 struct ActiveRequest {
     incarnation: u64,
     ssh_cancellation: Option<CancellationToken>,
+    /// A Codex login; an epoch runs at most one at a time.
+    codex_login: bool,
 }
 
 impl Drop for ActiveRequest {
@@ -95,6 +99,16 @@ pub(crate) trait BrokerRequestExecutor: Send + Sync {
         &self,
         _request: v1::EnvironmentProjectionRequest,
     ) -> Result<v1::EnvironmentProjectionComposition, BrokerRequestError> {
+        Err(BrokerRequestError::Denied)
+    }
+
+    /// The sealed Codex login, the one listed direct delivery exception. Only
+    /// an executor whose placement implements the whole delivery predicate
+    /// overrides this; every other executor denies.
+    async fn codex_login(
+        &self,
+        _request: v1::CodexLoginRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
         Err(BrokerRequestError::Denied)
     }
 
@@ -136,6 +150,13 @@ where
         OpenAiBroker::project_environment_fragment(self, request).await
     }
 
+    async fn codex_login(
+        &self,
+        request: v1::CodexLoginRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        OpenAiBroker::codex_login(self, request).await
+    }
+
     async fn execute_request(
         &self,
         request: v1::CredentialBridgeRequest,
@@ -170,8 +191,8 @@ pub trait CredentialBridgeTransport: Send {
 
 /// Cloneable, bounded output for already-filtered broker response frames.
 ///
-/// The managed runner sends bounded HTTP, environment-projection and SSH
-/// terminals, never Open. Implementations must reject Open, apply backpressure
+/// The managed runner sends bounded HTTP, environment-projection, Codex login
+/// and SSH terminals, never Open. Implementations must reject Open, apply backpressure
 /// without unbounded buffering, and report epoch loss rather than keep a
 /// disconnected send alive.
 #[async_trait]
@@ -211,6 +232,9 @@ impl CredentialBridgeResponseSink for CredentialBridgeResponseSender {
             }
             v1::credential_bridge_host_message::Payload::EnvironmentProjection(response) => {
                 self.send_environment_projection(response).await
+            }
+            v1::credential_bridge_host_message::Payload::CodexLogin(response) => {
+                self.send_codex_login(response).await
             }
             v1::credential_bridge_host_message::Payload::ResponseStart(response) => {
                 self.send_response_start(response).await
@@ -420,6 +444,7 @@ where
                         active.insert(request_id, ActiveRequest {
                             incarnation,
                             ssh_cancellation: Some(cancellation),
+                            codex_login: false,
                         });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::EnvironmentProjection(request)) => {
@@ -456,7 +481,48 @@ where
                             };
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, codex_login: false });
+                    }
+                    Some(v1::credential_bridge_guest_message::Payload::CodexLogin(request)) => {
+                        let request_id = request.request_id.clone();
+                        if !Uuid::parse_str(&request_id).is_ok_and(|id| !id.is_nil() && id.to_string() == request_id)
+                            || active.contains_key(&request_id)
+                        {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::InvalidProtocol);
+                        }
+                        // The daemon needs one login at a time; a second
+                        // concurrent one is refused before any lease.
+                        if active.values().any(|request| request.codex_login) {
+                            timing::capacity_rejected("codex_login_in_flight", "codex_login", 1, 1);
+                            if send_codex_login_response(&sender, request_id, Err(BrokerRequestError::AuthorityUnavailable)).await.is_err() {
+                                tasks.shutdown().await;
+                                return Err(BrokerBridgeError::Unavailable);
+                            }
+                            continue;
+                        }
+                        if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
+                            timing::capacity_rejected("bridge_in_flight", "codex_login", CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, active.len());
+                            if send_codex_login_response(&sender, request_id, Err(BrokerRequestError::AuthorityUnavailable)).await.is_err() {
+                                tasks.shutdown().await;
+                                return Err(BrokerBridgeError::Unavailable);
+                            }
+                            continue;
+                        }
+                        let Some(incarnation) = next_incarnation.checked_add(1) else {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::Unavailable);
+                        };
+                        next_incarnation = incarnation;
+                        let broker = Arc::clone(&broker);
+                        let sender = sender.clone();
+                        let completed_id = request_id.clone();
+                        tasks.spawn(async move {
+                            let response = broker.codex_login(request).await;
+                            let result = send_codex_login_response(&sender, completed_id.clone(), response).await;
+                            (completed_id, incarnation, result)
+                        });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, codex_login: true });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Request(request)) => {
                         let request_id = request.request_id.clone();
@@ -495,7 +561,7 @@ where
                             let result = serve_request(&*broker, &sender, &response_id, request).await;
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, codex_login: false });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Cancel(cancel)) => {
                         if !Uuid::parse_str(&cancel.request_id).is_ok_and(|id| {
@@ -554,6 +620,53 @@ async fn send_projection_response<S: CredentialBridgeResponseSink>(
                 },
             ),
         )
+        .await
+        .map_err(|_| ())
+}
+
+/// Only a bounded sealed login, DENIED or UNAVAILABLE. DENIED means no login
+/// is deliverable now (an API key, a credential needing Reconnect, a revoked,
+/// organization-owned or another user's credential, Codex not selected), so
+/// the daemon removes the one it wrote; UNAVAILABLE changes nothing.
+///
+/// Unlike an HTTP failure (`request_failure_ends_epoch`), neither answer ends
+/// the epoch. That is safe only because the platform placement is the one
+/// implementing `BrokerLeaseProvider::lease_codex_login`: a refresh the login
+/// started is drained by the shared refresh owner, and a refresh Start that
+/// fails is fenced by the platform store's durable reservation and execution
+/// deadlines rather than by this epoch's lease channel. A local placement
+/// whose reservations are released when its lease channel closes (see
+/// `complete_oauth_refresh`) must revisit this before implementing
+/// `lease_codex_login`.
+async fn send_codex_login_response<S: CredentialBridgeResponseSink>(
+    sender: &S,
+    request_id: String,
+    response: Result<Vec<u8>, BrokerRequestError>,
+) -> Result<(), ()> {
+    use v1::codex_login_response::Result as LoginResult;
+    let result = match response {
+        Ok(sealed) if !sealed.is_empty() && sealed.len() <= MAX_SEALED_CODEX_LOGIN_BYTES => {
+            LoginResult::SealedLogin(sealed)
+        }
+        Ok(_)
+        | Err(
+            BrokerRequestError::InvalidRequest
+            | BrokerRequestError::Denied
+            | BrokerRequestError::ReconnectRequired,
+        ) => LoginResult::Failure(v1::CredentialBridgeFailureReason::Denied as i32),
+        Err(
+            BrokerRequestError::AuthorityUnavailable
+            | BrokerRequestError::UpstreamFailed
+            | BrokerRequestError::ResponseTooLarge,
+        ) => LoginResult::Failure(v1::CredentialBridgeFailureReason::Unavailable as i32),
+    };
+    sender
+        .send(v1::credential_bridge_host_message::Payload::CodexLogin(
+            v1::CodexLoginResponse {
+                request_id,
+                result: Some(result),
+            },
+        ))
         .await
         .map_err(|_| ())
 }
@@ -749,6 +862,7 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod codex_login;
     mod projection;
     mod ssh;
 
@@ -1309,6 +1423,7 @@ pub(crate) mod tests {
             ActiveRequest {
                 incarnation: 2,
                 ssh_cancellation: None,
+                codex_login: false,
             },
         )]);
         remove_completed_request(&mut active, "request", 1);

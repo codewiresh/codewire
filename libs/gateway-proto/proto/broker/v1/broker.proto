@@ -11,9 +11,13 @@ service CredentialBrokerService {
   // Authenticate the caller before consuming the stream. The first guest
   // message must be Ready, whose protocol/environment/generation coordinates
   // must match that already-authenticated caller; Ready is not identity proof.
-  // Return successful stream headers only after this admission. Subsequent
-  // guest messages are Request or Cancel; responses are only the existing
-  // filtered ResponseStart/Body/End/Failure frames, never HostMessage.open.
-  // Protected provider credentials do not appear in either direction.
+  // Return successful stream headers only after this admission. Those headers
+  // list the optional operations this broker serves
+  // (x-codewire-credential-bridge-capabilities); the gateway copies them into
+  // the daemon's Open. Subsequent guest messages are operation or Cancel
+  // frames; responses are only typed operation terminals, never
+  // HostMessage.open. Protected provider credentials do not appear in either
+  // direction, except the one listed direct delivery exception: a Codex login
+  // sealed to the daemon's recipient key, opaque to the gateway.
   rpc CredentialBridge(stream codewire.bridge.v1.CredentialBridgeGuestMessage) returns (stream codewire.bridge.v1.CredentialBridgeHostMessage);
 }

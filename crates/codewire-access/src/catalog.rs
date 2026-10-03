@@ -5,6 +5,26 @@ use crate::{
     GrantPermission, ProviderCatalog, ProviderDefinition, ProviderId,
 };
 
+/// Operation of the dedicated Codex login permission. It names the one listed
+/// direct delivery exception (docs/dev/SECRETS-AND-CREDENTIALS.md): the
+/// Sandbox creator's own personal Codex ChatGPT access and ID tokens, sealed to
+/// the workspace daemon. No HTTP route or other operation implies it.
+pub const CODEX_LOGIN_OPERATION: &str = "codex-login";
+/// Route of the dedicated Codex login permission. It is not an HTTP route.
+pub const CODEX_LOGIN_ROUTE: &str = "codex-login";
+
+/// The Codex slot's dedicated permission for sealed login delivery. Holding it
+/// is necessary, never sufficient: the broker also requires a hosted Sandbox,
+/// an Active OAuth credential, and the creator as credential owner, profile
+/// owner and confirming user.
+pub fn codex_login_permission() -> GrantPermission {
+    GrantPermission {
+        operation: BrokerOperationId::parse(CODEX_LOGIN_OPERATION)
+            .expect("built-in Codex login operation ID"),
+        route: BrokerRouteId::parse(CODEX_LOGIN_ROUTE).expect("built-in Codex login route ID"),
+    }
+}
+
 /// Return the provider credential forms and capabilities admitted by the
 /// current Codewire credential stack.
 ///
@@ -40,12 +60,15 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
                             CredentialAuthKind::OAuth,
                             CredentialAuthKind::ApiKey,
                         ]),
-                        permissions: BTreeSet::from([GrantPermission {
-                            operation: BrokerOperationId::parse("responses")
-                                .expect("built-in Responses operation ID"),
-                            route: BrokerRouteId::parse("openai-api")
-                                .expect("built-in OpenAI route ID"),
-                        }]),
+                        permissions: BTreeSet::from([
+                            GrantPermission {
+                                operation: BrokerOperationId::parse("responses")
+                                    .expect("built-in Responses operation ID"),
+                                route: BrokerRouteId::parse("openai-api")
+                                    .expect("built-in OpenAI route ID"),
+                            },
+                            codex_login_permission(),
+                        ]),
                     },
                 ),
                 (
@@ -208,11 +231,40 @@ mod tests {
         assert_eq!(provider.authentication_kinds, codex.authentication_kinds);
         assert_eq!(
             codex.permissions,
-            BTreeSet::from([GrantPermission {
-                operation: BrokerOperationId::parse("responses").unwrap(),
-                route: BrokerRouteId::parse("openai-api").unwrap(),
-            }])
+            BTreeSet::from([
+                GrantPermission {
+                    operation: BrokerOperationId::parse("responses").unwrap(),
+                    route: BrokerRouteId::parse("openai-api").unwrap(),
+                },
+                GrantPermission {
+                    operation: BrokerOperationId::parse("codex-login").unwrap(),
+                    route: BrokerRouteId::parse("codex-login").unwrap(),
+                },
+            ])
         );
+        // The dedicated login permission belongs to the Codex slot alone.
+        for (id, provider) in [
+            ("openai", provider),
+            (
+                "github",
+                catalog.get(&ProviderId::parse("github").unwrap()).unwrap(),
+            ),
+            (
+                "anthropic",
+                catalog
+                    .get(&ProviderId::parse("anthropic").unwrap())
+                    .unwrap(),
+            ),
+            ("ssh", ssh),
+        ] {
+            for (slot, policy) in &provider.capabilities {
+                assert_eq!(
+                    policy.permissions.contains(&codex_login_permission()),
+                    id == "openai" && *slot == CapabilitySlot::codex(),
+                    "{id}/{slot}"
+                );
+            }
+        }
 
         let github = catalog
             .get(&ProviderId::parse("github").unwrap())

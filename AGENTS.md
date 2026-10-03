@@ -305,16 +305,29 @@ weakening of the required local hardware gate.
   Storing either does not attach it to an environment. Selecting an application
   secret source authorizes ordinary child-visible environment projection under
   the original names; selecting a credential profile authorizes its typed
-  proxy, signer, or executor, never raw provider material. Never infer the
-  category from a key name or value. Profiles contain provider identities only,
-  not secret mappings or exposure policies. Reuse the owning environment
-  operation identity; do not create a separate secret generation.
+  proxy, signer, or executor, never raw provider material except the listed
+  direct delivery exception. Never infer the category from a key name or
+  value. Profiles contain provider identities only, not secret mappings or
+  exposure policies. Reuse the owning environment operation identity; do not
+  create a separate secret generation.
 - Provider credential delivery keeps private material outside the sandbox. A
   sandbox may receive endpoints, public trust material, placeholders, and a
   bounded runtime capability, but not a provider credential or general
-  secret-read API. Application secrets are intentionally visible to their
-  receiving workload and root; do not promise secrecy from those processes.
-  Keep resolved launch values out of durable configuration, control events and
-  session metadata. Credential non-disclosure is not enforced egress mediation;
-  claim the latter only where the placement proves direct provider bypass is
-  denied.
+  secret-read API, except a listed direct delivery exception. Application
+  secrets are intentionally visible to their receiving workload and root; do
+  not promise secrecy from those processes. Keep resolved launch values out of
+  durable configuration, control events and session metadata. Credential
+  non-disclosure is not enforced egress mediation; claim the latter only where
+  the placement proves direct provider bypass is denied.
+- Direct delivery of provider material into a sandbox is allowed only where the
+  proxy cannot work, with owner approval, listed with its reason in
+  docs/dev/SECRETS-AND-CREDENTIALS.md "Direct delivery exceptions" and cited at
+  the delivering code. The only exception is the Sandbox creator's own personal
+  Codex ChatGPT access token and ID token, written as Codex's
+  `~/.codex/auth.json` with a non-empty placeholder refresh token, because
+  Codex enables `/usage`, analytics and account routing only with its own
+  login. Refresh tokens, API keys, GitHub and SSH material and
+  organization-owned credentials are never delivered. A delivered token is a
+  bearer token for the creator's ChatGPT account, usable from anywhere, and
+  stays valid at the provider until its `exp`; every process in the Sandbox,
+  and anyone who can open the Sandbox's terminal, can read it.

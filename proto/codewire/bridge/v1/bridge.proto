@@ -2,14 +2,25 @@ syntax = "proto3";
 
 package codewire.bridge.v1;
 
-// Material-free frames shared by the private native and platform credential
-// bridges. These messages carry filtered HTTP bytes, recipient-encrypted
-// application projections, public SSH keys and signatures; they never carry
-// provider credentials or plaintext application values.
+// Frames shared by the private native and platform credential bridges. These
+// messages carry filtered HTTP bytes, recipient-encrypted application
+// projections, public SSH keys and signatures; they never carry plaintext
+// application values or provider credentials, with one listed direct delivery
+// exception: CodexLoginResponse seals the Sandbox creator's own personal Codex
+// ChatGPT access token, ID token and account ID to a recipient key held by the
+// workspace daemon (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+// exceptions"). The refresh token is never carried. Relays see only
+// ciphertext.
 message CredentialBridgeOpen {
   uint32 protocol_version = 1;
   string environment_id = 2;
   uint64 environment_generation = 3;
+  // Optional operations the admitting host can serve on this epoch, such as
+  // "codex-login". A guest sends such an operation only when its epoch's Open
+  // lists it: an older host ends the epoch on an unknown frame. Only the host
+  // that admits an epoch sets this; it confers no authority, which the broker
+  // rederives for every request.
+  repeated string capabilities = 4;
 }
 
 message CredentialHttpHeader {
@@ -54,6 +65,7 @@ message CredentialBridgeHostMessage {
     CredentialBridgeResponseFailure response_failure = 5;
     EnvironmentProjectionResponse environment_projection = 6;
     CredentialSshResponse ssh = 7;
+    CodexLoginResponse codex_login = 8;
   }
 }
 
@@ -87,6 +99,7 @@ message CredentialBridgeGuestMessage {
     CredentialBridgeCancel cancel = 3;
     EnvironmentProjectionRequest environment_projection = 4;
     CredentialSshRequest ssh = 5;
+    CodexLoginRequest codex_login = 6;
   }
 }
 
@@ -175,4 +188,30 @@ message EnvironmentProjectionInventory {
 message EnvironmentProjectionComposition {
   bytes sealed_platform_fragment = 1;
   repeated EnvironmentProjectionInventory platform_inventories = 2;
+}
+
+// The workspace daemon asks for the Sandbox creator's personal Codex ChatGPT
+// login, sealed to a fresh recipient key it holds, to write Codex's own
+// auth.json. Sent only on an epoch whose Open lists "codex-login". The request
+// names no credential, owner or profile: the broker rederives the selected
+// Codex grant and delivers only an Active OAuth login owned by the creator,
+// selected by the creator's own confirmed profile.
+message CodexLoginRequest {
+  string request_id = 1;
+  bytes recipient_public_key = 2;
+  // At most 30 seconds after the request is made, never extended by a relay.
+  uint64 deadline_unix_ms = 3;
+}
+
+message CodexLoginResponse {
+  string request_id = 1;
+  oneof result {
+    // Recipient-sealed access token, ID token, account ID and refresh time.
+    // The plaintext format has no refresh-token field.
+    bytes sealed_login = 2 [debug_redact = true];
+    // Only DENIED (no deliverable login: an API key, a credential needing
+    // Reconnect, a revoked, organization-owned or another user's credential,
+    // or Codex not selected) or UNAVAILABLE (retry later).
+    CredentialBridgeFailureReason failure = 3;
+  }
 }

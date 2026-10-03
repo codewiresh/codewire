@@ -43,6 +43,7 @@ fn open(bridge: &CredentialBridge) -> v1::CredentialBridgeHostMessage {
                 protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                 environment_id: config.environment_id.to_string(),
                 environment_generation: config.environment_generation,
+                capabilities: Vec::new(),
             },
         )),
     }
@@ -243,4 +244,67 @@ async fn dropped_unopened_stream_releases_admission_without_activating() {
         .is_err()
     );
     bridge.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_hosts_listed_capabilities_reach_the_epoch_and_malformed_lists_refuse_it() {
+    let with_capabilities = |bridge: &CredentialBridge, capabilities: Vec<String>| {
+        let mut message = open(bridge);
+        if let Some(v1::credential_bridge_host_message::Payload::Open(value)) =
+            message.payload.as_mut()
+        {
+            value.capabilities = capabilities;
+        }
+        message
+    };
+    // A current gateway copies the broker's "codex-login"; an older one
+    // lists nothing, and the daemon then never sends the operation.
+    for (capabilities, supported) in [
+        (vec![], false),
+        (vec!["future-op".to_owned()], false),
+        (vec!["codex-login".to_owned()], true),
+    ] {
+        let (_temp, bridge, path) = fixture();
+        let (sender, mut connection) = prepared(&bridge, &path).await;
+        connection.output.next().await.unwrap().unwrap();
+        sender
+            .send(Ok(with_capabilities(&bridge, capabilities)))
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            bridge.wait_for_initial_host(&context(&bridge)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            bridge.shared().unwrap().supports_codex_login().await,
+            supported
+        );
+        bridge.shutdown().await;
+    }
+    for capabilities in [
+        vec!["Codex-Login".to_owned()],
+        vec![
+            "codex-login".to_owned();
+            codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES + 1
+        ],
+    ] {
+        let (_temp, bridge, path) = fixture();
+        let (sender, mut connection) = prepared(&bridge, &path).await;
+        connection.output.next().await.unwrap().unwrap();
+        sender
+            .send(Ok(with_capabilities(&bridge, capabilities)))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), connection.output.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!bridge.shared().unwrap().supports_codex_login().await);
+        bridge.shutdown().await;
+    }
 }

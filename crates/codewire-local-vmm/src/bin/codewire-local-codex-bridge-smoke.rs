@@ -1762,6 +1762,7 @@ function generalEgress(){
                     Some(Payload::Ready(_)) => stage("unexpected-second-ready"),
                     Some(Payload::EnvironmentProjection(_)) => stage("unexpected-environment-projection"),
                     Some(Payload::Ssh(_)) => stage("unexpected-ssh-request"),
+                    Some(Payload::CodexLogin(_)) => stage("unexpected-codex-login"),
                     None => stage("unexpected-empty-bridge-frame"),
                 }
                 Err(failed())

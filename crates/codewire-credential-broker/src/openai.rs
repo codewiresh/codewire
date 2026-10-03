@@ -149,7 +149,25 @@ impl OpenAiChatGptOAuthAdapter {
         &self,
         lease: L,
     ) -> Result<CodexOAuthCredential, CredentialBrokerError> {
-        validate_oauth_lease(&lease)?;
+        validate_oauth_lease(&lease, OPERATION_NAME, ROUTE_NAME)?;
+        lease.with_material(|material| {
+            CodexOAuthCredential::parse(material)
+                .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)
+        })
+    }
+
+    /// Parse the selected login for sealed delivery, the one listed direct
+    /// delivery exception. The lease must carry the dedicated Codex login
+    /// permission; a proxied Responses lease never qualifies, nor the reverse.
+    pub(crate) fn login_credential_from_lease<L: BrokerCredentialLease>(
+        &self,
+        lease: L,
+    ) -> Result<CodexOAuthCredential, CredentialBrokerError> {
+        validate_oauth_lease(
+            &lease,
+            codewire_access::CODEX_LOGIN_OPERATION,
+            codewire_access::CODEX_LOGIN_ROUTE,
+        )?;
         lease.with_material(|material| {
             CodexOAuthCredential::parse(material)
                 .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)
@@ -405,7 +423,11 @@ fn validate_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBr
     Ok(())
 }
 
-fn validate_oauth_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBrokerError> {
+fn validate_oauth_lease(
+    lease: &impl BrokerCredentialLease,
+    operation: &str,
+    route: &str,
+) -> Result<(), CredentialBrokerError> {
     validate_current_lease(lease)?;
     let metadata = lease.credential_metadata();
     let grant = lease.grant();
@@ -414,8 +436,8 @@ fn validate_oauth_lease(lease: &impl BrokerCredentialLease) -> Result<(), Creden
         || metadata.authentication_kind != CredentialAuthKind::OAuth
         || grant.capability_slot != CapabilitySlot::codex()
         || grant.credential_id != metadata.id
-        || permission.operation.as_str() != OPERATION_NAME
-        || permission.route.as_str() != ROUTE_NAME
+        || permission.operation.as_str() != operation
+        || permission.route.as_str() != route
         || !grant.permissions.contains(permission)
     {
         return Err(CredentialBrokerError::UnsupportedLease);
@@ -668,7 +690,7 @@ mod tests {
             "openai-api",
         );
         assert_eq!(
-            validate_oauth_lease(&oauth),
+            validate_oauth_lease(&oauth, OPERATION_NAME, ROUTE_NAME),
             Err(CredentialBrokerError::UnsupportedLease)
         );
         let codex = crate::http_test_support::Lease::new(
@@ -678,7 +700,70 @@ mod tests {
             "responses",
             "openai-api",
         );
-        assert_eq!(validate_oauth_lease(&codex), Ok(()));
+        assert_eq!(
+            validate_oauth_lease(&codex, OPERATION_NAME, ROUTE_NAME),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn proxied_and_login_leases_never_substitute_for_each_other() {
+        let adapter = OpenAiChatGptOAuthAdapter::new().unwrap();
+        let login = || {
+            crate::http_test_support::Lease::new(
+                "openai",
+                CredentialAuthKind::OAuth,
+                "codex",
+                codewire_access::CODEX_LOGIN_OPERATION,
+                codewire_access::CODEX_LOGIN_ROUTE,
+            )
+        };
+        let proxied = || {
+            crate::http_test_support::Lease::new(
+                "openai",
+                CredentialAuthKind::OAuth,
+                "codex",
+                "responses",
+                "openai-api",
+            )
+        };
+        // The synthetic material is not an OAuth bundle: reaching the parser
+        // proves the lease itself was accepted.
+        assert!(matches!(
+            adapter.login_credential_from_lease(login()),
+            Err(CredentialBrokerError::InvalidCredentialMaterial)
+        ));
+        assert!(matches!(
+            adapter.credential_from_lease(proxied()),
+            Err(CredentialBrokerError::InvalidCredentialMaterial)
+        ));
+        let rejected = proxied();
+        let reads = rejected.reads.clone();
+        assert!(matches!(
+            adapter.login_credential_from_lease(rejected),
+            Err(CredentialBrokerError::UnsupportedLease)
+        ));
+        let rejected = login();
+        let login_reads = rejected.reads.clone();
+        assert!(matches!(
+            adapter.credential_from_lease(rejected),
+            Err(CredentialBrokerError::UnsupportedLease)
+        ));
+        let api_key = crate::http_test_support::Lease::new(
+            "openai",
+            CredentialAuthKind::ApiKey,
+            "codex",
+            codewire_access::CODEX_LOGIN_OPERATION,
+            codewire_access::CODEX_LOGIN_ROUTE,
+        );
+        let api_key_reads = api_key.reads.clone();
+        assert!(matches!(
+            adapter.login_credential_from_lease(api_key),
+            Err(CredentialBrokerError::UnsupportedLease)
+        ));
+        for reads in [reads, login_reads, api_key_reads] {
+            assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
     }
     use crate::CanonicalCodexOAuthBundle;
 

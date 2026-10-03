@@ -73,6 +73,30 @@ pub const CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES: usize = 128;
 pub const CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
 pub const CREDENTIAL_BRIDGE_MAX_HEADER_BYTES: usize = 64 * 1024;
 pub const CREDENTIAL_BRIDGE_MAX_IN_FLIGHT: usize = 16;
+/// Response header on the broker's admitted `CredentialBridge` stream: one
+/// value per optional operation this broker serves. The gateway copies the
+/// known values into the daemon's `CredentialBridgeOpen.capabilities`.
+pub const CREDENTIAL_BRIDGE_CAPABILITIES_HEADER: &str = "x-codewire-credential-bridge-capabilities";
+/// The broker serves `CodexLoginRequest` on this epoch. A daemon sends that
+/// frame only when its epoch's Open lists this value: an older broker or
+/// gateway ends the epoch on an unknown frame.
+pub const CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN: &str = "codex-login";
+/// Every optional operation a current host may list. Unknown values are
+/// ignored by the gateway; an Open is bounded to this many entries.
+pub const CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES: &[&str] =
+    &[CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN];
+pub const CREDENTIAL_BRIDGE_MAX_CAPABILITIES: usize = 8;
+pub const CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES: usize = 64;
+
+/// A bounded, canonical capability name: lowercase ASCII letters, digits,
+/// `-` and `.`. Shape only; a listed capability confers no authority.
+pub fn valid_credential_bridge_capability(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-.".contains(&byte))
+}
 pub const CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES: usize =
     CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES + CREDENTIAL_BRIDGE_MAX_HEADER_BYTES + 128 * 1024;
 pub const DAEMON_CAPABILITIES: &[&str] = &[
@@ -208,6 +232,32 @@ mod tests {
     }
 
     #[test]
+    fn credential_bridge_capabilities_are_bounded_canonical_names() {
+        assert!(valid_credential_bridge_capability(
+            CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN
+        ));
+        for known in CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES {
+            assert!(valid_credential_bridge_capability(known));
+        }
+        assert!(CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES.len() <= CREDENTIAL_BRIDGE_MAX_CAPABILITIES);
+        let too_long = "a".repeat(CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES + 1);
+        for invalid in [
+            "",
+            "Codex-Login",
+            "codex login",
+            "codex_login",
+            "cödex",
+            &too_long,
+        ] {
+            assert!(!valid_credential_bridge_capability(invalid), "{invalid:?}");
+        }
+        assert_eq!(
+            CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+            CREDENTIAL_BRIDGE_CAPABILITIES_HEADER.to_ascii_lowercase()
+        );
+    }
+
+    #[test]
     fn daemon_auth_token_is_mandatory_canonical_and_redacted() {
         for invalid in ["", " ", " token", "token ", "line\nbreak", "tökén"] {
             assert_eq!(
@@ -238,6 +288,7 @@ mod tests {
                     protocol_version: 3,
                     environment_id: "e".to_owned(),
                     environment_generation: 7,
+                    capabilities: Vec::new(),
                 },
             )),
         };

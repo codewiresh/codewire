@@ -111,7 +111,23 @@ impl PreparedHostedCredentialBridge {
 
     /// Call only after the isolated broker returned authenticated admission
     /// headers for this stream's real Ready and both exact Pod tokens.
-    pub async fn activate(self) -> Result<CredentialBridgeResponseSender, SessionClientError> {
+    /// `capabilities` are the optional operations that broker listed in those
+    /// headers; the daemon sends such an operation only when its Open lists
+    /// it. Only bounded, canonical names this build knows are forwarded.
+    pub async fn activate(
+        self,
+        capabilities: &[String],
+    ) -> Result<CredentialBridgeResponseSender, SessionClientError> {
+        let mut forwarded = Vec::new();
+        for capability in capabilities {
+            if codewire_gateway_proto::CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES
+                .contains(&capability.as_str())
+                && !forwarded.contains(capability)
+                && forwarded.len() < codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+            {
+                forwarded.push(capability.clone());
+            }
+        }
         self.input
             .send(bridge_v1::CredentialBridgeHostMessage {
                 payload: Some(bridge_v1::credential_bridge_host_message::Payload::Open(
@@ -119,6 +135,7 @@ impl PreparedHostedCredentialBridge {
                         protocol_version: self.ready.protocol_version,
                         environment_id: self.ready.environment_id.clone(),
                         environment_generation: self.ready.environment_generation,
+                        capabilities: forwarded,
                     },
                 )),
             })
@@ -258,6 +275,8 @@ impl SessionClient {
                             codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: environment_id.to_string(),
                         environment_generation,
+                        // Local brokers serve no optional operation.
+                        capabilities: Vec::new(),
                     },
                 )),
             })
@@ -570,6 +589,16 @@ impl CredentialBridgeResponseSender {
             bridge_v1::credential_bridge_host_message::Payload::EnvironmentProjection(response),
         )
         .await
+    }
+
+    /// Forward one opaque sealed Codex login or its closed failure. The relay
+    /// never opens it; only the requesting daemon's recipient key can.
+    pub async fn send_codex_login(
+        &self,
+        response: bridge_v1::CodexLoginResponse,
+    ) -> Result<(), SessionClientError> {
+        self.send(bridge_v1::credential_bridge_host_message::Payload::CodexLogin(response))
+            .await
     }
 
     pub async fn send_response_start(

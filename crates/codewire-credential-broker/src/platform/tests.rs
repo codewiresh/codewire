@@ -1,6 +1,7 @@
 //! Real restricted PostgreSQL plus synthetic, process-local runtime identity.
 //! No Kubernetes, provider network, ambient configuration or real credentials.
 
+mod codex_login;
 mod keepalive;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
