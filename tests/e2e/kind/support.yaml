@@ -25,6 +25,11 @@ data:
   # it out of the disposable overlay until the tool image follows the
   # configured runtime image.
   SANDBOX_IMAGE_CACHE: disabled
+  # Commodity workspaces bind through WorkspaceBindingService (Program #2238
+  # B2), so orchestration refuses to start without these. Workspace Pods run
+  # in dev-sandboxes, so both are fully qualified.
+  CODEWIRE_API_URL: "http://codewire-orchestration.codewire-e2e.svc.cluster.local:8084"
+  CODEWIRE_COORDINATOR_URL: "http://codewire-coordinator.codewire-e2e.svc.cluster.local:8090"
 ---
 # The non-promotable credential fixture owns this public synthetic App slug.
 # No App client material is present in the browser or in this ConfigMap.

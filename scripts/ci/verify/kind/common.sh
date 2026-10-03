@@ -2212,22 +2212,31 @@ coordinator_runtime_smokes() {
 
   # The binding service rejects database-only runtime identities: the
   # referenced SandboxClaim and workspace Pod must both be live and current.
-  # Install the checked-in claim CRD before the full controller deployment so this
-  # listener probe can build that exact fixture without a controller racing
-  # its synthetic status.
+  # It resolves the Pod only through the runtime chain (Program #2238 B2):
+  # the Claim's status names its bound Sandbox, the Sandbox names its Pod,
+  # and there is no Claim-name fallback. Install the checked-in claim and
+  # Sandbox CRDs before the full controller deployment so this listener probe
+  # can build that exact chain without a controller racing its synthetic
+  # status.
   kubectl_apply --validate=false \
-    -f "$ROOT/deployments/k8s/agent-sandbox/base/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml"
+    -f "$ROOT/deployments/k8s/agent-sandbox/base/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml" \
+    -f "$ROOT/deployments/k8s/agent-sandbox/base/crds/agents.x-k8s.io_sandboxes.yaml"
   kubectl wait --for=condition=established --timeout=60s \
-    crd/sandboxclaims.extensions.agents.x-k8s.io
+    crd/sandboxclaims.extensions.agents.x-k8s.io \
+    crd/sandboxes.agents.x-k8s.io
 
   (
     # Admit the stopped UUID-addressed coordinator fixture. The binding
     # endpoint must mint a token the real coordinator accepts, rather than
     # merely returning a syntactically plausible token from its own process.
     local bound_environment_id=00000000-0000-4000-8000-000000000501
-    local bound_pod="sandbox-${bound_environment_id}"
+    local bound_claim="sandbox-${bound_environment_id}"
+    # A warm-pool member's name, as adoption leaves it: never the Claim's
+    # name, so the binding succeeds only by following the bound chain.
+    local bound_sandbox="kind-internal-ready-fixture-${bound_environment_id##*-}"
+    local bound_pod="$bound_sandbox"
     local bound_gateway="cw-binding-gateway-${bound_environment_id}"
-    local bound_pod_ip
+    local bound_claim_uid bound_sandbox_uid bound_pod_ip bound_claim_status
     local bound_port_id=port_internal_connect_kind
     local port_forward_log port_forward_pid local_port i sidecar_token in_cluster_probe
     port_forward_log="$(mktemp)"
@@ -2258,7 +2267,9 @@ SQL
         [ "$status" -ne 0 ] || status=1
         exit "$status"
       fi
-      kubectl -n "$NS" delete sandboxclaim "$bound_pod" \
+      kubectl -n "$NS" delete sandboxclaim "$bound_claim" \
+        --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
+      kubectl -n "$NS" delete sandbox "$bound_sandbox" \
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       kubectl -n "$NS" delete pod "$bound_pod" \
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
@@ -2270,7 +2281,9 @@ SQL
     }
     trap cleanup_internal_connect_fixture EXIT
 
-    kubectl -n "$NS" delete sandboxclaim "$bound_pod" \
+    kubectl -n "$NS" delete sandboxclaim "$bound_claim" \
+      --ignore-not-found=true --wait=true >/dev/null
+    kubectl -n "$NS" delete sandbox "$bound_sandbox" \
       --ignore-not-found=true --wait=true >/dev/null
     kubectl -n "$NS" delete pod "$bound_pod" \
       --ignore-not-found=true --wait=true >/dev/null
@@ -2283,22 +2296,6 @@ metadata:
   name: codewire-sandbox
   namespace: ${NS}
 automountServiceAccountToken: false
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${bound_pod}
-  namespace: ${NS}
-  labels:
-    codewire.sh/environment-id: ${bound_environment_id}
-    codewire.sh/type: workspace
-spec:
-  restartPolicy: Always
-  containers:
-    - name: workspace
-      image: ${KIND_POSTGRES_LOCAL_IMAGE}
-      imagePullPolicy: Never
-      command: ["sleep", "600"]
 ---
 apiVersion: v1
 kind: Pod
@@ -2338,19 +2335,76 @@ spec:
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
-  name: ${bound_pod}
+  name: ${bound_claim}
   namespace: ${NS}
 spec:
   warmPoolRef:
     name: kind-internal-ready-fixture
 EOF
+    bound_claim_uid="$(
+      kubectl -n "$NS" get sandboxclaim "$bound_claim" -o jsonpath='{.metadata.uid}'
+    )"
+    if [ -z "$bound_claim_uid" ]; then
+      echo "::error::internal Connect fixture SandboxClaim has no UID"
+      exit 1
+    fi
+    # The Claim controls its adopted Sandbox, which publishes its Pod's name.
+    kubectl_apply -f - <<EOF
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: ${bound_sandbox}
+  namespace: ${NS}
+  annotations:
+    agents.x-k8s.io/pod-name: ${bound_pod}
+  ownerReferences:
+    - apiVersion: extensions.agents.x-k8s.io/v1beta1
+      kind: SandboxClaim
+      name: ${bound_claim}
+      uid: ${bound_claim_uid}
+      controller: true
+spec:
+  podTemplate:
+    spec:
+      containers:
+        - name: workspace
+          image: ${KIND_POSTGRES_LOCAL_IMAGE}
+EOF
+    bound_sandbox_uid="$(
+      kubectl -n "$NS" get sandbox "$bound_sandbox" -o jsonpath='{.metadata.uid}'
+    )"
+    if [ -z "$bound_sandbox_uid" ]; then
+      echo "::error::internal Connect fixture Sandbox has no UID"
+      exit 1
+    fi
+    # The workspace Pod is the one that Sandbox controls.
+    kubectl_apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${bound_pod}
+  namespace: ${NS}
+  labels:
+    codewire.sh/environment-id: ${bound_environment_id}
+    codewire.sh/type: workspace
+  ownerReferences:
+    - apiVersion: agents.x-k8s.io/v1beta1
+      kind: Sandbox
+      name: ${bound_sandbox}
+      uid: ${bound_sandbox_uid}
+      controller: true
+spec:
+  restartPolicy: Always
+  containers:
+    - name: workspace
+      image: ${KIND_POSTGRES_LOCAL_IMAGE}
+      imagePullPolicy: Never
+      command: ["sleep", "600"]
+EOF
     kubectl -n "$NS" wait "pod/${bound_pod}" \
       --for=condition=Ready --timeout=60s
     kubectl -n "$NS" wait "pod/${bound_gateway}" \
       --for=condition=Ready --timeout=60s
-    kubectl -n "$NS" patch sandboxclaim "$bound_pod" \
-      --subresource=status --type=merge \
-      -p '{"status":{"conditions":[{"lastTransitionTime":"2026-01-01T00:00:00Z","message":"Kind internal binding fixture is ready","reason":"Ready","status":"True","type":"Ready"}]}}'
     bound_pod_ip="$(
       kubectl -n "$NS" get pod "$bound_pod" -o jsonpath='{.status.podIP}'
     )"
@@ -2358,6 +2412,16 @@ EOF
       echo "::error::internal Connect fixture Pod has no IP"
       exit 1
     fi
+    # Bind the Claim to its Sandbox and mark it Ready, as the controller does.
+    bound_claim_status="$(
+      jq -cn --arg sandbox "$bound_sandbox" --arg pod_ip "$bound_pod_ip" '{status: {
+        sandbox: {name: $sandbox, podIPs: [$pod_ip]},
+        conditions: [{lastTransitionTime: "2026-01-01T00:00:00Z",
+          message: "Kind internal binding fixture is ready", reason: "Ready",
+          status: "True", type: "Ready"}]}}'
+    )"
+    kubectl -n "$NS" patch sandboxclaim "$bound_claim" \
+      --subresource=status --type=merge -p "$bound_claim_status"
 
     kubectl -n "$NS" exec -i deploy/postgres -- \
       psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
@@ -2619,7 +2683,11 @@ file_service_smoke() (
   local environment_id=env-crd-smoke
   local claim_name=sandbox-env-crd-smoke
   local daemon_pod=crd-smoke-workspace-daemon
+  # The Sandbox that controls the daemon Pod, named like it, as the
+  # controller names a Sandbox's own Pod.
+  local sandbox_name="$daemon_pod"
   local gateway_token daemon_token original_replicas pod_ip pod_uid ready
+  local claim_uid sandbox_uid pod_owner
   gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
   daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
@@ -2635,6 +2703,9 @@ file_service_smoke() (
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_file_service_binding() {
     set +e
+    # Orphan the retained daemon Pod: it outlives its synthetic Sandbox.
+    kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
+      --ignore-not-found=true --wait=true >/dev/null
     kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
       --ignore-not-found=true --wait=true >/dev/null
     kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
@@ -2662,6 +2733,8 @@ file_service_smoke() (
     echo "::error::file-service fixture Pod has no current IP/UID"
     return 1
   fi
+  kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
+    --ignore-not-found=true --wait=true >/dev/null
   kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
     --ignore-not-found=true --wait=true >/dev/null
   kubectl_apply -f - <<EOF
@@ -2674,6 +2747,52 @@ spec:
   warmPoolRef:
     name: kind-file-service-ready-fixture
 EOF
+  # Orchestration reaches a workspace Pod only through Claim status ->
+  # bound Sandbox -> the Pod that Sandbox controls, and derives an unbound
+  # legacy daemon's credential only from that exact Pod (Program #2238 B2).
+  # Give the retained daemon Pod that chain while the controller is
+  # quiesced, so nothing reconciles the synthetic Sandbox.
+  claim_uid="$(
+    kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}'
+  )"
+  if [ -z "$claim_uid" ]; then
+    echo "::error::file-service fixture SandboxClaim has no UID"
+    return 1
+  fi
+  kubectl_apply -f - <<EOF
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: ${sandbox_name}
+  namespace: ${SANDBOX_NS}
+  annotations:
+    agents.x-k8s.io/pod-name: ${daemon_pod}
+  ownerReferences:
+    - apiVersion: extensions.agents.x-k8s.io/v1beta1
+      kind: SandboxClaim
+      name: ${claim_name}
+      uid: ${claim_uid}
+      controller: true
+spec:
+  podTemplate:
+    spec:
+      containers:
+        - name: workspace
+          image: codewire-gateway:e2e
+EOF
+  sandbox_uid="$(
+    kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.metadata.uid}'
+  )"
+  if [ -z "$sandbox_uid" ]; then
+    echo "::error::file-service fixture Sandbox has no UID"
+    return 1
+  fi
+  pod_owner="$(
+    jq -cn --arg sandbox "$sandbox_name" --arg uid "$sandbox_uid" --arg pod_uid "$pod_uid" \
+      '{metadata: {uid: $pod_uid, ownerReferences: [{apiVersion: "agents.x-k8s.io/v1beta1",
+        kind: "Sandbox", name: $sandbox, uid: $uid, controller: true}]}}'
+  )"
+  kubectl -n "$SANDBOX_NS" patch pod "$daemon_pod" --type=merge -p "$pod_owner"
   kubectl -n "$SANDBOX_NS" patch sandboxclaim "$claim_name" \
     --subresource=status --type=merge \
     -p "{\"status\":{\"sandbox\":{\"name\":\"${daemon_pod}\",\"podIPs\":[\"${pod_ip}\"]},\"conditions\":[{\"lastTransitionTime\":\"2026-01-01T00:00:00Z\",\"message\":\"Kind file-service fixture is ready\",\"reason\":\"Ready\",\"status\":\"True\",\"type\":\"Ready\"}]}}"
@@ -2763,6 +2882,8 @@ DELETE FROM sandbox_environment_backend
 WHERE environment_id = '$environment_id';
 DELETE FROM environments WHERE id = '$environment_id';
 SQL
+  kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
+    --ignore-not-found=true --wait=true >/dev/null
   kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
     --ignore-not-found=true --wait=true >/dev/null
   kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
