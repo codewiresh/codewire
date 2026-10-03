@@ -282,6 +282,118 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    #[cfg(target_os = "linux")]
+    async fn runtime_client(
+        &self,
+    ) -> Result<
+        v1::linux_cw_runtime_service_client::LinuxCwRuntimeServiceClient<tonic::transport::Channel>,
+        Status,
+    > {
+        // Every connection keeps the original socket-derived pidfd/image pin.
+        // Refusal cannot fall back to spawn, adoption or mutation replay.
+        let channel = connect_supervisor_peer(self.peer_pin.clone())
+            .await
+            .map_err(|_| Status::failed_precondition("retained native supervisor changed"))?;
+        let mut supervisor = LocalSupervisorServiceClient::new(channel.clone());
+        query_supervisor_info(&mut supervisor, Some(self.expected_configuration_digest))
+            .await
+            .map_err(|_| {
+                Status::failed_precondition(
+                    "native runtime update requires exact Linux supervisor protocol9",
+                )
+            })?;
+        Ok(v1::linux_cw_runtime_service_client::LinuxCwRuntimeServiceClient::new(channel))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_resolve(&self, selector: &str) -> Result<String, Status> {
+        let resolved = self
+            .runtime_client()
+            .await?
+            .resolve(v1::LinuxCwRuntimeSelector {
+                selector: selector.to_owned(),
+            })
+            .await?
+            .into_inner();
+        let id = Uuid::parse_str(&resolved.environment_id)
+            .ok()
+            .filter(|id| !id.is_nil() && id.to_string() == resolved.environment_id)
+            .ok_or_else(|| Status::failed_precondition("invalid resolved runtime environment"))?;
+        if Uuid::parse_str(selector).is_ok_and(|selected| selected != id) {
+            return Err(Status::failed_precondition(
+                "runtime environment UUID changed",
+            ));
+        }
+        Ok(resolved.environment_id)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_info(
+        &self,
+        environment_id: &str,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .info(v1::LinuxCwRuntimeQuery {
+                environment_id: environment_id.to_owned(),
+                request_id: String::new(),
+            })
+            .await
+            .map(|response| response.into_inner())
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_update(
+        &self,
+        request: v1::LinuxCwRuntimeMutation,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .update(request)
+            .await
+            .map(|response| response.into_inner())
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_rollback(
+        &self,
+        request: v1::LinuxCwRuntimeMutation,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .rollback(request)
+            .await
+            .map(|response| response.into_inner())
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_observe(
+        &self,
+        environment_id: &str,
+        request_id: &str,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .observe(v1::LinuxCwRuntimeQuery {
+                environment_id: environment_id.to_owned(),
+                request_id: request_id.to_owned(),
+            })
+            .await
+            .map(|response| response.into_inner())
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_cancel(
+        &self,
+        environment_id: &str,
+        request_id: &str,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .cancel(v1::LinuxCwRuntimeQuery {
+                environment_id: environment_id.to_owned(),
+                request_id: request_id.to_owned(),
+            })
+            .await
+            .map(|response| response.into_inner())
+    }
+
     async fn follow_environment_operation(
         &mut self,
         operation: v1::Operation,

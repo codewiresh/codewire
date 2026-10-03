@@ -15,6 +15,9 @@ mod direct_share;
 /// guest-visible configuration and Codex's own workspace-local state.
 pub const CODEX_GUEST_HOME_PATH: &str = codewire_access::CODEX_NATIVE_HOME;
 pub mod cw_runtime;
+pub mod cw_runtime_live;
+#[cfg(target_os = "linux")]
+pub mod cw_runtime_publisher;
 mod newc;
 mod progress;
 mod seed;

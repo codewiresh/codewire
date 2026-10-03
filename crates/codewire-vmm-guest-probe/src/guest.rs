@@ -286,6 +286,7 @@ pub fn run_init() -> Result<()> {
     // Keep the startup capability in the actual sealed guest ELF. Host
     // preflight reads it from the admitted boot image without executing it.
     std::hint::black_box(crate::GUEST_RUNTIME_ABI_MARKER);
+    std::hint::black_box(crate::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER);
     ensure!(
         unsafe { libc::getpid() } == 1,
         "guest init must run as PID 1"
@@ -372,6 +373,11 @@ pub fn run_init() -> Result<()> {
     }
     record_boot_stage("root-mounted")?;
     create_state_layout()?;
+    // The bootstrap remains an immutable disk. The publisher copies its
+    // verified members into the root-owned persistent readonly workload view.
+    if let Some(cache) = initialize_live_cw_runtime(&seed)? {
+        drop(cache);
+    }
 
     // Validate the complete seed before starting anything that accepts guest
     // control traffic. The child deliberately rereads it from the immutable
@@ -670,6 +676,7 @@ pub async fn run_daemon() -> Result<()> {
     );
     let seed = read_seed_from_discovered_disk()?;
     let plan = load_active_workspace_plan()?;
+    let publisher = initialize_live_cw_runtime(&seed)?;
     let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, seed.daemon_vsock_port()))
         .with_context(|| {
             format!(
@@ -694,7 +701,7 @@ pub async fn run_daemon() -> Result<()> {
                 container_id: WORKSPACE_CONTAINER_ID.to_owned(),
                 process_wrapper: vec![CONTAINER_INIT_PATH.to_owned(), "workspace-exec".to_owned()],
                 default_shell: plan.identity.shell.clone(),
-                base_environment: plan.environment.clone(),
+                base_environment: runtime_path_environment(&plan.environment, publisher.is_some()),
                 uid: plan.identity.uid,
                 gid: plan.identity.gid,
                 additional_gids: plan.identity.additional_gids.clone(),
@@ -717,13 +724,61 @@ pub async fn run_daemon() -> Result<()> {
         }),
     };
 
-    codewire_daemon::serve_grpc_with_incoming(
+    let daemon = codewire_daemon::serve_grpc_with_incoming(
         config,
         HostOnlyIncoming::new(listener.incoming()),
         shutdown_signal(),
+    );
+    if let Some(cache) = publisher {
+        tokio::select! {
+            result = daemon => result.context("serve authenticated guest daemon over AF_VSOCK"),
+            result = crate::cw_runtime_publisher::serve(cache) => {
+                result.context("serve trusted runtime publisher")?;
+                bail!("trusted runtime publisher exited")
+            }
+        }
+    } else {
+        daemon
+            .await
+            .context("serve authenticated guest daemon over AF_VSOCK")
+    }
+}
+
+fn initialize_live_cw_runtime(
+    seed: &Seed,
+) -> Result<Option<crate::cw_runtime_publisher::RuntimeCache>> {
+    let Some(expected) = seed.cw_runtime_catalog_sha256() else {
+        return Ok(None);
+    };
+    let catalog =
+        validate_cw_runtime_catalog(Some(expected))?.context("missing bound cw bootstrap")?;
+    let binding = crate::cw_runtime_live::RuntimeBinding {
+        environment_id: seed.vm_id(),
+        generation: seed.generation(),
+        bootstrap_catalog_sha256: expected.to_string(),
+    };
+    crate::cw_runtime_publisher::RuntimeCache::initialize(
+        binding,
+        &catalog,
+        Path::new(CW_RUNTIME_SOURCE),
+        Path::new(INIT_PATH),
     )
-    .await
-    .context("serve authenticated guest daemon over AF_VSOCK")
+    .map(Some)
+}
+
+fn runtime_path_environment(environment: &[String], enabled: bool) -> Vec<String> {
+    let mut environment = environment.to_vec();
+    if enabled {
+        if let Some(path) = environment
+            .iter_mut()
+            .find(|value| value.starts_with("PATH="))
+        {
+            *path = format!("PATH={CW_RUNTIME_ROOT}:{}", &path[5..]);
+        } else {
+            environment.push(format!("PATH={CW_RUNTIME_ROOT}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
+        }
+    }
+    environment
 }
 
 /// Trusted guest-side end of the raw-IP seam. This process is created by PID
@@ -2161,7 +2216,7 @@ fn spawn_workspace_process_with_projection(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    for entry in &plan.environment {
+    for entry in &runtime_path_environment(&plan.environment, Path::new(CW_RUNTIME_ROOT).is_dir()) {
         let (key, value) = entry
             .split_once('=')
             .ok_or_else(|| anyhow::anyhow!("sealed workspace environment is invalid"))?;
@@ -4656,13 +4711,34 @@ fn workspace_oci_config_with_cw(plan: &WorkspacePlan, cw_asset: bool) -> Result<
         }
     });
     if cw_asset {
+        configuration["process"]["env"] = serde_json::to_value(runtime_path_environment(
+            &configuration["process"]["env"]
+                .as_array()
+                .context("workspace environment")?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .context("workspace environment value")
+                        .map(str::to_owned)
+                })
+                .collect::<Result<Vec<_>>>()?,
+            true,
+        ))?;
         configuration["mounts"]
             .as_array_mut()
             .context("workspace mounts")?
-            .push(serde_json::json!({
-                "destination": CW_RUNTIME_ROOT, "type": "none", "source": CW_RUNTIME_SOURCE,
-                "options": ["bind", "ro", "nosuid", "nodev", "exec"]
-            }));
+            .extend([
+                serde_json::json!({
+                    "destination": CW_RUNTIME_ROOT, "type": "none", "source": crate::cw_runtime_live::LIVE_RUNTIME_VIEW,
+                    "options": ["bind", "ro", "nosuid", "nodev", "exec"]
+                }),
+                serde_json::json!({
+                    "destination": crate::cw_runtime_live::LIVE_RUNTIME_LAUNCHER, "type": "none",
+                    "source": format!("{}/cw", crate::cw_runtime_live::LIVE_RUNTIME_VIEW),
+                    "options": ["bind", "ro", "nosuid", "nodev", "exec"]
+                }),
+            ]);
     }
     serde_json::to_vec(&configuration).context("encode workspace OCI configuration")
 }
@@ -6322,13 +6398,31 @@ mod tests {
             .filter(|mount| mount["destination"] == CW_RUNTIME_ROOT)
             .collect::<Vec<_>>();
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0]["source"], CW_RUNTIME_SOURCE);
+        assert_eq!(
+            selected[0]["source"],
+            crate::cw_runtime_live::LIVE_RUNTIME_VIEW
+        );
         assert_eq!(
             selected[0]["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev", "exec"])
         );
         assert!(!CW_RUNTIME_ROOT.starts_with(&plan.identity.home));
         assert!(!CW_RUNTIME_ROOT.starts_with(WORKSPACE_PATH));
+        let launcher = mounts
+            .iter()
+            .filter(|mount| mount["destination"] == crate::cw_runtime_live::LIVE_RUNTIME_LAUNCHER)
+            .collect::<Vec<_>>();
+        assert_eq!(launcher.len(), 1);
+        assert_eq!(
+            launcher[0]["source"],
+            format!("{}/cw", crate::cw_runtime_live::LIVE_RUNTIME_VIEW)
+        );
+        assert_eq!(
+            launcher[0]["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "exec"])
+        );
+        assert!(!crate::cw_runtime_live::LIVE_RUNTIME_LAUNCHER.starts_with(&plan.identity.home));
+        assert!(!crate::cw_runtime_live::LIVE_RUNTIME_LAUNCHER.starts_with(WORKSPACE_PATH));
         let legacy: serde_json::Value =
             serde_json::from_slice(&workspace_oci_config_with_cw(&plan, false).unwrap()).unwrap();
         assert!(
@@ -6336,7 +6430,8 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|mount| mount["destination"] != CW_RUNTIME_ROOT)
+                .all(|mount| mount["destination"] != CW_RUNTIME_ROOT
+                    && mount["destination"] != crate::cw_runtime_live::LIVE_RUNTIME_LAUNCHER)
         );
     }
 

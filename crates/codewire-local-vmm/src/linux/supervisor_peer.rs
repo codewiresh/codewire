@@ -214,6 +214,23 @@ fn socket_pidfd(stream: &UnixStream) -> Result<(OwnedFd, u32), PeerError> {
     Ok((pidfd, pid))
 }
 
+/// Admit a stream against an ALREADY authoritative process birth. This does
+/// not discover a role, adopt a process, or admit executable provenance.
+/// The runtime publisher uses the persisted, revalidated VMM identity.
+pub(crate) fn admit_known_process_stream(
+    stream: &UnixStream,
+    expected: &ProcessIdentity,
+) -> Result<OwnedFd, PeerError> {
+    let (pidfd, pid) = socket_pidfd(stream)?;
+    require_live(&pidfd)?;
+    if pid != expected.pid || capture_process(pid, Instant::now() + ADMISSION_TIMEOUT)? != *expected
+    {
+        return Err(PeerError::Identity);
+    }
+    require_live(&pidfd)?;
+    Ok(pidfd)
+}
+
 fn require_live(pidfd: &OwnedFd) -> Result<(), PeerError> {
     let mut entry = libc::pollfd {
         fd: pidfd.as_raw_fd(),
@@ -353,3 +370,35 @@ fn admit_provenance(process: &ProcessIdentity) -> Result<Provenance, PeerError> 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod runtime_peer_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    #[tokio::test]
+    async fn live_runtime_known_socket_peer_pins_the_actual_kernel_birth() {
+        let parent = tempfile::Builder::new()
+            .prefix("cw-rp-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize("/var/tmp").unwrap())
+            .unwrap();
+        let socket = parent.path().join("peer.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        crate::linux::path::set_socket_private(&socket).unwrap();
+        let expected = ProcessIdentity::capture(std::process::id()).unwrap();
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_accepted, _) = listener.accept().await.unwrap();
+        let pidfd = admit_known_process_stream(&stream, &expected).unwrap();
+        let flags = unsafe { libc::fcntl(pidfd.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        let mut foreign = expected.clone();
+        foreign.start_time_ticks += 1;
+        assert!(admit_known_process_stream(&stream, &foreign).is_err());
+        foreign = expected.clone();
+        foreign.executable_sha256 = "a".repeat(64);
+        assert!(admit_known_process_stream(&stream, &foreign).is_err());
+        foreign = expected;
+        foreign.pid = foreign.pid.checked_add(1).unwrap();
+        assert!(admit_known_process_stream(&stream, &foreign).is_err());
+    }
+}

@@ -4,6 +4,7 @@ use std::path::Path;
 use super::*;
 
 mod progress;
+mod runtime;
 mod sources;
 
 use progress::{FollowPolicy, StartProgress, format_env_ready_text, format_environment_logs_plain};
@@ -128,6 +129,7 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         return Ok(());
     }
     match args.command {
+        EnvCommand::Runtime(args) => runtime::handle(globals, placement, args.command).await,
         EnvCommand::Create(create) => {
             handle_unified_environment_create(globals, placement, create).await
         }
@@ -328,6 +330,7 @@ pub(crate) async fn handle_platform_env_command(
     let org_id = current_org_id(&platform, &orgs)?;
 
     match command {
+        EnvCommand::Runtime(_) => anyhow::bail!("cw env runtime supports only native Linux VMs"),
         EnvCommand::Create(args) => {
             let began = Instant::now();
             let mut request = prepare_platform_env_create_request(&args)?;
