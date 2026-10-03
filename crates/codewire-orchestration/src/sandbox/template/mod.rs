@@ -319,6 +319,11 @@ impl TemplateOpts {
         self.workspace_binding_url().is_some()
     }
 
+    /// The StorageClass the workspace volume claim template names.
+    pub fn effective_workspace_storage_class(&self) -> &str {
+        runtime_policy::workspace_storage_class(self)
+    }
+
     pub fn validate_confidential_storage_manifest(&self) -> anyhow::Result<()> {
         let needs_manifest = self.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL
             && self.disk_gib > 0;

@@ -24,13 +24,14 @@ use crate::sandbox::client::{
 };
 use crate::sandbox::template::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
-    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts,
-    WORKSPACE_READY_TIMEOUT, WorkspaceIdentity, confidential_init_data, runtime_profile_spec,
-    validate_managed_runtime_profile,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec,
+    TemplateOpts, WORKSPACE_READY_TIMEOUT, WorkspaceIdentity, confidential_init_data,
+    runtime_profile_spec, validate_managed_runtime_profile,
 };
+use crate::sandbox::warm_pool::{WarmPoolObjects, WorkspaceShape, render_warm_pool};
 use crate::sandbox::{
-    ClaimOpts, claim_name, environment_template_name, is_canonical_workspace_runtime_image,
-    shadow_warm_pool_name,
+    CANONICAL_WORKSPACE_RUNTIME_IMAGE, ClaimOpts, claim_name, environment_template_name,
+    is_canonical_workspace_runtime_image, shadow_warm_pool_name,
 };
 use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
 
@@ -39,6 +40,9 @@ mod projection_tests;
 
 #[cfg(test)]
 mod projection_database_tests;
+
+#[cfg(test)]
+mod warm_pool_tests;
 
 /// Only an exactly owned Pod with stale immutable bootstrap may be restarted.
 /// Missing/replaced identities and storage errors must never select recovery.
@@ -395,7 +399,8 @@ pub fn is_first_party_workspace_image(image_ref: &str) -> bool {
         || image_ref.contains("codewiresh/workspace")
 }
 
-/// Mirrors `environmentTemplateOpts`.
+/// Mirrors `environmentTemplateOpts`: the environment's identity on top of
+/// the cluster and shape inputs of [`shape_template_opts`].
 pub fn environment_template_opts(
     cfg: &SandboxWorkerCfg,
     image_ref: &str,
@@ -442,24 +447,54 @@ pub fn environment_template_opts(
         gateway_token != daemon_auth_token,
         "hosted coordinate and daemon capabilities must be distinct"
     );
+
+    let runtime_spec = match runtime_profile_for_isolation_tier(&env.isolation_tier)
+        .expect("environment isolation tier is validated at creation")
+    {
+        Some(profile) => runtime_profile_spec(profile, &cfg.docker_mode, cfg.dind_enabled),
+        None => standard_runtime_profile_spec(cfg),
+    };
+    let template_base = if is_canonical_workspace_runtime_image(image_ref) {
+        CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
+    } else {
+        template_base
+    };
+    let shape = WorkspaceShape {
+        cpu_millicores: i64::from(env.cpu_millicores),
+        memory_mib: i64::from(env.memory_mb),
+        disk_gib: i64::from(env.disk_gb),
+    };
+
+    Ok(TemplateOpts {
+        name: environment_template_name(template_base, env_id),
+        environment_id: env_id.to_string(),
+        organization_id: env.org_id.clone(),
+        operation_generation,
+        projection_selection_sha256,
+        managed_credential_clients,
+        gateway_token: gateway_token.to_string(),
+        daemon_auth_token: daemon_auth_token.to_string(),
+        ..shape_template_opts(cfg, image_ref, &runtime_spec, shape)
+    })
+}
+
+/// The cluster and shape inputs of a workspace rendering, with no environment
+/// identity: images, runtime, resources, storage, transport and the identity
+/// mode. A warm pool renders from these alone (Program #2238 C1); an
+/// environment adds its identity in [`environment_template_opts`]. Every
+/// field is listed, so a new one must be placed on one side or the other.
+pub fn shape_template_opts(
+    cfg: &SandboxWorkerCfg,
+    image_ref: &str,
+    runtime_spec: &RuntimeProfileSpec,
+    shape: WorkspaceShape,
+) -> TemplateOpts {
     // Codewire base images supervise the daemon beneath PID 1. Custom
     // images also retain a keepalive alongside that managed daemon.
     let image_command = if is_first_party_workspace_image(image_ref) {
         Vec::new()
     } else {
         vec!["sleep".to_string(), "infinity".to_string()]
-    };
-
-    let runtime_spec = match runtime_profile_for_isolation_tier(&env.isolation_tier)
-        .expect("environment isolation tier is validated at creation")
-    {
-        Some(profile) => runtime_profile_spec(profile, &cfg.docker_mode, cfg.dind_enabled),
-        None => runtime_profile_spec(&cfg.runtime_profile, &cfg.docker_mode, cfg.dind_enabled),
-    };
-    let template_base = if is_canonical_workspace_runtime_image(image_ref) {
-        CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
-    } else {
-        template_base
     };
 
     let uses_runtime_transport_registry = !cfg.runtime_transport_zones_json.trim().is_empty();
@@ -483,23 +518,25 @@ pub fn environment_template_opts(
         WorkspaceIdentity::EnvironmentToken
     };
 
-    Ok(TemplateOpts {
-        name: environment_template_name(template_base, env_id),
+    TemplateOpts {
+        // Environment identity: none.
+        name: String::new(),
+        environment_id: String::new(),
+        organization_id: String::new(),
+        operation_generation: 0,
+        projection_selection_sha256: None,
+        managed_credential_clients: Default::default(),
+        confidential_storage_manifest_uri: String::new(),
+        gateway_token: String::new(),
+        daemon_auth_token: String::new(),
+        // Cluster and shape.
         image: image_ref.to_string(),
         image_command,
         support_image: cfg.gateway_image.clone(),
         dind_image: cfg.dind_image.clone(),
         runtime_profile: runtime_spec.profile.clone(),
         docker_mode: runtime_spec.docker_mode.clone(),
-        environment_id: env_id.to_string(),
-        organization_id: env.org_id.clone(),
-        operation_generation,
         credential_runtime: cfg.credential_runtime.clone(),
-        projection_selection_sha256,
-        managed_credential_clients,
-        confidential_storage_manifest_uri: String::new(),
-        gateway_token: gateway_token.to_string(),
-        daemon_auth_token: daemon_auth_token.to_string(),
         workspace_identity,
         gateway_daemon_credential_from_binding,
         api_base_url: cfg.api_base_url.clone(),
@@ -539,9 +576,9 @@ pub fn environment_template_opts(
             cfg.udp_relay_bind_addrs.clone()
         },
         udp_relay_allocator_egress_enabled: uses_runtime_transport_registry,
-        cpu_millicores: i64::from(env.cpu_millicores),
-        memory_mib: i64::from(env.memory_mb),
-        disk_gib: i64::from(env.disk_gb),
+        cpu_millicores: shape.cpu_millicores,
+        memory_mib: shape.memory_mib,
+        disk_gib: shape.disk_gib,
         workspace_storage_class: cfg.workspace_storage_class.clone(),
         network_policy_management: cfg.network_policy_management.clone(),
         dind_enabled: runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT,
@@ -553,7 +590,53 @@ pub fn environment_template_opts(
         kata_coco_test_resource_uri: cfg.kata_coco_test_resource_uri.clone(),
         kata_coco_test_resource_path: cfg.kata_coco_test_resource_path.clone(),
         debug_tailnet: cfg.debug_tailnet,
-    })
+    }
+}
+
+/// The runtime of a standard-tier environment: this process's configured
+/// profile.
+fn standard_runtime_profile_spec(cfg: &SandboxWorkerCfg) -> RuntimeProfileSpec {
+    runtime_profile_spec(&cfg.runtime_profile, &cfg.docker_mode, cfg.dind_enabled)
+}
+
+/// The identity-free inputs of one warm-pool shape (Program #2238 C1): the
+/// canonical workspace image on the standard tier, from the shape and this
+/// process's configuration alone, never from an environment row. A
+/// confidential runtime, a diagnostic runtime outside diagnostic clusters and
+/// the environment-token rollback mode render no pool.
+pub fn warm_pool_template_opts(
+    cfg: &SandboxWorkerCfg,
+    shape: WorkspaceShape,
+) -> anyhow::Result<TemplateOpts> {
+    let runtime_spec = standard_runtime_profile_spec(cfg);
+    anyhow::ensure!(
+        runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL,
+        "confidential workspaces are never pooled"
+    );
+    validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
+        .map_err(|error| anyhow::anyhow!("warm pool runtime profile: {error}"))?;
+    let opts = shape_template_opts(cfg, CANONICAL_WORKSPACE_RUNTIME_IMAGE, &runtime_spec, shape);
+    anyhow::ensure!(
+        opts.identity_free(),
+        "warm pools require identity-free workspaces (SANDBOX_WORKSPACE_IDENTITY_MODE=binding)"
+    );
+    Ok(opts)
+}
+
+/// Render one configured warm pool in the sandbox namespace. Only diagnostic
+/// clusters may pool images that are not digest-pinned.
+pub fn render_configured_warm_pool(
+    cfg: &SandboxWorkerCfg,
+    shape: WorkspaceShape,
+    replicas: i32,
+) -> anyhow::Result<WarmPoolObjects> {
+    let opts = warm_pool_template_opts(cfg, shape)?;
+    render_warm_pool(
+        &cfg.sandbox_namespace,
+        &opts,
+        replicas,
+        cfg.allow_diagnostic_runtime,
+    )
 }
 
 /// Product tiers deliberately select the existing approved runtime profiles.

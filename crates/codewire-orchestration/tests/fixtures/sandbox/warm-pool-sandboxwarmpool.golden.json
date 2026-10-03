@@ -1,0 +1,24 @@
+{
+  "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+  "kind": "SandboxWarmPool",
+  "metadata": {
+    "annotations": {
+      "codewire.sh/pool-revision": "ae9b7407549abb7313490521bd80f864efe5acfef9fd28b589d8b8863af6a4c4"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "codewire",
+      "codewire.sh/type": "workspace-pool"
+    },
+    "name": "cw-pool-1000m-4096mi-10gi-78909fe3",
+    "namespace": "dev-sandboxes"
+  },
+  "spec": {
+    "replicas": 2,
+    "sandboxTemplateRef": {
+      "name": "cw-pool-1000m-4096mi-10gi-78909fe3"
+    },
+    "updateStrategy": {
+      "type": "Recreate"
+    }
+  }
+}

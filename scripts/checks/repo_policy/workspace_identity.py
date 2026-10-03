@@ -9,6 +9,13 @@ workspace-binding token (workspace container only), the binding URL and its
 own UID from the downward API, plus exactly one new egress rule to the binding
 listener.
 
+Warm pools (Program #2238 C1) share one such template per exact shape. Their
+objects carry no environment, organization, generation, UUID or secret at all,
+are named `cw-pool-<cpu>m-<mem>mi-<disk>gi-<h8>` (never a legacy
+`sandbox-warmpool-` or `shadow-pool-` name), run only digest-pinned images,
+never the confidential runtime, and record `codewire.sh/pool-revision` as the
+SHA-256 of the template spec.
+
 The orchestration renderer's golden fixtures are the reviewed rendering; the
 Rust test pins renderer == fixture, and this guard pins the fixture against
 the invariant, so neither can drift alone.
@@ -16,8 +23,12 @@ the invariant, so neither can drift alone.
 
 from __future__ import annotations
 
+import base64
 import copy
+import gzip
+import hashlib
 import json
+import re
 from typing import Any
 
 from .shared import ROOT, argparse
@@ -25,7 +36,10 @@ from .shared import ROOT, argparse
 FIXTURES = [
     "crates/codewire-orchestration/tests/fixtures/sandbox/identity-free-sandboxtemplate.golden.json",
     "crates/codewire-orchestration/tests/fixtures/sandbox/identity-free-sandboxtemplate-runc.golden.json",
+    "crates/codewire-orchestration/tests/fixtures/sandbox/warm-pool-sandboxtemplate.golden.json",
 ]
+POOL_TEMPLATE_FIXTURE = "crates/codewire-orchestration/tests/fixtures/sandbox/warm-pool-sandboxtemplate.golden.json"
+POOL_FIXTURE = "crates/codewire-orchestration/tests/fixtures/sandbox/warm-pool-sandboxwarmpool.golden.json"
 
 FORBIDDEN_ENVIRONMENT = {
     "CODEWIRE_DAEMON_AUTH_TOKEN",
@@ -53,6 +67,26 @@ BINDING_VOLUME = "workspace-binding-identity"
 BINDING_AUDIENCE = "codewire.internal.workspace-binding.v1"
 BINDING_MOUNT = "/var/run/secrets/codewire/workspace-binding"
 ENVIRONMENT_LABEL = "codewire.sh/environment-id"
+POOL_NAME = re.compile(r"^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$")
+POOL_REVISION = "codewire.sh/pool-revision"
+POOL_LABELS = {"app.kubernetes.io/managed-by": "codewire", "codewire.sh/type": "workspace-pool"}
+POOL_POD_LABELS = {"codewire.sh/type": "workspace"}
+UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+DIGEST_PINNED = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
+KATA_INIT_DATA = "io.katacontainers.config.hypervisor.cc_init_data"
+# Environment or tenant state that never belongs in a shared pool object.
+POOL_FORBIDDEN_TEXT = (
+    "codewire.sh/org-id",
+    "codewire.sh/environment-operation-generation",
+    "codewire.sh/isolation-tier",
+    "io.katacontainers.volume.confidential",
+    "io.katacontainers.config.hypervisor.kernel_params",
+    "longhorn-confidential",
+    "ReadWriteOncePod",
+)
+# Environment-bound confidential init-data (KBS key IDs and storage contract).
+POOL_FORBIDDEN_INIT_DATA = ("codewire_workspace_storage_key_id", "codewire_confidential_storage", "aa.toml")
+SECRET_KEYS = {"secret", "secretName", "secretKeyRef", "envFrom"}
 
 
 def containers(spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -118,6 +152,160 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
     return output
 
 
+def pool_revision(template: dict[str, Any]) -> str:
+    """serde_json's compact, key-sorted serialization of the template spec."""
+    spec = json.dumps(template.get("spec"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(spec.encode("utf-8")).hexdigest()
+
+
+def walk_keys(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [key for key, item in value.items() for key in [key, *walk_keys(item)]]
+    if isinstance(value, list):
+        return [key for item in value for key in walk_keys(item)]
+    return []
+
+
+def pool_images(spec: dict[str, Any]) -> list[str]:
+    images = [container.get("image", "") for container in containers(spec)]
+    images += [(volume.get("image") or {}).get("reference", "") for volume in spec.get("volumes") or [] if "image" in volume]
+    return images
+
+
+def init_data_text(template: dict[str, Any]) -> str | None:
+    """The decoded commodity Kata policy init-data, "" when absent, None when undecodable."""
+    annotations = ((template.get("spec") or {}).get("podTemplate") or {}).get("metadata", {}).get("annotations") or {}
+    encoded = annotations.get(KATA_INIT_DATA)
+    if encoded is None:
+        return ""
+    try:
+        return gzip.decompress(base64.b64decode(encoded, validate=True)).decode("utf-8")
+    except (ValueError, OSError, EOFError, UnicodeDecodeError):
+        return None
+
+
+def pool_violations(template: dict[str, Any], pool: dict[str, Any], label: str) -> list[str]:
+    output: list[str] = []
+    name = (template.get("metadata") or {}).get("name", "")
+    if not POOL_NAME.fullmatch(str(name)):
+        output.append(f"{label}: template name {name!r} is not a cw-pool-<cpu>m-<mem>mi-<disk>gi-<h8> name")
+    if template.get("kind") != "SandboxTemplate" or pool.get("kind") != "SandboxWarmPool":
+        output.append(f"{label}: objects are not a SandboxTemplate and its SandboxWarmPool")
+    if (pool.get("metadata") or {}).get("name") != name or (pool.get("metadata") or {}).get("namespace") != (
+        template.get("metadata") or {}
+    ).get("namespace"):
+        output.append(f"{label}: pool and template do not share one name and namespace")
+    expected_spec_keys = {"replicas", "sandboxTemplateRef", "updateStrategy"}
+    pool_spec = pool.get("spec") or {}
+    if set(pool_spec) != expected_spec_keys or pool_spec.get("sandboxTemplateRef") != {"name": name}:
+        output.append(f"{label}: pool spec is not exactly its own template, replicas and update strategy")
+    replicas = pool_spec.get("replicas")
+    if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas < 0:
+        output.append(f"{label}: pool replicas are not a non-negative integer")
+    if pool_spec.get("updateStrategy") != {"type": "Recreate"}:
+        output.append(f"{label}: pool does not recreate stale members")
+    revision = pool_revision(template)
+    for kind, obj in (("template", template), ("pool", pool)):
+        metadata = obj.get("metadata") or {}
+        if metadata.get("labels") != POOL_LABELS:
+            output.append(f"{label}: {kind} labels are not exactly the pool labels")
+        if metadata.get("annotations") != {POOL_REVISION: revision}:
+            output.append(f"{label}: {kind} {POOL_REVISION} is not the SHA-256 of the template spec")
+        text = json.dumps(obj, sort_keys=True)
+        if UUID.search(text):
+            output.append(f"{label}: {kind} carries a UUID")
+        if ENVIRONMENT_LABEL in text:
+            output.append(f"{label}: {kind} carries the environment label")
+        for fragment in POOL_FORBIDDEN_TEXT:
+            if fragment in text:
+                output.append(f"{label}: {kind} carries {fragment}")
+        for key in sorted(SECRET_KEYS.intersection(walk_keys(obj))):
+            output.append(f"{label}: {kind} references a secret through {key}")
+    pod = ((template.get("spec") or {}).get("podTemplate") or {})
+    if (pod.get("metadata") or {}).get("labels") != POOL_POD_LABELS:
+        output.append(f"{label}: member Pod labels are not exactly the workspace type")
+    spec = pod.get("spec") or {}
+    if spec.get("runtimeClassName") == "confidential":
+        output.append(f"{label}: pools the confidential runtime")
+    for image in pool_images(spec):
+        if not DIGEST_PINNED.fullmatch(str(image)):
+            output.append(f"{label}: image {image!r} is not digest-pinned")
+    init_data = init_data_text(template)
+    if init_data is None:
+        output.append(f"{label}: Kata init-data cannot be decoded and checked")
+        init_data = ""
+    if UUID.search(init_data):
+        output.append(f"{label}: Kata init-data carries a UUID")
+    for fragment in POOL_FORBIDDEN_INIT_DATA:
+        if fragment in init_data:
+            output.append(f"{label}: Kata init-data carries {fragment}")
+    return output
+
+
+def pool_self_test(template: dict[str, Any], pool: dict[str, Any]) -> None:
+    environment_id = "3d6bb495-efac-419f-bf3a-91696e7c7ca4"
+
+    def rejected(name: str, mutate: Any, resign: bool = True) -> None:
+        fixture = {"template": copy.deepcopy(template), "pool": copy.deepcopy(pool)}
+        mutate(fixture)
+        # Re-sign the spec so each negative fails for its own reason, not only
+        # for a stale revision.
+        signed = pool_revision(fixture["template"])
+        for obj in fixture.values() if resign else ():
+            annotations = (obj.get("metadata") or {}).get("annotations")
+            if isinstance(annotations, dict) and POOL_REVISION in annotations:
+                annotations[POOL_REVISION] = signed
+        if not pool_violations(fixture["template"], fixture["pool"], f"negative pool fixture {name}"):
+            raise RuntimeError(f"negative pool fixture {name} was accepted")
+
+    def pod_spec(fixture: dict[str, Any]) -> dict[str, Any]:
+        return fixture["template"]["spec"]["podTemplate"]["spec"]
+
+    def workspace(fixture: dict[str, Any]) -> dict[str, Any]:
+        return next(c for c in pod_spec(fixture)["containers"] if c["name"] == "workspace")
+
+    def rename(fixture: dict[str, Any], name: str) -> None:
+        fixture["template"]["metadata"]["name"] = name
+        fixture["pool"]["metadata"]["name"] = name
+        fixture["pool"]["spec"]["sandboxTemplateRef"]["name"] = name
+
+    def init_data(fixture: dict[str, Any], text: str) -> None:
+        fixture["template"]["spec"]["podTemplate"]["metadata"]["annotations"][KATA_INIT_DATA] = base64.b64encode(
+            gzip.compress(text.encode("utf-8"))
+        ).decode("ascii")
+
+    rejected("legacy shared name", lambda f: rename(f, "sandbox-warmpool-workspace-5513aec3"))
+    rejected("shadow name", lambda f: rename(f, f"shadow-pool-workspace-{environment_id}"))
+    rejected("per-environment name", lambda f: rename(f, f"workspace-{environment_id}"))
+    rejected("uppercase hash", lambda f: rename(f, f["template"]["metadata"]["name"].upper()))
+    rejected("template ref mismatch", lambda f: f["pool"]["spec"]["sandboxTemplateRef"].__setitem__("name", "cw-pool-1m-1mi-1gi-00000000"))
+    rejected("pool environment label", lambda f: f["pool"]["metadata"]["labels"].__setitem__(ENVIRONMENT_LABEL, environment_id))
+    rejected("pool organization label", lambda f: f["pool"]["metadata"]["labels"].__setitem__("codewire.sh/org-id", "org"))
+    rejected("member generation label", lambda f: f["template"]["spec"]["podTemplate"]["metadata"]["labels"].__setitem__(
+        "codewire.sh/environment-operation-generation", "7"))
+    rejected("missing revision", lambda f: f["pool"]["metadata"].__setitem__("annotations", {}))
+    rejected("stale revision", lambda f: f["template"]["metadata"]["annotations"].__setitem__(POOL_REVISION, "0" * 64), resign=False)
+    rejected("unsigned image change", lambda f: workspace(f).__setitem__(
+        "image", "registry.example.invalid/codewire/workspace@sha256:" + "4" * 64), resign=False)
+    rejected("environment UUID in env", lambda f: workspace(f)["env"].append({"name": "CODEWIRE_SANDBOX", "value": environment_id}))
+    rejected("secret env", lambda f: workspace(f)["env"].append(
+        {"name": "TOKEN", "valueFrom": {"secretKeyRef": {"name": "env", "key": "token"}}}))
+    rejected("tagged workspace image", lambda f: workspace(f).__setitem__("image", "registry.example.invalid/codewire/workspace:main"))
+    rejected("tagged support image", lambda f: next(v for v in pod_spec(f)["volumes"] if "image" in v)["image"].__setitem__(
+        "reference", "git.example.invalid/codewire/gateway:main-4b5b65d"))
+    rejected("confidential runtime", lambda f: pod_spec(f).__setitem__("runtimeClassName", "confidential"))
+    rejected("confidential tier label", lambda f: f["template"]["spec"]["podTemplate"]["metadata"]["labels"].__setitem__(
+        "codewire.sh/isolation-tier", "confidential"))
+    rejected("confidential volume", lambda f: f["template"]["spec"]["volumeClaimTemplates"][0]["spec"].__setitem__(
+        "accessModes", ["ReadWriteOncePod"]))
+    rejected("environment init-data", lambda f: init_data(
+        f, f'"codewire_workspace_storage_key_id" = "{environment_id}"\n'))
+    rejected("undecodable init-data", lambda f: f["template"]["spec"]["podTemplate"]["metadata"]["annotations"].__setitem__(
+        KATA_INIT_DATA, "not base64"))
+    rejected("stale member reuse", lambda f: f["pool"]["spec"].__setitem__("updateStrategy", {"type": "OnReplenish"}))
+    rejected("negative replicas", lambda f: f["pool"]["spec"].__setitem__("replicas", -1))
+
+
 def self_test(base: dict[str, Any]) -> None:
     def rejected(name: str, mutate: Any) -> None:
         fixture = copy.deepcopy(base)
@@ -162,14 +350,24 @@ def check_identity_free_workspace(args: argparse.Namespace) -> int:
             continue
         base = base or template
         failures.extend(violations(template, rel))
+    pool_objects = []
+    for rel in (POOL_TEMPLATE_FIXTURE, POOL_FIXTURE):
+        try:
+            pool_objects.append(json.loads((ROOT / rel).read_text(encoding="utf-8")))
+        except (OSError, ValueError) as error:
+            failures.append(f"{rel}: unreadable ({error})")
+    if len(pool_objects) == 2:
+        failures.extend(pool_violations(pool_objects[0], pool_objects[1], POOL_FIXTURE))
     if args.self_test and base is not None:
         try:
             self_test(base)
+            if len(pool_objects) == 2:
+                pool_self_test(pool_objects[0], pool_objects[1])
         except RuntimeError as error:
             failures.append(str(error))
     for failure in failures:
         print(f"::error::identity-free workspace: {failure}")
     if failures:
         return 1
-    print(f"identity-free workspace: OK ({len(FIXTURES)} fixture(s){', self-test' if args.self_test else ''})")
+    print(f"identity-free workspace: OK ({len(FIXTURES)} fixture(s), 1 warm pool{', self-test' if args.self_test else ''})")
     return 0
