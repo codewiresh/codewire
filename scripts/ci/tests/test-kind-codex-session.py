@@ -35,7 +35,7 @@ for line in sys.stdin:
     if mode == "eof":
         break
     if method == "initialize":
-        send({"id":request_id,"result":{"codexHome":"/run/codewire-codex/home","platformOs":"linux"}})
+        send({"id":request_id,"result":{"codexHome":"/home/codewire/.codex","platformOs":"linux"}})
     elif method == "thread/start":
         send({"id":request_id,"result":{"thread":{"id":"thread-"+str(request_id),"ephemeral":True,"path":None},"modelProvider":"codewire_openai"}})
     elif method == "turn/start":
@@ -61,31 +61,69 @@ if mode == "stubborn":
 '''
 
 
+MANAGED = driver.MANAGED_HEADER.decode() + "\nmodel_provider = \"codewire_openai\"\n"
+
+
+@contextlib.contextmanager
+def codex_home(config=MANAGED):
+    """A synthetic Codex home holding config (or nothing when None)."""
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory)
+        if config is not None:
+            (home / "config.toml").write_text(config)
+        with patch.object(driver, "CODEX_HOME", str(home)):
+            yield home
+
+
 class ProjectionTests(unittest.TestCase):
-    def test_current_selected_loopback_configuration(self):
-        with patch.dict(os.environ, {"CODEX_HOME": driver.CODEX_HOME,
-                                     "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}, clear=True):
-            driver.validate_projection()
+    def test_both_identity_modes_with_the_daemon_written_config(self):
+        with codex_home() as home:
+            # Environment-token Pod: rendered selection and home. Identity-free
+            # Pod: neither; Codex uses its default home.
+            for values in ({"CODEX_HOME": str(home),
+                            "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}, {}):
+                with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
+                    driver.validate_projection()
 
     def test_missing_wrong_or_unselected_client_is_rejected(self):
-        for values in ({}, {"CODEX_HOME": driver.CODEX_HOME},
-                       {"CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"},
-                       {"CODEX_HOME": driver.CODEX_HOME,
-                        "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:none"},
-                       {"CODEX_HOME": "/synthetic/other-home",
-                        "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}):
-            with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
+        with codex_home() as home:
+            for values in ({"CODEX_HOME": str(home)},
+                           {"CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"},
+                           {"CODEX_HOME": str(home),
+                            "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:none"},
+                           {"CODEX_HOME": "/run/codewire-codex/home",
+                            "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"},
+                           {"CODEX_HOME": "/synthetic/other-home",
+                            "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}):
+                with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
+                    with self.assertRaisesRegex(driver.Failure, "^unexpected_projection$"):
+                        driver.validate_projection()
+
+    def test_selection_requires_codewires_own_config_file(self):
+        header = driver.MANAGED_HEADER.decode()
+        for config in (None, "model_provider = \"codewire_openai\"\n",
+                       "\n" + header + "\n", " " + header + "\n", header + "\r\n"):
+            with self.subTest(config=config), codex_home(config), \
+                    patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(driver.Failure, "^unexpected_projection$"):
+                    driver.validate_projection()
+        with codex_home(None) as home, tempfile.TemporaryDirectory() as elsewhere:
+            target = Path(elsewhere) / "config.toml"
+            target.write_text(MANAGED)
+            (home / "config.toml").symlink_to(target)
+            with patch.dict(os.environ, {}, clear=True):
                 with self.assertRaisesRegex(driver.Failure, "^unexpected_projection$"):
                     driver.validate_projection()
 
     def test_no_legacy_ca_override_fallback(self):
-        for value in ("", "/run/codewire-credentials/gateway-roots/ca.crt", "/synthetic/roots"):
-            with self.subTest(value=value), patch.dict(os.environ, {
-                    "CODEX_HOME": driver.CODEX_HOME,
-                    "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex",
-                    "CODEX_CA_CERTIFICATE": value}, clear=True):
-                with self.assertRaisesRegex(driver.Failure, "^unexpected_projection$"):
-                    driver.validate_projection()
+        with codex_home() as home:
+            for value in ("", "/run/codewire-credentials/gateway-roots/ca.crt", "/synthetic/roots"):
+                with self.subTest(value=value), patch.dict(os.environ, {
+                        "CODEX_HOME": str(home),
+                        "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex",
+                        "CODEX_CA_CERTIFICATE": value}, clear=True):
+                    with self.assertRaisesRegex(driver.Failure, "^unexpected_projection$"):
+                        driver.validate_projection()
 
 
 class ParserTests(unittest.TestCase):
@@ -243,6 +281,7 @@ class DiagnosticTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
+            (home / "config.toml").write_text(MANAGED)
             def server_factory(argv, cwd):
                 self.assertEqual(cwd, "/workspace")
                 self.assertEqual(argv[:4], [
@@ -282,7 +321,7 @@ class DiagnosticTests(unittest.TestCase):
                 if real_cancellation:
                     for sig, handler in original_handlers.items():
                         driver.signal.signal(sig, handler)
-            self.assertEqual(list(home.iterdir()), [])
+            self.assertEqual(list(home.iterdir()), [home / "config.toml"])
         self.assertEqual(status, 1)
         self.assertEqual(errors.getvalue(), "")
         self.assertEqual(len(children), 0 if script is None else 1)

@@ -250,8 +250,25 @@ mod tests {
         }
     }
 
+    /// Every hosted rendering that once carried Codex's ConfigMap, memory home
+    /// or init copy. The daemon now writes the user's `~/.codex` itself.
+    const LEGACY_CODEX_FRAGMENTS: [&str; 5] = [
+        "cw-credential-codex-",
+        "credential-codex-config",
+        "credential-codex-home",
+        "codex-bootstrap",
+        "/run/codewire-codex",
+    ];
+
+    fn assert_no_legacy_codex(rendered: &Value) {
+        let text = rendered.to_string();
+        for fragment in LEGACY_CODEX_FRAGMENTS {
+            assert!(!text.contains(fragment), "{fragment} rendered");
+        }
+    }
+
     #[test]
-    fn credential_bootstrap_has_exact_tls_intent_and_public_codex_config_only() {
+    fn credential_bootstrap_has_exact_tls_intent_and_no_codex_object() {
         let opts = credential_opts();
         let certificate = render_credential_gateway_certificate("dev-sandboxes", &opts).unwrap();
         assert_eq!(
@@ -280,27 +297,20 @@ mod tests {
             certificate["spec"]["secretTemplate"]["labels"],
             certificate["metadata"]["labels"]
         );
-        let config = render_credential_codex_config("dev-sandboxes", &opts).unwrap();
-        assert_eq!(config["data"].as_object().unwrap().len(), 1);
-        let text = config["data"]["config.toml"].as_str().unwrap();
-        assert_eq!(
-            text,
-            opts.managed_credential_clients
-                .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
-                .codex
-                .unwrap()
-                .config_toml()
-        );
-        for forbidden in [
-            "auth.json",
-            "OPENAI_API_KEY",
-            "api.openai.com",
-            "chatgpt.com",
-            "synthetic-trust-3",
-            &opts.gateway_token,
-            &opts.daemon_auth_token,
-        ] {
-            assert!(!text.contains(forbidden));
+        // Selected Codex renders no ConfigMap, memory home or init copy in any
+        // tier or identity mode: the daemon writes `~/.codex` itself.
+        for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_RUNC] {
+            for identity_free in [false, true] {
+                let mut variant = credential_opts();
+                variant.runtime_profile = profile.into();
+                if identity_free {
+                    variant.workspace_identity = WorkspaceIdentity::Binding {
+                        binding_url: "http://binding.dev.svc.cluster.local:8087".into(),
+                    };
+                }
+                assert_no_legacy_codex(&render_sandbox_template("dev-sandboxes", &variant));
+                assert_no_legacy_codex(&render_gateway_deployment("dev-sandboxes", &variant));
+            }
         }
     }
 
@@ -377,10 +387,10 @@ mod tests {
                     .unwrap()
                     .contains(&json!({"name":"codewire-run","mountPath":"/codewire/run"}))
             );
-            let init = &workspace["initContainers"][0];
-            assert!(init.get("securityContext").is_none());
-            let command = init["command"][2].as_str().unwrap();
             if profile == RUNTIME_PROFILE_CONFIDENTIAL {
+                let init = &workspace["initContainers"][0];
+                assert!(init.get("securityContext").is_none());
+                let command = init["command"][2].as_str().unwrap();
                 assert_eq!(init["name"], "codewire-daemon-init");
                 assert!(command.contains(
                     "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes"
@@ -393,11 +403,9 @@ mod tests {
                 );
             } else {
                 // The same-UID hosted daemon creates its owner-private process
-                // directory at startup; the client bootstrap never touches it.
-                assert_eq!(init["name"], "codewire-client-bootstrap");
-                assert!(!command.contains("/codewire/run"));
-                assert!(!init.to_string().contains("codewire-run"));
-                assert_eq!(workspace["initContainers"].as_array().unwrap().len(), 1);
+                // directory and writes Codex's home at startup: no init
+                // container runs.
+                assert!(workspace.get("initContainers").is_none());
             }
         }
     }
@@ -490,7 +498,7 @@ mod tests {
                 .map(|volume| &volume["name"])
                 .collect();
             for collection in ["containers", "initContainers"] {
-                for container in spec[collection].as_array().unwrap() {
+                for container in spec[collection].as_array().into_iter().flatten() {
                     for mount in container["volumeMounts"].as_array().unwrap() {
                         assert!(
                             !projected.contains(&&mount["name"]) || mount.get("subPath").is_none(),
@@ -500,55 +508,42 @@ mod tests {
                 }
             }
         }
-        // Commodity mounts the daemon from the support image, so only the
-        // stock-client bootstrap remains; confidential keeps the daemon copy.
-        let init = &workspace["initContainers"][0];
-        assert_eq!(workspace["initContainers"].as_array().unwrap().len(), 1);
-        assert_eq!(init["name"], "codewire-client-bootstrap");
-        assert_eq!(init["image"], opts.support_image);
-        let init_mounts = init["volumeMounts"].as_array().unwrap();
-        assert_eq!(init_mounts.len(), 2);
-        for name in ["credential-codex-config", "credential-codex-home"] {
-            assert!(init_mounts.iter().any(|mount| mount["name"] == name));
-        }
-        assert_eq!(
-            init["command"],
-            json!(["sh", "-c", format!(
-                "umask 077 && mkdir -p -m 0700 {CODEX_PLATFORM_HOME} && cp /codewire/codex-bootstrap/config.toml {CODEX_PLATFORM_HOME}/config.toml"
-            )])
-        );
+        // Commodity mounts the daemon from the support image and selected
+        // Codex needs no init container; confidential keeps only the daemon
+        // copy, which never reaches the home.
+        assert!(workspace.get("initContainers").is_none());
         let mut confidential = opts.clone();
         confidential.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
         let confidential = render_sandbox_template("dev-sandboxes", &confidential);
-        let confidential_init = &confidential["spec"]["podTemplate"]["spec"]["initContainers"][0];
+        let confidential_inits = confidential["spec"]["podTemplate"]["spec"]["initContainers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(confidential_inits.len(), 1);
+        let confidential_init = &confidential_inits[0];
         assert_eq!(confidential_init["name"], "codewire-daemon-init");
-        let confidential_mounts = confidential_init["volumeMounts"].as_array().unwrap();
-        assert_eq!(confidential_mounts.len(), 4);
-        for name in [
-            "codewire-bin",
-            "codewire-run",
-            "credential-codex-config",
-            "credential-codex-home",
-        ] {
-            assert!(confidential_mounts.iter().any(|mount| mount["name"] == name));
-        }
-        assert!(
-            confidential_init["command"][2]
-                .as_str()
-                .unwrap()
-                .contains(&format!("mkdir -p -m 0700 {CODEX_PLATFORM_HOME}"))
-        );
-        let home = workspace["volumes"]
+        let confidential_mounts: Vec<_> = confidential_init["volumeMounts"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|volume| volume["name"] == "credential-codex-home")
-            .unwrap();
-        assert_eq!(
-            home["emptyDir"],
-            json!({"medium":"Memory","sizeLimit":"256Mi"})
+            .map(|mount| mount["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(confidential_mounts, ["codewire-bin", "codewire-run"]);
+        assert!(
+            !confidential_init["command"]
+                .to_string()
+                .contains("codex")
         );
+        // Codex's home is the persistent home itself, mounted only as the
+        // workspace volume.
         let ws = &workspace["containers"][0];
+        assert!(
+            ws["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|mount| mount == &json!({"name":"workspace","mountPath":"/home/codewire"}))
+        );
+        assert!(CODEX_PLATFORM_HOME.starts_with("/home/codewire/"));
         assert!(
             ws["env"]
                 .as_array()
@@ -576,7 +571,7 @@ mod tests {
                 .to_string()
                 .contains(CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE)
         );
-        assert!(!gateway.to_string().contains("credential-codex-home"));
+        assert_no_legacy_codex(gateway);
         for container in workspace["containers"].as_array().unwrap().iter().skip(1) {
             assert!(
                 !container.to_string().contains("credential-"),
@@ -640,14 +635,12 @@ mod tests {
         opts.projection_selection_sha256 = None;
         let before = (
             render_sandbox_template("dev-sandboxes", &opts),
-            render_credential_codex_config("dev-sandboxes", &opts),
             render_credential_gateway_certificate("dev-sandboxes", &opts),
         );
         let first_gateway = render_gateway_deployment("dev-sandboxes", &opts);
         opts.operation_generation += 1;
         let after = (
             render_sandbox_template("dev-sandboxes", &opts),
-            render_credential_codex_config("dev-sandboxes", &opts),
             render_credential_gateway_certificate("dev-sandboxes", &opts),
         );
         assert_eq!(before, after);
@@ -670,7 +663,6 @@ mod tests {
     fn credential_free_templates_do_not_mount_provider_bootstrap_or_activate_listener() {
         let opts = commodity_opts();
         assert!(render_credential_gateway_certificate("dev-sandboxes", &opts).is_none());
-        assert!(render_credential_codex_config("dev-sandboxes", &opts).is_none());
         for value in [
             render_sandbox_template("dev-sandboxes", &opts),
             render_gateway_deployment("dev-sandboxes", &opts),
@@ -688,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn only_exact_selected_clients_render_environment_codex_config_and_mounts() {
+    fn only_exact_selected_clients_render_environment_and_no_codex_objects() {
         use codewire_access::{
             ManagedCredentialClient, ManagedCredentialClientPlacement, ManagedCredentialClients,
         };
@@ -735,22 +727,15 @@ mod tests {
                 .managed_credential_clients
                 .contains(ManagedCredentialClient::Codex);
             assert_eq!(
-                render_credential_codex_config("dev-sandboxes", &opts).is_some(),
+                environment.contains(
+                    &json!({"name":"CODEX_HOME","value":codewire_access::CODEX_PLATFORM_HOME})
+                ),
                 codex
             );
-            for field in [
-                &spec["volumes"],
-                &spec["containers"][0]["volumeMounts"],
-                &spec["initContainers"][0]["volumeMounts"],
-            ] {
-                assert_eq!(field.to_string().contains("credential-codex-home"), codex);
-            }
-            assert_eq!(
-                spec["initContainers"][0]["command"]
-                    .to_string()
-                    .contains("/codewire/codex-bootstrap/config.toml"),
-                codex
-            );
+            // The selection changes only the environment: no Codex volume,
+            // mount or init container in any case.
+            assert_no_legacy_codex(&rendered);
+            assert!(spec.get("initContainers").is_none());
         }
         let mut opts = credential_opts();
         opts.managed_credential_clients = Default::default();
@@ -788,7 +773,6 @@ mod tests {
         for path in [
             "/run/codewire-credentials/workspace",
             "/run/codewire-credentials/gateway-roots",
-            "/run/codewire-codex",
         ] {
             workspace["OCI"]["Mounts"].as_array_mut().unwrap().push(json!({"destination":path,"source":"/synthetic/public-bootstrap","type_":"bind","options":["rbind","ro"]}));
         }
@@ -804,8 +788,32 @@ mod tests {
             "bootstrap init must not acquire protected workspace storage"
         );
         init["storages"] = json!([]);
-        init["OCI"]["Mounts"] = json!([{"destination":"/codewire/codex-bootstrap","source":"/synthetic/public-bootstrap","type_":"bind","options":["rbind","ro"]}]);
+        init["OCI"]["Mounts"] = json!([
+            {"destination":"/codewire/bin","source":"/synthetic/daemon-copy","type_":"bind","options":["rbind","rw"]},
+            {"destination":"/codewire/run","source":"/synthetic/daemon-run","type_":"bind","options":["rbind","rw"]},
+        ]);
         assert!(kata_policy_allows(policy, &init));
+        // The daemon in the workspace container writes Codex's `~/.codex` on
+        // the protected disk. No init container can reach that home, not
+        // even through a plaintext bind at the protected path.
+        for destination in ["/home/codewire", "/workspace"] {
+            let mut home_writer = init.clone();
+            home_writer["OCI"]["Mounts"].as_array_mut().unwrap().push(json!(
+                {"destination":destination,"source":"/synthetic/plaintext-home","type_":"bind","options":["rbind","rw"]}
+            ));
+            assert!(
+                !kata_policy_allows(policy, &home_writer),
+                "init container reached {destination}"
+            );
+        }
+        let rendered_spec = &rendered["spec"]["podTemplate"]["spec"];
+        assert_no_legacy_codex(&rendered);
+        for init in rendered_spec["initContainers"].as_array().unwrap() {
+            for mount in init["volumeMounts"].as_array().unwrap() {
+                assert_ne!(mount["name"], "workspace");
+            }
+            assert!(init.get("volumeDevices").is_none());
+        }
         opts.credential_runtime = None;
         assert_eq!(
             authorized,
@@ -3336,7 +3344,7 @@ mod tests {
 
     /// Invariant 1 / design §13: names that must never appear in an
     /// identity-free workspace template.
-    const IDENTITY_FREE_FORBIDDEN_NAMES: [&str; 16] = [
+    const IDENTITY_FREE_FORBIDDEN_NAMES: [&str; 18] = [
         "CODEWIRE_DAEMON_AUTH_TOKEN",
         "CODEWIRE_ENVIRONMENT_ID",
         "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
@@ -3349,6 +3357,8 @@ mod tests {
         "CODEX_CA_CERTIFICATE",
         "SSH_AUTH_SOCK",
         "credential-codex-config",
+        "credential-codex-home",
+        "/run/codewire-codex",
         "cw-credential-codex-",
         "codewire-client-bootstrap",
         "codex-bootstrap",
@@ -3543,7 +3553,7 @@ mod tests {
         assert!(!env.iter().any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
         assert!(!serde_json::to_string(&env).unwrap().contains(&opts.daemon_auth_token));
         assert!(env.iter().any(|entry| entry["name"] == GATEWAY_BINDING_URL_ENV));
-        assert!(render_credential_codex_config("dev-sandboxes", &opts).is_none());
+        assert_no_legacy_codex(&render_sandbox_template("dev-sandboxes", &opts));
         let legacy = credential_opts();
         assert!(build_sidecar_env(&legacy)
             .iter()
@@ -3556,7 +3566,16 @@ mod tests {
         assert!(!build_sidecar_env(&rollback)
             .iter()
             .any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
-        assert!(render_credential_codex_config("dev-sandboxes", &legacy).is_some());
+        // The rollback rendering carries Codex's selection in its environment
+        // only; its daemon writes `~/.codex` exactly as a bound one does.
+        let rollback_template = render_sandbox_template("dev-sandboxes", &rollback);
+        assert_no_legacy_codex(&rollback_template);
+        assert!(
+            rollback_template["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"name":"CODEX_HOME","value":codewire_access::CODEX_PLATFORM_HOME}))
+        );
         // The per-environment daemon policy keeps the gateway 8443 egress
         // that left the shared template.
         let policy = render_workspace_daemon_network_policy("dev-sandboxes", &opts);

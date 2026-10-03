@@ -106,15 +106,14 @@ async fn disabled_credential_bootstrap_does_not_call_kubernetes() {
 
 #[tokio::test]
 async fn public_bootstrap_is_created_before_workspace_template_without_secret_access() {
+    // Codex is selected, yet the only bootstrap object is the Certificate:
+    // the workspace daemon writes Codex's `~/.codex`, so no ConfigMap exists.
     let opts = opts();
     let certificate = certificate(&opts);
-    let config = render_credential_codex_config(NS, &opts).unwrap();
     let template = render_sandbox_template(NS, &opts);
     let (client, requests) = client(vec![
         missing(),
         (StatusCode::CREATED, certificate),
-        missing(),
-        (StatusCode::CREATED, config),
         missing(),
         (StatusCode::CREATED, template),
     ]);
@@ -125,22 +124,14 @@ async fn public_bootstrap_is_created_before_workspace_template_without_secret_ac
             .iter()
             .map(|request| request.0.clone())
             .collect::<Vec<_>>(),
-        [
-            Method::GET,
-            Method::POST,
-            Method::GET,
-            Method::POST,
-            Method::GET,
-            Method::POST
-        ]
+        [Method::GET, Method::POST, Method::GET, Method::POST]
     );
     assert!(requests[1].1.ends_with("/certificates"));
-    assert!(requests[3].1.ends_with("/configmaps"));
-    assert!(requests[5].1.ends_with("/sandboxtemplates"));
+    assert!(requests[3].1.ends_with("/sandboxtemplates"));
     assert!(
-        requests
-            .iter()
-            .all(|request| !request.1.contains("/secrets"))
+        requests.iter().all(|request| {
+            !request.1.contains("/secrets") && !request.1.contains("/configmaps")
+        })
     );
 }
 
@@ -148,13 +139,9 @@ async fn public_bootstrap_is_created_before_workspace_template_without_secret_ac
 async fn unchanged_bootstrap_is_read_only_and_foreign_collision_is_not_adopted() {
     let opts = opts();
     let certificate = certificate(&opts);
-    let config = render_credential_codex_config(NS, &opts).unwrap();
-    let (client, requests) = client(vec![
-        (StatusCode::OK, certificate.clone()),
-        (StatusCode::OK, config),
-    ]);
+    let (client, requests) = client(vec![(StatusCode::OK, certificate.clone())]);
     client.ensure_credential_bootstrap(&opts).await.unwrap();
-    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert_eq!(requests.lock().unwrap().len(), 1);
     assert!(
         requests
             .lock()
@@ -181,11 +168,9 @@ async fn extra_certificate_authority_is_removed_and_never_accepted_as_ready() {
     let opts = opts();
     let mut changed = certificate(&opts);
     changed["spec"]["uris"] = json!(["spiffe://foreign.example.invalid/"]);
-    let config = render_credential_codex_config(NS, &opts).unwrap();
     let (client, requests) = client(vec![
         (StatusCode::OK, changed.clone()),
         (StatusCode::OK, certificate(&opts)),
-        (StatusCode::OK, config),
     ]);
     client.ensure_credential_bootstrap(&opts).await.unwrap();
     {

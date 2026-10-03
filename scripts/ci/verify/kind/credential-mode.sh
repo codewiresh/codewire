@@ -95,7 +95,7 @@ switch_kind_credentials_real() {
     echo '::error::set KIND_PUBLIC_ORIGIN to the browser origin registered as the GitHub App callback origin' >&2
     return 1
   }
-  require_kind_services_ci_image || return $?
+  require_kind_services_ci_image
   log "publishing the Kind Postgres root for verified credential-service TLS"
   # Only the public root certificate leaves its controller-owned Secret.
   roots="$(kubectl -n "$NS" get secret codewire-kind-postgres-root -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
@@ -104,7 +104,7 @@ switch_kind_credentials_real() {
     --from-literal="ca.pem=$roots" --dry-run=client -o yaml | kubectl_apply -f -
   kubectl -n "$NS" create secret generic codewire-credential-database \
     --from-literal="url=$KIND_REAL_CREDENTIAL_DATABASE_URL" --dry-run=client -o yaml | kubectl_apply -f -
-  load_kind_github_app || return $?
+  load_kind_github_app
   log "switching credential-service to the production binary (Kind test KEK, origin ${KIND_PUBLIC_ORIGIN})"
   patch_kind_credential_container "$(jq -cn --arg origin "$KIND_PUBLIC_ORIGIN" \
     '[{name: "CODEWIRE_KIND_CREDENTIAL_TEST_KEK", value: "true"},
@@ -115,7 +115,7 @@ switch_kind_credentials_real() {
 }
 
 switch_kind_credentials_fake() {
-  require_kind_services_ci_image || return $?
+  require_kind_services_ci_image
   log "restoring the gate's synthetic credential fixture"
   kubectl_apply -f "$ROOT/tests/e2e/kind/credential-fixture-config.yaml"
   patch_kind_credential_container '[]'
@@ -126,13 +126,14 @@ switch_kind_credentials_fake() {
 }
 
 run_retained_credential_mode() {
+  require_kind_errexit
   require_tool jq
   require_tool kind
   require_tool kubectl
   trap retained_suite_cleanup EXIT
   # Switching modes uses no workspace image, so it needs the cluster's identity
   # and runtime, not a verified-source receipt matching this worktree.
-  validate_retained_cluster_identity || return $?
+  validate_retained_cluster_identity
   case "$1" in
     real) switch_kind_credentials_real ;;
     fake) switch_kind_credentials_fake ;;

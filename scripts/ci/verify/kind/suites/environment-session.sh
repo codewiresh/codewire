@@ -14,12 +14,13 @@ run_retained_environment_session_suite() {
   local daemon_pod=crd-smoke-workspace-daemon
   local fixture
 
+  require_kind_errexit
   require_tool cargo
   require_tool kind
   require_tool kubectl
 
   trap retained_suite_cleanup EXIT
-  validate_retained_cluster_identity || return $?
+  validate_retained_cluster_identity
   if ! kubectl -n "$SANDBOX_NS" wait "pod/${daemon_pod}" \
       --for=condition=Ready --timeout=30s; then
     echo "::error::retained environment-session fixture pod ${daemon_pod} is not ready"
@@ -42,6 +43,6 @@ run_retained_environment_session_suite() {
     cd "$ROOT"
     cargo build --profile ci -p codewire-client --example environment-session-smoke
   )
-  environment_session_protocol_smoke "$environment_id" || return $?
+  environment_session_protocol_smoke "$environment_id"
   log "retained environment-session suite green"
 }

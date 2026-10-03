@@ -55,6 +55,20 @@ record() {
   printf '%s\n' "$1" >>"$CALLS"
 }
 
+# kind-e2e.sh runs every suite as a plain statement with errexit in force, and
+# require_kind_errexit refuses anything else: Bash ignores errexit inside a
+# function called from if, ||, && or !. Run one that way in a subshell, keep
+# its status in live_status, and fail when it succeeds. Call this plainly too.
+expect_live_failure() {
+  local label="$1"
+  shift
+  set +e
+  (set -e; "$@") >"$FIXTURE/${label}.out" 2>&1
+  live_status=$?
+  set -e
+  [ "$live_status" -ne 0 ] || fail "$label unexpectedly succeeded"
+}
+
 # Workspace exec uses the production private adapter and authenticated daemon,
 # not a bare container shell. Reuse the gateway fixture without giving the host
 # exec binary ownership of its Pod lifecycle.
@@ -246,8 +260,8 @@ SH
         fail 'issuing Certificate must disappear before its outputs'
       [[ "$failure" != certificate ]]
     elif [[ " $* " == *" secret/cw-credential-gateway-$environment_id "* ]]; then
-      [[ " $* " == *" configmap/cw-credential-codex-$environment_id "* ]] ||
-        fail 'credential cleanup omitted its exact configuration'
+      [[ " $* " != *' configmap/'* ]] ||
+        fail 'credential cleanup names a Codex ConfigMap that nothing creates'
       [[ "$failure" != leaf ]]
     elif [[ " $* " == *" secret/cw-gateway-host-key-$environment_id "* ]]; then
       [[ "$failure" != hostkey ]]
@@ -363,7 +377,7 @@ grep -Fq 'require_kind_host_ports_available "$KIND_CLUSTER_NAME"' "$COMMON" ||
   fail 'Kind cluster creation does not preflight requested host-port ownership'
 grep -Fq 'log_kind_bound_endpoints' "$COMMON" ||
   fail 'Kind cluster creation does not print the bound endpoint set'
-grep -Fq 'require_kind_host_ports_available || return $?' "$UP" ||
+grep -Fxq '  require_kind_host_ports_available' "$UP" ||
   fail 'kind-e2e.sh up does not fail fast when requested host ports are held'
 grep -Fq -- '--forward "${KIND_INGRESS_HOST_PORT}:80"' "$COMMON" ||
   fail 'remote DinD forwarding does not follow the requested ingress host port'
@@ -511,12 +525,10 @@ printf '%s\n' up environment-session runtime-acceptance | cmp -s - "$CALLS" ||
   fail 'shard dispatch did not chain up and its suites in order'
 
 : >"$CALLS"
+# shellcheck disable=SC2329 # Invoked indirectly by the shard dispatcher.
 run_retained_environment_session_suite() { record environment-session; return 44; }
-if dispatch_kind_e2e shard environment-session runtime-acceptance; then
-  fail 'shard dispatch accepted a failed suite'
-else
-  [ "$?" -eq 44 ] || fail 'shard dispatch lost the suite failure status'
-fi
+expect_live_failure failed-shard dispatch_kind_e2e shard environment-session runtime-acceptance
+[ "$live_status" -eq 44 ] || fail 'shard dispatch lost the suite failure status'
 printf '%s\n' up environment-session | cmp -s - "$CALLS" ||
   fail 'shard dispatch continued after a failed suite'
 run_retained_environment_session_suite() { record environment-session; }
@@ -536,7 +548,7 @@ source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
 (
   require_tool() { :; }
   KIND_CLUSTER_NAME=up-implicit KIND_CLUSTER_NAME_EXPLICIT=0
-  expect_failure up-implicit-name run_kind_up
+  expect_live_failure up-implicit-name run_kind_up
   grep -Fq 'up requires an explicit KIND_CLUSTER_NAME' \
     "$FIXTURE/up-implicit-name.out" || fail 'implicit up name was not decisive'
 )
@@ -548,7 +560,7 @@ source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
   }
   prepare_kind_temp_runtime() { fail 'existing-cluster up touched the host runtime'; }
   KIND_CLUSTER_NAME=up-existing KIND_CLUSTER_NAME_EXPLICIT=1
-  expect_failure up-existing-cluster run_kind_up
+  expect_live_failure up-existing-cluster run_kind_up
   grep -Fq 'already exists' "$FIXTURE/up-existing-cluster.out" ||
     fail 'existing-cluster up was not decisive'
 )
@@ -594,24 +606,25 @@ cmp -s "$FIXTURE/want-up-order" "$CALLS" || {
 }
 
 : >"$CALLS"
-if (
+set +e
+(
+  set -e
   require_tool() { :; }
   require_kind_host_ports_available() { record port-preflight; }
   prepare_kind_temp_runtime() { record temp-runtime; }
   acquire_kind_host_lock() { record acquire-lock; }
   cleanup() { :; }
-  # The real check exits on failure; exit here too so the fixture does not
-  # depend on set -e surviving the if-condition subshell.
+  # The real check exits on failure; exit here too.
   ingress_path_drift_check() { record ingress-drift; exit 43; }
   build_images_and_smokes() { fail 'kind up continued after an ingress drift failure'; }
   kind() { printf '%s\n' other-cluster; }
   KIND_CLUSTER_NAME=up-fixture KIND_CLUSTER_NAME_EXPLICIT=1
   run_kind_up
-); then
-  fail 'kind up accepted an ingress drift failure'
-else
-  [ "$?" -eq 43 ] || fail 'kind up lost the ingress drift failure status'
-fi
+)
+drift_status=$?
+set -e
+[ "$drift_status" -ne 0 ] || fail 'kind up accepted an ingress drift failure'
+[ "$drift_status" -eq 43 ] || fail 'kind up lost the ingress drift failure status'
 printf '%s\n' port-preflight temp-runtime acquire-lock ingress-drift | cmp -s - "$CALLS" ||
   fail 'kind up continued after an ingress drift failure'
 
@@ -654,6 +667,158 @@ expect_failure unknown-command dispatch_kind_e2e retained
 grep -Fq 'unknown Kind e2e command: retained' "$FIXTURE/unknown-command.out" ||
   fail 'unknown command did not explain its failure'
 
+# Bash ignores errexit inside any function called from ||, &&, an if, while or
+# until condition, or after !, even when that body sets -e again. The suites
+# rely on errexit for their unchecked kubectl, jq, cw and probe steps, so the
+# former `step || return $?` and shard `dispatch_kind_e2e suite ... || return
+# $?` shapes ran a failed probe and still reported green. The dispatcher and
+# suites therefore call every Kind function as a plain statement.
+kind_function_pattern="$(
+  grep -ho '^[A-Za-z_][A-Za-z0-9_]*() *[({]' \
+    "$SCRIPT" "$COMMON" "$CREDENTIALS" "$ROOT/scripts/ci/verify/kind/credential-mode.sh" \
+    "$ROOT"/scripts/ci/verify/kind/suites/*.sh \
+    "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh" \
+    "$ROOT/scripts/ci/verify/kind-host-runtime.sh" |
+    sed 's/() *[({]$//' | sort -u | paste -sd '|' -
+)"
+[[ "$kind_function_pattern" == *'|kind_credential_native_smoke|'* ]] ||
+  fail 'Kind function inventory for the errexit wrap check is incomplete'
+wrapped_kind_steps() {
+  grep -nE \
+    -e "^[[:space:]]*(if|elif|while|until)[[:space:]]+(![[:space:]]+)?(${kind_function_pattern})([[:space:];]|\$)" \
+    -e "^[[:space:]]*![[:space:]]+(${kind_function_pattern})([[:space:];]|\$)" \
+    -e "^[[:space:]]*(${kind_function_pattern})([[:space:]][^#]*)?(\|\||&&)" \
+    -e "(\|\||&&)[[:space:]]*(${kind_function_pattern})([[:space:];]|\$)" \
+    "$@"
+}
+if wrapped_kind_steps "$SCRIPT" "$ROOT/scripts/ci/verify/kind/credential-mode.sh" \
+    "$ROOT"/scripts/ci/verify/kind/suites/*.sh >"$FIXTURE/wrapped-kind-steps.out"; then
+  cat "$FIXTURE/wrapped-kind-steps.out" >&2
+  fail 'a Kind suite or the dispatcher wraps a step where Bash ignores errexit'
+fi
+cat >"$FIXTURE/former-wrapped-steps.sh" <<'EOF'
+  kind_credential_native_smoke || return $?
+      dispatch_kind_e2e suite "$suite" || return $?
+  if ! validate_retained_cluster; then
+  coordinator_runtime_smokes || coordinator_status=$?
+EOF
+[ "$(wrapped_kind_steps "$FIXTURE/former-wrapped-steps.sh" | wc -l)" -eq 4 ] ||
+  fail 'the errexit wrap check no longer recognizes the former wrapped shapes'
+
+# Drive the real dispatcher and credentials suite as kind-e2e.sh does: a new
+# process whose top level calls dispatch_kind_e2e. One probe has an unchecked
+# failing command, like the credential probe that exited 1 against a stale
+# cluster. ERREXIT_MECHANISM=former restores the replaced call shapes, proving
+# this fixture would have passed before the fix.
+errexit_driver="$FIXTURE/errexit-driver.sh"
+cat >"$errexit_driver" <<'EOF'
+set -euo pipefail
+# shellcheck source=scripts/ci/verify/kind-e2e.sh
+source "$1"
+shift
+record() { printf '%s\n' "$1" >>"$CALLS"; }
+log() { record "log:$*"; }
+require_tool() { :; }
+kubectl() {
+  case "$*" in
+    *'get deployment codewire-credential-service'*)
+      printf '%s' /codewire-kind-fixtures/credential-service ;;
+    *) record "kubectl:$*" ;;
+  esac
+}
+validate_retained_cluster() { record validate; }
+build_retained_kind_smokes() { record smokes; }
+kind_credential_bootstrap_smoke() { record bootstrap; }
+kind_credential_native_smoke() (
+  record native-start
+  false
+  record native-continued-after-failure
+)
+stop_gateway_port_forward() { :; }
+dump_cluster_state() { record dump; }
+if [ "${ERREXIT_MECHANISM:-current}" = current ]; then
+  run_kind_up() { require_kind_errexit; record up; }
+else
+  run_kind_up() { record up; }
+  run_retained_credentials_suite() {
+    trap retained_suite_cleanup EXIT
+    validate_retained_cluster || return $?
+    build_retained_kind_smokes || return $?
+    kind_credential_bootstrap_smoke || return $?
+    kind_credential_native_smoke || return $?
+    log "retained credentials suite green"
+  }
+fi
+case "${1:-}" in
+  former-shard)
+    shift
+    run_kind_up || exit $?
+    for suite in "$@"; do
+      dispatch_kind_e2e suite "$suite" || exit $?
+    done
+    log "Kind shard suites green: $*"
+    exit 0
+    ;;
+  wrapped-suite)
+    shift
+    dispatch_kind_e2e suite "$@" || exit $?
+    exit 0
+    ;;
+esac
+dispatch_kind_e2e "$@"
+EOF
+run_errexit_driver() {
+  local label="$1" mechanism="$2"
+  shift 2
+  : >"$CALLS"
+  driver_status=0
+  ERREXIT_MECHANISM="$mechanism" CALLS="$CALLS" RUN_DIR="$FIXTURE/errexit-run" \
+    bash "$errexit_driver" "$SCRIPT" "$@" >"$FIXTURE/${label}.out" 2>&1 ||
+    driver_status=$?
+}
+for errexit_mode in suite shard; do
+  if [ "$errexit_mode" = suite ]; then
+    run_errexit_driver "errexit-current-$errexit_mode" current suite credentials
+  else
+    run_errexit_driver "errexit-current-$errexit_mode" current shard credentials
+    [ "$(head -n 1 "$CALLS")" = up ] || fail 'errexit shard fixture did not bring its cluster up first'
+  fi
+  [ "$driver_status" -eq 1 ] ||
+    fail "${errexit_mode} dispatch did not fail with the unchecked probe's status: ${driver_status}"
+  grep -Fxq native-start "$CALLS" || fail "${errexit_mode} dispatch never reached the failing probe"
+  if grep -Fxq native-continued-after-failure "$CALLS"; then
+    fail "${errexit_mode} dispatch continued past a failed unchecked probe"
+  fi
+  if grep -Fq 'green' "$CALLS"; then
+    fail "${errexit_mode} dispatch reported green after a failed unchecked probe"
+  fi
+  grep -Fxq dump "$CALLS" || fail "${errexit_mode} dispatch skipped its failure diagnostics"
+done
+for errexit_mode in suite former-shard; do
+  run_errexit_driver "errexit-former-$errexit_mode" former "$errexit_mode" credentials
+  [ "$driver_status" -eq 0 ] ||
+    fail "the former ${errexit_mode} shape no longer hides the failed probe; revisit this fixture"
+  grep -Fxq native-continued-after-failure "$CALLS" ||
+    fail "the former ${errexit_mode} shape no longer continues past the failed probe"
+  grep -Fxq 'log:retained credentials suite green' "$CALLS" ||
+    fail "the former ${errexit_mode} shape no longer reports the failed suite green"
+done
+grep -Fxq 'log:Kind shard suites green: credentials' "$CALLS" ||
+  fail 'the former shard shape no longer reports the failed shard green'
+# A wrapped caller cannot silently restore the former behavior: `up` and each
+# suite refuse to start where Bash would ignore their failures.
+for wrapped_entry in former-shard:run_kind_up wrapped-suite:run_retained_credentials_suite; do
+  run_errexit_driver "errexit-wrapped-${wrapped_entry%%:*}" current "${wrapped_entry%%:*}" credentials
+  [ "$driver_status" -eq 70 ] ||
+    fail "${wrapped_entry#*:} under a wrapped caller did not fail closed: ${driver_status}"
+  grep -Fq "${wrapped_entry#*:} must run as a plain statement with errexit in force" \
+    "$FIXTURE/errexit-wrapped-${wrapped_entry%%:*}.out" ||
+    fail "the errexit guard did not name its refused entry ${wrapped_entry#*:}"
+  if grep -Fxq native-start "$CALLS"; then
+    fail "${wrapped_entry#*:} under a wrapped caller ran its probes"
+  fi
+done
+
 # Restore the production suite functions replaced by the dispatcher spies.
 # shellcheck source=scripts/ci/verify/kind/suites/integrated.sh
 source "$INTEGRATED"
@@ -673,6 +838,7 @@ source "$RUNTIME_ACCEPTANCE"
 : >"$CALLS"
 set +e
 (
+  set -e
   require_tool() { :; }
   require_dashboard_browser_host_dependencies() { record browser-prerequisites; return 29; }
   prepare_kind_temp_runtime() { record temp-runtime; }
@@ -820,7 +986,9 @@ cmp -s "$FIXTURE/want-integrated-retained-order" "$CALLS" || {
 
 for failed_step in validate smokes coordinator billing; do
   : >"$CALLS"
-  if (
+  set +e
+  (
+    set -e
     validate_retained_cluster() {
       record validate
       [ "$failed_step" != validate ] || return 41
@@ -846,11 +1014,11 @@ for failed_step in validate smokes coordinator billing; do
     log() { record "log:$*"; }
     RETAINED_KUBECONFIG=""
     run_retained_integrated_suite
-  ) >"$FIXTURE/integrated-retained-${failed_step}.out" 2>&1; then
+  ) >"$FIXTURE/integrated-retained-${failed_step}.out" 2>&1
+  retained_status=$?
+  set -e
+  [ "$retained_status" -ne 0 ] ||
     fail "retained integrated suite accepted a failed ${failed_step} step"
-  else
-    retained_status=$?
-  fi
   case "$failed_step" in
     validate) expected_status=41 ;;
     smokes) expected_status=42 ;;
@@ -1952,6 +2120,7 @@ kubectl() {
     *"configmap/${KIND_E2E_PREPARED_CONFIGMAP} "*)
       fake_marker_read "$FAKE_LEGACY_MARKER" "$*"
       ;;
+    *"get deployment/${FAKE_UNAVAILABLE_DEPLOYMENT:-none} "*) printf '0' ;;
     *'get deployment/'*) printf '1' ;;
     *'get crd/sandboxclaims.extensions.agents.x-k8s.io'*) return 0 ;;
     *"exec deploy/postgres -- psql "*"UPDATE oidc_access_tokens SET expires_at"*"at_kind_connect_oidc_codewire_api"*)
@@ -2059,6 +2228,18 @@ FAKE_MARKER_WORKSPACE="$(kind_workspace_runtime_image)"
 validate_retained_cluster >"$FIXTURE/accepted.out"
 grep -Fq 'accepted at compatibility version' "$FIXTURE/accepted.out" ||
   fail 'compatible retained cluster was not accepted'
+# Callers check identity with ||, where Bash ignores errexit, so every runtime
+# prerequisite is checked explicitly: on an otherwise accepted cluster, one
+# unavailable Deployment still stops validation under such a caller.
+FAKE_UNAVAILABLE_DEPLOYMENT=codewire-orchestration
+expect_failure unavailable-deployment validate_retained_cluster
+grep -Fq 'Deployment/codewire-orchestration in codewire-e2e has 0 available replicas' \
+  "$FIXTURE/unavailable-deployment.out" ||
+  fail 'an unavailable retained Deployment did not explain its rejection'
+if grep -Fq 'prerequisites accepted' "$FIXTURE/unavailable-deployment.out"; then
+  fail 'retained validation continued past an unavailable Deployment'
+fi
+unset FAKE_UNAVAILABLE_DEPLOYMENT
 
 # The cluster-workspace readback prefers the cluster-scoped marker and falls
 # back to the legacy unscoped name written by earlier harnesses.
@@ -2098,7 +2279,9 @@ child_kubeconfig="$(<"$FIXTURE/child-kubeconfig-path")"
 # Compose the real remote bootstrap and nested retained validation. The
 # external endpoint belongs to the sibling DinD daemon, so a child that drops
 # the parent's internal endpoint must fail even though the parent stays live.
-if (
+set +e
+(
+  set -e
   HOSTNAME=remote-retained-job
   KIND_CLUSTER_NAME=remote-retained-fixture
   KIND_CLUSTER_NAME_EXPLICIT=1
@@ -2180,7 +2363,7 @@ if (
     printf '%s\n' "$KUBECONFIG" >"$RUN_DIR/child-kubeconfig-path"
     record provenance
   }
-  configure_remote_dind_kind_network || exit $?
+  configure_remote_dind_kind_network
   remote_parent_kubeconfig="$KUBECONFIG"
   remote_parent_content="$(<"$remote_parent_kubeconfig")"
   [ "$(stat -c '%a' "$remote_parent_kubeconfig")" = 600 ] ||
@@ -2195,7 +2378,7 @@ if (
     REMOTE_DIND_FORWARDER_PID=""
     RETAINED_KUBECONFIG=""
     run_retained_sandbox_supply_chain_suite
-  ) || exit $?
+  )
   remote_child_kubeconfig="$(<"$RUN_DIR/child-kubeconfig-path")"
   [ ! -e "$remote_child_kubeconfig" ] || fail 'remote child leaked its owned kubeconfig'
   [ -f "$remote_parent_kubeconfig" ] || fail 'remote child removed its parent kubeconfig'
@@ -2207,9 +2390,10 @@ if (
     fail 'remote child made the parent API unreachable'
   printf '%s\n' network-connect forwarder-start provenance | cmp -s - "$CALLS" ||
     fail 'remote retained child changed bootstrap ownership or skipped provenance'
-) >"$FIXTURE/remote-nested-retained.out" 2>&1; then
-  :
-else
+) >"$FIXTURE/remote-nested-retained.out" 2>&1
+remote_nested_status=$?
+set -e
+if [ "$remote_nested_status" -ne 0 ]; then
   sed -n '1,120p' "$FIXTURE/remote-nested-retained.out" >&2
   fail 'remote parent bootstrap did not preserve reachability through nested retained validation'
 fi
@@ -2258,7 +2442,9 @@ for retained_function in run_retained_sandbox_supply_chain_suite \
   fi
   for failed_step in "${failed_steps[@]}"; do
     : >"$CALLS"
-    if (
+    set +e
+    (
+      set -e
       validate_retained_cluster() {
         record validate
         [ "$failed_step" != validate ] || return 41
@@ -2277,11 +2463,11 @@ for retained_function in run_retained_sandbox_supply_chain_suite \
       log() { record "log:$*"; }
       RETAINED_KUBECONFIG=""
       "$retained_function"
-    ) >"$FIXTURE/${retained_function}-${failed_step}.out" 2>&1; then
+    ) >"$FIXTURE/${retained_function}-${failed_step}.out" 2>&1
+    retained_status=$?
+    set -e
+    [ "$retained_status" -ne 0 ] ||
       fail "$retained_function accepted a failed $failed_step step"
-    else
-      retained_status=$?
-    fi
     expected_status=42
     [ "$failed_step" != validate ] || expected_status=41
     [ "$failed_step" != lock ] || expected_status=40
@@ -2299,6 +2485,43 @@ for retained_function in run_retained_sandbox_supply_chain_suite \
   done
 done
 
+# Renders run inside command substitutions, where Bash clears errexit. A failed
+# kustomize or image rewrite must fail its render rather than print the path of
+# a manifest that was never rewritten, and agent-sandbox must not apply one.
+env COMMON="$COMMON" FIXTURE="$FIXTURE" bash -seu <<'BASH'
+fail() { printf '[render-failure-test] ERROR: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=scripts/ci/verify/kind/common.sh
+source "$COMMON"
+RUN_DIR="$FIXTURE/render-failure-run"
+mkdir -p "$RUN_DIR"
+log() { :; }
+validate_sealed_kind_images() { return 1; }
+kubectl() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: unpinned\n'; }
+status=0
+rendered="$(render_kind_overlay_manifest 2>"$RUN_DIR/overlay.err")" || status=$?
+[ "$status" -ne 0 ] && [ -z "$rendered" ] ||
+  fail 'Kind overlay render accepted a manifest without its pinned support images'
+grep -Fq 'Kind support image occurrence mismatch' "$RUN_DIR/overlay.err" ||
+  fail 'Kind overlay render did not explain its failed image rewrite'
+kubectl() { return 7; }
+status=0
+rendered="$(render_agent_sandbox_manifest)" || status=$?
+[ "$status" -eq 7 ] && [ -z "$rendered" ] ||
+  fail 'agent-sandbox render ignored a failed kustomize build'
+validate_sealed_kind_images() { return 0; }
+python3() { return 9; }
+status=0
+rendered="$(render_ingress_manifest)" || status=$?
+[ "$status" -eq 9 ] && [ -z "$rendered" ] ||
+  fail 'sealed ingress render ignored a failed image rewrite'
+unset -f python3
+render_agent_sandbox_manifest() { return 7; }
+kubectl_apply() { fail 'agent-sandbox deployment applied a failed render'; }
+status=0
+deploy_agent_sandbox || status=$?
+[ "$status" -eq 7 ] || fail 'agent-sandbox deployment lost its failed render status'
+BASH
+
 # A retained-suite failure dumps state but never deletes its cluster, even when
 # KEEP_KIND_CLUSTER is unset or zero.
 : >"$CALLS"
@@ -2310,9 +2533,8 @@ log() { record "log:$*"; }
 kind() { record "kind:$*"; }
 KEEP_KIND_CLUSTER=0
 RETAINED_KUBECONFIG=""
-if (run_retained_final_fencing_suite); then
-  fail 'failing retained final-fencing suite unexpectedly succeeded'
-fi
+expect_live_failure final-fencing-failure run_retained_final_fencing_suite
+[ "$live_status" -eq 42 ] || fail 'retained final-fencing suite lost its failure status'
 grep -Fxq dump "$CALLS" || fail 'retained failure did not dump cluster state'
 if grep -Fq 'delete cluster' "$CALLS"; then
   fail 'retained suite tried to delete its cluster'

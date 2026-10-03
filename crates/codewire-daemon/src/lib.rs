@@ -1,4 +1,6 @@
 pub mod client;
+#[cfg(unix)]
+pub mod codex_home;
 pub mod config;
 mod credential_bridge;
 mod durable_session;
@@ -8,6 +10,8 @@ pub mod files;
 #[cfg(unix)]
 pub mod hosted_state;
 mod lifecycle;
+#[cfg(unix)]
+mod private_files;
 pub mod server;
 pub mod service;
 pub mod session;

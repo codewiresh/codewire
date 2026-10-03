@@ -425,7 +425,8 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
 }
 
 /// Identity-free Pod (Program #2238 B2): mark local readiness, bind, install
-/// the bound state, then listen. Nothing listens before an accepted binding.
+/// the bound credential, then prepare Codex's home and listen. Nothing listens
+/// before an accepted binding.
 #[cfg(unix)]
 async fn run_bound_hosted_daemon(
     config: codewire_daemon::WorkspaceBindingConfig,
@@ -461,6 +462,10 @@ async fn serve_hosted_daemon(config: codewire_daemon::Config, bound: bool) -> an
     config
         .prepare_native_launch_directory()
         .context("prepare hosted launch process directory")?;
+    // Both identity modes: the daemon is the one writer of Codewire's
+    // `~/.codex/config.toml`, before it listens, from the served clients.
+    #[cfg(unix)]
+    codewire_daemon::codex_home::CodexHome::default().prepare(config.managed_credential_clients);
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
         .with_context(|| format!("listen hosted daemon {}", config.listen_addr))?;

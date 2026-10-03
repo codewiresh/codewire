@@ -8,6 +8,7 @@ if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then
 fi
 
 run_integrated_kind_suite() {
+  require_kind_errexit
   require_tool curl
   require_tool base64
   require_tool docker
@@ -24,7 +25,7 @@ run_integrated_kind_suite() {
   # Browser dependencies are host inputs, not cluster state. Reject a missing
   # frozen install or browser before the expensive image, smoke-binary and
   # disposable-control-plane transaction begins.
-  require_dashboard_browser_host_dependencies || return $?
+  require_dashboard_browser_host_dependencies
 
   # kind serializes each image through the host temp filesystem before
   # importing it. Reject or replace a saturated default before compiling or
@@ -68,14 +69,15 @@ run_integrated_kind_suite() {
 # above runs them between the edge probes and the sandbox/Temporal block; on a
 # prepared cluster this suite reruns exactly those two probe groups.
 run_retained_integrated_suite() {
+  require_kind_errexit
   require_tool curl
   require_tool jq
   require_tool kind
   require_tool kubectl
 
   trap retained_suite_cleanup EXIT
-  validate_retained_cluster || return $?
-  build_retained_kind_smokes || return $?
+  validate_retained_cluster
+  build_retained_kind_smokes
   # The internal binding fixture owns a synthetic SandboxClaim whose status a
   # live agent-sandbox controller immediately rewrites, after which the
   # orchestration reconciler churns the fixture's runtime identity. The serial
@@ -93,7 +95,12 @@ run_retained_integrated_suite() {
     kubectl -n agent-sandbox-system wait pod -l app=agent-sandbox-controller \
       --for=delete --timeout=60s || return $?
   fi
-  coordinator_runtime_smokes || coordinator_status=$?
+  # Capture the probes' status to restore the controller first. A subshell
+  # keeps errexit in force for them; `fn || status=$?` would disable it.
+  set +e
+  (set -e; coordinator_runtime_smokes)
+  coordinator_status=$?
+  set -e
   kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
     --replicas="$controller_replicas" || return $?
   if [ "$controller_replicas" -gt 0 ]; then
@@ -101,6 +108,6 @@ run_retained_integrated_suite() {
       deploy/agent-sandbox-controller --timeout=180s || return $?
   fi
   [ "$coordinator_status" -eq 0 ] || return "$coordinator_status"
-  billing_contract_through_ingress || return $?
+  billing_contract_through_ingress
   log "retained integrated suite green"
 }

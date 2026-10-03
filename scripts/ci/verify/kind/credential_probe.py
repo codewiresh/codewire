@@ -6,13 +6,32 @@ import json
 import os
 from pathlib import Path
 import ssl
+import stat
 import sys
 import uuid
 
 TOKEN = Path("/run/codewire-credentials/workspace/token")
 ROOTS = "/run/codewire-credentials/gateway-roots/ca.crt"
-CODEX_HOME = Path("/run/codewire-codex/home")
+# Codex's default home on the persistent home volume. The workspace daemon
+# writes Codewire's config.toml there, first line MANAGED_HEADER.
+CODEX_HOME = Path("/home/codewire/.codex")
+MANAGED_HEADER = b"# Managed by Codewire. Delete this line to manage this file yourself."
+MAX_MANAGED_CONFIG = 64 * 1024
 MODES = {"success": 200, "revoked": 403, "unbound": 403, "missing": 401}
+
+
+def managed_config(path: Path) -> bool:
+    """Whether path is Codewire's daemon-written file: regular, not a symlink,
+    first line exactly the managed header."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    with os.fdopen(descriptor, "rb") as source:
+        contents = source.read(MAX_MANAGED_CONFIG + 1)
+    return contents.split(b"\n", 1)[0] == MANAGED_HEADER
 
 
 def probe(environment: str, mode: str) -> None:
@@ -24,12 +43,16 @@ def probe(environment: str, mode: str) -> None:
     selected = mode in {"success", "revoked"}
     if "CODEX_CA_CERTIFICATE" in os.environ:
         raise ValueError("projection")
+    # An environment-token Pod renders the selection and CODEX_HOME; an
+    # identity-free Pod renders neither, and this kubectl-exec'd probe then
+    # sees Codex's default home. Either way the daemon writes config.toml.
+    rendered = (os.environ.get("CODEX_HOME"), os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"))
+    config = CODEX_HOME / "config.toml"
     if selected:
-        if (os.environ.get("CODEX_HOME") != str(CODEX_HOME)
-                or os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS") != "v1:codex"):
+        if (rendered not in {(None, None), (str(CODEX_HOME), "v1:codex")}
+                or not managed_config(config)):
             raise ValueError("projection")
-    elif ("CODEX_HOME" in os.environ or "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS" in os.environ
-          or (CODEX_HOME / "config.toml").exists()):
+    elif rendered != (None, None) or os.path.lexists(config):
         # These modes run before any application source or profile is selected.
         raise ValueError("unexpected-unselected-client")
     if (CODEX_HOME / "auth.json").exists():

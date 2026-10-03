@@ -378,6 +378,28 @@ require_tool() {
   fi
 }
 
+# Bash ignores errexit for every command inside a function or subshell that
+# runs as part of an && or || list, an if, while or until condition, or after
+# !, even when that body sets -e again: a failed unchecked step falls through
+# and only the body's last status counts. The Kind suites rely on errexit to
+# stop at their unchecked kubectl, jq, cw and smoke-binary steps, so every
+# suite entry runs, and calls its steps, as a plain statement; a failure then
+# exits with its own status through the EXIT trap. Refuse to start anywhere
+# else, and exit rather than return: that context would ignore a return too.
+require_kind_errexit() {
+  local probe=0
+  if [[ $- == *e* ]]; then
+    set +e
+    (set -e; false; exit 0)
+    probe=$?
+    set -e
+  fi
+  if [ "$probe" -eq 0 ]; then
+    echo "::error::${FUNCNAME[1]:-a Kind suite} must run as a plain statement with errexit in force; Bash ignores errexit under &&, ||, if, while, until and !"
+    exit 70
+  fi
+}
+
 require_available_deployment() {
   local namespace="$1" name="$2" available
   if ! available="$(kubectl --request-timeout=10s -n "$namespace" get \
@@ -439,12 +461,13 @@ validate_retained_cluster_identity() {
     return 1
   fi
 
-  require_available_deployment "$NS" postgres
-  require_available_deployment "$NS" temporal
-  require_available_deployment "$NS" codewire-billing
-  require_available_deployment "$NS" codewire-orchestration
-  require_available_deployment "$NS" codewire-coordinator
-  require_available_deployment agent-sandbox-system agent-sandbox-controller
+  # Callers check this function with ||, which disables errexit inside it.
+  require_available_deployment "$NS" postgres || return $?
+  require_available_deployment "$NS" temporal || return $?
+  require_available_deployment "$NS" codewire-billing || return $?
+  require_available_deployment "$NS" codewire-orchestration || return $?
+  require_available_deployment "$NS" codewire-coordinator || return $?
+  require_available_deployment agent-sandbox-system agent-sandbox-controller || return $?
   if ! kubectl --request-timeout=10s get \
       crd/sandboxclaims.extensions.agents.x-k8s.io >/dev/null 2>&1; then
     echo "::error::retained Kind cluster is missing the SandboxClaim CRD"
@@ -1139,13 +1162,15 @@ load_images_into_kind() {
   fi
 }
 
+# Callers capture each render with a command substitution, where Bash clears
+# errexit. Check every render step, or a failed rewrite still prints its path.
 render_ingress_manifest() {
   local source="$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
   local rendered="$RUN_DIR/ingress-nginx-deploy.yaml"
 
   if validate_sealed_kind_images; then
     python3 - "$source" "$rendered" \
-      "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY'
+      "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import sys
 
@@ -1178,9 +1203,9 @@ render_agent_sandbox_manifest() {
   local source="$ROOT/deployments/k8s/agent-sandbox/base"
   local rendered="$RUN_DIR/agent-sandbox-deploy.yaml"
 
-  kubectl kustomize "$source" >"$rendered"
+  kubectl kustomize "$source" >"$rendered" || return $?
   if validate_sealed_kind_images; then
-    python3 - "$rendered" "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" <<'PY'
+    python3 - "$rendered" "$KIND_AGENT_SANDBOX_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import re
 import sys
@@ -1213,8 +1238,8 @@ render_kind_overlay_manifest() {
   local source="$ROOT/tests/e2e/kind"
   local rendered="$RUN_DIR/codewire-kind-overlay.yaml"
 
-  kubectl kustomize "$source" >"$rendered"
-  python3 - "$rendered" "$KIND_POSTGRES_LOCAL_IMAGE" "$KIND_TEMPORAL_LOCAL_IMAGE" <<'PY'
+  kubectl kustomize "$source" >"$rendered" || return $?
+  python3 - "$rendered" "$KIND_POSTGRES_LOCAL_IMAGE" "$KIND_TEMPORAL_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import re
 import sys
@@ -1242,7 +1267,7 @@ for public, (local, expected) in replacements.items():
 path.write_text(text)
 PY
   if validate_sealed_kind_images; then
-    python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" <<'PY'
+    python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
 import sys
 
@@ -3085,8 +3110,10 @@ environment_daemon_proxy_smoke() {
 }
 
 deploy_agent_sandbox() {
+  local manifest
   log "deploying agent-sandbox controller and CRDs"
-  kubectl_apply --validate=false -f "$(render_agent_sandbox_manifest)"
+  manifest="$(render_agent_sandbox_manifest)" || return $?
+  kubectl_apply --validate=false -f "$manifest"
   kubectl wait --for=condition=established --timeout=60s \
     crd/sandboxclaims.extensions.agents.x-k8s.io
   kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=180s

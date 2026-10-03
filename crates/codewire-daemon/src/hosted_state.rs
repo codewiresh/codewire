@@ -1,29 +1,20 @@
 //! Owner-only files a hosted daemon keeps under the Pod's `/codewire/run`
-//! (Program #2238 B2, design §8): the local readiness marker, the bound daemon
-//! credential that the fixed-purpose hosted exec reads, and the stock Codex
-//! configuration the daemon installs itself instead of an init container.
-//!
-//! Every write goes through a temporary file created exclusively in the target
-//! directory with its final mode, then renamed, so a reader never observes a
-//! partial file or a wider mode.
+//! (Program #2238 B2, design §8): the local readiness marker and the bound
+//! daemon credential that the fixed-purpose hosted exec reads. Codex's home
+//! is [`crate::codex_home`], which the daemon prepares in both identity modes.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::io;
 use std::path::Path;
-
-use codewire_access::{CODEX_CONFIG_FILE_NAME, CODEX_PLATFORM_HOME};
 
 use crate::config::{
     HOSTED_DAEMON_CREDENTIAL_FILE, HOSTED_DAEMON_READY_FILE, HOSTED_DAEMON_STATE_DIRECTORY,
     WorkspaceBinding,
 };
+use crate::private_files::{ensure_private_directory, write_atomically};
 
 const STATE_DIRECTORY_MODE: u32 = 0o700;
 const READY_MODE: u32 = 0o600;
 const CREDENTIAL_MODE: u32 = 0o400;
-const CODEX_HOME_MODE: u32 = 0o700;
-const CODEX_CONFIG_MODE: u32 = 0o600;
 
 /// Where one daemon keeps its state. Production uses the fixed Pod paths;
 /// tests point it at a private temporary directory.
@@ -32,7 +23,6 @@ pub struct HostedStatePaths {
     pub state_directory: std::path::PathBuf,
     pub ready_file: std::path::PathBuf,
     pub credential_file: std::path::PathBuf,
-    pub codex_home: std::path::PathBuf,
 }
 
 impl Default for HostedStatePaths {
@@ -41,7 +31,6 @@ impl Default for HostedStatePaths {
             state_directory: HOSTED_DAEMON_STATE_DIRECTORY.into(),
             ready_file: HOSTED_DAEMON_READY_FILE.into(),
             credential_file: HOSTED_DAEMON_CREDENTIAL_FILE.into(),
-            codex_home: CODEX_PLATFORM_HOME.into(),
         }
     }
 }
@@ -53,7 +42,6 @@ impl HostedStatePaths {
         Self {
             ready_file: state_directory.join("ready"),
             credential_file: state_directory.join("credential"),
-            codex_home: root.join("codex").join("home"),
             state_directory,
         }
     }
@@ -72,18 +60,9 @@ impl HostedStatePaths {
         write_atomically(&self.ready_file, b"", READY_MODE)
     }
 
-    /// Install the bound state before the daemon listens: the Codex
-    /// configuration when selected, then the credential file (0400).
+    /// Install the bound credential (0400) before the daemon listens.
     pub fn install_binding(&self, binding: &WorkspaceBinding) -> io::Result<()> {
         self.prepare()?;
-        if let Some(config) = binding.codex_config_toml() {
-            ensure_private_directory(&self.codex_home, CODEX_HOME_MODE)?;
-            write_atomically(
-                &self.codex_home.join(CODEX_CONFIG_FILE_NAME),
-                config.as_bytes(),
-                CODEX_CONFIG_MODE,
-            )?;
-        }
         write_atomically(
             &self.credential_file,
             binding.daemon_credential().expose_secret().as_bytes(),
@@ -92,77 +71,14 @@ impl HostedStatePaths {
     }
 }
 
-fn ensure_private_directory(path: &Path, mode: u32) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "hosted daemon state path is not a directory",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            match fs::DirBuilder::new().mode(mode).create(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if !fs::symlink_metadata(path)?.is_dir() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::AlreadyExists,
-                            "hosted daemon state path is not a directory",
-                        ));
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Err(error) => return Err(error),
-    }
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-}
-
-/// Write `contents` to `path` with exactly `mode`, through an exclusive
-/// temporary sibling and a rename.
-fn write_atomically(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
-    let temporary = directory.join(format!(
-        ".{}.{}.tmp",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    let _ = fs::remove_file(&temporary);
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&temporary)?;
-        // The umask may have narrowed the mode; never widen it past `mode`.
-        file.set_permissions(fs::Permissions::from_mode(mode))?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{BindResponseFields, HostedDaemonMode, WORKSPACE_BINDING_URL_ENV};
     use crate::config::{WORKSPACE_POD_UID_ENV, WorkspaceBindingConfig};
     use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
 
     const POD: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
     const ENVIRONMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -240,29 +156,17 @@ mod tests {
         // A rebind in the same Pod replaces the read-only file.
         paths.install_binding(&binding("", "v1:none")).unwrap();
         assert_eq!(mode(&paths.credential_file), 0o400);
-        assert!(!paths.codex_home.exists());
-    }
-
-    #[test]
-    fn codex_configuration_is_installed_only_when_selected() {
-        let root = tempfile::tempdir().unwrap();
-        let paths = HostedStatePaths::under(root.path());
-        paths
-            .install_binding(&binding(&"ab".repeat(32), "v1:openai"))
-            .unwrap();
-        assert!(!paths.codex_home.exists());
+        // A binding installs only the daemon's own state; Codex's home is
+        // prepared from the served configuration in both identity modes.
         paths
             .install_binding(&binding(&"ab".repeat(32), "v1:codex"))
             .unwrap();
-        let config = paths.codex_home.join(CODEX_CONFIG_FILE_NAME);
-        assert_eq!(mode(&paths.codex_home), 0o700);
-        assert_eq!(mode(&config), 0o600);
-        let expected = codewire_access::ManagedCredentialClients::decode("v1:codex")
+        let mut names: Vec<_> = fs::read_dir(root.path())
             .unwrap()
-            .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
-            .codex
-            .unwrap();
-        assert_eq!(fs::read_to_string(config).unwrap(), expected.config_toml());
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["daemon"]);
     }
 
     #[test]
@@ -286,6 +190,5 @@ mod tests {
             paths.credential_file,
             Path::new("/codewire/run/daemon/credential")
         );
-        assert_eq!(paths.codex_home, Path::new(CODEX_PLATFORM_HOME));
     }
 }

@@ -12,8 +12,15 @@ pub const CODEX_CONFIG_FILE_NAME: &str = "config.toml";
 pub const CODEX_PLATFORM_TOKEN_FILE: &str = "/run/codewire-credentials/workspace/token";
 /// Public gateway CA bundle mounted only as trust, not a private identity.
 pub const CODEX_PLATFORM_ROOTS_FILE: &str = "/run/codewire-credentials/gateway-roots/ca.crt";
-/// Writable per-Pod Codex state, separate from the persisted user workspace.
-pub const CODEX_PLATFORM_HOME: &str = "/run/codewire-codex/home";
+/// Codex's own default home (`~/.codex`) for the hosted workspace user, on the
+/// persistent home volume, so sessions and history survive Stop/Start.
+pub const CODEX_PLATFORM_HOME: &str = "/home/codewire/.codex";
+/// First line of the `config.toml` the hosted daemon keeps in
+/// [`CODEX_PLATFORM_HOME`]. The daemon replaces or removes that file only
+/// while this is still its first line; deleting the line hands the file to
+/// the user.
+pub const CODEX_MANAGED_CONFIG_HEADER: &str =
+    "# Managed by Codewire. Delete this line to manage this file yourself.";
 /// Native Codex state mounted at the existing isolated guest path.
 pub const CODEX_NATIVE_HOME: &str = "/run/codewire-agent/codex";
 /// Native workspace path for the distinct selected-key OpenSSH agent ingress.
@@ -208,13 +215,18 @@ impl ManagedCredentialClients {
         let mut environment = BTreeMap::new();
         let origin = format!("http://127.0.0.1:{MANAGED_HTTP_PORT}");
         let codex = self.contains(ManagedCredentialClient::Codex).then(|| {
-            let home = match placement {
-                ManagedCredentialClientPlacement::Native => CODEX_NATIVE_HOME,
-                ManagedCredentialClientPlacement::Platform => CODEX_PLATFORM_HOME,
+            let projection = CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT)
+                .expect("fixed managed HTTP port is unprivileged");
+            // The native home is Codewire's own directory. The hosted home is
+            // the user's `~/.codex`, so its file carries the ownership header.
+            let (home, projection) = match placement {
+                ManagedCredentialClientPlacement::Native => (CODEX_NATIVE_HOME, projection),
+                ManagedCredentialClientPlacement::Platform => {
+                    (CODEX_PLATFORM_HOME, projection.with_managed_header())
+                }
             };
             environment.insert("CODEX_HOME".into(), home.into());
-            CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT)
-                .expect("fixed managed HTTP port is unprivileged")
+            projection
         });
         if self.contains(ManagedCredentialClient::OpenAi) {
             environment.insert(
@@ -347,8 +359,16 @@ impl CodexProviderProjection {
         })
     }
 
+    /// The same configuration with [`CODEX_MANAGED_CONFIG_HEADER`] as its
+    /// first line, for a home the user also owns.
+    fn with_managed_header(self) -> Self {
+        Self {
+            config_toml: format!("{CODEX_MANAGED_CONFIG_HEADER}\n{}", self.config_toml),
+        }
+    }
+
     /// Return the complete UTF-8 contents to install as
-    /// [`CODEX_CONFIG_FILE_NAME`] inside an isolated guest `CODEX_HOME`.
+    /// [`CODEX_CONFIG_FILE_NAME`] inside the selected `CODEX_HOME`.
     pub fn config_toml(&self) -> &str {
         &self.config_toml
     }
@@ -511,6 +531,53 @@ mod tests {
         }
         assert_eq!(CODEX_CONFIG_FILE_NAME, "config.toml");
         assert_eq!(projection.clone().into_config_toml(), config);
+    }
+
+    #[test]
+    fn hosted_projection_marks_the_users_home_file_as_codewire_managed() {
+        let clients = ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+        let hosted = clients
+            .for_placement(ManagedCredentialClientPlacement::Platform)
+            .codex
+            .unwrap();
+        assert_eq!(
+            hosted.config_toml(),
+            concat!(
+                "# Managed by Codewire. Delete this line to manage this file yourself.\n",
+                "model_provider = \"codewire_openai\"\n",
+                "\n",
+                "[model_providers.codewire_openai]\n",
+                "name = \"Codewire OpenAI\"\n",
+                "base_url = \"http://127.0.0.1:38081/v1\"\n",
+                "wire_api = \"responses\"\n",
+                "requires_openai_auth = false\n",
+                "supports_websockets = false\n",
+                "\n",
+                "[features]\n",
+                "enable_request_compression = false\n",
+            )
+        );
+        assert_eq!(
+            hosted.config_toml().lines().next(),
+            Some(CODEX_MANAGED_CONFIG_HEADER)
+        );
+        // The header is a TOML comment; the configuration is unchanged.
+        assert_eq!(
+            toml::from_str::<Value>(hosted.config_toml()).unwrap(),
+            toml::from_str::<Value>(
+                CodexProviderProjection::for_loopback_port(38_081)
+                    .unwrap()
+                    .config_toml()
+            )
+            .unwrap()
+        );
+        // The local VM's Codex home is Codewire's own directory: no header.
+        let native = clients
+            .for_placement(ManagedCredentialClientPlacement::Native)
+            .codex
+            .unwrap();
+        assert!(!native.config_toml().contains(CODEX_MANAGED_CONFIG_HEADER));
+        assert_eq!(CODEX_PLATFORM_HOME, "/home/codewire/.codex");
     }
 
     #[test]

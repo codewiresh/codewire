@@ -235,10 +235,6 @@
                 "readOnly": true
               },
               {
-                "mountPath": "/run/codewire-codex",
-                "name": "credential-codex-home"
-              },
-              {
                 "mountPath": "/var/run/secrets/codewire/workspace-binding",
                 "name": "workspace-binding-identity",
                 "readOnly": true
@@ -316,13 +312,6 @@
               "name": "synthetic-trust-1"
             },
             "name": "credential-gateway-roots"
-          },
-          {
-            "emptyDir": {
-              "medium": "Memory",
-              "sizeLimit": "256Mi"
-            },
-            "name": "credential-codex-home"
           },
           {
             "name": "workspace-binding-identity",

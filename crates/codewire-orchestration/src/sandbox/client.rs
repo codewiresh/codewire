@@ -525,7 +525,25 @@ fn workspace_bootstrap_patch(
     ))?)))
 }
 
+/// Volumes that held Codex's configuration before the daemon wrote the
+/// user's `~/.codex`: the per-environment ConfigMap and a memory home. Nothing
+/// renders them now; a start removes them from older objects.
 const WORKSPACE_CLIENT_VOLUMES: [&str; 2] = ["credential-codex-config", "credential-codex-home"];
+
+/// Whether an object still renders a Codex volume the daemon made redundant.
+fn workspace_object_has_legacy_codex_home(object: &DynamicObject) -> anyhow::Result<bool> {
+    let volumes = match object.data.pointer("/spec/podTemplate/spec/volumes") {
+        None => return Ok(false),
+        Some(Value::Array(volumes)) => volumes,
+        Some(_) => anyhow::bail!("workspace volumes are malformed"),
+    };
+    Ok(volumes.iter().any(|volume| {
+        volume
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| WORKSPACE_CLIENT_VOLUMES.contains(&name))
+    }))
+}
 
 /// Reconcile named machine-owned entries without replacing their surrounding
 /// arrays. Array indices are protected by the outer object's UID/RV tests.
@@ -729,13 +747,15 @@ fn workspace_object_identity_free(object: &DynamicObject) -> anyhow::Result<bool
 
 /// The JSON Patch that replaces a legacy object's workspace Pod spec (and,
 /// for the template, its egress) with the identity-free rendering, bound to
-/// the validated UID and resourceVersion. `None` when already identity-free.
+/// the validated UID and resourceVersion. `None` when already identity-free
+/// and current. An identity-free object rendered before the daemon wrote
+/// `~/.codex` still mounts Codex's memory home, and is not current.
 fn identity_free_upgrade_patch(
     object: &DynamicObject,
     pod_spec: &Value,
     network_policy: Option<&Value>,
 ) -> anyhow::Result<Option<Patch<()>>> {
-    if workspace_object_identity_free(object)? {
+    if workspace_object_identity_free(object)? && !workspace_object_has_legacy_codex_home(object)? {
         return Ok(None);
     }
     let uid = object
@@ -2087,14 +2107,7 @@ impl SandboxClient {
                 workspace_bootstrap_patch(&before.sandbox, &expected, recovery.as_ref(), &clients)?,
             ),
         ];
-        if opts
-            .managed_credential_clients
-            .contains(codewire_access::ManagedCredentialClient::Codex)
-        {
-            // A newly selected Codex init mount must exist before resume; waiting
-            // for gateway/Pod readiness first would deadlock on its ConfigMap.
-            self.ensure_credential_bootstrap(opts).await?;
-        }
+        // Selecting Codex needs no Pod object: the daemon writes `~/.codex`.
         for (object, api, patch) in patches {
             let Some(patch) = patch else {
                 continue;
@@ -2161,9 +2174,9 @@ impl SandboxClient {
     /// volumes, probes, current images) and the template its identity-free
     /// egress. `volumeClaimTemplates` and the Pod template metadata are kept.
     /// Each object is patched under UID and resourceVersion tests; an object
-    /// that is already identity-free is left alone, so a partly upgraded
-    /// environment converges on its next start. The resumed Pod then binds
-    /// with `credential_scope='pod'`.
+    /// that is already identity-free and current is left alone, so a partly
+    /// upgraded environment converges on its next start. The resumed Pod then
+    /// binds with `credential_scope='pod'`.
     async fn reconcile_identity_free_bootstrap(
         &self,
         opts: &TemplateOpts,
@@ -2209,7 +2222,8 @@ impl SandboxClient {
                         .uid
                         .as_deref()
                         .expect("validated runtime UID")
-                    && workspace_object_identity_free(&updated)?,
+                    && workspace_object_identity_free(&updated)?
+                    && !workspace_object_has_legacy_codex_home(&updated)?,
                 "workspace identity upgrade did not converge"
             );
         }
@@ -2228,7 +2242,9 @@ impl SandboxClient {
                 && before.template.metadata.uid == after.template.metadata.uid
                 && before.sandbox.metadata.uid == after.sandbox.metadata.uid
                 && workspace_object_identity_free(&after.template)?
-                && workspace_object_identity_free(&after.sandbox)?,
+                && workspace_object_identity_free(&after.sandbox)?
+                && !workspace_object_has_legacy_codex_home(&after.template)?
+                && !workspace_object_has_legacy_codex_home(&after.sandbox)?,
             "workspace identity upgrade is no longer current"
         );
         Ok(())

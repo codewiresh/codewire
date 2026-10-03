@@ -10,13 +10,14 @@ if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then
 fi
 
 run_retained_dashboard_browser_suite() {
+  require_kind_errexit
   require_tool curl
   require_tool jq
   require_tool kind
   require_tool kubectl
 
   trap retained_suite_cleanup EXIT
-  validate_retained_cluster || return $?
-  dashboard_browser_e2e || return $?
+  validate_retained_cluster
+  dashboard_browser_e2e
   log "retained dashboard-browser suite green"
 }

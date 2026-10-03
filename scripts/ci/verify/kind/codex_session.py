@@ -27,7 +27,11 @@ import time
 
 
 CODEX = "/opt/codewire/agents/npm/bin/codex"
-CODEX_HOME = "/run/codewire-codex/home"
+# Codex's default home on the persistent home volume; the daemon writes
+# Codewire's config.toml there, first line MANAGED_HEADER.
+CODEX_HOME = "/home/codewire/.codex"
+MANAGED_HEADER = b"# Managed by Codewire. Delete this line to manage this file yourself."
+MAX_MANAGED_CONFIG = 64 * 1024
 TOKEN = "/run/codewire-credentials/workspace/token"
 MARKER = "CWCODEX149 kind"
 MAX_LINE = 1024 * 1024
@@ -469,12 +473,32 @@ def run(server, trace):
         emit(event, legacy_auth_commands=0, elapsed_ms=int(elapsed * 1000))
 
 
+def managed_config(path):
+    """Whether path is Codewire's daemon-written file: regular, not a symlink,
+    first line exactly the managed header."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    with os.fdopen(descriptor, "rb") as source:
+        contents = source.read(MAX_MANAGED_CONFIG + 1)
+    return contents.split(b"\n", 1)[0] == MANAGED_HEADER
+
+
 def validate_projection():
-    # Selected Codex uses the daemon-owned loopback route. The gateway's public
-    # roots are not a Codex environment override, even when that mount exists.
-    if (os.environ.get("CODEX_HOME") != CODEX_HOME
-            or os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS") != "v1:codex"
-            or "CODEX_CA_CERTIFICATE" in os.environ):
+    # Selected Codex uses the daemon-owned loopback route, configured by the
+    # daemon's own ~/.codex/config.toml. An environment-token Pod also renders
+    # the selection and CODEX_HOME; an identity-free Pod renders neither, and
+    # this kubectl-exec'd driver then relies on Codex's default home. The
+    # gateway's public roots are not a Codex environment override, even when
+    # that mount exists.
+    rendered = (os.environ.get("CODEX_HOME"),
+                os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"))
+    if (rendered not in {(None, None), (CODEX_HOME, "v1:codex")}
+            or "CODEX_CA_CERTIFICATE" in os.environ
+            or not managed_config(Path(CODEX_HOME) / "config.toml")):
         raise Failure("unexpected_projection")
 
 
