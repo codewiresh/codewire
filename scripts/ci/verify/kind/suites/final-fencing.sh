@@ -9,15 +9,16 @@ if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then
 fi
 
 run_retained_final_fencing_suite() {
+  require_kind_errexit
   require_tool kind
   require_tool kubectl
 
   trap retained_suite_cleanup EXIT
-  validate_retained_cluster || return $?
+  validate_retained_cluster
   if [ ! -x "$CARGO_CI_DIR/temporal-fencing-smoke" ]; then
     echo "::error::retained final-fencing suite requires executable ${CARGO_CI_DIR}/temporal-fencing-smoke"
     return 1
   fi
-  temporal_fencing_smoke || return $?
+  temporal_fencing_smoke
   log "retained final-fencing suite green"
 }

@@ -59,8 +59,11 @@ dispatch_kind_e2e() {
     run_integrated_kind_suite
     return
   fi
+  # Call every suite and `up` as a plain statement. Bash ignores errexit in a
+  # function called from ||, so `run_x || return $?` would let an unchecked
+  # failing step fall through to green; require_kind_errexit refuses that.
   if [ "${1:-}" = "up" ] && [ "$#" -eq 1 ]; then
-    run_kind_up || return $?
+    run_kind_up
     log "cluster ${KIND_CLUSTER_NAME} is up; no test suites ran"
     return
   fi
@@ -73,12 +76,12 @@ dispatch_kind_e2e() {
       kind_e2e_usage
       return 2
     fi
-    run_kind_up || return $?
+    run_kind_up
     log "cluster ${KIND_CLUSTER_NAME} is up; running shard suites: ${*:2}"
     shift
     local suite
     for suite in "$@"; do
-      dispatch_kind_e2e suite "$suite" || return $?
+      dispatch_kind_e2e suite "$suite"
     done
     log "Kind shard suites green: $*"
     return
