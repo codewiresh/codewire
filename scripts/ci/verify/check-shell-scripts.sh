@@ -59,6 +59,175 @@ self_test() {
   printf 'ShellCheck warning-ratchet self-test: OK\n'
 }
 
+# Print "shard<TAB>weight<TAB>path" for each tracked script path read from stdin
+# (one per line), placing the scripts on at most $1 shards.
+#
+# Without --external-sources, ShellCheck follows a sourced file only when that
+# file is named on the same command line, so the single full-list process
+# followed every tracked script that another script sources. A shard keeps that
+# result only when it holds each member's whole source closure. Scripts joined
+# by any source edge therefore share one shard, and every script is analyzed
+# exactly once. ShellCheck 0.11.0 follows the name in a `# shellcheck source=`
+# directive, a literal source word, or a word that is one expansion followed by
+# a literal "/name", which it reads as "./name". Edges cover all three: each
+# directive, and each .sh path in a `source` or `.` command line, with and
+# without its leading directories, resolved from the repository root and from
+# the script's directory. Extra edges only join more scripts into a shard, so
+# they cannot change a finding. A script's weight is its bytes plus the weight of
+# each file it sources, counted at every source site because ShellCheck reads a
+# sourced file again at each one. Components go heaviest first onto the
+# lightest shard, and each shard lists its lighter scripts first so its
+# heaviest analysis starts last.
+plan_shards() {
+  local shards="$1"
+
+  awk -v root="$ROOT" -v quote="'" '
+    function normalize(path,    count, parts, kept, depth, position, result) {
+      count = split(path, parts, "/")
+      depth = 0
+      for (position = 1; position <= count; position++) {
+        if (parts[position] == "" || parts[position] == ".") continue
+        if (parts[position] == ".." && depth > 0 && kept[depth] != "..") {
+          depth--
+          continue
+        }
+        kept[++depth] = parts[position]
+      }
+      result = ""
+      for (position = 1; position <= depth; position++) {
+        result = result (position > 1 ? "/" : "") kept[position]
+      }
+      return result
+    }
+    function add_edge(script, target) {
+      if (!(target in tracked) || target == script) return
+      edge[script, ++edges[script]] = target
+    }
+    function add_source(script, directory, value,    from_root, from_directory) {
+      if (value == "" || value == "/dev/null" || value ~ /[$`]/) return
+      if (substr(value, 1, 10) == "SCRIPTDIR/") {
+        add_edge(script, normalize(directory "/" substr(value, 11)))
+        return
+      }
+      if (substr(value, 1, 1) == "/") {
+        if (substr(value, 1, length(root) + 1) == root "/") {
+          add_edge(script, normalize(substr(value, length(root) + 2)))
+        }
+        add_edge(script, normalize(substr(value, 2)))
+        return
+      }
+      from_root = normalize(value)
+      from_directory = normalize(directory "/" value)
+      add_edge(script, from_root)
+      if (from_directory != from_root) add_edge(script, from_directory)
+    }
+    # ShellCheck follows a literal name and also "$dir/name", which it reads
+    # as "./name". Take every .sh path run in the command, with and without
+    # each of its leading directories.
+    function add_paths(script, directory, text,    path, position) {
+      gsub(/"/, "", text)
+      gsub(quote, "", text)
+      while (match(text, /[^[:space:]$`(){};&|<>]*\.sh/)) {
+        path = substr(text, RSTART, RLENGTH)
+        text = substr(text, RSTART + RLENGTH)
+        add_source(script, directory, path)
+        while ((position = index(path, "/")) > 0) {
+          path = substr(path, position)
+          add_source(script, directory, path)
+          path = substr(path, 2)
+        }
+      }
+    }
+    function scan(script,    directory, physical, line, rest, value) {
+      directory = script
+      if (!sub(/\/[^\/]*$/, "", directory)) directory = "."
+      bytes[script] = 0
+      line = ""
+      while ((getline physical < script) > 0) {
+        bytes[script] += length(physical) + 1
+        if (sub(/\\$/, "", physical)) {
+          line = line physical " "
+          continue
+        }
+        line = line physical
+        if (match(line, /#[[:space:]]*shellcheck[[:space:]]/)) {
+          rest = substr(line, RSTART + RLENGTH)
+          while (match(rest, /(^|[[:space:]])source=[^[:space:]]+/)) {
+            value = substr(rest, RSTART, RLENGTH)
+            rest = substr(rest, RSTART + RLENGTH)
+            sub(/^[[:space:]]*source=/, "", value)
+            gsub(/"/, "", value)
+            gsub(quote, "", value)
+            add_source(script, directory, value)
+          }
+        }
+        if (match(line, /(^|[;&|({[:space:]])(source|\.)[[:space:]]/)) {
+          add_paths(script, directory, substr(line, RSTART + RLENGTH))
+        }
+        line = ""
+      }
+      close(script)
+    }
+    function find(script) {
+      while (parent[script] != script) {
+        parent[script] = parent[parent[script]]
+        script = parent[script]
+      }
+      return script
+    }
+    function weight(script,    total, position) {
+      if (script in memo) return memo[script]
+      if (script in visiting) return 0
+      visiting[script] = 1
+      total = bytes[script]
+      for (position = 1; position <= edges[script]; position++) {
+        total += weight(edge[script, position])
+      }
+      delete visiting[script]
+      if (total > 1e15) total = 1e15
+      memo[script] = total
+      return total
+    }
+    { order[++count] = $0; tracked[$0] = 1; parent[$0] = $0 }
+    END {
+      for (script_index = 1; script_index <= count; script_index++) {
+        scan(order[script_index])
+      }
+      for (script_index = 1; script_index <= count; script_index++) {
+        script = order[script_index]
+        for (position = 1; position <= edges[script]; position++) {
+          left = find(script)
+          right = find(edge[script, position])
+          if (left != right) parent[right] = left
+        }
+      }
+      for (script_index = 1; script_index <= count; script_index++) {
+        component = find(order[script_index])
+        if (!(component in first)) first[component] = script_index
+        component_weight[component] += weight(order[script_index])
+      }
+      for (script_index = 1; script_index <= count; script_index++) {
+        script = order[script_index]
+        component = find(script)
+        printf "%.0f\t%d\t%.0f\t%s\n", component_weight[component], \
+          first[component], weight(script), script
+      }
+    }
+  ' | LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2n -k3,3n -k4,4 \
+    | awk -v shards="$shards" '
+      BEGIN { FS = OFS = "\t" }
+      $2 != component {
+        component = $2
+        target = 1
+        for (shard = 2; shard <= shards; shard++) {
+          if (load[shard] < load[target]) target = shard
+        }
+        load[target] += $1
+      }
+      { print target, $3, $4 }
+    '
+}
+
 if [[ "${1:-}" == --self-test ]]; then
   [[ $# -eq 1 ]] || {
     printf 'usage: check-shell-scripts.sh [--self-test]\n' >&2
@@ -72,11 +241,14 @@ fi
   exit 2
 }
 
+
 cd "$ROOT"
-# The full tracked-script analysis takes four to five minutes on loaded CI
-# workers and outgrew a 300-second deadline. Keep a bounded deadline with
-# headroom; one process keeps memory bounded (parallel batches that follow
-# sourced files exceeded worker memory).
+# ShellCheck reads a sourced file again at every source site, so a script that
+# repeats a large closure dominates the analysis: one script can need most of
+# a heavy worker's memory and minutes of CPU by itself. Shards follow source
+# closures (see plan_shards) and run concurrently. Every shard starts at once
+# under the same deadline, so SHELLCHECK_TIMEOUT_SECONDS bounds each shard and
+# the whole analysis. SHELLCHECK_SHARDS=1 is the single-process analysis.
 shellcheck_timeout_seconds="${SHELLCHECK_TIMEOUT_SECONDS:-600}"
 if [[ ! "$shellcheck_timeout_seconds" =~ ^[0-9]+$ ]] \
     || (( 10#$shellcheck_timeout_seconds < 1 )) \
@@ -84,6 +256,15 @@ if [[ ! "$shellcheck_timeout_seconds" =~ ^[0-9]+$ ]] \
   printf 'SHELLCHECK_TIMEOUT_SECONDS must be an integer from 1 through 900\n' >&2
   exit 2
 fi
+shellcheck_timeout_seconds=$((10#$shellcheck_timeout_seconds))
+shellcheck_shards="${SHELLCHECK_SHARDS:-4}"
+if [[ ! "$shellcheck_shards" =~ ^[0-9]+$ ]] \
+    || (( 10#$shellcheck_shards < 1 )) \
+    || (( 10#$shellcheck_shards > 16 )); then
+  printf 'SHELLCHECK_SHARDS must be an integer from 1 through 16\n' >&2
+  exit 2
+fi
+shellcheck_shards=$((10#$shellcheck_shards))
 shellcheck_bin="$(scripts/ci/setup/setup-shellcheck.sh)"
 mapfile -d '' shell_files < <(
   git ls-files -z -- '*.sh'
@@ -92,36 +273,163 @@ mapfile -d '' shell_files < <(
   printf 'ShellCheck policy found no tracked shell scripts\n' >&2
   exit 1
 }
+for shell_file in "${shell_files[@]}"; do
+  [[ "$shell_file" != *$'\n'* && "$shell_file" != *$'\t'* ]] || {
+    printf 'ShellCheck policy cannot shard a script path containing a tab or newline: %q\n' \
+      "$shell_file" >&2
+    exit 1
+  }
+done
 
-printf 'ShellCheck analysis: start (scripts=%s timeout_seconds=%s)\n' \
-  "${#shell_files[@]}" "$shellcheck_timeout_seconds"
+shellcheck_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-shellcheck.XXXXXX")"
+shard_pids=()
+stop_shards() {
+  local pid
+  for pid in "${shard_pids[@]}"; do
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+}
+trap 'stop_shards; rm -rf -- "$shellcheck_work"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+printf '%s\n' "${shell_files[@]}" | plan_shards "$shellcheck_shards" \
+  >"$shellcheck_work/plan.tsv"
+# Each tracked script must be analyzed exactly once: a missing script would
+# pass unchecked, and a repeated one would double its reviewed findings.
+if [[ "$(cut -f3 "$shellcheck_work/plan.tsv" | LC_ALL=C sort)" \
+    != "$(printf '%s\n' "${shell_files[@]}" | LC_ALL=C sort)" ]]; then
+  printf 'ShellCheck shard plan does not cover each tracked script exactly once\n' >&2
+  exit 1
+fi
+shard_ids=()
+shard_sizes=()
+shard_heaviest=()
+while IFS=$'\t' read -r shard_id shard_size shard_top; do
+  shard_ids+=("$shard_id")
+  shard_sizes+=("$shard_size")
+  shard_heaviest+=("$shard_top")
+done < <(awk -F '\t' '
+  {
+    if (!($1 in size)) order[++count] = $1
+    size[$1]++
+    if (!($1 in top) || $2 > weight[$1]) { weight[$1] = $2; top[$1] = $3 }
+  }
+  END { for (i = 1; i <= count; i++) printf "%s\t%s\t%s\n", order[i], size[order[i]], top[order[i]] }
+' "$shellcheck_work/plan.tsv" | LC_ALL=C sort -n)
+shard_count="${#shard_ids[@]}"
+
+shard_label() {
+  printf '%s/%s (scripts=%s heaviest=%s)' "$(($1 + 1))" "$shard_count" \
+    "${shard_sizes[$1]}" "${shard_heaviest[$1]}"
+}
+
+run_shard() {
+  local shard="$1" started_at=$SECONDS status elapsed
+  shift
+  set +e
+  timeout --foreground --signal=TERM --kill-after=5s \
+    "${shellcheck_timeout_seconds}s" \
+    "$shellcheck_bin" --severity=warning --format=json1 "$@" \
+    >"$shellcheck_work/shard-$shard.json"
+  status=$?
+  set -e
+  elapsed=$((SECONDS - started_at))
+  printf '%s\t%s\n' "$status" "$elapsed" >"$shellcheck_work/shard-$shard.status"
+  printf 'ShellCheck shard %s/%s: finish (status=%s elapsed_seconds=%s)\n' \
+    "$((shard + 1))" "$shard_count" "$status" "$elapsed"
+}
+
+printf 'ShellCheck analysis: start (scripts=%s shards=%s timeout_seconds=%s)\n' \
+  "${#shell_files[@]}" "$shard_count" "$shellcheck_timeout_seconds"
+for ((shard = 0; shard < shard_count; shard++)); do
+  printf 'ShellCheck shard %s: start\n' "$(shard_label "$shard")"
+done
 shellcheck_started_at=$SECONDS
-set +e
-findings_json="$(timeout --foreground --signal=TERM --kill-after=5s \
-  "${shellcheck_timeout_seconds}s" \
-  "$shellcheck_bin" --severity=warning --format=json1 "${shell_files[@]}")"
-shellcheck_status=$?
-set -e
+for ((shard = 0; shard < shard_count; shard++)); do
+  mapfile -t shard_files < <(
+    awk -F '\t' -v shard="${shard_ids[shard]}" '$1 == shard { print $3 }' \
+      "$shellcheck_work/plan.tsv"
+  )
+  run_shard "$shard" "${shard_files[@]}" &
+  shard_pids+=("$!")
+done
+for pid in "${shard_pids[@]}"; do
+  wait "$pid" || true
+done
+shard_pids=()
 shellcheck_elapsed_seconds=$((SECONDS - shellcheck_started_at))
+
+# Any shard that did not finish with a complete report fails the analysis;
+# the findings of the other shards never pass on their own.
+shellcheck_status=0
+shard_failures=()
+shard_reports=()
+for ((shard = 0; shard < shard_count; shard++)); do
+  shard_status=''
+  shard_elapsed=''
+  if [[ -s "$shellcheck_work/shard-$shard.status" ]]; then
+    IFS=$'\t' read -r shard_status shard_elapsed \
+      <"$shellcheck_work/shard-$shard.status"
+  fi
+  failure=''
+  failure_status=1
+  case "$shard_status" in
+    0|1)
+      if jq -e '.comments | type == "array"' \
+          "$shellcheck_work/shard-$shard.json" >/dev/null 2>&1; then
+        shard_reports+=("$shellcheck_work/shard-$shard.json")
+        if [[ "$shard_status" -eq 1 && "$shellcheck_status" -eq 0 ]]; then
+          shellcheck_status=1
+        fi
+      else
+        failure="ShellCheck shard $(shard_label "$shard") wrote no valid json1 report"
+      fi
+      ;;
+    124)
+      failure="ShellCheck shard $(shard_label "$shard") timed out after ${shellcheck_timeout_seconds} seconds"
+      failure_status=124
+      ;;
+    137)
+      failure_status=137
+      if (( shard_elapsed >= shellcheck_timeout_seconds )); then
+        failure="ShellCheck shard $(shard_label "$shard") timed out after ${shellcheck_timeout_seconds} seconds"
+      else
+        failure="ShellCheck shard $(shard_label "$shard") was killed after ${shard_elapsed} seconds, before its deadline (out of memory?)"
+      fi
+      ;;
+    '')
+      failure="ShellCheck shard $(shard_label "$shard") reported no status"
+      ;;
+    *)
+      failure="ShellCheck shard $(shard_label "$shard") failed with status ${shard_status}"
+      failure_status="$shard_status"
+      ;;
+  esac
+  if [[ -n "$failure" ]]; then
+    if [[ "${#shard_failures[@]}" -eq 0 ]]; then
+      shellcheck_status="$failure_status"
+    fi
+    shard_failures+=("$failure")
+  fi
+done
 printf 'ShellCheck analysis: finish (status=%s elapsed_seconds=%s)\n' \
   "$shellcheck_status" "$shellcheck_elapsed_seconds"
-if [[ "$shellcheck_status" -eq 124 || "$shellcheck_status" -eq 137 ]]; then
-  printf 'ShellCheck timed out after %s seconds\n' \
-    "$shellcheck_timeout_seconds" >&2
-  exit "$shellcheck_status"
-fi
-if [[ "$shellcheck_status" -gt 1 ]]; then
-  printf 'ShellCheck failed with status %s\n' "$shellcheck_status" >&2
+if [[ "${#shard_failures[@]}" -gt 0 ]]; then
+  printf '%s\n' "${shard_failures[@]}" >&2
   exit "$shellcheck_status"
 fi
 
+findings_json="$(jq -s '{comments: (map(.comments) | add // [])}' \
+  "${shard_reports[@]}")"
 expected_findings="$(printf '%s\n' "$SHELLCHECK_BASELINE_TSV" | normalize_baseline)"
 actual_findings="$(printf '%s\n' "$findings_json" | group_findings)"
 compare_findings "$expected_findings" "$actual_findings" || {
   printf 'ShellCheck warning set differs from the reviewed baseline\n' >&2
   exit 1
 }
-printf 'ShellCheck warning ratchet: OK (%s scripts, %s reviewed groups)\n' \
-  "${#shell_files[@]}" \
+printf 'ShellCheck warning ratchet: OK (%s scripts, %s shards, %s reviewed groups)\n' \
+  "${#shell_files[@]}" "$shard_count" \
   "$(printf '%s\n' "$SHELLCHECK_BASELINE_TSV" \
     | awk '/^[^#[:space:]]/ { count++ } END { print count + 0 }')"
