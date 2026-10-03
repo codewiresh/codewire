@@ -555,3 +555,101 @@ fn the_admission_policy_pins_the_renderer() {
             .is_none()
     );
 }
+
+/// What the agent-sandbox controller stores when it copies a rendering
+/// through typed Go structs: canonical quantities and no empty `omitempty`
+/// values.
+pub(crate) fn controller_copy(rendered: &Value) -> Value {
+    fn walk(value: &mut Value, path: &str) {
+        match value {
+            Value::Object(fields) => {
+                fields.retain(|key, field| !(key == "value" && field.as_str() == Some("")));
+                for (key, field) in fields.iter_mut() {
+                    walk(field, &format!("{path}/{key}"));
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter_mut().enumerate() {
+                    walk(item, &format!("{path}/{index}"));
+                }
+            }
+            Value::String(text) if path.contains("/resources/") => {
+                let canonical = match text.as_str() {
+                    "1000m" => "1",
+                    "2000m" => "2",
+                    "4096Mi" => "4Gi",
+                    "8192Mi" => "8Gi",
+                    other => other,
+                };
+                *text = canonical.to_owned();
+            }
+            _ => {}
+        }
+    }
+    let mut copy = rendered.clone();
+    walk(&mut copy, "");
+    copy
+}
+
+#[test]
+fn stored_specs_compare_by_meaning_not_spelling() {
+    let rendered = render(&pool_opts()).template["spec"].clone();
+    let stored = controller_copy(&rendered);
+    assert_ne!(
+        stored, rendered,
+        "the fixture exercises the controller's spelling"
+    );
+    assert_eq!(spec_equivalent(&rendered, &stored, "/spec"), Ok(()));
+
+    let mut defaulted = stored.clone();
+    defaulted["podTemplate"]["spec"]["containers"][0]["terminationMessagePath"] = json!("");
+    defaulted["podTemplate"]["spec"]["containers"][0]["stdin"] = json!(false);
+    assert_eq!(spec_equivalent(&rendered, &defaulted, "/spec"), Ok(()));
+
+    let refused = |mutate: &dyn Fn(&mut Value)| {
+        let mut live = stored.clone();
+        mutate(&mut live);
+        spec_equivalent(&rendered, &live, "/spec").expect_err("a different spec was equivalent")
+    };
+    assert_eq!(
+        refused(
+            &|live| live["podTemplate"]["spec"]["containers"][0]["resources"]["limits"]["cpu"] =
+                json!("2")
+        ),
+        "/spec/podTemplate/spec/containers/0/resources/limits/cpu"
+    );
+    assert_eq!(
+        refused(&|live| live["podTemplate"]["spec"]["hostNetwork"] = json!(true)),
+        "/spec/podTemplate/spec/hostNetwork"
+    );
+    assert_eq!(
+        refused(&|live| live["podTemplate"]["spec"]["securityContext"]["runAsUser"] = json!(0)),
+        "/spec/podTemplate/spec/securityContext/runAsUser"
+    );
+    assert_eq!(
+        refused(
+            &|live| live["podTemplate"]["spec"]["containers"][0]["image"] = json!("x@sha256:0")
+        ),
+        "/spec/podTemplate/spec/containers/0/image"
+    );
+    assert_eq!(
+        refused(&|live| {
+            live["podTemplate"]["spec"]["volumes"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+        }),
+        "/spec/podTemplate/spec/volumes"
+    );
+    // Only resource quantities are compared by value.
+    let with_env = |value: &str| json!({ "env": [{ "name": "LIMIT", "value": value }] });
+    assert!(spec_equivalent(&with_env("1000m"), &with_env("1"), "/container").is_err());
+    assert!(
+        spec_equivalent(
+            &json!({ "resources": { "limits": { "memory": "4096Mi" } } }),
+            &json!({ "resources": { "limits": { "memory": "4Gi" } } }),
+            "/container"
+        )
+        .is_ok()
+    );
+}

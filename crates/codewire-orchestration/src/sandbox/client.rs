@@ -4515,7 +4515,7 @@ fn workspace_resources_match(pod: &Pod, cpu: &str, memory: &str) -> bool {
 /// The kubelet canonicalizes equivalent requests (for example `3000m` to `3`
 /// and `5120Mi` to `5Gi`). Resource convergence must accept that formatting
 /// change without accepting a different value or a malformed observation.
-fn quantities_equal(left: &str, right: &str) -> bool {
+pub(crate) fn quantities_equal(left: &str, right: &str) -> bool {
     let Some((left_numerator, left_denominator)) = parse_quantity_ratio(left) else {
         return false;
     };

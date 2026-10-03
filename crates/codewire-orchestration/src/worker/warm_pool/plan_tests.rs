@@ -705,3 +705,18 @@ fn the_image_cache_gate_needs_every_cacheable_image_held_and_rolled_out() {
     with_local.push("codewire-gateway:e2e");
     assert!(image_cache_warm(Some(&cache(&images, true)), &with_local));
 }
+
+/// The controller stores members through typed structs: canonical
+/// quantities and dropped empty values. Such a member is current, not stale.
+#[test]
+fn a_member_in_the_controllers_spelling_is_current() {
+    let mut fixture = Fixture::settled();
+    let small = fixture.desired[0].clone();
+    let copy = crate::sandbox::warm_pool::tests::controller_copy(&small.objects.template);
+    assert_ne!(copy["spec"], small.objects.template["spec"]);
+    fixture
+        .members
+        .push(object(member(&small, "pool-0", "member-copied", &copy)));
+    assert!(fixture.plan().writes.is_empty());
+    assert_eq!(fixture.plan().reports[&small.label()].members, 1);
+}

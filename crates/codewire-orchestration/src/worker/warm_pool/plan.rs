@@ -15,7 +15,8 @@ use crate::sandbox::client::{parse_quantity_ratio, sandbox_name_hash};
 use crate::sandbox::image_cache::{CacheState, cached_images, is_approved_image, rollout};
 use crate::sandbox::warm_pool::{
     ConfiguredShape, MEMBER_POOL_LABEL, POOL_REVISION_ANNOTATION, TEMPLATE_REF_HASH_LABEL,
-    WarmPoolObjects, has_pool_labels, is_warm_pool_name, shape_label, warm_pool_name_shape,
+    WarmPoolObjects, has_pool_labels, is_warm_pool_name, shape_label, spec_equivalent,
+    warm_pool_name_shape,
 };
 use crate::sandbox::{EXTENSIONS_API_VERSION, image_cache::IMAGE_CACHE_STATE_ANNOTATION};
 
@@ -437,14 +438,20 @@ fn pod_annotations(object: &Value) -> BTreeMap<String, Value> {
 
 /// A member is stale when its Pod spec, Pod annotations or volume claim
 /// templates differ from the live pool template's: the controller copied
-/// them from an older revision. Both sides were stored by the API server, so
-/// they compare exactly.
+/// them from an older revision. The controller stores its copy through typed
+/// structs, so the comparison is [`spec_equivalent`], not byte equality.
 pub fn member_stale(member: &DynamicObject, template: &DynamicObject) -> bool {
     let (member, template) = (&member.data, &template.data);
-    member.pointer("/spec/podTemplate/spec") != template.pointer("/spec/podTemplate/spec")
-        || member.pointer("/spec/volumeClaimTemplates")
-            != template.pointer("/spec/volumeClaimTemplates")
-        || pod_annotations(member) != pod_annotations(template)
+    let part = |object: &Value, path: &str| object.pointer(path).cloned().unwrap_or(Value::Null);
+    ["/spec/podTemplate/spec", "/spec/volumeClaimTemplates"]
+        .into_iter()
+        .any(|path| spec_equivalent(&part(template, path), &part(member, path), path).is_err())
+        || spec_equivalent(
+            &Value::Object(pod_annotations(template).into_iter().collect()),
+            &Value::Object(pod_annotations(member).into_iter().collect()),
+            "/spec/podTemplate/metadata/annotations",
+        )
+        .is_err()
 }
 
 fn member_pod_name(member: &DynamicObject) -> Option<&str> {

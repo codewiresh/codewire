@@ -368,6 +368,80 @@ pub fn render_warm_pool(
     })
 }
 
+/// Whether `live` is the stored form of `expected`, a rendered Pod spec
+/// fragment. The API server and the agent-sandbox controller store a spec
+/// differently from its rendering without changing it: the controller copies
+/// a template through typed Go structs, which canonicalize quantities
+/// (`1000m` as `1`, `4096Mi` as `4Gi`) and drop empty `omitempty` fields (an
+/// empty env value), and the CRD may add its scalar defaults (an empty name,
+/// `false`, protocol `TCP`). Anything else that is extra, missing or
+/// different refuses with its JSON path.
+pub fn spec_equivalent(expected: &Value, live: &Value, path: &str) -> Result<(), String> {
+    match (expected, live) {
+        (Value::Object(expected), Value::Object(live)) => {
+            for (key, value) in expected {
+                let at = format!("{path}/{key}");
+                match live.get(key) {
+                    Some(live) => spec_equivalent(value, live, &at)?,
+                    None if omitted_when_empty(value) => {}
+                    None => return Err(at),
+                }
+            }
+            for (key, value) in live {
+                if !expected.contains_key(key) && !crd_default(key, value) {
+                    return Err(format!("{path}/{key}"));
+                }
+            }
+            Ok(())
+        }
+        (Value::Array(expected), Value::Array(live)) if expected.len() == live.len() => expected
+            .iter()
+            .zip(live)
+            .enumerate()
+            .try_for_each(|(index, (expected, live))| {
+                spec_equivalent(expected, live, &format!("{path}/{index}"))
+            }),
+        (Value::String(expected), Value::String(live))
+            if quantity_path(path) && super::client::quantities_equal(expected, live) =>
+        {
+            Ok(())
+        }
+        (expected, live) if expected == live => Ok(()),
+        _ => Err(path.to_owned()),
+    }
+}
+
+/// A rendered value a Go `omitempty` field drops.
+fn omitted_when_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.is_empty(),
+        Value::Bool(flag) => !flag,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+        Value::Number(_) => false,
+    }
+}
+
+/// A value the API server may add with its CRD default.
+fn crd_default(key: &str, value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.is_empty() || (key == "protocol" && text == "TCP"),
+        Value::Bool(flag) => !flag,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+        Value::Number(_) => false,
+    }
+}
+
+/// Resource quantities, which the controller may store canonicalized.
+fn quantity_path(path: &str) -> bool {
+    path.contains("/resources/requests/")
+        || path.contains("/resources/limits/")
+        || path.ends_with("/sizeLimit")
+}
+
 /// Refuse shape inputs that carry any environment state, a legacy identity,
 /// or the confidential runtime.
 pub fn validate_pool_template_opts(opts: &TemplateOpts) -> anyhow::Result<()> {
@@ -469,4 +543,4 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 #[path = "warm_pool_tests.rs"]
-mod tests;
+pub(crate) mod tests;
