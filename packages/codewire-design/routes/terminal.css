@@ -82,7 +82,8 @@ dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
   .cw-terminal-header { padding-inline: var(--space-3); }
   .cw-terminal-drawer { height: 55vh; }
   .cw-terminal-heading .cw-status { display: none; }
-  .cw-terminal-footer { gap: var(--space-3); }
+  /* Resources and the Sandbox ID wrap to two tight lines on phones. */
+  .cw-terminal-footer { gap: var(--space-1) var(--space-3); }
   .cw-terminal-session-tools select { width: 100%; max-width: 100%; }
   .cw-terminal-session-tools form { display: grid; grid-template-columns: minmax(0, 1fr) auto; width: 100%; }
   .cw-terminal-session-tools form > label { grid-column: 1 / -1; }
