@@ -37,6 +37,7 @@ use codewire_platform_credentials::{
 use codewire_protected_store::ProtectedValue;
 use uuid::Uuid;
 
+use crate::timing::{self, Phase};
 use crate::{
     BrokerCredentialLease, BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest,
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
@@ -356,7 +357,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         credentials: Arc<PlatformCredentialStore>,
         profiles: PlatformAccessProfileStore,
     ) -> Result<Self, PlatformRuntimeError> {
-        let session = authority.current_session().await?;
+        let session = timing::timed(Phase::Authority, authority.current_session()).await?;
         session.validate()?;
         Ok(Self {
             authority,
@@ -370,9 +371,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
     }
 
     async fn session(&self) -> Result<PlatformRuntimeSession, BrokerLeaseError> {
-        let mut current = self
-            .authority
-            .current_session()
+        let mut current = timing::timed(Phase::Authority, self.authority.current_session())
             .await
             .map_err(runtime_error)?;
         current.validate().map_err(runtime_error)?;
@@ -396,20 +395,20 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             grants,
             reconnect_required,
         } = match &session.identity {
-            RuntimeIdentity::Hosted { .. } => self
-                .profiles
-                .evaluate_grants(&session.context)
-                .await
-                .map_err(profile_error)?,
+            RuntimeIdentity::Hosted { .. } => timing::timed(
+                Phase::Grants,
+                self.profiles.evaluate_grants(&session.context),
+            )
+            .await
+            .map_err(profile_error)?,
             RuntimeIdentity::OwnerLocal {
                 profile: Some(profile),
                 ..
             } => {
-                let grants = self
-                    .authority
-                    .owner_local_grants(&session)
-                    .await
-                    .map_err(runtime_error)?;
+                let grants =
+                    timing::timed(Phase::Grants, self.authority.owner_local_grants(&session))
+                        .await
+                        .map_err(runtime_error)?;
                 if grants.iter().any(|grant| {
                     grant.environment_id != session.context.environment_id
                         || grant.environment_generation != session.context.environment_generation
@@ -455,11 +454,13 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 .unwrap_or(session.identity_expires_at_unix)
                 .min(session.identity_expires_at_unix),
         );
-        let record = self
-            .credentials
-            .record(&session.credential_owner, &grant.credential_id)
-            .await
-            .map_err(credential_error)?;
+        let record = timing::timed(
+            Phase::Record,
+            self.credentials
+                .record(&session.credential_owner, &grant.credential_id),
+        )
+        .await
+        .map_err(credential_error)?;
         if record.metadata.placement != Placement::Platform
             || record.metadata.owner != session.credential_owner
             || record.version.revocation_generation == 0
@@ -709,15 +710,16 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         }
         let permission = GrantPermission { operation, route };
         let before = self.admit(&slot, permission.clone()).await?;
-        let material = self
-            .credentials
-            .read_for_broker(
+        let material = timing::timed(
+            Phase::MaterialRead,
+            self.credentials.read_for_broker(
                 &before.record.metadata.owner,
                 &before.record.metadata.id,
                 before.record.version,
-            )
-            .await
-            .map_err(credential_error)?;
+            ),
+        )
+        .await
+        .map_err(credential_error)?;
         // OpenBao unwrap and SQL lock waits may outlive the original authority.
         // Recheck runtime, exact profile selection, current record and deadline.
         let mut after = self.admit(&slot, permission).await?;

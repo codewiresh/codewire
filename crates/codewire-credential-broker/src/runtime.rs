@@ -30,6 +30,7 @@ use crate::github_app::{
 };
 use crate::openai::OpenAiChatGptOAuthAdapter;
 use crate::refresh_failure::{ProviderRejection, RefreshFailure};
+use crate::timing::{self, Phase};
 use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiApiKeyAdapter, OpenAiStreamingResponse,
     ValidatedOpenAiRequest,
@@ -807,6 +808,10 @@ impl BrokerHttpResponse {
     pub fn into_parts(self) -> (StatusCode, HeaderMap, BrokerResponseBody) {
         (self.status, self.headers, self.body)
     }
+
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
 }
 
 /// Request/response failures safe to return over the material-free bridge.
@@ -1178,16 +1183,17 @@ where
             .prepare_validated(lease, validated)
             .map_err(map_adapter_error)?
             .into_parts();
-        let response = self
-            .upstream
-            .execute(BrokerUpstreamRequest {
+        let response = timing::timed(
+            Phase::Provider,
+            self.upstream.execute(BrokerUpstreamRequest {
                 method,
                 target,
                 headers,
                 body,
-            })
-            .await
-            .map_err(map_upstream_error)?;
+            }),
+        )
+        .await
+        .map_err(map_upstream_error)?;
         let (status, headers, body) = response.into_parts();
         if status.is_informational() {
             return Err(BrokerRequestError::UpstreamFailed);
@@ -1314,16 +1320,17 @@ where
         BrokerRequestError,
     > {
         let (method, target, headers, body, response_policy) = prepared.into_parts();
-        let upstream = self
-            .upstream
-            .execute(BrokerUpstreamRequest {
+        let upstream = timing::timed(
+            Phase::Provider,
+            self.upstream.execute(BrokerUpstreamRequest {
                 method,
                 target,
                 headers,
                 body,
-            })
-            .await
-            .map_err(map_upstream_error)?;
+            }),
+        )
+        .await
+        .map_err(map_upstream_error)?;
         Ok((upstream, response_policy))
     }
 
@@ -1332,16 +1339,17 @@ where
         prepared: crate::PreparedOpenAiRequest,
     ) -> Result<(BrokerUpstreamResponse, crate::PreparedOpenAiResponse), BrokerRequestError> {
         let (method, target, headers, body, response_policy) = prepared.into_parts();
-        let upstream = self
-            .upstream
-            .execute(BrokerUpstreamRequest {
+        let upstream = timing::timed(
+            Phase::Provider,
+            self.upstream.execute(BrokerUpstreamRequest {
                 method,
                 target,
                 headers,
                 body,
-            })
-            .await
-            .map_err(map_upstream_error)?;
+            }),
+        )
+        .await
+        .map_err(map_upstream_error)?;
         Ok((upstream, response_policy))
     }
 
@@ -1403,9 +1411,11 @@ where
                     generation,
                 });
             }
-            match self
-                .refresh_oauth_credential(credential, refresh_request)
-                .await?
+            match timing::timed(
+                Phase::Refresh,
+                self.refresh_oauth_credential(credential, refresh_request),
+            )
+            .await?
             {
                 Some(()) => {
                     // Persisting a rotated token does not authorize using it.
@@ -1601,9 +1611,11 @@ where
                 .github_app_authorization
                 .as_ref()
                 .ok_or(BrokerRequestError::AuthorityUnavailable)?;
-            match self
-                .refresh_github_app_credential(bundle, refresh_request, Arc::clone(owner))
-                .await?
+            match timing::timed(
+                Phase::Refresh,
+                self.refresh_github_app_credential(bundle, refresh_request, Arc::clone(owner)),
+            )
+            .await?
             {
                 Some(()) => {
                     // Durable publication never substitutes authority. Reacquire
@@ -3816,6 +3828,121 @@ mod tests {
         assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
         assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
         assert_eq!(state.response_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn oauth_unauthorized_retry_times_both_provider_requests_and_one_refresh() {
+        let now = current_unix_time().expect("current time");
+        let initial_access_token = jwt(json!({ "exp": now + 3_600 }));
+        let refreshed_access_token = jwt(json!({ "exp": now + 7_200 }));
+        let refresh_response = serde_json::to_vec(&json!({
+            "access_token": refreshed_access_token.clone(),
+            "refresh_token": "synthetic-new-refresh-token",
+            "token_type": "bearer"
+        }))
+        .unwrap();
+        let (broker, state) = oauth_broker_with_initial_token(
+            initial_access_token.clone(),
+            BTreeSet::from([initial_access_token]),
+            StatusCode::OK,
+            refresh_response,
+            refreshed_access_token,
+            Duration::ZERO,
+        );
+
+        let (response, timings) = timing::measure(broker.execute(request())).await;
+        assert_eq!(response.unwrap().status(), StatusCode::OK);
+        // The rejected request and its one replay. The refresh exchange itself
+        // runs in its tracked task and is inside the one refresh's time.
+        assert_eq!(timings.provider.count, 2);
+        assert_eq!(state.response_count.load(Ordering::Relaxed), 2);
+        assert_eq!(timings.refresh.count, 1);
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert!(timings.refresh.elapsed <= timings.total);
+        assert!(timings.provider.elapsed <= timings.total);
+    }
+
+    #[tokio::test]
+    async fn bridged_request_writes_one_secret_free_timing_line() {
+        let (log, _guard) = crate::timing::tests::TimingLog::install();
+        let environment_id = Uuid::new_v4();
+        let (input_tx, input_rx) = mpsc::channel(3);
+        let (output_tx, mut output_rx) = mpsc::channel(8);
+        let bridge = tokio::spawn(crate::bridge::tests::run_channel_test_bridge(
+            Arc::new(broker()),
+            input_rx,
+            output_tx,
+            environment_id,
+            4,
+        ));
+        input_tx
+            .send(v1::CredentialBridgeGuestMessage {
+                payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
+                    v1::CredentialBridgeReady {
+                        protocol_version:
+                            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        environment_id: environment_id.to_string(),
+                        environment_generation: 4,
+                    },
+                )),
+            })
+            .await
+            .unwrap();
+        let bridged = request();
+        let request_id = bridged.request_id.clone();
+        input_tx
+            .send(v1::CredentialBridgeGuestMessage {
+                payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+                    bridged,
+                )),
+            })
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                v1::credential_bridge_host_message::Payload::ResponseEnd(_) => break,
+                v1::credential_bridge_host_message::Payload::ResponseStart(_)
+                | v1::credential_bridge_host_message::Payload::ResponseBody(_) => {}
+                _ => panic!("unexpected bridge frame"),
+            }
+        }
+        drop(input_tx);
+        assert_eq!(
+            bridge.await.unwrap(),
+            Err(crate::BrokerBridgeError::Unavailable)
+        );
+
+        let text = log.text();
+        for canary in [
+            SYNTHETIC_KEY,
+            "CW_TEST_OPENAI",
+            "Bearer",
+            "api.openai.com",
+            "/responses",
+            "hello",
+            "reflected",
+            "REDACTED",
+            environment_id.to_string().as_str(),
+        ] {
+            assert!(!text.contains(canary), "timing exposed {canary}");
+        }
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{text}");
+        crate::timing::tests::assert_secret_free(&lines[0]);
+        let fields = &lines[0]["fields"];
+        assert_eq!(fields["event"], "proxied_request");
+        assert_eq!(fields["request_id"], request_id.as_str());
+        assert_eq!(fields["slot"], "codex");
+        assert_eq!(fields["route"], "openai-api");
+        assert_eq!(fields["outcome"], "response");
+        assert_eq!(fields["status"], 200);
+        assert_eq!(fields["provider_requests"], 1);
+        assert_eq!(fields["refresh"], false);
+        assert_eq!(fields["refreshes"], 0);
     }
 
     #[tokio::test]

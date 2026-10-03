@@ -51,6 +51,10 @@ pub use config::CredentialServiceConfig;
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSPORT_GRACE: Duration = Duration::from_secs(5);
 
+/// Diagnostics when `RUST_LOG` is unset: closed runtime events plus the
+/// broker's secret-free per-phase timing lines on their dedicated target.
+pub const DEFAULT_LOG_FILTER: &str = "info,codewire_credential_broker::timing=info";
+
 /// Closed failure classes; provider, SQL, filesystem, Kubernetes and transport
 /// errors are never retained as a source or formatted into logs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]

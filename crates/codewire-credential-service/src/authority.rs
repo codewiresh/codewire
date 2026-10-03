@@ -14,6 +14,7 @@ use codewire_credential_broker::platform::bridge::{
 use codewire_credential_broker::platform::{
     PlatformPodIdentity, PlatformRuntimeAuthority, PlatformRuntimeError, PlatformRuntimeSession,
 };
+use codewire_credential_broker::timing::{self, Phase};
 #[cfg(feature = "enrollment")]
 use codewire_platform_credentials::PlatformCredentialStore;
 use codewire_platform_credentials::{
@@ -69,7 +70,7 @@ impl RuntimeKekAuthorities {
     pub(crate) fn credential_store(&self, pool: PgPool) -> Arc<PlatformCredentialStore> {
         Arc::new(PlatformCredentialStore::new(
             pool,
-            self.credential.clone(),
+            TimedKekProvider::wrap(self.credential.clone()),
             builtin_provider_catalog(),
         ))
     }
@@ -85,6 +86,66 @@ impl RuntimeKekAuthorities {
     #[cfg(feature = "enrollment")]
     pub(crate) fn delegation_provider(&self) -> Arc<dyn KekProvider> {
         self.application.clone()
+    }
+}
+
+#[cfg(any(feature = "enrollment", test))]
+pub(crate) use timed_kek::TimedKekProvider;
+
+#[cfg(any(feature = "enrollment", test))]
+mod timed_kek {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use codewire_credential_broker::timing::{self, Phase};
+    use codewire_protected_store::secret_envelope::{
+        DEK_BYTES, DekContext, GeneratedDek, KekProvider, KekProviderKind, SecretEnvelopeError,
+        WrappedDek,
+    };
+    use zeroize::Zeroizing;
+
+    /// Forwards every KEK operation unchanged and exactly once, and adds only
+    /// the wall time of `unwrap` to the current request's timing line.
+    pub(crate) struct TimedKekProvider(Arc<dyn KekProvider>);
+
+    impl TimedKekProvider {
+        pub(crate) fn wrap(inner: Arc<dyn KekProvider>) -> Arc<dyn KekProvider> {
+            Arc::new(Self(inner))
+        }
+    }
+
+    #[async_trait]
+    impl KekProvider for TimedKekProvider {
+        fn kind(&self) -> KekProviderKind {
+            self.0.kind()
+        }
+
+        async fn generate(
+            &self,
+            context: &DekContext,
+        ) -> Result<GeneratedDek, SecretEnvelopeError> {
+            self.0.generate(context).await
+        }
+
+        async fn unwrap(
+            &self,
+            context: &DekContext,
+            wrapped: &WrappedDek,
+        ) -> Result<Zeroizing<[u8; DEK_BYTES]>, SecretEnvelopeError> {
+            timing::timed(Phase::Unwrap, self.0.unwrap(context, wrapped)).await
+        }
+
+        async fn rewrap(
+            &self,
+            context: &DekContext,
+            wrapped: &WrappedDek,
+        ) -> Result<WrappedDek, SecretEnvelopeError> {
+            self.0.rewrap(context, wrapped).await
+        }
+
+        async fn authority_id(&self) -> Result<Option<String>, SecretEnvelopeError> {
+            self.0.authority_id().await
+        }
     }
 }
 
@@ -133,10 +194,14 @@ impl PlatformBridgeAuthenticator for KubernetesPlatformBridgeAuthenticator {
         // Validate both complete inputs before either verifier/network call.
         let (gateway_headers, workspace_headers) = authentication_headers(metadata)?;
         tokio::time::timeout(AUTHORITY_TIMEOUT, async {
-            let (gateway, workspace) = tokio::try_join!(
-                self.gateway_verifier.authenticate(&gateway_headers),
-                self.workspace_verifier.authenticate(&workspace_headers),
-            )
+            // Two concurrent TokenReviews; the epoch line records their wall time.
+            let (gateway, workspace) = timing::timed_count(Phase::TokenReview, 2, async {
+                tokio::try_join!(
+                    self.gateway_verifier.authenticate(&gateway_headers),
+                    self.workspace_verifier.authenticate(&workspace_headers),
+                )
+            })
+            .await
             .map_err(authentication_error)?;
             // Only these metadata-only opaque verifier results are retained.
             let identities = Identities::new(gateway, workspace).map_err(runtime_auth_error)?;
@@ -409,12 +474,29 @@ impl AuthoritySource {
             .ok_or(Error::Denied)
     }
 
+    /// Record each completed resolve's Kubernetes and SQL time for the timing
+    /// line of the request or epoch admission that asked for it.
     async fn resolve(&self, identities: &Identities) -> Result<Resolved, Error> {
+        let started = std::time::Instant::now();
+        let mut kubernetes = Duration::ZERO;
+        let resolved = self.resolve_timed(identities, &mut kubernetes).await;
+        timing::record_resolve(kubernetes, started.elapsed());
+        resolved
+    }
+
+    async fn resolve_timed(
+        &self,
+        identities: &Identities,
+        kubernetes: &mut Duration,
+    ) -> Result<Resolved, Error> {
         identities.ensure_live()?;
-        let gateway: Pod = Api::namespaced(self.client.clone(), identities.gateway.namespace())
-            .get(identities.gateway.pod_name())
-            .await
-            .map_err(kube_error)?;
+        let gateway: Pod = kubernetes_read(
+            kubernetes,
+            Api::namespaced(self.client.clone(), identities.gateway.namespace())
+                .get(identities.gateway.pod_name()),
+        )
+        .await
+        .map_err(kube_error)?;
         live_pod(&gateway, &identities.gateway)?;
         let environment = gateway_environment(&gateway)?;
         let scope = self.scope(&environment).await?;
@@ -501,8 +583,11 @@ impl AuthoritySource {
         )
         .map_err(|_| Error::Denied)?;
         let selection = metadata.selection(&scope, reserved_keys)?;
-        let lineage =
-            validate_lineage(&self.client, &scope, &gateway, &identities.workspace).await?;
+        let lineage = kubernetes_read(
+            kubernetes,
+            validate_lineage(&self.client, &scope, &gateway, &identities.workspace),
+        )
+        .await?;
         // Selecting a GitHub repository needs no profile. Orchestration records
         // that choice once, in the verified workspace Pod's binding; only then
         // is the creator's active connection authorized. A missing connection
@@ -541,6 +626,14 @@ impl AuthoritySource {
             lineage,
         })
     }
+}
+
+/// Await Kubernetes reads and add their wall time to `elapsed`.
+async fn kubernetes_read<T>(elapsed: &mut Duration, read: impl Future<Output = T>) -> T {
+    let started = std::time::Instant::now();
+    let output = read.await;
+    *elapsed = elapsed.saturating_add(started.elapsed());
+    output
 }
 
 fn platform_pod(identity: &VerifiedPodIdentity) -> Result<PlatformPodIdentity, Error> {

@@ -447,7 +447,18 @@ fn runtime_errors_are_closed_and_have_no_upstream_source() {
 async fn restricted_role_leases_refreshes_and_admits_only_the_published_generation() -> Result<()> {
     let f = Fixture::create().await?;
     let result = async {
-        let initial = lease(&f.adapter).await?;
+        let (initial, timings) = crate::timing::measure(lease(&f.adapter)).await;
+        let initial = initial?;
+        // Today's lease: two admissions, each two authority checks, one grant
+        // evaluation and one record read, around one material read.
+        ensure!(
+            (
+                timings.authority.count,
+                timings.grants.count,
+                timings.record.count,
+                timings.material_read.count
+            ) == (4, 2, 2, 1)
+        );
         ensure!(
             initial.grant().expires_at_unix == Some(f.adapter.session.identity_expires_at_unix)
         );
