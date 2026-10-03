@@ -33,9 +33,12 @@
 //!
 //! The pinned agent-sandbox controller still lacks guarded member deletes,
 //! current-revision adoption and Ready-after-labels (C0); configuration (C4)
-//! follows the pin bump. The unbound members' deny-all ingress is the
-//! template-owned NetworkPolicy the controller manages from the template's
-//! `networkPolicy`, which renders no ingress rule.
+//! follows the pin bump. Until a pool shows the controller's claim safety,
+//! nothing is replaced, scaled or deleted; on a cluster with no
+//! SandboxWarmPool at all, where no pool could show it, the first configured
+//! pool is created empty ([`bootstrap_writes`]). The unbound members'
+//! deny-all ingress is the template-owned NetworkPolicy the controller
+//! manages from the template's `networkPolicy`, which renders no ingress rule.
 //!
 //! Metrics carry the shape (`<cpu>m-<mem>mi-<disk>gi`), never an environment.
 
@@ -70,8 +73,9 @@ use crate::sandbox::warm_pool::{
 use crate::sandbox::{CRD_VERSION, EXTENSIONS_GROUP, SANDBOX_GROUP};
 pub use plan::{
     Budget, DeleteReason, DesiredPool, Observed, Placement, Plan, Reservation, Write,
-    clamp_members, controller_capable, image_cache_warm, member_reservation, node_budget,
-    node_unfit, pool_observed_by_capable_controller, settle_budget, template_spec_current,
+    bootstrap_writes, clamp_members, controller_capable, image_cache_warm, member_reservation,
+    node_budget, node_unfit, pool_observed_by_capable_controller, settle_budget,
+    template_spec_current,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
@@ -347,6 +351,26 @@ async fn reconcile_once(
         state.capable = Some(capable);
     }
     if !capable {
+        // Review H1 holds every pool, but a capable controller shows itself
+        // only on a pool it reconciled. With none at all (a fresh cluster, or
+        // every environment destroyed) bootstrap one empty pool.
+        if all_pools.is_empty() {
+            let templates = by_name(templates_api.list(&pool_selector).await?.items);
+            let cache_warm = image_cache_gate(client, namespace, config).await?;
+            for write in bootstrap_writes(&config.pools, &templates, cache_warm) {
+                match execute(&templates_api, &pools_api, &sandboxes_api, &write).await {
+                    Ok(()) => log_write(&write),
+                    Err(WriteError::Conflict) => break,
+                    Err(WriteError::Other(error)) => {
+                        return Err(error.context(format!(
+                            "warm pools: bootstrap {} {}",
+                            write_kind(&write),
+                            write_name(&write)
+                        )));
+                    }
+                }
+            }
+        }
         return Ok(PassResult::Held);
     }
     let templates = by_name(templates_api.list(&pool_selector).await?.items);
@@ -382,16 +406,7 @@ async fn reconcile_once(
             })
             .collect();
 
-    let cache_warm = if config.image_cache_enabled {
-        let daemon_set = dynamic_daemon_sets(client, namespace)
-            .get_opt(IMAGE_CACHE_NAME)
-            .await?
-            .map(serde_json::to_value)
-            .transpose()?;
-        image_cache_warm(daemon_set.as_ref(), &config.images())
-    } else {
-        true
-    };
+    let cache_warm = image_cache_gate(client, namespace, config).await?;
 
     // The node cap, from the RuntimeClass the pools render.
     let (overhead, node_selector) = match config.runtime_class() {
@@ -562,6 +577,24 @@ async fn reconcile_once(
         }
     }
     Ok(result)
+}
+
+/// A2b's gate: whether every cacheable pool image is held and rolled out.
+/// With the cache disabled (Kind) it is open without a read.
+async fn image_cache_gate(
+    client: &kube::Client,
+    namespace: &str,
+    config: &WarmPoolConfig,
+) -> anyhow::Result<bool> {
+    if !config.image_cache_enabled {
+        return Ok(true);
+    }
+    let daemon_set = dynamic_daemon_sets(client, namespace)
+        .get_opt(IMAGE_CACHE_NAME)
+        .await?
+        .map(serde_json::to_value)
+        .transpose()?;
+    Ok(image_cache_warm(daemon_set.as_ref(), &config.images()))
 }
 
 fn dynamic_daemon_sets(client: &kube::Client, namespace: &str) -> Api<DynamicObject> {
