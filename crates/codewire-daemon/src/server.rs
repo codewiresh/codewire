@@ -178,7 +178,38 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
-    serve(config, runtime_state, None, incoming, shutdown).await
+    serve(config, runtime_state, None, None, incoming, shutdown).await
+}
+
+/// Dedicated owner-private Linux trusted-host control. The binding is the
+/// saved environment UUID selected by its owning lifecycle. Generic guest and
+/// platform entrypoints never register this service.
+#[cfg(target_os = "linux")]
+pub async fn serve_host_control_grpc_with_incoming<I, IO, IE, F>(
+    config: Config,
+    binding: crate::host_control::HostControlBinding,
+    incoming: I,
+    shutdown: F,
+) -> Result<()>
+where
+    I: Stream<Item = std::result::Result<IO, IE>> + Send + 'static,
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
+    F: Future<Output = ()> + Send + 'static,
+{
+    anyhow::ensure!(
+        config.host.is_some(),
+        "host control requires trusted-host configuration"
+    );
+    serve(
+        config,
+        DaemonRuntimeState::ready(),
+        None,
+        Some(binding),
+        incoming,
+        shutdown,
+    )
+    .await
 }
 
 /// The hosted workspace daemon: [`serve_grpc_with_incoming`] plus, on a hosted
@@ -202,6 +233,7 @@ where
         config,
         DaemonRuntimeState::ready(),
         Some(codex_home),
+        None,
         incoming,
         shutdown,
     )
@@ -213,10 +245,16 @@ type CodexLoginHome = crate::codex_home::CodexHome;
 #[cfg(not(target_os = "linux"))]
 type CodexLoginHome = std::convert::Infallible;
 
+#[cfg(target_os = "linux")]
+type HostControlBinding = crate::host_control::HostControlBinding;
+#[cfg(not(target_os = "linux"))]
+type HostControlBinding = std::convert::Infallible;
+
 async fn serve<I, IO, IE, F>(
     config: Config,
     runtime_state: DaemonRuntimeState,
     codex_home: Option<CodexLoginHome>,
+    host_control_binding: Option<HostControlBinding>,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -243,6 +281,24 @@ where
     let implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
     let session_owner = implementation.session_engine();
     let _session_cancellation = session_owner.cancel_on_drop();
+    #[cfg(target_os = "linux")]
+    let host_control = match host_control_binding {
+        Some(binding) => Some(
+            crate::host_control::HostControlService::new(
+                &startup_config,
+                binding,
+                session_owner.clone(),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = host_control_binding;
+    #[cfg(target_os = "linux")]
+    let control_owner = host_control.as_ref().map(|service| service.owner());
+    #[cfg(target_os = "linux")]
+    let _control_cancellation = control_owner.as_ref().map(|owner| owner.close_on_drop());
     let bridge_owner = implementation.credential_bridge();
     // Also cancel admission/registered work if this entire server future is
     // dropped. Normal exits below still await the actual owner drain.
@@ -279,14 +335,24 @@ where
             ))
         });
     let observer_tx = shutdown_tx.clone();
+    #[cfg(target_os = "linux")]
+    let observer_control = control_owner.clone();
     let shutdown_observer = AbortOnDropHandle::new(tokio::spawn(async move {
         shutdown.await;
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = observer_control {
+            owner.close();
+        }
         let _ = observer_tx.send(true);
     }));
     let observed_shutdown = wait_for_shutdown(shutdown_rx.clone());
-    let serving = Server::builder()
-        .add_service(configure_grpc_service(implementation))
-        .serve_with_incoming_shutdown(incoming, observed_shutdown);
+    let router = Server::builder().add_service(configure_grpc_service(implementation));
+    #[cfg(target_os = "linux")]
+    let router = router.add_optional_service(host_control.map(|service|
+        codewire_gateway_proto::daemon::v1::host_control_service_server::HostControlServiceServer::new(service)
+            .max_decoding_message_size(crate::host_control::HOST_CONTROL_MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(crate::host_control::HOST_CONTROL_MAX_MESSAGE_BYTES)));
+    let serving = router.serve_with_incoming_shutdown(incoming, observed_shutdown);
     let mut shutdown_started = shutdown_rx.clone();
     let ingress_shutdown = shutdown_rx.clone();
     let startup_shutdown = shutdown_rx.clone();
@@ -351,6 +417,8 @@ where
 
     let result = async { tokio::select! {
         result = &mut serving => {
+            #[cfg(target_os = "linux")]
+            if let Some(owner) = &control_owner { owner.close(); }
             session_owner.cancel_launches();
             let _ = shutdown_tx.send(true);
             bridge_owner.shutdown().await;
@@ -360,6 +428,8 @@ where
             result.context("serve workspace daemon gRPC transport")
         }
         ingress_result = &mut ingress_serving => {
+            #[cfg(target_os = "linux")]
+            if let Some(owner) = &control_owner { owner.close(); }
             session_owner.cancel_launches();
             let shutting_down = *shutdown_rx.borrow();
             let _ = shutdown_tx.send(true);
@@ -383,6 +453,8 @@ where
             }
         }
         _ = shutdown_started.changed() => {
+            #[cfg(target_os = "linux")]
+            if let Some(owner) = &control_owner { owner.close(); }
             session_owner.cancel_launches();
             bridge_owner.shutdown().await;
             match timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut serving).await {
@@ -406,11 +478,20 @@ where
     } }.await;
     // `?` inside a branch must not bypass the owner finalizer. This includes
     // prepared hosted Open waiters as well as both local/hosted active epochs.
+    #[cfg(target_os = "linux")]
+    let control_cleanup = match control_owner {
+        Some(owner) => owner.drain().await.map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let control_cleanup = Ok::<(), anyhow::Error>(());
     let session_cleanup = session_owner.shutdown().await;
     bridge_owner.shutdown().await;
     shutdown_observer.abort();
     let _ = shutdown_observer.await;
-    result.and(session_cleanup.context("settle daemon session launches during shutdown"))
+    result
+        .and(control_cleanup.context("settle host control requests during shutdown"))
+        .and(session_cleanup.context("settle daemon session launches during shutdown"))
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {

@@ -228,6 +228,9 @@ enum Command {
         #[command(subcommand)]
         command: MeshCommand,
     },
+    #[cfg(target_os = "linux")]
+    #[command(about = "Manage trusted Mesh access to a local host")]
+    Control(HostControlArgs),
     #[command(name = "__hosted-daemon", hide = true)]
     HostedDaemon,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -422,6 +425,8 @@ where
         Command::Credentials(args) => handle_credentials_command(&globals, args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
+        #[cfg(target_os = "linux")]
+        Command::Control(args) => handle_host_control_command(&globals, args).await,
         Command::HostedDaemon => run_hosted_daemon().await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,

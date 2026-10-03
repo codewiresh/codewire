@@ -62,10 +62,485 @@ pub struct SessionClient {
     auth_token: MetadataValue<tonic::metadata::Ascii>,
 }
 
+/// Private target-side facade. It never falls back to legacy Launch/Input/Stop
+/// or starts an owner. A failed mutation reply is recovered only with Observe
+/// of that same request ID; the caller must retain its original scope.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub struct HostControlClient {
+    inner: v1::host_control_service_client::HostControlServiceClient<Channel>,
+    auth_token: MetadataValue<tonic::metadata::Ascii>,
+    environment_id: String,
+}
+
+#[cfg(target_os = "linux")]
+impl HostControlClient {
+    pub fn from_channel(
+        channel: Channel,
+        daemon_token: impl AsRef<str>,
+        environment_id: String,
+    ) -> Result<Self, SessionClientError> {
+        crate::host_control::canonical_uuid(&environment_id).map_err(|_| {
+            tonic::Status::invalid_argument("host control requires canonical environment UUID")
+        })?;
+        Ok(Self {
+            inner: v1::host_control_service_client::HostControlServiceClient::new(channel)
+                .max_decoding_message_size(crate::host_control::HOST_CONTROL_MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(crate::host_control::HOST_CONTROL_MAX_MESSAGE_BYTES),
+            auth_token: SessionClient::parse_auth_token(daemon_token)?,
+            environment_id,
+        })
+    }
+
+    fn authorized<T>(&self, value: T) -> Request<T> {
+        let mut request = Request::new(value);
+        request
+            .metadata_mut()
+            .insert(DAEMON_AUTH_TOKEN_HEADER, self.auth_token.clone());
+        request
+    }
+
+    pub async fn require_ready(&self) -> Result<v1::HostControlInfoResponse, SessionClientError> {
+        let mut client = self.inner.clone();
+        let info = client
+            .get_host_control_info(self.authorized(v1::HostControlInfoRequest {}))
+            .await?
+            .into_inner();
+        if info.protocol_version != crate::host_control::HOST_CONTROL_PROTOCOL
+            || info.environment_id != self.environment_id
+            || info.verbs
+                != [
+                    v1::HostControlVerb::Read as i32,
+                    v1::HostControlVerb::Launch as i32,
+                    v1::HostControlVerb::Input as i32,
+                    v1::HostControlVerb::Stop as i32,
+                ]
+        {
+            return Err(tonic::Status::failed_precondition(
+                "host control protocol or identity is unavailable",
+            )
+            .into());
+        }
+        Ok(info)
+    }
+
+    fn scope(&self, scope: Option<&v1::HostControlScope>) -> Result<(), SessionClientError> {
+        let scope =
+            scope.ok_or_else(|| tonic::Status::invalid_argument("missing host control scope"))?;
+        crate::host_control::Scope::from_wire(scope.clone())
+            .map_err(|_| tonic::Status::invalid_argument("invalid host control scope"))?;
+        if scope.environment_id != self.environment_id {
+            return Err(tonic::Status::failed_precondition(
+                "host control environment identity changed",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn grant_response(
+        &self,
+        response: v1::HostControlGrantsResponse,
+    ) -> Result<v1::HostControlGrantsResponse, SessionClientError> {
+        let mut ids = std::collections::BTreeSet::new();
+        if response.environment_id != self.environment_id
+            || response.grants.len() > 128
+            || response.grants.iter().any(|grant| {
+                let scope = v1::HostControlScope {
+                    environment_id: grant.environment_id.clone(),
+                    org_id: grant.org_id.clone(),
+                    network_id: grant.network_id.clone(),
+                    caller_key: grant.caller_key.clone(),
+                    target_key: grant.target_key.clone(),
+                    grant_id: grant.grant_id.clone(),
+                    expected_grant_revision: grant.revision,
+                };
+                self.scope(Some(&scope)).is_err()
+                    || !ids.insert(grant.grant_id.clone())
+                    || grant.revision > response.book_revision
+                    || grant.verbs.is_empty()
+                    || grant.verbs.len() > 4
+                    || !grant.verbs.windows(2).all(|pair| pair[0] < pair[1])
+                    || grant.verbs.iter().any(|verb| {
+                        !matches!(
+                            v1::HostControlVerb::try_from(*verb),
+                            Ok(v1::HostControlVerb::Read
+                                | v1::HostControlVerb::Launch
+                                | v1::HostControlVerb::Input
+                                | v1::HostControlVerb::Stop)
+                        )
+                    })
+            })
+        {
+            return Err(tonic::Status::failed_precondition(
+                "host control grant environment changed",
+            )
+            .into());
+        }
+        Ok(response)
+    }
+
+    pub async fn grants(&self) -> Result<v1::HostControlGrantsResponse, SessionClientError> {
+        self.require_ready().await?;
+        let mut client = self.inner.clone();
+        let response = client
+            .list_host_control_grants(self.authorized(v1::HostControlInfoRequest {}))
+            .await?
+            .into_inner();
+        self.grant_response(response)
+    }
+
+    pub async fn put_grant(
+        &self,
+        request: v1::HostControlPutGrantRequest,
+    ) -> Result<v1::HostControlGrantsResponse, SessionClientError> {
+        if request
+            .grant
+            .as_ref()
+            .is_none_or(|grant| grant.environment_id != self.environment_id)
+        {
+            return Err(tonic::Status::invalid_argument(
+                "host control grant requires exact environment UUID",
+            )
+            .into());
+        }
+        self.require_ready().await?;
+        let mut client = self.inner.clone();
+        let response = client
+            .put_host_control_grant(self.authorized(request))
+            .await?
+            .into_inner();
+        self.grant_response(response)
+    }
+
+    pub async fn revoke_grant(
+        &self,
+        request: v1::HostControlRevokeGrantRequest,
+    ) -> Result<v1::HostControlGrantsResponse, SessionClientError> {
+        self.require_ready().await?;
+        let mut client = self.inner.clone();
+        let response = client
+            .revoke_host_control_grant(self.authorized(request))
+            .await?
+            .into_inner();
+        self.grant_response(response)
+    }
+
+    fn receipt(
+        &self,
+        response: v1::HostControlReceipt,
+        request_id: &str,
+        scope: &v1::HostControlScope,
+    ) -> Result<v1::HostControlReceipt, SessionClientError> {
+        if response.request_id != request_id
+            || response.scope.as_ref() != Some(scope)
+            || crate::host_control::valid_sha256(&response.fingerprint_sha256).is_err()
+            || crate::host_control::session_id(&response.session_id).is_err()
+            || response.launch_generation == 0
+            || !matches!(
+                v1::HostControlVerb::try_from(response.verb),
+                Ok(v1::HostControlVerb::Launch
+                    | v1::HostControlVerb::Input
+                    | v1::HostControlVerb::Stop)
+            )
+            || v1::SessionLifecycleState::try_from(response.session_state).is_err()
+            || (response.input_acknowledged
+                && (response.verb != v1::HostControlVerb::Input as i32
+                    || response.phase != v1::HostControlRequestPhase::Completed as i32
+                    || response.cleanup_unknown))
+            || (response.phase == v1::HostControlRequestPhase::Completed as i32
+                && (response.cleanup_unknown
+                    || response.session_state == v1::SessionLifecycleState::Unspecified as i32))
+            || (response.phase == v1::HostControlRequestPhase::Unknown as i32
+                && !response.cleanup_unknown)
+            || !matches!(
+                v1::HostControlRequestPhase::try_from(response.phase),
+                Ok(v1::HostControlRequestPhase::Pending
+                    | v1::HostControlRequestPhase::Issued
+                    | v1::HostControlRequestPhase::Completed
+                    | v1::HostControlRequestPhase::Rejected
+                    | v1::HostControlRequestPhase::Unknown)
+            )
+        {
+            return Err(tonic::Status::failed_precondition(
+                "host control receipt identity is unavailable; retain original request",
+            )
+            .into());
+        }
+        Ok(response)
+    }
+
+    fn mutation_receipt(
+        &self,
+        response: v1::HostControlReceipt,
+        validated: &crate::host_control::Mutation,
+    ) -> Result<v1::HostControlReceipt, SessionClientError> {
+        let response = self.receipt(response, &validated.request_id, &validated.scope.to_wire())?;
+        let (expected_session, expected_generation) = match &validated.operation {
+            crate::host_control::Operation::Launch(_) => {
+                (format!("session-{}", validated.request_id), 1)
+            }
+            crate::host_control::Operation::Input(value) => {
+                (value.session_id.clone(), value.expected_launch_generation)
+            }
+            crate::host_control::Operation::Stop(value) => {
+                (value.session_id.clone(), value.expected_launch_generation)
+            }
+        };
+        if response.fingerprint_sha256 != validated.fingerprint
+            || response.verb != validated.verb() as i32
+            || response.session_id != expected_session
+            || response.launch_generation != expected_generation
+        {
+            return Err(tonic::Status::failed_precondition(
+                "host control request fingerprint changed; retain original request",
+            )
+            .into());
+        }
+        Ok(response)
+    }
+
+    pub async fn mutate(
+        &self,
+        request: v1::HostControlMutationRequest,
+    ) -> Result<v1::HostControlReceipt, SessionClientError> {
+        self.scope(request.scope.as_ref())?;
+        let validated = crate::host_control::Mutation::from_wire(request.clone())
+            .map_err(|_| tonic::Status::invalid_argument("invalid host control mutation"))?;
+        self.require_ready().await?;
+        let mut client = self.inner.clone();
+        let response = client
+            .mutate_host_session(self.authorized(request))
+            .await?
+            .into_inner();
+        self.mutation_receipt(response, &validated)
+    }
+
+    pub async fn observe(
+        &self,
+        request: v1::HostControlObserveRequest,
+    ) -> Result<v1::HostControlReceipt, SessionClientError> {
+        self.scope(request.scope.as_ref())?;
+        crate::host_control::canonical_uuid(&request.request_id)
+            .map_err(|_| tonic::Status::invalid_argument("invalid host control request UUID"))?;
+        self.require_ready().await?;
+        let mut client = self.inner.clone();
+        let response = client
+            .observe_host_request(self.authorized(request.clone()))
+            .await?
+            .into_inner();
+        self.receipt(
+            response,
+            &request.request_id,
+            request.scope.as_ref().expect("scope was validated"),
+        )
+    }
+
+    pub async fn list(
+        &self,
+        request: v1::HostControlReadRequest,
+    ) -> Result<v1::HostControlListSessionsResponse, SessionClientError> {
+        self.scope(request.scope.as_ref())?;
+        self.require_ready().await?;
+        let mut client = self.inner.clone();
+        let after = request.after_session_id.clone();
+        let maximum = if request.page_limit == 0 {
+            8
+        } else {
+            request.page_limit as usize
+        };
+        let response = client
+            .list_host_sessions(self.authorized(request))
+            .await?
+            .into_inner();
+        use prost::Message;
+        let mut previous = after.as_str();
+        if response.sessions.len() > maximum.min(8)
+            || response.encoded_len() > 256 * 1024
+            || response.sessions.iter().any(|record| {
+                let refused = record.session_id.as_str() <= previous
+                    || record.launch_generation == 0
+                    || crate::host_control::session_id(&record.session_id).is_err();
+                previous = &record.session_id;
+                refused
+            })
+            || (!response.next_session_id.is_empty()
+                && response
+                    .sessions
+                    .last()
+                    .is_none_or(|record| response.next_session_id != record.session_id))
+        {
+            return Err(tonic::Status::failed_precondition(
+                "host control page identity or bound changed",
+            )
+            .into());
+        }
+        Ok(response)
+    }
+
+    pub async fn get(
+        &self,
+        request: v1::HostControlReadRequest,
+    ) -> Result<v1::SessionRecord, SessionClientError> {
+        self.scope(request.scope.as_ref())?;
+        self.require_ready().await?;
+        let expected_id = request.session_id.clone();
+        let mut client = self.inner.clone();
+        let session = client
+            .get_host_session(self.authorized(request))
+            .await?
+            .into_inner()
+            .session
+            .ok_or(SessionClientError::MissingSessionRecord)?;
+        if session.session_id != expected_id || session.launch_generation == 0 {
+            return Err(tonic::Status::failed_precondition(
+                "host control session identity changed",
+            )
+            .into());
+        }
+        Ok(session)
+    }
+
+    pub async fn read_output(
+        &self,
+        request: v1::HostControlReadRequest,
+    ) -> Result<v1::ReadSessionOutputResponse, SessionClientError> {
+        self.scope(request.scope.as_ref())?;
+        self.require_ready().await?;
+        let mut client = self.inner.clone();
+        Ok(client
+            .read_host_session_output(self.authorized(request))
+            .await?
+            .into_inner())
+    }
+}
+
 pub struct SessionAttachment {
     input: mpsc::Sender<v1::SessionAttachMessage>,
     output: Streaming<v1::SessionAttachMessage>,
     session_id: String,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod host_control_tests {
+    use super::*;
+    use crate::host_control::tests as fixture;
+
+    fn client() -> HostControlClient {
+        // No request is issued. A lazy channel supplies only the generated
+        // wrapper type for these hostile response-admission fixtures.
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        HostControlClient::from_channel(channel, "synthetic-owner", fixture::scope().environment_id)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn host_control_client_requires_exact_mutation_session_generation_and_fingerprint() {
+        let client = client();
+        let request = fixture::stop(
+            3,
+            &fixture::scope(),
+            &format!("session-{}", uuid::Uuid::from_u128(4)),
+            7,
+        );
+        let receipt = v1::HostControlReceipt {
+            request_id: request.request_id.clone(),
+            scope: Some(request.scope.to_wire()),
+            fingerprint_sha256: request.fingerprint.clone(),
+            verb: v1::HostControlVerb::Stop as i32,
+            phase: v1::HostControlRequestPhase::Completed as i32,
+            session_id: format!("session-{}", uuid::Uuid::from_u128(4)),
+            launch_generation: 7,
+            session_state: v1::SessionLifecycleState::Stopped as i32,
+            exit_code: None,
+            cleanup_unknown: false,
+            input_acknowledged: false,
+            reason: "completed".into(),
+        };
+        assert!(client.mutation_receipt(receipt.clone(), &request).is_ok());
+        let mut changed = receipt.clone();
+        changed.launch_generation = 8;
+        assert!(client.mutation_receipt(changed, &request).is_err());
+        let mut changed = receipt.clone();
+        changed.session_id = format!("session-{}", uuid::Uuid::from_u128(5));
+        assert!(client.mutation_receipt(changed, &request).is_err());
+        let mut changed = receipt;
+        changed.fingerprint_sha256 = "0".repeat(64);
+        assert!(client.mutation_receipt(changed, &request).is_err());
+    }
+
+    #[tokio::test]
+    async fn host_control_client_refuses_false_unknown_ack_and_unspecified_outcomes() {
+        let client = client();
+        let request = fixture::input(
+            3,
+            &fixture::scope(),
+            &format!("session-{}", uuid::Uuid::from_u128(4)),
+            1,
+            b"public-fixture\n",
+        );
+        let receipt = v1::HostControlReceipt {
+            request_id: request.request_id.clone(),
+            scope: Some(request.scope.to_wire()),
+            fingerprint_sha256: request.fingerprint.clone(),
+            verb: v1::HostControlVerb::Input as i32,
+            phase: v1::HostControlRequestPhase::Completed as i32,
+            session_id: format!("session-{}", uuid::Uuid::from_u128(4)),
+            launch_generation: 1,
+            session_state: v1::SessionLifecycleState::Running as i32,
+            exit_code: None,
+            cleanup_unknown: false,
+            input_acknowledged: true,
+            reason: "input_acknowledged".into(),
+        };
+        assert!(client.mutation_receipt(receipt.clone(), &request).is_ok());
+        for field in ["unknown", "zero-state", "zero-verb", "foreign-scope"] {
+            let mut changed = receipt.clone();
+            match field {
+                "unknown" => {
+                    changed.phase = v1::HostControlRequestPhase::Unknown as i32;
+                    changed.cleanup_unknown = true;
+                }
+                "zero-state" => changed.session_state = 0,
+                "zero-verb" => changed.verb = 0,
+                "foreign-scope" => changed.scope.as_mut().unwrap().caller_key = vec![9; 32],
+                _ => unreachable!(),
+            }
+            assert!(
+                client.mutation_receipt(changed, &request).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn host_control_client_refuses_duplicate_partial_or_foreign_grants() {
+        let client = client();
+        let mut grant = fixture::grant(&fixture::scope(), 0).grant.unwrap();
+        grant.revision = 1;
+        let response = v1::HostControlGrantsResponse {
+            environment_id: fixture::scope().environment_id,
+            book_revision: 1,
+            grants: vec![grant.clone()],
+        };
+        assert!(client.grant_response(response.clone()).is_ok());
+        let mut duplicate = response.clone();
+        duplicate.grants.push(grant.clone());
+        assert!(client.grant_response(duplicate).is_err());
+        for field in ["key", "environment", "verb", "revision"] {
+            let mut changed = response.clone();
+            match field {
+                "key" => changed.grants[0].caller_key.pop().map(|_| ()).unwrap(),
+                "environment" => {
+                    changed.grants[0].environment_id = uuid::Uuid::from_u128(90).to_string()
+                }
+                "verb" => changed.grants[0].verbs.push(999),
+                "revision" => changed.grants[0].revision = 2,
+                _ => unreachable!(),
+            }
+            assert!(client.grant_response(changed).is_err(), "{field}");
+        }
+    }
 }
 
 #[derive(Clone)]

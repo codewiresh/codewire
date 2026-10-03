@@ -7,6 +7,7 @@
 //!   presets, and secrets.
 //! - `mesh_commands`: network, node, and local Mesh management.
 //! - `sessions`: local and remote session lifecycle, output, and messaging.
+//! - `host_control`: trusted Mesh grants and local host control.
 //! - `collaboration`: remote access grants and Mesh groups.
 //!
 //! WS10 WI-2 through WI-7 change these handler families in place; the former
@@ -20,6 +21,11 @@ pub(crate) use sessions::agents::*;
 mod host;
 #[cfg(unix)]
 pub(crate) use host::*;
+
+#[cfg(target_os = "linux")]
+mod host_control;
+#[cfg(target_os = "linux")]
+pub(crate) use host_control::*;
 
 #[cfg(target_os = "linux")]
 mod native;

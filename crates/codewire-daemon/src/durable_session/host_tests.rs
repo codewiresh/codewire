@@ -1,5 +1,319 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+use crate::host_control::tests as control_fixture;
+
+#[cfg(target_os = "linux")]
+async fn wait_control_pending(
+    owner: &crate::host_control::Owner,
+    request: &crate::host_control::Mutation,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if owner
+                .observe(&request.request_id, &request.scope)
+                .await
+                .is_ok_and(|record| record.phase == v1::HostControlRequestPhase::Pending as i32)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_caller_drop_keeps_one_target_owned_pending_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    let admission = engine.inner.retention_admission.lock().await;
+    let marker = temp.path().join("one-spawn");
+    let request = control_fixture::launch(
+        3,
+        &control_fixture::scope(),
+        &format!("printf x >> '{}'; sleep 60", marker.display()),
+    );
+    let waiting_owner = owner.clone();
+    let waiting_request = request.clone();
+    let waiter = tokio::spawn(async move { waiting_owner.mutate(waiting_request).await });
+    wait_control_pending(&owner, &request).await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    assert!(!marker.exists());
+    drop(admission);
+    let receipt = control_fixture::settled(&owner, &request).await;
+    assert_eq!(receipt.phase, v1::HostControlRequestPhase::Completed as i32);
+    owner.mutate(request.clone()).await.unwrap();
+    wait_file(&marker).await;
+    assert_eq!(std::fs::read(marker).unwrap(), b"x");
+    assert_eq!(engine.list().await.unwrap().len(), 1);
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_revoke_before_issue_prevents_launch_publication_and_pruning() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    let admission = engine.inner.retention_admission.lock().await;
+    let request = control_fixture::launch(3, &control_fixture::scope(), "sleep 60");
+    let waiting_owner = owner.clone();
+    let waiting_request = request.clone();
+    let waiter = tokio::spawn(async move { waiting_owner.mutate(waiting_request).await });
+    wait_control_pending(&owner, &request).await;
+    owner
+        .revoke_grant(v1::HostControlRevokeGrantRequest {
+            expected_book_revision: 1,
+            grant_id: request.scope.grant_id.clone(),
+            expected_grant_revision: 1,
+        })
+        .await
+        .unwrap();
+    drop(admission);
+    let receipt = waiter.await.unwrap().unwrap();
+    assert_eq!(receipt.phase, v1::HostControlRequestPhase::Rejected as i32);
+    assert!(engine.list().await.unwrap().is_empty());
+    assert!(
+        !temp
+            .path()
+            .join("state/host-control/launch-stages")
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read_dir(temp.path().join("state/sessions"))
+            .unwrap()
+            .count(),
+        0
+    );
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_revoke_queued_input_and_stop_precedes_write_and_cancel() {
+    for stopping in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (owner, engine) = control_fixture::owner(temp.path()).await;
+        let marker = temp.path().join("input-effect");
+        let launched = owner
+            .mutate(control_fixture::launch(
+                3,
+                &control_fixture::scope(),
+                &format!(
+                    "read value; printf '%s' \"$value\" > '{}'; sleep 60",
+                    marker.display()
+                ),
+            ))
+            .await
+            .unwrap();
+        let handle = engine.handle(&launched.session_id).unwrap();
+        let operation = handle.operation.lock().await;
+        let request = if stopping {
+            control_fixture::stop(4, &control_fixture::scope(), &launched.session_id, 1)
+        } else {
+            control_fixture::input(
+                4,
+                &control_fixture::scope(),
+                &launched.session_id,
+                1,
+                b"must-not-write\n",
+            )
+        };
+        let waiting_owner = owner.clone();
+        let waiting_request = request.clone();
+        let waiter = tokio::spawn(async move { waiting_owner.mutate(waiting_request).await });
+        wait_control_pending(&owner, &request).await;
+        owner
+            .revoke_grant(v1::HostControlRevokeGrantRequest {
+                expected_book_revision: 1,
+                grant_id: request.scope.grant_id.clone(),
+                expected_grant_revision: 1,
+            })
+            .await
+            .unwrap();
+        assert!(!*handle.launch_cancellation.borrow());
+        drop(operation);
+        let receipt = waiter.await.unwrap().unwrap();
+        assert_eq!(receipt.phase, v1::HostControlRequestPhase::Rejected as i32);
+        assert!(!*handle.launch_cancellation.borrow());
+        assert!(!marker.exists());
+        assert_eq!(
+            engine.get(&launched.session_id).await.unwrap().state,
+            v1::SessionLifecycleState::Running as i32
+        );
+        owner.drain().await.unwrap();
+        engine.shutdown().await.unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_stale_generation_never_signals_or_inputs_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    let marker = temp.path().join("input-effect");
+    let launched = owner
+        .mutate(control_fixture::launch(
+            3,
+            &control_fixture::scope(),
+            &format!(
+                "read value; printf '%s' \"$value\" > '{}'; sleep 60",
+                marker.display()
+            ),
+        ))
+        .await
+        .unwrap();
+    owner
+        .mutate(control_fixture::stop(
+            4,
+            &control_fixture::scope(),
+            &launched.session_id,
+            1,
+        ))
+        .await
+        .unwrap();
+    let replacement = engine
+        .restart_with_generation(&launched.session_id, Some(1))
+        .await
+        .unwrap();
+    assert_eq!(replacement.launch_generation, 2);
+    for request in [
+        control_fixture::input(
+            5,
+            &control_fixture::scope(),
+            &launched.session_id,
+            1,
+            b"stale\n",
+        ),
+        control_fixture::stop(6, &control_fixture::scope(), &launched.session_id, 1),
+    ] {
+        assert_eq!(
+            owner.mutate(request).await.unwrap().phase,
+            v1::HostControlRequestPhase::Rejected as i32
+        );
+    }
+    assert!(!marker.exists());
+    let handle = engine.handle(&launched.session_id).unwrap();
+    assert!(!*handle.launch_cancellation.borrow());
+    assert_eq!(
+        engine.get(&launched.session_id).await.unwrap().state,
+        v1::SessionLifecycleState::Running as i32
+    );
+    assert!(
+        owner
+            .mutate(control_fixture::input(
+                7,
+                &control_fixture::scope(),
+                &launched.session_id,
+                2,
+                b"current\n"
+            ))
+            .await
+            .unwrap()
+            .input_acknowledged
+    );
+    assert_eq!(wait_file(&marker).await, "current");
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_issued_input_timeout_is_retained_ambiguous_without_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    let ready = temp.path().join("pipe-ready");
+    // Exercise actual kernel backpressure, independent of the host's default
+    // pipe capacity. Only the owned child's anonymous stdin pipe is resized.
+    let script = format!(
+        "exec /usr/bin/python3 -c 'import fcntl,time; fcntl.fcntl(0,fcntl.F_SETPIPE_SZ,4096); open(\"{}\",\"w\").write(\"ready\"); time.sleep(60)'",
+        ready.display()
+    );
+    let launched = owner
+        .mutate(control_fixture::launch(
+            3,
+            &control_fixture::scope(),
+            &script,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wait_file(&ready).await, "ready");
+    let request = control_fixture::input(
+        4,
+        &control_fixture::scope(),
+        &launched.session_id,
+        1,
+        &vec![b'x'; 65536],
+    );
+    let receipt = owner.mutate(request.clone()).await.unwrap();
+    assert!(receipt.unsettled());
+    let terminal = tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let receipt = owner
+                .observe(&request.request_id, &request.scope)
+                .await
+                .unwrap();
+            if !receipt.unsettled() {
+                break receipt;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(terminal.phase, v1::HostControlRequestPhase::Unknown as i32);
+    assert!(!terminal.input_acknowledged);
+    assert_eq!(owner.mutate(request).await.unwrap().phase, terminal.phase);
+    assert_eq!(
+        engine.get(&launched.session_id).await.unwrap().state,
+        v1::SessionLifecycleState::Running as i32
+    );
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_preserves_legacy_local_stop_prelock_projection_cancellation() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    let launched = owner
+        .mutate(control_fixture::launch(
+            3,
+            &control_fixture::scope(),
+            "sleep 60",
+        ))
+        .await
+        .unwrap();
+    let handle = engine.handle(&launched.session_id).unwrap();
+    let operation = handle.operation.lock().await;
+    let stopping_engine = engine.clone();
+    let session = launched.session_id;
+    let stopper = tokio::spawn(async move { stopping_engine.stop(&session).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if *handle.launch_cancellation.borrow() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(operation);
+    assert_eq!(
+        stopper.await.unwrap().unwrap().state,
+        v1::SessionLifecycleState::Stopped as i32
+    );
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
 fn host_engine(root: &Path) -> SessionEngine {
     std::fs::create_dir_all(root.join("home")).unwrap();
     let mut config = tests::test_engine(root).inner.config.clone();
@@ -158,6 +472,8 @@ async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid(
         let session_id = engine.create_session_id().await.unwrap();
         let metadata = PersistedSession {
             session_id: session_id.clone(),
+            #[cfg(target_os = "linux")]
+            control_origin: None,
             launch_generation: 1,
             name: String::new(),
             parent_session_id: None,

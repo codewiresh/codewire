@@ -199,6 +199,9 @@ enum PtyRuntimeControl {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedSession {
     session_id: String,
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    control_origin: Option<crate::host_control::Origin>,
     // Incarnation identity is admitted durably before launch effects. Zero is
     // an older record without a usable guarded-restart token.
     #[serde(default)]
@@ -470,6 +473,8 @@ impl SessionEngine {
         let session_id = self.create_session_id().await?;
         let persisted = PersistedSession {
             session_id: session_id.clone(),
+            #[cfg(target_os = "linux")]
+            control_origin: None,
             launch_generation: 1,
             name: request.name,
             parent_session_id: request.parent_session_id,
@@ -845,6 +850,325 @@ impl SessionEngine {
             })
             .await;
         result.clone().map_err(SessionError::Internal)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn initialize_host_control(&self) -> Result<(), SessionError> {
+        if self.inner.config.host.is_none() {
+            return Err(SessionError::FailedPrecondition(
+                "host control requires the host owner".into(),
+            ));
+        }
+        self.ensure_initialized().await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn admit_host_control_stage(
+        bytes: &[u8],
+        origin: &crate::host_control::Origin,
+    ) -> Result<(), crate::host_control::Error> {
+        use crate::host_control::Error;
+        let metadata: PersistedSession =
+            serde_json::from_slice(bytes).map_err(|_| Error::Storage)?;
+        if metadata.control_origin.as_ref() != Some(origin)
+            || metadata.session_id != format!("session-{}", origin.request_id)
+            || metadata.launch_generation != 1
+            || metadata.state != v1::SessionLifecycleState::Starting as i32
+            || metadata.started_at.is_some()
+            || metadata.finished_at.is_some()
+            || metadata.exit_code.is_some()
+            || metadata.output_end_offset != 0
+            || metadata.output_start_offset != 0
+            || !metadata.cleanup_unknown
+            || metadata.cleanup_confirmed
+            || !metadata.env.is_empty()
+            || metadata.environment_projection_required
+            || metadata.parent_session_id.is_some()
+        {
+            return Err(Error::Storage);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn execute_host_control(
+        &self,
+        owner: crate::host_control::Owner,
+        request: crate::host_control::Mutation,
+    ) -> Result<v1::SessionRecord, crate::host_control::Error> {
+        use crate::host_control::{Error, Operation};
+        if self.inner.config.host.is_none()
+            || request.scope.environment_id != owner.environment_id()
+        {
+            return Err(Error::Denied);
+        }
+        match &request.operation {
+            Operation::Launch(launch) => {
+                let launch = launch.clone();
+                let engine = self.clone();
+                self.own_launch(move |cancel| async move {
+                    engine
+                        .launch_host_control(owner, request, launch, cancel)
+                        .await
+                })
+                .await
+                .map_err(|_| Error::Unavailable)
+            }
+            Operation::Input(input) => {
+                let input = input.clone();
+                self.with_host_control_process(
+                    owner,
+                    request,
+                    &input.session_id,
+                    input.expected_launch_generation,
+                    Some(input.data),
+                )
+                .await
+            }
+            Operation::Stop(stop) => {
+                let stop = stop.clone();
+                self.with_host_control_process(
+                    owner,
+                    request,
+                    &stop.session_id,
+                    stop.expected_launch_generation,
+                    None,
+                )
+                .await
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn launch_host_control(
+        &self,
+        owner: crate::host_control::Owner,
+        request: crate::host_control::Mutation,
+        launch: v1::HostControlLaunch,
+        cancel: CancellationToken,
+    ) -> Result<v1::SessionRecord, SessionError> {
+        self.ensure_initialized().await?;
+        let admission = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(launch_cancelled_error()),
+            admission = self.inner.retention_admission.lock() => admission,
+        };
+        let session_id = format!("session-{}", request.request_id);
+        if lock(&self.inner.sessions).contains_key(&session_id) {
+            return Err(SessionError::AlreadyExists(
+                "controlled session identity is already retained".into(),
+            ));
+        }
+        let handles = lock(&self.inner.sessions)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for handle in handles {
+            if !launch.name.is_empty() && handle.metadata.lock().await.name == launch.name {
+                return Err(SessionError::AlreadyExists(
+                    "controlled session name is already retained".into(),
+                ));
+            }
+        }
+        let working_dir = if launch.working_dir.is_empty() {
+            self.inner.config.home_root.to_string_lossy().into_owned()
+        } else {
+            launch.working_dir
+        };
+        if !path_is_directory(&working_dir).await {
+            return Err(SessionError::InvalidArgument(
+                "controlled session working directory is unavailable".into(),
+            ));
+        }
+        let handle = Arc::new(SessionHandle {
+            metadata: AsyncMutex::new(PersistedSession {
+                session_id: session_id.clone(),
+                control_origin: Some(request.origin()),
+                launch_generation: 1,
+                name: launch.name,
+                parent_session_id: None,
+                state: v1::SessionLifecycleState::Starting as i32,
+                command: launch.command,
+                working_dir,
+                env: Vec::new(),
+                environment_projection_required: false,
+                pty: launch.pty,
+                term: launch.term,
+                width: launch.width,
+                height: launch.height,
+                created_at: PersistedTimestamp::now(),
+                started_at: None,
+                finished_at: None,
+                exit_code: None,
+                output_end_offset: 0,
+                output_start_offset: 0,
+                cleanup_confirmed: false,
+                cleanup_unknown: true,
+                status_message: "session starting".into(),
+            }),
+            output_index: Mutex::new(Vec::new()),
+            operation: AsyncMutex::new(()),
+            launch_cancellation: watch::channel(false).0,
+        });
+        let _operation = handle.operation.lock().await;
+        // Retention -> exact session operation -> grant/journal. This must
+        // precede even pruning or directory creation, not only process spawn.
+        owner.issue(&request).await.map_err(|_| {
+            SessionError::FailedPrecondition("controlled launch admission refused".into())
+        })?;
+        self.make_record_room_preserving(None).await?;
+        {
+            let metadata = handle.metadata.lock().await;
+            let bytes = serde_json::to_vec(&*metadata)
+                .map_err(|_| SessionError::Internal("encode controlled session".into()))?;
+            owner
+                .publish_session(&request, &bytes)
+                .await
+                .map_err(|_| SessionError::Internal("publish controlled session".into()))?;
+        }
+        lock(&self.inner.sessions).insert(session_id, handle.clone());
+        drop(admission);
+        self.start_process(handle.clone(), &cancel).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn with_host_control_process(
+        &self,
+        owner: crate::host_control::Owner,
+        request: crate::host_control::Mutation,
+        session_id: &str,
+        generation: u64,
+        input: Option<Vec<u8>>,
+    ) -> Result<v1::SessionRecord, crate::host_control::Error> {
+        use crate::host_control::Error;
+        self.ensure_initialized()
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        validate_session_id(session_id).map_err(|_| Error::Invalid)?;
+        let handle = self.handle(session_id).map_err(|_| Error::Unavailable)?;
+        let cancel = owner.cancellation();
+        let _operation = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(Error::Closed),
+            operation = handle.operation.lock() => operation,
+        };
+        let metadata = handle.metadata.lock().await;
+        if !metadata
+            .control_origin
+            .as_ref()
+            .is_some_and(|origin| origin.scope.same_principal(&request.scope))
+        {
+            return Err(Error::Denied);
+        }
+        if generation == 0 || metadata.launch_generation != generation || metadata.cleanup_unknown {
+            return Err(Error::Unavailable);
+        }
+        let captured = lock(&self.inner.active)
+            .get(session_id)
+            .map(|active| (active.token, active.control.clone()));
+        if input.is_some()
+            && (metadata.state != v1::SessionLifecycleState::Running as i32 || captured.is_none())
+        {
+            return Err(Error::Unavailable);
+        }
+        if captured.is_none() && is_live_state(metadata.state) {
+            return Err(Error::Unavailable);
+        }
+        drop(metadata);
+        owner.issue(&request).await?;
+        if let Some((_token, control)) = captured {
+            let dispatch = async {
+                match input {
+                    Some(data) => {
+                        let (reply, received) = oneshot::channel();
+                        control
+                            .send(SessionControl::Input { data, reply })
+                            .await
+                            .map_err(|_| Error::Unavailable)?;
+                        // The owning task keeps this receiver alive across RPC
+                        // loss, including the monitor's bounded write/flush.
+                        received
+                            .await
+                            .map_err(|_| Error::Unavailable)?
+                            .map_err(|_| Error::Unavailable)?;
+                    }
+                    None => {
+                        // Unlike legacy local Stop, no flag can precede admission.
+                        handle.launch_cancellation.send_replace(true);
+                        let (reply, received) = oneshot::channel();
+                        control
+                            .send(SessionControl::Stop { reply })
+                            .await
+                            .map_err(|_| Error::Unavailable)?;
+                        received.await.map_err(|_| Error::Unavailable)?;
+                    }
+                }
+                Ok::<_, Error>(())
+            };
+            // Queueing and the monitor's write/flush or cleanup share one
+            // bound. An issued timeout is retained Unknown, never replayable.
+            tokio::time::timeout(SESSION_INPUT_TIMEOUT, dispatch)
+                .await
+                .map_err(|_| Error::Unavailable)??;
+        }
+        let record = handle.metadata.lock().await.to_record();
+        if record.launch_generation != generation
+            || (request.verb() == v1::HostControlVerb::Stop
+                && (is_live_state(record.state) || record.cleanup_unknown))
+        {
+            return Err(Error::Unavailable);
+        }
+        Ok(record)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn get_host_control(
+        &self,
+        scope: &crate::host_control::Scope,
+        session_id: &str,
+    ) -> Result<v1::SessionRecord, crate::host_control::Error> {
+        use crate::host_control::Error;
+        self.ensure_initialized()
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        validate_session_id(session_id).map_err(|_| Error::Invalid)?;
+        let handle = self.handle(session_id).map_err(|_| Error::Unavailable)?;
+        let metadata = handle.metadata.lock().await;
+        if !metadata
+            .control_origin
+            .as_ref()
+            .is_some_and(|origin| origin.scope.same_principal(scope))
+        {
+            return Err(Error::Denied);
+        }
+        Ok(metadata.to_record())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn list_host_control(
+        &self,
+        scope: &crate::host_control::Scope,
+    ) -> Result<Vec<v1::SessionRecord>, crate::host_control::Error> {
+        self.ensure_initialized()
+            .await
+            .map_err(|_| crate::host_control::Error::Unavailable)?;
+        let handles = lock(&self.inner.sessions)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut records = Vec::new();
+        for handle in handles {
+            let metadata = handle.metadata.lock().await;
+            if metadata
+                .control_origin
+                .as_ref()
+                .is_some_and(|origin| origin.scope.same_principal(scope))
+            {
+                records.push(metadata.to_record());
+            }
+        }
+        records.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        Ok(records)
     }
 
     async fn create_session_id(&self) -> Result<String, SessionError> {
@@ -1598,6 +1922,19 @@ impl SessionEngineInner {
                     "session metadata identity mismatch in {}",
                     path.display()
                 )));
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(origin) = &metadata.control_origin {
+                origin.validate().map_err(|_| {
+                    SessionError::Internal("controlled session origin is invalid".into())
+                })?;
+                if self.config.host.is_none()
+                    || format!("session-{}", origin.request_id) != session_id
+                {
+                    return Err(SessionError::Internal(
+                        "controlled session origin identity is invalid".into(),
+                    ));
+                }
             }
             let legacy_projection = !metadata.env.is_empty();
             if legacy_projection {
@@ -3124,6 +3461,8 @@ mod tests {
         let session_id = engine.create_session_id().await.unwrap();
         let metadata = PersistedSession {
             session_id: session_id.clone(),
+            #[cfg(target_os = "linux")]
+            control_origin: None,
             launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
@@ -3644,6 +3983,8 @@ mod tests {
         file.sync_all().await.unwrap();
         let metadata = PersistedSession {
             session_id: session_id.into(),
+            #[cfg(target_os = "linux")]
+            control_origin: None,
             launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
@@ -4030,6 +4371,8 @@ mod tests {
 
         let mut metadata = PersistedSession {
             session_id: session_id.into(),
+            #[cfg(target_os = "linux")]
+            control_origin: None,
             launch_generation: 1,
             name: String::new(),
             parent_session_id: None,

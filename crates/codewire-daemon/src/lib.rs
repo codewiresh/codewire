@@ -7,6 +7,8 @@ mod durable_session;
 pub mod env;
 pub mod execution;
 pub mod files;
+#[cfg(target_os = "linux")]
+pub mod host_control;
 #[cfg(unix)]
 mod host_process;
 #[cfg(unix)]
@@ -27,5 +29,7 @@ pub use config::{
     WorkspaceBindingConfig,
 };
 pub use server::serve_grpc_with_incoming;
+#[cfg(target_os = "linux")]
+pub use server::serve_host_control_grpc_with_incoming;
 #[cfg(target_os = "linux")]
 pub use server::serve_hosted_grpc_with_incoming;

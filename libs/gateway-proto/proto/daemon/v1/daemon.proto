@@ -46,6 +46,149 @@ service DaemonService {
   rpc Readlink(ReadlinkRequest) returns (ReadlinkResponse);
 }
 
+// Target-owned trusted-host control. Registered only on the Linux host's
+// owner-private UDS, never on guest or platform daemon ingress. The future
+// authenticated Mesh adapter supplies its verified principal here; these
+// fields are not assertions accepted directly from a network caller. Owner
+// grant administration is never a Mesh wire operation.
+service HostControlService {
+  rpc GetHostControlInfo(HostControlInfoRequest) returns (HostControlInfoResponse);
+  rpc PutHostControlGrant(HostControlPutGrantRequest) returns (HostControlGrantsResponse);
+  rpc RevokeHostControlGrant(HostControlRevokeGrantRequest) returns (HostControlGrantsResponse);
+  rpc ListHostControlGrants(HostControlInfoRequest) returns (HostControlGrantsResponse);
+  // Registration is durable. RPC cancellation does not cancel the target's
+  // owning task. A lost reply is recovered with Observe, never a new request.
+  rpc MutateHostSession(HostControlMutationRequest) returns (HostControlReceipt);
+  rpc ObserveHostRequest(HostControlObserveRequest) returns (HostControlReceipt);
+  rpc ListHostSessions(HostControlReadRequest) returns (HostControlListSessionsResponse);
+  rpc GetHostSession(HostControlReadRequest) returns (GetSessionResponse);
+  rpc ReadHostSessionOutput(HostControlReadRequest) returns (ReadSessionOutputResponse);
+}
+
+enum HostControlVerb {
+  HOST_CONTROL_VERB_UNSPECIFIED = 0;
+  HOST_CONTROL_VERB_READ = 1;
+  HOST_CONTROL_VERB_LAUNCH = 2;
+  HOST_CONTROL_VERB_INPUT = 3;
+  HOST_CONTROL_VERB_STOP = 4;
+}
+
+enum HostControlRequestPhase {
+  HOST_CONTROL_REQUEST_PHASE_UNSPECIFIED = 0;
+  HOST_CONTROL_REQUEST_PHASE_PENDING = 1;
+  HOST_CONTROL_REQUEST_PHASE_ISSUED = 2;
+  HOST_CONTROL_REQUEST_PHASE_COMPLETED = 3;
+  HOST_CONTROL_REQUEST_PHASE_REJECTED = 4;
+  HOST_CONTROL_REQUEST_PHASE_UNKNOWN = 5;
+}
+
+message HostControlInfoRequest {}
+message HostControlInfoResponse {
+  uint32 protocol_version = 1;
+  string environment_id = 2;
+  repeated HostControlVerb verbs = 3;
+}
+
+message HostControlGrant {
+  string grant_id = 1;
+  string environment_id = 2;
+  string org_id = 3;
+  string network_id = 4;
+  bytes caller_key = 5;
+  bytes target_key = 6;
+  repeated HostControlVerb verbs = 7;
+  // Zero only on creation; edits compare this prior revision and increment it.
+  uint64 revision = 8;
+  bool revoked = 9;
+}
+message HostControlPutGrantRequest {
+  uint64 expected_book_revision = 1;
+  HostControlGrant grant = 2;
+}
+message HostControlRevokeGrantRequest {
+  uint64 expected_book_revision = 1;
+  string grant_id = 2;
+  uint64 expected_grant_revision = 3;
+}
+message HostControlGrantsResponse {
+  string environment_id = 1;
+  uint64 book_revision = 2;
+  repeated HostControlGrant grants = 3;
+}
+
+message HostControlScope {
+  string environment_id = 1;
+  string org_id = 2;
+  string network_id = 3;
+  bytes caller_key = 4;
+  bytes target_key = 5;
+  string grant_id = 6;
+  uint64 expected_grant_revision = 7;
+}
+message HostControlLaunch {
+  repeated string command = 1;
+  string working_dir = 2;
+  bool pty = 3;
+  string term = 4;
+  int32 width = 5;
+  int32 height = 6;
+  string name = 7;
+}
+message HostControlInput {
+  string session_id = 1;
+  uint64 expected_launch_generation = 2;
+  bytes data = 3;
+}
+message HostControlStop {
+  string session_id = 1;
+  uint64 expected_launch_generation = 2;
+}
+message HostControlMutationRequest {
+  string request_id = 1;
+  HostControlScope scope = 2;
+  oneof operation {
+    HostControlLaunch launch = 3;
+    HostControlInput input = 4;
+    HostControlStop stop = 5;
+  }
+}
+message HostControlObserveRequest {
+  string request_id = 1;
+  HostControlScope scope = 2;
+}
+message HostControlReceipt {
+  string request_id = 1;
+  HostControlScope scope = 2;
+  string fingerprint_sha256 = 3;
+  HostControlVerb verb = 4;
+  HostControlRequestPhase phase = 5;
+  string session_id = 6;
+  uint64 launch_generation = 7;
+  SessionLifecycleState session_state = 8;
+  optional int32 exit_code = 9;
+  bool cleanup_unknown = 10;
+  bool input_acknowledged = 11;
+  // Fixed material-free code. An absent/unknown receipt is never permission
+  // to relaunch or repeat input. Completed Launch means admission settled,
+  // not that the durable command exited.
+  string reason = 12;
+}
+message HostControlReadRequest {
+  HostControlScope scope = 1;
+  string session_id = 2;
+  uint64 offset = 3;
+  // At most 256KiB; zero selects that default.
+  uint64 limit = 4;
+  bool allow_history_gap = 5;
+  string after_session_id = 6;
+  // List pages contain at most eight bounded controlled session records.
+  uint32 page_limit = 7;
+}
+message HostControlListSessionsResponse {
+  repeated SessionRecord sessions = 1;
+  string next_session_id = 2;
+}
+
 enum DaemonState {
   DAEMON_STATE_UNSPECIFIED = 0;
   DAEMON_STATE_UNSUPPORTED = 1;

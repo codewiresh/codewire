@@ -447,9 +447,9 @@ fn check_socket_path(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn connect_host(
+async fn connect_host_channel(
     environment: &HostEnvironment,
-) -> anyhow::Result<codewire_daemon::client::SessionClient> {
+) -> anyhow::Result<(tonic::transport::Channel, String)> {
     let root = environment.root();
     existing_private_directory(&root)?;
     let socket = root.join("daemon.sock");
@@ -487,7 +487,33 @@ async fn connect_host(
         .connect_with_connector(connector)
         .await?;
     let token: String = read_private(&root.join("daemon-token.json"))?;
+    Ok((channel, token))
+}
+
+async fn connect_host(
+    environment: &HostEnvironment,
+) -> anyhow::Result<codewire_daemon::client::SessionClient> {
+    let (channel, token) = connect_host_channel(environment).await?;
     let client = codewire_daemon::client::SessionClient::from_channel(channel, token)?;
+    client.require_ready().await?;
+    Ok(client)
+}
+
+/// Grant inspection and delegated requests never start or repair an owner.
+#[cfg(target_os = "linux")]
+pub(crate) async fn host_control_client(
+    environment: &HostEnvironment,
+) -> anyhow::Result<codewire_daemon::client::HostControlClient> {
+    if environment.state != "running" {
+        anyhow::bail!("host control requires an already running host environment");
+    }
+    let current = host_environment_at(&environment.root())?;
+    if current.id != environment.id || current.state != "running" {
+        anyhow::bail!("host control environment identity changed");
+    }
+    let (channel, token) = connect_host_channel(&current).await?;
+    let client =
+        codewire_daemon::client::HostControlClient::from_channel(channel, token, current.id)?;
     client.require_ready().await?;
     Ok(client)
 }
@@ -696,6 +722,15 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
             }=>{},
         }
     };
+    #[cfg(target_os = "linux")]
+    let result = codewire_daemon::serve_host_control_grpc_with_incoming(
+        config,
+        codewire_daemon::host_control::HostControlBinding::new(environment.id.clone())?,
+        incoming,
+        shutdown,
+    )
+    .await;
+    #[cfg(not(target_os = "linux"))]
     let result = codewire_daemon::serve_grpc_with_incoming(config, incoming, shutdown).await;
     if let Ok(after) = fs::symlink_metadata(&socket)
         && (after.dev(), after.ino()) == (socket_identity.dev(), socket_identity.ino())
