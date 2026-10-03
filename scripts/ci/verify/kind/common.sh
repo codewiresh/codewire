@@ -2683,7 +2683,11 @@ file_service_smoke() (
   local environment_id=env-crd-smoke
   local claim_name=sandbox-env-crd-smoke
   local daemon_pod=crd-smoke-workspace-daemon
+  # The Sandbox that controls the daemon Pod, named like it, as the
+  # controller names a Sandbox's own Pod.
+  local sandbox_name="$daemon_pod"
   local gateway_token daemon_token original_replicas pod_ip pod_uid ready
+  local claim_uid sandbox_uid pod_owner
   gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
   daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
@@ -2699,6 +2703,9 @@ file_service_smoke() (
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_file_service_binding() {
     set +e
+    # Orphan the retained daemon Pod: it outlives its synthetic Sandbox.
+    kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
+      --ignore-not-found=true --wait=true >/dev/null
     kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
       --ignore-not-found=true --wait=true >/dev/null
     kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
@@ -2726,6 +2733,8 @@ file_service_smoke() (
     echo "::error::file-service fixture Pod has no current IP/UID"
     return 1
   fi
+  kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
+    --ignore-not-found=true --wait=true >/dev/null
   kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
     --ignore-not-found=true --wait=true >/dev/null
   kubectl_apply -f - <<EOF
@@ -2738,6 +2747,52 @@ spec:
   warmPoolRef:
     name: kind-file-service-ready-fixture
 EOF
+  # Orchestration reaches a workspace Pod only through Claim status ->
+  # bound Sandbox -> the Pod that Sandbox controls, and derives an unbound
+  # legacy daemon's credential only from that exact Pod (Program #2238 B2).
+  # Give the retained daemon Pod that chain while the controller is
+  # quiesced, so nothing reconciles the synthetic Sandbox.
+  claim_uid="$(
+    kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}'
+  )"
+  if [ -z "$claim_uid" ]; then
+    echo "::error::file-service fixture SandboxClaim has no UID"
+    return 1
+  fi
+  kubectl_apply -f - <<EOF
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: ${sandbox_name}
+  namespace: ${SANDBOX_NS}
+  annotations:
+    agents.x-k8s.io/pod-name: ${daemon_pod}
+  ownerReferences:
+    - apiVersion: extensions.agents.x-k8s.io/v1beta1
+      kind: SandboxClaim
+      name: ${claim_name}
+      uid: ${claim_uid}
+      controller: true
+spec:
+  podTemplate:
+    spec:
+      containers:
+        - name: workspace
+          image: codewire-gateway:e2e
+EOF
+  sandbox_uid="$(
+    kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.metadata.uid}'
+  )"
+  if [ -z "$sandbox_uid" ]; then
+    echo "::error::file-service fixture Sandbox has no UID"
+    return 1
+  fi
+  pod_owner="$(
+    jq -cn --arg sandbox "$sandbox_name" --arg uid "$sandbox_uid" --arg pod_uid "$pod_uid" \
+      '{metadata: {uid: $pod_uid, ownerReferences: [{apiVersion: "agents.x-k8s.io/v1beta1",
+        kind: "Sandbox", name: $sandbox, uid: $uid, controller: true}]}}'
+  )"
+  kubectl -n "$SANDBOX_NS" patch pod "$daemon_pod" --type=merge -p "$pod_owner"
   kubectl -n "$SANDBOX_NS" patch sandboxclaim "$claim_name" \
     --subresource=status --type=merge \
     -p "{\"status\":{\"sandbox\":{\"name\":\"${daemon_pod}\",\"podIPs\":[\"${pod_ip}\"]},\"conditions\":[{\"lastTransitionTime\":\"2026-01-01T00:00:00Z\",\"message\":\"Kind file-service fixture is ready\",\"reason\":\"Ready\",\"status\":\"True\",\"type\":\"Ready\"}]}}"
@@ -2827,6 +2882,8 @@ DELETE FROM sandbox_environment_backend
 WHERE environment_id = '$environment_id';
 DELETE FROM environments WHERE id = '$environment_id';
 SQL
+  kubectl -n "$SANDBOX_NS" delete sandbox "$sandbox_name" --cascade=orphan \
+    --ignore-not-found=true --wait=true >/dev/null
   kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
     --ignore-not-found=true --wait=true >/dev/null
   kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \

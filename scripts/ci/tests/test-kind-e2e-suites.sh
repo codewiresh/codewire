@@ -105,6 +105,19 @@ awk '
   /DELETE FROM sandbox_environment_backend/ { cleaned = terminal }
   END { exit !(terminal && cleaned) }
 ' <<<"$file_fixture" || fail 'terminal smoke must follow authenticated binding and precede cleanup'
+# Program #2238 B2: an unbound legacy daemon's credential is derived only from
+# the exact Pod its Claim's bound Sandbox controls. The retained daemon Pod
+# gains that chain before any daemon call, and cleanup orphans it, never
+# cascading the Sandbox deletion into the retained Pod.
+awk '
+  /^kind: Sandbox$/ { sandbox = 1 }
+  /patch pod "\$daemon_pod" --type=merge -p "\$pod_owner"/ { owned = sandbox }
+  /patch sandboxclaim "\$claim_name"/ { bound = owned }
+  /environment_daemon_proxy_smoke "\$environment_id"/ { daemon = bound }
+  END { exit !daemon }
+' <<<"$file_fixture" || fail 'daemon fixture Pod must be controlled by its bound Sandbox before daemon calls'
+[[ "$(grep -Fc 'delete sandbox "$sandbox_name" --cascade=orphan' <<<"$file_fixture")" -eq 3 ]] ||
+  fail 'file-service fixture cleanup must orphan the retained daemon Pod'
 # A manually prepared Ready workspace is not an active setup owner. Preserve
 # the production readiness guard and seed/upsert coherent completed metadata.
 for binding in \
