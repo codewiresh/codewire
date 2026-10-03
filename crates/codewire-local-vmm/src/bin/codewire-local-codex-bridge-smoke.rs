@@ -258,7 +258,7 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
 
         stage("config-check");
         if args.managed_broker {
-            require_codex_projection(&daemon).await?;
+            require_codex_projection(&daemon, &environment.working_directory).await?;
         } else {
             require(environment.access_profile_id.is_empty())?;
             require_unselected_codex_home(&daemon).await?;
@@ -1785,9 +1785,10 @@ function generalEgress(){
         require(output.exit_code == 0 && output.stdout.is_empty() && output.stderr.is_empty())
     }
 
-    async fn require_codex_projection(client: &SessionClient) -> SmokeResult<()> {
-        let expected = CodexProviderProjection::for_loopback_port(CREDENTIAL_BRIDGE_LOOPBACK_PORT)?
-            .into_config_toml();
+    async fn require_codex_projection(
+        client: &SessionClient,
+        working_directory: &str,
+    ) -> SmokeResult<()> {
         let command = format!(
             "test \"$CODEX_HOME\" = '{CODEX_GUEST_HOME_PATH}' && test -f \"$CODEX_HOME/config.toml\" && test ! -e \"$CODEX_HOME/auth.json\" && cat -- \"$CODEX_HOME/config.toml\""
         );
@@ -1798,11 +1799,43 @@ function generalEgress(){
             Vec::new(),
         )
         .await?;
-        require(
-            output.exit_code == 0
-                && output.stdout == expected.as_bytes()
-                && output.stderr.is_empty(),
-        )
+        validate_codex_projection(&output, working_directory)
+    }
+
+    fn validate_codex_projection(output: &ExecOutput, working_directory: &str) -> SmokeResult<()> {
+        if output.exit_code != 0 {
+            stage("config-command-failed");
+            return Err(failed());
+        }
+        if !output.stderr.is_empty() {
+            stage("config-unexpected-stderr");
+            return Err(failed());
+        }
+        if working_directory.len() > 4096
+            || !Path::new(working_directory).is_absolute()
+            || working_directory.chars().any(char::is_control)
+            || working_directory
+                .split('/')
+                .any(|component| matches!(component, "." | ".."))
+        {
+            stage("config-unsupported-working-directory");
+            return Err(failed());
+        }
+        let expected = CodexProviderProjection::for_loopback_port(CREDENTIAL_BRIDGE_LOOPBACK_PORT)?
+            .into_config_toml();
+        // Codex adds this single project entry after a managed turn. Keep the
+        // machine-owned projection byte-exact and reject every other addition.
+        // With controls excluded, JSON quotes only quotes and backslashes;
+        // those escapes are also valid in a TOML basic-string table key.
+        let project = serde_json::to_string(working_directory)?;
+        let trusted_project = format!("\n[projects.{project}]\ntrust_level = \"trusted\"\n");
+        if output.stdout != expected.as_bytes()
+            && output.stdout.strip_prefix(expected.as_bytes()) != Some(trusted_project.as_bytes())
+        {
+            stage("config-projection-mismatch");
+            return Err(failed());
+        }
+        Ok(())
     }
 
     async fn require_codex_version(
@@ -2105,6 +2138,137 @@ function generalEgress(){
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        const CODEX_CONFIG_FIXTURE: &str = concat!(
+            "model_provider = \"codewire_openai\"\n",
+            "\n",
+            "[model_providers.codewire_openai]\n",
+            "name = \"Codewire OpenAI\"\n",
+            "base_url = \"http://127.0.0.1:38081/v1\"\n",
+            "wire_api = \"responses\"\n",
+            "requires_openai_auth = false\n",
+            "supports_websockets = false\n",
+            "\n",
+            "[features]\n",
+            "enable_request_compression = false\n",
+        );
+        const CODEX_TRUST_FIXTURE: &str =
+            "\n[projects.\"/workspace/github\"]\ntrust_level = \"trusted\"\n";
+
+        fn codex_config_output(config: &str) -> ExecOutput {
+            ExecOutput {
+                stdout: config.as_bytes().to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            }
+        }
+
+        #[test]
+        fn codex_projection_accepts_original_and_observed_project_trust_bytes() {
+            use sha2::{Digest as _, Sha256};
+
+            let canonical =
+                CodexProviderProjection::for_loopback_port(CREDENTIAL_BRIDGE_LOOPBACK_PORT)
+                    .unwrap()
+                    .into_config_toml();
+            assert_eq!(canonical, CODEX_CONFIG_FIXTURE);
+            let retained = format!("{CODEX_CONFIG_FIXTURE}{CODEX_TRUST_FIXTURE}");
+            assert_eq!(retained.len(), 317);
+            assert_eq!(
+                format!("{:x}", Sha256::digest(retained.as_bytes())),
+                "7f2546a5da1e82bf68b16dc446705de681b10844b189ed4cff920a9a8df1cde9"
+            );
+            // The old whole-file predicate accepts pristine state and rejects
+            // the actual retained file even though the provider is unchanged.
+            assert_eq!(
+                codex_config_output(CODEX_CONFIG_FIXTURE).stdout,
+                canonical.as_bytes()
+            );
+            assert_ne!(codex_config_output(&retained).stdout, canonical.as_bytes());
+            for config in [CODEX_CONFIG_FIXTURE, retained.as_str()] {
+                assert!(
+                    validate_codex_projection(&codex_config_output(config), "/workspace/github")
+                        .is_ok()
+                );
+            }
+        }
+
+        #[test]
+        fn codex_projection_rejects_provider_feature_and_project_drift() {
+            let retained = format!("{CODEX_CONFIG_FIXTURE}{CODEX_TRUST_FIXTURE}");
+            for invalid in [
+                retained.replace(
+                    "model_provider = \"codewire_openai\"",
+                    "model_provider = \"other\"",
+                ),
+                retained.replace("http://127.0.0.1:38081/v1", "https://example.invalid/v1"),
+                retained.replace("wire_api = \"responses\"", "wire_api = \"chat\""),
+                retained.replace(
+                    "requires_openai_auth = false",
+                    "requires_openai_auth = true",
+                ),
+                retained.replace("supports_websockets = false", "supports_websockets = true"),
+                retained.replace(
+                    "enable_request_compression = false",
+                    "enable_request_compression = true",
+                ),
+                retained.replace("/workspace/github", "/workspace/other"),
+                retained.replace("trust_level = \"trusted\"", "trust_level = \"untrusted\""),
+                format!("{retained}unexpected = true\n"),
+                format!("{retained}\n[extra]\nvalue = true\n"),
+                format!("{retained}{CODEX_TRUST_FIXTURE}"),
+                format!("{retained}\n"),
+                retained.replace('\n', "\r\n"),
+            ] {
+                assert!(
+                    validate_codex_projection(&codex_config_output(&invalid), "/workspace/github")
+                        .is_err()
+                );
+            }
+        }
+
+        #[test]
+        fn codex_projection_rejects_failed_command_and_any_stderr() {
+            let mut output = codex_config_output(CODEX_CONFIG_FIXTURE);
+            output.exit_code = 1;
+            assert!(validate_codex_projection(&output, "/workspace/github").is_err());
+            output.exit_code = 0;
+            output.stderr = vec![b'\n'];
+            assert!(validate_codex_projection(&output, "/workspace/github").is_err());
+        }
+
+        #[test]
+        fn codex_projection_rejects_unsafe_working_directories() {
+            let output = codex_config_output(CODEX_CONFIG_FIXTURE);
+            for invalid in [
+                String::new(),
+                "workspace/github".into(),
+                "/workspace/./github".into(),
+                "/workspace/../github".into(),
+                "/workspace/github/.".into(),
+                "/workspace/github/..".into(),
+                "/workspace/\n[projects.\"/other\"]".into(),
+                "/workspace/\tgithub".into(),
+                "/workspace/\0github".into(),
+                "/workspace/\u{7f}github".into(),
+                format!("/{}", "a".repeat(4096)),
+            ] {
+                assert!(validate_codex_projection(&output, &invalid).is_err());
+            }
+        }
+
+        #[test]
+        fn codex_projection_quotes_paths_without_admitting_another_table() {
+            let cwd = "/workspace/quo\"te\\backslash";
+            let suffix =
+                "\n[projects.\"/workspace/quo\\\"te\\\\backslash\"]\ntrust_level = \"trusted\"\n";
+            let config = format!("{CODEX_CONFIG_FIXTURE}{suffix}");
+            assert!(validate_codex_projection(&codex_config_output(&config), cwd).is_ok());
+            assert!(
+                validate_codex_projection(&codex_config_output(&config), "/workspace/github")
+                    .is_err()
+            );
+        }
 
         #[test]
         fn hostname_probe_requires_owned_read_only_mapping_and_exact_local_resolution() {
