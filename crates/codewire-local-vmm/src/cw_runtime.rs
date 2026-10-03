@@ -16,6 +16,7 @@ use codewire_vmm_guest_probe::cw_runtime::{
     CW_RUNTIME_MAX_CATALOG, CW_RUNTIME_MAX_PACK, CW_RUNTIME_MAX_VERSIONS, CwRuntimeCatalog,
     CwRuntimeProvenance, decode_runtime_pack,
 };
+pub use codewire_vmm_guest_probe::cw_runtime_live::{RuntimeSelection, SelectionOutcome};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -32,6 +33,28 @@ const PREPARATION_TIMEOUT: Duration = Duration::from_secs(180);
 const PUBLICATION_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(5);
 const TOOL_OUTPUT_LIMIT: u64 = 128 * 1024;
 const MAXIMUM_STORE_OBJECTS: usize = 1024;
+
+/// Validation-only evidence for a Linux runtime journal row. This interface
+/// returns no journal contents and cannot open a store, path or process.
+/// The private transaction owner validates the typed intent and exact receipt.
+pub struct CwRuntimeJournalEvidence<'a> {
+    pub kind: &'a str,
+    pub operation_id: Uuid,
+    pub environment_id: Uuid,
+    pub phase: &'a str,
+    pub payload: &'a [u8],
+    pub result: Option<&'a [u8]>,
+    pub error_code: Option<&'a str>,
+}
+
+impl CwRuntimeJournalEvidence<'_> {
+    // Match the owning journal's JSON byte bound, including JSON escaping.
+    pub const MAXIMUM_JSON_BYTES: usize = 2 * 1024 * 1024;
+
+    pub fn validate(&self) -> bool {
+        self.validate_owned()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +126,10 @@ impl AdmittedCwRuntimeAsset {
 
     fn payload(&self) -> &[u8] {
         &self.bytes[self.payload_offset..]
+    }
+
+    pub(crate) fn pack(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -218,10 +245,36 @@ impl CwRuntimeStore {
     }
 
     pub fn admit_source(&self, source: &Path) -> Result<AdmittedCwRuntimeAsset, CwRuntimeError> {
+        self.admit_source_inner(source, None)
+    }
+
+    pub(crate) fn admit_source_pinned(
+        &self,
+        source: &Path,
+        image: &str,
+        payload: &str,
+    ) -> Result<AdmittedCwRuntimeAsset, CwRuntimeError> {
+        if !digest(image) || !digest(payload) {
+            return Err(CwRuntimeError::InvalidAsset);
+        }
+        self.admit_source_inner(source, Some((image, payload)))
+    }
+
+    fn admit_source_inner(
+        &self,
+        source: &Path,
+        expected: Option<(&str, &str)>,
+    ) -> Result<AdmittedCwRuntimeAsset, CwRuntimeError> {
         let deadline = Instant::now() + PREPARATION_TIMEOUT;
         let _publication = self.acquire_publication_until(deadline)?;
         self.recover_abandoned(deadline)?;
         let asset = AdmittedCwRuntimeAsset::read_source(source)?;
+        if expected.is_some_and(|(image, payload)| {
+            asset.provenance.image_index_sha256 != image
+                || asset.provenance.payload.sha256 != payload
+        }) {
+            return Err(CwRuntimeError::AssetCollision);
+        }
         let name = format!("{}.pack", asset.provenance.payload.sha256);
         let mut count = 0;
         let mut present = false;
@@ -244,7 +297,10 @@ impl CwRuntimeStore {
         Ok(stored)
     }
 
-    fn read_asset(&self, payload: &str) -> Result<AdmittedCwRuntimeAsset, CwRuntimeError> {
+    pub(crate) fn read_asset(
+        &self,
+        payload: &str,
+    ) -> Result<AdmittedCwRuntimeAsset, CwRuntimeError> {
         if !digest(payload) {
             return Err(CwRuntimeError::InvalidAsset);
         }
@@ -1235,6 +1291,44 @@ mod tests {
         )
         .unwrap();
         (root.path().join("cw-runtime.lock.json"), cw)
+    }
+
+    #[test]
+    fn live_runtime_source_pins_refuse_before_asset_publication() {
+        let task = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let (path, _) = fixture_asset(&task.path().join("source"), 1);
+        let source = AdmittedCwRuntimeAsset::read_source(&path).unwrap();
+        let engine = PrivateRoot::create(&task.path().join("engine")).unwrap();
+        let store = CwRuntimeStore::create(&engine).unwrap();
+        for (image, payload) in [
+            ("f".repeat(64), source.provenance.payload.sha256.clone()),
+            (source.provenance.image_index_sha256.clone(), "f".repeat(64)),
+            ("B".repeat(64), source.provenance.payload.sha256.clone()),
+        ] {
+            assert!(store.admit_source_pinned(&path, &image, &payload).is_err());
+            assert_eq!(fs::read_dir(store.assets.path()).unwrap().count(), 0);
+            assert_eq!(fs::read_dir(store.catalogs.path()).unwrap().count(), 0);
+        }
+        let admitted = store
+            .admit_source_pinned(
+                &path,
+                &source.provenance.image_index_sha256,
+                &source.provenance.payload.sha256,
+            )
+            .unwrap();
+        assert_eq!(admitted.provenance, source.provenance);
+        assert_eq!(
+            store
+                .read_asset(&admitted.provenance.payload.sha256)
+                .unwrap()
+                .pack(),
+            source.pack()
+        );
+        assert_eq!(fs::read_dir(store.assets.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(store.catalogs.path()).unwrap().count(), 0);
     }
 
     fn replace_lock(path: &Path, change: impl FnOnce(&mut CwRuntimeAssetLock)) {

@@ -85,6 +85,12 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
 
     axum::Router::new()
         .route_service(
+            "/codewire.local.v1.LinuxCwRuntimeService/{*method}",
+            v1::linux_cw_runtime_service_server::LinuxCwRuntimeServiceServer::new(
+                supervisor.clone(),
+            ),
+        )
+        .route_service(
             PRIVATE_SUPERVISOR_ROUTE,
             LocalSupervisorServiceServer::new(supervisor),
         )

@@ -31,6 +31,13 @@ fn entrypoint() -> anyhow::Result<()> {
 
     let mut arguments = std::env::args_os();
     let executable = arguments.next();
+    if executable
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+        == Some(OsStr::new("cw"))
+    {
+        return codewire_vmm_guest_probe::cw_runtime_publisher::launch_default(arguments.collect());
+    }
     let command = arguments.next();
     match command.as_deref().and_then(|value| value.to_str()) {
         None => {

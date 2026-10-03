@@ -722,6 +722,8 @@ pub(crate) struct EnvironmentRunArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvCommand {
+    #[command(about = "Inspect or change cw in a running native Linux VM")]
+    Runtime(EnvRuntimeArgs),
     #[command(
         about = "Create a new environment",
         long_about = "Create a new environment from direct CLI flags.\n\nMultiple repos can be specified as positional args or with --repo flags.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo."
@@ -789,6 +791,116 @@ pub(crate) enum EnvCommand {
     Logs(EnvLogsArgs),
     #[command(about = "Inspect or repair the managed environment daemon")]
     Daemon(EnvDaemonArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeArgs {
+    #[command(subcommand)]
+    command: EnvRuntimeCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum EnvRuntimeCommand {
+    #[command(about = "Show the running VM's bootstrap and live cw selection")]
+    Info(EnvRuntimeQueryArgs),
+    #[command(
+        about = "Select a pinned local cw image without restarting the VM or existing processes"
+    )]
+    Update(EnvRuntimeUpdateArgs),
+    #[command(about = "Select the retained previous cw without restarting existing processes")]
+    Rollback(EnvRuntimeRollbackArgs),
+    #[command(about = "Observe the same runtime request after an interrupted reply")]
+    Observe(EnvRuntimeOperationArgs),
+    #[command(about = "Cancel the same request or report its already committed effect")]
+    Cancel(EnvRuntimeOperationArgs),
+}
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeQueryArgs {
+    #[arg(value_name = "ENV", help = "Explicit native environment name or UUID")]
+    environment: String,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    output: OutputFormat,
+}
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeUpdateArgs {
+    #[arg(value_name = "ENV")]
+    environment: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Already admitted image-derived cw-runtime.lock.json"
+    )]
+    source: PathBuf,
+    #[arg(
+        long,
+        value_name = "SHA256",
+        help = "Exact lowercase cw image index SHA256",
+        value_parser = parse_runtime_sha256
+    )]
+    image_sha256: String,
+    #[arg(
+        long,
+        value_name = "SHA256",
+        help = "Exact lowercase cw executable SHA256",
+        value_parser = parse_runtime_sha256
+    )]
+    target_sha256: String,
+    #[arg(long, help = "Observed live selector revision", value_parser = parse_runtime_revision)]
+    expected_revision: u64,
+    #[arg(
+        long,
+        value_name = "UUID",
+        help = "Stable request UUID; an existing request is observation only",
+        value_parser = parse_runtime_request_id
+    )]
+    request_id: Option<uuid::Uuid>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    output: OutputFormat,
+}
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeRollbackArgs {
+    #[arg(value_name = "ENV")]
+    environment: String,
+    #[arg(long, help = "Observed live selector revision", value_parser = parse_runtime_revision)]
+    expected_revision: u64,
+    #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id)]
+    request_id: Option<uuid::Uuid>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    output: OutputFormat,
+}
+#[derive(Debug, Args)]
+pub(crate) struct EnvRuntimeOperationArgs {
+    #[arg(value_name = "ENV")]
+    environment: String,
+    #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id)]
+    request_id: uuid::Uuid,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    output: OutputFormat,
+}
+
+fn parse_runtime_sha256(value: &str) -> Result<String, String> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("runtime SHA256 must be exactly 64 lowercase hexadecimal characters".into())
+    }
+}
+fn parse_runtime_revision(value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|revision| *revision > 0)
+        .ok_or_else(|| "runtime selection revision must be a nonzero integer".into())
+}
+fn parse_runtime_request_id(value: &str) -> Result<uuid::Uuid, String> {
+    uuid::Uuid::parse_str(value)
+        .ok()
+        .filter(|id| !id.is_nil())
+        .ok_or_else(|| "runtime request ID must be a non-nil UUID".into())
 }
 
 #[derive(Debug, Args)]
@@ -1926,6 +2038,7 @@ mod tests {
     include!("tests/core.rs");
     include!("tests/network_delete.rs");
     include!("tests/environment.rs");
+    include!("tests/runtime.rs");
     include!("tests/run.rs");
     include!("tests/platform.rs");
     include!("tests/sessions.rs");

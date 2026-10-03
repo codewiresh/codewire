@@ -415,7 +415,9 @@ fn runner_protocol_info_rpc_error(status: Status) -> RunnerServiceError {
     }
 }
 
-fn admit_runner_protocol_info(info: &v1::RunnerProtocolInfo) -> Result<(), RunnerServiceError> {
+pub(crate) fn admit_runner_protocol_info(
+    info: &v1::RunnerProtocolInfo,
+) -> Result<(), RunnerServiceError> {
     if info.protocol_version != NATIVE_RUNNER_PROTOCOL_VERSION {
         return Err(RunnerServiceError::RunnerProtocolMismatch {
             expected: NATIVE_RUNNER_PROTOCOL_VERSION,

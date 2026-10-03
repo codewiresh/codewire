@@ -217,6 +217,62 @@ each invocation verifies and seals the selected bytes before execution. The
 workspace still needs the checked-in `/usr/bin/python3` launcher prerequisite.
 Conversation journals remain private to the workload user under HOME.
 
+### Updating cw in a running native Linux VM
+
+The bootstrap image/disk stays fixed. A compatible Linux protocol9 guest runs
+a root-owned publisher outside HOME and exposes sealed versions through the
+same read-only runtime mount. Publishing copies a verified image-derived pack
+once; it does not execute incoming bytes as guest root. An atomic selector
+changes the default for new invocations. Existing conversations keep their
+original digest paths, and the VM and its existing processes keep running.
+The workload view contains `selection.json`, the trusted `cw` launcher and
+retained `<payload_sha256>/{cw,provenance.json}` members. Its selector carries
+the complete catalog, default, previous version, revision and operation
+receipts. The original bootstrap `catalog.json` remains on `/codewire-cw`;
+changing the live default never changes that disk or bootstrap binding.
+The trusted launcher also has a read-only bind at `/usr/local/bin/cw`, so a
+login shell that resets PATH resolves the same selected default. Existing
+managed helpers continue to execute their original member paths.
+
+Use an explicit environment and the revision returned by `info`:
+
+```sh
+cw env --local runtime info vm-a --output json
+cw env --local runtime update vm-a \
+  --source /absolute/owned/cw-runtime/cw-runtime.lock.json \
+  --image-sha256 <admitted image index SHA256> \
+  --target-sha256 <admitted executable SHA256> \
+  --expected-revision 1 --request-id <stable request UUID>
+cw env --local runtime rollback vm-a --expected-revision 2
+```
+
+These commands do not restart the VM or invoke workspace/image lifecycle
+recipes. Stale revisions and conflicting provenance refuse selection. The
+publisher retains up to 16 versions and 128 selection receipts; it refuses
+further changes at capacity and never prunes bytes behind a live helper.
+
+Keep the printed request UUID after a lost or cancelled local reply. Query or
+cancel that same operation, rather than submitting a new update:
+
+```sh
+cw env --local runtime observe vm-a --request-id <original request UUID>
+cw env --local runtime cancel vm-a --request-id <original request UUID>
+```
+
+A cancellation before commit leaves the default unchanged. A cancellation
+after commit reports the durable committed effect. A pending unknown effect
+retains its intent and fences lifecycle changes on that live VM birth until
+observed or durably cancelled. A later boot verifies the retained selector against host
+receipts before startup succeeds; an interrupted operation is not assumed to
+have had no effect. Older guests without the trusted publisher refuse live
+updates and need an explicit later compatible boot. Platform and Mac runtime
+updates are outside this Linux route.
+
+Runtime commands resolve saved identity and observe the exact retained runner
+and VMM. A pending lifecycle intent or changed process, socket, boot, or protocol
+causes refusal with the original processes and journal preserved. These
+commands never dispatch lifecycle recovery, create a runner, or retire a VM.
+
 A changed global image or artifact lock does not change an existing VM's
 retained runtime on restart. Missing retained bytes refuse recovery without
 replaying a task. Keep the durable base inputs outside disposable worktrees.

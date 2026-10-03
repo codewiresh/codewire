@@ -65,9 +65,14 @@ pub(crate) enum OperationKind {
     Delete,
     GrowDisk,
     Reconcile,
+    UpdateCwRuntime,
+    RollbackCwRuntime,
 }
 
 impl OperationKind {
+    pub(crate) fn cw_runtime(self) -> bool {
+        matches!(self, Self::UpdateCwRuntime | Self::RollbackCwRuntime)
+    }
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Create => "create",
@@ -80,6 +85,8 @@ impl OperationKind {
             Self::Delete => "delete",
             Self::GrowDisk => "grow_disk",
             Self::Reconcile => "reconcile",
+            Self::UpdateCwRuntime => "update_cw_runtime",
+            Self::RollbackCwRuntime => "rollback_cw_runtime",
         }
     }
 
@@ -95,6 +102,8 @@ impl OperationKind {
             "delete" => Some(Self::Delete),
             "grow_disk" => Some(Self::GrowDisk),
             "reconcile" => Some(Self::Reconcile),
+            "update_cw_runtime" => Some(Self::UpdateCwRuntime),
+            "rollback_cw_runtime" => Some(Self::RollbackCwRuntime),
             _ => None,
         }
     }
@@ -275,6 +284,27 @@ impl SupervisorStore {
         let now = unix_millis()?;
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        // A live selector intent fences lifecycle births and disruption for
+        // this UUID, while read/history/message paths remain available. The
+        // check and admission share the same authoritative write transaction.
+        if let Some(environment_id) = environment_id
+            && kind != OperationKind::Reconcile
+        {
+            let collision: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM operations WHERE environment_id=?1
+                 AND request_id!=?2 AND kind!='reconcile' AND phase NOT IN ('completed','failed','interrupted')
+                 AND (kind IN ('update_cw_runtime','rollback_cw_runtime') OR ?3))",
+                params![
+                    environment_id.to_string(),
+                    request_id.to_string(),
+                    kind.cw_runtime()
+                ],
+                |row| row.get(0),
+            )?;
+            if collision {
+                return Err(SupervisorStoreError::JournalConflict);
+            }
+        }
         transaction.execute(
             "INSERT OR IGNORE INTO operations(
                operation_id, request_id, environment_id, kind, phase, checkpoint,
@@ -356,6 +386,24 @@ impl SupervisorStore {
         Ok(record)
     }
 
+    /// Observation-only fence for live runtime controls. Do not dispatch the
+    /// selected or any other environment's pending lifecycle work here.
+    pub(crate) fn has_pending_lifecycle_operation(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<bool, SupervisorStoreError> {
+        validate_non_nil(environment_id)?;
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM operations WHERE environment_id=?1
+                 AND kind NOT IN ('reconcile','update_cw_runtime','rollback_cw_runtime')
+                 AND phase NOT IN ('completed','failed','interrupted'))",
+                [environment_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub(crate) fn pending_operations(&self) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
         let mut statement = self.connection.prepare(
             "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
@@ -366,6 +414,92 @@ impl SupervisorStore {
         )?;
         let rows = statement.query_map([], decode_operation_row)?;
         rows.map(|row| row.map_err(Into::into)).collect()
+    }
+
+    pub(crate) fn cw_runtime_operation_by_id(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Option<OperationRecord>, SupervisorStoreError> {
+        validate_non_nil(operation_id)?;
+        operation_for_id(&self.connection, operation_id)
+    }
+
+    pub(crate) fn completed_cw_runtime_operations(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
+                    payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
+             FROM operations WHERE environment_id=?1
+             AND kind IN ('update_cw_runtime','rollback_cw_runtime') AND phase='completed'
+             ORDER BY created_unix_ms, operation_id LIMIT 129",
+        )?;
+        let records = statement
+            .query_map([environment_id.to_string()], decode_operation_row)?
+            .map(|row| row.map_err(Into::into))
+            .collect::<Result<Vec<_>, SupervisorStoreError>>()?;
+        if records.len() > 128 {
+            return Err(SupervisorStoreError::InvalidOperation);
+        }
+        Ok(records)
+    }
+
+    pub(crate) fn interrupted_cw_runtime_operations(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
+                    payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
+             FROM operations WHERE environment_id=?1
+             AND kind IN ('update_cw_runtime','rollback_cw_runtime') AND phase='interrupted'
+             ORDER BY created_unix_ms, operation_id LIMIT 129",
+        )?;
+        let records = statement
+            .query_map([environment_id.to_string()], decode_operation_row)?
+            .map(|row| row.map_err(Into::into))
+            .collect::<Result<Vec<_>, SupervisorStoreError>>()?;
+        if records.len() > 128 {
+            return Err(SupervisorStoreError::InvalidOperation);
+        }
+        Ok(records)
+    }
+
+    // A reboot invalidates the old process, not its possible selector effect.
+    // Only an exact retained guest receipt may close that particular runtime
+    // interruption. No ordinary terminal operation is rewound or replayed.
+    pub(crate) fn resolve_interrupted_cw_runtime(
+        &self,
+        operation: &OperationRecord,
+        result: &serde_json::Value,
+    ) -> Result<OperationRecord, SupervisorStoreError> {
+        if !operation.kind.cw_runtime()
+            || operation.phase != OperationPhase::Interrupted
+            || !matches!(
+                operation.error_code.as_deref(),
+                Some("host_reboot" | "runtime_vm_birth_lost")
+            )
+        {
+            return Err(SupervisorStoreError::JournalConflict);
+        }
+        let bytes = encode_operation_json(result)?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let updated = transaction.execute(
+            "UPDATE operations SET phase='completed', result_json=?1, error_code=NULL,
+             updated_unix_ms=MAX(updated_unix_ms,?2)
+             WHERE operation_id=?3 AND phase='interrupted' AND checkpoint=?4 AND error_code IN ('host_reboot','runtime_vm_birth_lost')",
+            params![bytes,unix_millis()?,operation.operation_id.to_string(),operation.checkpoint],
+        )?;
+        if updated != 1 {
+            return Err(SupervisorStoreError::JournalConflict);
+        }
+        let record = operation_for_id(&transaction, operation.operation_id)?
+            .ok_or(SupervisorStoreError::OperationNotFound)?;
+        transaction.commit()?;
+        let _ = self.operation_events.send(record.clone());
+        Ok(record)
     }
 
     pub(crate) fn host_reboot_interrupted_workspace_transitions(
@@ -3525,5 +3659,182 @@ mod tests {
             ),
             Err(SupervisorStoreError::InvalidOperation)
         ));
+    }
+    #[test]
+    fn live_runtime_journal_fences_only_mutations_for_the_exact_uuid() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let payload = serde_json::json!({"environment_id":id,"expected_revision":1});
+        let intent = store
+            .begin_operation(
+                request_id,
+                Some(id),
+                OperationKind::UpdateCwRuntime,
+                &payload,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .begin_operation(
+                    request_id,
+                    Some(id),
+                    OperationKind::UpdateCwRuntime,
+                    &payload
+                )
+                .unwrap(),
+            intent
+        );
+        for kind in [
+            OperationKind::Start,
+            OperationKind::Stop,
+            OperationKind::Restart,
+            OperationKind::Delete,
+            OperationKind::GrowDisk,
+            OperationKind::UpdateWorkspace,
+            OperationKind::RollbackWorkspace,
+            OperationKind::UpdateEnvironmentSources,
+            OperationKind::RollbackCwRuntime,
+        ] {
+            assert!(
+                matches!(
+                    store.begin_operation(Uuid::new_v4(), Some(id), kind, &payload),
+                    Err(SupervisorStoreError::JournalConflict)
+                ),
+                "{kind:?}"
+            );
+        }
+        store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(Uuid::new_v4()),
+                OperationKind::Start,
+                &serde_json::json!({"name":"neighbor"}),
+            )
+            .unwrap();
+        store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(id),
+                OperationKind::Reconcile,
+                &serde_json::json!({"name":"selected"}),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.begin_operation(
+                Uuid::new_v4(),
+                Some(Uuid::nil()),
+                OperationKind::Reconcile,
+                &payload
+            ),
+            Err(SupervisorStoreError::InvalidOperation)
+        ));
+        store
+            .advance_operation(
+                intent.operation_id,
+                0,
+                OperationPhase::Completed,
+                Some(&serde_json::json!({"component_effect":"observed"})),
+                None,
+            )
+            .unwrap();
+        store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(id),
+                OperationKind::Stop,
+                &serde_json::json!({"name":"selected"}),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn live_runtime_journal_reopens_without_replay_or_resetting_unknown_effect() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let id = Uuid::new_v4();
+        let request = Uuid::new_v4();
+        let payload = serde_json::json!({"environment_id":id,"expected_revision":4,"target_sha256":"a".repeat(64)});
+        let intent = store
+            .begin_operation(request, Some(id), OperationKind::UpdateCwRuntime, &payload)
+            .unwrap();
+        let issued = store
+            .advance_operation(
+                intent.operation_id,
+                0,
+                OperationPhase::EffectApplied,
+                None,
+                None,
+            )
+            .unwrap();
+        drop(store);
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert_eq!(store.pending_operations().unwrap(), vec![issued.clone()]);
+        drop(store);
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-b").unwrap();
+        let interrupted = store.operation_by_request(request).unwrap().unwrap();
+        assert_eq!(interrupted.phase, OperationPhase::Interrupted);
+        assert_eq!(interrupted.error_code.as_deref(), Some("host_reboot"));
+        assert_eq!(interrupted.checkpoint, issued.checkpoint);
+        assert_eq!(interrupted.payload, payload);
+        assert!(interrupted.result.is_none());
+        assert_eq!(
+            store.interrupted_cw_runtime_operations(id).unwrap(),
+            vec![interrupted.clone()]
+        );
+        // Only the typed caller's exact retained receipt may close an old
+        // birth. This storage component preserves that result atomically.
+        let observed = serde_json::json!({"component_effect":"committed","selection_revision":5});
+        let completed = store
+            .resolve_interrupted_cw_runtime(&interrupted, &observed)
+            .unwrap();
+        assert_eq!(completed.phase, OperationPhase::Completed);
+        assert_eq!(completed.checkpoint, issued.checkpoint);
+        assert_eq!(completed.result, Some(observed));
+        assert!(matches!(
+            store.resolve_interrupted_cw_runtime(
+                &interrupted,
+                &serde_json::json!({"another_effect":true})
+            ),
+            Err(SupervisorStoreError::JournalConflict)
+        ));
+        drop(store);
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-b").unwrap();
+        assert_eq!(
+            store.operation_by_request(request).unwrap(),
+            Some(completed)
+        );
+    }
+
+    #[test]
+    fn live_runtime_journal_keeps_secret_guards_and_closed_kinds() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        for key in ["credential", "capability", "auth_token"] {
+            let request = Uuid::new_v4();
+            let payload = serde_json::json!({key:"synthetic forbidden material"});
+            assert!(
+                store
+                    .begin_operation(
+                        request,
+                        Some(Uuid::new_v4()),
+                        OperationKind::UpdateCwRuntime,
+                        &payload
+                    )
+                    .is_err()
+            );
+            assert!(store.operation_by_request(request).unwrap().is_none());
+        }
+        for kind in [
+            OperationKind::UpdateCwRuntime,
+            OperationKind::RollbackCwRuntime,
+        ] {
+            assert_eq!(OperationKind::parse(kind.as_str()), Some(kind));
+            assert!(crate::lifecycle::effects(kind).is_empty());
+        }
+        for kind in ["root_exec", "publish_file", "update_runtime_arbitrary"] {
+            assert!(OperationKind::parse(kind).is_none());
+        }
     }
 }

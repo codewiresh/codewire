@@ -1099,7 +1099,27 @@ pub(crate) async fn native_environment_managed_runtime_catalog(
     {
         anyhow::bail!("managed runtime catalog and active provenance disagree");
     }
-    Ok(catalog)
+    // Bootstrap remains fixed. The separate service admits the live default
+    // and retained helpers against the host's append-only asset custody.
+    let selected = supervisor
+        .runtime_info(environment_id)
+        .await
+        .map_err(native_status)?;
+    let selection: codewire_local_vmm::cw_runtime::RuntimeSelection =
+        serde_json::from_slice(&selected.selection_json)?;
+    selection.validate().map_err(anyhow::Error::msg)?;
+    if selected.environment_id != environment_id
+        || selected.generation != environment.generation
+        || selection.environment_id.to_string() != environment_id
+        || selection.bootstrap_catalog_sha256 != runtime.cw_runtime_catalog_generation
+        || catalog
+            .runtimes
+            .iter()
+            .any(|member| selection.catalog.runtime(&member.payload.sha256) != Some(member))
+    {
+        anyhow::bail!("live cw selection does not match the running VM bootstrap");
+    }
+    Ok(selection.catalog)
 }
 
 fn native_runtime_digest_valid(value: &str) -> bool {
@@ -1291,6 +1311,12 @@ fn format_binary_bytes(bytes: u64) -> String {
     } else {
         bytes.to_string()
     }
+}
+
+pub(crate) async fn native_runtime_control_client() -> anyhow::Result<NativeSupervisorClient> {
+    NativeSupervisorClient::connect_runtime(&native_runtime_config()?)
+        .await
+        .context("connect to existing native runtime publisher")
 }
 
 async fn native_client() -> anyhow::Result<NativeSupervisorClient> {

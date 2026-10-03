@@ -219,10 +219,30 @@ impl AdmittedArtifacts {
         }
         Ok(())
     }
+
+    pub(crate) fn require_live_cw_runtime_publisher(&self) -> Result<(), ArtifactError> {
+        let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
+        let marker = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER;
+        if init
+            .windows(marker.len())
+            .filter(|bytes| *bytes == marker)
+            .count()
+            != 1
+        {
+            return Err(ArtifactError::GuestLiveRuntimeUnsupported(
+                self.initramfs.path().to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
+    #[error(
+        "retained guest has no trusted live cw publisher; it cannot be retrofitted without an explicit later boot: {0}"
+    )]
+    GuestLiveRuntimeUnsupported(PathBuf),
     #[error(
         "retained boot assets do not support the current startup protocol; explicitly upgrade the environment boot assets before starting or updating cw: {0}"
     )]
@@ -1133,6 +1153,59 @@ mod tests {
                 write_artifact(&root.path().join(&name), &changed, 0o400);
                 assert!(matches!(
                     artifacts.require_current_guest_seed_abi(),
+                    Err(ArtifactError::IdentityChanged(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn live_runtime_capability_requires_the_exact_pinned_init() {
+        let task = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = PrivateRoot::open(task.path()).unwrap();
+        let marker = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER;
+        for (index, capability) in [
+            Vec::new(),
+            marker.to_vec(),
+            [marker, marker].concat(),
+            b"CODEWIRE_NATIVE_CW_LIVE_PUBLISHER_V0\0".to_vec(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut init = vec![0; 64];
+            init[..4].copy_from_slice(b"\x7fELF");
+            init.extend(codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER);
+            init.extend(capability);
+            let archive = canonical_newc(&init).unwrap();
+            let name = format!("publisher-{index}");
+            write_artifact(&root.path().join(&name), &archive, 0o400);
+            let artifacts = AdmittedArtifacts {
+                cloud_hypervisor: AdmittedArtifact::for_test("/unused/ch"),
+                virtiofsd: None,
+                kernel: AdmittedArtifact::for_test("/unused/kernel"),
+                initramfs: admit_one(&root, &spec(&name, &archive), false).unwrap(),
+            };
+            // Seed9/disk support alone must never imply a trusted publisher.
+            artifacts.require_current_guest_seed_abi().unwrap();
+            assert_eq!(
+                artifacts.require_live_cw_runtime_publisher().is_ok(),
+                index == 1
+            );
+            if index == 1 {
+                let mut changed = archive;
+                *changed.last_mut().unwrap() ^= 1;
+                std::fs::set_permissions(
+                    root.path().join(&name),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+                write_artifact(&root.path().join(&name), &changed, 0o400);
+                assert!(matches!(
+                    artifacts.require_live_cw_runtime_publisher(),
                     Err(ArtifactError::IdentityChanged(_))
                 ));
             }

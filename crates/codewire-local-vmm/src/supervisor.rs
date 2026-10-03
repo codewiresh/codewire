@@ -6,6 +6,7 @@
 
 mod bootstrap;
 mod metadata;
+mod runtime;
 mod sources;
 #[cfg(test)]
 pub(crate) use crate::supervisor_metadata::SUPERVISOR_STATE_SCHEMA;
@@ -274,6 +275,12 @@ fn resolve_forbidden_root(path: &Path) -> Result<PathBuf, SupervisorError> {
 }
 
 impl NativeSupervisorClient {
+    /// Connect-only; no runtime action starts or replaces any service or VM.
+    pub async fn connect_runtime(config: &NativeRuntimeConfig) -> Result<Self, SupervisorError> {
+        config.validate()?;
+        Self::connect_for_config(&config.supervisor_socket(), config).await
+    }
+
     pub async fn connect_or_start(config: &NativeRuntimeConfig) -> Result<Self, SupervisorError> {
         config.validate()?;
         let socket = config.supervisor_socket();
@@ -394,6 +401,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         state,
         children: HashMap::new(),
         live_runners: HashMap::new(),
+        runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
         operation_progress: operation_progress.clone(),
         _lock: lock,
@@ -556,6 +564,7 @@ struct SupervisorCore {
     state: SupervisorState,
     children: HashMap<Uuid, Child>,
     live_runners: HashMap<Uuid, LiveProcess>,
+    runtime_operations: BTreeSet<Uuid>,
     // Observation only: an unsupported protocol never grants runner RPC or
     // retirement authority, and does not rewrite the durable lifecycle state.
     incompatible_runners: BTreeSet<Uuid>,
@@ -865,6 +874,14 @@ impl SupervisorCore {
             .await
             .map_err(|_| SupervisorError::ArtifactStore)?
             .require_current_guest_seed_abi()?;
+        if fs::symlink_metadata(self.config.cw_runtime_lock()).is_ok() {
+            RuntimeArtifactStore::create(&engine)
+                .map_err(|_| SupervisorError::ArtifactStore)?
+                .open_generation(&artifact_generation)
+                .await
+                .map_err(|_| SupervisorError::ArtifactStore)?
+                .require_live_cw_runtime_publisher()?;
+        }
         crate::linux::preflight::preflight().map_err(RunnerError::from)?;
         Ok(artifact_generation)
     }
@@ -1575,6 +1592,12 @@ impl SupervisorCore {
 
     async fn run_pending_operations(&mut self, recovering: bool) -> Result<(), SupervisorError> {
         for operation in self.store.pending_operations()? {
+            if operation.kind.cw_runtime() {
+                if !self.runtime_operations.contains(&operation.operation_id) {
+                    runtime::recover(self, &operation).await?;
+                }
+                continue;
+            }
             let Some(name) = operation
                 .payload
                 .get("name")
@@ -2571,6 +2594,15 @@ impl SupervisorCore {
         .to_owned();
         self.require_guest_seed_abi_for_generation(&generation)
             .await?;
+        if self.environment(name)?.cw_runtime.is_some() {
+            let engine = PrivateRoot::open(&self.config.engine_root())?;
+            RuntimeArtifactStore::create(&engine)
+                .map_err(|_| SupervisorError::ArtifactStore)?
+                .open_generation(&generation)
+                .await
+                .map_err(|_| SupervisorError::ArtifactStore)?
+                .require_live_cw_runtime_publisher()?;
+        }
         self.admit_environment_cw_runtime(name).await?;
         Ok(())
     }
@@ -2656,10 +2688,21 @@ impl SupervisorCore {
         }
         let current_state = StoredEnvironmentState::from_proto(current.state)?;
         if current_state == StoredEnvironmentState::Running {
-            return (current.generation == generation
-                && current.cw_runtime_catalog_generation == expected_cw_runtime_generation)
-                .then_some(())
-                .ok_or(SupervisorError::InvalidRunnerResponse);
+            if current.generation != generation
+                || current.cw_runtime_catalog_generation != expected_cw_runtime_generation
+            {
+                return Err(SupervisorError::InvalidRunnerResponse);
+            }
+            if cw_runtime.is_some() {
+                let access = client
+                    .daemon_access()
+                    .await
+                    .map_err(|_| SupervisorError::RunnerUnavailable)?;
+                runtime::confirm_boot(self, name, generation, access)
+                    .await
+                    .map_err(|status| SupervisorError::VmStart(status.message().to_owned()))?;
+            }
+            return Ok(());
         }
         if current.generation >= generation {
             return Err(SupervisorError::InvalidRunnerResponse);
@@ -2809,6 +2852,20 @@ impl SupervisorCore {
         {
             let _ = client.stop().await;
             return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        if cw_runtime.is_some() {
+            let confirmation = match client.daemon_access().await {
+                Ok(access) => runtime::confirm_boot(self, name, generation, access).await,
+                Err(_) => Err(Status::unavailable("runtime startup endpoint unavailable")),
+            };
+            if let Err(status) = confirmation {
+                let _ = client.stop().await;
+                let mut failed_generation = environment.clone();
+                failed_generation.generation = generation;
+                self.stop_environment_broker_if_present(&failed_generation)
+                    .await?;
+                return Err(SupervisorError::VmStart(status.message().to_owned()));
+            }
         }
         self.environment_mut(name)?
             .runner
@@ -4847,6 +4904,8 @@ fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status>
         OperationKind::Delete => v1::OperationKind::Delete,
         OperationKind::GrowDisk => v1::OperationKind::GrowDisk,
         OperationKind::Reconcile => v1::OperationKind::Reconcile,
+        OperationKind::UpdateCwRuntime => v1::OperationKind::UpdateCwRuntime,
+        OperationKind::RollbackCwRuntime => v1::OperationKind::RollbackCwRuntime,
     };
     let phase = match operation.phase {
         OperationPhase::Intent => v1::OperationPhase::Intent,
@@ -4975,6 +5034,15 @@ fn operation_result_proto(
     operation: &OperationRecord,
     result: &serde_json::Value,
 ) -> Result<v1::OperationResult, Status> {
+    if operation.kind.cw_runtime() {
+        let reply = runtime::decode_result(operation, result)?;
+        return Ok(v1::OperationResult {
+            value: Some(v1::operation_result::Value::CwRuntime(runtime::status(
+                &reply,
+                Some(operation),
+            )?)),
+        });
+    }
     let fields = result
         .as_object()
         .ok_or_else(|| Status::internal("local lifecycle operation result is invalid"))?;
@@ -7656,6 +7724,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
@@ -8038,6 +8107,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
@@ -11390,6 +11460,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
@@ -14176,6 +14247,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
@@ -14243,6 +14315,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             _lock: lock,
