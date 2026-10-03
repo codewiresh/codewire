@@ -47,6 +47,35 @@ target must be the host's release target, and its protocol and record
 versions must be ones this cw understands. The explicit `--sha256` pin, the
 identity and the bytes must all agree before anything is published.
 
+## Self-install identity
+
+`cw install --managed` derives the same schema-2 identity for itself before
+any store or entry change:
+
+- `package_version`, `target`, `rustc`, `source_revision` and
+  `source_tree_sha256` come from the one build record compiled into this cw;
+  `cw --version` reports that record's version.
+- `sha256` and `size` come from the exact running executable
+  (`/proc/self/exe` on Linux).
+- That executable must contain this build record exactly once.
+
+`make cli-install` builds through `scripts/dev/build-cw.py`, which passes the
+checkout's revision and source digest explicitly. It admits the result only
+when the record, the unchanged source and every compiled input agree (see
+[cw release delivery](../runbooks/cw-release-delivery.md#build-record)). Set
+`CODEWIRE_VERSION` to override the effective version.
+
+Self-install refuses, before any store or entry change:
+
+- a cw built without source provenance, such as a plain `cargo build`;
+- a record for another platform's target;
+- an executable that does not hold its record exactly once;
+- a stored version with the same bytes that records a different identity.
+
+The store's self-install record format is unchanged (no `payload`), so older
+cw versions can still read and roll back to it. The derived identity is shown
+on install and in `--json` output as `identity`.
+
 ## Guarantees and refusals
 
 - Publication writes a private staging directory, verifies size, digest and

@@ -872,6 +872,23 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_local_vmm
         recognized=true
         ;;
+      scripts/dev/cw-runtime-image.py|scripts/dev/test-cw-runtime-image.py)
+        # The OCI/runtime-pack tool runs with the local VMM transport suite
+        # and backs the release delivery's raw/OCI/pack equality proof.
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token release
+        recognized=true
+        ;;
+      scripts/dev/build-cw.py)
+        # The `make cli-build` entrypoint admits cw through the shared
+        # release identity producer.
+        select_token rust
+        select_token rust_pkg_codewire_cli
+        select_token rust_pkg_codewire_cli_bin
+        select_token release
+        recognized=true
+        ;;
       packages/codewire-proto-ts/*)
         ;;
       packages/codewire-types/*)
@@ -1566,6 +1583,16 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      scripts/dev/build-native-managed-agent.py|\
+      crates/codewire-cli/build.rs|crates/codewire-cli/src/build_record.rs)
+        # Producers of the embedded cw build record and native identity that
+        # the shared release identity producer admits.
+        select_token release
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
       images/*|\
       .gitea/workflows/cli-release.yaml|\
       .gitea/workflows/mirror-github.yaml|\
@@ -1595,6 +1622,12 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/mint-github-app-token.sh|\
       scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
+      scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
+      scripts/ci/release/sign-cw-release.sh|\
+      scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh|\
+      scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
+      scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
+      scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-publish-image-to-ghcr.sh|\

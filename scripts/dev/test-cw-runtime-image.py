@@ -17,19 +17,33 @@ image = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(image)
 
 
+RUSTC = "rustc 1.93.0 (synthetic fixture)"
+
+
+def build_record(version="0.1.0", revision="a" * 40, tree="b" * 64, target=None):
+    """The closed record crates/codewire-cli/build.rs embeds in every cw."""
+    body = image.release.canonical({"package_version": version, "rustc": RUSTC, "source_revision": revision,
+                                    "source_tree_sha256": tree, "target": target or image.TARGET})
+    return image.release.BUILD_RECORD_MAGIC + struct.pack("<I", len(body)) + body
+
+
+def static_cw(record):
+    cw = bytearray(136)
+    cw[:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into("<HH", cw, 16, 2, 62)
+    struct.pack_into("<Q", cw, 32, 64)
+    struct.pack_into("<HH", cw, 54, 56, 1)
+    struct.pack_into("<I", cw, 64, 1)
+    return cw + record
+
+
 class Admission(unittest.TestCase):
     def setUp(self):
-        self.cw = bytearray(136)
-        self.cw[:7] = b"\x7fELF\x02\x01\x01"
-        struct.pack_into("<HH", self.cw, 16, 2, 62)
-        struct.pack_into("<Q", self.cw, 32, 64)
-        struct.pack_into("<HH", self.cw, 54, 56, 1)
-        struct.pack_into("<I", self.cw, 64, 1)
+        self.cw = static_cw(build_record())
         self.metadata = {"schema_version": 2, "protocol_version": 1, "record_version": 1,
                          "package_version": "0.1.0", "target": image.TARGET,
                          "source_revision": "a" * 40, "source_tree_sha256": "b" * 64,
-                         "rustc": "rustc 1.93.0 (synthetic fixture)", "sha256": image.sha(self.cw),
-                         "size": len(self.cw)}
+                         "rustc": RUSTC, "sha256": image.sha(self.cw), "size": len(self.cw)}
 
     def layer(self, metadata=None, cw=None, extra=()):
         return image.tar_bytes([(name, 0o555, None) for name in image.DIRECTORIES]
@@ -199,8 +213,39 @@ class Admission(unittest.TestCase):
 
     def test_provenance_cannot_substitute_hash_size_protocol_or_source(self):
         for changes in ({"sha256": "0" * 64}, {"size": 137}, {"protocol_version": 2},
-                        {"source_revision": "A" * 40}, {"target": "x86_64-unknown-linux-gnu"}, {"path": "/host/cw"}):
+                        {"source_revision": "A" * 40}, {"target": "x86_64-unknown-linux-gnu"}, {"path": "/host/cw"},
+                        {"source_revision": "c" * 40}, {"source_tree_sha256": "d" * 64}, {"package_version": "0.1.1"},
+                        {"rustc": "rustc 1.93.0 (other fixture)"}):
             self.refuses(*self.package(layer=self.layer(metadata=dict(self.metadata, **changes))))
+
+    def test_provenance_must_match_the_payload_build_record(self):
+        # The provenance claims v1.2.3; the bytes were compiled as v1.2.30 and
+        # also mention v1.2.3 incidentally.
+        claimed = dict(self.metadata, package_version="v1.2.3")
+        for name, record in {
+            "different effective version": b"cw v1.2.3\0" + build_record("v1.2.30"),
+            "no build record": b"cw v1.2.3\0",
+            "two build records": build_record("v1.2.3") + build_record("v1.2.3"),
+            "unbound source": build_record("v1.2.3", revision=None, tree=None),
+            "other source": build_record("v1.2.3", revision="c" * 40),
+        }.items():
+            with self.subTest(name):
+                cw = static_cw(record)
+                metadata = dict(claimed, sha256=image.sha(cw), size=len(cw))
+                self.refuses(*self.package(layer=self.layer(metadata=metadata, cw=cw)))
+                with tempfile.TemporaryDirectory() as task:
+                    task = Path(task)
+                    (task / "cw").write_bytes(cw)
+                    (task / "cw").chmod(0o500)
+                    descriptor = task / "artifact.json"
+                    descriptor.write_bytes(image.encode({key: value for key, value in metadata.items()
+                                                         if key != "size"} | {"path": str(task / "cw")}))
+                    with self.assertRaises(ValueError):
+                        image.build(descriptor, task / "image")
+                    self.assertFalse((task / "image").exists())
+        cw = static_cw(b"cw v1.2.3\0" + build_record("v1.2.3"))
+        metadata = dict(claimed, sha256=image.sha(cw), size=len(cw))
+        self.assertEqual(image.admit(*self.package(layer=self.layer(metadata=metadata, cw=cw)))[0], cw)
 
     def test_regular_file_guard_refuses_links_fifo_and_sparse_oversize(self):
         with tempfile.TemporaryDirectory() as task:

@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+"""Synthetic proof for cw release identities, transports, manifest and trust."""
+
+import copy
+import importlib.util
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cw_release_fixtures as fx  # noqa: E402
+
+release = fx.release
+ROOT = fx.ROOT
+
+
+class DeliveryTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.base = fx.scratch("cw-release-delivery.")
+        cls.signer = fx.Signer(cls.base)
+        cls.other = fx.Signer(cls.base, "Synthetic other signer")
+        (cls.base / "signed").mkdir()
+        cls.dist, cls.executables, cls.source_sha = fx.signed_delivery(cls.base / "signed", cls.signer)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.signer.close()
+        cls.other.close()
+        shutil.rmtree(cls.base)
+
+    def copy_dist(self, name):
+        target = self.base / name
+        shutil.copytree(self.dist, target)
+        return target
+
+    # --- identities -----------------------------------------------------------
+
+    def test_four_target_identities_carry_the_effective_compiled_version(self):
+        paths = release.delivery_paths(self.dist)
+        identities = [release.parse_canonical((paths["identities"] / f"{target}.json").read_bytes())
+                      for target in release.RELEASE_TARGETS]
+        self.assertEqual(len(identities), 4)
+        for target, identity in zip(release.RELEASE_TARGETS, identities):
+            data = self.executables[target]
+            self.assertEqual(identity["target"], target)
+            self.assertEqual(identity["package_version"], fx.VERSION)
+            self.assertEqual((identity["sha256"], identity["size"]), (fx.digest(data), len(data)))
+            self.assertEqual(identity["source_revision"], self.source_sha)
+            self.assertEqual(identity["rustc"], fx.RUSTC)
+            self.assertEqual((identity["schema_version"], identity["protocol_version"],
+                              identity["record_version"]), (2, 1, 1))
+
+    def test_identity_producer_refuses_inconsistent_executables(self):
+        good = fx.executable("x86_64-unknown-linux-musl")
+        args = ("x86_64-unknown-linux-musl", fx.VERSION, "a" * 40, "b" * 64, fx.RUSTC)
+        release.make_identity(good, *args)
+        cases = {
+            "version not compiled in": fx.executable("x86_64-unknown-linux-musl", "v9.9.9"),
+            "wrong architecture": fx.executable("aarch64-unknown-linux-gnu"),
+            "mach-o for linux": fx.executable("x86_64-apple-darwin"),
+            "dynamic runtime target": fx.executable("x86_64-unknown-linux-musl", static=False),
+            "truncated": good[:32],
+        }
+        for name, data in cases.items():
+            with self.subTest(name), self.assertRaises(release.ReleaseError):
+                release.make_identity(data, *args)
+        with self.assertRaises(release.ReleaseError):
+            release.make_identity(good, "x86_64-unknown-linux-gnu", *args[1:])
+        darwin = fx.executable("aarch64-apple-darwin")
+        with self.assertRaises(release.ReleaseError):
+            release.make_identity(darwin, "x86_64-apple-darwin", *args[1:])
+
+    def test_identity_schema_is_closed_and_typed(self):
+        identity = release.make_identity(fx.executable("aarch64-apple-darwin"), "aarch64-apple-darwin",
+                                         fx.VERSION, "a" * 40, "b" * 64, fx.RUSTC)
+        mutations = {
+            "extra field": lambda v: v.update(extra=1),
+            "missing size": lambda v: v.pop("size"),
+            "boolean protocol": lambda v: v.update(protocol_version=True),
+            "protocol 2": lambda v: v.update(protocol_version=2),
+            "record 0": lambda v: v.update(record_version=0),
+            "schema 3": lambda v: v.update(schema_version=3),
+            "unsupported target": lambda v: v.update(target="x86_64-unknown-linux-gnu"),
+            "uppercase digest": lambda v: v.update(sha256=v["sha256"].upper()),
+            "oversized": lambda v: v.update(size=release.MAX_EXECUTABLE + 1),
+            "bad version": lambda v: v.update(package_version="v 1"),
+            "not rustc": lambda v: v.update(rustc="cargo 1.93.0"),
+        }
+        for name, mutate in mutations.items():
+            value = copy.deepcopy(identity)
+            mutate(value)
+            with self.subTest(name), self.assertRaises(release.ReleaseError):
+                release.validate_identity(value, "aarch64-apple-darwin")
+
+    def test_identity_requires_the_exact_embedded_build_record(self):
+        target = "x86_64-unknown-linux-musl"
+        args = (target, "v1.2.3", fx.REVISION, fx.TREE, fx.RUSTC)
+        # The requested version occurs incidentally, but the record compiled v1.2.30.
+        actual = fx.executable(target, "v1.2.30", tag=b"cw v1.2.3 compatibility v1.2.3\0")
+        self.assertIn(b"v1.2.3", actual.replace(b"v1.2.30", b""))
+        with self.assertRaisesRegex(release.ReleaseError, "package_version v1.2.30 differs from the admitted v1.2.3"):
+            release.make_identity(actual, *args)
+        self.assertEqual(release.make_identity(actual, target, "v1.2.30", *args[2:])["package_version"], "v1.2.30")
+        record = fx.build_record("v1.2.3", target)
+        good = fx.executable(target, record=record)
+        self.assertEqual(release.make_identity(good, *args)["package_version"], "v1.2.3")
+        body = record[len(release.BUILD_RECORD_MAGIC) + 4:]
+
+        def framed(json_bytes):
+            return release.BUILD_RECORD_MAGIC + struct.pack("<I", len(json_bytes)) + json_bytes
+
+        value = json.loads(body)
+        refused = {
+            "no record": fx.executable(target, record=b"cw v1.2.3"),
+            "two records": fx.executable(target, record=record, tag=record),
+            "no source provenance": fx.executable(target, record=fx.build_record(
+                "v1.2.3", target, revision=None, tree=None)),
+            "wrong revision": fx.executable(target, "v1.2.3", revision="c" * 40),
+            "wrong source digest": fx.executable(target, "v1.2.3", tree="d" * 64),
+            "wrong compiler": fx.executable(target, "v1.2.3", rustc="rustc 1.94.0 (other 2026-03-01)"),
+            "wrong target": fx.executable(target, record=fx.build_record("v1.2.3", "aarch64-unknown-linux-gnu")),
+            "partial provenance": fx.executable(target, record=framed(release.canonical({**value,
+                                                                                          "source_tree_sha256": None}))),
+            "unknown field": fx.executable(target, record=framed(release.canonical({**value, "extra": 1}))),
+            "missing field": fx.executable(target, record=framed(release.canonical(
+                {key: item for key, item in value.items() if key != "rustc"}))),
+            "not canonical": fx.executable(target, record=framed(json.dumps(value, indent=1).encode())),
+            "duplicate key": fx.executable(target, record=framed(body.replace(b'{"package_version"',
+                                                                              b'{"target":"x","package_version"'))),
+            "length overruns": fx.executable(target, record=record)[:1024 + len(record) - 1],
+            "oversized length": fx.executable(target, record=release.BUILD_RECORD_MAGIC + struct.pack("<I", 4096)),
+        }
+        for name, data in refused.items():
+            with self.subTest(name), self.assertRaises(release.ReleaseError):
+                release.make_identity(data, *args)
+
+    def test_build_record_format_matches_the_rust_producer(self):
+        build = (ROOT / "crates/codewire-cli/build.rs").read_text()
+        self.assertIn('const MAGIC: &[u8] = b"\\0codewire-cw-build-record-v1\\0";', build)
+        self.assertEqual(release.BUILD_RECORD_MAGIC, b"\0codewire-cw-build-record-v1\0")
+        keys = [key for key in sorted(release.BUILD_RECORD_FIELDS)]
+        positions = [build.index(f'\\"{key}\\":') for key in keys]
+        self.assertEqual(positions, sorted(positions), "build.rs must emit the record's keys in canonical order")
+        self.assertIn("to_le_bytes", build)
+        for name in ("CODEWIRE_VERSION", "CODEWIRE_SOURCE_REVISION", "CODEWIRE_SOURCE_TREE_SHA256"):
+            self.assertIn(f'"{name}"', build)
+            self.assertIn(name, release.build_environment(fx.VERSION, fx.REVISION, fx.TREE))
+        self.assertNotIn('Command::new("git")', build)
+
+    def test_source_digest_covers_every_compiled_input_kind(self):
+        source, _ = fx.source_repo(self.base / "digest")
+        spec = importlib.util.spec_from_file_location(
+            "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        self.assertIs(native.release, release, "the native producer must use the shared identity producer")
+        inputs = {
+            "crates/codewire-mesh/migrations/001_initial_schema.sql": "create table mesh(id int);\n",
+            "crates/codewire-server-core/migrations/0001_init.sql": "create table core(id int);\n",
+            "crates/codewire-proto/codewire_descriptor.bin": "descriptor\n",
+            "crates/codewire-credential-broker/src/ssh_agent/askpass.sh": "#!/bin/sh\n",
+        }
+        for name, text in inputs.items():
+            (source / name).parent.mkdir(parents=True, exist_ok=True)
+            (source / name).write_text(text)
+        before = release.source_tree_sha256(source)
+        for name in [*inputs, "crates/demo/src/lib.rs", "Cargo.lock", "crates/demo/demo.proto"]:
+            with self.subTest(name):
+                path = source / name
+                original = path.read_bytes()
+                path.write_bytes(original + b"-- changed\n")
+                self.assertNotEqual(release.source_tree_sha256(source), before)
+                path.write_bytes(original)
+                self.assertEqual(release.source_tree_sha256(source), before)
+        (source / "README.md").write_text("still not an input\n")
+        self.assertEqual(release.source_tree_sha256(source), before)
+
+    def depinfo(self, base, paths):
+        rule = base / "cw.d"
+        escaped = " ".join(str(path).replace(" ", "\\ ") for path in paths)
+        rule.write_text(f"{base}/target/release/cw: {escaped}\n\n")
+        return rule
+
+    def test_compiled_inputs_must_all_be_in_the_source_digest(self):
+        base = self.base / "depinfo"
+        base.mkdir()
+        source, _ = fx.source_repo(base)
+        target, cargo = base / "target", base / "cargo home"
+        (cargo / "registry/src").mkdir(parents=True)
+        (target / "out").mkdir(parents=True)
+        (source / "crates/demo/odd name.sql").write_text("select 1;\n")
+        (source / "crates/demo/schema.sql").write_text("select 2;\n")
+        covered = [source / "crates/demo/src/lib.rs", source / "Cargo.lock", target / "out/generated.rs",
+                   cargo / "registry/src/dependency.rs"]
+        self.assertEqual(release.check_build_inputs(source, self.depinfo(base, covered), (target, cargo)), 2)
+        for name, extra in {
+            "undigested repository file": source / "crates/demo/schema.sql",
+            "undigested path with a space": source / "crates/demo/odd name.sql",
+            "file outside the repository": Path("/etc/hostname"),
+        }.items():
+            with self.subTest(name), self.assertRaises(release.ReleaseError):
+                release.check_build_inputs(source, self.depinfo(base, [*covered, extra]), (target, cargo))
+        with self.assertRaises(release.ReleaseError):
+            release.check_build_inputs(source, self.depinfo(base, [target / "out/generated.rs"]), (target, cargo))
+
+    def test_admission_refuses_a_source_change_during_the_build(self):
+        base = self.base / "admit"
+        base.mkdir()
+        source, revision = fx.source_repo(base)
+        tree = release.source_tree_sha256(source)
+        target = "x86_64-unknown-linux-musl"
+        executable = base / "cw"
+        executable.write_bytes(fx.executable(target, revision=revision, tree=tree))
+        depinfo = self.depinfo(base, [source / "crates/demo/src/lib.rs"])
+        data, identity, inputs = release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree,
+                                                     fx.RUSTC, (base / "target",))
+        self.assertEqual((identity["sha256"], identity["source_tree_sha256"], inputs), (fx.digest(data), tree, 1))
+        (source / "crates/demo/src/lib.rs").write_text("pub fn mutated() {}\n")
+        with self.assertRaisesRegex(release.ReleaseError, "source changed during the build"):
+            release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree, fx.RUSTC,
+                                (base / "target",))
+
+    def test_preparation_refuses_changed_source_and_unpinned_toolchain(self):
+        base = self.base / "refuse"
+        base.mkdir()
+        source, sha = fx.source_repo(base)
+        dist, _ = fx.package(base, source, sha)
+        with self.assertRaises(release.ReleaseError):
+            release.prepare(dist, fx.VERSION, source, sha, sha, fx.RUSTC, source_digest_before="0" * 64)
+        shutil.rmtree(dist / release.DELIVERY, ignore_errors=True)
+        with self.assertRaises(release.ReleaseError):
+            release.prepare(dist, fx.VERSION, source, sha, sha, "rustc 1.94.0 (other)")
+        shutil.rmtree(dist / release.DELIVERY, ignore_errors=True)
+        with self.assertRaises(release.ReleaseError):
+            release.prepare(dist, fx.VERSION, source, "c" * 40, sha, fx.RUSTC)
+        shutil.rmtree(dist / release.DELIVERY, ignore_errors=True)
+        (dist / "SHA256SUMS").write_text("0" * 64 + "  cw-v0.4.2-x86_64-apple-darwin\n")
+        with self.assertRaises(release.ReleaseError):
+            release.prepare(dist, fx.VERSION, source, sha, sha, fx.RUSTC)
+
+    # --- transports -----------------------------------------------------------
+
+    def test_raw_oci_and_pack_carry_identical_executable_bytes(self):
+        paths = release.delivery_paths(self.dist)
+        raw = self.executables[release.RUNTIME_TARGET]
+        provenance, payload = release.decode_pack(paths["pack"].read_bytes())
+        self.assertEqual(payload, raw)
+        receipt = json.loads(paths["image"].read_bytes())
+        self.assertEqual(receipt["cw_sha256"], fx.digest(raw))
+        self.assertNotEqual(receipt["index_sha256"], receipt["archive_sha256"])
+        out = self.base / "unpacked"
+        image = self.base / "image.tar"
+        image.write_bytes(paths["oci"].read_bytes())
+        image.chmod(0o600)
+        subprocess.run([sys.executable, str(release.RUNTIME_IMAGE_TOOL), "unpack", "--image", str(image),
+                        "--index-sha256", receipt["index_sha256"], "--output", str(out)],
+                       check=True, stdout=subprocess.DEVNULL)
+        self.assertEqual((out / "cw").read_bytes(), raw)
+        self.assertEqual(provenance["payload"]["sha256"], fx.digest(raw))
+        result = release.verify_delivery(self.dist, self.signer.trust)
+        self.assertEqual(result, {"targets": 4, "version": fx.VERSION, "runtime_equal": True, "signed": True})
+
+    def test_contradictory_transports_and_hashes_are_refused(self):
+        def tamper(name, mutate):
+            dist = self.copy_dist(name)
+            mutate(dist, release.delivery_paths(dist))
+            with self.assertRaises((release.ReleaseError, subprocess.CalledProcessError)):
+                release.verify_delivery(dist, self.signer.trust)
+            shutil.rmtree(dist)
+
+        def flip(path, offset=-1):
+            data = bytearray(path.read_bytes())
+            data[offset] ^= 1
+            path.write_bytes(bytes(data))
+
+        cases = {
+            "raw executable": lambda d, p: flip(d / release.asset_name(fx.VERSION, "aarch64-apple-darwin")),
+            "runtime pack payload": lambda d, p: flip(p["pack"]),
+            "OCI archive": lambda d, p: flip(p["oci"], 600),
+            "runtime lock": lambda d, p: p["lock"].write_text(p["lock"].read_text().replace("1", "2", 1)),
+            "identity digest": lambda d, p: (p["identities"] / "x86_64-apple-darwin.json").write_bytes(
+                (p["identities"] / "x86_64-apple-darwin.json").read_bytes().replace(b'"size":4096', b'"size":4097')),
+            "SHA256SUMS": lambda d, p: p["sums"].write_text(p["sums"].read_text()[::-1]),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name):
+                tamper(name.replace(" ", "-"), mutate)
+
+    # --- manifest -----------------------------------------------------------------
+
+    def manifest(self):
+        return release.parse_canonical(release.delivery_paths(self.dist)["manifest"].read_bytes())
+
+    def test_manifest_is_closed_and_binds_consistent_objects(self):
+        manifest = self.manifest()
+        release.validate_manifest(manifest)
+        runtime = manifest["targets"][release.RELEASE_TARGETS.index(release.RUNTIME_TARGET)]
+        mutations = {
+            "extra field": lambda m: m.update(extra=True),
+            "missing target": lambda m: m["targets"].pop(0),
+            "reordered targets": lambda m: m["targets"].reverse(),
+            "identity version": lambda m: m["targets"][0]["identity"].update(package_version="v0.4.3"),
+            "executable digest": lambda m: m["targets"][1]["executable"].update(sha256="0" * 64),
+            "executable key": lambda m: m["targets"][1]["executable"].update(key="cw/v1/blobs/sha256/" + "1" * 64),
+            "oci index equals archive": lambda m: m["targets"][3]["oci"].update(
+                index_sha256=m["targets"][3]["oci"]["archive"]["sha256"]),
+            "darwin with pack": lambda m: m["targets"][0].update(runtime_pack=runtime["runtime_pack"]),
+            "musl without pack": lambda m: m["targets"][3].pop("runtime_pack"),
+            "boolean size": lambda m: m["targets"][2]["executable"].update(size=True),
+            "lowercase fingerprint": lambda m: m.update(signing_fingerprint=m["signing_fingerprint"].lower()),
+            "foreign key prefix": lambda m: m["checksums"]["file"].update(key="other/SHA256SUMS"),
+            "package version mismatch": lambda m: m.update(package_version="v0.4.3"),
+        }
+        for name, mutate in mutations.items():
+            value = copy.deepcopy(manifest)
+            mutate(value)
+            with self.subTest(name), self.assertRaises((release.ReleaseError, KeyError)):
+                release.validate_manifest(value)
+
+    def test_manifest_encoding_is_canonical_and_bounded(self):
+        data = release.delivery_paths(self.dist)["manifest"].read_bytes()
+        for name, bad in {
+            "pretty printed": json.dumps(json.loads(data), indent=2).encode(),
+            "duplicate key": data.replace(b'{"checksums"', b'{"schema":"x","checksums"', 1),
+            "trailing garbage": data + b"{}",
+            "oversized": b" " * (release.MAX_JSON + 1),
+        }.items():
+            with self.subTest(name), self.assertRaises(release.ReleaseError):
+                release.parse_canonical(bad)
+
+    # --- signatures and trust -----------------------------------------------------------
+
+    def test_signature_tampering_and_wrong_keys_are_refused(self):
+        paths = release.delivery_paths(self.dist)
+        manifest = paths["manifest"].read_bytes()
+        signature = paths["manifest_sig"].read_bytes()
+        release.verify_detached(manifest, signature, self.signer.trust)
+        tampered = manifest.replace(b'"release_tag":"v0.4.2"', b'"release_tag":"v0.4.3"')
+        with self.assertRaises(release.ReleaseError):
+            release.verify_detached(tampered, signature, self.signer.trust)
+        with self.assertRaises(release.ReleaseError):
+            release.verify_detached(manifest, self.other.sign(manifest), self.signer.trust)
+        with self.assertRaises(release.ReleaseError):
+            release.verify_detached(manifest, signature, self.other.trust)
+        mixed = self.base / "mixed.asc"
+        mixed.write_bytes(self.signer.public.read_bytes() + self.other.public.read_bytes())
+        with self.assertRaises(release.ReleaseError):
+            release.verify_detached(manifest, signature, release.Trust(mixed, self.signer.fingerprint))
+        with self.assertRaises(release.ReleaseError):
+            release.verify_detached(manifest, b"-----BEGIN PGP SIGNATURE-----\nbad\n", self.signer.trust)
+
+    def test_synthetic_keys_never_satisfy_production_trust(self):
+        installer = (ROOT / "apps/cli/install.sh").read_text()
+        self.assertIn(f'GPG_KEY_ID="{release.PRODUCTION_FINGERPRINT}"', installer)
+        self.assertNotEqual(self.signer.fingerprint, release.PRODUCTION_FINGERPRINT)
+        with self.assertRaises(release.ReleaseError):
+            release.verify_delivery(self.dist, release.PRODUCTION_TRUST)
+        with self.assertRaises(release.ReleaseError):
+            release.verify_detached(b"x", self.signer.sign(b"x"), release.PRODUCTION_TRUST)
+        # The production key file carries exactly the pinned primary key.
+        listing = subprocess.check_output(["gpg", "--batch", "--show-keys", "--with-colons",
+                                           str(release.PRODUCTION_KEY)], text=True)
+        fingerprints = [line.split(":")[9] for line in listing.splitlines() if line.startswith("fpr:")]
+        self.assertEqual(fingerprints[0], release.PRODUCTION_FINGERPRINT)
+
+    def test_channel_object_is_self_signed_and_closed(self):
+        paths = release.delivery_paths(self.dist)
+        data = paths["channel"].read_bytes()
+        pointer = release.verify_channel(data, self.signer.trust)
+        self.assertEqual(pointer["release_tag"], fx.VERSION)
+        value = json.loads(data)
+        value["pointer"]["release_tag"] = "v0.4.3"
+        for name, bad in {
+            "retargeted pointer": release.canonical(value),
+            "other signer": release.channel_object(pointer, self.other.sign(release.canonical(pointer))),
+        }.items():
+            with self.subTest(name), self.assertRaises(release.ReleaseError):
+                release.verify_channel(bad, self.signer.trust)
+        with self.assertRaises(release.ReleaseError):
+            release.channel_pointer("beta", b"{}", b"sig", fx.VERSION)
+
+    # --- signing step -------------------------------------------------------------------
+
+    def signing_repo(self, name):
+        """A copied script tree whose trust root is the synthetic key, never production."""
+        repo = self.base / name
+        for relative in ("scripts/ci/release/cw_release.py", "scripts/ci/release/sign-cw-release.sh",
+                         "scripts/dev/cw-runtime-image.py"):
+            (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, repo / relative)
+        module = repo / "scripts/ci/release/cw_release.py"
+        text = module.read_text()
+        self.assertEqual(text.count(f'PRODUCTION_FINGERPRINT = "{release.PRODUCTION_FINGERPRINT}"'), 1)
+        module.write_text(text.replace(release.PRODUCTION_FINGERPRINT, self.signer.fingerprint))
+        (repo / "apps/cli").mkdir(parents=True)
+        shutil.copy2(self.signer.public, repo / "apps/cli/GPG_PUBLIC_KEY.asc")
+        return repo / "scripts/ci/release/sign-cw-release.sh"
+
+    def run_signer(self, script, dist, key_id=None):
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.base), "LC_ALL": "C",
+               "CW_RELEASE_GPG_PRIVATE_KEY": self.signer.secret_key(),
+               "CW_RELEASE_GPG_KEY_ID": key_id or self.signer.fingerprint}
+        return subprocess.run(["bash", str(script), str(dist)], env=env, capture_output=True, text=True, timeout=120)
+
+    def test_real_signer_refuses_a_synthetic_key_before_signing(self):
+        base = self.base / "real-signer"
+        base.mkdir()
+        dist, _, _ = fx.unsigned_delivery(base)
+        result = self.run_signer(ROOT / "scripts/ci/release/sign-cw-release.sh", dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("signing key is not the admitted release key", result.stderr)
+        self.assertFalse((dist / "SHA256SUMS.asc").exists())
+        self.assertNotIn(self.signer.secret_key().splitlines()[2], result.stdout + result.stderr)
+
+    def test_signer_signs_fresh_and_retains_published_signatures(self):
+        script = self.signing_repo("signing-repo")
+        base = self.base / "fresh-signer"
+        base.mkdir()
+        dist, _, _ = fx.unsigned_delivery(base)
+        result = self.run_signer(script, dist)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("signed mode=fresh", result.stdout)
+        self.assertTrue(release.verify_delivery(dist, self.signer.trust)["signed"])
+        again = self.run_signer(script, dist)
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("a channel pointer is already signed", again.stderr)
+        # Retained: an already-signed release gets only a new channel signature.
+        paths = release.delivery_paths(dist)
+        kept = {name: paths[name].read_bytes() for name in ("sums_sig", "manifest", "manifest_sig")}
+        paths["pointer"].unlink()
+        paths["channel"].unlink()
+        retained = self.run_signer(script, dist)
+        self.assertEqual(retained.returncode, 0, retained.stderr)
+        self.assertIn("signed mode=retained", retained.stdout)
+        self.assertEqual({name: paths[name].read_bytes() for name in kept}, kept)
+        # A partially signed delivery is never completed by re-signing.
+        partial_base = self.base / "partial-signer"
+        partial_base.mkdir()
+        partial, _, _ = fx.unsigned_delivery(partial_base)
+        (partial / "SHA256SUMS.asc").write_bytes(self.signer.sign((partial / "SHA256SUMS").read_bytes()))
+        result = self.run_signer(script, partial)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("partially signed", result.stderr)
+
+    def test_tree_digest_binds_every_file(self):
+        before = release.tree_digest(self.dist)
+        dist = self.copy_dist("digest-copy")
+        self.assertEqual(release.tree_digest(dist), before)
+        # Artifact transfer drops modes; content and paths stay bound.
+        executable = dist / release.asset_name(fx.VERSION, "x86_64-apple-darwin")
+        executable.chmod(0o644)
+        self.assertEqual(release.tree_digest(dist), before)
+        executable.write_bytes(executable.read_bytes() + b"x")
+        self.assertNotEqual(release.tree_digest(dist), before)
+        executable.write_bytes(executable.read_bytes()[:-1])
+        (dist / "extra").write_text("x")
+        self.assertNotEqual(release.tree_digest(dist), before)
+        shutil.rmtree(dist)
+
+
+if __name__ == "__main__":
+    result = unittest.main(argv=[sys.argv[0], "-v"], exit=False).result
+    print(f"test-cw-release-delivery: tests={result.testsRun} failures={len(result.failures)} "
+          f"errors={len(result.errors)}")
+    sys.exit(0 if result.wasSuccessful() and result.testsRun > 0 else 1)

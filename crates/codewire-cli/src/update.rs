@@ -16,12 +16,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::{Args, Subcommand};
-use codewire_cw_release::identity::{CwPayloadIdentity, MAX_IDENTITY_BYTES};
+use codewire_cw_release::identity::{CwPayloadIdentity, MAX_IDENTITY_BYTES, Platform};
 use codewire_cw_release::store::{
     self, Admission, Candidate, DEFAULT_LOCK_TIMEOUT, EntryState, Status, Store, StoreError,
+    VersionRecord,
 };
 use rustix::fs::{self as rfs, Mode, OFlags};
 use serde::Serialize;
+
+use crate::build_record::{BUILD_RECORD, BuildRecord};
 
 /// Identity file beside `cw` in a pinned local release directory; the same
 /// schema-2 document the cw image carries as `cw-runtime.json`.
@@ -105,6 +108,9 @@ struct SelectionReport<'a> {
     changed: bool,
     generation: u64,
     previous: Option<&'a str>,
+    /// Complete identity of a self-installed cw, from its build record and bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<&'a CwPayloadIdentity>,
 }
 
 pub(crate) fn run(args: UpdateArgs) -> anyhow::Result<()> {
@@ -127,6 +133,7 @@ pub(crate) fn run(args: UpdateArgs) -> anyhow::Result<()> {
                     changed: selected.changed,
                     generation: selected.generation,
                     previous: selected.previous.as_deref(),
+                    identity: None,
                 },
                 rollback.selection.store.json,
             )
@@ -148,6 +155,7 @@ pub(crate) fn run(args: UpdateArgs) -> anyhow::Result<()> {
                     changed: selected.changed,
                     generation: selected.generation,
                     previous: selected.previous.as_deref(),
+                    identity: None,
                 },
                 args.selection.store.json,
             )
@@ -162,6 +170,21 @@ pub(crate) fn run(args: UpdateArgs) -> anyhow::Result<()> {
 }
 
 pub(crate) fn install(args: InstallArgs) -> anyhow::Result<()> {
+    // The complete identity comes from this cw's build record and its exact
+    // running bytes, before any store or entry change.
+    let host = Platform::host().ok_or(StoreError::UnsupportedHost)?;
+    let executable = running_executable()?;
+    let identity = BuildRecord::embedded()?
+        .identity(&BUILD_RECORD, &executable, host)
+        .context("admit this cw for managed installation")?;
+    install_identified(args, executable, &identity)
+}
+
+fn install_identified(
+    args: InstallArgs,
+    executable: PathBuf,
+    identity: &CwPayloadIdentity,
+) -> anyhow::Result<()> {
     debug_assert!(args.managed);
     let root = match args.store {
         Some(root) => absolute(root)?,
@@ -171,16 +194,25 @@ pub(crate) fn install(args: InstallArgs) -> anyhow::Result<()> {
         Some(directory) => absolute(directory)?,
         None => default_bin_dir()?,
     };
+    refuse_contradiction(&root, identity)?;
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("create managed entry directory {}", bin_dir.display()))?;
     let candidate = Candidate {
-        executable: running_executable()?,
+        executable,
         admission: Admission::SelfInstall {
-            package_version: crate::CLI_VERSION.to_owned(),
+            package_version: identity.package_version.clone(),
         },
     };
     let installed = store::install(&root, &bin_dir.join("cw"), &candidate, DEFAULT_LOCK_TIMEOUT)
         .map_err(with_hint)?;
+    anyhow::ensure!(
+        installed.published.sha256 == identity.sha256,
+        "the running cw changed while it was installed: stored {} instead of {}; select the \
+         intended version with `cw update rollback`",
+        installed.published.sha256,
+        identity.sha256
+    );
+    consistent(&installed.published.record, identity)?;
     print_selection(
         &installed.store,
         &SelectionReport {
@@ -192,9 +224,46 @@ pub(crate) fn install(args: InstallArgs) -> anyhow::Result<()> {
             changed: installed.selected.changed,
             generation: installed.selected.generation,
             previous: installed.selected.previous.as_deref(),
+            identity: Some(identity),
         },
         args.json,
     )
+}
+
+/// Refuse before any change when the store already holds these bytes under
+/// a different identity.
+fn refuse_contradiction(root: &Path, identity: &CwPayloadIdentity) -> anyhow::Result<()> {
+    let store = match Store::open(root, DEFAULT_LOCK_TIMEOUT) {
+        Ok(store) => store,
+        Err(StoreError::NotAStore { .. }) => return Ok(()),
+        Err(StoreError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("open managed cw store {}", root.display()));
+        }
+    };
+    match store.verify(&identity.sha256) {
+        Ok(record) => consistent(&record, identity),
+        Err(StoreError::UnknownVersion(_)) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn consistent(record: &VersionRecord, identity: &CwPayloadIdentity) -> anyhow::Result<()> {
+    let agrees = record.sha256 == identity.sha256
+        && record.size == identity.size
+        && record.package_version == identity.package_version
+        && record
+            .payload
+            .as_ref()
+            .is_none_or(|payload| payload == identity);
+    anyhow::ensure!(
+        agrees,
+        "stored cw version {} records an identity that contradicts this cw's build record",
+        identity.sha256
+    );
+    Ok(())
 }
 
 fn status(args: StoreArgs) -> anyhow::Result<()> {
@@ -287,6 +356,12 @@ fn print_selection(store: &Store, report: &SelectionReport<'_>, json: bool) -> a
         store.entry().display(),
         report.generation
     );
+    if let Some(identity) = report.identity {
+        println!(
+            "Identity: {} source {} (tree {}), {}.",
+            identity.target, identity.source_revision, identity.source_tree_sha256, identity.rustc
+        );
+    }
     if report.changed && report.previous.is_some() {
         println!("Running cw processes keep their current version.");
     }
@@ -466,6 +541,7 @@ mod tests {
     use clap::Parser as _;
 
     use super::*;
+    use crate::build_record::tests::{decoded, executable, framed, host, host_target, json, write};
     use crate::{Cli, Command};
 
     fn parse(arguments: &[&str]) -> Result<Command, clap::Error> {
@@ -592,6 +668,29 @@ mod tests {
         assert_eq!(fs::read(target).unwrap(), b"{}");
     }
 
+    fn install_args(directory: &Path) -> InstallArgs {
+        InstallArgs {
+            managed: true,
+            bin_dir: Some(directory.join("bin")),
+            store: Some(directory.join("store")),
+            json: false,
+        }
+    }
+
+    /// A synthetic executable holding one build record for `target`, and the
+    /// identity self-install derives from it.
+    fn identified(directory: &Path, target: &str) -> (PathBuf, CwPayloadIdentity) {
+        let record = framed(&json("v1.2.30", target, true));
+        let decoded = decoded(&record);
+        let path = write(
+            directory,
+            "candidate-cw",
+            &executable(&[b"v1.2.3", &record]),
+        );
+        let identity = decoded.identity(&record, &path, host()).unwrap();
+        (path, identity)
+    }
+
     #[test]
     fn managed_install_refuses_an_unmanaged_entry_and_explains_migration() {
         let directory = tempfile::tempdir().unwrap();
@@ -599,18 +698,121 @@ mod tests {
         fs::create_dir(&bin).unwrap();
         fs::write(bin.join("cw"), b"legacy cw").unwrap();
         let store = directory.path().join("store");
-        let error = install(InstallArgs {
-            managed: true,
-            bin_dir: Some(bin.clone()),
-            store: Some(store.clone()),
-            json: false,
-        })
-        .unwrap_err();
+        let (executable, identity) = identified(directory.path(), host_target());
+        let error =
+            install_identified(install_args(directory.path()), executable, &identity).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("unmanaged regular file"), "{message}");
         assert!(message.contains("install-user-unmanaged"), "{message}");
         assert_eq!(fs::read(bin.join("cw")).unwrap(), b"legacy cw");
         assert!(!store.exists());
+    }
+
+    #[test]
+    fn self_install_without_source_provenance_changes_nothing() {
+        let record = BuildRecord::embedded().unwrap();
+        if record.source_revision.is_some() {
+            // This test binary was built with explicit provenance.
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let error = install(install_args(directory.path())).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("without source provenance"), "{message}");
+        assert!(message.contains("make cli-install"), "{message}");
+        assert!(!directory.path().join("bin").exists());
+        assert!(!directory.path().join("store").exists());
+    }
+
+    #[test]
+    fn self_install_admits_the_identity_of_its_exact_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let (executable, identity) = identified(directory.path(), host_target());
+        assert_eq!(identity.package_version, "v1.2.30");
+        install_identified(
+            install_args(directory.path()),
+            executable.clone(),
+            &identity,
+        )
+        .unwrap();
+        let store = Store::open(&directory.path().join("store"), DEFAULT_LOCK_TIMEOUT).unwrap();
+        let record = store.verify(&identity.sha256).unwrap();
+        assert_eq!(record.origin, store::Origin::SelfInstall);
+        assert_eq!(record.package_version, "v1.2.30");
+        assert_eq!(record.size, identity.size);
+        assert_eq!(record.payload, None);
+        assert_eq!(
+            fs::read_link(directory.path().join("bin/cw")).unwrap(),
+            store.version_executable(&identity.sha256)
+        );
+        // Reinstalling the same bytes is idempotent.
+        install_identified(install_args(directory.path()), executable, &identity).unwrap();
+        assert_eq!(store.status().unwrap().versions.len(), 1);
+    }
+
+    #[test]
+    fn self_install_refuses_stored_bytes_with_a_contradicting_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let release = host().release_target().as_str();
+        let (executable, identity) = identified(directory.path(), release);
+        let mut pinned = identity.clone();
+        pinned.source_revision = "f".repeat(40);
+        let entry = directory.path().join("bin");
+        fs::create_dir(&entry).unwrap();
+        let installed = store::install(
+            &directory.path().join("store"),
+            &entry.join("cw"),
+            &Candidate {
+                executable: executable.clone(),
+                admission: Admission::Pinned {
+                    identity: pinned,
+                    sha256: identity.sha256.clone(),
+                },
+            },
+            DEFAULT_LOCK_TIMEOUT,
+        )
+        .unwrap();
+        let generation = installed.selected.generation;
+        let error = install_identified(
+            install_args(directory.path()),
+            executable.clone(),
+            &identity,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("contradicts"), "{error:#}");
+        assert_eq!(installed.store.status().unwrap().generation, generation);
+
+        // The same bytes pinned under the identical identity are consistent.
+        let agreeing = tempfile::tempdir().unwrap();
+        let entry = agreeing.path().join("bin");
+        fs::create_dir(&entry).unwrap();
+        store::install(
+            &agreeing.path().join("store"),
+            &entry.join("cw"),
+            &Candidate {
+                executable: executable.clone(),
+                admission: Admission::Pinned {
+                    identity: identity.clone(),
+                    sha256: identity.sha256.clone(),
+                },
+            },
+            DEFAULT_LOCK_TIMEOUT,
+        )
+        .unwrap();
+        install_identified(install_args(agreeing.path()), executable, &identity).unwrap();
+    }
+
+    #[test]
+    fn self_install_refuses_bytes_other_than_its_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let (executable, mut identity) = identified(directory.path(), host_target());
+        identity.sha256 = "e".repeat(64);
+        let error =
+            install_identified(install_args(directory.path()), executable, &identity).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("changed while it was installed"),
+            "{error:#}"
+        );
     }
 
     #[test]

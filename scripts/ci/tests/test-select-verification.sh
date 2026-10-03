@@ -959,8 +959,31 @@ run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-managed.py
 run_paths_case cli_native_managed_artifact pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
   scripts/dev/build-native-managed-agent.py
+# Release delivery sources and their proofs were unclassified (all product
+# verification) or missed the release suite; each now selects it.
+run_paths_case cw_release_delivery_core pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/release/cw_release.py scripts/ci/release/cw_release_r2.py
+run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/release/sign-cw-release.sh \
+  scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
+  scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh
+run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
+  scripts/ci/tests/test-cw-release-delivery.py scripts/ci/tests/test-cw-release-r2.py
+run_paths_case cw_runtime_image_tool pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/cw-runtime-image.py scripts/dev/test-cw-runtime-image.py
+run_paths_case cw_host_build_tool pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/build-cw.py
+run_paths_case cw_build_record_producer pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli' \
+  crates/codewire-cli/build.rs crates/codewire-cli/src/build_record.rs
 run_paths_case edge_harness pull_request refs/pull/153/head false \
   'policy' scripts/ci/verify/kind-e2e.sh
 run_paths_case edge_host_runtime pull_request refs/pull/1529/head true \

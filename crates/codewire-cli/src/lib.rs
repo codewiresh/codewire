@@ -1,3 +1,4 @@
+mod build_record;
 pub mod config;
 mod console_client;
 mod environment_client;
@@ -45,10 +46,9 @@ use presentation::{
 };
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};
 
-const CLI_VERSION: &str = match option_env!("CODEWIRE_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+// The effective compiled version: `CODEWIRE_VERSION` when the build set it,
+// otherwise the workspace version, read from this cw's embedded build record.
+use build_record::CLI_VERSION;
 
 /// Reassert a credential-bearing child's non-dumpable state immediately after
 /// `execve`, which resets this flag for an ordinary executable. The selected

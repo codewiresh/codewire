@@ -5,17 +5,23 @@ usage() {
   cat <<'EOF'
 usage: package-cw-release.sh <vX.Y.Z>
 
-Builds Rust cw release assets into $CW_RELEASE_DIST_DIR.
+Builds Rust cw release assets into $CW_RELEASE_DIST_DIR. Every build embeds the
+explicit version, source revision and source digest in its build record, and
+each executable is admitted only if that record, the unchanged source and its
+Cargo dep-info agree. With exactly the four release targets it also prepares
+the unsigned delivery: one identity per final executable, the OCI image and
+native runtime pack from the same Linux x86-64 musl bytes, and the data the
+release manifest binds. Signing is a separate step (sign-cw-release.sh);
+compilation never receives signing or publication credentials.
 
 Environment:
   CW_RELEASE_TARGETS             Space-separated target triples.
   CW_RELEASE_PROFILE             Cargo profile to build (default: release).
   CW_RELEASE_BUILD_CMD           Cargo command prefix (default: cargo build).
   CW_RELEASE_DIST_DIR            Output directory (default: dist/cw-release).
-  CW_RELEASE_REQUIRE_SIGNATURE   Require SHA256SUMS.asc (default: 1).
-  CW_RELEASE_GPG_PRIVATE_KEY     ASCII-armored private key for signing.
-  CW_RELEASE_GPG_PASSPHRASE      Optional GPG passphrase.
-  CW_RELEASE_GPG_KEY_ID          Optional signing key id.
+  CW_RELEASE_SOURCE_SHA          Selected source commit (default: HEAD).
+  CW_RELEASE_TAG_OBJECT_SHA      Selected tag object (default: the source commit,
+                                 for unpublished dry runs).
 EOF
 }
 
@@ -29,6 +35,12 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
+# Compilation runs in a job without signing or publication capability.
+for name in CW_RELEASE_GPG_PRIVATE_KEY CW_RELEASE_GPG_PASSPHRASE \
+  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY GH_MIRROR_TOKEN_FILE; do
+  [ -z "${!name:-}" ] || die "$name must not reach release compilation"
+done
+
 version="${1:-${VERSION:-}}"
 [ -n "$version" ] || die "version is required"
 case "$version" in
@@ -39,13 +51,19 @@ case "$version" in
     ;;
 esac
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+release_py="$script_dir/cw_release.py"
+release_targets='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin'
 host_target="$(rustc -vV | awk '/^host:/ {print $2}')"
 targets="${CW_RELEASE_TARGETS:-$host_target}"
 profile="${CW_RELEASE_PROFILE:-release}"
 build_cmd="${CW_RELEASE_BUILD_CMD:-cargo build}"
 dist_dir="${CW_RELEASE_DIST_DIR:-dist/cw-release}"
-require_signature="${CW_RELEASE_REQUIRE_SIGNATURE:-1}"
 target_dir="${CARGO_TARGET_DIR:-target}"
+source_sha="${CW_RELEASE_SOURCE_SHA:-$(git rev-parse HEAD)}"
+tag_object_sha="${CW_RELEASE_TAG_OBJECT_SHA:-$source_sha}"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+[ "$(git rev-parse HEAD)" = "$source_sha" ] || die "checkout is not the selected source revision $source_sha"
 
 case "$profile" in
   dev)
@@ -62,6 +80,10 @@ case "$profile" in
     ;;
 esac
 
+# Bind the source before anything is built. Each build embeds it, and
+# admission and preparation recheck it afterwards.
+source_digest_before="$(python3 "$release_py" source-digest --source-root .)"
+
 rm -rf "$dist_dir"
 mkdir -p "$dist_dir"
 
@@ -69,7 +91,10 @@ for target in $targets; do
   echo "building cw $version for $target"
   # shellcheck disable=SC2206
   cmd=($build_cmd)
-  CODEWIRE_VERSION="$version" "${cmd[@]}" \
+  CODEWIRE_VERSION="$version" \
+    CODEWIRE_SOURCE_REVISION="$source_sha" \
+    CODEWIRE_SOURCE_TREE_SHA256="$source_digest_before" \
+    "${cmd[@]}" \
     --locked \
     "${profile_flag[@]}" \
     -p codewire-cli-bin \
@@ -78,6 +103,16 @@ for target in $targets; do
 
   binary="$target_dir/$target/$profile_dir/cw"
   [ -x "$binary" ] || die "expected built binary at $binary"
+  python3 "$release_py" admit \
+    --source-root . \
+    --executable "$binary" \
+    --depinfo "$target_dir/$target/$profile_dir/cw.d" \
+    --target "$target" \
+    --version "$version" \
+    --source-sha "$source_sha" \
+    --source-digest-before "$source_digest_before" \
+    --target-dir "$target_dir" \
+    --cargo-home "$cargo_home"
   cp "$binary" "$dist_dir/cw-$version-$target"
 done
 
@@ -86,37 +121,18 @@ done
   sha256sum cw-* | sort -k2 > SHA256SUMS
 )
 
-if [ -n "${CW_RELEASE_GPG_PRIVATE_KEY:-}" ]; then
-  gnupg_home="$(mktemp -d)"
-  cleanup_gpg() {
-    rm -rf "$gnupg_home"
-  }
-  trap cleanup_gpg EXIT
-  chmod 700 "$gnupg_home"
-  export GNUPGHOME="$gnupg_home"
-
-  printf '%s\n' "$CW_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
-  gpg_args=(--batch --yes --pinentry-mode loopback --armor --detach-sign)
-  if [ -n "${CW_RELEASE_GPG_PASSPHRASE:-}" ]; then
-    gpg_args+=(--passphrase-fd 0)
-  fi
-  if [ -n "${CW_RELEASE_GPG_KEY_ID:-}" ]; then
-    gpg_args+=(--local-user "$CW_RELEASE_GPG_KEY_ID")
-  fi
-  if [ -n "${CW_RELEASE_GPG_PASSPHRASE:-}" ]; then
-    printf '%s' "$CW_RELEASE_GPG_PASSPHRASE" |
-      gpg "${gpg_args[@]}" \
-        --output "$dist_dir/SHA256SUMS.asc" \
-        "$dist_dir/SHA256SUMS"
-  else
-    gpg "${gpg_args[@]}" \
-      --output "$dist_dir/SHA256SUMS.asc" \
-      "$dist_dir/SHA256SUMS"
-  fi
-elif [ "$require_signature" = "1" ]; then
-  die "CW_RELEASE_GPG_PRIVATE_KEY is required to produce SHA256SUMS.asc"
+sorted_targets="$(printf '%s\n' $targets | sort | tr '\n' ' ')"
+release_set="$(printf '%s\n' $release_targets | sort | tr '\n' ' ')"
+if [ "$sorted_targets" = "$release_set" ]; then
+  python3 "$release_py" prepare \
+    --dist "$dist_dir" \
+    --version "$version" \
+    --source-root . \
+    --source-sha "$source_sha" \
+    --tag-object-sha "$tag_object_sha" \
+    --source-digest-before "$source_digest_before"
 else
-  echo "warning: unsigned dry-run; SHA256SUMS.asc was not produced" >&2
+  echo "package-cw-release: delivery preparation needs exactly the four release targets; skipped" >&2
 fi
 
 echo "release assets:"
