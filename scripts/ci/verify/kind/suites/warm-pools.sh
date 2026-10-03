@@ -621,13 +621,13 @@ warm_pool_orchestration_env() {
 # Resumed, the reconciler replaces the old members, and the next hit carries
 # the new revision. The original settings are restored.
 warm_pool_stale_revision() {
-  local original loops other paused state old_revision old_members id path
+  local original loops rotated_profile paused state old_revision old_members id path
   local sandbox_uid deadline new_state new_revision cold_before uid gone=no
   original="$(warm_pool_orchestration_env SANDBOX_RUNTIME_PROFILE)"
   loops="$(warm_pool_orchestration_env WORKER_LOOPS)"
   case "$original" in
-    runc) other=none ;;
-    none) other=runc ;;
+    runc) rotated_profile=none ;;
+    none) rotated_profile=runc ;;
     *)
       echo "::error::orchestration runs runtime profile ${original}; the rotation journey needs a Kind diagnostic runtime"
       return 1
@@ -638,9 +638,9 @@ warm_pool_stale_revision() {
   state="$(warm_pool_state)"
   old_revision="${state%% *}"
   old_members=" ${state#* } "
-  log "rendering runtime profile ${other} over revision ${old_revision:0:12} with the pool reconciler paused"
+  log "rendering runtime profile ${rotated_profile} over revision ${old_revision:0:12} with the pool reconciler paused"
   WARM_POOL_RESTORE_CONFIG="${original}|${loops}"
-  warm_pool_set_orchestration "$other" "$paused"
+  warm_pool_set_orchestration "$rotated_profile" "$paused"
   cold_before="$(warm_pool_metric codewire_warm_pool_routes_total 'route="cold_revision"')"
   warm_pool_timed_create stale-refused "$WP_CPU" "$WP_MEMORY" "$WP_DISK"
   id="$WP_ID"
@@ -658,7 +658,7 @@ warm_pool_stale_revision() {
   log "stale revision refused: ${id} started cold; old member(s)${old_members}stay unclaimed"
   warm_pool_destroy "$id"
 
-  warm_pool_set_orchestration "$other" "$loops"
+  warm_pool_set_orchestration "$rotated_profile" "$loops"
   deadline=$(( $(date +%s) + WARM_POOL_TIMEOUT_SECONDS ))
   new_revision=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
