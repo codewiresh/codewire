@@ -201,7 +201,12 @@ async fn run_epoch_with_lifetime(
                     .map_err(|_| ())?;
             // Successful TLS/RPC headers certify the broker's dual TokenReview,
             // live Ready Pods, Running DB state, exact generation and real Ready.
-            let sender = prepared.activate().await.map_err(|_| ())?;
+            // They also list the optional operations this broker serves. The
+            // daemon's Open carries them, so the daemon never sends one that
+            // an older broker would end the epoch on; an older gateway lists
+            // none.
+            let capabilities = broker_capabilities(response.metadata());
+            let sender = prepared.activate(&capabilities).await.map_err(|_| ())?;
             let mut responses = response.into_inner();
             loop {
                 let frame = match responses.message().await {
@@ -299,6 +304,8 @@ async fn forward_host(
         Some(Payload::EnvironmentProjection(value)) => {
             sender.send_environment_projection(value).await
         }
+        // Opaque recipient-sealed ciphertext; this relay cannot open it.
+        Some(Payload::CodexLogin(value)) => sender.send_codex_login(value).await,
         Some(Payload::Open(_)) | None => {
             return Err(Status::unavailable(
                 "hosted credential bridge frame is invalid",
@@ -306,6 +313,20 @@ async fn forward_host(
         }
     };
     result.map_err(|_| Status::unavailable("hosted credential bridge stream is unavailable"))
+}
+
+/// The broker's advertised optional operations, bounded and canonical. A
+/// malformed or unknown value is dropped, never forwarded; the daemon client
+/// forwards only names this build knows.
+fn broker_capabilities(metadata: &tonic::metadata::MetadataMap) -> Vec<String> {
+    metadata
+        .get_all(codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter(|value| codewire_gateway_proto::valid_credential_bridge_capability(value))
+        .take(codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Cancelling an epoch wins over queued frames. Its owner waits for this exact

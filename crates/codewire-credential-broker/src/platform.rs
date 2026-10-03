@@ -26,8 +26,9 @@ use async_trait::async_trait;
 use codewire_access::{
     AvailableGrants, BrokerOperationId, BrokerRouteId,
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
-    CredentialId, CredentialMetadata, DerivedGrant, EnvironmentAccessBinding, GrantContext,
-    GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS, Placement,
+    CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
+    GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
+    Placement, codex_login_permission,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, OAuthRefreshState, PlatformAccessProfileStore,
@@ -585,6 +586,87 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         })
     }
 
+    /// One lease: two runtime authority checks bracket grant and record
+    /// reads, the protected-material read, and a second grant and record read.
+    /// `admissible`, when present, is a delivery predicate applied to the
+    /// session and to both record reads.
+    async fn lease(
+        &self,
+        request_id: Uuid,
+        slot: CapabilitySlot,
+        permission: GrantPermission,
+        admissible: Option<DeliveryPredicate>,
+    ) -> Result<PlatformCredentialLease, BrokerLeaseError> {
+        if request_id.is_nil() {
+            return Err(BrokerLeaseError::InvalidRequest);
+        }
+        // Held until this lease returns: many epochs cannot stampede SQL,
+        // Kubernetes or the KEK with more than the service's lease budget.
+        let _budget = match &self.leases {
+            Some(leases) => Some(
+                leases
+                    .acquire(self.session.identity_expires_at_unix)
+                    .await?,
+            ),
+            None => None,
+        };
+        // Two runtime authority checks bracket the whole lease. Both grant
+        // evaluations use the first response, and the last response must be
+        // exactly that one apart from its expiry, so nothing either evaluation
+        // relied on can have changed without denying the lease. The response is
+        // never kept beyond this lease.
+        let initial = self.session().await?;
+        // A delivery predicate refuses before any grant, record or material
+        // read it cannot pass, and again for each record read.
+        if let Some(admissible) = admissible {
+            admissible(&initial, None)?;
+        }
+        let before = self
+            .grant_and_record(&initial, &slot, permission.clone())
+            .await?;
+        ensure_live(&before.record.metadata, &before.grant)?;
+        if let Some(admissible) = admissible {
+            admissible(&initial, Some(&before))?;
+        }
+        let material = timing::timed(
+            Phase::MaterialRead,
+            self.credentials.read_for_broker(
+                &before.record.metadata.owner,
+                &before.record.metadata.id,
+                before.record.version,
+            ),
+        )
+        .await
+        .map_err(credential_error)?;
+        // OpenBao unwrap and SQL lock waits may outlive the original authority.
+        // Recheck the exact profile selection and current record, then runtime
+        // authority last. Nothing below awaits, so no wait follows that check.
+        let mut after = self.grant_and_record(&initial, &slot, permission).await?;
+        let current = self.session().await?;
+        if !initial.same_except_expiry(&current)
+            || before.record != after.record
+            || before.permission != after.permission
+            || !same_grant_binding(&before.grant, &after.grant)
+        {
+            return Err(BrokerLeaseError::Denied);
+        }
+        after.grant.expires_at_unix = before
+            .grant
+            .expires_at_unix
+            .min(after.grant.expires_at_unix)
+            .map(|deadline| deadline.min(current.identity_expires_at_unix));
+        ensure_live(&after.record.metadata, &after.grant)?;
+        if let Some(admissible) = admissible {
+            admissible(&current, Some(&after))?;
+        }
+        Ok(PlatformCredentialLease {
+            record: after.record,
+            grant: after.grant,
+            permission: after.permission,
+            material,
+        })
+    }
+
     async fn admit_request(
         &self,
         request: &BrokerCredentialRefreshRequest,
@@ -621,6 +703,12 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             || !same_grant_binding(&admission.grant, &request.grant)
         {
             return Err(BrokerRefreshError::Denied);
+        }
+        // A refresh started for login delivery keeps that delivery's whole
+        // predicate. Its session facts are fixed by `same_binding`, which
+        // every authority check in `admit` enforced against this session.
+        if admission.permission == codex_login_permission() {
+            codex_login_admissible(&self.session, Some(&admission)).map_err(refresh_lease_error)?;
         }
         let requested_deadline = request
             .grant
@@ -806,64 +894,23 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         operation: BrokerOperationId,
         route: BrokerRouteId,
     ) -> Result<Self::Lease, BrokerLeaseError> {
-        if request_id.is_nil() {
-            return Err(BrokerLeaseError::InvalidRequest);
-        }
-        // Held until this lease returns: many epochs cannot stampede SQL,
-        // Kubernetes or the KEK with more than the service's lease budget.
-        let _budget = match &self.leases {
-            Some(leases) => Some(
-                leases
-                    .acquire(self.session.identity_expires_at_unix)
-                    .await?,
-            ),
-            None => None,
-        };
         let permission = GrantPermission { operation, route };
-        // Two runtime authority checks bracket the whole lease. Both grant
-        // evaluations use the first response, and the last response must be
-        // exactly that one apart from its expiry, so nothing either evaluation
-        // relied on can have changed without denying the lease. The response is
-        // never kept beyond this lease.
-        let initial = self.session().await?;
-        let before = self
-            .grant_and_record(&initial, &slot, permission.clone())
-            .await?;
-        ensure_live(&before.record.metadata, &before.grant)?;
-        let material = timing::timed(
-            Phase::MaterialRead,
-            self.credentials.read_for_broker(
-                &before.record.metadata.owner,
-                &before.record.metadata.id,
-                before.record.version,
-            ),
-        )
-        .await
-        .map_err(credential_error)?;
-        // OpenBao unwrap and SQL lock waits may outlive the original authority.
-        // Recheck the exact profile selection and current record, then runtime
-        // authority last. Nothing below awaits, so no wait follows that check.
-        let mut after = self.grant_and_record(&initial, &slot, permission).await?;
-        let current = self.session().await?;
-        if !initial.same_except_expiry(&current)
-            || before.record != after.record
-            || before.permission != after.permission
-            || !same_grant_binding(&before.grant, &after.grant)
-        {
+        // The login permission is leased only with its delivery predicate.
+        if permission == codex_login_permission() {
             return Err(BrokerLeaseError::Denied);
         }
-        after.grant.expires_at_unix = before
-            .grant
-            .expires_at_unix
-            .min(after.grant.expires_at_unix)
-            .map(|deadline| deadline.min(current.identity_expires_at_unix));
-        ensure_live(&after.record.metadata, &after.grant)?;
-        Ok(PlatformCredentialLease {
-            record: after.record,
-            grant: after.grant,
-            permission: after.permission,
-            material,
-        })
+        self.lease(request_id, slot, permission, None).await
+    }
+
+    /// The one listed direct delivery exception; see [`codex_login_admissible`].
+    async fn lease_codex_login(&self, request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
+        self.lease(
+            request_id,
+            CapabilitySlot::codex(),
+            codex_login_permission(),
+            Some(codex_login_admissible),
+        )
+        .await
     }
 
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
@@ -1098,6 +1145,68 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         // drains Start, provider exchange and terminal publication before here.
         Ok(())
     }
+}
+
+/// A check a lease applies to its runtime session and, once read, to each
+/// credential admission.
+type DeliveryPredicate =
+    fn(&PlatformRuntimeSession, Option<&Admission>) -> Result<(), BrokerLeaseError>;
+
+/// Delivery predicate of the one listed direct delivery exception
+/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions"): the
+/// Sandbox creator's own personal Codex ChatGPT login, sealed to the
+/// workspace daemon. Every condition must hold:
+///
+/// - a hosted Sandbox: an owner-local runtime never receives a login;
+/// - the profile owner is the Sandbox creator (`context.user_id`, the
+///   environment's `created_by`), and the creator confirmed the personal
+///   profile's consent. The hosted authority sets `allow_personal_credentials`
+///   exactly when the bound profile is the creator's own and its
+///   `personal_owner_confirmed_by` is the creator, and resolves the profile
+///   owner to the creator only then (credential-service `authority.rs`,
+///   `Scope::context` and `Scope::owner`). Both facts are part of
+///   `same_binding`, so every authority check rechecks them;
+/// - the Codex grant comes from that profile and carries the dedicated
+///   `codex-login` permission, which this lease requested;
+/// - the credential is the creator's own Active OpenAI OAuth login on the
+///   platform: never an API key, an organization's credential, another
+///   user's, or one that is revoked or needs Reconnect.
+///
+/// Other users who can open the Sandbox's terminal can read a delivered token
+/// until its `exp`; the owner accepted that ("always deliver"), so this
+/// predicate deliberately does not consider them.
+fn codex_login_admissible(
+    session: &PlatformRuntimeSession,
+    admission: Option<&Admission>,
+) -> Result<(), BrokerLeaseError> {
+    let RuntimeIdentity::Hosted { .. } = &session.identity else {
+        return Err(BrokerLeaseError::Denied);
+    };
+    let creator = Owner::User(session.context.user_id.clone());
+    if session.context.placement != GrantPlacement::Platform
+        || session.credential_owner != creator
+        || !session.context.allow_personal_credentials
+    {
+        return Err(BrokerLeaseError::Denied);
+    }
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let metadata = &admission.record.metadata;
+    if admission.permission != codex_login_permission()
+        || admission.grant.capability_slot != CapabilitySlot::codex()
+        || !admission.grant.permissions.contains(&admission.permission)
+        || admission.grant.profile.is_none()
+        || admission.grant.credential_id != metadata.id
+        || metadata.owner != creator
+        || metadata.placement != Placement::Platform
+        || metadata.provider.as_str() != "openai"
+        || metadata.authentication_kind != CredentialAuthKind::OAuth
+        || metadata.status != CredentialStatus::Active
+    {
+        return Err(BrokerLeaseError::Denied);
+    }
+    Ok(())
 }
 
 fn expected(request: &BrokerCredentialRefreshRequest) -> CredentialVersion {

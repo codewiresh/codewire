@@ -150,6 +150,12 @@ impl CredentialBridge {
             .ok_or_else(|| Status::failed_precondition("credential bridge is unavailable"))
     }
 
+    /// The shared bridge itself, for the hosted Codex login writer.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn shared_bridge(&self) -> Option<SharedCredentialBridge> {
+        self.shared().ok().cloned()
+    }
+
     pub(crate) async fn project_environment_for_recipient(
         &self,
         context: codewire_workload_secrets::ProjectionContext,
@@ -207,12 +213,18 @@ impl CredentialBridge {
                 result = tokio::time::timeout_at(deadline, hosted::read_workspace_authorization(token_file)) => result.map_err(|_| hosted::unavailable())??,
             })
         } else {
-            tokio::select! {
+            None
+        };
+        // A local host's Open is read eagerly, before preparing; a hosted
+        // Open arrives only after the broker admitted the prepared Ready.
+        let local_capabilities = if hosted {
+            None
+        } else {
+            Some(tokio::select! {
                 biased;
                 _ = self.owner.shutdown.cancelled() => return Err(hosted::unavailable()),
                 result = read_open(&mut input, config, deadline) => result?,
-            }
-            None
+            })
         };
         let (prepared, output) = self.shared()?.prepare_connection()?;
         let config = config.clone();
@@ -221,10 +233,12 @@ impl CredentialBridge {
         if !*accepting || self.owner.shutdown.is_cancelled() {
             return Err(hosted::unavailable());
         }
-        if !hosted {
+        if let Some(capabilities) = local_capabilities {
             // Keep the local eager-Open contract: RPC headers are sent only
             // after this already-authenticated host has actually activated.
-            let connection = prepared.activate(input).await?;
+            let connection = prepared
+                .activate_with_capabilities(input, &capabilities)
+                .await?;
             drop(self.owner.tasks.spawn(async move {
                 let _permit = permit;
                 connection.run_until(owner.shutdown.cancelled()).await;
@@ -244,14 +258,17 @@ impl CredentialBridge {
                 _ = owner.shutdown.cancelled() => return,
                 result = read_open(&mut input, &config, deadline) => result,
             };
-            if admitted.is_err() {
+            let Ok(capabilities) = admitted else {
                 return;
-            }
+            };
             let accepting = owner.accepting.lock().await;
             if !*accepting || owner.shutdown.is_cancelled() {
                 return;
             }
-            let Ok(connection) = prepared.activate(input).await else {
+            let Ok(connection) = prepared
+                .activate_with_capabilities(input, &capabilities)
+                .await
+            else {
                 return;
             };
             drop(accepting);
@@ -361,11 +378,13 @@ fn bind_hosted_loopback() -> io::Result<TcpListener> {
     Ok(listener)
 }
 
+/// Read and check the host's Open, returning the optional operations it
+/// lists for this epoch. A malformed capability list refuses the epoch.
 async fn read_open<S>(
     input: &mut S,
     config: &CredentialBridgeConfig,
     deadline: tokio::time::Instant,
-) -> Result<(), Status>
+) -> Result<Vec<String>, Status>
 where
     S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Unpin,
 {
@@ -386,7 +405,16 @@ where
             "credential bridge identity is invalid",
         ));
     }
-    Ok(())
+    if open.capabilities.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+        || !open.capabilities.iter().all(|capability| {
+            codewire_gateway_proto::valid_credential_bridge_capability(capability)
+        })
+    {
+        return Err(Status::invalid_argument(
+            "credential bridge capabilities are invalid",
+        ));
+    }
+    Ok(open.capabilities)
 }
 
 impl CredentialIngress {

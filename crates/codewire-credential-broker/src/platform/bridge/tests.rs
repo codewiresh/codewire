@@ -894,3 +894,89 @@ async fn shutdown_fails_queued_leases_and_still_drains() {
     fixture.slots_released().await;
     fixture.finish().await;
 }
+
+fn codex_login_request() -> v1::CredentialBridgeGuestMessage {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::CodexLogin(
+            v1::CodexLoginRequest {
+                request_id: Uuid::new_v4().to_string(),
+                recipient_public_key: codewire_workload_secrets::ProjectionRecipient::new()
+                    .public_key()
+                    .to_vec(),
+                deadline_unix_ms: now + 10_000,
+            },
+        )),
+    }
+}
+
+#[tokio::test]
+async fn admitted_streams_list_codex_login_and_answer_it_under_the_lease_budget() {
+    for creator_confirmed in [false, true] {
+        let fixture = Fixture::with_limits(TEST_STREAMS, 1).await;
+        // Without the creator's own confirmed personal profile, the session
+        // alone fails the delivery predicate, before any grant or record read.
+        fixture
+            .authenticator
+            .authority
+            .session
+            .lock()
+            .unwrap()
+            .context
+            .allow_personal_credentials = creator_confirmed;
+        let held = Arc::clone(&fixture.service.state.leases.permits)
+            .try_acquire_owned()
+            .unwrap();
+        let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+        let response = response.unwrap();
+        let capabilities: Vec<_> = response
+            .metadata()
+            .get_all(codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(capabilities, ["codex-login"]);
+        let mut output = response.into_inner();
+        authority_calls_reach(&fixture, 2).await;
+        input.send(codex_login_request()).await.unwrap();
+        // A login lease waits for the shared lease budget like any lease.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), output.message())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture.authenticator.authority.calls.load(Ordering::SeqCst),
+            2
+        );
+        drop(held);
+        let expected = if creator_confirmed {
+            // The session passes; the closed synthetic database then fails
+            // the grant read, which is not a decision about the login.
+            v1::CredentialBridgeFailureReason::Unavailable
+        } else {
+            v1::CredentialBridgeFailureReason::Denied
+        };
+        for answered in 0..2 {
+            let frame = tokio::time::timeout(TEST_TIMEOUT, output.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(frame.payload,
+                Some(v1::credential_bridge_host_message::Payload::CodexLogin(response))
+                if response.result == Some(v1::codex_login_response::Result::Failure(expected as i32))));
+            if answered == 0 {
+                // The epoch survives either answer.
+                input.send(codex_login_request()).await.unwrap();
+            }
+        }
+        assert_eq!(fixture.service.state.leases.available(), 1);
+        drop((input, output));
+        fixture.slots_released().await;
+        fixture.finish().await;
+    }
+}

@@ -25,3 +25,5 @@ pub use config::{
     WorkspaceBindingConfig,
 };
 pub use server::serve_grpc_with_incoming;
+#[cfg(target_os = "linux")]
+pub use server::serve_hosted_grpc_with_incoming;

@@ -604,7 +604,8 @@ for profile_input in src/access_profiles.rs src/connect/access_profiles.rs tests
     "crates/codewire-orchestration/$profile_input"
 done
 run_paths_case credential_kind_fixtures pull_request refs/pull/721/head false \
-  'policy' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-credentials.py
+  'policy' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-codex-login.py \
+  scripts/ci/tests/test-kind-credentials.py
 run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/tests/wire_contract.rs \
@@ -1406,7 +1407,7 @@ grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
 grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 20' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 23' "$integration_runner"
 grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
@@ -1415,7 +1416,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runn
 grep -qF -- '--skip tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 3' "$integration_runner"
 grep -qF -- '--lib tests::database::projection::' "$integration_runner"
-grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 11' "$integration_runner"
+grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 12' "$integration_runner"
 grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
 grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"

@@ -116,6 +116,7 @@ impl Harness {
                             codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: config.environment_id.to_string(),
                         environment_generation: config.environment_generation,
+                        capabilities: Vec::new(),
                     },
                 )),
             }))

@@ -185,6 +185,18 @@ impl ProjectionRecipient {
     ) -> Result<EnvironmentProjection, ProjectionError> {
         composition::open_bundle(self, ciphertext, expected, now_unix_ms)
     }
+
+    /// Open one Codex login sealed for this recipient, consuming it even on
+    /// failure. A projection never opens as a login, nor a login as a
+    /// projection: each has its own outer and inner domain.
+    pub fn open_codex_login(
+        self,
+        ciphertext: &[u8],
+        expected: &crate::CodexLoginContext,
+        now_unix_ms: u64,
+    ) -> Result<crate::OpenedCodexLogin, crate::CodexLoginError> {
+        crate::codex_login::open(&self.0, ciphertext, expected, now_unix_ms)
+    }
 }
 
 impl fmt::Debug for ProjectionRecipient {

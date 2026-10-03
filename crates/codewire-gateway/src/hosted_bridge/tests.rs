@@ -38,6 +38,8 @@ struct SyntheticDaemon {
 #[derive(Clone)]
 struct SyntheticBroker {
     calls: mpsc::Sender<BrokerCall>,
+    /// Response-header capability values; empty models an older broker.
+    capabilities: Arc<std::sync::Mutex<Vec<&'static str>>>,
 }
 
 macro_rules! daemon_service {
@@ -133,7 +135,14 @@ impl CredentialBrokerService for SyntheticBroker {
         accepted
             .await
             .map_err(|_| Status::cancelled("fixture rejected"))??;
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        let mut response = Response::new(ReceiverStream::new(receiver));
+        for capability in self.capabilities.lock().unwrap().iter() {
+            response.metadata_mut().append(
+                codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+                tonic::metadata::MetadataValue::from_static(capability),
+            );
+        }
+        Ok(response)
     }
 }
 
@@ -144,6 +153,7 @@ struct Fixture {
     daemon_calls: mpsc::Receiver<DaemonCall>,
     broker_calls: mpsc::Receiver<BrokerCall>,
     workspace_token: Arc<Mutex<String>>,
+    broker_capabilities: Arc<std::sync::Mutex<Vec<&'static str>>>,
     shutdown: CancellationToken,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -163,6 +173,11 @@ impl Fixture {
         let shutdown = CancellationToken::new();
         let daemon_shutdown = shutdown.clone();
         let broker_shutdown = shutdown.clone();
+        let broker_capabilities = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let synthetic_broker = SyntheticBroker {
+            calls: broker_tx,
+            capabilities: broker_capabilities.clone(),
+        };
         let synthetic_daemon = SyntheticDaemon {
             environment: environment_id,
             workspace_token: workspace_token.clone(),
@@ -181,9 +196,7 @@ impl Fixture {
             }),
             tokio::spawn(async move {
                 tonic::transport::Server::builder()
-                    .add_service(CredentialBrokerServiceServer::new(SyntheticBroker {
-                        calls: broker_tx,
-                    }))
+                    .add_service(CredentialBrokerServiceServer::new(synthetic_broker))
                     .serve_with_incoming_shutdown(
                         TcpListenerStream::new(broker_listener),
                         broker_shutdown.cancelled(),
@@ -212,6 +225,7 @@ impl Fixture {
             daemon_calls,
             broker_calls,
             workspace_token,
+            broker_capabilities,
             shutdown,
             tasks,
         }
@@ -413,6 +427,128 @@ async fn broker_admission_precedes_open_and_typed_frames_are_preserved() {
     assert!(bounded(daemon.input.message()).await.unwrap().is_none());
     drop((input, output, daemon));
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn broker_capabilities_reach_the_open_and_codex_login_frames_relay_opaquely() {
+    for current_broker in [false, true] {
+        let mut fixture = Fixture::new().await;
+        if current_broker {
+            // A malformed and an unknown value are dropped, never forwarded.
+            *fixture.broker_capabilities.lock().unwrap() =
+                vec!["future-op", "Not-Canonical", "codex-login", "codex-login"];
+        }
+        let (cancel, task) = fixture.epoch();
+        let mut daemon = bounded(fixture.daemon_calls.recv()).await.unwrap();
+        let BrokerCall {
+            mut input,
+            output,
+            accept,
+            ..
+        } = bounded(fixture.broker_calls.recv()).await.unwrap();
+        accept.send(Ok(())).unwrap();
+        let Some(v1::credential_bridge_host_message::Payload::Open(open)) =
+            bounded(daemon.input.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .payload
+        else {
+            panic!("Open must follow broker admission");
+        };
+        if !current_broker {
+            // An older broker lists nothing, so the daemon never sends a
+            // Codex login it would end the epoch on.
+            assert!(open.capabilities.is_empty());
+        } else {
+            assert_eq!(open.capabilities, ["codex-login"]);
+            let request = v1::CodexLoginRequest {
+                request_id: Uuid::new_v4().to_string(),
+                recipient_public_key: vec![7; 32],
+                deadline_unix_ms: 123456,
+            };
+            daemon
+                .output
+                .send(Ok(v1::CredentialBridgeGuestMessage {
+                    payload: Some(v1::credential_bridge_guest_message::Payload::CodexLogin(
+                        request.clone(),
+                    )),
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                bounded(input.message()).await.unwrap().unwrap().payload,
+                Some(v1::credential_bridge_guest_message::Payload::CodexLogin(
+                    request.clone()
+                ))
+            );
+            for result in [
+                v1::codex_login_response::Result::SealedLogin(
+                    b"opaque-synthetic-sealed-login".to_vec(),
+                ),
+                v1::codex_login_response::Result::Failure(
+                    v1::CredentialBridgeFailureReason::Denied as i32,
+                ),
+            ] {
+                let response = v1::CodexLoginResponse {
+                    request_id: request.request_id.clone(),
+                    result: Some(result),
+                };
+                output
+                    .send(Ok(v1::CredentialBridgeHostMessage {
+                        payload: Some(v1::credential_bridge_host_message::Payload::CodexLogin(
+                            response.clone(),
+                        )),
+                    }))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    bounded(daemon.input.message())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .payload,
+                    Some(v1::credential_bridge_host_message::Payload::CodexLogin(
+                        response
+                    ))
+                );
+            }
+        }
+        cancel.cancel();
+        bounded(task).await.unwrap().unwrap();
+        drop((input, output, daemon));
+        fixture.stop().await;
+    }
+}
+
+#[test]
+fn only_bounded_canonical_capability_headers_are_copied() {
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    for value in [
+        "codex-login",
+        "Codex-Login",
+        "future-op",
+        "spaces are invalid",
+    ] {
+        if let Ok(value) = value.parse() {
+            metadata.append(
+                codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+                value,
+            );
+        }
+    }
+    assert_eq!(broker_capabilities(&metadata), ["codex-login", "future-op"]);
+    for _ in 0..codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES * 2 {
+        metadata.append(
+            codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+            "padding".parse().unwrap(),
+        );
+    }
+    assert_eq!(
+        broker_capabilities(&metadata).len(),
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+    );
+    assert!(broker_capabilities(&tonic::metadata::MetadataMap::new()).is_empty());
 }
 
 #[tokio::test]

@@ -7,9 +7,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
-    DerivedGrant, PROVIDER_REFRESH_TIMEOUT_SECONDS,
+    DerivedGrant, GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, codex_login_permission,
 };
 use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_workload_secrets::{
+    CodexLogin, CodexLoginBinding, CodexLoginContext, MAX_CODEX_LOGIN_LIFETIME_MS,
+    seal_codex_login, validate_projection_recipient,
+};
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use futures::stream;
 use futures::{Stream, StreamExt as _};
@@ -22,7 +26,10 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::anthropic::{AnthropicApiKeyAdapter, AnthropicStreamingResponse};
-use crate::codex_oauth::{CanonicalCodexOAuthBundle, CodexOAuthCredential};
+use crate::codex_oauth::{
+    ACCESS_TOKEN_REFRESH_WINDOW_SECONDS, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
+    CanonicalCodexOAuthBundle, CodexOAuthCredential,
+};
 use crate::github::GitHubOAuthAdapter;
 use crate::github_app::{
     GitHubAppAuthorizationError, GitHubAppAuthorizationOwner, GitHubAppRefreshError,
@@ -124,6 +131,18 @@ pub trait BrokerLeaseProvider: Send + Sync {
         operation: BrokerOperationId,
         route: BrokerRouteId,
     ) -> Result<Self::Lease, BrokerLeaseError>;
+
+    /// Lease the Codex slot's selected login for sealed delivery to the
+    /// workspace daemon: the one listed direct delivery exception
+    /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
+    /// The request names nothing; the placement rederives the grant, requires
+    /// its dedicated `codex-login` permission, and admits only the Sandbox
+    /// creator's own Active personal Codex OAuth login, selected by the
+    /// creator's own confirmed profile, rechecked around the material read.
+    /// Placements that do not implement that whole predicate deny.
+    async fn lease_codex_login(&self, _request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
+        Err(BrokerLeaseError::Denied)
+    }
 
     /// Serialize a refresh for the exact credential generation selected by an
     /// already-admitted operation. This boundary carries metadata only.
@@ -871,6 +890,31 @@ struct GitHubRefreshPreparation<'a> {
     admitted_grant: &'a DerivedGrant,
 }
 
+/// Which admission a Codex OAuth lease answers. A proxied request's lease and
+/// the sealed login's lease have different permissions and predicates; one is
+/// never used in place of the other.
+enum CodexOAuthPurpose {
+    Operation {
+        operation: BrokerOperationId,
+        route: BrokerRouteId,
+    },
+    /// The one listed direct delivery exception, leased only through
+    /// [`BrokerLeaseProvider::lease_codex_login`].
+    Login,
+}
+
+impl CodexOAuthPurpose {
+    fn permission(&self) -> GrantPermission {
+        match self {
+            Self::Operation { operation, route } => GrantPermission {
+                operation: operation.clone(),
+                route: route.clone(),
+            },
+            Self::Login => codex_login_permission(),
+        }
+    }
+}
+
 fn refresh_generation(lease: &impl BrokerCredentialLease) -> RefreshCredentialGeneration {
     RefreshCredentialGeneration {
         credential_id: lease.credential_metadata().id.clone(),
@@ -998,6 +1042,109 @@ where
             .project_environment_fragment(request)
             .await
             .map_err(map_lease_error)
+    }
+
+    /// Seal the Sandbox creator's own personal Codex ChatGPT login to the
+    /// workspace daemon's recipient key: the one listed direct delivery
+    /// exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+    /// exceptions"). Codex enables `/usage`, analytics and account routing
+    /// only with its own login, which a proxy cannot supply.
+    ///
+    /// The placement's `lease_codex_login` decides delivery. The access token
+    /// is refreshed first, through the same serialized path proxied requests
+    /// use, unless it stays valid for thirty minutes (capped at half its
+    /// lifetime). The sealed plaintext carries the access token, ID token,
+    /// account ID and refresh time, and is bound to this environment and
+    /// generation, the request, the recipient, its deadline and the exact
+    /// credential version. The refresh token never leaves the broker.
+    pub(crate) async fn codex_login(
+        &self,
+        request: v1::CodexLoginRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        let request_id = Uuid::parse_str(&request.request_id)
+            .ok()
+            .filter(|id| !id.is_nil() && id.to_string() == request.request_id)
+            .ok_or(BrokerRequestError::InvalidRequest)?;
+        let recipient: [u8; 32] = request
+            .recipient_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| BrokerRequestError::InvalidRequest)?;
+        validate_projection_recipient(recipient).map_err(|_| BrokerRequestError::InvalidRequest)?;
+        // A deadline outside this broker's window is a clock or timing fault,
+        // not a decision about the login: answer UNAVAILABLE, and name the
+        // cause in a secret-free line so daemon clock skew is diagnosable.
+        let now_ms = current_unix_time_ms()?;
+        if !request
+            .deadline_unix_ms
+            .checked_sub(now_ms)
+            .is_some_and(|remaining| (1..=MAX_CODEX_LOGIN_LIFETIME_MS).contains(&remaining))
+        {
+            timing::codex_login_refused(if request.deadline_unix_ms <= now_ms {
+                "deadline_passed"
+            } else {
+                "deadline_too_far"
+            });
+            return Err(BrokerRequestError::AuthorityUnavailable);
+        }
+
+        let lease = self
+            .lease_codex_oauth(request_id, &CodexOAuthPurpose::Login)
+            .await?;
+        let admitted_grant = lease.grant().clone();
+        let generation = refresh_generation(&lease);
+        let credential = self.codex_oauth_credential(lease, &CodexOAuthPurpose::Login)?;
+        let (credential, generation) = if credential
+            .should_refresh_within(current_unix_time()?, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS)
+        {
+            drop(credential);
+            self.fresh_codex_oauth_credential(
+                request_id,
+                &CodexOAuthPurpose::Login,
+                None,
+                &admitted_grant,
+                CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
+            )
+            .await?
+        } else {
+            (credential, generation)
+        };
+
+        let environment_id = Uuid::parse_str(admitted_grant.environment_id.as_str())
+            .map_err(|_| BrokerRequestError::Denied)?;
+        let login = CodexLogin::new(
+            Zeroizing::new(credential.access_token().to_owned()),
+            Zeroizing::new(credential.id_token().to_owned()),
+            credential.account_id().to_owned(),
+            credential.refreshed_at_unix(),
+        )
+        .map_err(|_| BrokerRequestError::Denied)?;
+        drop(credential);
+        let binding = CodexLoginBinding {
+            credential_id: generation.credential_id.as_str().to_owned(),
+            revocation_generation: generation.revocation_generation,
+            material_generation: generation.material_generation,
+        };
+        let context = CodexLoginContext {
+            environment_id: *environment_id.as_bytes(),
+            environment_generation: admitted_grant.environment_generation,
+            request_id: *request_id.as_bytes(),
+            deadline_unix_ms: request.deadline_unix_ms,
+        };
+        seal_codex_login(
+            &login,
+            &binding,
+            &context,
+            recipient,
+            current_unix_time_ms()?,
+        )
+        .map_err(|error| match error {
+            codewire_workload_secrets::CodexLoginError::InvalidContext => {
+                timing::codex_login_refused("deadline_passed_before_seal");
+                BrokerRequestError::AuthorityUnavailable
+            }
+            _ => BrokerRequestError::Denied,
+        })
     }
 
     pub(crate) async fn execute_ssh(
@@ -1363,18 +1510,80 @@ where
         force_refresh_of: Option<&RefreshCredentialGeneration>,
         admitted_grant: &DerivedGrant,
     ) -> Result<PreparedOAuthRequest, BrokerRequestError> {
+        let (credential, generation) = self
+            .fresh_codex_oauth_credential(
+                request_id,
+                &CodexOAuthPurpose::Operation { operation, route },
+                force_refresh_of,
+                admitted_grant,
+                ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
+            )
+            .await?;
+        Ok(PreparedOAuthRequest {
+            request: self
+                .oauth_adapter
+                .prepare_credential(credential, provider_request)
+                .map_err(map_adapter_error)?,
+            generation,
+        })
+    }
+
+    /// Lease the selected Codex OAuth login for `purpose`.
+    async fn lease_codex_oauth(
+        &self,
+        request_id: Uuid,
+        purpose: &CodexOAuthPurpose,
+    ) -> Result<P::Lease, BrokerRequestError> {
+        match purpose {
+            CodexOAuthPurpose::Operation { operation, route } => {
+                self.leases
+                    .lease_operation(
+                        request_id,
+                        CapabilitySlot::codex(),
+                        operation.clone(),
+                        route.clone(),
+                    )
+                    .await
+            }
+            CodexOAuthPurpose::Login => self.leases.lease_codex_login(request_id).await,
+        }
+        .map_err(map_lease_error)
+    }
+
+    fn codex_oauth_credential(
+        &self,
+        lease: P::Lease,
+        purpose: &CodexOAuthPurpose,
+    ) -> Result<CodexOAuthCredential, BrokerRequestError> {
+        match purpose {
+            CodexOAuthPurpose::Operation { .. } => self.oauth_adapter.credential_from_lease(lease),
+            CodexOAuthPurpose::Login => self.oauth_adapter.login_credential_from_lease(lease),
+        }
+        .map_err(map_adapter_error)
+    }
+
+    /// The selected Codex OAuth login from a lease whose access token stays
+    /// valid for `minimum_validity_seconds` (capped at half its lifetime, see
+    /// `CodexOAuthCredential::should_refresh_within`), refreshing first when
+    /// it would not. Every caller shares one serialized refresh: this epoch's
+    /// mutex, then the placement's durable refresh journal, whose `InProgress`
+    /// or `Stale` answer waits for another owner's refresh and re-leases. The
+    /// minimum applies on every pass of that wait. A rotated token is used only
+    /// from a fresh lease taken after its durable commit, so the placement
+    /// rechecks its whole admission, and for a login its delivery predicate,
+    /// before anything uses the new material.
+    async fn fresh_codex_oauth_credential(
+        &self,
+        request_id: Uuid,
+        purpose: &CodexOAuthPurpose,
+        force_refresh_of: Option<&RefreshCredentialGeneration>,
+        admitted_grant: &DerivedGrant,
+        minimum_validity_seconds: u64,
+    ) -> Result<(CodexOAuthCredential, RefreshCredentialGeneration), BrokerRequestError> {
         let _refresh_guard = self.oauth_refresh.lock().await;
+        let permission = purpose.permission();
         for refresh_waits in 0..=OAUTH_REFRESH_WAIT_ATTEMPTS {
-            let lease = self
-                .leases
-                .lease_operation(
-                    request_id,
-                    CapabilitySlot::codex(),
-                    operation.clone(),
-                    route.clone(),
-                )
-                .await
-                .map_err(map_lease_error)?;
+            let lease = self.lease_codex_oauth(request_id, purpose).await?;
             validate_request_binding(lease.grant(), admitted_grant)?;
             if lease.credential_metadata().authentication_kind != CredentialAuthKind::OAuth {
                 return Err(BrokerRequestError::Denied);
@@ -1385,23 +1594,16 @@ where
                 request_id,
                 kind: BrokerCredentialRefreshKind::CodexOAuth,
                 grant: bounded_refresh_grant(lease.grant(), admitted_grant),
-                operation: operation.clone(),
-                route: route.clone(),
+                operation: permission.operation.clone(),
+                route: permission.route.clone(),
                 material_generation: lease.material_generation(),
             };
-            let credential = self
-                .oauth_adapter
-                .credential_from_lease(lease)
-                .map_err(map_adapter_error)?;
+            let credential = self.codex_oauth_credential(lease, purpose)?;
             let force_refresh = force_refresh_of == Some(&generation);
-            if !force_refresh && !credential.should_refresh(current_unix_time()?) {
-                return Ok(PreparedOAuthRequest {
-                    request: self
-                        .oauth_adapter
-                        .prepare_credential(credential, provider_request)
-                        .map_err(map_adapter_error)?,
-                    generation,
-                });
+            if !force_refresh
+                && !credential.should_refresh_within(current_unix_time()?, minimum_validity_seconds)
+            {
+                return Ok((credential, generation));
             }
             match timing::timed(
                 Phase::Refresh,
@@ -1413,29 +1615,11 @@ where
                     // Persisting a rotated token does not authorize using it.
                     // Refresh can outlive the original grant or binding; ask
                     // the placement authority again after durable commit.
-                    let lease = self
-                        .leases
-                        .lease_operation(
-                            request_id,
-                            CapabilitySlot::codex(),
-                            operation.clone(),
-                            route.clone(),
-                        )
-                        .await
-                        .map_err(map_lease_error)?;
+                    let lease = self.lease_codex_oauth(request_id, purpose).await?;
                     validate_request_binding(lease.grant(), admitted_grant)?;
                     let generation = refresh_generation(&lease);
-                    let credential = self
-                        .oauth_adapter
-                        .credential_from_lease(lease)
-                        .map_err(map_adapter_error)?;
-                    return Ok(PreparedOAuthRequest {
-                        request: self
-                            .oauth_adapter
-                            .prepare_credential(credential, provider_request)
-                            .map_err(map_adapter_error)?,
-                        generation,
-                    });
+                    let credential = self.codex_oauth_credential(lease, purpose)?;
+                    return Ok((credential, generation));
                 }
                 None if refresh_waits < OAUTH_REFRESH_WAIT_ATTEMPTS => {
                     tokio::time::sleep(OAUTH_REFRESH_WAIT_INTERVAL).await;
@@ -1490,6 +1674,9 @@ where
             // this epoch so a still-Reserved attempt cannot retain an owner
             // that no caller can release. An uncertain ACK takes the same
             // drain path, but recovery never retries a Started attempt.
+            // A Codex login answers this error without ending its epoch; that
+            // relies on the platform store's durable deadlines (see
+            // `send_codex_login_response` in bridge.rs).
             Err(error) => {
                 RefreshFailure::Start(error).warn(CODEX_REFRESH_PROVIDER);
                 return Err(BrokerRequestError::AuthorityUnavailable);
@@ -2054,6 +2241,14 @@ fn map_refresh_error(error: BrokerRefreshError) -> BrokerRequestError {
     }
 }
 
+fn current_unix_time_ms() -> Result<u64, BrokerRequestError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .ok_or(BrokerRequestError::AuthorityUnavailable)
+}
+
 fn current_unix_time() -> Result<u64, BrokerRequestError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2111,6 +2306,8 @@ mod tests {
 
     use super::*;
     use crate::openai::response_admission_test_cases::{accepted_encodings, denied_encodings};
+
+    mod codex_login;
 
     const SYNTHETIC_KEY: &str = "CW_TEST_OPENAI_VALUE_123";
 
@@ -2257,6 +2454,7 @@ mod tests {
         lease_count: Arc<AtomicUsize>,
         commit_return_gate: Arc<CommitReturnGate>,
         begin_control: Option<Arc<BlockingRefreshControl>>,
+        deny_login: Arc<AtomicBool>,
     }
 
     #[async_trait]
@@ -2282,6 +2480,25 @@ mod tests {
                     route,
                 })
                 .map_err(|_| BrokerLeaseError::Denied)
+        }
+
+        /// Stands for a placement whose delivery predicate admitted the
+        /// login; the platform predicate itself has its own database tests.
+        async fn lease_codex_login(
+            &self,
+            request_id: Uuid,
+        ) -> Result<Self::Lease, BrokerLeaseError> {
+            if self.deny_login.load(Ordering::Acquire) {
+                return Err(BrokerLeaseError::Denied);
+            }
+            let permission = codex_login_permission();
+            self.lease_operation(
+                request_id,
+                CapabilitySlot::codex(),
+                permission.operation,
+                permission.route,
+            )
+            .await
         }
 
         async fn begin_credential_refresh(
@@ -2329,11 +2546,16 @@ mod tests {
                 .map_err(|_| BrokerRefreshError::Unavailable)?;
             let expected_material_generation =
                 self.material_generation.load(Ordering::Acquire) as u64;
+            let proxied = request.operation.as_str() == OPENAI_OPERATION
+                && request.route.as_str() == OPENAI_ROUTE;
+            let login = GrantPermission {
+                operation: request.operation.clone(),
+                route: request.route.clone(),
+            } == codex_login_permission();
             if request.refresh_id.is_nil()
                 || request.request_id.is_nil()
                 || request.grant.capability_slot != CapabilitySlot::codex()
-                || request.operation.as_str() != OPENAI_OPERATION
-                || request.route.as_str() != OPENAI_ROUTE
+                || !(proxied || login)
                 || request.grant.credential_id != self.credential_id
                 || request.grant.credential_revocation_generation
                     != current.metadata.revocation_generation
@@ -2747,10 +2969,13 @@ mod tests {
                 CapabilitySlot::codex(),
                 CapabilityPolicy {
                     authentication_kinds: BTreeSet::from([authentication_kind]),
-                    permissions: BTreeSet::from([GrantPermission {
-                        operation: BrokerOperationId::parse(OPENAI_OPERATION).unwrap(),
-                        route: BrokerRouteId::parse(OPENAI_ROUTE).unwrap(),
-                    }]),
+                    permissions: BTreeSet::from([
+                        GrantPermission {
+                            operation: BrokerOperationId::parse(OPENAI_OPERATION).unwrap(),
+                            route: BrokerRouteId::parse(OPENAI_ROUTE).unwrap(),
+                        },
+                        codex_login_permission(),
+                    ]),
                 },
             )]),
         }])
@@ -2937,6 +3162,7 @@ mod tests {
                 lease_count,
                 commit_return_gate,
                 begin_control: None,
+                deny_login: Arc::new(AtomicBool::new(false)),
             },
             OAuthSyntheticUpstream {
                 refresh_status,

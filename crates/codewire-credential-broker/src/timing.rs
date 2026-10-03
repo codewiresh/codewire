@@ -1,8 +1,8 @@
 //! Secret-free per-phase timing for the isolated credential broker.
 //!
 //! The broker writes one `info` line on the dedicated [`TARGET`] for each
-//! proxied HTTP request, each platform bridge epoch admission and each
-//! capacity rejection. Its fields are only durations in milliseconds, counts,
+//! proxied HTTP request, each platform bridge epoch admission, each capacity
+//! rejection and each Codex login refused for a timing cause. Its fields are only durations in milliseconds, counts,
 //! booleans, closed static labels and a proxied request's opaque, canonical
 //! UUID. This module accepts nothing else, so no token, header, URL, body,
 //! account, owner, credential, environment or Pod identifier can reach a line.
@@ -301,6 +301,19 @@ pub(crate) fn capacity_rejected(
     );
 }
 
+/// One line per Codex login answered UNAVAILABLE for a timing cause the daemon
+/// cannot see, such as clock skew between daemon and broker. `reason` is a
+/// closed label: `deadline_passed`, `deadline_too_far` or
+/// `deadline_passed_before_seal`.
+pub(crate) fn codex_login_refused(reason: &'static str) {
+    tracing::info!(
+        target: TARGET,
+        event = "codex_login_refused",
+        reason,
+        "credential broker Codex login refused"
+    );
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::collections::BTreeSet;
@@ -452,6 +465,7 @@ pub(crate) mod tests {
         "in_use",
         "message",
     ];
+    const CODEX_LOGIN_REFUSED_FIELDS: &[&str] = &["event", "reason", "message"];
     /// Every string a timing line may carry besides a canonical request UUID.
     const CLOSED_LABELS: &[&str] = &[
         "proxied_request",
@@ -490,6 +504,13 @@ pub(crate) mod tests {
         "http",
         "ssh",
         "projection",
+        "codex_login",
+        "codex_login_in_flight",
+        "codex_login_refused",
+        "credential broker Codex login refused",
+        "deadline_passed",
+        "deadline_too_far",
+        "deadline_passed_before_seal",
     ];
 
     /// The whole contract of a timing line: the dedicated target, exactly its
@@ -503,6 +524,7 @@ pub(crate) mod tests {
             Some("proxied_request") => REQUEST_FIELDS,
             Some("epoch_admission") => EPOCH_FIELDS,
             Some("capacity_rejected") => CAPACITY_FIELDS,
+            Some("codex_login_refused") => CODEX_LOGIN_REFUSED_FIELDS,
             other => panic!("unknown timing event {other:?}"),
         }
         .iter()

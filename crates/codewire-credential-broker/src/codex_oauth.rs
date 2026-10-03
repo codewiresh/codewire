@@ -17,7 +17,11 @@ const MAX_TOKEN_BYTES: usize = 256 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 1024;
 const MAX_ACCOUNT_HINT_BYTES: usize = 256;
 const MAX_JWT_PAYLOAD_BYTES: usize = 64 * 1024;
-const ACCESS_TOKEN_REFRESH_WINDOW_SECONDS: u64 = 5 * 60;
+/// A proxied request refreshes an access token this close to its expiry.
+pub(crate) const ACCESS_TOKEN_REFRESH_WINDOW_SECONDS: u64 = 5 * 60;
+/// A delivered Codex login must stay valid this long, capped at half the
+/// token's lifetime (see [`CodexOAuthCredential::should_refresh_within`]).
+pub(crate) const CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS: u64 = 30 * 60;
 const FALLBACK_REFRESH_INTERVAL_SECONDS: u64 = 8 * 24 * 60 * 60;
 
 /// Stable import failures that never retain provider material or parser input.
@@ -136,6 +140,10 @@ impl CodexOAuthCredential {
         &self.access_token
     }
 
+    pub(crate) fn id_token(&self) -> &str {
+        &self.id_token
+    }
+
     pub(crate) fn refresh_token(&self) -> &str {
         &self.refresh_token
     }
@@ -150,17 +158,42 @@ impl CodexOAuthCredential {
 
     /// When this material was imported or last rotated: the same signal Codex
     /// CLI keeps as `last_refresh`. It is not an access-token expiry.
-    #[cfg(feature = "platform")]
     pub(crate) fn refreshed_at_unix(&self) -> u64 {
         self.refreshed_at_unix
     }
 
     pub(crate) fn should_refresh(&self, now_unix: u64) -> bool {
-        match jwt_expiration(&self.access_token) {
-            Ok(Some(expires_at)) => {
-                expires_at <= now_unix.saturating_add(ACCESS_TOKEN_REFRESH_WINDOW_SECONDS)
+        self.should_refresh_within(now_unix, ACCESS_TOKEN_REFRESH_WINDOW_SECONDS)
+    }
+
+    /// Whether the access token would expire within `minimum_validity_seconds`,
+    /// capped at half its lifetime and never below the proxied request's
+    /// five-minute window. The cap keeps a short-lived token from refreshing on
+    /// every check: a token just obtained always satisfies its own minimum.
+    /// The lifetime runs from the token's `iat`, or else from when Codewire
+    /// last obtained it. Without an `exp`, only the fixed fallback interval
+    /// applies, whatever the minimum.
+    pub(crate) fn should_refresh_within(
+        &self,
+        now_unix: u64,
+        minimum_validity_seconds: u64,
+    ) -> bool {
+        match jwt_validity(&self.access_token) {
+            Ok(JwtValidity {
+                expires_at: Some(expires_at),
+                issued_at,
+            }) => {
+                let issued_at = issued_at.unwrap_or(self.refreshed_at_unix);
+                let half_lifetime = expires_at.saturating_sub(issued_at) / 2;
+                let window = minimum_validity_seconds
+                    .min(half_lifetime)
+                    .max(ACCESS_TOKEN_REFRESH_WINDOW_SECONDS);
+                expires_at <= now_unix.saturating_add(window)
             }
-            Ok(None) | Err(_) => {
+            Ok(JwtValidity {
+                expires_at: None, ..
+            })
+            | Err(_) => {
                 self.refreshed_at_unix
                     .saturating_add(FALLBACK_REFRESH_INTERVAL_SECONDS)
                     <= now_unix
@@ -215,6 +248,13 @@ struct JwtClaims {
 struct JwtExpirationClaims {
     #[serde(default)]
     exp: Option<u64>,
+    #[serde(default)]
+    iat: Option<u64>,
+}
+
+struct JwtValidity {
+    expires_at: Option<u64>,
+    issued_at: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -335,8 +375,11 @@ fn id_token_claims(token: &str) -> Result<ImportedClaims, CodexOAuthMaterialErro
     })
 }
 
-fn jwt_expiration(token: &str) -> Result<Option<u64>, CodexOAuthMaterialError> {
-    decode_jwt_payload::<JwtExpirationClaims>(token).map(|claims| claims.exp)
+fn jwt_validity(token: &str) -> Result<JwtValidity, CodexOAuthMaterialError> {
+    decode_jwt_payload::<JwtExpirationClaims>(token).map(|claims| JwtValidity {
+        expires_at: claims.exp,
+        issued_at: claims.iat,
+    })
 }
 
 fn decode_jwt_payload<T>(token: &str) -> Result<T, CodexOAuthMaterialError>
@@ -541,6 +584,66 @@ mod tests {
         let credential = CodexOAuthCredential::parse(bundle.as_bytes()).unwrap();
         assert!(!credential.should_refresh(imported_at + FALLBACK_REFRESH_INTERVAL_SECONDS - 1));
         assert!(credential.should_refresh(imported_at + FALLBACK_REFRESH_INTERVAL_SECONDS));
+    }
+
+    #[test]
+    fn login_validity_minimum_is_capped_at_half_the_token_lifetime() {
+        let credential = |access: serde_json::Value, refreshed_at: u64| {
+            let source = Zeroizing::new(
+                serde_json::to_vec(&json!({
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": null,
+                    "tokens": {
+                        "id_token": jwt(json!({
+                            "https://api.openai.com/auth": {
+                                "chatgpt_account_id": "account-work"
+                            }
+                        })),
+                        "access_token": jwt(access),
+                        "refresh_token": "synthetic-refresh-token",
+                        "account_id": "account-work"
+                    }
+                }))
+                .unwrap(),
+            );
+            let (bundle, _) = import_codex_auth_json_at(&source, refreshed_at)
+                .unwrap()
+                .into_parts();
+            CodexOAuthCredential::parse(bundle.as_bytes()).unwrap()
+        };
+        let issued = 1_800_000_000;
+        let minimum = CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS;
+
+        // A ten-day token: the full thirty minutes, versus five for a proxy.
+        let long = credential(json!({ "iat": issued, "exp": issued + 864_000 }), issued);
+        let expiry = issued + 864_000;
+        assert!(!long.should_refresh_within(expiry - minimum - 1, minimum));
+        assert!(long.should_refresh_within(expiry - minimum, minimum));
+        assert!(!long.should_refresh(expiry - minimum));
+        assert!(long.should_refresh(expiry - ACCESS_TOKEN_REFRESH_WINDOW_SECONDS));
+
+        // A forty-minute token needs only twenty: a fresh one never refreshes.
+        let short = credential(json!({ "iat": issued, "exp": issued + 2_400 }), issued);
+        assert!(!short.should_refresh_within(issued, minimum));
+        assert!(!short.should_refresh_within(issued + 1_199, minimum));
+        assert!(short.should_refresh_within(issued + 1_200, minimum));
+
+        // Without iat the lifetime runs from when Codewire obtained the token.
+        let no_iat = credential(json!({ "exp": issued + 2_400 }), issued);
+        assert!(!no_iat.should_refresh_within(issued + 1_199, minimum));
+        assert!(no_iat.should_refresh_within(issued + 1_200, minimum));
+
+        // A very short token keeps at least the proxy's five-minute window.
+        let tiny = credential(json!({ "iat": issued, "exp": issued + 360 }), issued);
+        assert!(!tiny.should_refresh_within(issued + 59, minimum));
+        assert!(tiny.should_refresh_within(issued + 60, minimum));
+
+        // Without exp, the minimum changes nothing: only the fallback applies.
+        let opaque = credential(json!({ "iat": issued }), issued);
+        assert!(
+            !opaque.should_refresh_within(issued + FALLBACK_REFRESH_INTERVAL_SECONDS - 1, minimum)
+        );
+        assert!(opaque.should_refresh_within(issued + FALLBACK_REFRESH_INTERVAL_SECONDS, minimum));
     }
 
     #[test]

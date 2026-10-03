@@ -150,6 +150,44 @@ class WorkspaceProbe(unittest.TestCase):
                 PROBE.probe(ENVIRONMENT, "success")
         self.connection.request.assert_not_called()
 
+    def codewire_login(self, refresh_token=None):
+        return json.dumps({
+            "auth_mode": "chatgpt", "OPENAI_API_KEY": None,
+            "tokens": {"id_token": "e30.e30.synthetic", "access_token": "e30.e30.synthetic",
+                       "refresh_token": refresh_token or PROBE.PLACEHOLDER,
+                       "account_id": "codewire-kind-synthetic-account"},
+            "last_refresh": "2026-10-03T00:00:00Z"})
+
+    def test_codewires_delivered_login_replaces_its_proxy_config(self):
+        # Once the daemon delivers Codex's own login it removes config.toml.
+        (self.home / "auth.json").write_text(self.codewire_login(), encoding="ascii")
+        for config in (True, False):
+            with self.subTest(config=config):
+                if not config:
+                    (self.home / "config.toml").unlink()
+                for mode in ("success", "revoked"):
+                    self.connection.getresponse.return_value.status = PROBE.MODES[mode]
+                    PROBE.probe(ENVIRONMENT, mode)
+
+    def test_a_login_that_is_not_codewires_fails_before_network(self):
+        outside = self.home / "outside.json"
+        outside.write_text(self.codewire_login(), encoding="ascii")
+        for contents in ("synthetic",
+                         # The broker's refresh token never leaves Codewire.
+                         self.codewire_login("CW_KIND_SYNTHETIC_REFRESH_1"),
+                         self.codewire_login("users-own-refresh-token"),
+                         None):
+            with self.subTest(contents=contents):
+                auth = self.home / "auth.json"
+                auth.unlink(missing_ok=True)
+                if contents is None:
+                    auth.symlink_to(outside)
+                else:
+                    auth.write_text(contents, encoding="ascii")
+                with self.assertRaisesRegex(ValueError, "^unexpected-provider-auth-file$"):
+                    PROBE.probe(ENVIRONMENT, "success")
+        self.connection.request.assert_not_called()
+
     def test_provider_auth_file_or_environment_fail_before_network(self):
         (self.home / "auth.json").write_text("synthetic", encoding="ascii")
         with self.assertRaises(ValueError):
@@ -193,9 +231,10 @@ class WorkspaceProbe(unittest.TestCase):
                 self.managed(first_line)
                 with self.assertRaisesRegex(ValueError, "^projection$"):
                     PROBE.probe(ENVIRONMENT, "success")
+        # A delivered login removes Codewire's config.toml; absence is fine.
         (self.home / "config.toml").unlink()
-        with self.assertRaisesRegex(ValueError, "^projection$"):
-            PROBE.probe(ENVIRONMENT, "success")
+        PROBE.probe(ENVIRONMENT, "success")
+        self.connection.request.reset_mock()
         outside = self.home / "outside.toml"
         outside.write_text(PROBE.MANAGED_HEADER.decode() + "\n")
         (self.home / "config.toml").symlink_to(outside)
@@ -582,6 +621,71 @@ assert_no_kind_codex_config_map '%s'
         start = flow.index('env --platform start "$environment"')
         self.assertLess(flow.index("/home/codewire/.codex/kind-persistence"), stop)
         self.assertLess(start, flow.index('cat /home/codewire/.codex/kind-persistence'))
+
+    def codex_login(self, output, status=0, mode="deliver", extra=""):
+        directory = tempfile.TemporaryDirectory(prefix="kind-codex-login-")
+        self.addCleanup(directory.cleanup)
+        return self.shell('''
+RUN_DIR='%s'
+SANDBOX_NS=dev-sandboxes
+kind_credential_workspace() { [ "$1" = '%s' ] || return 97; printf 'workspace-pod\\n'; }
+kubectl() {
+  [ "$*" = '-n dev-sandboxes exec -i workspace-pod -c workspace -- python3 -B -u - %s%s' ] || return 99
+  cmp -s - "$ROOT/scripts/ci/verify/kind/codex_login.py" || return 98
+  printf '%%s' '%s'
+  return %d
+}
+kind_credential_codex_login '%s' %s %s
+''' % (directory.name, ENVIRONMENT, mode, " " + extra if extra else "", output, status,
+       ENVIRONMENT, mode, extra))
+
+    def test_codex_login_step_passes_only_on_its_own_completion(self):
+        delivered = '{"event":"delivered","generation":0}\n'
+        result = self.codex_login(delivered + '{"event":"complete","mode":"deliver"}\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"generation":0', result.stdout)
+        result = self.codex_login('{"event":"rotation_adopted","generation":2}\n'
+                                  '{"event":"complete","mode":"rotation"}\n',
+                                  mode="rotation", extra="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for output, status in (
+                (delivered + '{"event":"complete","mode":"deliver"}\n', 1),
+                (delivered + '{"event":"complete","mode":"logout"}\n', 0),
+                ('{"event":"failed","mode":"deliver","reason":"login_not_delivered"}\n'
+                 '{"event":"complete","mode":"deliver"}\n', 0),
+                ('{"event":"complete","mode":"deliver"}\n', 0),
+                ("not-json\n", 0),
+                ("", 0)):
+            with self.subTest(output=output, status=status):
+                result = self.codex_login(output, status)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("Codex ChatGPT login acceptance failed in mode deliver", result.stderr)
+
+    def test_native_flow_proves_the_chatgpt_login_in_order(self):
+        flow = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
+        index = flow.index
+        deliver = index('kind_credential_codex_login "$environment" deliver')
+        session = index("scripts/ci/verify/kind/codex_session.py")
+        counts = index("assert_kind_credential_provider_counts 2")
+        rotation = index('kind_credential_codex_login "$environment" rotation "$login_generation" || return $?')
+        own = index('kind_credential_codex_login "$environment" own-login || return $?')
+        logout = index('kind_credential_codex_login "$environment" logout || return $?')
+        stop = index('env --platform stop "$environment"')
+        start = index('env --platform start "$environment"')
+        redelivered = index('kind_credential_codex_login "$environment" redelivered || return $?')
+        success = index('kind_credential_probe "$environment" success')
+        revoke = index('credentials --platform revoke "$credential_name"')
+        revoked = index('kind_credential_codex_login "$environment" revoked || return $?')
+        destroy = index('env --platform rm "$environment"')
+        # Delivery before the proxy session whose refreshes rotate it; the
+        # user's own login and logout after rotation; a new container forgets
+        # the logout; revocation removes the login before destroy.
+        self.assertEqual(sorted([deliver, session, counts, rotation, own, logout, stop, start,
+                                 redelivered, success, revoke, revoked, destroy]),
+                         [deliver, session, counts, rotation, own, logout, stop, start,
+                          redelivered, success, revoke, revoked, destroy])
+        self.assertIn('login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?',
+                      flow)
 
     def test_bootstrap_cleanup_rejects_noncanonical_environment_without_io(self):
         for environment in ("", "foreign", ENVIRONMENT.upper()):

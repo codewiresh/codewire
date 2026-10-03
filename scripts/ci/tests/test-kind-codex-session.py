@@ -99,9 +99,13 @@ class ProjectionTests(unittest.TestCase):
                     with self.assertRaisesRegex(driver.Failure, "^unexpected_projection$"):
                         driver.validate_projection()
 
-    def test_selection_requires_codewires_own_config_file(self):
+    def test_codewires_config_or_none_but_never_a_users_file(self):
+        # A delivered ChatGPT login removes Codewire's config.toml; the session
+        # forces the same proxy provider itself, so an absent file is fine.
+        with codex_home(None), patch.dict(os.environ, {}, clear=True):
+            driver.validate_projection()
         header = driver.MANAGED_HEADER.decode()
-        for config in (None, "model_provider = \"codewire_openai\"\n",
+        for config in ("model_provider = \"codewire_openai\"\n",
                        "\n" + header + "\n", " " + header + "\n", header + "\r\n"):
             with self.subTest(config=config), codex_home(config), \
                     patch.dict(os.environ, {}, clear=True):
@@ -292,9 +296,7 @@ class DiagnosticTests(unittest.TestCase):
                     "/usr/bin/strace", "-f", "-ttt", "-e", "trace=execve", "-s", "512",
                 ])
                 self.assertEqual(argv[7], "-o")
-                self.assertEqual(argv[9:], [
-                    "--", driver.CODEX, "app-server", "--stdio", "--strict-config",
-                ])
+                self.assertEqual(argv[9:], ["--", *driver.CODEX_ARGV])
                 trace = Path(argv[8])
                 self.assertEqual(trace.parent.parent, home)
                 if trace_content is not None:
@@ -524,13 +526,45 @@ class DiagnosticTests(unittest.TestCase):
         })
         self.assertNotIn("absent-private-launcher", output)
 
+    @staticmethod
+    def strace_execve(argv):
+        quoted = ", ".join(driver.strace_string(argument) for argument in argv)
+        return f'execve({driver.strace_string(argv[0])}, [{quoted}], 0x123 /* 20 vars */)'
+
+    def test_session_forces_the_daemons_proxy_provider(self):
+        overrides = driver.CODEX_OVERRIDES[1::2]
+        self.assertEqual(driver.CODEX_OVERRIDES[0::2], ("-c",) * len(overrides))
+        values = dict(value.split("=", 1) for value in overrides)
+        self.assertEqual(len(values), len(overrides))
+        self.assertEqual(values["model_provider"], '"codewire_openai"')
+        self.assertEqual(values["model_providers.codewire_openai.base_url"],
+                         '"http://127.0.0.1:38081/v1"')
+        self.assertEqual(values["model_providers.codewire_openai.requires_openai_auth"], "false")
+        self.assertEqual(values["chatgpt_base_url"], '"http://127.0.0.1:9/backend-api/"')
+        # No token, auth command, key or header reaches Codex through an override.
+        segments = {segment for key in values for segment in key.split(".")}
+        for forbidden in ("auth", "experimental_bearer_token", "env_key", "http_headers",
+                          "env_http_headers", "OPENAI_API_KEY"):
+            self.assertNotIn(forbidden, segments)
+        self.assertFalse(any("token" in value.lower() for value in values.values()))
+        self.assertEqual(driver.CODEX_ARGV[:4],
+                         (driver.CODEX, "app-server", "--stdio", "--strict-config"))
+
+    def test_strace_strings_escape_quotes_and_backslashes(self):
+        self.assertEqual(driver.strace_string('a="b"\\c'), '"a=\\"b\\"\\\\c"')
+
     def test_exact_codex_exec_is_not_confused_with_failed_or_other_commands(self):
-        exact = f'execve("{driver.CODEX}", ["{driver.CODEX}", "app-server", "--stdio", "--strict-config"], 0x123 /* 20 vars */)'
+        exact = self.strace_execve(driver.CODEX_ARGV)
+        # The previous argv, without the forced proxy provider, is not this session.
+        unforced = self.strace_execve(driver.CODEX_ARGV[:4])
+        other_provider = self.strace_execve(tuple(
+            argument.replace('"codewire_openai"', '"openai"') for argument in driver.CODEX_ARGV))
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "trace"
             for operation in (exact + " = -1 EACCES (Permission denied)",
                               exact.replace('"--strict-config"', '"--help"') + " = 0",
-                              exact.replace(driver.CODEX, "/other/codex") + " = 0"):
+                              exact.replace(driver.CODEX, "/other/codex") + " = 0",
+                              unforced + " = 0", other_provider + " = 0"):
                 with self.subTest(operation=operation):
                     trace.write_text(f"100 123.100000 {operation}\n")
                     self.assertIs(driver.codex_exec_succeeded(trace), False)

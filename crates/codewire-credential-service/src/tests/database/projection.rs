@@ -755,3 +755,70 @@ async fn credential_needing_reconnect_withholds_only_its_capability_and_launches
     .await;
     f.finish(result).await
 }
+
+/// The hosted authority maps `environments.created_by` to the session's user
+/// and admits a personal profile only when its `personal_owner_confirmed_by`
+/// is that creator; the broker's Codex login predicate relies on both.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn codex_login_follows_only_the_creators_own_confirmed_profile() -> Result<()> {
+    let f = Fixture::create().await?;
+    let result = async {
+        let kek = Arc::new(support::SyntheticKek::default());
+        let (codex, _) = bind_two_capabilities(&f, kek.clone()).await?;
+        let (broker_pool, _) = f.db.broker_pool().await?;
+        let connect = async |authority: Arc<crate::KubernetesPlatformRuntimeAuthority>| {
+            anyhow::Ok(
+                PlatformBrokerLeaseProvider::connect(
+                    authority,
+                    Arc::new(PlatformCredentialStore::new(
+                        broker_pool.clone(),
+                        kek.clone(),
+                        builtin_provider_catalog(),
+                    )),
+                    PlatformAccessProfileStore::new(
+                        broker_pool.clone(),
+                        builtin_provider_catalog(),
+                    ),
+                )
+                .await?,
+            )
+        };
+        let authority = admitted(&f, Arc::new(ObservedProvider::default())).await?;
+        let broker = connect(authority.clone()).await?;
+        let login = broker.lease_codex_login(Uuid::new_v4()).await?;
+        ensure!(login.credential_metadata().id == codex);
+        ensure!(login.credential_metadata().owner == f.owner);
+        ensure!(login.permission() == &codewire_access::codex_login_permission());
+        ensure!(
+            login.with_material(|material| material == b"synthetic-codex-bundle-never-projected")
+        );
+
+        // Consent recorded by anyone but the creator, or by nobody: the
+        // connected broker's next login is denied and no new session forms.
+        f.db.user("synthetic-other-user").await?;
+        for confirmed in [Some("synthetic-other-user"), None] {
+            sqlx::query(
+                "UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by=$1",
+            )
+            .bind(confirmed)
+            .execute(&f.db.pool)
+            .await?;
+            ensure!(
+                matches!(
+                    broker.lease_codex_login(Uuid::new_v4()).await,
+                    Err(BrokerLeaseError::Denied)
+                ),
+                "{confirmed:?}: a login followed another user's consent"
+            );
+            ensure!(
+                admitted(&f, Arc::new(ObservedProvider::default()))
+                    .await
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}

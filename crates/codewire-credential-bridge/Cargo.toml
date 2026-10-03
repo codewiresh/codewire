@@ -17,3 +17,6 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+zeroize = { workspace = true }

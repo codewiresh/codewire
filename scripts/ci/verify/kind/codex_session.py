@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Managed Kind only: one stock Codex process, three successes and one denial.
 
-The caller pipes this file into the actual workspace's python3. There are no
-provider/token/config overrides. Protocol is pinned to Codex 0.157.0 commit
-00c972ed5d6ff6499317fd41b7f23605b8e6850d. Never print raw RPC, stderr, trace,
-token bytes or fingerprints: stdout is the closed acceptance event stream.
+The caller pipes this file into the actual workspace's python3. Protocol is
+pinned to Codex 0.157.0 commit 00c972ed5d6ff6499317fd41b7f23605b8e6850d. Never
+print raw RPC, stderr, trace, token bytes or fingerprints: stdout is the
+closed acceptance event stream.
+
+This session covers the proxy route. Once the daemon delivers Codex's own
+ChatGPT login it removes Codewire's config.toml (codex_login.py covers that
+route), so the session forces the same proxy provider with CODEX_OVERRIDES
+and points Codex's ChatGPT backend at a closed loopback port. There are no
+token or auth overrides.
 
 The harness runs the tracer and Codex in one fresh user namespace, mapping only
 the calling user to namespace root. This is harness-local tracing authority,
@@ -27,6 +33,22 @@ import time
 
 
 CODEX = "/opt/codewire/agents/npm/bin/codex"
+# The daemon's proxy provider (codewire-access CodexProviderProjection's
+# loopback form), forced whether or not Codewire's config.toml is present.
+# A ChatGPT login in auth.json would otherwise send Codex's account, settings
+# and analytics calls to chatgpt.com through blocked egress; a closed loopback
+# port fails them at once. The provider itself sends no OpenAI auth.
+CODEX_OVERRIDES = (
+    "-c", 'model_provider="codewire_openai"',
+    "-c", 'model_providers.codewire_openai.name="Codewire OpenAI"',
+    "-c", 'model_providers.codewire_openai.base_url="http://127.0.0.1:38081/v1"',
+    "-c", 'model_providers.codewire_openai.wire_api="responses"',
+    "-c", "model_providers.codewire_openai.requires_openai_auth=false",
+    "-c", "model_providers.codewire_openai.supports_websockets=false",
+    "-c", "features.enable_request_compression=false",
+    "-c", 'chatgpt_base_url="http://127.0.0.1:9/backend-api/"',
+)
+CODEX_ARGV = (CODEX, "app-server", "--stdio", "--strict-config", *CODEX_OVERRIDES)
 # Codex's default home on the persistent home volume; the daemon writes
 # Codewire's config.toml there, first line MANAGED_HEADER.
 CODEX_HOME = "/home/codewire/.codex"
@@ -148,8 +170,14 @@ def auth_calls(trace):
         trace, f'execve("/bin/cat", ["/bin/cat", "{TOKEN}"], ')
 
 
+def strace_string(value):
+    """A string as strace prints it: quoted, with quotes and backslashes escaped."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def codex_exec_calls(trace):
-    prefix = f'execve("{CODEX}", ["{CODEX}", "app-server", "--stdio", "--strict-config"], '
+    arguments = ", ".join(strace_string(argument) for argument in CODEX_ARGV)
+    prefix = f'execve({strace_string(CODEX)}, [{arguments}], '
     return successful_exec_calls(trace, prefix)
 
 
@@ -488,17 +516,19 @@ def managed_config(path):
 
 
 def validate_projection():
-    # Selected Codex uses the daemon-owned loopback route, configured by the
-    # daemon's own ~/.codex/config.toml. An environment-token Pod also renders
-    # the selection and CODEX_HOME; an identity-free Pod renders neither, and
-    # this kubectl-exec'd driver then relies on Codex's default home. The
-    # gateway's public roots are not a Codex environment override, even when
-    # that mount exists.
+    # Selected Codex uses the daemon-owned loopback route. The daemon's own
+    # ~/.codex/config.toml configures it until a delivered ChatGPT login
+    # removes that file; never a user's file or a symlink. An
+    # environment-token Pod also renders the selection and CODEX_HOME; an
+    # identity-free Pod renders neither, and this kubectl-exec'd driver then
+    # relies on Codex's default home. The gateway's public roots are not a
+    # Codex environment override, even when that mount exists.
     rendered = (os.environ.get("CODEX_HOME"),
                 os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"))
+    config = Path(CODEX_HOME) / "config.toml"
     if (rendered not in {(None, None), (CODEX_HOME, "v1:codex")}
             or "CODEX_CA_CERTIFICATE" in os.environ
-            or not managed_config(Path(CODEX_HOME) / "config.toml")):
+            or (os.path.lexists(config) and not managed_config(config))):
         raise Failure("unexpected_projection")
 
 
@@ -520,7 +550,7 @@ def main():
             server = Server([
                 "/usr/bin/unshare", "--user", "--map-root-user", "--",
                 "/usr/bin/strace", "-f", "-ttt", "-e", "trace=execve", "-s", "512",
-                "-o", str(trace), "--", CODEX, "app-server", "--stdio", "--strict-config",
+                "-o", str(trace), "--", *CODEX_ARGV,
             ], "/workspace")
             stage = "session"
             try:

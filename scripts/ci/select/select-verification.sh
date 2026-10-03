@@ -1444,7 +1444,8 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
-      scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-credentials.py)
+      scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-codex-login.py|\
+      scripts/ci/tests/test-kind-credentials.py)
         # These hermetic fixtures exercise the dispatcher and cleanup contract
         # without provisioning a cluster. A real harness/runtime path in the
         # same change still marks the selection Kind-relevant above.

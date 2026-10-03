@@ -13,10 +13,14 @@ import uuid
 TOKEN = Path("/run/codewire-credentials/workspace/token")
 ROOTS = "/run/codewire-credentials/gateway-roots/ca.crt"
 # Codex's default home on the persistent home volume. The workspace daemon
-# writes Codewire's config.toml there, first line MANAGED_HEADER.
+# writes Codewire's config.toml there, first line MANAGED_HEADER, until it
+# delivers Codex's own ChatGPT login as auth.json with PLACEHOLDER in place
+# of the refresh token.
 CODEX_HOME = Path("/home/codewire/.codex")
 MANAGED_HEADER = b"# Managed by Codewire. Delete this line to manage this file yourself."
 MAX_MANAGED_CONFIG = 64 * 1024
+PLACEHOLDER = "codewire-managed-no-refresh-token"
+MAX_AUTH = 1024 * 1024
 MODES = {"success": 200, "revoked": 403, "unbound": 403, "missing": 401}
 
 
@@ -34,6 +38,29 @@ def managed_config(path: Path) -> bool:
     return contents.split(b"\n", 1)[0] == MANAGED_HEADER
 
 
+def codewire_login(path: Path) -> bool:
+    """Whether path is Codewire's delivered login: a regular file, not a
+    symlink, in ChatGPT mode with exactly the placeholder refresh token and
+    none of the broker's refresh tokens."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    with os.fdopen(descriptor, "rb") as source:
+        contents = source.read(MAX_AUTH + 1)
+    if len(contents) > MAX_AUTH or b"CW_KIND_SYNTHETIC_REFRESH_" in contents:
+        return False
+    try:
+        document = json.loads(contents)
+    except ValueError:
+        return False
+    tokens = document.get("tokens") if isinstance(document, dict) else None
+    return (document.get("auth_mode") == "chatgpt" and isinstance(tokens, dict)
+            and tokens.get("refresh_token") == PLACEHOLDER)
+
+
 def probe(environment: str, mode: str) -> None:
     if str(uuid.UUID(environment)) != environment or mode not in {*MODES, "wrong-root"}:
         raise ValueError("selection")
@@ -45,17 +72,22 @@ def probe(environment: str, mode: str) -> None:
         raise ValueError("projection")
     # An environment-token Pod renders the selection and CODEX_HOME; an
     # identity-free Pod renders neither, and this kubectl-exec'd probe then
-    # sees Codex's default home. Either way the daemon writes config.toml.
+    # sees Codex's default home. Either way the daemon owns the files there:
+    # Codewire's config.toml, or Codewire's auth.json once it delivered
+    # Codex's own login, and never a user's file in their place.
     rendered = (os.environ.get("CODEX_HOME"), os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"))
     config = CODEX_HOME / "config.toml"
+    auth = CODEX_HOME / "auth.json"
     if selected:
         if (rendered not in {(None, None), (str(CODEX_HOME), "v1:codex")}
-                or not managed_config(config)):
+                or (os.path.lexists(config) and not managed_config(config))):
             raise ValueError("projection")
+        if os.path.lexists(auth) and not codewire_login(auth):
+            raise ValueError("unexpected-provider-auth-file")
     elif rendered != (None, None) or os.path.lexists(config):
         # These modes run before any application source or profile is selected.
         raise ValueError("unexpected-unselected-client")
-    if (CODEX_HOME / "auth.json").exists():
+    elif os.path.lexists(auth):
         raise ValueError("unexpected-provider-auth-file")
     # The expected synthetic provider values must not have entered the child
     # environment. The only token read below is its bounded Pod capability.

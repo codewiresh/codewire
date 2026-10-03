@@ -54,6 +54,12 @@ pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS: usize = 1024;
 /// statement times, far inside the pool's 5-second acquire timeout, whose
 /// expiry would end the epoch, and bound Kubernetes and OpenBao concurrency.
 pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
+/// Optional operations this broker serves, listed in the admitted stream's
+/// response headers. The gateway copies them into the daemon's Open, and the
+/// daemon sends an optional operation only when listed, so an older broker or
+/// gateway is never sent a frame that would end its epoch.
+pub const PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES: &[&str] =
+    &[codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN];
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_BUFFER: usize = 32;
 
@@ -458,7 +464,16 @@ where
             Ok((authority, input))
         })
         .await
-        .map(Response::new)
+        .map(|stream| {
+            let mut response = Response::new(stream);
+            for capability in PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES {
+                response.metadata_mut().append(
+                    codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+                    tonic::metadata::MetadataValue::from_static(capability),
+                );
+            }
+            response
+        })
     }
 }
 

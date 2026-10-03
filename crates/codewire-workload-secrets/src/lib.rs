@@ -4,13 +4,22 @@
 //!
 //! Storage inventory is metadata-only. A selected source can additionally
 //! supply a bounded, transient environment projection to an authenticated
-//! launcher. Provider credentials do not use this delivery format.
+//! launcher. Provider credentials do not use this delivery format; the one
+//! listed direct delivery exception, the Sandbox creator's personal Codex
+//! login, has its own sealed format in [`seal_codex_login`].
 
+mod codex_login;
 mod composition_plan;
 mod launch;
 #[cfg(unix)]
 pub mod launcher;
 
+pub use codex_login::{
+    CodexLogin, CodexLoginBinding, CodexLoginContext, CodexLoginError,
+    MAX_CODEX_LOGIN_ACCOUNT_ID_BYTES, MAX_CODEX_LOGIN_CREDENTIAL_ID_BYTES,
+    MAX_CODEX_LOGIN_LIFETIME_MS, MAX_CODEX_LOGIN_TOKEN_BYTES, MAX_SEALED_CODEX_LOGIN_BYTES,
+    OpenedCodexLogin, seal_codex_login,
+};
 pub use composition_plan::{ProjectionCompositionPlan, ProjectionSourceInventory};
 
 pub use launch::{
