@@ -230,8 +230,8 @@ fn pool_spec_equals_each_environment_rendering_of_its_shape() {
                 environment_id: "1d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6".into(),
                 organization_id: "org-other".into(),
                 operation_generation: 12,
-                gateway_token: "synthetic-coordinate-2".into(),
-                daemon_auth_token: "synthetic-daemon-2".into(),
+                gateway_token: "gw-token-other".into(),
+                daemon_auth_token: "daemon-token-other".into(),
                 projection_selection_sha256: Some([0x11; 32]),
                 managed_credential_clients:
                     codewire_access::ManagedCredentialClients::from_profile_slots([
