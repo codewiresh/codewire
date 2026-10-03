@@ -68,6 +68,7 @@ PRODUCTION_FINGERPRINT = "39F95DC66BA8EFBEAF49FAEF39D46239F95F4632"
 # compiles into cw, and the producers that turn those bytes into identities.
 # A build whose dep-info names any other repository file is refused.
 SOURCE_PATHSPEC = ("*.rs", "*.toml", "*.lock", "*.proto",
+                   "apps/cli/GPG_PUBLIC_KEY.asc",
                    "crates/codewire-credential-broker/src/ssh_agent/askpass.sh",
                    "crates/codewire-egress-policy/policies", "crates/codewire-mesh/migrations",
                    "crates/codewire-proto/codewire_descriptor.bin",

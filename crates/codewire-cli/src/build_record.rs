@@ -9,8 +9,8 @@
 //! identity's `sha256` and `size` are always computed from the bytes.
 
 use std::fs::{File, Metadata, OpenOptions};
-use std::io::{self, Read as _};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
 
 use anyhow::Context as _;
@@ -213,6 +213,121 @@ fn scan(path: &Path, record: &[u8]) -> anyhow::Result<Scan> {
         .custom_flags(flags)
         .open(path)
         .with_context(|| format!("open the running cw executable {}", path.display()))?;
+    scan_file(&mut file, path, record)
+}
+
+/// Admit downloaded bytes without executing them. The expected record is
+/// assembled from the signed shared identity, borrowing this executable's
+/// marker instead of adding another compiled marker literal.
+pub(crate) fn admit_incoming(
+    file: &mut File,
+    path: &Path,
+    expected: &CwPayloadIdentity,
+    host: Platform,
+) -> anyhow::Result<()> {
+    let target = expected.validate()?;
+    anyhow::ensure!(
+        target.platform() == host,
+        "release target differs from this host"
+    );
+    let record = BuildRecord {
+        package_version: expected.package_version.clone(),
+        rustc: expected.rustc.clone(),
+        source_revision: Some(expected.source_revision.clone()),
+        source_tree_sha256: Some(expected.source_tree_sha256.clone()),
+        target: expected.target.clone(),
+    };
+    let json = canonical_json(&record)?;
+    anyhow::ensure!(
+        json.len() <= MAX_RECORD_JSON,
+        "incoming build record exceeds its bound"
+    );
+    let mut framed = BUILD_RECORD[..BUILD_RECORD_JSON - 4].to_vec();
+    framed.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    framed.extend_from_slice(&json);
+    let before = file.metadata().context("inspect incoming executable")?;
+    anyhow::ensure!(
+        before.is_file() && before.len() <= MAX_EXECUTABLE_BYTES,
+        "incoming executable is not a bounded regular file"
+    );
+    if target == codewire_cw_release::identity::ReleaseTarget::X86_64UnknownLinuxMusl {
+        admit_static_elf(file, before.len())?;
+    }
+    file.seek(SeekFrom::Start(0))
+        .context("rewind downloaded release executable")?;
+    let scan = scan_file(file, path, &framed)?;
+    host.validate_executable_header(&scan.header)?;
+    anyhow::ensure!(
+        scan.records == 1 && scan.markers == 1,
+        "incoming executable does not hold exactly one matching complete build record"
+    );
+    anyhow::ensure!(
+        scan.sha256 == expected.sha256 && scan.size == expected.size,
+        "incoming executable differs from its signed digest or size"
+    );
+    anyhow::ensure!(
+        unchanged(&before, &file.metadata()?),
+        "incoming executable changed during target admission"
+    );
+    Ok(())
+}
+
+/// The release producer's musl contract: no interpreter or needed library.
+/// Read only bounded tables from the same held stream that is then hashed.
+fn admit_static_elf(file: &File, size: u64) -> anyhow::Result<()> {
+    let mut header = [0_u8; 64];
+    file.read_exact_at(&mut header, 0)
+        .context("read incoming ELF header")?;
+    let offset = u64::from_le_bytes(header[32..40].try_into().expect("ELF offset"));
+    let entry_size = u16::from_le_bytes(header[54..56].try_into().expect("ELF size"));
+    let count = u16::from_le_bytes(header[56..58].try_into().expect("ELF count"));
+    anyhow::ensure!(
+        offset >= 64
+            && entry_size == 56
+            && (1..=128).contains(&count)
+            && offset
+                .checked_add(u64::from(entry_size) * u64::from(count))
+                .is_some_and(|end| end <= size),
+        "musl release has invalid ELF program headers"
+    );
+    let mut dynamic_bytes = 0_u64;
+    for index in 0..u64::from(count) {
+        let mut entry = [0_u8; 56];
+        file.read_exact_at(&mut entry, offset + index * 56)?;
+        let kind = u32::from_le_bytes(entry[..4].try_into().expect("ELF kind"));
+        anyhow::ensure!(kind != 3, "musl release has a dynamic interpreter");
+        if kind == 2 {
+            let start = u64::from_le_bytes(entry[8..16].try_into().expect("dynamic offset"));
+            let length = u64::from_le_bytes(entry[32..40].try_into().expect("dynamic length"));
+            dynamic_bytes = dynamic_bytes
+                .checked_add(length)
+                .context("ELF table overflow")?;
+            anyhow::ensure!(
+                length % 16 == 0
+                    && dynamic_bytes <= MAX_EXECUTABLE_BYTES
+                    && start.checked_add(length).is_some_and(|end| end <= size),
+                "musl release has an invalid or unbounded dynamic table"
+            );
+            let mut buffer = [0_u8; 4096];
+            let mut position = 0;
+            'table: while position < length {
+                let n = (length - position).min(buffer.len() as u64) as usize;
+                file.read_exact_at(&mut buffer[..n], start + position)?;
+                for entry in buffer[..n].chunks_exact(16) {
+                    let tag = i64::from_le_bytes(entry[..8].try_into().expect("dynamic tag"));
+                    if tag == 0 {
+                        break 'table;
+                    }
+                    anyhow::ensure!(tag != 1, "musl release names a shared library");
+                }
+                position += n as u64;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scan_file(file: &mut File, path: &Path, record: &[u8]) -> anyhow::Result<Scan> {
     let before = file
         .metadata()
         .with_context(|| format!("inspect {}", path.display()))?;
@@ -233,7 +348,7 @@ fn scan(path: &Path, record: &[u8]) -> anyhow::Result<Scan> {
     let mut records = 0;
     let mut markers = 0;
     loop {
-        let read = match read_some(&mut file, &mut buffer) {
+        let read = match read_some(file, &mut buffer) {
             Ok(0) => break,
             Ok(read) => read,
             Err(error) => {
@@ -403,6 +518,20 @@ pub(crate) mod tests {
         bytes
     }
 
+    pub(crate) fn release_executable(body: &[&[u8]]) -> Vec<u8> {
+        let mut bytes = executable(body);
+        if host().release_target()
+            == codewire_cw_release::identity::ReleaseTarget::X86_64UnknownLinuxMusl
+        {
+            bytes.splice(64..64, [0_u8; 56]);
+            bytes[32..40].copy_from_slice(&64_u64.to_le_bytes());
+            bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
+            bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
+            bytes[64] = 1;
+        }
+        bytes
+    }
+
     pub(crate) fn write(directory: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = directory.join(name);
         fs::write(&path, bytes).unwrap();
@@ -504,6 +633,147 @@ pub(crate) mod tests {
             decoded.identity(&record, &path, host()).unwrap().size,
             large.len() as u64
         );
+    }
+
+    #[test]
+    fn incoming_admission_binds_signed_record_fields_and_exact_held_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = host().release_target().as_str();
+        let record = framed(&json("v1.2.3", target, true));
+        let bytes = release_executable(&[&record]);
+        let expected = CwPayloadIdentity {
+            schema_version: 2,
+            protocol_version: 1,
+            record_version: 1,
+            package_version: "v1.2.3".into(),
+            target: target.into(),
+            source_revision: REVISION.into(),
+            source_tree_sha256: TREE.into(),
+            rustc: "rustc 1.93.0 (synthetic 2026-01-01)".into(),
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            size: bytes.len() as u64,
+        };
+        let path = write(directory.path(), "candidate", &bytes);
+        let mut held = File::open(&path).unwrap();
+        admit_incoming(&mut held, &path, &expected, host()).unwrap();
+        for field in [
+            "version", "revision", "tree", "rustc", "target", "sha256", "size",
+        ] {
+            let mut wrong = expected.clone();
+            match field {
+                "version" => wrong.package_version = "v1.2.4".into(),
+                "revision" => wrong.source_revision = "a".repeat(40),
+                "tree" => wrong.source_tree_sha256 = "b".repeat(64),
+                "rustc" => wrong.rustc = "rustc 1.94.0 (synthetic)".into(),
+                "target" => {
+                    wrong.target = if target == "aarch64-apple-darwin" {
+                        "x86_64-unknown-linux-musl"
+                    } else {
+                        "aarch64-apple-darwin"
+                    }
+                    .into()
+                }
+                "sha256" => wrong.sha256 = "c".repeat(64),
+                _ => wrong.size += 1,
+            }
+            assert!(
+                admit_incoming(&mut held, &path, &wrong, host()).is_err(),
+                "field {field}"
+            );
+        }
+        // Replacement of the name cannot change the held stream being admitted.
+        fs::rename(&path, directory.path().join("original")).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        admit_incoming(&mut held, &path, &expected, host()).unwrap();
+        fs::write(directory.path().join("original"), b"in-place mutation").unwrap();
+        assert!(admit_incoming(&mut held, &path, &expected, host()).is_err());
+    }
+
+    #[test]
+    fn incoming_admission_rejects_extra_or_truncated_markers_and_bad_headers() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = host().release_target().as_str();
+        let record = framed(&json("v1.2.3", target, true));
+        let other = framed(&json("v9.9.9", target, true));
+        let marker = &record[..BUILD_RECORD_JSON - 4];
+        for (index, mut bytes) in [
+            release_executable(&[&record, &record]),
+            release_executable(&[&record, &other]),
+            release_executable(&[&record, marker]),
+            release_executable(&[b"v1.2.3"]),
+            release_executable(&[&record]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index == 4 {
+                bytes[0] = b'x';
+            }
+            let expected = CwPayloadIdentity {
+                schema_version: 2,
+                protocol_version: 1,
+                record_version: 1,
+                package_version: "v1.2.3".into(),
+                target: target.into(),
+                source_revision: REVISION.into(),
+                source_tree_sha256: TREE.into(),
+                rustc: "rustc 1.93.0 (synthetic 2026-01-01)".into(),
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                size: bytes.len() as u64,
+            };
+            let path = write(directory.path(), "candidate", &bytes);
+            assert!(
+                admit_incoming(&mut File::open(&path).unwrap(), &path, &expected, host()).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn static_musl_admission_rejects_interpreters_libraries_and_unbounded_tables() {
+        if host().release_target()
+            != codewire_cw_release::identity::ReleaseTarget::X86_64UnknownLinuxMusl
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let record = framed(&json("v1.2.3", host().release_target().as_str(), true));
+        let good = release_executable(&[&record]);
+        let path = write(directory.path(), "candidate", &good);
+        admit_static_elf(&File::open(&path).unwrap(), good.len() as u64).unwrap();
+        for mode in [
+            "interp",
+            "needed",
+            "offset",
+            "size",
+            "count",
+            "dynamic-end",
+            "dynamic-size",
+        ] {
+            let mut bytes = good.clone();
+            match mode {
+                "interp" => bytes[64..68].copy_from_slice(&3_u32.to_le_bytes()),
+                "offset" => bytes[32..40].copy_from_slice(&u64::MAX.to_le_bytes()),
+                "size" => bytes[54..56].copy_from_slice(&55_u16.to_le_bytes()),
+                "count" => bytes[56..58].copy_from_slice(&129_u16.to_le_bytes()),
+                _ => {
+                    bytes[64..68].copy_from_slice(&2_u32.to_le_bytes());
+                    bytes[72..80].copy_from_slice(&120_u64.to_le_bytes());
+                    bytes[96..104].copy_from_slice(&16_u64.to_le_bytes());
+                    if mode == "needed" {
+                        bytes[120..128].copy_from_slice(&1_i64.to_le_bytes());
+                    } else if mode == "dynamic-end" {
+                        bytes[72..80].copy_from_slice(&u64::MAX.to_le_bytes());
+                    } else {
+                        bytes[96..104].copy_from_slice(&15_u64.to_le_bytes());
+                    }
+                }
+            }
+            let path = write(directory.path(), "candidate", &bytes);
+            assert!(
+                admit_static_elf(&File::open(&path).unwrap(), bytes.len() as u64).is_err(),
+                "{mode}"
+            );
+        }
     }
 
     #[test]

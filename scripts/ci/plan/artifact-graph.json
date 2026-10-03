@@ -82,6 +82,7 @@
         "aarch64-apple-darwin"
       ],
       "package_inputs": {
+        "codewire-cli": ["apps/cli/GPG_PUBLIC_KEY.asc"],
         "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
@@ -129,6 +130,7 @@
       "profiles": ["release"],
       "release_targets": ["host"],
       "package_inputs": {
+        "codewire-cli": ["apps/cli/GPG_PUBLIC_KEY.asc"],
         "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],

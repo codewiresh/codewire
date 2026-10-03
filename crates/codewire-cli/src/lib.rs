@@ -8,6 +8,7 @@ mod hosted_exec;
 mod mesh;
 mod organization_client;
 mod presentation;
+mod public_fetch;
 mod secret_client;
 mod tailnet_ssh;
 mod terminal_attach;
@@ -380,7 +381,7 @@ where
         Command::Completion(args) => handle_completion_command(args),
         Command::ConfigSsh(args) => handle_config_ssh_command(args),
         Command::Doctor(args) => handle_doctor_command(&globals, args).await,
-        Command::Update(args) => update::run(args),
+        Command::Update(args) => update::run(args).await,
         Command::Install(args) => update::install(args),
         Command::Login(args) => handle_login_command(&globals, args).await,
         Command::Setup(args) => handle_setup_command(&globals, args).await,

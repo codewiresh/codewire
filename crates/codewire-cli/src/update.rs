@@ -4,9 +4,8 @@
 //! in an ordinary-user store and points one entry, normally `~/.local/bin/cw`,
 //! at the selected version. New invocations follow the selection; running
 //! processes and the commands they saved keep their original bytes and path.
-//! Source resolution is separate from installation: today the only source is
-//! an explicitly pinned local release directory. Public release fetching stays
-//! disabled until a release signing key is admitted.
+//! Source resolution is separate from installation. Public sources are always
+//! explicit and must pass compiled-key verification before Store admission.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -25,6 +24,7 @@ use rustix::fs::{self as rfs, Mode, OFlags};
 use serde::Serialize;
 
 use crate::build_record::{BUILD_RECORD, BuildRecord};
+use crate::public_fetch;
 
 /// Identity file beside `cw` in a pinned local release directory; the same
 /// schema-2 document the cw image carries as `cw-runtime.json`.
@@ -37,11 +37,17 @@ pub(crate) struct UpdateArgs {
     #[command(subcommand)]
     command: Option<UpdateCommand>,
     /// Pinned local release directory containing `cw` and `cw-runtime.json`.
-    #[arg(long, value_name = "DIR", requires = "sha256")]
+    #[arg(long, value_name = "DIR", requires = "sha256", conflicts_with_all = ["version", "channel"])]
     from: Option<PathBuf>,
     /// SHA-256 of the release `cw`; required with --from.
-    #[arg(long, value_name = "HEX", requires = "from")]
+    #[arg(long, value_name = "HEX", requires = "from", conflicts_with_all = ["version", "channel"])]
     sha256: Option<String>,
+    /// Explicit signed public release; an intentional downgrade is permitted.
+    #[arg(long, value_name = "vMAJOR.MINOR.PATCH", value_parser = release_version, conflicts_with = "channel")]
+    version: Option<String>,
+    /// Signed public channel; stable refuses installed-version regressions.
+    #[arg(long, value_parser = ["stable"])]
+    channel: Option<String>,
     #[command(flatten)]
     selection: SelectionArgs,
 }
@@ -113,10 +119,16 @@ struct SelectionReport<'a> {
     identity: Option<&'a CwPayloadIdentity>,
 }
 
-pub(crate) fn run(args: UpdateArgs) -> anyhow::Result<()> {
-    match (args.command, args.from, args.sha256) {
-        (Some(UpdateCommand::Status(store)), _, _) => status(store),
-        (Some(UpdateCommand::Rollback(rollback)), _, _) => {
+pub(crate) async fn run(args: UpdateArgs) -> anyhow::Result<()> {
+    match (
+        args.command,
+        args.from,
+        args.sha256,
+        args.version,
+        args.channel,
+    ) {
+        (Some(UpdateCommand::Status(store)), _, _, _, _) => status(store),
+        (Some(UpdateCommand::Rollback(rollback)), _, _, _, _) => {
             let store = open_store(rollback.selection.store.store.as_deref())?;
             let selected = store
                 .rollback(rollback.to.as_deref(), rollback.selection.expect_generation)
@@ -138,7 +150,7 @@ pub(crate) fn run(args: UpdateArgs) -> anyhow::Result<()> {
                 rollback.selection.store.json,
             )
         }
-        (None, Some(directory), Some(sha256)) => {
+        (None, Some(directory), Some(sha256), None, None) => {
             let store = open_store(args.selection.store.store.as_deref())?;
             let candidate = local_release(&directory, &sha256)?;
             let (published, selected) = store
@@ -160,13 +172,109 @@ pub(crate) fn run(args: UpdateArgs) -> anyhow::Result<()> {
                 args.selection.store.json,
             )
         }
-        (None, _, _) => anyhow::bail!(
-            "public cw releases are not available yet, so automatic updates are unavailable \
-             during the private preview; update your authorized source checkout and run \
-             `make cli-install` from its root, or select a pinned local release with \
-             `cw update --from DIR --sha256 HEX`"
+        (None, None, None, Some(version), None) => {
+            public_release(public_fetch::Selection::Version(version), args.selection).await
+        }
+        (None, None, None, None, Some(channel)) if channel == "stable" => {
+            public_release(public_fetch::Selection::Stable, args.selection).await
+        }
+        _ => anyhow::bail!(
+            "cw update requires an explicit source: --version vMAJOR.MINOR.PATCH, \
+             --channel stable, or --from DIR --sha256 HEX; public delivery may not yet \
+             be available during the private preview. For source installs, use `make cli-install`"
         ),
     }
+}
+
+fn release_version(value: &str) -> Result<String, String> {
+    if codewire_cw_release::release::valid_release_tag(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("version must be a bounded vMAJOR.MINOR.PATCH release tag".into())
+    }
+}
+
+async fn public_release(
+    source: public_fetch::Selection,
+    options: SelectionArgs,
+) -> anyhow::Result<()> {
+    let host = Platform::host().ok_or(StoreError::UnsupportedHost)?;
+    let stable = matches!(source, public_fetch::Selection::Stable);
+    let store = open_store(options.store.store.as_deref())?;
+    let (expected, current) = admit_public_selection(&store, options.expect_generation)?;
+    let fetched = public_fetch::fetch(source, host).await?;
+    let identity = fetched.identity.clone();
+    let operation = commit_public(&store, expected, current.as_ref(), stable, &fetched);
+    let cleanup = fetched.cleanup();
+    let (published, selected) = match operation {
+        Ok(value) => {
+            cleanup.context("selection committed, but public release scratch cleanup failed")?;
+            value
+        }
+        Err(error) => {
+            if cleanup.is_err() {
+                return Err(
+                    error.context("public release scratch cleanup failed; scratch retained")
+                );
+            }
+            return Err(error);
+        }
+    };
+    print_selection(
+        &store,
+        &SelectionReport {
+            entry: store.entry(),
+            store: store.root(),
+            sha256: &published.sha256,
+            package_version: &published.record.package_version,
+            published: published.created,
+            changed: selected.changed,
+            generation: selected.generation,
+            previous: selected.previous.as_deref(),
+            identity: Some(&identity),
+        },
+        options.store.json,
+    )
+}
+
+fn admit_public_selection(
+    store: &Store,
+    requested: Option<u64>,
+) -> anyhow::Result<(u64, Option<VersionRecord>)> {
+    let status = store.status()?;
+    anyhow::ensure!(
+        status.consistent && status.pending.is_none(),
+        "public update refuses an uncertain or inconsistent Store selection; observe cw update status and resolve the owning operation first"
+    );
+    let expected = requested.unwrap_or(status.generation);
+    anyhow::ensure!(
+        expected == status.generation,
+        "managed cw selection generation changed before public fetch"
+    );
+    let current = status
+        .current
+        .as_deref()
+        .map(|digest| store.verify(digest))
+        .transpose()?;
+    Ok((expected, current))
+}
+
+pub(crate) fn commit_public(
+    store: &Store,
+    expected: u64,
+    current: Option<&VersionRecord>,
+    stable: bool,
+    fetched: &public_fetch::FetchedRelease,
+) -> anyhow::Result<(store::Published, store::Selected)> {
+    if stable {
+        codewire_cw_release::release::guard_stable(
+            current.map(|record| (record.package_version.as_str(), record.sha256.as_str())),
+            &fetched.identity,
+        )?;
+    }
+    store
+        .publish_and_select(fetched.candidate(), Some(expected))
+        .map_err(with_hint)
 }
 
 pub(crate) fn install(args: InstallArgs) -> anyhow::Result<()> {
@@ -539,6 +647,7 @@ fn default_bin_dir() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
     use crate::build_record::tests::{decoded, executable, framed, host, host_target, json, write};
@@ -613,11 +722,85 @@ mod tests {
     }
 
     #[test]
-    fn public_update_stays_disabled_and_explains_source_install() {
+    fn public_update_sources_are_explicit_exclusive_bounded_and_closed() {
+        let Ok(Command::Update(version)) = parse(&["cw", "update", "--version", "v1.2.3"]) else {
+            panic!("version");
+        };
+        assert_eq!(version.version.as_deref(), Some("v1.2.3"));
+        assert!(version.channel.is_none() && version.from.is_none());
+        let Ok(Command::Update(channel)) = parse(&[
+            "cw",
+            "update",
+            "--channel",
+            "stable",
+            "--expect-generation",
+            "7",
+        ]) else {
+            panic!("channel");
+        };
+        assert_eq!(channel.channel.as_deref(), Some("stable"));
+        assert_eq!(channel.selection.expect_generation, Some(7));
+        let sha = "a".repeat(64);
+        for args in [
+            vec!["cw", "update", "--version", ""],
+            vec!["cw", "update", "--version", "1.2.3"],
+            vec!["cw", "update", "--version", "v1.2.3/../../x"],
+            vec!["cw", "update", "--version", "v1.2.3", "--version", "v1.2.4"],
+            vec!["cw", "update", "--channel", "stable", "--channel", "stable"],
+            vec!["cw", "update", "--channel", "dev"],
+            vec!["cw", "update", "--version", "v1.2.3", "--channel", "stable"],
+            vec![
+                "cw",
+                "update",
+                "--from",
+                "/r",
+                "--sha256",
+                &sha,
+                "--version",
+                "v1.2.3",
+            ],
+            vec![
+                "cw",
+                "update",
+                "--from",
+                "/r",
+                "--sha256",
+                &sha,
+                "--channel",
+                "stable",
+            ],
+            vec!["cw", "update", "--channel", "stable", "status"],
+            vec!["cw", "update", "--version", "v1.2.3", "rollback"],
+            vec![
+                "cw",
+                "update",
+                "--channel",
+                "stable",
+                "--url",
+                "https://example.invalid",
+            ],
+            vec!["cw", "update", "--channel", "stable", "--key", "/tmp/key"],
+            vec![
+                "cw",
+                "update",
+                "--channel",
+                "stable",
+                "--proxy",
+                "http://127.0.0.1:1",
+            ],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn update_has_no_implicit_public_source_and_explains_source_install() {
         let error = run(UpdateArgs {
             command: None,
             from: None,
             sha256: None,
+            version: None,
+            channel: None,
             selection: SelectionArgs {
                 expect_generation: None,
                 store: StoreArgs {
@@ -626,11 +809,54 @@ mod tests {
                 },
             },
         })
+        .await
         .unwrap_err()
         .to_string();
         assert!(error.contains("private preview"));
         assert!(error.contains("make cli-install"));
-        assert!(error.contains("cw update --from DIR --sha256 HEX"));
+        assert!(error.contains("--from DIR --sha256 HEX"));
+    }
+
+    #[test]
+    fn public_prefetch_admission_captures_verified_state_and_refuses_stale_or_corrupt_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let store = Store::create(
+            &directory.path().join("store"),
+            &bin.join("cw"),
+            DEFAULT_LOCK_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(admit_public_selection(&store, None).unwrap(), (0, None));
+        let (executable, identity) =
+            identified(directory.path(), crate::build_record::tests::host_target());
+        store
+            .publish_and_select(
+                &Candidate {
+                    executable,
+                    admission: Admission::SelfInstall {
+                        package_version: identity.package_version,
+                    },
+                },
+                Some(0),
+            )
+            .unwrap();
+        let before = store.status().unwrap();
+        let (generation, current) = admit_public_selection(&store, None).unwrap();
+        assert_eq!(generation, before.generation);
+        assert_eq!(
+            current.unwrap(),
+            store.verify(before.current.as_deref().unwrap()).unwrap()
+        );
+        assert!(admit_public_selection(&store, Some(0)).is_err());
+        assert_eq!(store.status().unwrap(), before);
+        let path = store.version_executable(before.current.as_deref().unwrap());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&path, b"corrupted retained bytes").unwrap();
+        assert!(admit_public_selection(&store, None).is_err());
+        let version = path.parent().unwrap();
+        fs::set_permissions(version, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]

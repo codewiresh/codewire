@@ -478,8 +478,7 @@ fn concurrent_fenced_selections_commit_exactly_once() {
         .collect();
     let barrier = Arc::new(Barrier::new(candidates.len()));
     let threads: Vec<_> = candidates
-        .iter()
-        .cloned()
+        .into_iter()
         .map(|sha256| {
             let root = fixture.root.clone();
             let barrier = barrier.clone();

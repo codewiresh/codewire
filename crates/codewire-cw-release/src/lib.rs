@@ -10,5 +10,6 @@
 //! immutable boundary and is never a trusted managed-helper source.
 
 pub mod identity;
+pub mod release;
 #[cfg(unix)]
 pub mod store;
