@@ -22,6 +22,17 @@
 //! reason `deleted`; the steady-state row shape is identical, only the
 //! close reason for a hard-deleted CR differs. Documented accepted drift.)
 //!
+//! ## Billing opens at bind (Program #2238 C3)
+//!
+//! Owner decision, 2026-10-02: a session opens at the environment's
+//! claim-time binding, for every sandbox, cold or pool-born. A Ready Sandbox
+//! opens a row only while the environment's live binding names this exact
+//! Sandbox (`sandbox_workspace_bindings.sandbox_uid`), and the row starts at
+//! that binding's `bound_at`, never before the Sandbox's previous session
+//! ended. An unclaimed warm-pool member, and an adopted one that is not bound
+//! yet, is never billed: it has no binding. An already open row keeps its
+//! heartbeat, so a Pod replaced while running is billed without a gap.
+//!
 //! ## Gating
 //!
 //! Runs when `billing-session` is in `WORKER_LOOPS` (the default), under
@@ -72,13 +83,13 @@ pub struct Resources {
 
 /// Mirrors `sessions.Identity`.
 #[derive(Debug, Clone)]
-struct Identity {
-    environment_id: String,
-    org_id: String,
-    runtime_tier: String,
-    runtime_uid: String,
-    runtime_name: String,
-    namespace: String,
+pub(crate) struct Identity {
+    pub(crate) environment_id: String,
+    pub(crate) org_id: String,
+    pub(crate) runtime_tier: String,
+    pub(crate) runtime_uid: String,
+    pub(crate) runtime_name: String,
+    pub(crate) namespace: String,
 }
 
 #[derive(Debug)]
@@ -101,6 +112,18 @@ fn unresolved_identities_metric() -> &'static IntCounterVec {
             &["reason"]
         )
         .expect("billing identity metric registration must be unique")
+    })
+}
+
+static AWAITING_BIND: OnceLock<IntGauge> = OnceLock::new();
+
+fn awaiting_bind_metric() -> &'static IntGauge {
+    AWAITING_BIND.get_or_init(|| {
+        register_int_gauge!(
+            "codewire_billing_awaiting_bind_sandboxes",
+            "Ready Codewire Sandboxes whose environment has not bound them yet, so nothing is billed."
+        )
+        .expect("awaiting-bind billing metric registration must be unique")
     })
 }
 
@@ -502,23 +525,89 @@ async fn resolve_identity(
     }))
 }
 
-/// Mirrors `Store.OpenOrHeartbeat`: upsert the open row keyed by the
-/// partial unique index `(runtime_type, runtime_uid) WHERE ended_at IS
-/// NULL`. Idempotent: a re-observed running Sandbox refreshes resources
-/// and `last_observed_at`/`updated_at` rather than inserting a duplicate.
-async fn open_or_heartbeat(
+/// What [`open_or_heartbeat`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionWrite {
+    /// The open row was refreshed.
+    Heartbeat,
+    /// A row opened at the binding's `bound_at`.
+    Opened,
+    /// No open row and no live binding of this Sandbox: nothing is billed.
+    AwaitingBind,
+}
+
+/// Heartbeat the open row for this runtime UID, or open one at bind.
+///
+/// An open row (keyed by the partial unique index `(runtime_type,
+/// runtime_uid) WHERE ended_at IS NULL`) refreshes its resources and
+/// `last_observed_at`. Otherwise a row opens only while the environment's
+/// live binding names this Sandbox, starting at that binding's `bound_at`,
+/// no earlier than the Sandbox's last closed session and no later than this
+/// observation.
+pub(crate) async fn open_or_heartbeat(
     pool: &PgPool,
     id: &Identity,
     res: &Resources,
     observed_at: chrono::DateTime<chrono::Utc>,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"INSERT INTO sandbox_running_sessions (
+) -> anyhow::Result<SessionWrite> {
+    let refreshed = sqlx::query(
+        r#"UPDATE sandbox_running_sessions SET
+               environment_id = $1,
+               organization_id = $2,
+               runtime_name = $4,
+               runtime_namespace = $5,
+               cpu_millicores = $6,
+               memory_mib = $7,
+               disk_gib = $8,
+               runtime_class = $9,
+               runtime_tier = $10,
+               last_observed_at = $11,
+               updated_at = $11
+           WHERE runtime_type = 'sandbox' AND runtime_uid = $3 AND ended_at IS NULL"#,
+    )
+    .bind(&id.environment_id)
+    .bind(&id.org_id)
+    .bind(&id.runtime_uid)
+    .bind(&id.runtime_name)
+    .bind(&id.namespace)
+    .bind(res.cpu_millicores)
+    .bind(res.memory_mib)
+    .bind(res.disk_gib)
+    .bind(&res.runtime_class)
+    .bind(&id.runtime_tier)
+    .bind(observed_at)
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("heartbeat sandbox session: {e}"))?
+    .rows_affected();
+    if refreshed > 0 {
+        return Ok(SessionWrite::Heartbeat);
+    }
+    let opened = sqlx::query(
+        r#"WITH bound AS (
+               SELECT w.bound_at
+                 FROM sandbox_environment_backend b
+                 JOIN sandbox_workspace_bindings w
+                   ON w.environment_id = b.environment_id
+                  AND w.pod_uid = b.pod_uid
+                  AND w.released_at IS NULL
+                WHERE b.environment_id = $1
+                  AND b.bound_at IS NOT NULL
+                  AND w.sandbox_uid = $3
+           ), previous AS (
+               SELECT max(ended_at) AS ended_at
+                 FROM sandbox_running_sessions
+                WHERE runtime_type = 'sandbox' AND runtime_uid = $3
+           )
+           INSERT INTO sandbox_running_sessions (
                environment_id, organization_id, runtime_type, runtime_uid, runtime_name,
                runtime_namespace, cpu_millicores, memory_mib, disk_gib, runtime_class, runtime_tier,
                started_at, last_observed_at, updated_at
            )
-           VALUES ($1, $2, 'sandbox', $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $11)
+           SELECT $1, $2, 'sandbox', $3, $4, $5, $6, $7, $8, $9, $10,
+                  LEAST($11, GREATEST(bound.bound_at, COALESCE(previous.ended_at, bound.bound_at))),
+                  $11, $11
+             FROM bound CROSS JOIN previous
            ON CONFLICT (runtime_type, runtime_uid) WHERE ended_at IS NULL
            DO UPDATE SET
                environment_id = EXCLUDED.environment_id,
@@ -546,8 +635,13 @@ async fn open_or_heartbeat(
     .bind(observed_at)
     .execute(pool)
     .await
-    .map_err(|e| anyhow::anyhow!("open/heartbeat sandbox session: {e}"))?;
-    Ok(())
+    .map_err(|e| anyhow::anyhow!("open sandbox session at bind: {e}"))?
+    .rows_affected();
+    Ok(if opened > 0 {
+        SessionWrite::Opened
+    } else {
+        SessionWrite::AwaitingBind
+    })
 }
 
 /// Mirrors `Store.CloseByUID`: set `ended_at`/`end_reason` on the open row
@@ -605,14 +699,23 @@ async fn list_open(pool: &PgPool, namespace: &str) -> anyhow::Result<Vec<OpenSes
 
 // ── controller.go ──────────────────────────────────────────────────────
 
-/// Mirrors `handler.reconcile`: resolve identity, classify, then open/
-/// heartbeat (Running) or close (Terminated). Pending is a no-op.
-async fn reconcile(pool: &PgPool, sb: &DynamicObject) -> bool {
+/// One Sandbox's billing state this cycle, for the gauges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Reconciled {
+    /// Running without a resolved billable identity.
+    unbillable: bool,
+    /// Running, resolved, but not bound: billing waits for the bind.
+    awaiting_bind: bool,
+}
+
+/// Mirrors `handler.reconcile`: resolve identity, classify, then open at
+/// bind or heartbeat (Running) or close (Terminated). Pending is a no-op.
+async fn reconcile(pool: &PgPool, sb: &DynamicObject) -> Reconciled {
     let value = match serde_json::to_value(sb) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "billing-session: serialize Sandbox failed");
-            return false;
+            return Reconciled::default();
         }
     };
     let namespace = sb.metadata.namespace.clone().unwrap_or_default();
@@ -627,16 +730,19 @@ async fn reconcile(pool: &PgPool, sb: &DynamicObject) -> bool {
     let (phase, reason) = classify(&value);
     let id = match resolve_identity(pool, &namespace, &name, &uid, labels_map).await {
         Ok(IdentityResolution::Resolved(id)) => id,
-        Ok(IdentityResolution::NotManaged) => return false,
+        Ok(IdentityResolution::NotManaged) => return Reconciled::default(),
         Ok(IdentityResolution::Unresolved(reason)) => {
             if phase == Phase::Running {
                 unresolved_identities_metric()
                     .with_label_values(&[reason])
                     .inc();
                 tracing::error!(reason, runtime_uid = %uid, "billing_identity_unresolved");
-                return true;
+                return Reconciled {
+                    unbillable: true,
+                    ..Reconciled::default()
+                };
             }
-            return false;
+            return Reconciled::default();
         }
         Err(e) => {
             if phase == Phase::Running {
@@ -644,10 +750,13 @@ async fn reconcile(pool: &PgPool, sb: &DynamicObject) -> bool {
                     .with_label_values(&["database_error"])
                     .inc();
                 tracing::error!(error = %e, runtime_uid = %uid, reason = "database_error", "billing_identity_unresolved");
-                return true;
+                return Reconciled {
+                    unbillable: true,
+                    ..Reconciled::default()
+                };
             }
             tracing::error!(error = %e, "billing-session: resolve identity");
-            return false;
+            return Reconciled::default();
         }
     };
     let now = chrono::Utc::now();
@@ -660,11 +769,27 @@ async fn reconcile(pool: &PgPool, sb: &DynamicObject) -> bool {
                 Ok(resources) => resources,
                 Err(error) => {
                     tracing::error!(environment_id = id.environment_id, sandbox = name, %error, "billing-session: resolve resize resources");
-                    return false;
+                    return Reconciled::default();
                 }
             };
-            if let Err(e) = open_or_heartbeat(pool, &id, &res, now).await {
-                tracing::error!(environment_id = id.environment_id, sandbox = name, error = %e, "billing-session: open/heartbeat session");
+            match open_or_heartbeat(pool, &id, &res, now).await {
+                Ok(SessionWrite::AwaitingBind) => {
+                    return Reconciled {
+                        awaiting_bind: true,
+                        ..Reconciled::default()
+                    };
+                }
+                Ok(SessionWrite::Opened) => {
+                    tracing::info!(
+                        environment_id = id.environment_id,
+                        sandbox = name,
+                        "billing-session: session opened at bind"
+                    );
+                }
+                Ok(SessionWrite::Heartbeat) => {}
+                Err(e) => {
+                    tracing::error!(environment_id = id.environment_id, sandbox = name, error = %e, "billing-session: open/heartbeat session");
+                }
             }
         }
         Phase::Terminated => {
@@ -679,7 +804,7 @@ async fn reconcile(pool: &PgPool, sb: &DynamicObject) -> bool {
         }
         Phase::Pending => {}
     }
-    false
+    Reconciled::default()
 }
 
 /// One reconcile cycle: list every Sandbox, reconcile it, then close DB
@@ -699,13 +824,17 @@ async fn run_cycle(ctx: &WorkerContext, namespace: &str) {
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut unbillable_running = 0i64;
+    let mut awaiting_bind = 0i64;
     for sb in &sandboxes {
         if let Some(uid) = &sb.metadata.uid {
             seen.insert(uid.clone());
         }
-        unbillable_running += i64::from(reconcile(&ctx.pool, sb).await);
+        let reconciled = reconcile(&ctx.pool, sb).await;
+        unbillable_running += i64::from(reconciled.unbillable);
+        awaiting_bind += i64::from(reconciled.awaiting_bind);
     }
     unbillable_running_metric().set(unbillable_running);
+    awaiting_bind_metric().set(awaiting_bind);
 
     let open = match list_open(&ctx.pool, namespace).await {
         Ok(o) => o,
@@ -756,6 +885,10 @@ pub async fn billing_session_loop(
         run_cycle(&ctx, &namespace).await;
     }
 }
+
+#[cfg(test)]
+#[path = "billing_sessions/database_tests.rs"]
+mod database_tests;
 
 #[cfg(test)]
 mod tests {

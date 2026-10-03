@@ -59,6 +59,9 @@ pub struct BindableRuntime {
     /// status current, the Pod Running with every container started from a
     /// resolved image. Claim and Pod readiness are not required.
     pub bind_ready: bool,
+    /// The SandboxWarmPool the Claim selects: an environment's zero-replica
+    /// shadow, or a shared `cw-pool-` pool for a pool-born environment.
+    pub warm_pool_ref: String,
 }
 
 impl RuntimeIdentityObservation {
@@ -93,12 +96,20 @@ impl SandboxClient {
             runtime_identity_converged(&snapshot.claim, &snapshot.sandbox, &snapshot.pod, opts);
         let bind_ready =
             runtime_bind_ready(&snapshot.claim, &snapshot.sandbox, &snapshot.pod, opts);
+        let warm_pool_ref = snapshot
+            .claim
+            .data
+            .pointer("/spec/warmPoolRef/name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         Ok(BindableRuntime {
             sandbox: snapshot.sandbox,
             pod: snapshot.pod,
             observation: snapshot.observation,
             converged,
             bind_ready,
+            warm_pool_ref,
         })
     }
 

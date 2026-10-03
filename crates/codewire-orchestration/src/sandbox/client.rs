@@ -59,6 +59,9 @@ pub struct ProbeResult {
     pub pod_ip: String,
     /// Start marks of the probed Pod, read from the same Pod object.
     pub pod_timeline: PodStartTimeline,
+    /// The bound Sandbox's agent-sandbox launch type: `warm` for an adopted
+    /// warm-pool member (Program #2238 C3).
+    pub launch_type: String,
 }
 
 /// Kubernetes-reported start marks for one workspace Pod incarnation, taken
@@ -169,6 +172,10 @@ struct WorkspaceBootstrapSnapshot {
     pool: DynamicObject,
     template: DynamicObject,
     sandbox: DynamicObject,
+    /// The Claim selects a shared `cw-pool-` pool (Program #2238 C3): its
+    /// template serves every member and is never written for one
+    /// environment.
+    shared: bool,
 }
 
 struct RuntimeIdentitySnapshot {
@@ -259,6 +266,10 @@ mod credentials;
 #[path = "client/workspace_binding.rs"]
 mod workspace_binding;
 pub(crate) use workspace_binding::sandbox_name_hash;
+
+#[path = "client/warm_pool.rs"]
+mod warm_pool;
+pub use warm_pool::PoolBornClaim;
 pub use workspace_binding::{BindableRuntime, WorkspacePvc, WorkspacePvcAnchor};
 
 #[cfg(test)]
@@ -1937,13 +1948,17 @@ impl SandboxClient {
         let (claim, sandbox) = self
             .read_owned_claim_sandbox(&claim_opts, expected_claim_name, expected_claim_uid)
             .await?;
+        let selected = claim
+            .data
+            .pointer("/spec/warmPoolRef/name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if super::warm_pool::is_warm_pool_name(selected) {
+            return self.read_shared_pool_bootstrap(selected, sandbox).await;
+        }
         let pool_name = super::shadow_warm_pool_name(&opts.name);
         anyhow::ensure!(
-            claim
-                .data
-                .pointer("/spec/warmPoolRef/name")
-                .and_then(Value::as_str)
-                == Some(pool_name.as_str()),
+            selected == pool_name,
             "workspace bootstrap Claim does not select its environment shadow"
         );
         // A later cold allocation must not overwrite the immutable bootstrap
@@ -2009,6 +2024,59 @@ impl SandboxClient {
             pool,
             template,
             sandbox,
+            shared: false,
+        })
+    }
+
+    /// A pool-born environment's bootstrap (Program #2238 C3): its Claim
+    /// selects a shared warm pool, whose template is Codewire's identity-free
+    /// pool template. Restart accepts it only while the owned Sandbox is
+    /// identity-free too, and then never writes the shared template.
+    async fn read_shared_pool_bootstrap(
+        &self,
+        pool_name: &str,
+        sandbox: DynamicObject,
+    ) -> anyhow::Result<WorkspaceBootstrapSnapshot> {
+        let pool = self
+            .warm_pools()
+            .get(pool_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace warm pool is unavailable"))?;
+        require_bootstrap_object(&pool, &self.namespace, pool_name, "SandboxWarmPool")?;
+        anyhow::ensure!(
+            super::warm_pool::has_pool_labels(pool.metadata.labels.as_ref())
+                && pool
+                    .data
+                    .pointer("/spec/sandboxTemplateRef/name")
+                    .and_then(Value::as_str)
+                    == Some(pool_name),
+            "workspace warm pool is not Codewire's shared pool of its template"
+        );
+        let template = self
+            .templates()
+            .get(pool_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace warm-pool template is unavailable"))?;
+        require_bootstrap_object(&template, &self.namespace, pool_name, "SandboxTemplate")?;
+        anyhow::ensure!(
+            super::warm_pool::has_pool_labels(template.metadata.labels.as_ref())
+                && template
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .is_none_or(|labels| !labels.contains_key(LABEL_ENV_ID))
+                && workspace_object_identity_free(&template)?,
+            "workspace warm-pool template is not identity-free"
+        );
+        anyhow::ensure!(
+            workspace_object_identity_free(&sandbox)?,
+            "a pool-born workspace Sandbox must be identity-free"
+        );
+        Ok(WorkspaceBootstrapSnapshot {
+            pool,
+            template,
+            sandbox,
+            shared: true,
         })
     }
 
@@ -2197,10 +2265,17 @@ impl SandboxClient {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("identity-free workspace rendering has no Pod spec"))?;
         let network_policy = rendered.pointer("/spec/networkPolicy").cloned();
-        for (object, api, network_policy) in [
-            (&before.template, self.templates(), network_policy.as_ref()),
-            (&before.sandbox, self.sandboxes(), None),
-        ] {
+        // A shared pool template serves every member: only the Sandbox is
+        // ever patched for one environment.
+        let objects = if before.shared {
+            vec![(&before.sandbox, self.sandboxes(), None)]
+        } else {
+            vec![
+                (&before.template, self.templates(), network_policy.as_ref()),
+                (&before.sandbox, self.sandboxes(), None),
+            ]
+        };
+        for (object, api, network_policy) in objects {
             let Some(patch) = identity_free_upgrade_patch(object, &pod_spec, network_policy)?
             else {
                 continue;
@@ -2242,7 +2317,9 @@ impl SandboxClient {
                 && before.sandbox.metadata.uid == after.sandbox.metadata.uid
                 && workspace_object_identity_free(&after.template)?
                 && workspace_object_identity_free(&after.sandbox)?
-                && !workspace_object_has_legacy_codex_home(&after.template)?
+                // A shared pool template is the reconciler's to rotate, never
+                // this environment's to upgrade.
+                && (after.shared || !workspace_object_has_legacy_codex_home(&after.template)?)
                 && !workspace_object_has_legacy_codex_home(&after.sandbox)?,
             "workspace identity upgrade is no longer current"
         );
@@ -2676,7 +2753,11 @@ impl SandboxClient {
             .await
             .map_err(|error| anyhow::anyhow!("update Sandbox {sandbox_name}: {error}"))?;
 
+        // Only a private per-environment template follows the resize; a
+        // shared warm-pool template (Program #2238 C3) is never written for
+        // one environment.
         if let Some(template_name) = self.claim_template_name(env_id).await?
+            && !super::warm_pool::is_warm_pool_name(&template_name)
             && template_name.ends_with(&format!("-{env_id}"))
         {
             let templates = self.templates();
@@ -3222,6 +3303,18 @@ impl SandboxClient {
         recorded_pvc_uid: Option<&str>,
         timeout: Duration,
     ) -> anyhow::Result<()> {
+        // A pool-born Sandbox (Program #2238 C3) is named for its pool and
+        // carries no environment label. When the backend never recorded its
+        // Pod, find it through the Claim before the Claim is deleted.
+        let claimed_sandbox = self
+            .get_sandbox_claim(env_id)
+            .await?
+            .and_then(|claim| claim_bound_sandbox_name(&claim).map(str::to_owned));
+        let known_sandbox_name = if known_sandbox_name.trim().is_empty() {
+            claimed_sandbox.as_deref().unwrap_or_default()
+        } else {
+            known_sandbox_name
+        };
         self.delete_gateway_stack(env_id).await?;
         self.delete_credential_bootstrap(env_id, timeout).await?;
         delete_dynamic_until_absent(
@@ -4279,6 +4372,13 @@ impl SandboxClient {
                 .and_then(Value::as_str)
                 == Some("Suspended");
             result.replicas = if result.sandbox_suspended { 0 } else { 1 };
+            result.launch_type = sb
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(super::warm_pool::LAUNCH_TYPE_LABEL))
+                .cloned()
+                .unwrap_or_default();
             pod_lookup = sandbox_pod_name(&sb, &sandbox_name).to_owned();
         }
 
