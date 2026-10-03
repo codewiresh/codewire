@@ -1884,7 +1884,7 @@ fn require_directory_identity(path: &Path, held: &File) -> Result<()> {
     Ok(())
 }
 
-fn create_new_file(path: &Path, mode: u32) -> Result<File> {
+fn create_new_file(path: &Path, mode: rfs::RawMode) -> Result<File> {
     let fd = rfs::open(
         path,
         OFlags::WRONLY
@@ -1901,7 +1901,7 @@ fn create_new_file(path: &Path, mode: u32) -> Result<File> {
     Ok(file)
 }
 
-fn write_new_file(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+fn write_new_file(path: &Path, bytes: &[u8], mode: rfs::RawMode) -> Result<()> {
     let mut file = create_new_file(path, 0o600)?;
     file.write_all(bytes).map_err(io_error(path))?;
     file.sync_all().map_err(io_error(path))?;
