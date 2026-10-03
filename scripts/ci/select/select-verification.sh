@@ -864,7 +864,7 @@ if [ "$event_selected" = false ]; then
         select_token rust_pkg_codewire_cli_bin
         recognized=true
         ;;
-      scripts/dev/test-cli-native-managed.py|scripts/dev/build-native-managed-agent.py)
+      scripts/dev/test-cli-native-managed.py|scripts/dev/test-cli-native-update.py|scripts/dev/build-native-managed-agent.py)
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_cli_bin
