@@ -25,6 +25,11 @@ data:
   # it out of the disposable overlay until the tool image follows the
   # configured runtime image.
   SANDBOX_IMAGE_CACHE: disabled
+  # One small shared warm pool (Program #2238 C4) for the warm-pools suite:
+  # a member serves only a claim of exactly this shape and the canonical
+  # workspace image. Pools stay held until the agent-sandbox controller shows
+  # C0's claim safety (status.observedGeneration on a SandboxWarmPool).
+  SANDBOX_WARM_POOL_SHAPES: 500m/1024Mi/5Gi=1
   # Commodity workspaces bind through WorkspaceBindingService (Program #2238
   # B2), so orchestration refuses to start without these. Workspace Pods run
   # in dev-sandboxes, so both are fully qualified.

@@ -245,6 +245,10 @@ WARM_POOL_ENVIRONMENT = (
 )
 WARM_POOL_AUDIENCES = ("codewire.internal.workspace-binding.v1", "codewire.internal.credential-workspace.v1")
 WARM_POOL_KIND_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8s/overlays/local-kind-static", "tests/e2e/kind")
+# Images without a registry digest a pool template may still run: only the
+# Kind e2e overlay's side-loaded gateway image (C4). Every other target admits
+# digest-pinned images alone.
+WARM_POOL_LOCAL_IMAGES = {"tests/e2e/kind": ["codewire-gateway:e2e"]}
 
 
 def cel_list(values: tuple[str, ...] | list[str]) -> str:
@@ -292,8 +296,8 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             f"request.name.matches('{WARM_POOL_NAME_PATTERN}')",
             "!variables.identity.exists(k, k in object.metadata.labels)",
             "!variables.identity.exists(k, k in object.spec.podTemplate.metadata.labels)",
-            f"variables.containers.all(c, c.image.matches('{WARM_POOL_DIGEST_PATTERN}'))",
-            f"v.image.reference.matches('{WARM_POOL_DIGEST_PATTERN}')",
+            f"variables.containers.all(c, c.image.matches('{WARM_POOL_DIGEST_PATTERN}') || c.image in variables.localImages)",
+            f"(v.image.reference.matches('{WARM_POOL_DIGEST_PATTERN}') || v.image.reference in variables.localImages)",
             "!has(variables.pod.ephemeralContainers)",
             "variables.containers.all(c, !has(c.envFrom)",
             f"- expression: '{cel_list(WARM_POOL_ENVIRONMENT)}' name: environment",
@@ -349,6 +353,12 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                 found = re.search(r"variables: - expression: '?(\[[^\]]*\])'? name: runtimeClasses ", normalized)
                 if not found or found.group(1) != cel_list(classes):
                     output.append(f"{label}: {policy_name} runtime classes must be exactly {cel_list(classes)}, first: "
+                                  f"{found.group(1) if found else None}")
+                # Only the Kind e2e overlay names a local image, second.
+                local = WARM_POOL_LOCAL_IMAGES.get(target["path"], [])
+                found = re.search(r"name: runtimeClasses - expression: '?(\[[^\]]*\])'? name: localImages ", normalized)
+                if not found or found.group(1) != cel_list(local):
+                    output.append(f"{label}: {policy_name} local images must be exactly {cel_list(local)}, second: "
                                   f"{found.group(1) if found else None}")
         if binding:
             expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
@@ -819,7 +829,12 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_POLICY, "object.spec.updateStrategy.type == 'Recreate'", "true"),
             (WARM_POOL_POLICY, "object.spec.replicas <= 16", "true"),
             (WARM_POOL_POLICY, "object.spec.sandboxTemplateRef.name == request.name", "true"),
-            (WARM_POOL_TEMPLATE_POLICY, "@sha256:[0-9a-f]{64}$')) &&", "')) &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "@sha256:[0-9a-f]{64}$') || c.image in", "') || c.image in"),
+            (WARM_POOL_TEMPLATE_POLICY, "@sha256:[0-9a-f]{64}$') || v.image.reference in", "') || v.image.reference in"),
+            (WARM_POOL_TEMPLATE_POLICY, "|| c.image in variables.localImages", "|| true"),
+            (WARM_POOL_TEMPLATE_POLICY, "|| v.image.reference in variables.localImages", "|| true"),
+            # C4: only the Kind e2e overlay admits a local image.
+            (WARM_POOL_TEMPLATE_POLICY, "- expression: '[]'", "- expression: '[''codewire-gateway:e2e'']'"),
             (WARM_POOL_TEMPLATE_POLICY, "variables.pod.runtimeClassName != 'confidential'", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "size(object.spec.networkPolicy.ingress) == 0", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "variables.pod.automountServiceAccountToken == false", "true"),
