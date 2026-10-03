@@ -1755,3 +1755,119 @@ async fn unowned_or_ambiguous_templates_are_refused_without_writes() {
             .all(|patch| !patch.to_string().contains("sandbox-incarnation"))
     );
 }
+
+// ------------------------------------- pool-born restart (Program #2238 C3)
+
+const SHARED_POOL: &str = "cw-pool-1000m-4096mi-10gi-78909fe3";
+
+/// A pool-born environment: its Claim selects a shared warm pool whose
+/// template is Codewire's identity-free pool template, and the adopted
+/// Sandbox carries that rendering.
+fn pool_born_fixture() -> Fixture {
+    let mut fixture = fixture();
+    let rendered = render_sandbox_template(NS, &binding_opts());
+    let labels =
+        json!({"app.kubernetes.io/managed-by":"codewire","codewire.sh/type":"workspace-pool"});
+    fixture.claim["spec"]["warmPoolRef"]["name"] = json!(SHARED_POOL);
+    fixture.pool = json!({"apiVersion":super::super::EXTENSIONS_API_VERSION,"kind":"SandboxWarmPool",
+        "metadata":{"name":SHARED_POOL,"namespace":NS,"uid":"shared-pool","labels":labels},
+        "spec":{"replicas":2,"sandboxTemplateRef":{"name":SHARED_POOL},"updateStrategy":{"type":"Recreate"}}});
+    fixture.template = json!({"apiVersion":super::super::EXTENSIONS_API_VERSION,"kind":"SandboxTemplate",
+        "metadata":{"name":SHARED_POOL,"namespace":NS,"uid":"shared-template","resourceVersion":"20",
+            "labels":labels},
+        "spec":rendered["spec"].clone()});
+    fixture.sandbox["spec"]["podTemplate"]["spec"] =
+        rendered["spec"]["podTemplate"]["spec"].clone();
+    fixture
+}
+
+/// Start accepts a shared pool while the owned Sandbox is identity-free, in
+/// either identity mode, and never writes the shared template. A Sandbox
+/// that still mounts Codex's retired memory home is upgraded alone.
+#[tokio::test]
+async fn a_pool_born_restart_never_writes_the_shared_template() {
+    let (sandboxes, state) = client(pool_born_fixture());
+    for opts in [binding_opts(), opts()] {
+        sandboxes
+            .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+            .await
+            .unwrap();
+    }
+    assert!(patches(&state.lock().unwrap()).is_empty());
+
+    let mut legacy_home = pool_born_fixture();
+    for object in [&mut legacy_home.template, &mut legacy_home.sandbox] {
+        object["spec"]["podTemplate"]["spec"]["volumes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"credential-codex-home","emptyDir":{"medium":"Memory"}}));
+    }
+    let template_before = legacy_home.template.clone();
+    let (sandboxes, state) = client(legacy_home);
+    sandboxes
+        .reconcile_workspace_bootstrap(
+            &binding_opts(),
+            &claim_name(ENV),
+            CLAIM_UID,
+            &expected_sandbox(),
+        )
+        .await
+        .unwrap();
+    let state = state.lock().unwrap();
+    let written: Vec<&String> = state
+        .requests
+        .iter()
+        .filter(|(method, _, _)| *method == Method::PATCH)
+        .map(|(_, path, _)| path)
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert!(written[0].contains("/sandboxes/"));
+    assert_eq!(state.template, template_before);
+    assert!(
+        !state.sandbox["spec"]["podTemplate"]
+            .to_string()
+            .contains("credential-codex-home")
+    );
+}
+
+/// A legacy Sandbox under a shared pool, a pool or template that is not
+/// Codewire's identity-free pool, is refused before any write.
+#[tokio::test]
+async fn a_pool_born_restart_refuses_anything_but_codewires_identity_free_pool() {
+    type Case = (&'static str, fn(&mut Fixture));
+    let cases: [Case; 4] = [
+        ("legacy Sandbox", |fixture| {
+            fixture.sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|entry| entry["name"] != "CODEWIRE_WORKSPACE_BINDING_URL");
+        }),
+        ("foreign pool", |fixture| {
+            fixture.pool["metadata"]["labels"] = json!({});
+        }),
+        ("pool of another template", |fixture| {
+            fixture.pool["spec"]["sandboxTemplateRef"]["name"] = json!("workspace-other");
+        }),
+        ("environment template", |fixture| {
+            fixture.template["metadata"]["labels"][LABEL_ENV_ID] = json!(ENV);
+        }),
+    ];
+    for (label, mutate) in cases {
+        let mut before = pool_born_fixture();
+        mutate(&mut before);
+        let (sandboxes, state) = client(before);
+        assert!(
+            sandboxes
+                .reconcile_workspace_bootstrap(
+                    &binding_opts(),
+                    &claim_name(ENV),
+                    CLAIM_UID,
+                    &expected_sandbox()
+                )
+                .await
+                .is_err(),
+            "{label} was accepted"
+        );
+        assert!(patches(&state.lock().unwrap()).is_empty(), "{label} wrote");
+    }
+}

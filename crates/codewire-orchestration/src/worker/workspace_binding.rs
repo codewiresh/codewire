@@ -34,13 +34,19 @@ use sqlx::{PgConnection, PgPool};
 
 use super::WorkerContext;
 use super::activity_authority::{ActivityAuthority, await_external_mutation, is_authority_lost};
+use super::create::SandboxWorkerCfg;
 use super::env_data::{BackendRow, EnvironmentRow, load_environment, load_environment_in};
 use super::env_log::emit_authoritative_environment_log_for_states;
 use super::gatewayauth::{WorkspaceCredentialScope, daemon_credential_for};
 use crate::sandbox::client::{
     RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity, WorkspacePvc,
 };
+use crate::sandbox::warm_pool::{
+    LAUNCH_TYPE_LABEL, WarmPoolObjects, is_warm_pool_name, pod_spec_pool_revision,
+    sandbox_matches_rendering,
+};
 use crate::sandbox::{ClaimOpts, LABEL_OPERATION_GENERATION};
+use crate::start_metrics::StartPath;
 
 /// Environments examined per pass.
 const BACKFILL_BATCH: i64 = 16;
@@ -889,10 +895,90 @@ pub(crate) enum BindRefused {
 /// error never does.
 type Refusal = (BindRefused, Option<WorkspaceCredentialScope>, bool);
 
+const DENIED_IMAGES: &str = "images";
+const DENIED_VOLUME: &str = "workspace volume";
+const DENIED_SCOPE: &str = "credential scope";
+const DENIED_CAPTURE: &str = "bootstrap capture";
+/// Program #2238 C3: a pool-born Sandbox's first bind found a spec other than
+/// this environment's expected rendering.
+const DENIED_POOL_RENDERING: &str = "pool rendering";
+/// Refusals that are definitive about the observed Sandbox and Pod: they
+/// cannot clear by waiting. A read, resolution or write-time refusal is not
+/// listed.
+const DEFINITIVE_DENIALS: [&str; 5] = [
+    DENIED_IMAGES,
+    DENIED_VOLUME,
+    DENIED_SCOPE,
+    DENIED_CAPTURE,
+    DENIED_POOL_RENDERING,
+];
+
+/// Whether a binding error is a definitive check failure on the observed
+/// runtime (C3's cold re-claim acts only on these).
+pub(crate) fn definitive_refusal(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<BindRefused>(),
+        Some(BindRefused::Denied(reason)) if DEFINITIVE_DENIALS.contains(reason)
+    )
+}
+
+/// Whether any binding, live or released, ever named this Sandbox for this
+/// environment. A Sandbox bound once has held tenant data.
+pub(crate) async fn sandbox_ever_bound(
+    pool: &PgPool,
+    environment_id: &str,
+    sandbox_uid: &str,
+) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM sandbox_workspace_bindings
+                         WHERE environment_id = $1 AND sandbox_uid = $2)",
+    )
+    .bind(environment_id)
+    .bind(sandbox_uid)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Whether any environment's binding, live or released, ever named this
+/// Sandbox. A cold re-claim never deletes such a Sandbox, and only a Sandbox
+/// nothing ever bound counts as a warm start.
+pub(crate) async fn sandbox_bound_by_any(pool: &PgPool, sandbox_uid: &str) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM sandbox_workspace_bindings WHERE sandbox_uid = $1)",
+    )
+    .bind(sandbox_uid)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The expected pool of a pool-born environment (Program #2238 C3): the
+/// identity-free pool of its exact shape on this replica, whose template
+/// carries the pool revision marker. Routing sends an environment to a pool
+/// only when its own rendering equals this one's, less the marker.
+fn pool_born_rendering(
+    cfg: &SandboxWorkerCfg,
+    env: &EnvironmentRow,
+    namespace: &str,
+) -> anyhow::Result<WarmPoolObjects> {
+    anyhow::ensure!(
+        env.isolation_tier == "standard",
+        "only standard environments are pool-born"
+    );
+    let shape = crate::sandbox::warm_pool::WorkspaceShape {
+        cpu_millicores: i64::from(env.cpu_millicores),
+        memory_mib: i64::from(env.memory_mb),
+        disk_gib: i64::from(env.disk_gb),
+    };
+    let opts = super::create::warm_pool_template_opts(cfg, shape)?;
+    crate::sandbox::warm_pool::render_warm_pool(namespace, &opts, 0, cfg.allow_diagnostic_runtime)
+}
+
 /// What one checked attempt would record, before the fenced write.
 struct CheckedBinding {
     record: BindingRecord,
     pod: WorkspacePodIdentity,
+    /// Warm only for the first bind of an adopted warm-pool member.
+    path: StartPath,
 }
 
 /// The §5.1–§5.5 checks against live objects, shared by the enforced path.
@@ -900,6 +986,8 @@ struct CheckedBinding {
 /// observed and waited on; anything else is refused, never relabelled.
 async fn check_bindable_runtime(
     client: &SandboxClient,
+    pool: &PgPool,
+    cfg: Option<&SandboxWorkerCfg>,
     env: &EnvironmentRow,
     backend: &BackendFacts,
     observation: &RuntimeIdentityObservation,
@@ -939,7 +1027,42 @@ async fn check_bindable_runtime(
     }
     // §5.3: images.
     if !images_match(&runtime.sandbox, &pod) {
-        return refuse(BindRefused::Denied("images"), scope, true);
+        return refuse(BindRefused::Denied(DENIED_IMAGES), scope, true);
+    }
+    // Program #2238 C3: the first bind of a pool-born Sandbox (its Claim
+    // selects a shared `cw-pool-` pool) requires the Claim to name this
+    // environment's own pool, the Sandbox's spec to be exactly that pool's
+    // rendering, and the Pod to have booted from that pool revision, read
+    // from its immutable spec (review M1), so a stale, foreign or altered
+    // member never binds. Without the configuration to render it, refuse
+    // without deleting.
+    let pool_born = is_warm_pool_name(&runtime.warm_pool_ref);
+    if pool_born && !sandbox_ever_bound(pool, &env.id, &sandbox_uid).await? {
+        let Some(cfg) = cfg else {
+            return refuse(
+                BindRefused::Denied("pool rendering unverified"),
+                scope,
+                false,
+            );
+        };
+        let sandbox = serde_json::to_value(&runtime.sandbox)?;
+        let pod_spec = serde_json::to_value(&pod.spec)?;
+        let matched = pool_born_rendering(cfg, env, &backend.namespace)
+            .map_err(|error| format!("{error:#}"))
+            .and_then(|expected| {
+                if runtime.warm_pool_ref != expected.name {
+                    return Err("/spec/warmPoolRef/name".to_owned());
+                }
+                sandbox_matches_rendering(&sandbox, &expected.template)?;
+                if pod_spec_pool_revision(&pod_spec) != Some(expected.revision.as_str()) {
+                    return Err("pod /spec/containers/workspace/env".to_owned());
+                }
+                Ok(())
+            });
+        if let Err(path) = matched {
+            tracing::warn!(env = %env.id, %path, "pool-born Sandbox differs from the expected rendering");
+            return refuse(BindRefused::Denied(DENIED_POOL_RENDERING), scope, true);
+        }
     }
     // §5.4: the workspace PVC, by UID. A resolution error may be an API
     // failure, so it refuses without deleting; the Pod mounting another claim
@@ -956,20 +1079,40 @@ async fn check_bindable_runtime(
         Err(_) => return refuse(BindRefused::Denied("workspace PVC"), scope, false),
     };
     if !pvc_matches(&pod, &pvc) {
-        return refuse(BindRefused::Denied("workspace volume"), scope, true);
+        return refuse(BindRefused::Denied(DENIED_VOLUME), scope, true);
     }
     // §5.5: scope and captured bootstrap.
     let Some(credential) = scope else {
-        return refuse(BindRefused::Denied("credential scope"), None, true);
+        return refuse(BindRefused::Denied(DENIED_SCOPE), None, true);
     };
     let captured = match credential {
         WorkspaceCredentialScope::Pod => pod_scope_capture(env),
         WorkspaceCredentialScope::Environment => environment_scope_capture(&pod),
     };
     let Some(captured) = captured else {
-        return refuse(BindRefused::Denied("bootstrap capture"), scope, true);
+        return refuse(BindRefused::Denied(DENIED_CAPTURE), scope, true);
+    };
+    // Review L2: an adopted member's launch-type label outlives its first
+    // bind; a restart of the same Sandbox is not a warm start.
+    let adopted = StartPath::from_launch_type(
+        runtime
+            .sandbox
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(LAUNCH_TYPE_LABEL))
+            .map(String::as_str),
+    );
+    let path = if pool_born
+        && adopted == StartPath::Warm
+        && !sandbox_bound_by_any(pool, &sandbox_uid).await?
+    {
+        StartPath::Warm
+    } else {
+        StartPath::Cold
     };
     Ok(Ok(CheckedBinding {
+        path,
         record: BindingRecord {
             environment_id: env.id.clone(),
             organization_id: env.org_id.clone(),
@@ -1010,14 +1153,19 @@ async fn pod_has_binding(pool: &PgPool, pod_uid: &str) -> anyhow::Result<bool> {
 /// An unbound identity-free Pod that failed a check is deleted with a UID
 /// precondition so it never serves (§5.6); a Pod bound to another
 /// environment and a legacy environment-scope Pod are never deleted here.
+///
+/// Returns the write outcome and the start path of the bound Sandbox (warm
+/// for an adopted pool member). `cfg` renders a pool-born Sandbox's expected
+/// spec for its first bind; without it such a bind is refused.
 pub(crate) async fn record_workspace_binding(
     kube: &kube::Client,
+    cfg: Option<&SandboxWorkerCfg>,
     env: &EnvironmentRow,
     backend: &BackendRow,
     authority: &ActivityAuthority,
     states: &[&str],
     observation: &RuntimeIdentityObservation,
-) -> anyhow::Result<WriteOutcome> {
+) -> anyhow::Result<(WriteOutcome, StartPath)> {
     anyhow::ensure!(
         env.id == authority.environment_id()
             && env.operation_generation == authority.operation_generation()
@@ -1036,7 +1184,8 @@ pub(crate) async fn record_workspace_binding(
         "workspace binding backend association changed"
     );
     let client = SandboxClient::new(kube.clone(), &facts.namespace);
-    let checked = match check_bindable_runtime(&client, env, &facts, observation).await? {
+    let checked = match check_bindable_runtime(&client, pool, cfg, env, &facts, observation).await?
+    {
         Ok(checked) => checked,
         Err((reason, scope, definitive)) => {
             if definitive
@@ -1092,29 +1241,40 @@ pub(crate) async fn record_workspace_binding(
     .await?;
     guard.commit().await?;
     debug_assert_eq!(checked.pod, *observation.pod());
-    Ok(outcome)
+    Ok((outcome, checked.path))
+}
+
+/// A binding this call recorded: how long it took, and whether the Sandbox
+/// is an adopted warm-pool member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RecordedBind {
+    pub elapsed: Duration,
+    pub path: StartPath,
 }
 
 /// [`record_workspace_binding`] with its environment log row
 /// (`workspace_bind`, with `duration_ms`, which A0a's stage metric reads)
 /// and its closed-category counter. A repeat for an already-bound Pod is
-/// silent. Returns the elapsed time of a newly recorded binding.
+/// silent. Returns the elapsed time and start path of a newly recorded
+/// binding.
 pub(crate) async fn bind_workspace_runtime(
     kube: &kube::Client,
+    cfg: Option<&SandboxWorkerCfg>,
     env: &EnvironmentRow,
     backend: &BackendRow,
     authority: &ActivityAuthority,
     states: &[&str],
     observation: &RuntimeIdentityObservation,
-) -> anyhow::Result<Option<Duration>> {
+) -> anyhow::Result<Option<RecordedBind>> {
     let started = Instant::now();
-    let result = record_workspace_binding(kube, env, backend, authority, states, observation).await;
+    let result =
+        record_workspace_binding(kube, cfg, env, backend, authority, states, observation).await;
     let elapsed = started.elapsed();
     let metadata = Some(serde_json::json!({
         "duration_ms": i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX),
     }));
     match result {
-        Ok(WriteOutcome::Recorded) => {
+        Ok((WriteOutcome::Recorded, path)) => {
             observe_record(RecordResult::Recorded);
             emit_authoritative_environment_log_for_states(
                 authority,
@@ -1125,9 +1285,9 @@ pub(crate) async fn bind_workspace_runtime(
                 metadata,
             )
             .await?;
-            Ok(Some(elapsed))
+            Ok(Some(RecordedBind { elapsed, path }))
         }
-        Ok(WriteOutcome::Unchanged) => {
+        Ok((WriteOutcome::Unchanged, _)) => {
             observe_record(RecordResult::Unchanged);
             Ok(None)
         }
@@ -1177,17 +1337,18 @@ const EARLY_BIND_POLL: Duration = Duration::from_millis(500);
 /// through the enforced [`bind_workspace_runtime`], with every §5 check and
 /// the locked re-check of the captured values.
 ///
-/// Returns the record time when this call recorded the binding, or `None`
-/// when the Pod was already bound or is a legacy Pod, which keeps the
-/// post-ready order unchanged. A refusal that can clear (labels not yet
+/// Returns the record time and start path when this call recorded the
+/// binding, or `None` when the Pod was already bound or is a legacy Pod,
+/// which keeps the post-ready order unchanged. A refusal that can clear (labels not yet
 /// converged, a replaced Pod, an unreadable chain) is retried; any other
 /// refusal fails exactly as the post-ready bind does. The caller drops this
 /// future once its own wait ends.
 pub(crate) async fn bind_before_ready(
     kube: &kube::Client,
+    cfg: Option<&SandboxWorkerCfg>,
     authority: &ActivityAuthority,
     states: &[&str],
-) -> anyhow::Result<Option<Duration>> {
+) -> anyhow::Result<Option<RecordedBind>> {
     let pool = authority.pool();
     loop {
         let env = load_environment(pool, authority.environment_id()).await?;
@@ -1213,6 +1374,7 @@ pub(crate) async fn bind_before_ready(
                 }
                 match bind_workspace_runtime(
                     kube,
+                    cfg,
                     &env,
                     &backend,
                     authority,
@@ -1283,7 +1445,9 @@ pub(crate) async fn bind_replacement_runtime(
             ),
         )
         .await?;
-    bind_workspace_runtime(kube, &env, &backend, authority, states, &observation).await?;
+    // A replacement Pod belongs to a Sandbox this environment already bound,
+    // so no pool rendering is needed; a first bind without one is refused.
+    bind_workspace_runtime(kube, None, &env, &backend, authority, states, &observation).await?;
     Ok(())
 }
 

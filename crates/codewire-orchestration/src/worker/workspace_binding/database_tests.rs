@@ -11,6 +11,7 @@ use sqlx::postgres::PgListener;
 
 use super::*;
 use crate::api::internal::gateway_daemon_authority;
+use crate::start_metrics::StartPath;
 use crate::test_database_support::TestDatabase;
 use crate::workspace_binding::{BindingStore, PgBindingStore, WORKSPACE_BINDINGS_CHANNEL};
 
@@ -863,6 +864,7 @@ async fn enforced(
     let authority = ActivityAuthority::capture(pool, environment, GENERATION).await?;
     record_workspace_binding(
         &fake.client(),
+        None,
         &env,
         &backend,
         &authority,
@@ -870,6 +872,7 @@ async fn enforced(
         &observed(environment, pod_uid),
     )
     .await
+    .map(|(outcome, _)| outcome)
 }
 
 fn bind_refused(error: &anyhow::Error) -> Option<BindRefused> {
@@ -1451,7 +1454,7 @@ async fn db_a_bind_happens_while_dind_is_still_starting() -> Result<()> {
         let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
         let bound = tokio::time::timeout(
             Duration::from_secs(5),
-            bind_before_ready(&starting.client(), &authority, &["creating"]),
+            bind_before_ready(&starting.client(), None, &authority, &["creating"]),
         )
         .await??;
         ensure!(bound.is_some(), "the early bind did not record");
@@ -1473,7 +1476,7 @@ async fn db_a_bind_happens_while_dind_is_still_starting() -> Result<()> {
         ensure!(
             tokio::time::timeout(
                 Duration::from_secs(5),
-                bind_before_ready(&starting.client(), &authority, &["creating"]),
+                bind_before_ready(&starting.client(), None, &authority, &["creating"]),
             )
             .await??
             .is_none()
@@ -1486,7 +1489,7 @@ async fn db_a_bind_happens_while_dind_is_still_starting() -> Result<()> {
         ensure!(
             tokio::time::timeout(
                 Duration::from_secs(5),
-                bind_before_ready(&legacy.client(), &authority, &["starting"]),
+                bind_before_ready(&legacy.client(), None, &authority, &["starting"]),
             )
             .await??
             .is_none()
@@ -1737,6 +1740,7 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
         let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
         let error = record_workspace_binding(
             &fake.client(),
+            None,
             &env,
             &backend,
             &authority,
@@ -1758,6 +1762,7 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
         let backend = crate::worker::env_data::load_backend_row(&db.pool, ENV_A).await?;
         let error = record_workspace_binding(
             &fake.client(),
+            None,
             &stale,
             &backend,
             &authority,
@@ -1773,6 +1778,293 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
         ensure!(
             enforced(&db.pool, &fake, ENV_A, POD_1, &["creating"]).await? == WriteOutcome::Recorded
         );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A Dev-shaped commodity configuration whose pool shape is environment A's
+/// once [`pool_shape`] sizes it.
+fn pool_cfg() -> SandboxWorkerCfg {
+    SandboxWorkerCfg {
+        sandbox_namespace: NAMESPACE.into(),
+        credential_runtime: Some(
+            crate::sandbox::template::CredentialRuntimeTemplateConfig::synthetic(NAMESPACE),
+        ),
+        gateway_image: "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+        dind_image: "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333".into(),
+        runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
+        docker_mode: crate::sandbox::template::DOCKER_MODE_PROFILE_DEFAULT.into(),
+        workspace_storage_class: "linstor-local".into(),
+        network_policy_management: "Managed".into(),
+        kata_agent_policy_enabled: true,
+        api_base_url: "https://codewire-dev.sh".into(),
+        coordinator_url: "http://codewire-coordinator.dev.svc.cluster.local:8090".into(),
+        pod_namespace: "dev".into(),
+        workspace_identity_mode: crate::worker::create::WorkspaceIdentityMode::Binding,
+        warm_pool_shapes: "1000m/4096Mi/10Gi=2".into(),
+        ..Default::default()
+    }
+}
+
+async fn pool_shape(pool: &PgPool, environment: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE environments SET cpu_millicores = 1000, memory_mb = 4096, disk_gb = 10 \
+          WHERE id = $1",
+    )
+    .bind(environment)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The converged chain of [`FakeKube::runtime`], made pool-born: the Claim
+/// selects the shared pool and the Sandbox is that pool's rendering (as the
+/// controller copies it, with the identity labels adoption adds); the Pod
+/// runs the rendered images, its workspace container booted from the pool
+/// revision.
+fn pool_born(
+    environment: &str,
+    pod_uid: &str,
+    objects: &crate::sandbox::warm_pool::WarmPoolObjects,
+    warm: bool,
+) -> FakeKube {
+    let rendering = &objects.template;
+    let fake = FakeKube::runtime(environment, pod_uid, WorkspaceCredentialScope::Pod);
+    let name = format!("sandbox-{environment}");
+    fake.update(
+        &format!("{CLAIMS_API}/{NAMESPACE}/sandboxclaims/{name}"),
+        |claim| claim["spec"]["warmPoolRef"] = json!({ "name": objects.name }),
+    );
+    let images: Vec<(String, String)> = rendering["spec"]["podTemplate"]["spec"]["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|container| {
+            (
+                container["name"].as_str().unwrap().to_owned(),
+                container["image"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    fake.update(
+        &format!("{SANDBOXES_API}/{NAMESPACE}/sandboxes/{name}"),
+        |sandbox| {
+            let labels = sandbox["spec"]["podTemplate"]["metadata"]["labels"].clone();
+            // As the controller stores it: canonical quantities, no empty values.
+            sandbox["spec"] =
+                crate::sandbox::warm_pool::tests::controller_copy(rendering)["spec"].clone();
+            for (key, value) in labels.as_object().unwrap() {
+                sandbox["spec"]["podTemplate"]["metadata"]["labels"][key] = value.clone();
+            }
+            if warm {
+                sandbox["metadata"]["labels"] = json!({ "agents.x-k8s.io/launch-type": "warm" });
+            }
+        },
+    );
+    fake.update(&pod_path(environment), |pod| {
+        pod["spec"]["containers"] = json!(
+            images
+                .iter()
+                .map(|(name, image)| {
+                    let env = if name == "workspace" {
+                        json!([{
+                            "name": crate::sandbox::warm_pool::POOL_REVISION_ENV,
+                            "value": objects.revision,
+                        }])
+                    } else {
+                        json!([])
+                    };
+                    json!({ "name": name, "image": image, "env": env })
+                })
+                .collect::<Vec<_>>()
+        );
+        pod["status"]["containerStatuses"] = json!(
+            images
+                .iter()
+                .map(|(name, image)| json!({
+                    "name": name, "image": image, "imageID": image, "ready": true,
+                    "started": true, "restartCount": 0,
+                }))
+                .collect::<Vec<_>>()
+        );
+    });
+    fake
+}
+
+async fn enforced_with(
+    pool: &PgPool,
+    fake: &FakeKube,
+    cfg: Option<&SandboxWorkerCfg>,
+    environment: &str,
+    pod_uid: &str,
+    states: &[&str],
+) -> Result<(WriteOutcome, StartPath)> {
+    let env = load_environment(pool, environment).await?;
+    let backend = crate::worker::env_data::load_backend_row(pool, environment).await?;
+    let authority = ActivityAuthority::capture(pool, environment, GENERATION).await?;
+    record_workspace_binding(
+        &fake.client(),
+        cfg,
+        &env,
+        &backend,
+        &authority,
+        states,
+        &observed(environment, pod_uid),
+    )
+    .await
+}
+
+/// Program #2238 C3: a pool-born Sandbox's first bind requires its Claim to
+/// name the environment's own pool, its spec to be exactly that pool's
+/// rendering, and its Pod to have booted from that pool revision (review
+/// M1: an annotation-only change cannot pass). Without the configuration to
+/// render it the bind is refused and nothing is deleted; an altered member
+/// is a definitive failure whose unbound Pod is deleted by UID.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_pool_born_first_bind_refuses_anything_but_its_rendering() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        pool_shape(&db.pool, ENV_A).await?;
+        let cfg = pool_cfg();
+        let env = load_environment(&db.pool, ENV_A).await?;
+        let rendering = pool_born_rendering(&cfg, &env, NAMESPACE)?;
+
+        let unverifiable = pool_born(ENV_A, POD_1, &rendering, true);
+        let error = enforced_with(&db.pool, &unverifiable, None, ENV_A, POD_1, &["creating"])
+            .await
+            .expect_err("a pool-born bind without a rendering was recorded");
+        ensure!(bind_refused(&error) == Some(BindRefused::Denied("pool rendering unverified")));
+        ensure!(!definitive_refusal(&error));
+        ensure!(unverifiable.deletes().is_empty());
+
+        for (label, change) in [
+            ("host network", json!(true)),
+            ("environment token", json!("synthetic")),
+            ("stale Pod revision", json!("0".repeat(64))),
+            ("other pool", json!("cw-pool-1000m-4096mi-10gi-0a1b2c3d")),
+        ] {
+            let altered = pool_born(ENV_A, POD_1, &rendering, true);
+            match label {
+                "stale Pod revision" => altered.update(&pod_path(ENV_A), |pod| {
+                    pod["spec"]["containers"][0]["env"][0]["value"] = change.clone();
+                }),
+                "other pool" => altered.update(
+                    &format!("{CLAIMS_API}/{NAMESPACE}/sandboxclaims/sandbox-{ENV_A}"),
+                    |claim| claim["spec"]["warmPoolRef"]["name"] = change.clone(),
+                ),
+                _ => altered.update(
+                    &format!("{SANDBOXES_API}/{NAMESPACE}/sandboxes/sandbox-{ENV_A}"),
+                    |sandbox| match label {
+                        "host network" => {
+                            sandbox["spec"]["podTemplate"]["spec"]["hostNetwork"] = change.clone()
+                        }
+                        _ => sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({ "name": "CODEWIRE_DAEMON_AUTH_TOKEN", "value": change })),
+                    },
+                ),
+            }
+            let error = enforced_with(&db.pool, &altered, Some(&cfg), ENV_A, POD_1, &["creating"])
+                .await
+                .expect_err("an altered pool-born member was bound");
+            ensure!(
+                bind_refused(&error) == Some(BindRefused::Denied("pool rendering")),
+                "{label}: {error:#}"
+            );
+            ensure!(definitive_refusal(&error), "{label}");
+            let deletes = altered.deletes();
+            ensure!(
+                deletes.len() == 1 && deletes[0].0 == pod_path(ENV_A),
+                "{label}: {deletes:?}"
+            );
+            ensure!(deletes[0].1["preconditions"]["uid"] == POD_1, "{label}");
+        }
+        // Another environment shape's rendering is not this environment's.
+        sqlx::query("UPDATE environments SET cpu_millicores = 2000 WHERE id = $1")
+            .bind(ENV_A)
+            .execute(&db.pool)
+            .await?;
+        let resized = pool_born(ENV_A, POD_1, &rendering, true);
+        let error = enforced_with(&db.pool, &resized, Some(&cfg), ENV_A, POD_1, &["creating"])
+            .await
+            .expect_err("another shape's member was bound");
+        ensure!(bind_refused(&error) == Some(BindRefused::Denied("pool rendering")));
+        ensure!(bindings(&db.pool).await?.is_empty());
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Program #2238 C3: the exact rendering binds, and an adopted member binds
+/// as a warm start. Once the environment bound the Sandbox, a later Pod of it
+/// (here after a resize changed the Sandbox) is no longer held to the pool
+/// rendering.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_pool_born_sandbox_binds_as_its_rendering_and_then_as_its_own() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        pool_shape(&db.pool, ENV_A).await?;
+        let cfg = pool_cfg();
+        let env = load_environment(&db.pool, ENV_A).await?;
+        let rendering = pool_born_rendering(&cfg, &env, NAMESPACE)?;
+
+        let adopted = pool_born(ENV_A, POD_1, &rendering, true);
+        let (outcome, path) =
+            enforced_with(&db.pool, &adopted, Some(&cfg), ENV_A, POD_1, &["creating"]).await?;
+        ensure!(outcome == WriteOutcome::Recorded && path == StartPath::Warm);
+        ensure!(adopted.deletes().is_empty());
+        ensure!(sandbox_ever_bound(&db.pool, ENV_A, &sandbox_uid(ENV_A)).await?);
+
+        // A cold Sandbox the controller created from the shared template
+        // (no ready member) binds as a cold start.
+        set_state(&db.pool, ENV_B, "creating").await?;
+        pool_shape(&db.pool, ENV_B).await?;
+        let env_b = load_environment(&db.pool, ENV_B).await?;
+        let cold = pool_born(
+            ENV_B,
+            POD_2,
+            &pool_born_rendering(&cfg, &env_b, NAMESPACE)?,
+            false,
+        );
+        let (outcome, path) =
+            enforced_with(&db.pool, &cold, Some(&cfg), ENV_B, POD_2, &["creating"]).await?;
+        ensure!(outcome == WriteOutcome::Recorded && path == StartPath::Cold);
+
+        // Running, resized in place, and its Pod replaced: the replacement
+        // binds although the Sandbox no longer equals the pool rendering.
+        set_state(&db.pool, ENV_A, "running").await?;
+        let replacement_uid = "0b8e3f2a-5c4d-4e6f-9a1b-2c3d4e5f6a7b";
+        let replaced = pool_born(ENV_A, replacement_uid, &rendering, true);
+        replaced.update(
+            &format!("{SANDBOXES_API}/{NAMESPACE}/sandboxes/sandbox-{ENV_A}"),
+            |sandbox| {
+                sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["resources"]["limits"]
+                    ["cpu"] = json!("1500m");
+            },
+        );
+        let (outcome, path) = enforced_with(
+            &db.pool,
+            &replaced,
+            None,
+            ENV_A,
+            replacement_uid,
+            &["running"],
+        )
+        .await?;
+        // Review L2: the adopted Sandbox keeps its launch-type label, but
+        // only its first bind is a warm start.
+        ensure!(outcome == WriteOutcome::Recorded && path == StartPath::Cold);
+        ensure!(pointer(&db.pool, ENV_A).await?.0.as_deref() == Some(replacement_uid));
         Ok(())
     }
     .await;

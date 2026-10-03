@@ -423,6 +423,52 @@ pub fn render_warm_pool(
     })
 }
 
+/// The fork removes this from an adopted Sandbox when the pool set it.
+const SAFE_TO_EVICT_ANNOTATION: &str = "cluster-autoscaler.kubernetes.io/safe-to-evict";
+
+/// Program #2238 C3: whether a pool-born Sandbox carries `rendered` (a
+/// SandboxTemplate rendering): an equivalent Pod spec, Pod annotations and
+/// volume claim templates ([`spec_equivalent`]), and every rendered Pod
+/// label. Adoption adds labels and may remove the pool's safe-to-evict
+/// annotation. Anything else that is extra, missing or different refuses
+/// with its JSON path.
+pub fn sandbox_matches_rendering(sandbox: &Value, rendered: &Value) -> Result<(), String> {
+    for path in ["/spec/podTemplate/spec", "/spec/volumeClaimTemplates"] {
+        spec_equivalent(
+            rendered.pointer(path).unwrap_or(&Value::Null),
+            sandbox.pointer(path).unwrap_or(&Value::Null),
+            path,
+        )?;
+    }
+    let annotations = |object: &Value| -> Value {
+        let mut annotations = object
+            .pointer("/spec/podTemplate/metadata/annotations")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if let Some(map) = annotations.as_object_mut() {
+            map.remove(SAFE_TO_EVICT_ANNOTATION);
+        }
+        annotations
+    };
+    spec_equivalent(
+        &annotations(rendered),
+        &annotations(sandbox),
+        "/spec/podTemplate/metadata/annotations",
+    )?;
+    let live_labels = sandbox.pointer("/spec/podTemplate/metadata/labels");
+    for (key, value) in rendered
+        .pointer("/spec/podTemplate/metadata/labels")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        if live_labels.and_then(|labels| labels.get(key)) != Some(value) {
+            return Err(format!("/spec/podTemplate/metadata/labels/{key}"));
+        }
+    }
+    Ok(())
+}
+
 /// Whether `live` is the stored form of `expected`, a rendered Pod spec
 /// fragment. The API server and the agent-sandbox controller store a spec
 /// differently from its rendering without changing it: the controller copies

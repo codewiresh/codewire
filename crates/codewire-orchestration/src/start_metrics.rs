@@ -86,17 +86,31 @@ impl StartStage {
     }
 }
 
-/// How the workspace was obtained. Every start is cold until claim-time
-/// binding and warm pools add a pool-hit path.
+/// How the workspace was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartPath {
+    /// A Sandbox created for this environment: its own template, or a pool
+    /// claim that found no ready member.
     Cold,
+    /// A ready warm-pool member a claim adopted (Program #2238 C3): the
+    /// agent-sandbox `launch-type` is `warm`.
+    Warm,
 }
 
 impl StartPath {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Cold => "cold",
+            Self::Warm => "warm",
+        }
+    }
+
+    /// The path of a Sandbox, from the agent-sandbox launch type it carries.
+    pub fn from_launch_type(launch_type: Option<&str>) -> Self {
+        if launch_type == Some(crate::sandbox::warm_pool::LAUNCH_TYPE_WARM) {
+            Self::Warm
+        } else {
+            Self::Cold
         }
     }
 }
@@ -261,6 +275,27 @@ mod tests {
         assert_eq!(
             StartProfile::from_runtime_profile("kata-clh-unreviewed"),
             StartProfile::Other
+        );
+    }
+
+    #[test]
+    fn only_an_adopted_pool_member_is_a_warm_start() {
+        assert_eq!(StartPath::from_launch_type(Some("warm")), StartPath::Warm);
+        assert_eq!(StartPath::from_launch_type(Some("cold")), StartPath::Cold);
+        assert_eq!(StartPath::from_launch_type(None), StartPath::Cold);
+        assert_eq!(StartPath::Warm.as_str(), "warm");
+        observe_stage(
+            StartStage::WorkspaceBind,
+            StartPath::Warm,
+            StartProfile::Commodity,
+            Duration::from_millis(900),
+        );
+        assert_eq!(
+            stage_seconds_metric()
+                .get_metric_with_label_values(&["workspace_bind", "warm", "commodity"])
+                .unwrap()
+                .get_sample_count(),
+            1
         );
     }
 

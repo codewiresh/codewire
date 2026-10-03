@@ -15,7 +15,7 @@ use super::gatewayauth::{WorkspaceCredentialScope, issue_environment_tokens};
 use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
 use super::workspace_binding::{
     EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
-    credential_scope, live_environment_binding,
+    credential_scope, definitive_refusal, live_environment_binding, sandbox_bound_by_any,
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
@@ -34,6 +34,8 @@ use crate::sandbox::{
     is_canonical_workspace_runtime_image, shadow_warm_pool_name,
 };
 use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
+
+mod pool_route;
 
 #[cfg(test)]
 mod projection_tests;
@@ -1039,6 +1041,9 @@ async fn run_environment_create(
     let mut bootstrap_recovered = false;
     let mut workspace_resumed = false;
     let mut reconciled_runtime: Option<ReconciledRuntime> = None;
+    // Program #2238 C3: after a pool-born Claim failed its first bind and
+    // was re-claimed, this attempt claims cold.
+    let mut reclaimed_cold = false;
 
     loop {
         authority.ensure().await?;
@@ -1080,6 +1085,7 @@ async fn run_environment_create(
         }
 
         let setup_complete = backend.as_ref().is_some_and(|b| b.setup_complete);
+        let start_path = StartPath::from_launch_type(Some(probe.launch_type.as_str()));
         let mut action = next_create_action(&env.state, backend.as_ref(), setup_complete, &probe);
         if action == CreateAction::ResumeWorkspace && workspace_resumed {
             // One resume per attempt. A Sandbox suspended again meanwhile must
@@ -1093,7 +1099,7 @@ async fn run_environment_create(
             let observed = ReconciledRuntime::observe(&env, backend, &probe);
             if reconciled_runtime.as_ref() != Some(&observed) {
                 reconciled_runtime = None;
-                if reconcile_or_refresh_runtime_identity(
+                match reconcile_or_refresh_runtime_identity(
                     ctx,
                     &env,
                     backend,
@@ -1102,12 +1108,22 @@ async fn run_environment_create(
                     &probe,
                     !bootstrap_recovered,
                 )
-                .await?
+                .await
                 {
-                    bootstrap_recovered = true;
-                    // The old probe must not overwrite the replacement's backend
-                    // association or let setup act on the retired incarnation.
-                    continue;
+                    Ok(true) => {
+                        bootstrap_recovered = true;
+                        // The old probe must not overwrite the replacement's backend
+                        // association or let setup act on the retired incarnation.
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        if reclaim_cold(ctx, &env, authority, &error).await {
+                            reclaimed_cold = true;
+                            continue;
+                        }
+                        return Err(error);
+                    }
                 }
                 reconciled_runtime = Some(observed);
             }
@@ -1206,10 +1222,10 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        client.wait_for_ready(
+                        readiness_wait(client.wait_for_ready(
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
-                        ),
+                        )),
                     ),
                 )
                 .await
@@ -1223,6 +1239,10 @@ async fn run_environment_create(
                         duration_meta(started),
                     )
                     .await?;
+                    if reclaim_cold(ctx, &env, authority, &e).await {
+                        reclaimed_cold = true;
+                        continue;
+                    }
                     record_error(
                         &svc,
                         authority,
@@ -1242,7 +1262,7 @@ async fn run_environment_create(
                     elapsed_meta(elapsed),
                 )
                 .await?;
-                observe_create_stage(StartStage::WaitForReady, profile, elapsed);
+                observe_create_stage(StartStage::WaitForReady, start_path, profile, elapsed);
             }
 
             CreateAction::EnsureNamespace => {
@@ -1418,7 +1438,7 @@ async fn run_environment_create(
                     .await?;
                     return Err(e);
                 }
-                let claim_opts = environment_claim_opts(
+                let mut claim_opts = environment_claim_opts(
                     &image_ref,
                     &template_base,
                     &env,
@@ -1444,69 +1464,99 @@ async fn run_environment_create(
                     }
                 };
 
-                if claim_opts.template_ref != template_opts.name {
-                    let error = anyhow::anyhow!(
-                        "claim template does not match environment-scoped daemon template"
-                    );
-                    emit_create_log(
-                        authority,
-                        "create_claim",
-                        "failed",
-                        &error.to_string(),
-                        duration_meta(started),
-                    )
-                    .await?;
-                    record_error(&svc, authority, env_id, &error.to_string()).await?;
-                    return Err(error);
-                }
-                let ensured_template = template_opts.name.clone();
-                let ensured_shadow_pool = if claim_opts.warm_pool_ref.is_empty() {
-                    shadow_warm_pool_name(&ensured_template)
-                } else {
-                    claim_opts.warm_pool_ref.clone()
-                };
-                if let Err(e) = run_template_mutation(
-                    authority,
+                // Program #2238 C3: claim from a shared warm pool only when
+                // every routing condition holds; otherwise cold, unchanged. A
+                // pool Claim carries only `warmPoolRef` and the identity
+                // labels, and the shared template is never written for one
+                // environment.
+                let route = pool_route::route(
+                    cfg,
+                    &env,
+                    &image_ref,
                     &template_opts,
-                    CREATE_MUTATION_STATES,
-                    client.ensure_sandbox_template(&template_opts),
+                    &client,
+                    reclaimed_cold,
                 )
-                .await
-                {
-                    emit_create_log(
+                .await;
+                let claim_path = match &route {
+                    pool_route::Route::Pool { name } => {
+                        tracing::info!(env = env_id, pool = %name, "create: claiming from a warm pool");
+                        claim_opts.warm_pool_ref = name.clone();
+                        claim_opts.template_ref = name.clone();
+                        StartPath::Warm
+                    }
+                    pool_route::Route::Cold(_) => StartPath::Cold,
+                };
+                if claim_path == StartPath::Cold {
+                    if claim_opts.template_ref != template_opts.name {
+                        let error = anyhow::anyhow!(
+                            "claim template does not match environment-scoped daemon template"
+                        );
+                        emit_create_log(
+                            authority,
+                            "create_claim",
+                            "failed",
+                            &error.to_string(),
+                            duration_meta(started),
+                        )
+                        .await?;
+                        record_error(&svc, authority, env_id, &error.to_string()).await?;
+                        return Err(error);
+                    }
+                    let ensured_template = template_opts.name.clone();
+                    let ensured_shadow_pool = if claim_opts.warm_pool_ref.is_empty() {
+                        shadow_warm_pool_name(&ensured_template)
+                    } else {
+                        claim_opts.warm_pool_ref.clone()
+                    };
+                    if let Err(e) = run_template_mutation(
                         authority,
-                        "create_claim",
-                        "failed",
-                        &format!("{e:#}"),
-                        duration_meta(started),
-                    )
-                    .await?;
-                    record_error(&svc, authority, env_id, &format!("template: {e:#}")).await?;
-                    return Err(e);
-                }
-                if let Err(e) = authority
-                    .run_external_mutation(
+                        &template_opts,
                         CREATE_MUTATION_STATES,
-                        client.ensure_shadow_pool(&ensured_shadow_pool, &ensured_template, env_id),
+                        client.ensure_sandbox_template(&template_opts),
                     )
                     .await
-                {
-                    let _ = authority
+                    {
+                        emit_create_log(
+                            authority,
+                            "create_claim",
+                            "failed",
+                            &format!("{e:#}"),
+                            duration_meta(started),
+                        )
+                        .await?;
+                        record_error(&svc, authority, env_id, &format!("template: {e:#}")).await?;
+                        return Err(e);
+                    }
+                    if let Err(e) = authority
                         .run_external_mutation(
                             CREATE_MUTATION_STATES,
-                            client.delete_sandbox_template(&ensured_template),
+                            client.ensure_shadow_pool(
+                                &ensured_shadow_pool,
+                                &ensured_template,
+                                env_id,
+                            ),
                         )
-                        .await;
-                    emit_create_log(
-                        authority,
-                        "create_claim",
-                        "failed",
-                        &format!("{e:#}"),
-                        duration_meta(started),
-                    )
-                    .await?;
-                    record_error(&svc, authority, env_id, &format!("shadow pool: {e:#}")).await?;
-                    return Err(e);
+                        .await
+                    {
+                        let _ = authority
+                            .run_external_mutation(
+                                CREATE_MUTATION_STATES,
+                                client.delete_sandbox_template(&ensured_template),
+                            )
+                            .await;
+                        emit_create_log(
+                            authority,
+                            "create_claim",
+                            "failed",
+                            &format!("{e:#}"),
+                            duration_meta(started),
+                        )
+                        .await?;
+                        record_error(&svc, authority, env_id, &format!("shadow pool: {e:#}"))
+                            .await?;
+                        return Err(e);
+                    }
                 }
                 let claim_result = async {
                     let mut guard = authority
@@ -1595,7 +1645,7 @@ async fn run_environment_create(
                     elapsed_meta(claim_elapsed),
                 )
                 .await?;
-                observe_create_stage(StartStage::CreateClaim, profile, claim_elapsed);
+                observe_create_stage(StartStage::CreateClaim, claim_path, profile, claim_elapsed);
 
                 // The gateway serves readiness only after it reaches the
                 // workspace daemon, so this wait covers the workspace cold
@@ -1623,10 +1673,10 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        client.wait_for_credential_gateway_ready(
+                        readiness_wait(client.wait_for_credential_gateway_ready(
                             &template_opts,
                             ready_timeout_for_isolation(&env.isolation_tier),
-                        ),
+                        )),
                     ),
                 )
                 .await;
@@ -1644,11 +1694,30 @@ async fn run_environment_create(
                         gateway_meta,
                     )
                     .await?;
+                    if reclaim_cold(ctx, &env, authority, &e).await {
+                        reclaimed_cold = true;
+                        continue;
+                    }
                     record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
                     return Err(e);
                 }
                 emit_create_log(authority, "gateway_ready", "completed", "", gateway_meta).await?;
-                observe_create_stage(StartStage::GatewayReady, profile, gateway_elapsed);
+                // A pool Claim's Sandbox is warm only when the controller
+                // adopted a member; with none ready it was created cold.
+                let gateway_path = match claim_path {
+                    StartPath::Warm => client
+                        .probe_environment(env_id)
+                        .await
+                        .map(|probe| StartPath::from_launch_type(Some(probe.launch_type.as_str())))
+                        .unwrap_or(StartPath::Cold),
+                    StartPath::Cold => StartPath::Cold,
+                };
+                observe_create_stage(
+                    StartStage::GatewayReady,
+                    gateway_path,
+                    profile,
+                    gateway_elapsed,
+                );
             }
 
             CreateAction::StoreBackend => {
@@ -1674,7 +1743,7 @@ async fn run_environment_create(
                         reconciled.entered_running();
                     }
                     if records_pod_start_marks(action) {
-                        record_pod_start_marks(ctx, authority, &probe, profile).await?;
+                        record_pod_start_marks(ctx, authority, &probe, start_path, profile).await?;
                     }
                 }
                 emit_running_log(authority, "mark_running", "completed", "", None).await?;
@@ -1798,6 +1867,7 @@ async fn record_pod_start_marks(
     ctx: &WorkerContext,
     authority: &ActivityAuthority,
     probe: &ProbeResult,
+    path: StartPath,
     profile: StartProfile,
 ) -> anyhow::Result<()> {
     if probe.pod_uid.is_empty() {
@@ -1838,14 +1908,19 @@ async fn record_pod_start_marks(
             Some(timing.metadata(&probe.pod_uid)),
         )
         .await?;
-        observe_create_stage(timing.stage, profile, timing.duration);
+        observe_create_stage(timing.stage, path, profile, timing.duration);
     }
     Ok(())
 }
 
 /// Observe a completed create stage after its durable log row committed.
-fn observe_create_stage(stage: StartStage, profile: StartProfile, elapsed: Duration) {
-    start_metrics::observe_stage(stage, StartPath::Cold, profile, elapsed);
+fn observe_create_stage(
+    stage: StartStage,
+    path: StartPath,
+    profile: StartProfile,
+    elapsed: Duration,
+) {
+    start_metrics::observe_stage(stage, path, profile, elapsed);
 }
 
 fn require_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
@@ -2168,7 +2243,7 @@ pub(super) async fn wait_with_early_bind<T>(
     let Some(kube) = ctx.kube.as_ref() else {
         return wait.await;
     };
-    let bind = bind_before_ready(kube, authority, states);
+    let bind = bind_before_ready(kube, Some(&ctx.sandbox_cfg), authority, states);
     tokio::pin!(wait);
     tokio::pin!(bind);
     let mut binding = true;
@@ -2177,13 +2252,14 @@ pub(super) async fn wait_with_early_bind<T>(
             result = &mut wait => return result,
             result = &mut bind, if binding => {
                 binding = false;
-                if let Some(elapsed) = result?
+                if let Some(recorded) = result?
                     && matches!(env.state.as_str(), "creating" | "starting")
                 {
                     observe_create_stage(
                         StartStage::WorkspaceBind,
+                        recorded.path,
                         start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
-                        elapsed,
+                        recorded.elapsed,
                     );
                 }
             }
@@ -2289,14 +2365,23 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         .kube
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("sandbox backend is not configured"))?;
-    if let Some(elapsed) =
-        bind_workspace_runtime(kube, env, backend, authority, states, &observation).await?
+    if let Some(recorded) = bind_workspace_runtime(
+        kube,
+        Some(&ctx.sandbox_cfg),
+        env,
+        backend,
+        authority,
+        states,
+        &observation,
+    )
+    .await?
         && matches!(env.state.as_str(), "creating" | "starting")
     {
         observe_create_stage(
             StartStage::WorkspaceBind,
+            recorded.path,
             start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
-            elapsed,
+            recorded.elapsed,
         );
     }
 
@@ -2346,6 +2431,112 @@ async fn workspace_bootstrap_current(
             .is_none_or(|binding| binding_bootstrap_current(binding, template_opts))),
         None => anyhow::bail!("workspace credential scope is ambiguous"),
     }
+}
+
+/// How long a cold re-claim waits for the pool-born Claim to be gone.
+const RECLAIM_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A create's readiness wait expired or failed before its Sandbox bound
+/// (review M3). It reads exactly as the wait's own error.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct ReadinessWaitFailed(anyhow::Error);
+
+/// Mark a readiness wait's failure, so a never-bound pool-born Claim that
+/// never became Ready can be re-claimed cold. Authority loss is checked
+/// outside this wait and is never marked.
+async fn readiness_wait<T>(
+    wait: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    wait.await.map_err(|error| {
+        if crate::worker::activity_authority::is_authority_lost(&error) {
+            error
+        } else {
+            ReadinessWaitFailed(error).into()
+        }
+    })
+}
+
+/// Whether a create failure may re-claim cold: a definitive bind-check
+/// refusal, or a readiness wait that failed (review M3).
+fn reclaim_eligible(error: &anyhow::Error) -> bool {
+    definitive_refusal(error)
+        || (error.downcast_ref::<ReadinessWaitFailed>().is_some()
+            && !crate::worker::activity_authority::is_authority_lost(error))
+}
+
+/// Program #2238 C3: a definitive bind-check failure, or a readiness wait
+/// that failed (review M3), on a pool-born Claim whose Sandbox nothing ever
+/// bound deletes that Claim and its Sandbox, each by UID, so the create loop
+/// claims cold. A Sandbox any environment ever bound may hold tenant data
+/// and is never deleted here; a member is never handed back to its pool.
+/// `false` leaves the original error to the caller's ordinary failure path:
+/// a failure inside the re-claim is logged and counted, never returned in
+/// its place (review L3).
+async fn reclaim_cold(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    authority: &ActivityAuthority,
+    error: &anyhow::Error,
+) -> bool {
+    if !reclaim_eligible(error) || !matches!(env.state.as_str(), "pending" | "creating") {
+        return false;
+    }
+    match try_reclaim_cold(ctx, env, authority).await {
+        Ok(reclaimed) => reclaimed,
+        Err(reclaim_error) => {
+            pool_route::record_reclaim("failed");
+            tracing::warn!(
+                env = %env.id,
+                error = %format!("{reclaim_error:#}"),
+                original = %format!("{error:#}"),
+                "create: cold re-claim failed; keeping the original failure"
+            );
+            false
+        }
+    }
+}
+
+async fn try_reclaim_cold(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    authority: &ActivityAuthority,
+) -> anyhow::Result<bool> {
+    let Some(kube) = ctx.kube.as_ref() else {
+        return Ok(false);
+    };
+    let backend = load_backend_row(&ctx.pool, &env.id).await?;
+    if backend.namespace.is_empty() || backend.claim_uid.is_empty() {
+        return Ok(false);
+    }
+    let client = SandboxClient::new(kube.clone(), &backend.namespace);
+    let Some(observed) = client.pool_born_claim(&env.id, &backend.claim_uid).await? else {
+        return Ok(false);
+    };
+    if let Some((_, sandbox_uid)) = &observed.sandbox
+        && sandbox_bound_by_any(&ctx.pool, sandbox_uid).await?
+    {
+        pool_route::record_reclaim("refused_bound");
+        return Ok(false);
+    }
+    let started = std::time::Instant::now();
+    authority
+        .run_external_mutation(
+            CREATE_MUTATION_STATES,
+            client.delete_pool_born_claim(&env.id, &observed, RECLAIM_TIMEOUT),
+        )
+        .await?;
+    emit_create_log(
+        authority,
+        "reclaim_cold",
+        "completed",
+        "the pool-born Claim never bound; claiming cold",
+        duration_meta(started),
+    )
+    .await?;
+    pool_route::record_reclaim("reclaimed");
+    tracing::warn!(env = %env.id, pool = %observed.pool, "create: re-claiming cold after a pool-born bind failure");
+    Ok(true)
 }
 
 async fn record_error(

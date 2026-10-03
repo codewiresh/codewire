@@ -714,3 +714,99 @@ fn an_absent_rendered_false_is_not_equivalent() {
         Err("/spec/podTemplate/spec/automountServiceAccountToken".to_owned())
     );
 }
+
+/// What the agent-sandbox controller makes of a pool template: the member
+/// Sandbox copies the blueprint through typed structs, adoption replaces the
+/// Pod metadata with the template's plus the claim's labels, and the API
+/// server may add its CRD's scalar defaults.
+fn adopted_sandbox(template: &Value) -> Value {
+    let mut sandbox = json!({
+        "apiVersion": "agents.x-k8s.io/v1beta1",
+        "kind": "Sandbox",
+        "metadata": { "name": "cw-pool-1000m-4096mi-10gi-78909fe3-x7k2p" },
+        "spec": controller_copy(template)["spec"].clone(),
+    });
+    let labels = sandbox["spec"]["podTemplate"]["metadata"]["labels"]
+        .as_object_mut()
+        .unwrap();
+    labels.insert("codewire.sh/environment-id".into(), json!("env"));
+    labels.insert("agents.x-k8s.io/claim-uid".into(), json!("claim"));
+    sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["terminationMessagePath"] = json!("");
+    sandbox
+}
+
+#[test]
+fn a_pool_born_sandbox_must_equal_the_rendering() {
+    let rendered = render(&pool_opts()).template;
+    let sandbox = adopted_sandbox(&rendered);
+    assert_eq!(sandbox_matches_rendering(&sandbox, &rendered), Ok(()));
+    let mut evictable = sandbox.clone();
+    evictable["spec"]["podTemplate"]["metadata"]["annotations"]["cluster-autoscaler.kubernetes.io/safe-to-evict"] =
+        json!("true");
+    assert_eq!(sandbox_matches_rendering(&evictable, &rendered), Ok(()));
+
+    let refused = |mutate: &dyn Fn(&mut Value)| {
+        let mut sandbox = sandbox.clone();
+        mutate(&mut sandbox);
+        sandbox_matches_rendering(&sandbox, &rendered).expect_err("a changed member was accepted")
+    };
+    assert_eq!(
+        refused(
+            &|sandbox| sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["image"] = json!(
+                "registry.example.invalid/codewire/workspace@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+            )
+        ),
+        "/spec/podTemplate/spec/containers/0/image"
+    );
+    assert_eq!(
+        refused(
+            &|sandbox| sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "name": "CODEWIRE_DAEMON_AUTH_TOKEN", "value": "x" }))
+        ),
+        "/spec/podTemplate/spec/containers/0/env"
+    );
+    assert_eq!(
+        refused(&|sandbox| sandbox["spec"]["podTemplate"]["spec"]["hostNetwork"] = json!(true)),
+        "/spec/podTemplate/spec/hostNetwork"
+    );
+    assert_eq!(
+        refused(&|sandbox| sandbox["spec"]["podTemplate"]["spec"]
+            .as_object_mut()
+            .unwrap()
+            .remove("runtimeClassName")
+            .map(|_| ())
+            .unwrap()),
+        "/spec/podTemplate/spec/runtimeClassName"
+    );
+    assert_eq!(
+        refused(
+            &|sandbox| sandbox["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]
+                ["storage"] = json!("20Gi")
+        ),
+        "/spec/volumeClaimTemplates/0/spec/resources/requests/storage"
+    );
+    assert_eq!(
+        refused(
+            &|sandbox| sandbox["spec"]["podTemplate"]["metadata"]["annotations"]["io.katacontainers.config.hypervisor.kernel_params"] =
+                json!("x")
+        ),
+        "/spec/podTemplate/metadata/annotations/io.katacontainers.config.hypervisor.kernel_params"
+    );
+    assert_eq!(
+        refused(
+            &|sandbox| sandbox["spec"]["podTemplate"]["metadata"]["labels"]["codewire.sh/type"] =
+                json!("gateway")
+        ),
+        "/spec/podTemplate/metadata/labels/codewire.sh/type"
+    );
+    // Another shape's rendering is another spec.
+    let other = render(&TemplateOpts {
+        cpu_millicores: 2000,
+        memory_mib: 8192,
+        ..pool_opts()
+    })
+    .template;
+    assert!(sandbox_matches_rendering(&sandbox, &other).is_err());
+}
