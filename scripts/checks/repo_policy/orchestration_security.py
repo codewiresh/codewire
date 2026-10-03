@@ -231,6 +231,91 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
             output.append(f"{label}: {IMAGE_CACHE_ROLE} must deny by identity without mutable namespace selectors")
 
 
+WARM_POOL_POLICY = "codewire-orchestration-warm-pool"
+WARM_POOL_TEMPLATE_POLICY = "codewire-orchestration-warm-pool-template"
+WARM_POOL_NAME_PATTERN = "^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$"
+WARM_POOL_DIGEST_PATTERN = "^[^@ ]+@sha256:[0-9a-f]{64}$"
+WARM_POOL_IDENTITY_ENVIRONMENT = (
+    "CODEWIRE_DAEMON_AUTH_TOKEN", "CODEWIRE_ENVIRONMENT_ID", "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
+    "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256", "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS", "OPENAI_BASE_URL",
+    "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CODEX_HOME",
+    "CODEX_CA_CERTIFICATE", "SSH_AUTH_SOCK", "GIT_ASKPASS",
+)
+
+
+def cluster_role_rules(cluster_role: str) -> list[str]:
+    """The ClusterRole's rules, one compacted rule per entry."""
+    rules = top_level_block(cluster_role, "rules")
+    return [compact("- apiGroups:" + rule) for rule in re.split(r"^- apiGroups:", rules, flags=re.MULTILINE)[1:]]
+
+
+def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+    """Program #2238 C2. The warm-pool reconciler reads runtime nodes and the
+    pool RuntimeClass, nothing more, and two identity-bound admission policies
+    bound every pool and pool template orchestration writes. CEL behaviour is
+    evaluated against the renderer's goldens out of tree and proven on Kind."""
+    cluster_role = exactly_one(resources, "ClusterRole", "codewire-orchestration", label, output)
+    if cluster_role:
+        rules = cluster_role_rules(cluster_role)
+        node_rules = [rule for rule in rules if re.search(r"resources: (- [^ ]+ )*- nodes( |$)", rule)]
+        if node_rules != ['- apiGroups: - "" resources: - nodes verbs: - get - list']:
+            output.append(f"{label}: orchestration may only get and list nodes, in one rule: {node_rules}")
+        class_rules = [rule for rule in rules if "runtimeclasses" in rule]
+        if class_rules != ["- apiGroups: - node.k8s.io resources: - runtimeclasses verbs: - get"]:
+            output.append(f"{label}: orchestration may only get RuntimeClasses, in one rule: {class_rules}")
+    required_by_policy = {
+        WARM_POOL_POLICY: [
+            "operations: - CREATE - UPDATE", "resources: - sandboxwarmpools",
+            "request.name.startsWith('cw-pool-')",
+            "variables.pool || (has(object.spec.replicas) && object.spec.replicas == 0)",
+            f"request.name.matches('{WARM_POOL_NAME_PATTERN}')",
+            "object.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire'",
+            "object.metadata.labels['codewire.sh/type'] == 'workspace-pool'",
+            "object.metadata.annotations['codewire.sh/pool-revision'].matches('^[0-9a-f]{64}$')",
+            "object.spec.sandboxTemplateRef.name == request.name",
+            "object.spec.updateStrategy.type == 'Recreate'",
+            "object.spec.replicas >= 0 && object.spec.replicas <= 16",
+        ],
+        WARM_POOL_TEMPLATE_POLICY: [
+            "operations: - CREATE - UPDATE", "resources: - sandboxtemplates",
+            "expression: request.name.startsWith('cw-pool-')",
+            f"request.name.matches('{WARM_POOL_NAME_PATTERN}')",
+            "!variables.identity.exists(k, k in object.metadata.labels)",
+            "!variables.identity.exists(k, k in object.spec.podTemplate.metadata.labels)",
+            f"variables.containers.all(c, c.image.matches('{WARM_POOL_DIGEST_PATTERN}'))",
+            f"v.image.reference.matches('{WARM_POOL_DIGEST_PATTERN}')",
+            "!has(variables.pod.ephemeralContainers)",
+            "variables.containers.all(c, !has(c.envFrom)",
+            "!has(e.valueFrom.secretKeyRef) && !has(e.valueFrom.configMapKeyRef)",
+            "e.name == 'CODEWIRE_WORKSPACE_BINDING_URL'",
+            "variables.volumes.all(v, !has(v.secret)",
+            "v.projected.sources.all(s, !has(s.secret))",
+            "variables.pod.serviceAccountName == 'codewire-sandbox'",
+            "variables.pod.automountServiceAccountToken == false",
+            "variables.pod.runtimeClassName != 'confidential'",
+            "'io.katacontainers.config.hypervisor.kernel_params' in object.spec.podTemplate.metadata.annotations",
+            "t.spec.storageClassName != 'longhorn-confidential'",
+            "object.spec.networkPolicyManagement == 'Managed'",
+            "size(object.spec.networkPolicy.ingress) == 0",
+        ] + [f"'{name}'" for name in WARM_POOL_IDENTITY_ENVIRONMENT],
+    }
+    for policy_name, required in required_by_policy.items():
+        policy = exactly_one(resources, "ValidatingAdmissionPolicy", policy_name, label, output)
+        binding = exactly_one(resources, "ValidatingAdmissionPolicyBinding", policy_name, label, output)
+        if policy:
+            normalized = compact(top_level_block(policy, "spec")).replace("''", "'")
+            for fragment in ["failurePolicy: Fail", "matchPolicy: Equivalent",
+                    "request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')", *required]:
+                if fragment not in normalized:
+                    output.append(f"{label}: {policy_name} missing {fragment}")
+            if metadata_field(policy, "namespace") is not None:
+                output.append(f"{label}: {policy_name} must remain cluster-scoped")
+        if binding:
+            expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
+            if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
+                output.append(f"{label}: {policy_name} must deny by identity without mutable namespace selectors")
+
+
 GATEWAY_REPLICASET_ROLE = "codewire-orchestration-gateway-replicaset"
 
 
@@ -526,6 +611,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         assert_admission(resources, label, output)
         assert_credential_bootstrap(resources, target, label, output)
         assert_image_cache(resources, target, label, output)
+        assert_warm_pool(resources, target, label, output)
         assert_gateway_replicaset(resources, target, label, output)
         assert_workspace_binding_ingress(resources, target, label, output)
         if target["path"] != "deployments/k8s/orchestration":
@@ -688,6 +774,32 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         image_cache_rejected("any command allowed", "ValidatingAdmissionPolicy", "'sleep', '2147483647'", "'sh'")
         image_cache_rejected("namespace-label bypass", "ValidatingAdmissionPolicyBinding",
                              "spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n")
+        for policy_name, before, after in [
+            (WARM_POOL_POLICY, "variables.pool ||", "true ||"),
+            (WARM_POOL_POLICY, "object.spec.updateStrategy.type == 'Recreate'", "true"),
+            (WARM_POOL_POLICY, "object.spec.replicas <= 16", "true"),
+            (WARM_POOL_POLICY, "object.spec.sandboxTemplateRef.name == request.name", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "@sha256:[0-9a-f]{64}$')) &&", "')) &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "'CODEWIRE_DAEMON_AUTH_TOKEN', ", ""),
+            (WARM_POOL_TEMPLATE_POLICY, "!has(v.secret) &&", "true &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "variables.pod.runtimeClassName != 'confidential'", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "size(object.spec.networkPolicy.ingress) == 0", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "variables.pod.automountServiceAccountToken == false", "true"),
+        ]:
+            image_cache_rejected(f"warm pool {before}", "ValidatingAdmissionPolicy", before, after, policy_name)
+        image_cache_rejected("warm pool namespace-label bypass", "ValidatingAdmissionPolicyBinding",
+                             "spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n",
+                             WARM_POOL_POLICY)
+        expect_rejected("missing warm pool template policy", lambda resources: [
+            resource for resource in resources
+            if metadata_field(resource, "name") != WARM_POOL_TEMPLATE_POLICY
+        ])
+        for before, after in [
+            ("  - nodes\n  verbs:\n  - get\n  - list", "  - nodes\n  verbs:\n  - get\n  - list\n  - watch"),
+            ("  - nodes\n  verbs:\n  - get\n  - list", "  - nodes\n  verbs:\n  - get\n  - list\n  - patch"),
+            ("  - runtimeclasses\n  verbs:\n  - get", "  - runtimeclasses\n  verbs:\n  - get\n  - update"),
+        ]:
+            image_cache_rejected(f"warm pool ClusterRole {after.split()[-1]}", "ClusterRole", before, after, orchestration)
         expect_rejected("missing gateway ReplicaSet grant", lambda resources: [
             resource for resource in resources
             if metadata_field(resource, "name") != GATEWAY_REPLICASET_ROLE

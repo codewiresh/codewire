@@ -422,3 +422,136 @@ fn pool_images_must_be_digest_pinned_outside_diagnostic_runtimes() {
     };
     assert!(render_warm_pool(NAMESPACE, &tag_and_digest, 2, false).is_ok());
 }
+
+#[test]
+fn warm_pool_shapes_parse_exact_shapes_and_member_counts() {
+    assert_eq!(parse_warm_pool_shapes("").unwrap(), []);
+    assert_eq!(parse_warm_pool_shapes("  ").unwrap(), []);
+    assert_eq!(
+        parse_warm_pool_shapes(" 1000m/4096Mi/10Gi=2 , 2000m/8192Mi/10Gi=0").unwrap(),
+        [
+            ConfiguredShape {
+                shape: shape(1000, 4096, 10),
+                members: 2,
+            },
+            ConfiguredShape {
+                shape: shape(2000, 8192, 10),
+                members: 0,
+            },
+        ]
+    );
+    assert_eq!(
+        parse_warm_pool_shapes("500m/1024Mi/5Gi=16").unwrap()[0].members,
+        MAX_POOL_MEMBERS
+    );
+    for invalid in [
+        "1000m/4096Mi/10Gi",
+        "1000m/4096Mi/10Gi=",
+        "1000m/4096Mi/10Gi=17",
+        "1000m/4096Mi/10Gi=-1",
+        "1000m/4096Mi/10Gi=02",
+        "1/4096Mi/10Gi=1",
+        "1000m/4Gi/10Gi=1",
+        "1000m/4096Mi/10G=1",
+        "1000m/4096Mi=1",
+        "1000m/4096Mi/10Gi/1Gi=1",
+        "0m/4096Mi/10Gi=1",
+        "01000m/4096Mi/10Gi=1",
+        "1000m/4096Mi/0Gi=1",
+        "1000m/4096Mi/10Gi=1,",
+        "1000m/4096Mi/10Gi=1,1000m/4096Mi/10Gi=2",
+        "4294967296m/4096Mi/10Gi=1",
+        "1000m / 4096Mi / 10Gi=1",
+    ] {
+        assert!(
+            parse_warm_pool_shapes(invalid).is_err(),
+            "{invalid:?} must be refused"
+        );
+    }
+}
+
+#[test]
+fn shape_labels_and_pool_names_round_trip() {
+    let [small, large] = owner_shapes();
+    assert_eq!(shape_label(small), "1000m-4096mi-10gi");
+    for shape in [small, large] {
+        let name = key(shape, "linstor-local", NAMESPACE, "dev").name();
+        assert_eq!(warm_pool_name_shape(&name), Some(shape));
+    }
+    assert_eq!(warm_pool_name_shape("shadow-pool-workspace-env"), None);
+    assert_eq!(warm_pool_name_shape("cw-pool-1000m-4096mi-10gi"), None);
+}
+
+#[test]
+fn pool_labels_select_only_codewire_pools() {
+    use std::collections::BTreeMap;
+    assert_eq!(
+        pool_label_selector(),
+        "app.kubernetes.io/managed-by=codewire,codewire.sh/type=workspace-pool"
+    );
+    let labels = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    };
+    let pool = labels(&[
+        ("app.kubernetes.io/managed-by", "codewire"),
+        ("codewire.sh/type", "workspace-pool"),
+        (TEMPLATE_REF_HASH_LABEL, "0f0f0f0f"),
+    ]);
+    assert!(has_pool_labels(Some(&pool)));
+    assert!(!has_pool_labels(Some(&labels(&[(
+        "codewire.sh/type",
+        "workspace-pool"
+    )]))));
+    assert!(!has_pool_labels(None));
+}
+
+/// The admission policies pin what this renderer produces; drift in either
+/// fails here first.
+#[test]
+fn the_admission_policy_pins_the_renderer() {
+    let policy = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deployments/k8s/orchestration/warm-pool-authz.yaml"
+    ))
+    .expect("warm-pool admission policy");
+    for fragment in [
+        format!("object.spec.replicas <= {MAX_POOL_MEMBERS}"),
+        format!("'{POOL_REVISION_ANNOTATION}' in object.metadata.annotations"),
+        format!("object.metadata.labels['codewire.sh/type'] == '{WARM_POOL_TYPE}'"),
+        format!("request.name.startsWith('{WARM_POOL_NAME_PREFIX}')"),
+        "object.spec.updateStrategy.type == 'Recreate'".to_owned(),
+        format!(
+            "variables.pod.runtimeClassName != '{}'",
+            crate::sandbox::template::RUNTIME_CLASS_CONFIDENTIAL
+        ),
+    ] {
+        assert!(policy.contains(&fragment), "policy lost {fragment}");
+    }
+    // The policy's name pattern accepts exactly the names the renderer emits.
+    let pattern = "^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$";
+    assert!(policy.contains(pattern));
+    for shape in owner_shapes() {
+        let name = key(shape, "linstor-local", NAMESPACE, "dev").name();
+        assert!(is_warm_pool_name(&name));
+        let (_, hash) = name.rsplit_once('-').unwrap();
+        assert_eq!(hash.len(), 8);
+    }
+    let rendered = render(&pool_opts());
+    assert_eq!(rendered.pool["spec"]["updateStrategy"]["type"], "Recreate");
+    assert_eq!(
+        rendered.template["spec"]["podTemplate"]["spec"]["serviceAccountName"],
+        "codewire-sandbox"
+    );
+    assert_eq!(
+        rendered.template["spec"]["podTemplate"]["spec"]["automountServiceAccountToken"],
+        false
+    );
+    assert!(
+        rendered.template["spec"]["networkPolicy"]
+            .get("ingress")
+            .is_none()
+    );
+}

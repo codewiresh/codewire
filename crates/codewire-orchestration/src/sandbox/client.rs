@@ -258,7 +258,6 @@ mod credentials;
 
 #[path = "client/workspace_binding.rs"]
 mod workspace_binding;
-#[cfg(test)]
 pub(crate) use workspace_binding::sandbox_name_hash;
 pub use workspace_binding::{BindableRuntime, WorkspacePvc, WorkspacePvcAnchor};
 
@@ -4532,7 +4531,7 @@ fn quantities_equal(left: &str, right: &str) -> bool {
     }
 }
 
-fn parse_quantity_ratio(quantity: &str) -> Option<(i128, i128)> {
+pub(crate) fn parse_quantity_ratio(quantity: &str) -> Option<(i128, i128)> {
     let quantity = quantity.trim();
     if quantity.is_empty() {
         return None;

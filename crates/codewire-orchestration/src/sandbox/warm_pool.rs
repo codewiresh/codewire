@@ -22,9 +22,12 @@
 //! digest-pinned, so a new digest is a new revision. Replicas are not part of
 //! the revision: resizing a pool never rotates its members.
 //!
-//! This module is pure and inert: nothing creates pools yet. The reconciler
-//! (C2), routing and billing (C3) and configuration (C4) come later.
-//! Confidential environments are never pooled.
+//! Which shapes are kept warm, and how many unclaimed members each holds, is
+//! `SANDBOX_WARM_POOL_SHAPES` ([`parse_warm_pool_shapes`]). Empty or unset
+//! configures no pool, and then nothing in Codewire creates, routes to or
+//! reconciles one: the leader reconciler (C2, `worker::warm_pool`) returns
+//! before it builds a Kubernetes client. Confidential environments are never
+//! pooled.
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -43,6 +46,115 @@ const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 /// existing pool names.
 const PLACEMENT_HASH_DOMAIN: &str = "codewire.sh/warm-pool/placement/v1";
 const PLACEMENT_HASH_HEX: usize = 8;
+/// The agent-sandbox fork labels each member Sandbox, and its Pod, with the
+/// FNV-1a name hash of the pool that created it. Adoption removes it.
+pub const MEMBER_POOL_LABEL: &str = "agents.x-k8s.io/warm-pool-sandbox";
+/// The fork's launch-type label: `warm` once a claim adopted a pool member.
+pub const LAUNCH_TYPE_LABEL: &str = "agents.x-k8s.io/launch-type";
+pub const LAUNCH_TYPE_WARM: &str = "warm";
+/// The fork's template-reference label: the FNV-1a hash of the template a
+/// Sandbox was built from. It survives adoption.
+pub const TEMPLATE_REF_HASH_LABEL: &str = "agents.x-k8s.io/sandbox-template-ref-hash";
+/// The warm-pool configuration key.
+pub const WARM_POOL_SHAPES_ENV: &str = "SANDBOX_WARM_POOL_SHAPES";
+/// The most unclaimed members one shape may hold, whatever the node cap
+/// allows. The admission policy pins the same bound.
+pub const MAX_POOL_MEMBERS: i32 = 16;
+
+/// One configured pool: an exact shape and its unclaimed member count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConfiguredShape {
+    pub shape: WorkspaceShape,
+    pub members: i32,
+}
+
+/// Parse `SANDBOX_WARM_POOL_SHAPES`: comma-separated
+/// `<cpu>m/<memory>Mi/<disk>Gi=<members>` entries, for example
+/// `1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2`. Dimensions are positive
+/// decimal integers without leading zeros, exactly the units a workspace is
+/// sized in; members are 0 to [`MAX_POOL_MEMBERS`]. A shape may appear once.
+/// Empty or whitespace configures no pool.
+pub fn parse_warm_pool_shapes(value: &str) -> anyhow::Result<Vec<ConfiguredShape>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut configured: Vec<ConfiguredShape> = Vec::new();
+    for (index, entry) in value.split(',').enumerate() {
+        let entry = entry.trim();
+        let parsed = parse_shape_entry(entry).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{WARM_POOL_SHAPES_ENV} entry {} must be <cpu>m/<memory>Mi/<disk>Gi=<members> \
+                 with members 0..={MAX_POOL_MEMBERS}",
+                index + 1
+            )
+        })?;
+        anyhow::ensure!(
+            !configured.iter().any(|seen| seen.shape == parsed.shape),
+            "{WARM_POOL_SHAPES_ENV} entry {} repeats an earlier shape",
+            index + 1
+        );
+        configured.push(parsed);
+    }
+    Ok(configured)
+}
+
+fn parse_shape_entry(entry: &str) -> Option<ConfiguredShape> {
+    let (shape, members) = entry.split_once('=')?;
+    let mut dimensions = shape.split('/');
+    let cpu = positive_decimal(dimensions.next()?.strip_suffix('m')?)?;
+    let memory = positive_decimal(dimensions.next()?.strip_suffix("Mi")?)?;
+    let disk = positive_decimal(dimensions.next()?.strip_suffix("Gi")?)?;
+    if dimensions.next().is_some() {
+        return None;
+    }
+    let members = match members {
+        "0" => 0,
+        other => i32::try_from(positive_decimal(other)?).ok()?,
+    };
+    (members <= MAX_POOL_MEMBERS).then_some(ConfiguredShape {
+        shape: WorkspaceShape {
+            cpu_millicores: cpu,
+            memory_mib: memory,
+            disk_gib: disk,
+        },
+        members,
+    })
+}
+
+fn positive_decimal(text: &str) -> Option<i64> {
+    (!text.is_empty() && !text.starts_with('0') && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| text.parse::<i64>().ok())
+        .flatten()
+        .filter(|value| *value <= i64::from(i32::MAX))
+}
+
+/// The bounded metric label of a shape: `<cpu>m-<mem>mi-<disk>gi`. It names
+/// configuration, never an environment.
+pub fn shape_label(shape: WorkspaceShape) -> String {
+    let WorkspaceShape {
+        cpu_millicores,
+        memory_mib,
+        disk_gib,
+    } = shape;
+    format!("{cpu_millicores}m-{memory_mib}mi-{disk_gib}gi")
+}
+
+/// The shape a warm pool name encodes, when `name` is one.
+pub fn warm_pool_name_shape(name: &str) -> Option<WorkspaceShape> {
+    if !is_warm_pool_name(name) {
+        return None;
+    }
+    let mut fields = name.strip_prefix(WARM_POOL_NAME_PREFIX)?.split('-');
+    let cpu = fields.next()?.strip_suffix('m')?.parse().ok()?;
+    let memory = fields.next()?.strip_suffix("mi")?.parse().ok()?;
+    let disk = fields.next()?.strip_suffix("gi")?.parse().ok()?;
+    Some(WorkspaceShape {
+        cpu_millicores: cpu,
+        memory_mib: memory,
+        disk_gib: disk,
+    })
+}
 
 /// The exact resources a workspace renders with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -300,9 +412,23 @@ fn pool_labels() -> Value {
     })
 }
 
+/// Selects every warm pool and pool template Codewire owns.
+pub fn pool_label_selector() -> String {
+    format!("{MANAGED_BY_LABEL}=codewire,{LABEL_TYPE}={WARM_POOL_TYPE}")
+}
+
+/// Whether a live object carries the pool labels (other labels, such as the
+/// fork's template-reference hash, may be added beside them).
+pub fn has_pool_labels(labels: Option<&std::collections::BTreeMap<String, String>>) -> bool {
+    labels.is_some_and(|labels| {
+        labels.get(MANAGED_BY_LABEL).map(String::as_str) == Some("codewire")
+            && labels.get(LABEL_TYPE).map(String::as_str) == Some(WARM_POOL_TYPE)
+    })
+}
+
 /// Every image a Pod spec runs or mounts: containers, init containers and
 /// image volumes.
-fn pod_template_images(pod_spec: &Value) -> Vec<&str> {
+pub fn pod_template_images(pod_spec: &Value) -> Vec<&str> {
     let containers = ["containers", "initContainers"]
         .into_iter()
         .filter_map(|field| pod_spec[field].as_array())

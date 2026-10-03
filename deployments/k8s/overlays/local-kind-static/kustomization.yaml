@@ -209,7 +209,7 @@ transformers:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup|image-cache)
+      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup|image-cache|warm-pool|warm-pool-template)
   - |-
     apiVersion: builtin
     kind: PatchTransformer

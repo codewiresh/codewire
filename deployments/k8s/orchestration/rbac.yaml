@@ -71,9 +71,15 @@ rules:
     resources: ["storageclasses"]
     verbs: ["get"]
   # Gateway binding selects transport-zone capabilities from the scheduled
-  # runtime node labels.
+  # runtime node labels. The warm-pool reconciler (Program #2238 C2) lists
+  # runtime nodes for the 25% node cap and to find cordoned ones. Read-only.
   - apiGroups: [""]
     resources: ["nodes"]
+    verbs: ["get", "list"]
+  # The warm-pool node cap reads the pool RuntimeClass's fixed overhead and
+  # node selector. Read-only.
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods/exec", "pods/portforward"]

@@ -264,6 +264,10 @@ pub struct SandboxWorkerCfg {
     pub pod_namespace: String,
     pub debug_tailnet: bool,
     pub workspace_identity_mode: WorkspaceIdentityMode,
+    /// `SANDBOX_WARM_POOL_SHAPES` as configured (Program #2238 C2). Empty
+    /// configures no warm pool; parsed by
+    /// [`crate::sandbox::warm_pool::parse_warm_pool_shapes`].
+    pub warm_pool_shapes: String,
 }
 
 impl SandboxWorkerCfg {
@@ -359,6 +363,8 @@ impl SandboxWorkerCfg {
                     WorkspaceIdentityMode::ENV
                 )
             }),
+            warm_pool_shapes: std::env::var(crate::sandbox::warm_pool::WARM_POOL_SHAPES_ENV)
+                .unwrap_or_default(),
         }
     }
 }
