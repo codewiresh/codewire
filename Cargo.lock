@@ -1483,9 +1483,11 @@ dependencies = [
  "futures",
  "libc",
  "rand 0.8.6",
+ "serde_json",
  "tempfile",
  "tokio",
  "tonic 0.14.6",
+ "tracing-subscriber",
  "uuid",
  "zeroize",
 ]

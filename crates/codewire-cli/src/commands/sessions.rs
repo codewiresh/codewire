@@ -445,7 +445,7 @@ async fn resolve_environment_session_target(
     environment: Option<&str>,
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     #[cfg(unix)]
     if let Some(requested) = environment.and_then(trimmed_str) {
         if let Some(environment) = resolve_host_reference(globals, requested, None).await? {
@@ -1508,7 +1508,7 @@ async fn adjacent_environment_target(
     forward: bool,
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let targets = attachment_environment_targets(globals, &paths, &env).await?;
     let current_index = targets
         .iter()
@@ -1624,7 +1624,7 @@ fn strip_ansi_escapes(data: &[u8]) -> Vec<u8> {
 
 pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> anyhow::Result<()> {
     if args.all {
-        let paths = ResolvePaths::from_env(&OsEnv);
+        let paths = ResolvePaths::from_env(&OsEnv)?;
         let targets = attachment_environment_targets(globals, &paths, &OsEnv).await?;
         let mut rows = Vec::new();
         let mut incomplete = false;

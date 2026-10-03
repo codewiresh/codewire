@@ -271,7 +271,7 @@ pub(crate) fn host_environment(requested: &str) -> anyhow::Result<Option<HostEnv
 }
 
 pub(crate) fn selected_host_environment() -> anyhow::Result<Option<HostEnvironment>> {
-    let paths = ResolvePaths::from_env(&OsEnv);
+    let paths = ResolvePaths::from_env(&OsEnv)?;
     let target = config::current_target(&paths.mesh_data_dir)?;
     if target.kind == "host" {
         host_environment(&target.target_ref)
@@ -304,7 +304,7 @@ pub(crate) async fn resolve_host_reference(
         );
     }
     if placement.is_none() {
-        let paths = ResolvePaths::from_env(&OsEnv);
+        let paths = ResolvePaths::from_env(&OsEnv)?;
         if let Ok(platform) = resolve_platform(globals, &paths, &OsEnv) {
             let orgs = organization_client(&platform)?.list_orgs().await.context(
                 "check host/platform name ambiguity; use --local or exact host ID while offline",
@@ -624,7 +624,7 @@ pub(crate) async fn host_lifecycle(
             let registry = host_data_dir();
             let _registry = HostLock::wait(&registry.join("registry.lock")).await?;
             fs::remove_dir_all(&root).context("remove owned host runtime metadata")?;
-            let paths = ResolvePaths::from_env(&OsEnv);
+            let paths = ResolvePaths::from_env(&OsEnv)?;
             if config::current_target(&paths.mesh_data_dir)
                 .is_ok_and(|t| t.kind == "host" && t.target_ref == environment.id)
             {

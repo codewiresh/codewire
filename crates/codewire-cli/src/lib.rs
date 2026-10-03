@@ -367,6 +367,9 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let cli = Cli::parse_from(args);
+    // Validate an explicitly selected Mesh state root before any ordinary
+    // command effects, including routes that otherwise need only platform state.
+    ResolvePaths::from_env(&OsEnv)?;
     let globals = Globals {
         server: cli.server.clone(),
     };

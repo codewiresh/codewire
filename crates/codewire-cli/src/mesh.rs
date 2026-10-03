@@ -388,7 +388,7 @@ mod tests {
             (CODEWIRE_MESH_URL_ENV, base_url),
             (CODEWIRE_MESH_AUTH_TOKEN_ENV, token),
         ]);
-        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
         crate::config::resolve_mesh(MeshResolveOptions::default(), &paths, &env)
             .expect("resolved Mesh")
     }

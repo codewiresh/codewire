@@ -246,7 +246,7 @@ async fn handle_unified_environment_cp(
         },
         UnifiedEnvironmentTarget::Platform(_) => {
             let env = OsEnv;
-            let paths = ResolvePaths::from_env(&env);
+            let paths = ResolvePaths::from_env(&env)?;
             let platform = resolve_platform(globals, &paths, &env)?;
             let orgs = organization_client(&platform)?.list_orgs().await?;
             let org_id = current_org_id(&platform, &orgs)?;
@@ -298,7 +298,7 @@ async fn handle_unified_environment_share(
 /// This only observes the current placements; it never changes `cw use`.
 pub(crate) async fn show_workspace_list(globals: &Globals) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let placement = resolve_platform(globals, &paths, &env)
         .is_err()
         .then_some(EnvironmentPlacement::Local);
@@ -320,7 +320,7 @@ pub(crate) async fn handle_platform_env_command(
     command: EnvCommand,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let environment_client = EnvironmentClient::new(&platform)?;
     let organization_client = organization_client(&platform)?;
@@ -1144,7 +1144,7 @@ async fn handle_unified_environment_list(
     args: EnvListArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     #[cfg(target_os = "linux")]
     let native = if placement != Some(EnvironmentPlacement::Platform)
         && args.environment_type.as_deref() != Some("host")
@@ -1578,7 +1578,7 @@ async fn resolve_unified_environment_daemon_target(
     }
 
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let current = config::current_target(&paths.mesh_data_dir).map_err(|_| {
         anyhow::anyhow!(
             "no environment selected; use `cw use ENV` or pass ENV to `cw env {}`",
@@ -1715,7 +1715,13 @@ async fn handle_unified_environment_lifecycle(
 #[cfg(target_os = "linux")]
 async fn reconcile_native_current_after_delete(deleted_name: &str) {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = match ResolvePaths::from_env(&env) {
+        Ok(paths) => paths,
+        Err(error) => {
+            eprintln!("Warning: could not reconcile the current local target: {error}");
+            return;
+        }
+    };
     let Ok(current) = config::current_target(&paths.mesh_data_dir) else {
         return;
     };
@@ -1777,7 +1783,7 @@ async fn resolve_unified_environment_target(
     command: &str,
 ) -> anyhow::Result<UnifiedEnvironmentTarget> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let target_ref = trimmed_required(target_ref, "environment")?;
     #[cfg(unix)]
     if resolve_host_reference(globals, target_ref, placement)

@@ -8,6 +8,9 @@
 //! The STUN listener covers the STUN-only edge mode used by the current Go
 //! binary. Mesh forwarding covers the multi-replica DERP deployment shape.
 
+mod runner;
+pub use runner::run_from_env;
+
 use std::collections::{HashMap, VecDeque};
 use std::io::{Error as IoError, ErrorKind};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};

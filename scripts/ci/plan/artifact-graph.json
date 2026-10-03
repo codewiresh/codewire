@@ -86,10 +86,15 @@
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
-        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
+        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"],
+        "codewire-mesh": ["crates/codewire-mesh/migrations/**"],
+        "codewire-server-core": ["crates/codewire-server-core/migrations/**"]
       },
       "explicit_inputs": [
         "rust-toolchain.toml",
+        "scripts/ci/release/cw_release.py",
+        "scripts/dev/cw-runtime-image.py",
+        "scripts/dev/build-cw.py",
         "scripts/ci/release/package-cw-release.sh",
         "scripts/ci/release/check-cw-darwin-sdkless.sh"
       ]
@@ -105,7 +110,9 @@
         "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
-        "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"]
+        "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
+        "codewire-mesh": ["crates/codewire-mesh/migrations/**"],
+        "codewire-server-core": ["crates/codewire-server-core/migrations/**"]
       },
       "explicit_inputs": [
         "rust-toolchain.toml",
@@ -126,7 +133,9 @@
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
-        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
+        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"],
+        "codewire-mesh": ["crates/codewire-mesh/migrations/**"],
+        "codewire-server-core": ["crates/codewire-server-core/migrations/**"]
       },
       "explicit_inputs": ["rust-toolchain.toml"]
     },

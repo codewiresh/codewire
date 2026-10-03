@@ -35,14 +35,14 @@ fn hex_identity(value: &str, len: usize) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-fn index_root() -> PathBuf {
-    ResolvePaths::from_env(&OsEnv)
+fn index_root() -> anyhow::Result<PathBuf> {
+    Ok(ResolvePaths::from_env(&OsEnv)?
         .platform_config_dir
-        .join("native-managed-messages-v1")
+        .join("native-managed-messages-v1"))
 }
 
 fn location_path(message_id: &str) -> anyhow::Result<PathBuf> {
-    Ok(index_root().join(format!("{}.json", canonical_uuid(message_id)?)))
+    Ok(index_root()?.join(format!("{}.json", canonical_uuid(message_id)?)))
 }
 
 fn save_location(
@@ -59,7 +59,7 @@ fn save_location(
         session_id: session_id.map(str::to_owned),
         executable: guest.executable.clone(),
     };
-    private_directory(&index_root())?;
+    private_directory(&index_root()?)?;
     let path = location_path(message_id)?;
     if let Some(old) = read_optional::<MessageLocation>(&path)?
         && (old.version != 1
@@ -857,7 +857,7 @@ pub(super) async fn recover_and_wait(
     timeout: Duration,
     output: OutputFormat,
 ) -> anyhow::Result<bool> {
-    let paths = ResolvePaths::from_env(&OsEnv);
+    let paths = ResolvePaths::from_env(&OsEnv)?;
     if selected_host_environment()?.is_some() {
         return Ok(false);
     }

@@ -305,7 +305,7 @@
     fn save_login_platform_config_persists_only_reconciled_default_org() {
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::default();
-        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
         config::save_platform_config(
             &paths.platform_config_dir,
             &config::PlatformConfig {
@@ -374,7 +374,7 @@
         let paths = ResolvePaths::from_home_and_env(
             home.path().to_path_buf(),
             &config::MapEnv::default(),
-        );
+        ).unwrap();
         let credentials = codewire_client::OAuthCredentials::new(
             "https://api.codewire-dev.sh",
             codewire_client::CODEWIRE_CLI_OAUTH_CLIENT_ID,
@@ -428,98 +428,55 @@
             return;
         }
 
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let directory = tempfile::Builder::new()
-            .prefix(".codewire-mesh-child-test-")
-            .tempdir_in(std::env::current_dir().unwrap())
-            .unwrap();
-        let executable = directory.path().join("synthetic-child");
-        fs::write(
-            &executable,
-            r#"#!/bin/sh
-if [ "$1" = "--base-url" ]; then
-    output="$2"
-else
-    output="$TLS_LISTEN_ADDR"
-fi
-set > "$output"
-exec /bin/sleep 30
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-
+        use crate::commands::mesh_commands::retained::{HelperConfiguration, configure_environment};
         let raw_api_key = "cw_synthetic-local-mesh-api-key";
-        let local_identity = config::LocalMeshIdentity {
+        let identity = config::LocalMeshIdentity {
             organization_id: "local-org-synthetic".to_owned(),
             api_key: raw_api_key.to_owned(),
         };
-        let mesh_environment = directory.path().join("mesh.env");
-        let mesh_spec = LocalMeshStartSpec {
-            binary: executable.clone(),
-            base_url: mesh_environment.display().to_string(),
-            listen_addr: "127.0.0.1:0".to_owned(),
-            local_identity: local_identity.clone(),
-            log_path: directory.path().join("mesh.log"),
-            derp: None,
+        let mesh = HelperConfiguration::Mesh {
+            base_url: "http://127.0.0.1:18090".to_owned(),
+            listen_addr: "127.0.0.1:18090".to_owned(),
+            derp_url: None,
+            organization_id: identity.organization_id.clone(),
+            api_key_hash: identity.api_key_hash(),
         };
-        assert!(!format!("{mesh_spec:?}").contains(raw_api_key));
-        let mesh_pid = start_local_mesh_process(&mesh_spec).unwrap();
-        let mesh_dump = fs::read_to_string(&mesh_environment).unwrap();
-        let _ = std::process::Command::new("/bin/kill")
-            .arg(mesh_pid.to_string())
-            .status();
-        assert!(mesh_dump.contains("CODEWIRE_MESH_LOCAL_ORGANIZATION_ID="));
-        assert!(mesh_dump.contains("local-org-synthetic"));
-        assert!(mesh_dump.contains("CODEWIRE_MESH_LOCAL_API_KEY_HASH="));
-        assert!(mesh_dump.contains(&local_identity.api_key_hash()));
-        assert!(mesh_dump.contains("RUST_LOG="));
-        assert!(mesh_dump.contains("codewire_mesh=trace"));
-        assert!(!mesh_dump.contains(raw_api_key));
-        for forbidden in [
-            CHILD_SENTINEL,
-            "UNRELATED_SECRET",
-            "DATABASE_URL",
-            "CODEWIRE_MESH_AUTHORIZATION_URL",
-            "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET",
-            AMBIENT_CANARY,
-        ] {
-            assert!(!mesh_dump.contains(forbidden), "Mesh inherited {forbidden}");
-        }
-
-        let derp_environment = directory.path().join("derp.env");
-        let derp_spec = LocalDerpStartSpec {
-            binary: executable,
-            url: "https://127.0.0.1:33443".to_owned(),
-            listen_addr: derp_environment.display().to_string(),
-            log_path: directory.path().join("derp.log"),
+        let derp = HelperConfiguration::Derp {
+            url: "http://127.0.0.1:18091".to_owned(),
+            listen_addr: "127.0.0.1:18091".to_owned(),
         };
-        let derp = start_local_derp_process(&derp_spec).unwrap();
-        let derp_dump = fs::read_to_string(&derp_environment).unwrap();
-        let _ = std::process::Command::new("/bin/kill")
-            .arg(derp.pid.to_string())
-            .status();
-        assert!(derp_dump.contains("PORT='-1'") || derp_dump.contains("PORT=-1"));
-        assert!(derp_dump.contains("TLS_LISTEN_ADDR="));
-        assert!(derp_dump.contains(&derp_environment.display().to_string()));
-        assert!(
-            derp_dump.contains("STUN_LISTEN_ADDR='-1'")
-                || derp_dump.contains("STUN_LISTEN_ADDR=-1")
-        );
-        assert!(derp_dump.contains("RUST_LOG="));
-        for forbidden in [
-            CHILD_SENTINEL,
-            "UNRELATED_SECRET",
-            "DATABASE_URL",
-            "CODEWIRE_MESH_AUTHORIZATION_URL",
-            "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET",
-            "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID",
-            "CODEWIRE_MESH_LOCAL_API_KEY_HASH",
-            AMBIENT_CANARY,
-            raw_api_key,
-        ] {
-            assert!(!derp_dump.contains(forbidden), "DERP inherited {forbidden}");
+        for (configuration, is_mesh) in [(&mesh, true), (&derp, false)] {
+            let mut command = std::process::Command::new("/usr/bin/env");
+            configure_environment(
+                &mut command,
+                configuration,
+                "00000000-0000-4000-8000-000000000001",
+            );
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            let dump = String::from_utf8(output.stdout).unwrap();
+            assert!(dump.contains("CW_LOCAL_HELPER_NONCE="));
+            assert!(dump.contains("RUST_LOG=codewire_mesh=trace"));
+            if is_mesh {
+                assert!(dump.contains("CODEWIRE_MESH_LOCAL_ORGANIZATION_ID=local-org-synthetic"));
+                assert!(dump.contains(&identity.api_key_hash()));
+            } else {
+                assert!(dump.contains("PORT=-1"));
+                assert!(dump.contains("STUN_LISTEN_ADDR=-1"));
+                assert!(dump.contains("TLS_LISTEN_ADDR=127.0.0.1:18091"));
+                assert!(!dump.contains("CODEWIRE_MESH_LOCAL_API_KEY_HASH="));
+            }
+            for forbidden in [
+                raw_api_key,
+                CHILD_SENTINEL,
+                "UNRELATED_SECRET",
+                "DATABASE_URL",
+                "CODEWIRE_MESH_AUTHORIZATION_URL",
+                "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET",
+                AMBIENT_CANARY,
+            ] {
+                assert!(!dump.contains(forbidden), "helper inherited {forbidden}");
+            }
         }
     }
 
@@ -607,7 +564,7 @@ exec /bin/sleep 30
     fn resolve_setup_server_url_defaults_to_hosted_codewire() {
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::default();
-        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
         let globals = Globals {
             server: None,
         };
@@ -622,7 +579,7 @@ exec /bin/sleep 30
     fn resolve_setup_server_url_prefers_global_server() {
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::new([("CODEWIRE_SERVER_URL", "https://env.codewire.sh")]);
-        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
         let globals = Globals {
             server: Some(" https://flag.codewire.sh/ ".to_string()),
         };

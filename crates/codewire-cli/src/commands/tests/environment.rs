@@ -1624,7 +1624,7 @@ fn platform_project_boundary_rejects_all_reserved_runtime_environment_keys() {
 fn platform_env_mesh_bootstrap_pins_explicit_network_to_hosted_origin() {
     let home = tempfile::tempdir().unwrap();
     let env = config::MapEnv::default();
-    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
     for (server_url, expected_mesh_url) in [
         ("https://codewire.sh", "https://mesh.codewire.sh"),
         ("https://codewire-dev.sh", "https://mesh.codewire-dev.sh"),
@@ -1652,7 +1652,7 @@ fn platform_env_mesh_bootstrap_pins_explicit_network_to_hosted_origin() {
 fn platform_env_mesh_bootstrap_honors_only_the_matching_auto_connect_owner() {
     let home = tempfile::tempdir().unwrap();
     let env = config::MapEnv::default();
-    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
     save_local_mesh_owner_context(
         &paths.mesh_data_dir,
         &LocalMeshOwnerContext {
@@ -1691,7 +1691,7 @@ fn platform_env_mesh_bootstrap_honors_only_the_matching_auto_connect_owner() {
 fn platform_env_mesh_bootstrap_does_not_inherit_saved_local_mesh_pairing() {
     let home = tempfile::tempdir().unwrap();
     let env = config::MapEnv::default();
-    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
     config::save_mesh_connection(
         &paths.mesh_data_dir,
         "http://127.0.0.1:18090",

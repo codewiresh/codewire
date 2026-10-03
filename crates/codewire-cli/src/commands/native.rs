@@ -289,6 +289,11 @@ fn resolve_native_mesh_attachment(
                     "local Mesh is not running; run 'cw mesh up' before attaching network {network_id:?}"
                 )
             })?;
+            #[cfg(target_os = "linux")]
+            mesh_commands::retained::validate_owner(&runtime, &owner).context(
+                "standalone local Mesh runtime custody is unknown; no attachment was admitted",
+            )?;
+            #[cfg(not(target_os = "linux"))]
             if !local_process_is_running(runtime.pid) {
                 anyhow::bail!(
                     "local Mesh runtime is stale; run 'cw mesh up' before attaching network {network_id:?}"
@@ -341,7 +346,7 @@ pub(crate) async fn create_native_environment(
         .ok_or_else(|| anyhow::anyhow!("native local creation requires --name"))?
         .to_owned();
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let requested_path = args.path.as_deref().unwrap_or_else(|| Path::new("."));
     let source_path = std::fs::canonicalize(requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
@@ -520,7 +525,7 @@ pub(crate) async fn handle_native_environment_update(
     )
     .await?;
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let resolved = sources::resolve_requested_sources(
         globals,
         &paths,
@@ -1329,7 +1334,7 @@ where
 
 fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let root = absolute_override(NATIVE_STATE_ROOT_ENV)?
         .unwrap_or_else(|| paths.mesh_data_dir.join("native-v1"));
     let home = env::var_os("HOME")
@@ -1985,6 +1990,8 @@ mod tests {
             binary: "codewire-mesh".to_owned(),
             log_path: root.path().join("mesh.log").display().to_string(),
             started_at: "2026-09-02T00:00:00Z".to_owned(),
+            #[cfg(target_os = "linux")]
+            custody: None,
             derp: None,
         };
         save_local_mesh_runtime(&mesh_data_dir, &runtime).unwrap();
@@ -2009,6 +2016,27 @@ mod tests {
             ..NativeProjectPlan::default()
         };
 
+        let error = resolve_native_mesh_attachment(
+            &paths,
+            &config::MapEnv::default(),
+            "native-dev",
+            &project,
+            Some("explicit-network"),
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("custody is unknown"), "{error}");
+        assert_eq!(
+            load_local_mesh_runtime(&mesh_data_dir).unwrap().unwrap(),
+            runtime
+        );
+        let mut hosted = load_local_mesh_owner_context(&mesh_data_dir)
+            .unwrap()
+            .unwrap();
+        hosted.auth_source = LocalMeshOwnerAuthSource::HostedCurrent;
+        save_local_mesh_owner_context(&mesh_data_dir, &hosted).unwrap();
+
         let explicit = resolve_native_mesh_attachment(
             &paths,
             &config::MapEnv::default(),
@@ -2027,7 +2055,7 @@ mod tests {
         assert_eq!(explicit.guest_ports, vec![3_001, 8_080]);
         assert_eq!(
             explicit.auth_source,
-            v1::MeshEnrollmentAuthSource::StandaloneLocal as i32
+            v1::MeshEnrollmentAuthSource::HostedCurrent as i32
         );
 
         let selected = resolve_native_mesh_attachment(
