@@ -150,6 +150,12 @@ impl CredentialBridge {
             .ok_or_else(|| Status::failed_precondition("credential bridge is unavailable"))
     }
 
+    /// The shared bridge itself, for the hosted Codex login writer.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn shared_bridge(&self) -> Option<SharedCredentialBridge> {
+        self.shared().ok().cloned()
+    }
+
     pub(crate) async fn project_environment_for_recipient(
         &self,
         context: codewire_workload_secrets::ProjectionContext,

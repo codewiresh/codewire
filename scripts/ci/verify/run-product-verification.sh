@@ -712,6 +712,7 @@ run_edge() {
   scripts/ci/tests/test-kind-e2e-suites.sh
   scripts/ci/tests/test-kind-forwards.sh
   python3 -B scripts/ci/tests/test-kind-codex-session.py
+  python3 -B scripts/ci/tests/test-kind-codex-login.py
   python3 -B scripts/ci/tests/test-kind-credentials.py
 }
 

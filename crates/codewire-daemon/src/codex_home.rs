@@ -2,14 +2,19 @@
 //! ([`CODEX_PLATFORM_HOME`]) on the persistent home volume, as on a laptop:
 //! sessions, history and the user's own settings survive Stop/Start.
 //!
-//! The hosted daemon is the only writer of Codewire's file there, in both
-//! identity modes, before it listens. While Codex is selected it writes the
+//! The hosted daemon is the only writer of Codewire's files there, in both
+//! identity modes. Before it listens, while Codex is selected, it writes the
 //! credential-free provider `config.toml`; when Codex is not selected it
-//! removes it. The file is Codewire's only while it is a regular file (never
-//! a symlink), owned by the daemon's uid, whose first line is exactly
-//! [`CODEX_MANAGED_CONFIG_HEADER`]. Any other `config.toml`, including one
-//! whose header line the user deleted, is the user's: it is never written,
-//! replaced or removed. Nothing else in the home is touched.
+//! removes that and Codewire's `auth.json`. The file is Codewire's only while
+//! it is a regular file (never a symlink), owned by the daemon's uid, whose
+//! first line is exactly [`CODEX_MANAGED_CONFIG_HEADER`]. Any other
+//! `config.toml`, including one whose header line the user deleted, is the
+//! user's: it is never written, replaced or removed.
+//!
+//! Once listening, the daemon also keeps Codex's own ChatGPT login in
+//! `auth.json` while the broker delivers one ([`login`]); a delivered login
+//! removes Codewire's `config.toml`, so Codex uses its built-in provider.
+//! Nothing else in the home is touched.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read as _};
@@ -23,6 +28,14 @@ use codewire_access::{
 
 use crate::private_files::{
     ensure_private_directory, sync_directory, temporary_sibling, write_new,
+};
+
+#[cfg(target_os = "linux")]
+pub mod login;
+#[cfg(target_os = "linux")]
+pub use login::{
+    CODEX_AUTH_FILE_NAME, CODEX_LOGIN_CHECK_PERIOD, CODEX_LOGIN_LAPSE, CODEX_LOGIN_STATE_DIRECTORY,
+    CODEX_MANAGED_REFRESH_TOKEN, CodexLoginDelivery, CodexLoginSync, CodexLoginWriter,
 };
 
 const CODEX_HOME_MODE: u32 = 0o700;
@@ -83,8 +96,9 @@ impl CodexHome {
         self.sync_config(selected.as_deref())
     }
 
-    /// [`Self::sync`] before the daemon listens. A failure is logged and never
-    /// stops the daemon: `~/.codex` belongs to the user, and without
+    /// [`Self::sync`] before the daemon listens, and, when Codex is not
+    /// selected, removal of Codewire's `auth.json`. A failure is logged and
+    /// never stops the daemon: `~/.codex` belongs to the user, and without
     /// Codewire's file Codex only lacks its managed route.
     pub fn prepare(&self, clients: ManagedCredentialClients) {
         match self.sync(clients) {
@@ -95,6 +109,18 @@ impl CodexHome {
                 error_kind = ?error.kind(),
                 "hosted Codex home unavailable; Codewire's Codex configuration was not written"
             ),
+        }
+        #[cfg(target_os = "linux")]
+        if !clients.contains(codewire_access::ManagedCredentialClient::Codex) {
+            match self.remove_codewire_login() {
+                Ok(removal) => {
+                    tracing::info!(codex_login = ?removal, "hosted Codex login cleared");
+                }
+                Err(error) => tracing::warn!(
+                    error_kind = ?error.kind(),
+                    "hosted Codex login could not be cleared"
+                ),
+            }
         }
     }
 

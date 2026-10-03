@@ -34,9 +34,18 @@ impl Fixture {
             .tempdir_in(runtime)
             .map_err(|_| RuntimeError::Enrollment)?;
         validate_private_tmpfs_runtime(directory.path()).map_err(|_| RuntimeError::Enrollment)?;
-        let id_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({
-            "email":"kind-fixture@example.test", "https://api.openai.com/auth":{"chatgpt_account_id":ACCOUNT}
-        })).map_err(|_| RuntimeError::Enrollment)?);
+        // The claims stock Codex reads from a ChatGPT login's ID token, so the
+        // login the daemon delivers reads as a ChatGPT account with a plan.
+        // A personal plan: business, enterprise and edu make Codex fetch
+        // workspace configuration at startup.
+        let id_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "email":"kind-fixture@example.test", "https://api.openai.com/auth":{
+                    "chatgpt_account_id":ACCOUNT, "chatgpt_plan_type":"plus",
+                    "chatgpt_user_id":"user-codewire-kind-synthetic"}
+            }))
+            .map_err(|_| RuntimeError::Enrollment)?,
+        );
         let access = access_token(0).map_err(|_| RuntimeError::Enrollment)?;
         let auth = serde_json::to_vec(&json!({"auth_mode":"chatgpt","OPENAI_API_KEY":null,
             "tokens":{"id_token":format!("e30.{id_payload}.synthetic-kind-signature"),"access_token":access,

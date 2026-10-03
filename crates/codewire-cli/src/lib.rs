@@ -481,6 +481,17 @@ async fn serve_hosted_daemon(config: codewire_daemon::Config, bound: bool) -> an
     {
         tracing::warn!(error = %error, "hosted daemon readiness marker unavailable");
     }
+    // Once listening, the hosted daemon also keeps Codex's own ChatGPT login
+    // while the broker delivers one, in the same home.
+    #[cfg(target_os = "linux")]
+    return codewire_daemon::serve_hosted_grpc_with_incoming(
+        config,
+        codewire_daemon::codex_home::CodexHome::default(),
+        TcpListenerStream::new(listener),
+        hosted_daemon_shutdown_signal(),
+    )
+    .await;
+    #[cfg(not(target_os = "linux"))]
     codewire_daemon::serve_grpc_with_incoming(
         config,
         TcpListenerStream::new(listener),

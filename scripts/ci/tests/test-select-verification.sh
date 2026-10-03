@@ -604,7 +604,8 @@ for profile_input in src/access_profiles.rs src/connect/access_profiles.rs tests
     "crates/codewire-orchestration/$profile_input"
 done
 run_paths_case credential_kind_fixtures pull_request refs/pull/721/head false \
-  'policy' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-credentials.py
+  'policy' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-codex-login.py \
+  scripts/ci/tests/test-kind-credentials.py
 run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/tests/wire_contract.rs \

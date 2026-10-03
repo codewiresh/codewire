@@ -178,6 +178,59 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
+    serve(config, runtime_state, None, incoming, shutdown).await
+}
+
+/// The hosted workspace daemon: [`serve_grpc_with_incoming`] plus, on a hosted
+/// bridge while Codex is selected, the task that keeps Codex's own ChatGPT
+/// login in `codex_home` ([`crate::codex_home::login`]). The caller listens
+/// first and prepares `codex_home` before that.
+#[cfg(target_os = "linux")]
+pub async fn serve_hosted_grpc_with_incoming<I, IO, IE, F>(
+    config: Config,
+    codex_home: crate::codex_home::CodexHome,
+    incoming: I,
+    shutdown: F,
+) -> Result<()>
+where
+    I: Stream<Item = std::result::Result<IO, IE>> + Send + 'static,
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
+    F: Future<Output = ()> + Send + 'static,
+{
+    serve(
+        config,
+        DaemonRuntimeState::ready(),
+        Some(codex_home),
+        incoming,
+        shutdown,
+    )
+    .await
+}
+
+#[cfg(target_os = "linux")]
+type CodexLoginHome = crate::codex_home::CodexHome;
+#[cfg(not(target_os = "linux"))]
+type CodexLoginHome = std::convert::Infallible;
+
+async fn serve<I, IO, IE, F>(
+    config: Config,
+    runtime_state: DaemonRuntimeState,
+    codex_home: Option<CodexLoginHome>,
+    incoming: I,
+    shutdown: F,
+) -> Result<()>
+where
+    I: Stream<Item = std::result::Result<IO, IE>> + Send + 'static,
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
+    F: Future<Output = ()> + Send + 'static,
+{
+    #[cfg(target_os = "linux")]
+    let codex_login =
+        codex_home.and_then(|home| crate::codex_home::login::hosted_writer(&config, home));
+    #[cfg(not(target_os = "linux"))]
+    let _ = codex_home;
     let selected_ssh = config
         .managed_credential_clients
         .contains(codewire_access::ManagedCredentialClient::Ssh);
@@ -210,6 +263,20 @@ where
     let incoming = incoming
         .map(move |result| result.map(|io| ShutdownIo::new(io, Arc::clone(&incoming_shutdown))));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // The third task: Codex's own login, beside gRPC and the guest ingress.
+    // It asks only over an admitted epoch and stops with the daemon.
+    #[cfg(target_os = "linux")]
+    let _codex_login = codex_login
+        .zip(bridge_owner.shared_bridge())
+        .map(|(writer, bridge)| {
+            AbortOnDropHandle::new(tokio::spawn(
+                crate::codex_home::login::run_codex_login_writer(
+                    writer,
+                    bridge,
+                    shutdown_rx.clone(),
+                ),
+            ))
+        });
     let observer_tx = shutdown_tx.clone();
     let shutdown_observer = AbortOnDropHandle::new(tokio::spawn(async move {
         shutdown.await;

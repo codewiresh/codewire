@@ -268,6 +268,24 @@ kind_credential_probe() {
     python3 -B -u - "$environment" "$mode" < "$ROOT/scripts/ci/verify/kind/credential_probe.py"
 }
 
+# One codex_login.py mode in the exact workspace. Its stdout is closed events
+# only; the mode passes only when its last event is its own completion.
+kind_credential_codex_login() {
+  local environment="$1" mode="$2" pod output status=0
+  shift 2
+  pod="$(kind_credential_workspace "$environment")" || return $?
+  output="$(kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- \
+    python3 -B -u - "$mode" "$@" < "$ROOT/scripts/ci/verify/kind/codex_login.py")" || status=$?
+  printf '%s\n' "$output" >> "$RUN_DIR/credential-codex-login.jsonl" || return $?
+  printf '%s\n' "$output"
+  if [ "$status" -ne 0 ] || ! jq -se --arg mode "$mode" \
+      'length >= 2 and .[-1] == {event: "complete", mode: $mode}
+        and all(.[]; .event != "failed")' <<<"$output" >/dev/null; then
+    echo "::error::Codex ChatGPT login acceptance failed in mode ${mode}" >&2
+    return 1
+  fi
+}
+
 kind_credential_fixture_events() {
   # This test-only subscriber disables all SQL/HTTP/material diagnostics.
   # Do not turn on a generic debug logger to obtain acceptance evidence.
@@ -418,6 +436,7 @@ kind_credential_native_smoke() (
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
   local certificate certificate_uid after_certificate_uid workspace_image marker
+  local login_events login_generation
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
   trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
@@ -471,6 +490,13 @@ kind_credential_native_smoke() (
     if ($expected | length) == 1 and ($expected[0] | test("^[1-9][0-9]*$"))
       and ($rendered == [] or $rendered == $expected)
     then $expected[0] else error("expected exact immutable workspace generation") end')"
+  # The creator's own login reaches Codex's auth.json; stock Codex reads it as
+  # ChatGPT, reads usage and completes a turn against a synthetic backend.
+  login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?
+  login_generation="$(jq -er 'select(.event == "delivered") | .generation' <<<"$login_events")" ||
+    return $?
+  # The proxy session forces the proxy provider; its broker refreshes rotate
+  # the delivered login too.
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
   assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$gateway_uid" \
@@ -480,6 +506,11 @@ kind_credential_native_smoke() (
     return 1
   }
   assert_kind_credential_provider_counts 2
+  # The file adopts the rotation at the next check, a user's own login is
+  # never touched, and `codex logout` stays logged out.
+  kind_credential_codex_login "$environment" rotation "$login_generation" || return $?
+  kind_credential_codex_login "$environment" own-login || return $?
+  kind_credential_codex_login "$environment" logout || return $?
 
   certificate="cw-credential-gateway-$environment"
   certificate_uid="$(kubectl -n "$SANDBOX_NS" get certificate "$certificate" -o 'jsonpath={.metadata.uid}')"
@@ -509,10 +540,15 @@ kind_credential_native_smoke() (
   }
   kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- rm -f /home/codewire/.codex/kind-persistence ||
     return $?
+  # A new container forgets the logout and receives the login again.
+  kind_credential_codex_login "$environment" redelivered || return $?
   kind_credential_probe "$environment" success
   assert_kind_credential_provider_counts 3
   kind_credential_cli credentials --platform revoke "$credential_name" --output json
   kind_credential_probe "$environment" revoked
+  # Revocation is an explicit denial: the daemon removes Codewire's login and
+  # restores its proxy config.toml at the next check.
+  kind_credential_codex_login "$environment" revoked || return $?
   assert_kind_credential_provider_counts 3
 
   # Do not unbind before destroy: terminal cleanup itself must remove the
@@ -524,5 +560,5 @@ kind_credential_native_smoke() (
   assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
   kind_credential_cli credentials --platform delete "$credential_name" --yes
-  log "public synthetic Codex flow, native rotation/retry, revocation and terminal cleanup passed"
+  log "public synthetic Codex flow, ChatGPT login delivery, native rotation/retry, revocation and terminal cleanup passed"
 )
