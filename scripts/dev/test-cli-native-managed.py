@@ -52,7 +52,7 @@ LONG_TOKEN = re.compile(r"[A-Za-z0-9_+=.\-]{24,}")
 
 COMMON_REQUIRED = (
     "preflight/environment-running/preexisting-sessions-recorded",
-    "preflight/image-derived-cw/root-owned/read-only/digest-pinned/before-first-agent",
+    "preflight/image-derived-cw/root-owned/read-only/digest-pinned/bootstrap-bound/readonly-launcher/before-first-agent",
     "sentinel/durable-terminal-running",
     "refusal/unmanaged-parent/missing-parent/unqualified-agent/no-session",
     "codex-lead/two-turns/native-ack/same-conversation",
@@ -338,7 +338,7 @@ print(json.dumps({"peer":value, "current":current, "receipt_sha256":hashlib.sha2
 
 
 BOOT_ASSET_PROBE = r'''import hashlib, json, os, stat, sys
-expected_index, expected_manifest, expected_cw = sys.argv[1:]
+expected_index, expected_manifest, expected_cw, expected_environment, expected_bootstrap = sys.argv[1:]
 flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 directory_flags = flags | os.O_DIRECTORY
 root = os.open("/", directory_flags)
@@ -365,13 +365,22 @@ def read(directory_fd, name, mode, bound):
     finally:
         os.close(fd)
 directory(root)
-catalog = json.loads(read(root, "catalog.json", 0o444, 16 * 16384))
+selection = json.loads(read(root, "selection.json", 0o444, 2 * 16 * 16384))
+assert set(selection) == {"schema_version", "environment_id", "bootstrap_catalog_sha256", "revision", "previous_sha256", "catalog", "operations"}
+assert selection["schema_version"] == 1 and selection["environment_id"] == expected_environment
+assert selection["bootstrap_catalog_sha256"] == expected_bootstrap
+assert selection["revision"] == 1 and selection["previous_sha256"] is None and selection["operations"] == []
+catalog = selection["catalog"]
 assert set(catalog) == {"schema_version", "active_sha256", "runtimes"}
 assert catalog["schema_version"] == 1 and catalog["active_sha256"] == expected_cw
+# The fresh selector embeds the immutable bootstrap catalog. Its Rust JSON
+# encoding has ordered struct fields, compact separators and a final newline.
+catalog_bytes = (json.dumps(catalog, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+assert hashlib.sha256(catalog_bytes).hexdigest() == expected_bootstrap
 assert 1 <= len(catalog["runtimes"]) <= 16
 digests = [runtime["payload"]["sha256"] for runtime in catalog["runtimes"]]
 assert digests == sorted(set(digests)) and expected_cw in digests
-assert set(os.listdir(root)) == {"catalog.json", *digests}
+assert set(os.listdir(root)) == {"selection.json", "cw", *digests}
 selected = os.open(expected_cw, directory_flags, dir_fd=root)
 directory(selected)
 assert set(os.listdir(selected)) == {"cw", "provenance.json"}
@@ -382,7 +391,17 @@ assert provenance["image_manifest"]["sha256"] == expected_manifest
 assert provenance["payload"]["sha256"] == expected_cw
 cw = read(selected, "cw", 0o555, 256 * 1024 * 1024)
 assert len(cw) == provenance["payload"]["size"] and hashlib.sha256(cw).hexdigest() == expected_cw
-print(json.dumps({"cw_sha256": expected_cw, "image_manifest_sha256": expected_manifest, "read_only": True}))
+launcher = read(root, "cw", 0o555, 256 * 1024 * 1024)
+fixed = os.open("/", directory_flags)
+for component in ("usr", "local", "bin"):
+    child = os.open(component, directory_flags, dir_fd=fixed)
+    metadata = os.fstat(child)
+    assert stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == metadata.st_gid == 0
+    assert stat.S_IMODE(metadata.st_mode) & 0o022 == 0
+    os.close(fixed)
+    fixed = child
+assert read(fixed, "cw", 0o555, 256 * 1024 * 1024) == launcher
+print(json.dumps({"cw_sha256": expected_cw, "image_manifest_sha256": expected_manifest, "bootstrap_catalog_sha256": expected_bootstrap, "selection_revision": 1, "read_only": True, "fixed_launcher_read_only": True}))
 '''
 
 
@@ -863,14 +882,20 @@ class Journey:
         require(isinstance(self.image_receipt, dict), "VM journey requires the externally pinned cw image receipt")
         pins = [self.image_receipt.get(field) for field in ("index_sha256", "manifest_sha256", "cw_sha256")]
         require(all(isinstance(pin, str) and re.fullmatch("[0-9a-f]{64}", pin) for pin in pins), "invalid cw image receipt")
-        sid = self.launch_command("boot-cw", ["/usr/bin/python3", "-I", "-B", "-c", BOOT_ASSET_PROBE, *pins])
+        _, runtime = self.data("env", "--local", "runtime", "info", self.environment, "--output", "json", timeout=60)
+        require(runtime.get("environment_id") == self.environment, "runtime info reported another environment")
+        bootstrap = (runtime.get("selection") or {}).get("bootstrap_catalog_sha256")
+        require(isinstance(bootstrap, str) and re.fullmatch("[0-9a-f]{64}", bootstrap), "runtime info omitted its bound bootstrap")
+        sid = self.launch_command("boot-cw", ["/usr/bin/python3", "-I", "-B", "-c", BOOT_ASSET_PROBE, *pins, self.environment, bootstrap])
         _, waited = self.data("wait", self.environment, sid, "--timeout", "30s", "--output", "json", timeout=45)
         require(waited.get("eof") and (waited.get("session") or {}).get("exit_code") == 0,
                 "startup cw asset is not the root-owned read-only image payload")
         proof = json.loads(waited.get("output", ""))
-        require(proof == {"cw_sha256": pins[2], "image_manifest_sha256": pins[1], "read_only": True},
+        require(proof == {"cw_sha256": pins[2], "image_manifest_sha256": pins[1],
+                          "bootstrap_catalog_sha256": bootstrap, "selection_revision": 1,
+                          "read_only": True, "fixed_launcher_read_only": True},
                 "VM boot cw image identity changed")
-        self.check("preflight/image-derived-cw/root-owned/read-only/digest-pinned/before-first-agent")
+        self.check("preflight/image-derived-cw/root-owned/read-only/digest-pinned/bootstrap-bound/readonly-launcher/before-first-agent")
         if self.synthetic:
             code, output = self.guest("agents", (
                 'for name in codex claude; do path=$(command -v "$name") || '

@@ -952,6 +952,9 @@ run_paths_case cli_makefile pull_request refs/pull/1521/head false \
 run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   scripts/dev/test-cli-host.py
+run_paths_case cli_host_update_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-cli-update.py
 run_paths_case cli_agent_peer_fixture pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   scripts/dev/fixtures/agent-peer.py

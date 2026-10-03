@@ -858,7 +858,7 @@ if [ "$event_selected" = false ]; then
         select_token ios
         recognized=true
         ;;
-      apps/cli/Makefile|scripts/dev/test-cli-host.py|scripts/dev/test-native-managed-startup.py|scripts/dev/fixtures/agent-peer.py)
+      apps/cli/Makefile|scripts/dev/test-cli-host.py|scripts/dev/test-cli-update.py|scripts/dev/test-native-managed-startup.py|scripts/dev/fixtures/agent-peer.py)
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_cli_bin
