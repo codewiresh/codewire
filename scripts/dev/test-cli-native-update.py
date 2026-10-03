@@ -358,8 +358,8 @@ class HostCustody:
                     and state.parent.parent.name == "vms" and state.parent.parent.parent.name == "engine"
                     and path == state.parent.parent.parent.parent / "runners" / f"{environment}.sock",
                     "host custody paths do not select this environment's canonical VM and runner")
-            raw, self.state_stamp = regular(path_arg(state), MAX_JSON, private_parent=True)
-            self.state_path = path_arg(state)
+            raw, self.state_stamp = regular(state, MAX_JSON, private_parent=True)
+            self.state_path = state
             value = producer.parse_json(raw)
             require(value["vm_id"] == environment and value["phase"] == "running"
                     and type(value["generation"]) is int and value["generation"] > 0,
@@ -1452,6 +1452,34 @@ def contract_tests(producer=None, image=None):
                 with self.assertRaises(Failure):
                     regular(target,64)
                 self.assertEqual(target.read_bytes(),b"sentinel")
+
+        def test_canonical_host_custody_paths_reach_the_process_boundary(self):
+            current = sys.modules[__name__]
+            class ProcessBoundary(Exception):
+                pass
+
+            environment = "00000000-0000-4000-8000-000000000001"
+            with tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                state = root / "engine" / "vms" / environment / "state.json"
+                state.parent.mkdir(parents=True, mode=0o700)
+                runner = root / "runners" / f"{environment}.sock"
+                runner.parent.mkdir(mode=0o700)
+                expected = {"pid": 42}
+                state.write_bytes(producer.canonical({"vm_id": environment, "phase": "running",
+                                                     "generation": 1, "process": expected}))
+                state.chmod(0o600)
+                with mock.patch.object(current, "Process", side_effect=ProcessBoundary) as process:
+                    # Actual lexical and descriptor/file admission; the kernel
+                    # process boundary is injected, so this proves no VM custody.
+                    with self.assertRaises(ProcessBoundary):
+                        HostCustody(str(state), str(runner), environment, producer)
+                    process.assert_called_once_with(42, expected=expected)
+                    process.reset_mock()
+                    state.parent.chmod(0o755)
+                    with self.assertRaisesRegex(Failure, "custody input parent"):
+                        HostCustody(str(state), str(runner), environment, producer)
+                    process.assert_not_called()
 
         def test_unknown_request_is_not_resent(self):
             value = object.__new__(Journey)

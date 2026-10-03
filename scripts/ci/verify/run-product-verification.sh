@@ -532,6 +532,9 @@ run_rust() {
     run_rust_packages rust_pkg_
   fi
   rust_shard features || return 0
+  if selected rust_workspace || selected rust_pkg_codewire_cli || selected rust_pkg_codewire_cli_bin; then
+    python3 -B scripts/ci/tests/test-cli-update-mesh-endpoints.py
+  fi
   if selected rust_workspace || selected rust_pkg_codewire_cli \
       || selected rust_pkg_codewire_cli_bin || selected rust_pkg_codewire_admin_proto \
       || selected rust_pkg_codewire_proto; then
@@ -639,6 +642,8 @@ run_transport() {
   if selected transport_pkg_codewire_local_vmm || selected transport_pkg_codewire_vmm_guest_probe; then
     python3 -B scripts/dev/test-cw-runtime-image.py
     python3 -B scripts/dev/test-cli-native-managed.py --self-test
+    python3 -B scripts/dev/test-cli-native-update.py --self-test
+    python3 -B scripts/ci/tests/test-native-managed-update-entrypoint.py
   fi
   if selected transport_pkg_codewire_local_vmm; then
     crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh

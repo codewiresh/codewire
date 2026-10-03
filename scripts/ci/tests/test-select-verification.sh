@@ -955,6 +955,9 @@ run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
 run_paths_case cli_host_update_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   scripts/dev/test-cli-update.py
+run_paths_case cli_host_update_port_regression pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/ci/tests/test-cli-update-mesh-endpoints.py
 run_paths_case cli_agent_peer_fixture pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   scripts/dev/fixtures/agent-peer.py
@@ -967,6 +970,9 @@ run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false
 run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-update.py
+run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/ci/tests/test-native-managed-update-entrypoint.py
 run_paths_case cli_native_managed_artifact pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
   scripts/dev/build-native-managed-agent.py

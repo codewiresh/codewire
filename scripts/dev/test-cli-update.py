@@ -101,6 +101,22 @@ def descendants(pid):
 
 class Journey(host.Journey):
     def __init__(self, a, b, mesh):
+        self.mesh_arguments = []
+        if mesh:
+            # Match the retained-helper fixture: reserve both distinct loopback
+            # endpoints together, then reuse them through selection and restart.
+            with (
+                socket.socket(socket.AF_INET, socket.SOCK_STREAM) as mesh_listener,
+                socket.socket(socket.AF_INET, socket.SOCK_STREAM) as derp_listener,
+            ):
+                mesh_listener.bind(("127.0.0.1", 0))
+                derp_listener.bind(("127.0.0.1", 0))
+                mesh_address = f"127.0.0.1:{mesh_listener.getsockname()[1]}"
+                derp_address = f"127.0.0.1:{derp_listener.getsockname()[1]}"
+            self.mesh_arguments = [
+                "--base-url", f"http://{mesh_address}", "--listen", mesh_address,
+                "--derp-url", f"http://{derp_address}", "--derp-listen", derp_address,
+            ]
         super().__init__(a[0] / "cw", False)
         # Synthetic peers must not inherit provider or other ambient secrets.
         self.env = {key: value for key, value in self.env.items() if key in (
@@ -254,7 +270,7 @@ class Journey(host.Journey):
             pending.difference_update(ready)
 
     def mesh_up(self, identity):
-        report = self.call("mesh", "up", "--output", "json", data=True)
+        report = self.call("mesh", "up", *self.mesh_arguments, "--output", "json", data=True)
         assert report["started"], report
         self.mesh_started = True
         runtime = json.loads((self.root / "mesh" / "mesh_runtime.json").read_text())
@@ -279,7 +295,7 @@ class Journey(host.Journey):
     def verify_mesh(self):
         if not self.mesh:
             return
-        report = self.call("mesh", "up", "--output", "json", data=True)
+        report = self.call("mesh", "up", *self.mesh_arguments, "--output", "json", data=True)
         assert not report["started"], "selection restarted a retained helper"
         runtime = json.loads((self.root / "mesh" / "mesh_runtime.json").read_text())
         assert runtime == self.mesh_original, "selection changed helper custody/configuration"
