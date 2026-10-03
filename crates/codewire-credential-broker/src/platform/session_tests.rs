@@ -1,7 +1,7 @@
 use super::*;
 use codewire_access::{AccessProfileId, CredentialId, EnvironmentId, GrantProfile, OwnerId};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
@@ -277,6 +277,12 @@ struct DescriptionsAuthority {
     session: Mutex<PlatformRuntimeSession>,
     descriptions: Mutex<Vec<DerivedGrant>>,
     description_calls: AtomicUsize,
+    /// When set, each grant evaluation waits for one `gate` permit, so a test
+    /// can hold leases inside their authority work.
+    gated: AtomicBool,
+    gate: tokio::sync::Semaphore,
+    inside: AtomicUsize,
+    most_inside: AtomicUsize,
 }
 
 #[async_trait]
@@ -291,6 +297,12 @@ impl PlatformRuntimeAuthority for DescriptionsAuthority {
     ) -> Result<Vec<DerivedGrant>, PlatformRuntimeError> {
         self.description_calls.fetch_add(1, Ordering::SeqCst);
         assert!(expected.same_binding(&self.session.lock().unwrap()));
+        if self.gated.load(Ordering::SeqCst) {
+            let inside = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most_inside.fetch_max(inside, Ordering::SeqCst);
+            self.gate.acquire().await.unwrap().forget();
+            self.inside.fetch_sub(1, Ordering::SeqCst);
+        }
         Ok(self.descriptions.lock().unwrap().clone())
     }
 }
@@ -325,6 +337,10 @@ impl ClosedDatabaseFixture {
             session: Mutex::new(session),
             descriptions: Mutex::new(descriptions),
             description_calls: AtomicUsize::new(0),
+            gated: AtomicBool::new(false),
+            gate: tokio::sync::Semaphore::new(0),
+            inside: AtomicUsize::new(0),
+            most_inside: AtomicUsize::new(0),
         });
         let adapter =
             PlatformBrokerLeaseProvider::connect(authority.clone(), credentials, profiles)
@@ -422,8 +438,9 @@ async fn admission_timing_counts_each_authority_grant_and_record_call() {
             timings.material_read.count,
         )
     };
-    // One authority check, one grant evaluation and one record read, which
-    // fails on the closed pool before a second check or any material read.
+    // Admission and a lease each begin with one authority check, one grant
+    // evaluation and one record read. That read fails on the closed pool, before
+    // any material read or later authority check.
     let (admitted, timings) = crate::timing::measure(
         fixture
             .adapter
@@ -446,6 +463,115 @@ async fn admission_timing_counts_each_authority_grant_and_record_call() {
         fixture.authority.description_calls.load(Ordering::SeqCst),
         2
     );
+}
+
+fn lease_operation(
+    adapter: &PlatformBrokerLeaseProvider<DescriptionsAuthority>,
+) -> impl Future<Output = Result<PlatformCredentialLease, BrokerLeaseError>> + '_ {
+    adapter.lease_operation(
+        Uuid::new_v4(),
+        CapabilitySlot::codex(),
+        permission().operation,
+        permission().route,
+    )
+}
+
+#[tokio::test]
+async fn lease_budget_bounds_concurrent_leases_and_queues_the_rest() {
+    const CAPACITY: usize = 2;
+    const LEASES: usize = 5;
+    let session = owner_local(true);
+    let valid = description(&session);
+    let mut fixture = ClosedDatabaseFixture::new(session, vec![valid]).await;
+    let budget = LeaseBudget::new(CAPACITY);
+    fixture.adapter.leases = Some(budget.clone());
+    let authority = fixture.authority.clone();
+    authority.gated.store(true, Ordering::SeqCst);
+    let leases = futures::future::join_all((0..LEASES).map(|_| lease_operation(&fixture.adapter)));
+    let release = async {
+        for released in 0..LEASES {
+            // Quiescent: the budget is full of leases inside authority work
+            // and every other lease is queued for a slot, not failed.
+            let inside = CAPACITY.min(LEASES - released);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while authority.inside.load(Ordering::SeqCst) != inside
+                    || budget.available() != CAPACITY - inside
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("leases did not settle inside the budget");
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(authority.inside.load(Ordering::SeqCst), inside);
+            assert_eq!(
+                authority.description_calls.load(Ordering::SeqCst),
+                released + inside
+            );
+            authority.gate.add_permits(1);
+        }
+    };
+    let (results, ()) = tokio::join!(leases, release);
+    // Every lease ran its authority work, then failed only on the closed pool.
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result, Err(BrokerLeaseError::Unavailable)))
+    );
+    assert_eq!(authority.description_calls.load(Ordering::SeqCst), LEASES);
+    assert_eq!(authority.most_inside.load(Ordering::SeqCst), CAPACITY);
+    assert_eq!(budget.available(), CAPACITY);
+}
+
+#[tokio::test]
+async fn a_queued_lease_waits_until_its_identity_expiry_and_no_longer() {
+    let (log, _guard) = crate::timing::tests::TimingLog::install();
+    let session = owner_local(true);
+    let expires_in = session.identity_expires_at_unix - unix_now().unwrap();
+    let valid = description(&session);
+    let mut fixture = ClosedDatabaseFixture::new(session, vec![valid]).await;
+    let budget = LeaseBudget::new(1);
+    let held = Arc::clone(&budget.permits).try_acquire_owned().unwrap();
+    fixture.adapter.leases = Some(budget.clone());
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let (leased, timings) = crate::timing::measure(lease_operation(&fixture.adapter)).await;
+    let waited = started.elapsed();
+    assert!(matches!(leased, Err(BrokerLeaseError::Unavailable)));
+    assert!(waited > Duration::from_secs(expires_in.saturating_sub(2)));
+    assert!(waited <= Duration::from_secs(expires_in));
+    // Timing uses wall-clock time, which this paused test does not advance.
+    assert_eq!(timings.lease_wait.count, 1);
+    // It never started authority, database or KEK work.
+    assert_eq!(timings.authority.count, 0);
+    assert_eq!(
+        fixture.authority.description_calls.load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(fixture.kek.unwrap_calls.load(Ordering::SeqCst), 0);
+    let rejected: Vec<_> = log
+        .lines()
+        .into_iter()
+        .inspect(crate::timing::tests::assert_secret_free)
+        .filter(|line| line["fields"]["event"] == "capacity_rejected")
+        .map(|line| line["fields"].clone())
+        .collect();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["limit"], "broker_leases");
+    assert_eq!(rejected[0]["operation"], "lease");
+    assert_eq!(rejected[0]["capacity"], 1);
+    assert_eq!(rejected[0]["in_use"], 1);
+    // A closed budget (service shutdown) fails a lease at once.
+    budget.close();
+    let started = tokio::time::Instant::now();
+    assert!(matches!(
+        lease_operation(&fixture.adapter).await,
+        Err(BrokerLeaseError::Unavailable)
+    ));
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    drop(held);
 }
 
 #[tokio::test]
@@ -667,4 +793,84 @@ fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
         }
         assert!(!session.same_authority(&changed), "{attack}");
     }
+}
+
+#[test]
+fn lease_authority_is_the_same_response_apart_from_expiry() {
+    let local = owner_local(true);
+    let (gateway, workspace) = hosted_pods();
+    let session = PlatformRuntimeSession::new(
+        gateway,
+        workspace,
+        GrantContext {
+            placement: GrantPlacement::Platform,
+            ..local.context.clone()
+        },
+        local.credential_owner.clone(),
+        local.identity_expires_at_unix,
+    )
+    .unwrap();
+    for changed_expiry in [
+        session.identity_expires_at_unix - 10,
+        session.identity_expires_at_unix + 3_600,
+    ] {
+        let mut renewed = session.clone();
+        renewed.identity_expires_at_unix = changed_expiry;
+        assert!(session.same_except_expiry(&renewed));
+    }
+    for attack in [
+        "authorized set cleared",
+        "authorized set replaced",
+        "environment",
+        "generation",
+        "placement",
+        "user",
+        "organization",
+        "personal",
+        "gateway",
+        "workspace",
+        "identity kind",
+        "owner",
+    ] {
+        let mut changed = session.clone();
+        match attack {
+            "authorized set cleared" => changed.context.authorized_credentials.clear(),
+            // A GitHub reconnect: the hosted binding still matches.
+            "authorized set replaced" => {
+                changed.context.authorized_credentials =
+                    [CredentialId::parse(Uuid::new_v4().to_string()).unwrap()].into()
+            }
+            "environment" => {
+                changed.context.environment_id =
+                    EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap()
+            }
+            "generation" => changed.context.environment_generation += 1,
+            "placement" => changed.context.placement = GrantPlacement::PlatformToLocal,
+            "user" => changed.context.user_id = OwnerId::parse("changed-owner").unwrap(),
+            "organization" => {
+                changed.context.organization_id = Some(OwnerId::parse("changed-org").unwrap())
+            }
+            "personal" => {
+                changed.context.allow_personal_credentials =
+                    !changed.context.allow_personal_credentials
+            }
+            "gateway" => changed.gateway_mut().uid = Uuid::new_v4(),
+            "workspace" => changed.workspace_mut().uid = Uuid::new_v4(),
+            "identity kind" => changed.identity = local.identity.clone(),
+            "owner" => changed.credential_owner = Owner::User(OwnerId::parse("other").unwrap()),
+            _ => unreachable!(),
+        }
+        if attack.starts_with("authorized set") {
+            assert!(session.same_authority(&changed), "{attack}");
+        }
+        assert!(!session.same_except_expiry(&changed), "{attack}");
+    }
+    // An owner-local selection is held to the same exact response.
+    let mut renewed = local.clone();
+    renewed.identity_expires_at_unix += 3_600;
+    assert!(local.same_except_expiry(&renewed));
+    let mut replaced = local.clone();
+    replaced.context.authorized_credentials =
+        [CredentialId::parse(Uuid::new_v4().to_string()).unwrap()].into();
+    assert!(!local.same_except_expiry(&replaced));
 }

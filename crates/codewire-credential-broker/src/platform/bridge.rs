@@ -31,7 +31,9 @@ use tokio_util::task::TaskTracker;
 use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 use uuid::Uuid;
 
-use super::{PlatformBrokerLeaseProvider, PlatformRuntimeAuthority, PlatformRuntimeError};
+use super::{
+    LeaseBudget, PlatformBrokerLeaseProvider, PlatformRuntimeAuthority, PlatformRuntimeError,
+};
 use crate::timing::{self, Phase};
 use crate::{
     AdmittedCredentialBridge, BrokerBridgeError, BrokerLeaseError, BrokerUpstreamTransport,
@@ -40,7 +42,18 @@ use crate::{
 };
 
 /// Admission and active/draining epochs share one process-wide service budget.
-pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS: usize = 8;
+/// Each hosted Sandbox with credentials holds one long-lived epoch (two while
+/// its gateway rotates), so this is the replica's Sandbox ceiling. An idle
+/// epoch is one TLS connection and its tasks; its response buffer is bounded.
+pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS: usize = 1024;
+/// Concurrent leases across all epochs: authority checks, grant and record
+/// reads and the protected-material read (SQL and KEK unwrap). A lease runs
+/// its statements one at a time, so it holds at most one of the credential
+/// service's 16 pool connections and none during its Kubernetes reads or the
+/// unwrap. Sixty-four leases queue at most four per connection for a few
+/// statement times, far inside the pool's 5-second acquire timeout, whose
+/// expiry would end the epoch, and bound Kubernetes and OpenBao concurrency.
+pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_BUFFER: usize = 32;
 
@@ -90,6 +103,8 @@ struct ServiceState<A, U> {
     upstream: U,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     permits: Arc<Semaphore>,
+    stream_capacity: usize,
+    leases: LeaseBudget,
     accepting: Arc<Mutex<bool>>,
     workers: TaskTracker,
     shutdown: CancellationToken,
@@ -122,6 +137,26 @@ where
         profiles: PlatformAccessProfileStore,
         upstream: U,
     ) -> Self {
+        Self::with_limits(
+            authenticator,
+            credentials,
+            profiles,
+            upstream,
+            PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS,
+            PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES,
+        )
+    }
+
+    /// The production limits come only from [`Self::new`]; tests use this
+    /// seam to reach a full budget without opening a thousand streams.
+    fn with_limits(
+        authenticator: Arc<A>,
+        credentials: Arc<PlatformCredentialStore>,
+        profiles: PlatformAccessProfileStore,
+        upstream: U,
+        streams: usize,
+        leases: usize,
+    ) -> Self {
         Self {
             state: Arc::new(ServiceState {
                 authenticator,
@@ -129,7 +164,9 @@ where
                 profiles,
                 upstream,
                 github_app_authorization: None,
-                permits: Arc::new(Semaphore::new(PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS)),
+                permits: Arc::new(Semaphore::new(streams)),
+                stream_capacity: streams,
+                leases: LeaseBudget::new(leases),
                 accepting: Arc::new(Mutex::new(true)),
                 workers: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
@@ -226,7 +263,11 @@ where
             }
         })
         .await;
-        timing::epoch_admission(admission_outcome(&admission), &timings);
+        timing::epoch_admission(
+            admission_outcome(&admission),
+            self.streams_in_use(),
+            &timings,
+        );
         let Admission {
             broker,
             admitted,
@@ -259,6 +300,8 @@ where
             *accepting = false;
             self.state.workers.close();
         }
+        // Queued leases fail now; leases already holding a slot finish.
+        self.state.leases.close();
         self.state.shutdown.cancel();
     }
 
@@ -285,12 +328,17 @@ where
                 timing::capacity_rejected(
                     "bridge_streams",
                     "epoch",
-                    PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS,
-                    PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS
-                        .saturating_sub(self.state.permits.available_permits()),
+                    self.state.stream_capacity,
+                    self.streams_in_use(),
                 );
                 Status::resource_exhausted("platform credential bridge capacity reached")
             })
+    }
+
+    fn streams_in_use(&self) -> usize {
+        self.state
+            .stream_capacity
+            .saturating_sub(self.state.permits.available_permits())
     }
 
     fn spawn_worker(
@@ -316,13 +364,17 @@ where
         authority: Arc<B>,
         input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
     ) -> Result<Admission<B, U>, Status> {
-        let provider = PlatformBrokerLeaseProvider::connect(
-            authority,
-            Arc::clone(&self.state.credentials),
-            self.state.profiles.clone(),
-        )
-        .await
-        .map_err(runtime_status)?;
+        let provider = PlatformBrokerLeaseProvider {
+            // Every epoch of this service shares its one lease budget.
+            leases: Some(self.state.leases.clone()),
+            ..PlatformBrokerLeaseProvider::connect(
+                authority,
+                Arc::clone(&self.state.credentials),
+                self.state.profiles.clone(),
+            )
+            .await
+            .map_err(runtime_status)?
+        };
         #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
         let provider = PlatformBrokerLeaseProvider {
             ssh: self.state.ssh.as_ref().map(|ssh| ssh.epoch()),

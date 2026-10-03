@@ -449,15 +449,16 @@ async fn restricted_role_leases_refreshes_and_admits_only_the_published_generati
     let result = async {
         let (initial, timings) = crate::timing::measure(lease(&f.adapter)).await;
         let initial = initial?;
-        // Today's lease: two admissions, each two authority checks, one grant
-        // evaluation and one record read, around one material read.
+        // One authority check, a grant evaluation and record read, the
+        // material read, a second grant evaluation and record read, then the
+        // final authority check.
         ensure!(
             (
                 timings.authority.count,
                 timings.grants.count,
                 timings.record.count,
                 timings.material_read.count
-            ) == (4, 2, 2, 1)
+            ) == (2, 2, 2, 1)
         );
         ensure!(
             initial.grant().expires_at_unix == Some(f.adapter.session.identity_expires_at_unix)
@@ -574,11 +575,36 @@ async fn unwrap_rechecks_replacement_revocation_rebinding_stop_generation_and_ha
     Ok(())
 }
 
+/// Change one coordinate of the synthetic runtime authority's responses.
+fn change_authority(session: &mut PlatformRuntimeSession, mutation: &str) {
+    match mutation {
+        "gateway" => session.gateway_mut().uid = Uuid::new_v4(),
+        "workspace" => session.workspace_mut().uid = Uuid::new_v4(),
+        "policy" => session.context.authorized_credentials.clear(),
+        // As after the account deletes and reconnects a credential: the hosted
+        // binding is unchanged, but a different credential is authorized.
+        "authorized set replaced" => {
+            session.context.authorized_credentials =
+                [CredentialId::parse(Uuid::new_v4().to_string()).unwrap()].into()
+        }
+        "personal-policy" => session.context.allow_personal_credentials = false,
+        "expiry" => session.identity_expires_at_unix = 0,
+        _ => unreachable!(),
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn unwrap_rechecks_authenticated_gateway_workspace_policy_and_identity_expiry() -> Result<()>
 {
-    for mutation in ["gateway", "workspace", "policy", "expiry"] {
+    for mutation in [
+        "gateway",
+        "workspace",
+        "policy",
+        "authorized set replaced",
+        "personal-policy",
+        "expiry",
+    ] {
         let f = Fixture::create().await?;
         let result = async {
             f.provider.unwrap_gate.arm();
@@ -587,13 +613,8 @@ async fn unwrap_rechecks_authenticated_gateway_workspace_policy_and_identity_exp
                 async move { lease(&adapter).await }
             });
             f.provider.unwrap_gate.wait().await?;
-            f.authority.change(|session| match mutation {
-                "gateway" => session.gateway_mut().uid = Uuid::new_v4(),
-                "workspace" => session.workspace_mut().uid = Uuid::new_v4(),
-                "policy" => session.context.authorized_credentials.clear(),
-                "expiry" => session.identity_expires_at_unix = 0,
-                _ => unreachable!(),
-            });
+            f.authority
+                .change(|session| change_authority(session, mutation));
             f.provider.unwrap_gate.release();
             ensure!(
                 matches!(finish_task(operation).await?, Err(BrokerLeaseError::Denied)),
@@ -757,6 +778,110 @@ async fn final_lease_and_started_admission_recheck_pod_identity_after_sql_lock_w
             );
             if phase == "start" {
                 ensure!(f.state().await? == OAuthRefreshState::Unknown);
+            }
+            Ok(())
+        }
+        .await;
+        f.finish(result).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn lease_denies_authority_changed_before_its_first_grant_evaluation() -> Result<()> {
+    for mutation in [
+        "gateway",
+        "workspace",
+        "policy",
+        "authorized set replaced",
+        "expiry",
+        "personal-policy",
+    ] {
+        let f = Fixture::create().await?;
+        let result = async {
+            // Hold the environment row: the lease's first grant evaluation
+            // waits for it after the lease's first runtime authority check.
+            let mut holder = f.db.pool.begin().await?;
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *holder)
+                .await?;
+            sqlx::query("SELECT id FROM environments WHERE id=$1 FOR UPDATE")
+                .bind(f.context.environment_id.as_str())
+                .fetch_one(&mut *holder)
+                .await?;
+            let unwraps = f.provider.unwrap_calls.load(Ordering::SeqCst);
+            let operation = spawn({
+                let adapter = f.adapter.clone();
+                async move { lease(&adapter).await }
+            });
+            wait_for_database_blocker(&f.db.pool, pid).await?;
+            f.authority
+                .change(|session| change_authority(session, mutation));
+            holder.commit().await?;
+            ensure!(
+                matches!(finish_task(operation).await?, Err(BrokerLeaseError::Denied)),
+                "{mutation} released material for a changed authority"
+            );
+            // Both grant evaluations use the first response, so only the final
+            // check sees the change. Material was unwrapped once and withheld.
+            ensure!(
+                f.provider.unwrap_calls.load(Ordering::SeqCst) == unwraps + 1,
+                "{mutation}: the lease did not reach its final authority check"
+            );
+            Ok(())
+        }
+        .await;
+        f.finish(result).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn final_lease_authority_denies_any_change_and_only_narrows_expiry() -> Result<()> {
+    for mutation in [
+        "gateway",
+        "workspace",
+        "policy",
+        "authorized set replaced",
+        "expiry",
+        "shorter expiry",
+        "longer expiry",
+    ] {
+        let f = Fixture::create().await?;
+        let result = async {
+            let connected = f.adapter.session.identity_expires_at_unix;
+            let unwraps = f.provider.unwrap_calls.load(Ordering::SeqCst);
+            // The lease's second runtime authority check is its last: it
+            // follows both grant evaluations and the only unwrap.
+            f.authority.gate.arm(2);
+            let operation = spawn({
+                let adapter = f.adapter.clone();
+                async move { lease(&adapter).await }
+            });
+            f.authority.gate.wait().await?;
+            ensure!(f.provider.unwrap_calls.load(Ordering::SeqCst) == unwraps + 1);
+            f.authority.change(|session| match mutation {
+                "shorter expiry" => session.identity_expires_at_unix = connected - 600,
+                "longer expiry" => session.identity_expires_at_unix = connected + 600,
+                _ => change_authority(session, mutation),
+            });
+            f.authority.gate.release();
+            let leased = finish_task(operation).await?;
+            match mutation {
+                "shorter expiry" => ensure!(
+                    leased?.grant().expires_at_unix == Some(connected - 600),
+                    "a shorter final expiry did not narrow the lease"
+                ),
+                "longer expiry" => ensure!(
+                    leased?.grant().expires_at_unix == Some(connected),
+                    "a longer final expiry extended the lease"
+                ),
+                _ => ensure!(
+                    matches!(leased, Err(BrokerLeaseError::Denied)),
+                    "{mutation} released material for a changed authority"
+                ),
             }
             Ok(())
         }

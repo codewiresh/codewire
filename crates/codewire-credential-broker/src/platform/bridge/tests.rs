@@ -31,6 +31,9 @@ use crate::platform::{PlatformPodIdentity, PlatformRuntimeSession};
 use crate::{BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+/// A full stream budget small enough to open; production limits come from
+/// `new` and are checked separately.
+const TEST_STREAMS: usize = 4;
 
 #[derive(Default)]
 struct Gate {
@@ -159,7 +162,16 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// The production limits.
     async fn new() -> Self {
+        Self::with_limits(
+            PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS,
+            PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES,
+        )
+        .await
+    }
+
+    async fn with_limits(streams: usize, leases: usize) -> Self {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://synthetic:synthetic@127.0.0.1:1/synthetic")
             .unwrap();
@@ -204,11 +216,13 @@ impl Fixture {
             kek.clone(),
             builtin_provider_catalog(),
         ));
-        let service = Service::new(
+        let service = Service::with_limits(
             authenticator.clone(),
             store,
             PlatformAccessProfileStore::new(pool, builtin_provider_catalog()),
             upstream.clone(),
+            streams,
+            leases,
         );
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
@@ -282,7 +296,7 @@ impl Fixture {
             self.service
                 .state
                 .permits
-                .acquire_many(PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS as u32),
+                .acquire_many(self.service.state.stream_capacity as u32),
         )
         .await
         .unwrap()
@@ -557,10 +571,10 @@ async fn original_verified_expiry_ends_an_idle_epoch_without_extension() {
 }
 
 #[tokio::test]
-async fn cloned_services_share_eight_slots_and_shutdown_closes_all_epochs() {
-    let fixture = Fixture::new().await;
+async fn cloned_services_share_stream_slots_and_shutdown_closes_all_epochs() {
+    let fixture = Fixture::with_limits(TEST_STREAMS, PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES).await;
     let mut streams = Vec::new();
-    for _ in 0..PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS {
+    for _ in 0..TEST_STREAMS {
         let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
         streams.push((input, response.unwrap().into_inner()));
     }
@@ -587,13 +601,13 @@ async fn cloned_services_share_eight_slots_and_shutdown_closes_all_epochs() {
 #[tokio::test]
 async fn admissions_and_capacity_rejections_write_secret_free_timing_lines() {
     let (log, _guard) = crate::timing::tests::TimingLog::install();
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::with_limits(TEST_STREAMS, PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES).await;
     let (input, denied) = fixture.open(Some("synthetic-deny"), fixture.ready()).await;
     assert_eq!(denied.unwrap_err().code(), Code::PermissionDenied);
     drop(input);
     fixture.slots_released().await;
     let mut streams = Vec::new();
-    for _ in 0..PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS {
+    for _ in 0..TEST_STREAMS {
         let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
         streams.push((input, response.unwrap().into_inner()));
     }
@@ -616,26 +630,24 @@ async fn admissions_and_capacity_rejections_write_secret_free_timing_lines() {
             .collect()
     };
     let admissions = fields("epoch_admission");
-    assert_eq!(admissions.len(), PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS + 1);
+    assert_eq!(admissions.len(), TEST_STREAMS + 1);
     assert_eq!(admissions[0]["outcome"], "denied");
     assert_eq!(admissions[0]["authority_checks"], 0);
-    for admitted in &admissions[1..] {
+    // A refused admission still counts its own slot until it returns.
+    assert_eq!(admissions[0]["streams_in_use"], 1);
+    for (live, admitted) in admissions[1..].iter().enumerate() {
         assert_eq!(admitted["outcome"], "admitted");
         // Connect, then the recheck after the guest's Ready frame.
         assert_eq!(admitted["authority_checks"], 2);
+        // Every earlier epoch is still live, plus this one.
+        assert_eq!(admitted["streams_in_use"], live + 1);
     }
     let rejected = fields("capacity_rejected");
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0]["limit"], "bridge_streams");
     assert_eq!(rejected[0]["operation"], "epoch");
-    assert_eq!(
-        rejected[0]["capacity"],
-        PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS
-    );
-    assert_eq!(
-        rejected[0]["in_use"],
-        PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS
-    );
+    assert_eq!(rejected[0]["capacity"], TEST_STREAMS);
+    assert_eq!(rejected[0]["in_use"], TEST_STREAMS);
     assert!(fields("proxied_request").is_empty());
 }
 
@@ -726,4 +738,159 @@ fn authentication_errors_have_no_input_or_source_chain() {
         assert!(!format!("{error:?} {error}").contains("synthetic-secret-marker"));
         assert!(!error.status().message().contains("synthetic-secret-marker"));
     }
+}
+
+#[tokio::test]
+async fn production_limits_admit_more_than_eight_epochs_and_shutdown_drains_them() {
+    const EPOCHS: usize = 12;
+    let fixture = Fixture::new().await;
+    assert_eq!(
+        fixture.service.state.stream_capacity,
+        PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS
+    );
+    assert_eq!(
+        fixture.service.state.leases.available(),
+        PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES
+    );
+    let mut streams = Vec::new();
+    for _ in 0..EPOCHS {
+        let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+        streams.push((input, response.unwrap().into_inner()));
+    }
+    assert_eq!(fixture.service.state.workers.len(), EPOCHS);
+    assert_eq!(fixture.service.streams_in_use(), EPOCHS);
+    fixture.service.clone().shutdown().await.unwrap();
+    for (input, mut output) in streams {
+        assert_eq!(
+            output.message().await.unwrap_err().code(),
+            Code::Unavailable
+        );
+        drop(input);
+    }
+    fixture.slots_released().await;
+    fixture.finish().await;
+}
+
+/// A request that passes validation and reaches `lease_operation`.
+fn leased_request() -> v1::CredentialBridgeGuestMessage {
+    v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+            v1::CredentialBridgeRequest {
+                capability_slot: "github".into(),
+                route: "github-api".into(),
+                request_id: Uuid::new_v4().to_string(),
+                method: "GET".into(),
+                path: "/user".into(),
+                query: String::new(),
+                headers: vec![v1::CredentialHttpHeader {
+                    name: "content-type".into(),
+                    value: b"application/json".to_vec(),
+                }],
+                body: vec![],
+            },
+        )),
+    }
+}
+
+/// Wait until the authority has been asked `calls` times in total.
+async fn authority_calls_reach(fixture: &Fixture, calls: usize) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while fixture.authenticator.authority.calls.load(Ordering::SeqCst) < calls {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_lease_waits_for_a_free_slot_instead_of_failing() {
+    let fixture = Fixture::with_limits(TEST_STREAMS, 1).await;
+    let held = Arc::clone(&fixture.service.state.leases.permits)
+        .try_acquire_owned()
+        .unwrap();
+    let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let mut output = response.unwrap().into_inner();
+    // Connect and the recheck after Ready.
+    authority_calls_reach(&fixture, 2).await;
+    input.send(leased_request()).await.unwrap();
+    // Queued: no answer and no authority work while the only slot is held.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), output.message())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture.authenticator.authority.calls.load(Ordering::SeqCst),
+        2
+    );
+    drop(held);
+    // The freed slot admits the queued lease, which reaches the authority and
+    // then fails only on the synthetic closed database.
+    let frame = tokio::time::timeout(TEST_TIMEOUT, output.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(frame.payload,
+        Some(v1::credential_bridge_host_message::Payload::ResponseFailure(failure))
+        if failure.reason == v1::CredentialBridgeFailureReason::Unavailable as i32));
+    assert_eq!(
+        fixture.authenticator.authority.calls.load(Ordering::SeqCst),
+        3
+    );
+    assert_eq!(
+        fixture.service.state.leases.available(),
+        1,
+        "the lease returned its slot"
+    );
+    drop((input, output));
+    fixture.slots_released().await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn shutdown_fails_queued_leases_and_still_drains() {
+    let fixture = Fixture::with_limits(TEST_STREAMS, 1).await;
+    let held = Arc::clone(&fixture.service.state.leases.permits)
+        .try_acquire_owned()
+        .unwrap();
+    let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let mut output = response.unwrap().into_inner();
+    authority_calls_reach(&fixture, 2).await;
+    input.send(leased_request()).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), output.message())
+            .await
+            .is_err()
+    );
+    // The test still holds the only slot: shutdown must not wait for it.
+    tokio::time::timeout(TEST_TIMEOUT, fixture.service.clone().shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    // Either a failure frame for the queued request or only the terminal
+    // status may arrive first; the epoch always ends unavailable.
+    let terminal = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, output.message())
+            .await
+            .unwrap()
+        {
+            Ok(Some(frame)) => assert!(matches!(frame.payload,
+                Some(v1::credential_bridge_host_message::Payload::ResponseFailure(failure))
+                if failure.reason == v1::CredentialBridgeFailureReason::Unavailable as i32)),
+            Ok(None) => panic!("epoch ended without a terminal status"),
+            Err(status) => break status,
+        }
+    };
+    assert_eq!(terminal.code(), Code::Unavailable);
+    // The queued lease never did authority, database or KEK work.
+    assert_eq!(
+        fixture.authenticator.authority.calls.load(Ordering::SeqCst),
+        2
+    );
+    assert!(fixture.service.state.workers.is_empty());
+    drop((input, output, held));
+    fixture.slots_released().await;
+    fixture.finish().await;
 }

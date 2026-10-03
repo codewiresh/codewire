@@ -265,6 +265,7 @@ impl<A: PlatformRuntimeAuthority + 'static> PlatformBrokerLeaseProvider<A> {
             instance_id: self.instance_id,
             credentials: self.credentials.clone(),
             profiles: self.profiles.clone(),
+            leases: self.leases.clone(),
             ssh: None,
         };
         let admission = scope.clone();

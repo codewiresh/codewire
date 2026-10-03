@@ -47,6 +47,8 @@ pub enum Phase {
     TokenReview,
     /// An epoch's wait for the guest's Ready frame.
     Ready,
+    /// One lease's wait for a slot in the service's concurrent-lease budget.
+    LeaseWait,
 }
 
 /// How often one phase ran and its summed wall time.
@@ -81,6 +83,7 @@ pub struct Timings {
     pub refresh: Sample,
     pub token_review: Sample,
     pub ready: Sample,
+    pub lease_wait: Sample,
 }
 
 impl Timings {
@@ -95,6 +98,7 @@ impl Timings {
             Phase::Refresh => &mut self.refresh,
             Phase::TokenReview => &mut self.token_review,
             Phase::Ready => &mut self.ready,
+            Phase::LeaseWait => &mut self.lease_wait,
         }
     }
 
@@ -232,6 +236,7 @@ pub(crate) fn proxied_request(
         outcome,
         status,
         total_ms = ms(timings.total),
+        lease_wait_ms = ms(timings.lease_wait.elapsed),
         authority_checks = timings.authority.count,
         authority_ms = ms(timings.authority.elapsed),
         resolves = timings.resolve.count,
@@ -255,12 +260,15 @@ pub(crate) fn proxied_request(
 }
 
 /// One line per platform bridge epoch admission. `outcome` is a closed label.
+/// `streams_in_use` counts the service's held stream slots, this one included:
+/// live, admitting and draining epochs.
 #[cfg(feature = "platform")]
-pub(crate) fn epoch_admission(outcome: &'static str, timings: &Timings) {
+pub(crate) fn epoch_admission(outcome: &'static str, streams_in_use: usize, timings: &Timings) {
     tracing::info!(
         target: TARGET,
         event = "epoch_admission",
         outcome,
+        streams_in_use,
         total_ms = ms(timings.total),
         token_reviews = timings.token_review.count,
         token_review_ms = ms(timings.token_review.elapsed),
@@ -400,6 +408,7 @@ pub(crate) mod tests {
         "outcome",
         "status",
         "total_ms",
+        "lease_wait_ms",
         "authority_checks",
         "authority_ms",
         "resolves",
@@ -423,6 +432,7 @@ pub(crate) mod tests {
     const EPOCH_FIELDS: &[&str] = &[
         "event",
         "outcome",
+        "streams_in_use",
         "total_ms",
         "token_reviews",
         "token_review_ms",
@@ -474,7 +484,9 @@ pub(crate) mod tests {
         "failed",
         "bridge_streams",
         "bridge_in_flight",
+        "broker_leases",
         "epoch",
+        "lease",
         "http",
         "ssh",
         "projection",
@@ -606,6 +618,7 @@ pub(crate) mod tests {
         timings.material_read.add(1, millis(30));
         timings.unwrap.add(1, millis(12));
         timings.provider.add(1, millis(240));
+        timings.lease_wait.add(1, millis(7));
         let canonical = Uuid::new_v4().to_string();
         let response = Ok(BrokerHttpResponse::new(
             StatusCode::UNAUTHORIZED,
@@ -622,7 +635,7 @@ pub(crate) mod tests {
             &timings,
         );
         #[cfg(feature = "platform")]
-        epoch_admission("admitted", &timings);
+        epoch_admission("admitted", 9, &timings);
         capacity_rejected("bridge_in_flight", "http", 8, 8);
 
         let text = log.text();
@@ -645,11 +658,14 @@ pub(crate) mod tests {
         assert_eq!(first["unwrap_ms"], 12.0);
         assert_eq!(first["provider_connect_ttfb_ms"], 240.0);
         assert_eq!(first["refresh"], false);
+        assert_eq!(first["lease_wait_ms"], 7.0);
         let second = &lines[1]["fields"];
         assert_eq!(second["request_id"], Uuid::nil().to_string().as_str());
         assert_eq!(second["slot"], "invalid");
         assert_eq!(second["route"], "invalid");
         assert_eq!(second["outcome"], "denied");
         assert_eq!(second["status"], 0);
+        #[cfg(feature = "platform")]
+        assert_eq!(lines[2]["fields"]["streams_in_use"], 9);
     }
 }

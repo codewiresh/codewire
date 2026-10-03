@@ -37,7 +37,7 @@ use codewire_server_core::connect::ConnectAuthLayer;
 use codewire_server_core::http::AppBuilder;
 use codewire_tls::{ServerTlsFiles, TlsIncoming};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, PgPool};
+use sqlx::{ConnectOptions, Connection as _, PgPool};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -49,6 +49,8 @@ use crate::repositories::GithubRepositoryOwner;
 pub use config::CredentialServiceConfig;
 
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A pooled database connection idle this long is pinged before reuse.
+const DATABASE_REPROVE_AFTER_IDLE: Duration = Duration::from_secs(1);
 const TRANSPORT_GRACE: Duration = Duration::from_secs(5);
 
 /// Diagnostics when `RUST_LOG` is unset: closed runtime events plus the
@@ -102,10 +104,7 @@ pub async fn run(
         .disable_statement_logging();
     let pool = tokio::time::timeout(
         DATABASE_TIMEOUT,
-        PgPoolOptions::new()
-            .max_connections(16)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect_with(options),
+        database_pool_options().connect_with(options),
     )
     .await
     .map_err(|_| RuntimeError::Database)?
@@ -114,6 +113,36 @@ pub async fn run(
     // Every owner has drained before its underlying connection pool closes.
     pool.close().await;
     result
+}
+
+/// The credential database pool of the service and of its Kind fixture.
+fn database_pool_options() -> PgPoolOptions {
+    database_pool_options_reproving_after(DATABASE_REPROVE_AFTER_IDLE)
+}
+
+/// sqlx would ping every connection on every acquire, and one lease acquires
+/// many times. sqlx already pings each connection when it is released and
+/// closes it if that fails, so a connection idle for less than
+/// `reprove_after_idle` was proven live that recently and is used as is. A
+/// longer-idle one is pinged first; if the ping fails it is closed and
+/// replaced, and the caller never sees the failure.
+///
+/// A connection that dies within that window (a Postgres restart or failover
+/// during active use, which fails in-flight statements anyway) fails the one
+/// statement that next uses it and is then discarded on release. That lease
+/// fails as Unavailable, which ends that Sandbox's bridge epoch; its next
+/// request opens a new one.
+fn database_pool_options_reproving_after(reprove_after_idle: Duration) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(16)
+        .acquire_timeout(Duration::from_secs(5))
+        .test_before_acquire(false)
+        .before_acquire(move |connection, metadata| {
+            Box::pin(async move {
+                // A rejected connection is closed without logging the error.
+                Ok(metadata.idle_for < reprove_after_idle || connection.ping().await.is_ok())
+            })
+        })
 }
 
 async fn run_connected(
@@ -163,7 +192,9 @@ async fn run_connected(
     };
     // The platform process serves many environments. Resolve the finite product
     // destination families; each operation still requires its exact profile lease.
-    let upstream = ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
+    // This long-lived process is the only broker that keeps provider
+    // connections alive between requests; per-environment brokers do not.
+    let upstream = ProviderHttpsTransport::resolve_pooled(&std::collections::BTreeSet::from([
         HttpProvider::OpenAiApiKey,
         HttpProvider::CodexOAuth,
         HttpProvider::AnthropicApiKey,
