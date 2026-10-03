@@ -289,7 +289,12 @@ async fn an_enabled_image_cache_without_its_daemon_set_writes_nothing() {
 async fn pools_are_held_until_the_controller_shows_claim_safety() {
     let mut legacy_shadow = reconciled_shadow();
     legacy_shadow["status"] = json!({ "replicas": 0, "readyReplicas": 0 });
-    for pools in [vec![], vec![legacy_shadow]] {
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+        .unwrap()
+        .unwrap();
+    let mut empty_pool = config.pools[0].objects.pool.clone();
+    empty_pool["spec"]["replicas"] = json!(0);
+    for pools in [vec![legacy_shadow], vec![empty_pool]] {
         let cluster = Arc::new(Mutex::new(Cluster {
             pools,
             ..Cluster::default()
@@ -310,6 +315,74 @@ async fn pools_are_held_until_the_controller_shows_claim_safety() {
             cluster.requests
         );
     }
+}
+
+/// A cluster with no SandboxWarmPool at all has no pool on which a capable
+/// controller could show itself, so the held reconciler bootstraps one: the
+/// first pool's template, then that pool with zero members. Once a pool
+/// exists it holds again, reading only the pool list, until the controller
+/// observes it.
+#[tokio::test]
+async fn a_held_cluster_without_pools_bootstraps_one_empty_pool() {
+    let cluster = Arc::new(Mutex::new(Cluster::default()));
+    let client = api(Arc::clone(&cluster));
+    let config =
+        WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2"), false)
+            .unwrap()
+            .unwrap();
+    let mut state = LoopState::default();
+
+    for pass in 0..3 {
+        let result = reconcile_once(&client, &config, &mut state).await.unwrap();
+        assert_eq!(result, PassResult::Held, "pass {pass}");
+    }
+    let cluster = cluster.lock().unwrap();
+    let writes: Vec<(&str, &Value)> = cluster
+        .writes
+        .iter()
+        .map(|(_, path, body)| (path.as_str(), body))
+        .collect();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert_eq!(writes[0].0, format!("{API}/sandboxtemplates"));
+    assert_eq!(
+        writes[0].1["spec"],
+        config.pools[0].objects.template["spec"]
+    );
+    assert_eq!(writes[1].0, format!("{API}/sandboxwarmpools"));
+    assert_eq!(
+        writes[1].1["metadata"]["name"],
+        config.pools[0].objects.name
+    );
+    assert_eq!(writes[1].1["spec"]["replicas"], 0);
+    // The third pass found the empty pool and only read the pool list.
+    let (_, last) = cluster.requests.last().unwrap();
+    assert!(
+        last.ends_with("/sandboxwarmpools?"),
+        "{:?}",
+        cluster.requests
+    );
+}
+
+/// An enabled image cache that is not warm keeps the bootstrap from creating
+/// a template, as it keeps every template change.
+#[tokio::test]
+async fn a_cold_image_cache_blocks_the_bootstrap() {
+    let cluster = Arc::new(Mutex::new(Cluster::default()));
+    let client = api(Arc::clone(&cluster));
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), true)
+        .unwrap()
+        .unwrap();
+    let mut state = LoopState::default();
+    let result = reconcile_once(&client, &config, &mut state).await.unwrap();
+    assert_eq!(result, PassResult::Held);
+    let cluster = cluster.lock().unwrap();
+    assert!(cluster.writes.is_empty());
+    assert!(
+        cluster
+            .requests
+            .iter()
+            .all(|(method, _)| method == Method::GET)
+    );
 }
 
 /// Review L7: an invalid configuration drains existing pools instead of

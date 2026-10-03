@@ -229,9 +229,41 @@ pub fn settle_budget(previous: Option<(Budget, u8)>, observed: Budget) -> (Budge
 /// pinned `4c528d3` controller and its CRD have no such field, and the API
 /// server would prune it. Any pool, an environment's zero-replica shadow
 /// included, whose status observed its current generation is the evidence.
-/// Without it, pools are held: no template, pool or member is written.
+/// Without it, pools are held: nothing is replaced, scaled or deleted, and
+/// only [`bootstrap_writes`] may create an empty pool.
 pub fn controller_capable(pools: &[DynamicObject]) -> bool {
     pools.iter().any(pool_observed_by_capable_controller)
+}
+
+/// The held reconciler's only writes, on a cluster with no SandboxWarmPool at
+/// all: there the controller has no pool to show its claim safety on, so the
+/// hold would never end. Create the first configured pool's template, behind
+/// the image-cache gate, and once it exists the pool itself with zero
+/// members. An empty pool holds nothing an unguarded controller could delete
+/// or adopt, and creates route cold until a capable controller observes it;
+/// a capable one does, which ends the hold.
+pub fn bootstrap_writes(
+    desired: &[DesiredPool],
+    templates: &BTreeMap<String, DynamicObject>,
+    cache_warm: bool,
+) -> Vec<Write> {
+    let Some(first) = desired.first() else {
+        return Vec::new();
+    };
+    let name = first.objects.name.clone();
+    match templates.get(&name) {
+        Some(template) if deleting(template) => Vec::new(),
+        Some(_) => {
+            let mut body = first.objects.pool.clone();
+            body["spec"]["replicas"] = Value::from(0);
+            vec![Write::CreatePool { name, body }]
+        }
+        None if cache_warm => vec![Write::CreateTemplate {
+            name,
+            body: first.objects.template.clone(),
+        }],
+        None => Vec::new(),
+    }
 }
 
 /// One pool's status was written by a capable controller at its current

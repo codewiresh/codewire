@@ -827,6 +827,44 @@ fn only_an_observed_generation_shows_a_capable_controller() {
     ]));
 }
 
+/// With no SandboxWarmPool anywhere, the held reconciler creates the first
+/// configured pool's template (only behind a warm image cache), then that
+/// pool with zero members, and nothing else.
+#[test]
+fn a_held_cluster_without_pools_bootstraps_one_empty_pool() {
+    let desired = desired();
+    let first = &desired[0];
+    let none = BTreeMap::new();
+    assert!(bootstrap_writes(&desired, &none, false).is_empty());
+    assert!(bootstrap_writes(&[], &none, true).is_empty());
+    assert_eq!(
+        bootstrap_writes(&desired, &none, true),
+        [Write::CreateTemplate {
+            name: first.objects.name.clone(),
+            body: first.objects.template.clone(),
+        }]
+    );
+
+    let templates = BTreeMap::from([(
+        first.objects.name.clone(),
+        live(&first.objects.template, "template-uid"),
+    )]);
+    let writes = bootstrap_writes(&desired, &templates, false);
+    let [Write::CreatePool { name, body }] = writes.as_slice() else {
+        panic!("one empty pool after its template: {writes:?}");
+    };
+    assert_eq!(name, &first.objects.name);
+    assert_eq!(body["spec"]["replicas"], 0);
+    let mut expected = first.objects.pool.clone();
+    expected["spec"]["replicas"] = json!(0);
+    assert_eq!(body, &expected);
+
+    let mut terminating = first.objects.template.clone();
+    terminating["metadata"]["deletionTimestamp"] = json!("2026-10-03T00:00:00Z");
+    let templates = BTreeMap::from([(first.objects.name.clone(), live(&terminating, "t"))]);
+    assert!(bootstrap_writes(&desired, &templates, true).is_empty());
+}
+
 /// Review L6: a lower budget waits three passes; a higher one applies now.
 #[test]
 fn a_lower_budget_applies_only_after_it_holds() {
