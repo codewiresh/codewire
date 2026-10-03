@@ -1,0 +1,415 @@
+{
+  "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+  "kind": "SandboxTemplate",
+  "metadata": {
+    "annotations": {
+      "codewire.sh/pool-revision": "ae9b7407549abb7313490521bd80f864efe5acfef9fd28b589d8b8863af6a4c4"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "codewire",
+      "codewire.sh/type": "workspace-pool"
+    },
+    "name": "cw-pool-1000m-4096mi-10gi-78909fe3",
+    "namespace": "dev-sandboxes"
+  },
+  "spec": {
+    "networkPolicy": {
+      "egress": [
+        {
+          "to": [
+            {
+              "ipBlock": {
+                "cidr": "0.0.0.0/0",
+                "except": [
+                  "10.0.0.0/8",
+                  "100.64.0.0/10",
+                  "127.0.0.0/8",
+                  "172.16.0.0/12",
+                  "192.168.0.0/16",
+                  "169.254.0.0/16"
+                ]
+              }
+            },
+            {
+              "ipBlock": {
+                "cidr": "::/0",
+                "except": [
+                  "fc00::/7"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 53,
+              "protocol": "UDP"
+            },
+            {
+              "port": 53,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 443,
+              "protocol": "TCP"
+            },
+            {
+              "port": 80,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/name": "rke2-ingress-nginx"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8087,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "podTemplate": {
+      "metadata": {
+        "annotations": {
+          "codewire.sh/disk-gib": "10",
+          "codewire.sh/workspace": "true",
+          "io.katacontainers.config.hypervisor.cc_init_data": "H4sIAAAAAAAA/wGbB2T4dmVyc2lvbiA9ICIwLjEuMCIKYWxnb3JpdGhtID0gInNoYTI1NiIKCltkYXRhXQoicG9saWN5LnJlZ28iID0gJycnCnBhY2thZ2UgYWdlbnRfcG9saWN5CgojIENvZGV3aXJlLW93bmVkIGJhc2UgcG9saWN5IGZvciBjb21tb2RpdHkgS2F0YSBBZ2VudCBQb2xpY3kgYW5kIGNvbmZpZGVudGlhbAojIENvQ28gYm9vdHN0cmFwLiBDb21tb2RpdHkgdXNlcyB0aGlzIG9ubHkgYXMgZGVmZW5zZSBpbiBkZXB0aDogd2l0aG91dCBTTlAvVERYCiMgdGhlIGhvc3QgY2FuIHN0aWxsIHJlcGxhY2UgdGhlIGd1ZXN0IGltYWdlLCBhZ2VudCwgb3IgcG9saWN5LgpkZWZhdWx0IEFkZEFSUE5laWdoYm9yc1JlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IEFkZFN3YXBQYXRoUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgQWRkU3dhcFJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IENsb3NlU3RkaW5SZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBDb3B5RmlsZVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IENyZWF0ZVNhbmRib3hSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBEZXN0cm95U2FuZGJveFJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IEV4ZWNQcm9jZXNzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgR2V0RGlhZ25vc3RpY0RhdGFSZXF1ZXN0IDo9IGZhbHNlCmRlZmF1bHQgR2V0SVBUYWJsZXNSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBHZXRNZXRyaWNzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgR2V0T09NRXZlbnRSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBHdWVzdERldGFpbHNSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBMaXN0SW50ZXJmYWNlc1JlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IExpc3RSb3V0ZXNSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBNZW1BZ2VudENvbXBhY3RDb25maWcgOj0gdHJ1ZQpkZWZhdWx0IE1lbUFnZW50TWVtY2dDb25maWcgOj0gdHJ1ZQpkZWZhdWx0IE1lbUhvdHBsdWdCeVByb2JlUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgT25saW5lQ1BVTWVtUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUGF1c2VDb250YWluZXJSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBQdWxsSW1hZ2VSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBSZWFkU3RyZWFtUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVtb3ZlQ29udGFpbmVyUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVtb3ZlU3RhbGVWaXJ0aW9mc1NoYXJlTW91bnRzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVzZWVkUmFuZG9tRGV2UmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVzaXplVm9sdW1lUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVzdW1lQ29udGFpbmVyUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgU2V0R3Vlc3REYXRlVGltZVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFNldElQVGFibGVzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgU2V0UG9saWN5UmVxdWVzdCA6PSBmYWxzZQpkZWZhdWx0IFNpZ25hbFByb2Nlc3NSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBTdGFydENvbnRhaW5lclJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFN0YXJ0VHJhY2luZ1JlcXVlc3QgOj0gZmFsc2UKZGVmYXVsdCBTdGF0c0NvbnRhaW5lclJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFN0b3BUcmFjaW5nUmVxdWVzdCA6PSBmYWxzZQpkZWZhdWx0IFR0eVdpblJlc2l6ZVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFVwZGF0ZUNvbnRhaW5lclJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFVwZGF0ZUVwaGVtZXJhbE1vdW50c1JlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFVwZGF0ZUludGVyZmFjZVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFVwZGF0ZVJvdXRlc1JlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFZvbHVtZVN0YXRzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgV2FpdFByb2Nlc3NSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBXcml0ZVN0cmVhbVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IENyZWF0ZUNvbnRhaW5lclJlcXVlc3QgOj0gdHJ1ZQonJycK5H4mdpsHAAA="
+        },
+        "labels": {
+          "codewire.sh/type": "workspace"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "sh",
+              "-c",
+              "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group; while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; (exec 'sleep' 'infinity') & workload_pid=$!; shutdown() { kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; wait \"$workload_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; trap 'shutdown; exit 0' TERM INT; while kill -0 \"$workload_pid\" 2>/dev/null; do if ! kill -0 \"$daemon_pid\" 2>/dev/null; then wait \"$daemon_pid\" 2>/dev/null || true; sleep 1; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; fi; sleep 1; done; wait \"$workload_pid\"; status=$?; kill \"$daemon_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; exit \"$status\""
+            ],
+            "env": [
+              {
+                "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
+                "value": "0.0.0.0:7777"
+              },
+              {
+                "name": "HOME",
+                "value": "/home/codewire"
+              },
+              {
+                "name": "USER",
+                "value": "codewire"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_BINDING_URL",
+                "value": "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+              },
+              {
+                "name": "CODEWIRE_POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              },
+              {
+                "name": "DOCKER_HOST",
+                "value": "unix:///var/run/docker/docker.sock"
+              }
+            ],
+            "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "name": "workspace",
+            "ports": [
+              {
+                "containerPort": 7777,
+                "name": "daemon",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-ec",
+                  "test -f /codewire/run/daemon/ready && docker version --format '{{.Server.Version}}' >/dev/null"
+                ]
+              },
+              "failureThreshold": 3,
+              "periodSeconds": 2,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "resizePolicy": [
+              {
+                "resourceName": "cpu",
+                "restartPolicy": "NotRequired"
+              },
+              {
+                "resourceName": "memory",
+                "restartPolicy": "NotRequired"
+              }
+            ],
+            "resources": {
+              "limits": {
+                "cpu": "1000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              },
+              "requests": {
+                "cpu": "1000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              }
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-ec",
+                  "test -f /codewire/run/daemon/ready && docker version --format '{{.Server.Version}}' >/dev/null"
+                ]
+              },
+              "failureThreshold": 600,
+              "periodSeconds": 1,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/home/codewire",
+                "name": "workspace"
+              },
+              {
+                "mountPath": "/workspace",
+                "name": "workspace"
+              },
+              {
+                "mountPath": "/codewire/bin",
+                "name": "codewire-bin",
+                "readOnly": true,
+                "subPath": "usr/local/bin"
+              },
+              {
+                "mountPath": "/codewire/run",
+                "name": "codewire-run"
+              },
+              {
+                "mountPath": "/run/codewire-credentials/workspace",
+                "name": "credential-workspace-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/run/codewire-credentials/gateway-roots",
+                "name": "credential-gateway-roots",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/run/codewire-codex",
+                "name": "credential-codex-home"
+              },
+              {
+                "mountPath": "/var/run/secrets/codewire/workspace-binding",
+                "name": "workspace-binding-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/docker",
+                "name": "docker-sock"
+              }
+            ]
+          },
+          {
+            "command": [
+              "sh",
+              "-ec",
+              "data_image=\"${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}\"\ndata_root=\"${CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}\"\ndata_size=\"${CODEWIRE_DOCKER_DATA_SIZE:-8G}\"\nmount_mode=\"${CODEWIRE_DOCKER_MOUNT_MODE:-loop}\"\ncodewire_dir=\"$(dirname \"$data_image\")\"\nmkdir -p \"$codewire_dir\" \"$data_root\"\nchown 1000:1000 \"$codewire_dir\"\nchmod 0775 \"$codewire_dir\"\nif [ \"$mount_mode\" = \"loop\" ]; then\n  if [ ! -s \"$data_image\" ]; then\n    truncate -s \"$data_size\" \"$data_image\"\n    mkfs.ext4 -q -F \"$data_image\"\n  fi\n  if ! awk -v target=\"$data_root\" '$2 == target && $3 == \"ext4\" { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then\n    mount -o loop \"$data_image\" \"$data_root\"\n  fi\nelif [ \"$mount_mode\" != \"none\" ]; then\n  echo \"unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode\" >&2\n  exit 1\nfi\nexec dockerd --host \"unix:///var/run/docker/docker.sock\" --group 1000 --data-root \"$data_root\" --storage-driver vfs"
+            ],
+            "env": [
+              {
+                "name": "DOCKER_TLS_CERTDIR",
+                "value": ""
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_IMAGE",
+                "value": "/workspace/.codewire/docker-data.ext4"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_ROOT",
+                "value": "/var/lib/docker"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_SIZE",
+                "value": "8G"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_MOUNT_MODE",
+                "value": "loop"
+              }
+            ],
+            "image": "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "name": "dind",
+            "resources": {
+              "limits": {
+                "cpu": "2",
+                "memory": "2Gi"
+              },
+              "requests": {
+                "cpu": "500m",
+                "memory": "1Gi"
+              }
+            },
+            "securityContext": {
+              "privileged": true,
+              "runAsGroup": 0,
+              "runAsUser": 0
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/var/run/docker",
+                "name": "docker-sock"
+              },
+              {
+                "mountPath": "/workspace",
+                "name": "workspace"
+              }
+            ]
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "restartPolicy": "Never",
+        "runtimeClassName": "commodity",
+        "securityContext": {
+          "fsGroup": 1000,
+          "fsGroupChangePolicy": "OnRootMismatch",
+          "runAsGroup": 1000,
+          "runAsUser": 1000
+        },
+        "serviceAccountName": "codewire-sandbox",
+        "volumes": [
+          {
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "reference": "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            },
+            "name": "codewire-bin"
+          },
+          {
+            "emptyDir": {},
+            "name": "codewire-run"
+          },
+          {
+            "name": "credential-workspace-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.credential-workspace.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "configMap": {
+              "name": "synthetic-trust-1"
+            },
+            "name": "credential-gateway-roots"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "256Mi"
+            },
+            "name": "credential-codex-home"
+          },
+          {
+            "name": "workspace-binding-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.workspace-binding.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "docker-sock"
+          }
+        ]
+      }
+    },
+    "volumeClaimTemplates": [
+      {
+        "metadata": {
+          "name": "workspace"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "10Gi"
+            }
+          },
+          "storageClassName": "linstor-local"
+        }
+      }
+    ]
+  }
+}

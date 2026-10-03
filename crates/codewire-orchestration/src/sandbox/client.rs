@@ -6390,6 +6390,93 @@ mod tests {
             "sandbox-warmpool-workspace-5513AEC3",
             "workspace"
         ));
+        // Program #2238 C1 warm pools are never legacy candidates, and the
+        // retirement pass skips them before its fail-closed name check.
+        for pool_name in c1_warm_pool_names() {
+            assert!(!pool_name.starts_with(LEGACY_SHARED_WARM_POOL_PREFIX));
+            for template_name in [
+                pool_name.as_str(),
+                "workspace",
+                "workspace-1000m-4096mib-10gib",
+            ] {
+                assert!(!legacy_shared_warm_pool_name_matches(
+                    &pool_name,
+                    template_name
+                ));
+            }
+        }
+    }
+
+    fn c1_warm_pool_names() -> Vec<String> {
+        [(1000, 4096, 10), (2000, 8192, 10)]
+            .into_iter()
+            .map(|(cpu_millicores, memory_mib, disk_gib)| {
+                super::super::warm_pool::WarmPoolKey::new(
+                    super::super::warm_pool::WorkspaceShape {
+                        cpu_millicores,
+                        memory_mib,
+                        disk_gib,
+                    },
+                    "linstor-local",
+                    "dev-sandboxes",
+                    "dev",
+                )
+                .unwrap()
+                .name()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn legacy_shared_warm_pool_retirement_preserves_c1_warm_pools() {
+        let legacy_pool = "sandbox-warmpool-workspace-5513aec3";
+        let pools = c1_warm_pool_names();
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (
+                StatusCode::OK,
+                warm_pool_list(vec![
+                    warm_pool(&pools[0], &pools[0]),
+                    warm_pool(legacy_pool, "workspace"),
+                    warm_pool(&pools[1], &pools[1]),
+                ]),
+            ),
+            // A claimed C1 member does not hold back the legacy retirement.
+            (
+                StatusCode::OK,
+                claim_list(vec![json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxClaim",
+                    "metadata": {"name": "sandbox-env-live", "namespace": "dev-sandboxes"},
+                    "spec": {"warmPoolRef": {"name": pools[0]}},
+                })]),
+            ),
+            (StatusCode::OK, kubernetes_status("Success", 200)),
+            // Only C1 pools remain: nothing to retire, no claim read.
+            (
+                StatusCode::OK,
+                warm_pool_list(vec![
+                    warm_pool(&pools[0], &pools[0]),
+                    warm_pool(&pools[1], &pools[1]),
+                ]),
+            ),
+        ]);
+
+        assert_eq!(client.retire_legacy_shared_warm_pools().await.unwrap(), 1);
+        assert_eq!(client.retire_legacy_shared_warm_pools().await.unwrap(), 0);
+        let pools_path =
+            "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxwarmpools";
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &[
+                (Method::GET, pools_path.into()),
+                (
+                    Method::GET,
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims".into(),
+                ),
+                (Method::DELETE, format!("{pools_path}/{legacy_pool}")),
+                (Method::GET, pools_path.into()),
+            ]
+        );
     }
 
     #[tokio::test]

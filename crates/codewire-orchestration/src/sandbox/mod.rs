@@ -8,6 +8,7 @@ pub mod exec;
 pub mod image_cache;
 pub mod sidecar;
 pub mod template;
+pub mod warm_pool;
 
 use std::collections::BTreeMap;
 
